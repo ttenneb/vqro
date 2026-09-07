@@ -444,7 +444,7 @@ pane_history = false
 "##;
 
 // Bundled at build time so the printed skill always matches this binary's release.
-const SKILL: &str = include_str!("../skills/herdr/SKILL.md");
+const SKILL: &str = include_str!("../skills/vqro/SKILL.md");
 
 fn should_block_nested(config: &config::Config) -> bool {
     should_block_nested_for_env(config, std::env::var(HERDR_ENV_VAR).ok().as_deref())

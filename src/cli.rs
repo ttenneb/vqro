@@ -42,17 +42,14 @@ mod workspace;
 mod worktree;
 
 const TERMINAL_SESSION_OBSERVE_USAGE: &str =
-    "usage: herdr terminal session observe <target> [--cols N] [--rows N]";
+    "usage: vqro terminal session observe <target> [--cols N] [--rows N]";
 const TERMINAL_SESSION_CONTROL_USAGE: &str =
-    "usage: herdr terminal session control <target> [--takeover] [--cols N] [--rows N]";
+    "usage: vqro terminal session control <target> [--takeover] [--cols N] [--rows N]";
 pub(crate) const AGENT_HELP_FOOTER: &str = concat!(
-    "Are you an AI? Use these resources ONLY IF your task specifically asks you to:\n",
-    "  Help a human understand or set up Herdr for the first time:\n",
-    "    https://herdr.dev/agent-guide.md\n",
-    "  Debug or investigate a problem with Herdr:\n",
-    "    https://herdr.dev/llms.txt\n",
-    "  Control Herdr panes, agents, or workspaces:\n",
-    "    SKIP if a Herdr skill is already in your context. Otherwise run: herdr --skill",
+    "Are you an AI working with vqro?\n",
+    "  Read the alpha guide only when your task requires runtime control:\n",
+    "    vqro --skill\n",
+    "  Keep VQRO_* routing isolated from any installed Herdr session.",
 );
 
 pub(crate) fn parse_token_assignment(raw: &str) -> Result<(String, Option<String>), String> {
@@ -535,7 +532,7 @@ fn session_delete(args: &[String]) -> std::io::Result<i32> {
 fn terminal_attach(args: &[String]) -> std::io::Result<i32> {
     let (terminal_id, takeover) = match parse_attach_target(
         args,
-        "usage: herdr terminal attach <terminal_id> [--takeover]",
+        "usage: vqro terminal attach <terminal_id> [--takeover]",
     ) {
         Ok(parsed) => parsed,
         Err(code) => return Ok(code),
@@ -687,7 +684,7 @@ fn terminal_title(args: &[String]) -> std::io::Result<i32> {
     match args.first().map(|arg| arg.as_str()) {
         Some("set") => {
             if args.len() != 2 {
-                eprintln!("usage: herdr terminal title set <title>");
+                eprintln!("usage: vqro terminal title set <title>");
                 return Ok(2);
             }
             print_response(&send_request(&Request {
@@ -699,7 +696,7 @@ fn terminal_title(args: &[String]) -> std::io::Result<i32> {
         }
         Some("clear") => {
             if args.len() != 1 {
-                eprintln!("usage: herdr terminal title clear");
+                eprintln!("usage: vqro terminal title clear");
                 return Ok(2);
             }
             print_response(&send_request(&Request {
@@ -708,12 +705,12 @@ fn terminal_title(args: &[String]) -> std::io::Result<i32> {
             })?)
         }
         Some("help" | "--help" | "-h") => {
-            eprintln!("usage: herdr terminal title set <title>");
+            eprintln!("usage: vqro terminal title set <title>");
             eprintln!("       herdr terminal title clear");
             Ok(0)
         }
         _ => {
-            eprintln!("usage: herdr terminal title set <title>");
+            eprintln!("usage: vqro terminal title set <title>");
             eprintln!("       herdr terminal title clear");
             Ok(2)
         }
