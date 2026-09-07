@@ -683,7 +683,7 @@ fn render_terminal_inspector_overlay(
 ) -> Option<OverlayRender> {
     let outer = popup(b.area, 76, 24)?;
     // At narrow widths, use the full row so clipped sidebar text cannot peek around the modal.
-    let outer = if outer.x <= b.area.x.saturating_add(1) {
+    let outer = if outer.x <= b.area.x.saturating_add(2) {
         Rect::new(b.area.x, outer.y, b.area.width, outer.height)
     } else {
         outer
