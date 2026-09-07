@@ -27,7 +27,7 @@ const STATUS_REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Private daemon-start hint used to seed a fresh headless server from the
 /// directory where the user ran `herdr`.
-pub(crate) const STARTUP_CWD_ENV_VAR: &str = "HERDR_STARTUP_CWD";
+pub(crate) const STARTUP_CWD_ENV_VAR: &str = "VQRO_STARTUP_CWD";
 
 // ---------------------------------------------------------------------------
 // Server detection
@@ -234,7 +234,7 @@ fn build_server_daemon_command(exe: PathBuf) -> Command {
     if crate::session::explicit_session_requested() {
         command
             .env_remove(crate::api::SOCKET_PATH_ENV_VAR)
-            .env_remove("HERDR_CLIENT_SOCKET_PATH");
+            .env_remove(crate::product::CLIENT_SOCKET_PATH_ENV);
     }
 
     command
@@ -273,7 +273,7 @@ pub fn wait_for_server_socket(socket_path: &Path, timeout: Duration) -> io::Resu
             "server did not become ready within {}s (socket: {}). The background server may still be starting; try `herdr` again, or check {}",
             timeout.as_secs(),
             socket_path.display(),
-            crate::session::data_dir().join("herdr-server.log").display()
+            crate::session::data_dir().join(crate::product::SERVER_LOG_FILE).display()
         ),
     ))
 }

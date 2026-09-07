@@ -7,7 +7,7 @@ use interprocess::local_socket::traits::Stream as _;
 
 use crate::ipc::LocalStream;
 
-pub const SESSION_ENV_VAR: &str = "HERDR_SESSION";
+pub const SESSION_ENV_VAR: &str = crate::product::SESSION_ENV;
 pub const DEFAULT_SESSION_NAME: &str = "default";
 
 const MAX_SESSION_NAME_LEN: usize = 64;
@@ -42,10 +42,10 @@ pub fn configure_from_args(args: &[String]) -> Result<Vec<String>, String> {
             return Ok(args.to_vec());
         }
         let Some(name) = args.get(3) else {
-            return Err("usage: herdr session attach <name>".to_string());
+            return Err("usage: vqro session attach <name>".to_string());
         };
         if args.len() != 4 {
-            return Err("usage: herdr session attach <name>".to_string());
+            return Err("usage: vqro session attach <name>".to_string());
         }
         apply_explicit_name(name)?;
         return Ok(cleaned);
@@ -102,8 +102,8 @@ pub fn active_name() -> Option<String> {
 
 pub fn local_attach_command() -> String {
     match active_name() {
-        Some(name) => format!("herdr session attach {name}"),
-        None => "herdr".to_string(),
+        Some(name) => crate::product::command(&format!("session attach {name}")),
+        None => crate::product::command(""),
     }
 }
 
@@ -113,15 +113,15 @@ pub fn local_stop_command() -> String {
 
 pub fn stop_command_for(name: Option<&str>) -> String {
     match name {
-        Some(name) => format!("herdr session stop {name}"),
-        None => "herdr server stop".to_string(),
+        Some(name) => crate::product::command(&format!("session stop {name}")),
+        None => crate::product::command("server stop"),
     }
 }
 
 pub fn restart_after_update_guidance(stop_command: &str, attach_command: Option<&str>) -> String {
     let restart = match attach_command {
         Some(command) => format!("Run `{stop_command}`, then run `{command}` again."),
-        None => format!("Run `{stop_command}`, then restart Herdr with the same socket override."),
+        None => format!("Run `{stop_command}`, then restart vqro with the same socket override."),
     };
     format!(
         "Stop the old server to use the new version.\nStopping exits pane processes.\n{restart}"
@@ -133,9 +133,10 @@ pub fn active_restart_after_update_guidance() -> String {
         if let Ok(socket_path) = std::env::var(crate::api::SOCKET_PATH_ENV_VAR) {
             return restart_after_update_guidance(
                 &format!(
-                    "{}={} herdr server stop",
+                    "{}={} {} server stop",
                     crate::api::SOCKET_PATH_ENV_VAR,
-                    socket_path
+                    socket_path,
+                    crate::product::NAME
                 ),
                 None,
             );
@@ -167,7 +168,7 @@ pub fn data_dir_for(name: Option<&str>) -> PathBuf {
 }
 
 pub fn api_socket_path_for(name: Option<&str>) -> PathBuf {
-    data_dir_for(name).join("herdr.sock")
+    data_dir_for(name).join(crate::product::API_SOCKET_FILE)
 }
 
 pub fn active_api_socket_path() -> PathBuf {
@@ -181,7 +182,7 @@ pub fn active_api_socket_path() -> PathBuf {
 }
 
 pub fn client_socket_path_for(name: Option<&str>) -> PathBuf {
-    data_dir_for(name).join("herdr-client.sock")
+    data_dir_for(name).join(crate::product::CLIENT_SOCKET_FILE)
 }
 
 pub fn list_sessions() -> std::io::Result<Vec<SessionInfo>> {
@@ -772,7 +773,7 @@ mod tests {
             active_api_socket_path(),
             config_home
                 .join(crate::config::app_dir_name())
-                .join("herdr.sock")
+                .join(crate::product::API_SOCKET_FILE)
         );
         std::env::remove_var("XDG_CONFIG_HOME");
         std::env::remove_var(SESSION_ENV_VAR);
@@ -823,7 +824,7 @@ mod tests {
             active_api_socket_path(),
             config_home
                 .join(crate::config::app_dir_name())
-                .join("herdr.sock")
+                .join(crate::product::API_SOCKET_FILE)
         );
         std::env::remove_var("XDG_CONFIG_HOME");
         std::env::remove_var(SESSION_ENV_VAR);
@@ -836,7 +837,7 @@ mod tests {
         let _guard = env_lock().lock().unwrap();
         std::env::remove_var(SESSION_ENV_VAR);
 
-        assert_eq!(local_attach_command(), "herdr");
+        assert_eq!(local_attach_command(), "vqro");
     }
 
     #[test]
@@ -844,7 +845,7 @@ mod tests {
         let _guard = env_lock().lock().unwrap();
         std::env::set_var(SESSION_ENV_VAR, "work");
 
-        assert_eq!(local_attach_command(), "herdr session attach work");
+        assert_eq!(local_attach_command(), "vqro session attach work");
 
         std::env::remove_var(SESSION_ENV_VAR);
     }
@@ -854,7 +855,7 @@ mod tests {
         let _guard = env_lock().lock().unwrap();
         std::env::remove_var(SESSION_ENV_VAR);
 
-        assert_eq!(local_stop_command(), "herdr server stop");
+        assert_eq!(local_stop_command(), "vqro server stop");
 
         std::env::remove_var(SESSION_ENV_VAR);
     }
@@ -864,7 +865,7 @@ mod tests {
         let _guard = env_lock().lock().unwrap();
         std::env::set_var(SESSION_ENV_VAR, "work");
 
-        assert_eq!(local_stop_command(), "herdr session stop work");
+        assert_eq!(local_stop_command(), "vqro session stop work");
 
         std::env::remove_var(SESSION_ENV_VAR);
     }
@@ -889,7 +890,7 @@ mod tests {
 
         assert_eq!(
             active_restart_after_update_guidance(),
-            "Stop the old server to use the new version.\nStopping exits pane processes.\nRun `HERDR_SOCKET_PATH=/tmp/custom-herdr.sock herdr server stop`, then restart Herdr with the same socket override."
+            "Stop the old server to use the new version.\nStopping exits pane processes.\nRun `VQRO_SOCKET_PATH=/tmp/custom-herdr.sock vqro server stop`, then restart vqro with the same socket override."
         );
 
         std::env::remove_var(crate::api::SOCKET_PATH_ENV_VAR);
@@ -913,7 +914,7 @@ mod tests {
                 .join(crate::config::app_dir_name())
                 .join("sessions")
                 .join("work")
-                .join("herdr.sock")
+                .join(crate::product::API_SOCKET_FILE)
         );
         std::env::remove_var("XDG_CONFIG_HOME");
         std::env::remove_var(SESSION_ENV_VAR);

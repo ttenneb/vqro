@@ -261,7 +261,7 @@ pub(crate) fn create_remote_ssh_config_dir(control_socket_name: &str) -> std::io
     let mut path_fits = false;
     for base in bases {
         for attempt in 0..100 {
-            let dir = base.join(format!("herdr-ssh-{}-{attempt}", std::process::id()));
+            let dir = base.join(format!("vqro-ssh-{}-{attempt}", std::process::id()));
             if !fits_unix_socket_path(&dir.join(control_socket_name)) {
                 continue;
             }

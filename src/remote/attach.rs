@@ -32,11 +32,11 @@ const REMOTE_SERVER_SHUTDOWN_POLL_INTERVAL: Duration = Duration::from_millis(100
 const CURRENT_PROTOCOL: u32 = crate::protocol::PROTOCOL_VERSION;
 const STABLE_UPDATE_MANIFEST_URL: &str = "https://herdr.dev/latest.json";
 const PREVIEW_UPDATE_MANIFEST_URL: &str = "https://herdr.dev/preview.json";
-const REMOTE_BINARY_ENV_VAR: &str = "HERDR_REMOTE_BINARY";
-const REMOTE_OUTPUT_READY_MARKER: &str = "herdr-remote-output-ready:1";
-const WINDOWS_REMOTE_PATH_MARKER: &str = "herdr-remote-path:1:";
-const WINDOWS_REMOTE_INSTALL_DIR_MARKER: &str = "herdr-remote-install-dir:1:";
-const WINDOWS_REMOTE_INSTALL_RESULT_MARKER: &str = "herdr-remote-install-result:1:";
+const REMOTE_BINARY_ENV_VAR: &str = "VQRO_REMOTE_BINARY";
+const REMOTE_OUTPUT_READY_MARKER: &str = "vqro-remote-output-ready:1";
+const REMOTE_SERVER_READY_MARKER: &str = "vqro-remote-server-ready:1";
+const WINDOWS_REMOTE_INSTALL_DIR_MARKER: &str = "vqro-remote-install-dir:1:";
+const WINDOWS_REMOTE_INSTALL_RESULT_MARKER: &str = "vqro-remote-install-result:1:";
 const SSH_CONTROL_SOCKET_NAME: &str = "ctl";
 pub(crate) fn run_remote(remote: RemoteLaunch) -> io::Result<()> {
     let session_name = crate::session::active_name()
@@ -44,7 +44,7 @@ pub(crate) fn run_remote(remote: RemoteLaunch) -> io::Result<()> {
     let local_socket = local_forward_socket_path(&remote.target, &session_name);
     let program = std::env::args()
         .next()
-        .unwrap_or_else(|| "herdr".to_string());
+        .unwrap_or_else(|| crate::product::NAME.to_string());
     let reattach_command = reattach_command(
         &program,
         &remote.target,
@@ -3060,10 +3060,10 @@ fn local_forward_socket_path(target: &str, session_name: &str) -> PathBuf {
     let pid = std::process::id();
     let target_clean = sanitize_path_component(target);
     let session_clean = sanitize_path_component(session_name);
-    let readable_name = format!("herdr-remote-{pid}-{target_clean}-{session_clean}.sock");
+    let readable_name = format!("vqro-remote-{pid}-{target_clean}-{session_clean}.sock");
     let target_prefix: String = target_clean.chars().take(8).collect();
     let hash = short_socket_hash(target, session_name);
-    let short_name = format!("herdr-r-{pid}-{target_prefix}-{hash}.sock");
+    let short_name = format!("vqro-r-{pid}-{target_prefix}-{hash}.sock");
     crate::platform::remote_bridge_endpoint_path(&readable_name, &short_name)
 }
 

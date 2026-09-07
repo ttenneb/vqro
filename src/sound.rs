@@ -15,9 +15,9 @@ use std::time::{Duration, Instant};
 
 use tracing::warn;
 
-const DISABLE_SOUND_ENV: &str = "HERDR_DISABLE_SOUND";
+const DISABLE_SOUND_ENV: &str = "VQRO_DISABLE_SOUND";
 #[cfg(any(windows, test))]
-const WINDOWS_SOUND_PATH_ENV: &str = "HERDR_SOUND_PATH";
+const WINDOWS_SOUND_PATH_ENV: &str = "VQRO_SOUND_PATH";
 #[cfg(not(any(windows, target_os = "macos")))]
 const AUDIO_PLAYER_TIMEOUT: Duration = Duration::from_secs(15);
 #[cfg(not(any(windows, target_os = "macos")))]
@@ -107,7 +107,7 @@ fn playback_error(output: &Output) -> String {
 
 fn temp_sound_path() -> PathBuf {
     let id = SOUND_TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-    std::env::temp_dir().join(format!("herdr-sound-{}-{id}.mp3", std::process::id()))
+    std::env::temp_dir().join(format!("vqro-sound-{}-{id}.mp3", std::process::id()))
 }
 
 #[cfg(windows)]

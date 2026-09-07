@@ -1,7 +1,7 @@
 use super::*;
 
 pub(super) fn init_logging() {
-    crate::logging::init_file_logging("herdr-client.log");
+    crate::logging::init_file_logging(crate::product::CLIENT_LOG_FILE);
 }
 
 pub(super) fn apply_reload(

@@ -1,3 +1,36 @@
+# vqro
+
+> **Early-stage, provisionally named fork of [Herdr](https://github.com/herdrdev/herdr). Not ready for use.**
+
+vqro is exploring an open, terminal-native multiplexer for organizing human and agent work. It is intended to remain a community public good: provider-neutral, independently operable, and not dependent on a proprietary service.
+
+## Principles
+
+- **Terminals are canonical.** Agents remain real, independently interactive and addressable PTYs—not reconstructed chats or opaque jobs.
+- **Defaults are not ceilings.** A coherent built-in experience should rest on composable primitives and replaceable policy.
+- **Extensions are first-class.** Open, versioned interfaces should let external tools participate without unstable access to renderer or runtime internals.
+- **Work has structure.** Sessions should organize repositories, checkouts, related terminals, and parallel agents without hiding their underlying capabilities.
+- **Coexistence is safe.** vqro and Herdr must not accidentally share mutable state, sockets, protocols, plugins, or update channels.
+
+## Current status
+
+This branch starts from the upstream Herdr implementation. The first milestone is a distinct product identity and fail-closed compatibility isolation; feature work will follow from that foundation.
+
+The initial direction includes:
+
+1. separating session, runtime, and client presentation boundaries;
+2. stabilizing terminal collections and repository-aware workspaces as host-owned primitives;
+3. adding supervised, out-of-process extension services; and
+4. exposing declarative presentation and orchestration through versioned protocols.
+
+vqro is not affiliated with or endorsed by the Herdr project. It will retain upstream attribution, track useful upstream work where practical, and treat interoperability as an explicit compatibility contract rather than an assumption.
+
+## Upstream README
+
+The documentation below is retained from the current Herdr baseline for reference. Its installation commands, release links, branding, and service endpoints refer to Herdr—not vqro.
+
+---
+
 # herdr
 
 
