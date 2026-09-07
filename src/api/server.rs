@@ -1094,7 +1094,7 @@ mod tests {
 
         let expected = config_home
             .join(crate::config::app_dir_name())
-            .join("herdr.sock");
+            .join(crate::product::API_SOCKET_FILE);
         assert_eq!(socket_path(), expected);
 
         std::env::remove_var("XDG_CONFIG_HOME");
@@ -1114,7 +1114,7 @@ mod tests {
             .join(crate::config::app_dir_name())
             .join("sessions")
             .join("work")
-            .join("herdr.sock");
+            .join(crate::product::API_SOCKET_FILE);
         assert_eq!(socket_path(), expected);
 
         std::env::remove_var(crate::session::SESSION_ENV_VAR);

@@ -549,7 +549,7 @@ fn client_error_display_detached_default_session_reattach_hint() {
     };
     let msg = err.to_string();
     assert!(
-        msg.contains("Run `herdr` to reattach"),
+        msg.contains("Run `vqro` to reattach"),
         "should suggest default reattach command: {msg}"
     );
 }
@@ -564,7 +564,7 @@ fn client_error_display_detached_named_session_reattach_hint() {
     };
     let msg = err.to_string();
     assert!(
-        msg.contains("Run `herdr session attach work` to reattach"),
+        msg.contains("Run `vqro session attach work` to reattach"),
         "should suggest named session reattach command: {msg}"
     );
 }
@@ -574,7 +574,7 @@ fn client_error_display_detached_remote_reattach_hint_takes_precedence() {
     let _guard = env_lock().lock().unwrap();
     let _remote_env = EnvVarGuard::set(
         crate::remote::REATTACH_COMMAND_ENV_VAR,
-        "herdr --remote host --session work",
+        "vqro --remote host --session work",
     );
     let _session_env = EnvVarGuard::set(crate::session::SESSION_ENV_VAR, "work");
     let err = ClientError::ServerShutdown {
@@ -582,7 +582,7 @@ fn client_error_display_detached_remote_reattach_hint_takes_precedence() {
     };
     let msg = err.to_string();
     assert!(
-        msg.contains("Run `herdr --remote host --session work` to reattach"),
+        msg.contains("Run `vqro --remote host --session work` to reattach"),
         "should prefer remote reattach command: {msg}"
     );
 }
@@ -604,12 +604,12 @@ fn client_error_display_remote_connection_lost_has_reattach_hint() {
     let _guard = env_lock().lock().unwrap();
     let _remote_env = EnvVarGuard::set(
         crate::remote::REATTACH_COMMAND_ENV_VAR,
-        "herdr --remote host --session work",
+        "vqro --remote host --session work",
     );
     let err = ClientError::ConnectionLost(io::Error::new(io::ErrorKind::BrokenPipe, "broken pipe"));
     let msg = err.to_string();
     assert!(
-        msg.contains("lost connection to remote Herdr"),
+        msg.contains("lost connection to remote vqro"),
         "should mention remote connection loss: {msg}"
     );
     assert!(
@@ -617,7 +617,7 @@ fn client_error_display_remote_connection_lost_has_reattach_hint() {
         "should explain possible persistence: {msg}"
     );
     assert!(
-        msg.contains("Run `herdr --remote host --session work` to reattach"),
+        msg.contains("Run `vqro --remote host --session work` to reattach"),
         "should show remote reattach command: {msg}"
     );
 }

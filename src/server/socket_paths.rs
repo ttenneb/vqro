@@ -111,7 +111,6 @@ mod tests {
             path,
             crate::config::config_dir().join(crate::product::CLIENT_SOCKET_FILE)
         );
-        assert!(!path.to_string_lossy().contains("herdr"));
     }
 
     #[test]

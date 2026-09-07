@@ -1433,6 +1433,7 @@ impl AppState {
         results: Vec<WorkspaceGitStatus>,
     ) -> bool {
         let mut changed = false;
+        let mut repository_changed = false;
         for result in results {
             let Some(ws_idx) = self
                 .workspaces
@@ -1453,6 +1454,7 @@ impl AppState {
             let ws = &mut self.workspaces[ws_idx];
             if ws.cached_identity_cwd != result.resolved_identity_cwd {
                 ws.cached_identity_cwd = result.resolved_identity_cwd;
+                repository_changed = true;
             }
             if ws.cached_auto_label != result.auto_label {
                 ws.cached_auto_label = result.auto_label;
@@ -1472,9 +1474,12 @@ impl AppState {
             if ws.cached_git_space != result.space {
                 ws.cached_git_space = result.space;
                 changed = true;
+                repository_changed = true;
             }
         }
-        changed |= self.reconcile_repositories();
+        if repository_changed {
+            changed |= self.reconcile_repositories();
+        }
         changed
     }
 
@@ -2703,7 +2708,7 @@ mod tests {
     }
 
     #[test]
-    fn apply_workspace_git_statuses_does_not_change_worktree_membership() {
+    fn apply_workspace_git_statuses_reconciles_changed_repository_membership() {
         let mut state = app_with_workspaces(&["one"]);
         mark_linked_worktree(&mut state, 0);
         let workspace_id = state.workspaces[0].id.clone();
@@ -2732,7 +2737,13 @@ mod tests {
         );
 
         assert!(changed);
-        assert_eq!(state.workspaces[0].worktree_space().cloned(), membership);
+        assert_ne!(state.workspaces[0].worktree_space().cloned(), membership);
+        assert_eq!(
+            state.workspaces[0]
+                .worktree_space()
+                .map(|membership| membership.key.as_str()),
+            Some("other-repo-key")
+        );
     }
 
     #[test]
