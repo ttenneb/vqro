@@ -401,9 +401,10 @@ impl TileLayout {
         direction: Direction,
         ratio: f32,
     ) -> Option<PaneId> {
-        if self.placement(target) != Some(PanePlacement::Tiled) {
-            return None;
-        }
+        let target_leaf = match self.placement(target)? {
+            PanePlacement::Tiled => LayoutLeaf::Pane(target),
+            PanePlacement::Collection(collection_id) => LayoutLeaf::Collection(collection_id),
+        };
         let new_id = PaneId::alloc();
         let old = std::mem::replace(
             &mut self.root,
@@ -411,7 +412,7 @@ impl TileLayout {
         );
         self.root = typed_split_at(
             old,
-            LayoutLeaf::Pane(target),
+            target_leaf,
             direction,
             LayoutLeaf::Pane(new_id),
             valid_split_ratio(ratio),
@@ -1544,6 +1545,32 @@ mod tests {
         assert_eq!(layout.pane_ids(), vec![root]);
         assert_eq!(layout.focused(), root);
         assert!(matches!(layout.root(), Node::Pane(id) if *id == root));
+    }
+
+    #[test]
+    fn splitting_selected_collection_member_splits_the_collection_leaf() {
+        let (mut layout, root) = TileLayout::new();
+        let collection = CollectionId::from_raw(9_350_001).expect("valid collection id");
+        assert!(layout.insert_collection_near(
+            LayoutLeaf::Pane(root),
+            collection,
+            Direction::Horizontal,
+            0.5,
+        ));
+        assert!(layout.remove_tiled_pane_for_collection(root));
+        assert!(layout.add_collection_member(collection, root));
+
+        let new_pane = layout
+            .split_pane(root, Direction::Vertical, 0.4)
+            .expect("collection member remains a valid split target");
+
+        assert_eq!(
+            layout.placement(root),
+            Some(PanePlacement::Collection(collection))
+        );
+        assert_eq!(layout.placement(new_pane), Some(PanePlacement::Tiled));
+        assert_eq!(layout.leaf_count(), 2);
+        assert_eq!(layout.pane_count(), 2);
     }
 
     #[test]

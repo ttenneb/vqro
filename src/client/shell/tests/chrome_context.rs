@@ -373,6 +373,38 @@ fn terminal_inspector_opens_from_pane_menu_and_renders_safe_telemetry() {
     assert!(text.contains("12.5%"));
     assert!(text.contains("argv/env never collected"));
 
+    if let Some(ClientShellOverlay::TerminalInspector(inspector)) = state.overlay.as_mut() {
+        inspector.telemetry.as_mut().unwrap().document =
+            Some(crate::inspector_document::InspectorDocument {
+                title: "Terminal intelligence".into(),
+                subtitle: Some("supervised extension".into()),
+                sections: vec![crate::inspector_document::InspectorSection {
+                    id: "activity".into(),
+                    title: Some("Agent activity".into()),
+                    blocks: vec![crate::inspector_document::InspectorBlock::Badge {
+                        label: "Agent".into(),
+                        value: "Pi".into(),
+                        tone: crate::inspector_document::InspectorTone::Accent,
+                    }],
+                }],
+                actions: Vec::new(),
+            });
+    }
+    let narrow = state.compose(72, 30).expect("narrow declarative inspector");
+    let narrow_text = narrow
+        .cells
+        .chunks(narrow.width as usize)
+        .map(|row| {
+            row.iter()
+                .map(|cell| cell.symbol.as_str())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(narrow_text.contains("Terminal intelligence"));
+    assert!(narrow_text.contains("supervised extension"));
+    assert!(narrow_text.contains("Agent activity"));
+
     let refresh = state.handle_input_bytes(b"r");
     assert!(matches!(
         refresh.actions.first(),

@@ -52,6 +52,17 @@ pub(crate) fn request_changes_ui(request: &Request) -> bool {
             | Method::AgentStart(_)
             | Method::AgentPrompt(_)
             | Method::AgentSendKeys(_)
+            | Method::CollectionCreate(_)
+            | Method::CollectionAdd(_)
+            | Method::CollectionPromote(_)
+            | Method::CollectionSelect(_)
+            | Method::CollectionReorder(_)
+            | Method::CollectionArchive(_)
+            | Method::CollectionRestore(_)
+            | Method::CollectionClose(_)
+            | Method::DelegationCreate(_)
+            | Method::DelegationReparent(_)
+            | Method::DelegationReorder(_)
             | Method::PaneSplit(_)
             | Method::PaneSwap(_)
             | Method::PaneMove(_)
@@ -97,4 +108,27 @@ pub type ApiRequestSender = mpsc::UnboundedSender<ApiRequestMessage>;
 
 pub fn socket_path() -> PathBuf {
     crate::session::active_api_socket_path()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn collection_layout_mutations_request_a_client_redraw() {
+        let request = Request {
+            id: "test".into(),
+            method: Method::CollectionAdd(crate::api::schema::CollectionAddParams {
+                collection_id: "collection_1".into(),
+                pane_id: "w1:p1".into(),
+            }),
+        };
+        assert!(request_changes_ui(&request));
+
+        let query = Request {
+            id: "test".into(),
+            method: Method::CollectionList(Default::default()),
+        };
+        assert!(!request_changes_ui(&query));
+    }
 }

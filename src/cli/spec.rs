@@ -6,7 +6,7 @@ mod completion;
 mod machine;
 
 pub(super) fn command() -> Command {
-    let command = Command::new("herdr")
+    let command = Command::new(crate::product::NAME)
         .about("terminal workspace manager for AI coding agents")
         .disable_help_flag(true)
         .disable_version_flag(true)
