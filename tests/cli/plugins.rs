@@ -358,7 +358,7 @@ command = ["sh", "-c", "sleep 5"]
             "--entrypoint",
             "board",
             "--env",
-            "HERDR_ROLE=board",
+            "VQRO_ROLE=board",
             "--no-focus",
         ],
     );
@@ -406,7 +406,7 @@ min_herdr_version = "0.6.10"
 platforms = ["linux", "macos", "windows"]
 
 [[build]]
-command = ["sh", "-c", "echo built > built.txt; if [ -n \"$HERDR_SESSION\" ]; then echo \"$HERDR_SESSION\" > leaked-session.txt; fi"]
+command = ["sh", "-c", "echo built > built.txt; if [ -n \"$VQRO_SESSION\" ]; then echo \"$VQRO_SESSION\" > leaked-session.txt; fi"]
 
 [[actions]]
 id = "bootstrap"
@@ -446,7 +446,7 @@ command = ["sh", "-c", "echo bootstrap"]
         ],
         &[
             ("GIT_CONFIG_GLOBAL", &git_config),
-            ("HERDR_SESSION", Path::new("leaked-session")),
+            ("VQRO_SESSION", Path::new("leaked-session")),
         ],
     );
     assert!(
@@ -483,7 +483,7 @@ command = ["sh", "-c", "echo bootstrap"]
             .join("worktree-bootstrap")
             .join("leaked-session.txt")
             .exists(),
-        "build command should not inherit HERDR_SESSION"
+        "build command should not inherit VQRO_SESSION"
     );
 
     let uninstall = run_named_cli(
@@ -840,7 +840,7 @@ command = ["sh", "-c", "echo new"]
     fs::create_dir_all(&config_home).unwrap();
     fs::create_dir_all(&runtime_dir).unwrap();
     let managed_checkout = config_home
-        .join("herdr-dev")
+        .join("vqro-dev")
         .join("plugins")
         .join("github")
         .join(WORKTREE_BOOTSTRAP_MANAGED_COMPONENT);
@@ -966,7 +966,7 @@ command = ["sh", "-c", "echo install"]
     fs::create_dir_all(&config_home).unwrap();
     fs::create_dir_all(&runtime_dir).unwrap();
     let managed_checkout = config_home
-        .join("herdr-dev")
+        .join("vqro-dev")
         .join("plugins")
         .join("github")
         .join(WORKTREE_BOOTSTRAP_MANAGED_COMPONENT);
@@ -1094,7 +1094,7 @@ command = ["sh", "-c", "echo install"]
     fs::create_dir_all(&config_home).unwrap();
     fs::create_dir_all(&runtime_dir).unwrap();
     let managed_checkout = config_home
-        .join("herdr-dev")
+        .join("vqro-dev")
         .join("plugins")
         .join("github")
         .join(WORKTREE_BOOTSTRAP_MANAGED_COMPONENT);

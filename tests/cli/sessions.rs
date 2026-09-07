@@ -132,7 +132,7 @@ fn named_sessions_use_separate_servers_and_workspace_state() {
     assert!(alpha_session["socket_path"]
         .as_str()
         .unwrap()
-        .ends_with("/sessions/alpha/herdr.sock"));
+        .ends_with("/sessions/alpha/vqro.sock"));
     assert!(beta_session["session_dir"]
         .as_str()
         .unwrap()
@@ -210,7 +210,7 @@ fn dead_server_cli_reports_one_session_aware_json_line() {
         assert_eq!(
             response["error"]["message"],
             format!(
-                "no herdr server is running at {}; run `{attach_command}` to start or attach it",
+                "no vqro server is running at {}; run `{attach_command}` to start or attach it",
                 socket_path.display()
             )
         );
@@ -228,7 +228,7 @@ fn dead_server_cli_reports_one_session_aware_json_line() {
         &runtime_dir,
         &["--session", "foo", "workspace", "create"],
     );
-    assert_server_not_running(missing, &named_socket, "herdr session attach foo");
+    assert_server_not_running(missing, &named_socket, "vqro session attach foo");
 
     let stale_socket = runtime_dir.join("stale.sock");
     drop(UnixListener::bind(&stale_socket).unwrap());
@@ -236,19 +236,19 @@ fn dead_server_cli_reports_one_session_aware_json_line() {
         .args(["workspace", "create"])
         .env("XDG_CONFIG_HOME", &config_home)
         .env("XDG_RUNTIME_DIR", &runtime_dir)
-        .env("HERDR_SOCKET_PATH", &stale_socket)
-        .env("HERDR_SESSION", "unrelated")
-        .env_remove("HERDR_CLIENT_SOCKET_PATH")
-        .env_remove("HERDR_ENV")
+        .env("VQRO_SOCKET_PATH", &stale_socket)
+        .env("VQRO_SESSION", "unrelated")
+        .env_remove("VQRO_CLIENT_SOCKET_PATH")
+        .env_remove("VQRO_ENV")
         .output()
         .unwrap();
-    assert_server_not_running(stale, &stale_socket, "herdr");
+    assert_server_not_running(stale, &stale_socket, "vqro");
 
     cleanup_test_base(&base);
 }
 
 #[test]
-fn integration_commands_run_locally_when_server_is_missing() {
+fn inherited_integration_mutation_is_disabled_during_alpha() {
     let base = unique_test_dir();
     let home_dir = base.join("home");
     let extensions_dir = home_dir.join(".pi/agent/extensions");
@@ -267,7 +267,7 @@ fn integration_commands_run_locally_when_server_is_missing() {
 
     let workspace_list = Command::new(env!("CARGO_BIN_EXE_vqro"))
         .args(["workspace", "list"])
-        .env("HERDR_SOCKET_PATH", &missing_socket)
+        .env("VQRO_SOCKET_PATH", &missing_socket)
         .env("HOME", &home_dir)
         .output()
         .unwrap();
@@ -275,37 +275,37 @@ fn integration_commands_run_locally_when_server_is_missing() {
 
     let integration_install = Command::new(env!("CARGO_BIN_EXE_vqro"))
         .args(["integration", "install", "pi"])
-        .env("HERDR_SOCKET_PATH", &missing_socket)
+        .env("VQRO_SOCKET_PATH", &missing_socket)
         .env("HOME", &home_dir)
         .output()
         .unwrap();
-    assert_eq!(integration_install.status.code(), Some(0));
+    assert_eq!(integration_install.status.code(), Some(1));
     assert!(
-        expected_extension.exists(),
-        "integration install should write local files without a server"
+        !expected_extension.exists(),
+        "vqro must not overwrite the installed Herdr integration during alpha"
     );
 
     let integration_status = Command::new(env!("CARGO_BIN_EXE_vqro"))
         .args(["integration", "status"])
-        .env("HERDR_SOCKET_PATH", &missing_socket)
+        .env("VQRO_SOCKET_PATH", &missing_socket)
         .env("HOME", &home_dir)
         .output()
         .unwrap();
     assert_eq!(integration_status.status.code(), Some(0));
     let status_stdout = String::from_utf8_lossy(&integration_status.stdout);
-    assert!(status_stdout.contains("pi: current (v9)"));
+    assert!(status_stdout.contains("pi: not installed"));
     assert!(status_stdout.contains("claude: not installed"));
 
     let integration_uninstall = Command::new(env!("CARGO_BIN_EXE_vqro"))
         .args(["integration", "uninstall", "pi"])
-        .env("HERDR_SOCKET_PATH", &missing_socket)
+        .env("VQRO_SOCKET_PATH", &missing_socket)
         .env("HOME", &home_dir)
         .output()
         .unwrap();
-    assert_eq!(integration_uninstall.status.code(), Some(0));
+    assert_eq!(integration_uninstall.status.code(), Some(1));
     assert!(
         !expected_extension.exists(),
-        "integration uninstall should remove local files without a server"
+        "vqro must not remove Herdr-owned integration files during alpha"
     );
 
     cleanup_test_base(&base);
@@ -330,7 +330,7 @@ fn integration_status_outdated_only_prints_action_for_legacy_install() {
 
     let output = Command::new(env!("CARGO_BIN_EXE_vqro"))
         .args(["integration", "status", "--outdated-only"])
-        .env("HERDR_SOCKET_PATH", &missing_socket)
+        .env("VQRO_SOCKET_PATH", &missing_socket)
         .env("HOME", &home_dir)
         .output()
         .unwrap();
@@ -356,7 +356,7 @@ fn integration_status_rejects_unknown_flags() {
 
     let output = Command::new(env!("CARGO_BIN_EXE_vqro"))
         .args(["integration", "status", "--wat"])
-        .env("HERDR_SOCKET_PATH", &missing_socket)
+        .env("VQRO_SOCKET_PATH", &missing_socket)
         .env("HOME", &home_dir)
         .output()
         .unwrap();
@@ -713,12 +713,15 @@ fn server_start_restores_legacy_session_through_api_identity() {
     assert_eq!(panes.len(), 2);
     let root_pane_id = format!("{workspace_id}:p1");
     let focused_pane_id = format!("{workspace_id}:p2");
-    assert!(panes.iter().any(|pane| {
-        pane["pane_id"] == root_pane_id
-            && pane["tab_id"] == format!("{workspace_id}:t1")
-            && pane["cwd"] == pion_cwd
-            && pane["focused"] == false
-    }));
+    assert!(
+        panes.iter().any(|pane| {
+            pane["pane_id"] == root_pane_id
+                && pane["tab_id"] == format!("{workspace_id}:t1")
+                && pane["cwd"] == pion_cwd
+                && pane["focused"] == false
+        }),
+        "restored panes: {panes:?}"
+    );
     assert!(panes.iter().any(|pane| {
         pane["pane_id"] == focused_pane_id
             && pane["tab_id"] == format!("{workspace_id}:t1")

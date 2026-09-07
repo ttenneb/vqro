@@ -278,9 +278,9 @@ fn root_and_command_group_help_point_agents_to_plain_text_docs() {
     for args in [&["--help"][..], &["agent", "--help"][..]] {
         let output = Command::new(env!("CARGO_BIN_EXE_vqro"))
             .args(args)
-            .env_remove("HERDR_SOCKET_PATH")
-            .env_remove("HERDR_CLIENT_SOCKET_PATH")
-            .env_remove("HERDR_ENV")
+            .env_remove("VQRO_SOCKET_PATH")
+            .env_remove("VQRO_CLIENT_SOCKET_PATH")
+            .env_remove("VQRO_ENV")
             .output()
             .unwrap();
         assert!(output.status.success(), "herdr {} failed", args.join(" "));
@@ -326,9 +326,9 @@ fn subcommand_help_explains_automation_semantics_without_a_server() {
     for (args, expected) in cases {
         let output = Command::new(env!("CARGO_BIN_EXE_vqro"))
             .args(*args)
-            .env_remove("HERDR_SOCKET_PATH")
-            .env_remove("HERDR_CLIENT_SOCKET_PATH")
-            .env_remove("HERDR_ENV")
+            .env_remove("VQRO_SOCKET_PATH")
+            .env_remove("VQRO_CLIENT_SOCKET_PATH")
+            .env_remove("VQRO_ENV")
             .output()
             .unwrap();
         assert!(
@@ -368,8 +368,8 @@ fn removed_wait_and_agent_send_commands_are_rejected() {
         .unwrap();
     assert_eq!(send.status.code(), Some(2));
     let stderr = String::from_utf8_lossy(&send.stderr);
-    assert!(stderr.contains("herdr agent send-keys"));
-    assert!(!stderr.contains("herdr agent send <"));
+    assert!(stderr.contains("vqro agent send-keys"));
+    assert!(!stderr.contains("vqro agent send <"));
 }
 
 #[test]
@@ -405,7 +405,7 @@ fn agent_cli_rejects_invalid_wait_and_rename_grammar_locally() {
     ] {
         let output = Command::new(env!("CARGO_BIN_EXE_vqro"))
             .args(args)
-            .env("HERDR_SOCKET_PATH", "/nonexistent/herdr.sock")
+            .env("VQRO_SOCKET_PATH", "/nonexistent/herdr.sock")
             .output()
             .unwrap();
         assert_eq!(
@@ -423,9 +423,9 @@ fn agent_cli_rejects_invalid_wait_and_rename_grammar_locally() {
 fn completion_command_prints_zsh_script_without_session_startup() {
     let output = Command::new(env!("CARGO_BIN_EXE_vqro"))
         .args(["completion", "zsh"])
-        .env_remove("HERDR_SOCKET_PATH")
-        .env_remove("HERDR_CLIENT_SOCKET_PATH")
-        .env_remove("HERDR_ENV")
+        .env_remove("VQRO_SOCKET_PATH")
+        .env_remove("VQRO_CLIENT_SOCKET_PATH")
+        .env_remove("VQRO_ENV")
         .output()
         .unwrap();
 
@@ -436,7 +436,7 @@ fn completion_command_prints_zsh_script_without_session_startup() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("#compdef herdr"), "stdout: {stdout}");
+    assert!(stdout.contains("#compdef vqro"), "stdout: {stdout}");
     assert!(
         !stdout.contains("--cwd=[]"),
         "zsh completions should not suggest equals-style values unsupported by most manual parsers: {stdout}"
@@ -461,7 +461,7 @@ fn root_help_hides_explicit_client_command() {
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        !stdout.contains("herdr client"),
+        !stdout.contains("vqro client"),
         "root help should not advertise the internal client command: {stdout}"
     );
 }
@@ -476,7 +476,7 @@ fn root_help_advertises_api_schema_command_group() {
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.contains("herdr api <subcommand>"),
+        stdout.contains("vqro api <subcommand>"),
         "root help should advertise the api command group: {stdout}"
     );
 }
@@ -490,9 +490,9 @@ fn api_schema_default_output_is_a_short_summary() {
 
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("Herdr API schema"), "stdout: {stdout}");
+    assert!(stdout.contains("vqro API schema"), "stdout: {stdout}");
     assert!(
-        stdout.contains("Use `herdr api schema --json`"),
+        stdout.contains("Use `vqro api schema --json`"),
         "stdout: {stdout}"
     );
     assert!(
@@ -593,9 +593,9 @@ fn explicit_client_command_respects_nested_guard() {
 
     let output = Command::new(env!("CARGO_BIN_EXE_vqro"))
         .arg("client")
-        .env("HERDR_ENV", "1")
+        .env("VQRO_ENV", "1")
         .env("XDG_CONFIG_HOME", &base)
-        .env_remove("HERDR_CONFIG_PATH")
+        .env_remove("VQRO_CONFIG_PATH")
         .output()
         .unwrap();
 
@@ -613,7 +613,7 @@ fn explicit_client_command_respects_nested_guard() {
 fn removed_show_changelog_flag_fails_before_nested_guard() {
     let output = Command::new(env!("CARGO_BIN_EXE_vqro"))
         .arg("--show-changelog")
-        .env("HERDR_ENV", "1")
+        .env("VQRO_ENV", "1")
         .output()
         .unwrap();
 

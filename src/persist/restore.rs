@@ -1069,10 +1069,17 @@ fn recover_typed_layout(
         });
     }
     let root = root?;
-    let saved_focus = snap.focused_leaf.and_then(|leaf| match leaf {
-        LayoutLeafSnapshot::Pane(old) => id_map.get(&old).copied().map(LayoutLeaf::Pane),
-        LayoutLeafSnapshot::Collection(id) => Some(LayoutLeaf::Collection(id)),
-    });
+    let saved_focus = snap
+        .focused_leaf
+        .and_then(|leaf| match leaf {
+            LayoutLeafSnapshot::Pane(old) => id_map.get(&old).copied().map(LayoutLeaf::Pane),
+            LayoutLeafSnapshot::Collection(id) => Some(LayoutLeaf::Collection(id)),
+        })
+        .or_else(|| {
+            snap.focused
+                .and_then(|old| id_map.get(&old).copied())
+                .map(LayoutLeaf::Pane)
+        });
     let mut leaves = Vec::new();
     fn collect_leaves(node: &TypedNode, leaves: &mut Vec<LayoutLeaf>) {
         match node {

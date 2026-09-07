@@ -48,7 +48,7 @@ fn write_delayed_shell_and_fake_pi(
     fs::write(
         &fake_pi,
         format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$@\" >> '{}'\nexport HERDR_AGENT=pi\n'{}' pane report-agent \"$HERDR_PANE_ID\" --source custom:delayed-shell-pi --agent pi --state idle >/dev/null\nwhile IFS= read -r _prompt; do :; done\n",
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" >> '{}'\nexport HERDR_AGENT=pi\n'{}' pane report-agent \"$VQRO_PANE_ID\" --source custom:delayed-shell-pi --agent pi --state idle >/dev/null\nwhile IFS= read -r _prompt; do :; done\n",
             invocations.display(),
             env!("CARGO_BIN_EXE_vqro"),
         ),
@@ -223,7 +223,7 @@ fn agent_start_command_works() {
     fs::write(
         &fake_pi,
         format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{0}'\nexport HERDR_AGENT=pi\n'{1}' pane report-agent \"$HERDR_PANE_ID\" --source custom:fake-pi --agent pi --state idle >/dev/null\nwhile IFS= read -r prompt; do\n  case \"$prompt\" in\n    \"do not transition\") continue ;;\n    \"done churn\")\n      '{1}' pane report-agent \"$HERDR_PANE_ID\" --source custom:fake-pi --agent pi --state done >/dev/null\n      '{1}' pane report-agent \"$HERDR_PANE_ID\" --source custom:fake-pi --agent pi --state idle >/dev/null\n      continue\n      ;;\n    \"session churn\")\n      '{1}' pane report-agent-session \"$HERDR_PANE_ID\" --source custom:fake-pi --agent pi --agent-session-id replacement >/dev/null\n      continue\n      ;;\n    \"block after submit\")\n      '{1}' pane report-agent \"$HERDR_PANE_ID\" --source custom:fake-pi --agent pi --state blocked >/dev/null\n      continue\n      ;;\n  esac\n  '{1}' pane report-agent \"$HERDR_PANE_ID\" --source custom:fake-pi --agent pi --state working >/dev/null\n  '{1}' pane report-agent \"$HERDR_PANE_ID\" --source custom:fake-pi --agent pi --state idle >/dev/null\n  printf '%s\\n' \"$prompt\" >> '{2}'\ndone\n",
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{0}'\nexport HERDR_AGENT=pi\n'{1}' pane report-agent \"$VQRO_PANE_ID\" --source custom:fake-pi --agent pi --state idle >/dev/null\nwhile IFS= read -r prompt; do\n  case \"$prompt\" in\n    \"do not transition\") continue ;;\n    \"done churn\")\n      '{1}' pane report-agent \"$VQRO_PANE_ID\" --source custom:fake-pi --agent pi --state done >/dev/null\n      '{1}' pane report-agent \"$VQRO_PANE_ID\" --source custom:fake-pi --agent pi --state idle >/dev/null\n      continue\n      ;;\n    \"session churn\")\n      '{1}' pane report-agent-session \"$VQRO_PANE_ID\" --source custom:fake-pi --agent pi --agent-session-id replacement >/dev/null\n      continue\n      ;;\n    \"block after submit\")\n      '{1}' pane report-agent \"$VQRO_PANE_ID\" --source custom:fake-pi --agent pi --state blocked >/dev/null\n      continue\n      ;;\n  esac\n  '{1}' pane report-agent \"$VQRO_PANE_ID\" --source custom:fake-pi --agent pi --state working >/dev/null\n  '{1}' pane report-agent \"$VQRO_PANE_ID\" --source custom:fake-pi --agent pi --state idle >/dev/null\n  printf '%s\\n' \"$prompt\" >> '{2}'\ndone\n",
             captured_args.display(),
             env!("CARGO_BIN_EXE_vqro"),
             captured_prompts.display(),

@@ -61,10 +61,10 @@ fn spawn_server_with_env(
     api_socket: &Path,
     extra_env: &[(&str, &str)],
 ) -> SpawnedHerdr {
-    fs::create_dir_all(config_home.join("herdr")).unwrap();
+    fs::create_dir_all(config_home.join("vqro-dev")).unwrap();
     fs::create_dir_all(runtime_dir).unwrap();
     fs::write(
-        config_home.join("herdr/config.toml"),
+        config_home.join("vqro-dev/config.toml"),
         "onboarding = false\n",
     )
     .unwrap();
@@ -81,9 +81,9 @@ fn spawn_server_with_env(
     cmd.arg("server");
     cmd.env("XDG_CONFIG_HOME", config_home);
     cmd.env("XDG_RUNTIME_DIR", runtime_dir);
-    cmd.env("HERDR_SOCKET_PATH", api_socket);
+    cmd.env("VQRO_SOCKET_PATH", api_socket);
     cmd.env(
-        "HERDR_CLIENT_SOCKET_PATH",
+        "VQRO_CLIENT_SOCKET_PATH",
         runtime_dir.join("herdr-client.sock"),
     );
     cmd.env("SHELL", "/bin/sh");
@@ -104,10 +104,10 @@ fn spawn_named_session_server(
     runtime_dir: &Path,
     session_name: &str,
 ) -> SpawnedHerdr {
-    fs::create_dir_all(config_home.join("herdr-dev")).unwrap();
+    fs::create_dir_all(config_home.join("vqro-dev")).unwrap();
     fs::create_dir_all(runtime_dir).unwrap();
     fs::write(
-        config_home.join("herdr-dev/config.toml"),
+        config_home.join("vqro-dev/config.toml"),
         "onboarding = false\n",
     )
     .unwrap();
@@ -124,9 +124,9 @@ fn spawn_named_session_server(
     cmd.arg("server");
     cmd.env("XDG_CONFIG_HOME", config_home);
     cmd.env("XDG_RUNTIME_DIR", runtime_dir);
-    cmd.env("HERDR_SESSION", session_name);
-    cmd.env_remove("HERDR_SOCKET_PATH");
-    cmd.env_remove("HERDR_CLIENT_SOCKET_PATH");
+    cmd.env("VQRO_SESSION", session_name);
+    cmd.env_remove("VQRO_SOCKET_PATH");
+    cmd.env_remove("VQRO_CLIENT_SOCKET_PATH");
     cmd.env("SHELL", "/bin/sh");
 
     let child = pair.slave.spawn_command(cmd).unwrap();
@@ -138,10 +138,10 @@ fn spawn_named_session_server(
 }
 
 fn spawn_default_session_server(config_home: &Path, runtime_dir: &Path) -> SpawnedHerdr {
-    fs::create_dir_all(config_home.join("herdr-dev")).unwrap();
+    fs::create_dir_all(config_home.join("vqro-dev")).unwrap();
     fs::create_dir_all(runtime_dir).unwrap();
     fs::write(
-        config_home.join("herdr-dev/config.toml"),
+        config_home.join("vqro-dev/config.toml"),
         "onboarding = false\n",
     )
     .unwrap();
@@ -159,9 +159,9 @@ fn spawn_default_session_server(config_home: &Path, runtime_dir: &Path) -> Spawn
     cmd.env("XDG_CONFIG_HOME", config_home);
     cmd.env("XDG_RUNTIME_DIR", runtime_dir);
     cmd.env("XDG_STATE_HOME", runtime_dir.join("state"));
-    cmd.env_remove("HERDR_SESSION");
-    cmd.env_remove("HERDR_SOCKET_PATH");
-    cmd.env_remove("HERDR_CLIENT_SOCKET_PATH");
+    cmd.env_remove("VQRO_SESSION");
+    cmd.env_remove("VQRO_SOCKET_PATH");
+    cmd.env_remove("VQRO_CLIENT_SOCKET_PATH");
     cmd.env("SHELL", "/bin/sh");
 
     let child = pair.slave.spawn_command(cmd).unwrap();
@@ -179,10 +179,10 @@ fn spawn_server_with_args_and_socket_env(
     api_socket_env: Option<&Path>,
     client_socket_env: Option<&Path>,
 ) -> SpawnedHerdr {
-    fs::create_dir_all(config_home.join("herdr-dev")).unwrap();
+    fs::create_dir_all(config_home.join("vqro-dev")).unwrap();
     fs::create_dir_all(runtime_dir).unwrap();
     fs::write(
-        config_home.join("herdr-dev/config.toml"),
+        config_home.join("vqro-dev/config.toml"),
         "onboarding = false\n",
     )
     .unwrap();
@@ -203,16 +203,16 @@ fn spawn_server_with_args_and_socket_env(
     cmd.arg("server");
     cmd.env("XDG_CONFIG_HOME", config_home);
     cmd.env("XDG_RUNTIME_DIR", runtime_dir);
-    cmd.env_remove("HERDR_SESSION");
+    cmd.env_remove("VQRO_SESSION");
     if let Some(api_socket_env) = api_socket_env {
-        cmd.env("HERDR_SOCKET_PATH", api_socket_env);
+        cmd.env("VQRO_SOCKET_PATH", api_socket_env);
     } else {
-        cmd.env_remove("HERDR_SOCKET_PATH");
+        cmd.env_remove("VQRO_SOCKET_PATH");
     }
     if let Some(client_socket_env) = client_socket_env {
-        cmd.env("HERDR_CLIENT_SOCKET_PATH", client_socket_env);
+        cmd.env("VQRO_CLIENT_SOCKET_PATH", client_socket_env);
     } else {
-        cmd.env_remove("HERDR_CLIENT_SOCKET_PATH");
+        cmd.env_remove("VQRO_CLIENT_SOCKET_PATH");
     }
     cmd.env("SHELL", "/bin/sh");
 
@@ -781,9 +781,9 @@ fn live_handoff_preserves_named_session_socket_paths() {
     let base = unique_test_dir();
     let config_home = base.join("config");
     let runtime_dir = base.join("runtime");
-    let session_dir = config_home.join("herdr-dev/sessions/work");
-    let api_socket = session_dir.join("herdr.sock");
-    let client_socket = session_dir.join("herdr-client.sock");
+    let session_dir = config_home.join("vqro-dev/sessions/work");
+    let api_socket = session_dir.join("vqro.sock");
+    let client_socket = session_dir.join("vqro-client.sock");
 
     let spawned = spawn_named_session_server(&config_home, &runtime_dir, "work");
     wait_for_socket(&api_socket, Duration::from_secs(10));
@@ -797,7 +797,7 @@ fn live_handoff_preserves_named_session_socket_paths() {
     wait_for_api(&api_socket, Duration::from_secs(10));
     wait_for_socket(&client_socket, Duration::from_secs(5));
     assert!(
-        !config_home.join("herdr-dev/herdr.sock").exists(),
+        !config_home.join("vqro-dev/vqro.sock").exists(),
         "named handoff unexpectedly bound the default session API socket"
     );
 
@@ -814,12 +814,12 @@ fn live_handoff_ignores_leaked_default_socket_env_for_named_session() {
     let base = unique_test_dir();
     let config_home = base.join("config");
     let runtime_dir = base.join("runtime");
-    let default_session_dir = config_home.join("herdr-dev");
-    let default_api_socket = default_session_dir.join("herdr.sock");
-    let default_client_socket = default_session_dir.join("herdr-client.sock");
-    let work_session_dir = config_home.join("herdr-dev/sessions/work");
-    let work_api_socket = work_session_dir.join("herdr.sock");
-    let work_client_socket = work_session_dir.join("herdr-client.sock");
+    let default_session_dir = config_home.join("vqro-dev");
+    let default_api_socket = default_session_dir.join("vqro.sock");
+    let default_client_socket = default_session_dir.join("vqro-client.sock");
+    let work_session_dir = config_home.join("vqro-dev/sessions/work");
+    let work_api_socket = work_session_dir.join("vqro.sock");
+    let work_client_socket = work_session_dir.join("vqro-client.sock");
 
     let default_spawned = spawn_default_session_server(&config_home, &runtime_dir);
     wait_for_socket(&default_api_socket, Duration::from_secs(10));
@@ -861,7 +861,7 @@ fn live_handoff_preserves_client_socket_env_without_api_socket_env() {
     let base = unique_test_dir();
     let config_home = base.join("config");
     let runtime_dir = base.join("runtime");
-    let api_socket = config_home.join("herdr-dev/herdr.sock");
+    let api_socket = config_home.join("vqro-dev/vqro.sock");
     let client_socket = runtime_dir.join("custom-client.sock");
 
     let spawned = spawn_server_with_args_and_socket_env(
@@ -896,8 +896,8 @@ fn live_handoff_preserves_installed_plugins() {
     let base = unique_test_dir();
     let config_home = base.join("config");
     let runtime_dir = base.join("runtime");
-    let api_socket = config_home.join("herdr-dev/herdr.sock");
-    let registry_path = config_home.join("herdr-dev/plugins.json");
+    let api_socket = config_home.join("vqro-dev/vqro.sock");
+    let registry_path = config_home.join("vqro-dev/plugins.json");
     let existing_plugin = base.join("plugins/existing");
     let added_plugin = base.join("plugins/added");
     write_plugin_manifest(&existing_plugin, "test.live-handoff-existing");
@@ -1362,7 +1362,7 @@ fn live_handoff_accepts_canonical_pane_id_from_child_env() {
         serde_json::json!({
             "id": "test:pane:print-id",
             "method": "pane.send_input",
-            "params": {"pane_id": pane_id, "text": format!("printf '%s' \"$HERDR_PANE_ID\" > {}", pane_id_marker.display()), "keys": ["Enter"]}
+            "params": {"pane_id": pane_id, "text": format!("printf '%s' \"$VQRO_PANE_ID\" > {}", pane_id_marker.display()), "keys": ["Enter"]}
         }),
     ));
     let old_pane_id = wait_for_file_contains(&pane_id_marker, &pane_id, Duration::from_secs(5));
@@ -1807,10 +1807,10 @@ fn live_handoff_preserves_http_servers_across_multiple_sessions() {
     let config_home = base.join("config");
     let runtime_dir = base.join("runtime");
     let sessions = [
-        (None, config_home.join("herdr-dev/herdr.sock")),
+        (None, config_home.join("vqro-dev/vqro.sock")),
         (
             Some("work"),
-            config_home.join("herdr-dev/sessions/work/herdr.sock"),
+            config_home.join("vqro-dev/sessions/work/vqro.sock"),
         ),
     ];
     let mut spawned = Vec::new();
@@ -1988,7 +1988,7 @@ fn live_handoff_import_failure_rolls_back_old_server_at(failure_point: &str) {
         &config_home,
         &runtime_dir,
         &api_socket,
-        &[("HERDR_TEST_HANDOFF_IMPORT_FAIL", failure_point)],
+        &[("VQRO_TEST_HANDOFF_IMPORT_FAIL", failure_point)],
     );
     wait_for_socket(&api_socket, Duration::from_secs(10));
     register_runtime_dir(&runtime_dir);

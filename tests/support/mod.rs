@@ -732,7 +732,7 @@ fn process_runtime_dir(pid: u32) -> std::io::Result<Option<PathBuf>> {
             return Ok(Some(PathBuf::from(value)));
         }
 
-        if let Some(value) = kv.strip_prefix("HERDR_SOCKET_PATH=") {
+        if let Some(value) = kv.strip_prefix("VQRO_SOCKET_PATH=") {
             socket_path = Some(PathBuf::from(value));
         }
     }
