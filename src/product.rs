@@ -78,7 +78,7 @@ mod tests {
 
     #[test]
     fn inherited_self_update_is_quarantined() {
-        assert!(!SELF_UPDATE_ENABLED);
+        const { assert!(!SELF_UPDATE_ENABLED) };
     }
 
     #[test]
