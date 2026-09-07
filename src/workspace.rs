@@ -192,7 +192,9 @@ pub struct Workspace {
     pub(crate) cached_git_ahead_behind: Option<(usize, usize)>,
     /// Cached derived Git repo metadata for worktree actions and status display.
     pub(crate) cached_git_space: Option<GitSpaceMetadata>,
-    /// Explicit Herdr-managed worktree grouping provenance.
+    /// Immutable repository checkout identity. Pane CWD changes never rewrite it.
+    pub checkout: Option<crate::repository::CheckoutProvenance>,
+    /// Compatibility projection for the existing workspace/worktree API.
     pub worktree_space: Option<WorktreeSpaceMembership>,
     pub(crate) metadata_tokens: crate::metadata_tokens::MetadataTokens,
     pub(crate) metadata_token_sequences: HashMap<String, u64>,
@@ -259,6 +261,7 @@ impl Workspace {
             cached_git_branch: git_branch(&identity_cwd),
             cached_git_ahead_behind: None,
             cached_git_space,
+            checkout: None,
             worktree_space: None,
             metadata_tokens: crate::metadata_tokens::MetadataTokens::default(),
             metadata_token_sequences: HashMap::new(),
@@ -411,6 +414,7 @@ impl Workspace {
                 cached_git_branch: git_branch(&initial_cwd),
                 cached_git_ahead_behind: None,
                 cached_git_space,
+                checkout: None,
                 worktree_space: None,
                 metadata_tokens: crate::metadata_tokens::MetadataTokens::default(),
                 metadata_token_sequences: HashMap::new(),
@@ -1023,6 +1027,19 @@ impl Workspace {
             .or_else(|| Some(self.identity_cwd.clone()))
     }
 
+    /// Stable identity source for repository discovery. Once a workspace is
+    /// attached to a checkout, shell `cd` activity must not move it between Spaces.
+    pub(crate) fn repository_identity_cwd_from(
+        &self,
+        terminals: &HashMap<TerminalId, TerminalState>,
+        terminal_runtimes: &TerminalRuntimeRegistry,
+    ) -> Option<PathBuf> {
+        self.checkout
+            .as_ref()
+            .map(|checkout| checkout.checkout_path.clone())
+            .or_else(|| self.resolved_identity_cwd_from(terminals, terminal_runtimes))
+    }
+
     #[cfg(test)]
     pub fn display_name(&self) -> String {
         if let Some(name) = &self.custom_name {
@@ -1204,6 +1221,7 @@ impl Workspace {
             cached_git_branch: git_branch(&identity_cwd),
             cached_git_ahead_behind: None,
             cached_git_space: None,
+            checkout: None,
             worktree_space: None,
             metadata_tokens: crate::metadata_tokens::MetadataTokens::default(),
             metadata_token_sequences: HashMap::new(),

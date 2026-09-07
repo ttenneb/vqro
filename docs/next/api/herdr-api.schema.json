@@ -79,6 +79,36 @@
           ],
           "type": "string"
         },
+        "CheckoutInfo": {
+          "properties": {
+            "checkout_path": {
+              "type": "string"
+            },
+            "kind": {
+              "$ref": "#/schemas/event/$defs/CheckoutKind"
+            },
+            "repository_id": {
+              "type": "string"
+            },
+            "workspace_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "workspace_id",
+            "repository_id",
+            "checkout_path",
+            "kind"
+          ],
+          "type": "object"
+        },
+        "CheckoutKind": {
+          "enum": [
+            "primary",
+            "linked"
+          ],
+          "type": "string"
+        },
         "EventData": {
           "oneOf": [
             {
@@ -1076,6 +1106,16 @@
             "agent_status": {
               "$ref": "#/schemas/event/$defs/AgentStatus"
             },
+            "checkout": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/event/$defs/CheckoutInfo"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "focused": {
               "type": "boolean"
             },
@@ -1091,6 +1131,12 @@
               "format": "uint",
               "minimum": 0,
               "type": "integer"
+            },
+            "repository_id": {
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "tab_count": {
               "format": "uint",
@@ -6876,6 +6922,36 @@
           ],
           "type": "string"
         },
+        "CheckoutInfo": {
+          "properties": {
+            "checkout_path": {
+              "type": "string"
+            },
+            "kind": {
+              "$ref": "#/schemas/success_response/$defs/CheckoutKind"
+            },
+            "repository_id": {
+              "type": "string"
+            },
+            "workspace_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "workspace_id",
+            "repository_id",
+            "checkout_path",
+            "kind"
+          ],
+          "type": "object"
+        },
+        "CheckoutKind": {
+          "enum": [
+            "primary",
+            "linked"
+          ],
+          "type": "string"
+        },
         "ClientWindowTitleReason": {
           "enum": [
             "set",
@@ -9416,6 +9492,43 @@
           ],
           "type": "string"
         },
+        "RepositoryInfo": {
+          "description": "Optional first-class repository projection. Workspace APIs remain available\nfor clients that do not understand this model.",
+          "properties": {
+            "checkout_workspace_ids": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "focused": {
+              "type": "boolean"
+            },
+            "git_common_dir": {
+              "type": "string"
+            },
+            "label": {
+              "type": "string"
+            },
+            "last_focused_workspace_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "repository_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "repository_id",
+            "label",
+            "git_common_dir",
+            "checkout_workspace_ids",
+            "focused"
+          ],
+          "type": "object"
+        },
         "ResponseResult": {
           "oneOf": [
             {
@@ -10864,6 +10977,18 @@
               "minimum": 0,
               "type": "integer"
             },
+            "repositories": {
+              "items": {
+                "$ref": "#/schemas/success_response/$defs/RepositoryInfo"
+              },
+              "type": "array"
+            },
+            "space_order": {
+              "items": {
+                "$ref": "#/schemas/success_response/$defs/SpaceInfo"
+              },
+              "type": "array"
+            },
             "tabs": {
               "items": {
                 "$ref": "#/schemas/success_response/$defs/TabInfo"
@@ -10890,6 +11015,42 @@
             "agents"
           ],
           "type": "object"
+        },
+        "SpaceInfo": {
+          "oneOf": [
+            {
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "kind": {
+                  "const": "repository",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind",
+                "id"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "kind": {
+                  "const": "standalone_workspace",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind",
+                "id"
+              ],
+              "type": "object"
+            }
+          ]
         },
         "SplitDirection": {
           "enum": [
@@ -10945,6 +11106,16 @@
             "agent_status": {
               "$ref": "#/schemas/success_response/$defs/AgentStatus"
             },
+            "checkout": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/success_response/$defs/CheckoutInfo"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "focused": {
               "type": "boolean"
             },
@@ -10960,6 +11131,12 @@
               "format": "uint",
               "minimum": 0,
               "type": "integer"
+            },
+            "repository_id": {
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "tab_count": {
               "format": "uint",

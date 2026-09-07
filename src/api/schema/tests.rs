@@ -786,6 +786,8 @@ fn session_snapshot_request_and_response_round_trip() {
                 focused_workspace_id: None,
                 focused_tab_id: None,
                 focused_pane_id: None,
+                repositories: Vec::new(),
+                space_order: Vec::new(),
                 workspaces: Vec::new(),
                 tabs: Vec::new(),
                 panes: Vec::new(),
@@ -831,6 +833,8 @@ fn worktree_request_and_response_round_trip() {
                 active_tab_id: "w_1:1".into(),
                 agent_status: AgentStatus::Unknown,
                 tokens: HashMap::new(),
+                repository_id: None,
+                checkout: None,
                 worktree: Some(WorkspaceWorktreeInfo {
                     repo_key: "/repo/herdr/.git".into(),
                     repo_name: "herdr".into(),
@@ -917,6 +921,8 @@ fn worktree_lifecycle_events_round_trip() {
         active_tab_id: "w_2:1".into(),
         agent_status: AgentStatus::Unknown,
         tokens: HashMap::new(),
+        repository_id: None,
+        checkout: None,
         worktree: Some(WorkspaceWorktreeInfo {
             repo_key: "/repo/herdr/.git".into(),
             repo_name: "herdr".into(),

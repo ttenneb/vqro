@@ -119,8 +119,8 @@ impl App {
             .workspaces
             .iter()
             .filter_map(|ws| {
-                let cwd =
-                    ws.resolved_identity_cwd_from(&self.state.terminals, &self.terminal_runtimes)?;
+                let cwd = ws
+                    .repository_identity_cwd_from(&self.state.terminals, &self.terminal_runtimes)?;
                 let cache_key_hint = (!refresh_repo_discovery && ws.cached_identity_cwd == cwd)
                     .then(|| ws.cached_git_status_key.clone());
                 Some(WorkspaceGitRefreshItem {

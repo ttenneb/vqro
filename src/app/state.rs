@@ -794,6 +794,9 @@ pub struct AppState {
     pub(crate) pane_id_aliases: std::collections::HashMap<u32, PaneId>,
     pub(crate) public_pane_id_aliases: std::collections::HashMap<String, PaneId>,
     pub workspaces: Vec<Workspace>,
+    /// Shared repository identities and top-level Spaces ordering.
+    pub repositories: Vec<crate::repository::Repository>,
+    pub space_order: Vec<crate::repository::SpaceRef>,
     pub active: Option<usize>,
     pub(crate) previous_pane_focus: Option<PaneFocusTarget>,
     pub selected: usize,
@@ -892,6 +895,38 @@ pub struct AppState {
 }
 
 impl AppState {
+    pub(crate) fn reconcile_repositories(&mut self) -> bool {
+        let previous_repositories = self.repositories.clone();
+        let previous_order = self.space_order.clone();
+        let previous_checkouts = self
+            .workspaces
+            .iter()
+            .map(|workspace| workspace.checkout.clone())
+            .collect::<Vec<_>>();
+        let active_workspace_id = self
+            .active
+            .and_then(|index| self.workspaces.get(index))
+            .map(|workspace| workspace.id.clone());
+        crate::repository::reconcile(
+            &mut self.workspaces,
+            &mut self.repositories,
+            &mut self.space_order,
+            active_workspace_id.as_deref(),
+        );
+        let changed = previous_repositories != self.repositories
+            || previous_order != self.space_order
+            || previous_checkouts
+                != self
+                    .workspaces
+                    .iter()
+                    .map(|workspace| workspace.checkout.clone())
+                    .collect::<Vec<_>>();
+        if changed {
+            self.mark_session_dirty();
+        }
+        changed
+    }
+
     pub(crate) fn mark_session_dirty(&mut self) {
         self.session_dirty = true;
     }
@@ -1025,6 +1060,8 @@ impl AppState {
             pane_id_aliases: std::collections::HashMap::new(),
             public_pane_id_aliases: std::collections::HashMap::new(),
             workspaces: Vec::new(),
+            repositories: Vec::new(),
+            space_order: Vec::new(),
             active: None,
             previous_pane_focus: None,
             selected: 0,

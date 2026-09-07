@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use super::agents::AgentInfo;
 use super::panes::{PaneInfo, PaneLayoutSnapshot};
+use super::repositories::{RepositoryInfo, SpaceInfo};
 use super::tabs::TabInfo;
 use super::workspaces::WorkspaceInfo;
 
@@ -15,6 +16,10 @@ pub struct SessionSnapshot {
     pub focused_tab_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub focused_pane_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub repositories: Vec<RepositoryInfo>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub space_order: Vec<SpaceInfo>,
     pub workspaces: Vec<WorkspaceInfo>,
     pub tabs: Vec<TabInfo>,
     pub panes: Vec<PaneInfo>,

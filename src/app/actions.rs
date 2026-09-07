@@ -459,6 +459,19 @@ impl AppState {
             self.active = Some(idx);
             self.selected = idx;
             let workspace_id = self.workspaces[idx].id.clone();
+            if let Some(repository_id) = self.workspaces[idx]
+                .checkout
+                .as_ref()
+                .map(|checkout| checkout.repository_id.clone())
+            {
+                if let Some(repository) = self
+                    .repositories
+                    .iter_mut()
+                    .find(|repo| repo.id == repository_id)
+                {
+                    repository.last_focused_workspace_id = Some(workspace_id.clone());
+                }
+            }
             crate::logging::workspace_focused(&workspace_id);
             self.mark_session_dirty();
             if let Some(ws) = self.workspaces.get_mut(idx) {
@@ -489,6 +502,19 @@ impl AppState {
         self.active = Some(ws_idx);
         self.selected = ws_idx;
         let workspace_id = self.workspaces[ws_idx].id.clone();
+        if let Some(repository_id) = self.workspaces[ws_idx]
+            .checkout
+            .as_ref()
+            .map(|checkout| checkout.repository_id.clone())
+        {
+            if let Some(repository) = self
+                .repositories
+                .iter_mut()
+                .find(|repo| repo.id == repository_id)
+            {
+                repository.last_focused_workspace_id = Some(workspace_id.clone());
+            }
+        }
         if workspace_changed {
             crate::logging::workspace_focused(&workspace_id);
         }
@@ -570,6 +596,11 @@ impl AppState {
         self.selected = selected_id
             .and_then(|id| self.workspaces.iter().position(|ws| ws.id == id))
             .unwrap_or(0);
+        crate::repository::project_workspace_order(
+            &self.workspaces,
+            &mut self.repositories,
+            &mut self.space_order,
+        );
         true
     }
 
@@ -636,6 +667,11 @@ impl AppState {
         self.selected = selected_id
             .and_then(|id| self.workspaces.iter().position(|ws| ws.id == id))
             .unwrap_or(0);
+        crate::repository::project_workspace_order(
+            &self.workspaces,
+            &mut self.repositories,
+            &mut self.space_order,
+        );
         true
     }
 
@@ -772,6 +808,7 @@ impl AppState {
             }
             self.active = Some(self.selected);
         }
+        self.reconcile_repositories();
     }
 }
 
@@ -1406,7 +1443,7 @@ impl AppState {
             };
 
             if self.workspaces[ws_idx]
-                .resolved_identity_cwd_from(&self.terminals, terminal_runtimes)
+                .repository_identity_cwd_from(&self.terminals, terminal_runtimes)
                 .as_ref()
                 != Some(&result.resolved_identity_cwd)
             {
@@ -1437,6 +1474,7 @@ impl AppState {
                 changed = true;
             }
         }
+        changed |= self.reconcile_repositories();
         changed
     }
 

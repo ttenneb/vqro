@@ -532,6 +532,8 @@ mod tests {
     fn empty_snapshot() -> crate::persist::SessionSnapshot {
         crate::persist::SessionSnapshot {
             version: 0,
+            repositories: Vec::new(),
+            space_order: Vec::new(),
             workspaces: Vec::new(),
             active: None,
             selected: 0,

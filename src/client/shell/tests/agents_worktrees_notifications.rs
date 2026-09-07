@@ -171,6 +171,31 @@ fn grouped_worktrees_render_parent_branch_and_indented_child() {
 }
 
 #[test]
+fn repository_group_survives_without_a_primary_checkout_projection() {
+    let mut projected = snapshot();
+    projected.workspaces[0].worktree = Some(ClientShellWorktree {
+        key: "repo".into(),
+        label: "repo".into(),
+        is_linked_worktree: true,
+    });
+    let mut sibling = projected.workspaces[0].clone();
+    sibling.workspace_id = "ws_2".into();
+    sibling.number = 2;
+    sibling.focused = false;
+    projected.workspaces.push(sibling);
+
+    let entries = super::super::sidebar::workspace_entries(&projected, &HashSet::new());
+
+    assert_eq!(entries.len(), 2);
+    assert!(!entries[0].indented);
+    assert!(entries[1].indented);
+    assert_eq!(
+        super::super::sidebar::parent_group_key(&projected, entries[0].index).as_deref(),
+        Some("repo")
+    );
+}
+
+#[test]
 fn workspace_click_waits_for_release_and_drag_reorders_by_stable_id() {
     let mut projected = snapshot();
     for index in 2..=3 {

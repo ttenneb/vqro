@@ -42,12 +42,43 @@ impl App {
             }
         }
 
+        let repositories = self
+            .state
+            .repositories
+            .iter()
+            .map(|repository| crate::api::schema::RepositoryInfo {
+                repository_id: repository.id.clone(),
+                label: repository.display_label().to_owned(),
+                git_common_dir: repository.git_common_dir.display().to_string(),
+                checkout_workspace_ids: repository.checkout_workspace_ids.clone(),
+                last_focused_workspace_id: repository.last_focused_workspace_id.clone(),
+                focused: focused_workspace_id
+                    .as_ref()
+                    .is_some_and(|focused| repository.checkout_workspace_ids.contains(focused)),
+            })
+            .collect();
+        let space_order = self
+            .state
+            .space_order
+            .iter()
+            .map(|space| match space {
+                crate::repository::SpaceRef::Repository(id) => {
+                    crate::api::schema::SpaceInfo::Repository(id.clone())
+                }
+                crate::repository::SpaceRef::StandaloneWorkspace(id) => {
+                    crate::api::schema::SpaceInfo::StandaloneWorkspace(id.clone())
+                }
+            })
+            .collect();
+
         SessionSnapshot {
             version: crate::build_info::version(),
             protocol: crate::protocol::PROTOCOL_VERSION,
             focused_workspace_id,
             focused_tab_id,
             focused_pane_id,
+            repositories,
+            space_order,
             workspaces,
             tabs,
             panes: self.collect_panes_for_workspace(None).unwrap_or_default(),
@@ -77,6 +108,46 @@ mod tests {
         app.state.ensure_test_terminals();
         app.state.active = Some(0);
         app
+    }
+
+    #[test]
+    fn session_snapshot_projects_optional_repository_identity_and_order() {
+        let mut app = app_with_two_tabs();
+        let workspace_id = app.state.workspaces[0].id.clone();
+        app.state.workspaces[0].identity_cwd = "/repos/app".into();
+        app.state.workspaces[0].cached_git_space = Some(crate::workspace::GitSpaceMetadata {
+            key: "/repos/app/.git".into(),
+            checkout_key: "/repos/app".into(),
+            repo_name: "app".into(),
+            repo_root: "/repos/app".into(),
+            is_linked_worktree: false,
+        });
+        app.state.reconcile_repositories();
+
+        let snapshot = app.session_snapshot();
+
+        assert_eq!(snapshot.repositories.len(), 1);
+        assert_eq!(
+            snapshot.repositories[0].checkout_workspace_ids,
+            vec![workspace_id.clone()]
+        );
+        assert_eq!(
+            snapshot.space_order,
+            vec![crate::api::schema::SpaceInfo::Repository(
+                snapshot.repositories[0].repository_id.clone()
+            )]
+        );
+        assert_eq!(
+            snapshot.workspaces[0].repository_id,
+            Some(snapshot.repositories[0].repository_id.clone())
+        );
+        assert_eq!(
+            snapshot.workspaces[0]
+                .checkout
+                .as_ref()
+                .map(|checkout| checkout.workspace_id.as_str()),
+            Some(workspace_id.as_str())
+        );
     }
 
     #[test]

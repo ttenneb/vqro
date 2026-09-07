@@ -146,6 +146,7 @@ impl App {
         self.terminal_runtimes.insert(terminal.id.clone(), runtime);
         self.state.terminals.insert(terminal.id.clone(), terminal);
         self.state.workspaces.push(ws);
+        self.state.reconcile_repositories();
         let idx = self.state.workspaces.len() - 1;
         self.state
             .remove_alias_shadowed_by_new_pane(self.state.workspaces[idx].tabs[0].root_pane);
@@ -390,6 +391,19 @@ impl App {
             }),
             agent_status: pane_agent_status(agg_state, seen),
             tokens: ws.metadata_tokens.values(),
+            repository_id: ws
+                .checkout
+                .as_ref()
+                .map(|checkout| checkout.repository_id.clone()),
+            checkout: ws
+                .checkout
+                .as_ref()
+                .map(|checkout| crate::api::schema::CheckoutInfo {
+                    workspace_id: ws.id.clone(),
+                    repository_id: checkout.repository_id.clone(),
+                    checkout_path: checkout.checkout_path.display().to_string(),
+                    kind: checkout.kind,
+                }),
             worktree: ws
                 .worktree_space()
                 .map(|space| crate::api::schema::WorkspaceWorktreeInfo {

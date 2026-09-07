@@ -373,8 +373,8 @@ impl App {
         // Try to restore previous session
         let mut restored_terminals = std::collections::HashMap::new();
         let mut restored_terminal_runtimes = crate::terminal::TerminalRuntimeRegistry::new();
-        let (workspaces, active, selected) = if !policy.restore_session {
-            (Vec::new(), None, 0)
+        let (workspaces, repositories, space_order, active, selected) = if !policy.restore_session {
+            (Vec::new(), Vec::new(), Vec::new(), None, 0)
         } else if let Some(snap) = crate::persist::load() {
             let history = config
                 .experimental
@@ -398,15 +398,15 @@ impl App {
             restored_terminal_runtimes = terminal_runtimes.into();
             if ws.is_empty() {
                 crate::logging::session_restored(0, "empty");
-                (Vec::new(), None, 0)
+                (Vec::new(), Vec::new(), Vec::new(), None, 0)
             } else {
                 crate::logging::session_restored(ws.len(), "ok");
                 let active = snap.active.filter(|&i| i < ws.len());
                 let selected = snap.selected.min(ws.len().saturating_sub(1));
-                (ws, active, selected)
+                (ws, snap.repositories, snap.space_order, active, selected)
             }
         } else {
-            (Vec::new(), None, 0)
+            (Vec::new(), Vec::new(), Vec::new(), None, 0)
         };
 
         let agent_panel_sort = agent_panel_sort_from_config(config.ui.agent_panel_sort);
@@ -450,6 +450,8 @@ impl App {
             pane_id_aliases: std::collections::HashMap::new(),
             public_pane_id_aliases: std::collections::HashMap::new(),
             workspaces,
+            repositories,
+            space_order,
             active,
             previous_pane_focus: None,
             selected,
@@ -529,6 +531,8 @@ impl App {
         };
 
         state.terminals = restored_terminals;
+        state.reconcile_repositories();
+        state.session_dirty = false;
 
         for ws_idx in 0..state.workspaces.len() {
             let cwd = state.workspaces[ws_idx]
@@ -663,6 +667,8 @@ impl App {
 
         app.state.pane_id_aliases = pane_id_aliases;
         app.state.workspaces = workspaces;
+        app.state.repositories = snapshot.repositories.clone();
+        app.state.space_order = snapshot.space_order.clone();
         app.state.terminals = terminals;
         app.terminal_runtimes = runtimes.into();
         app.state.active = snapshot
@@ -676,6 +682,8 @@ impl App {
         } else {
             state::Mode::Navigate
         };
+        app.state.reconcile_repositories();
+        app.state.session_dirty = false;
         app.last_focus = app.state.active.and_then(|idx| {
             app.state
                 .workspaces

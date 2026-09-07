@@ -9,7 +9,7 @@ use crate::terminal::TerminalRuntimeRegistry;
 use crate::workspace::Workspace;
 
 /// Current snapshot format version.
-pub(super) const SNAPSHOT_VERSION: u32 = 3;
+pub(super) const SNAPSHOT_VERSION: u32 = 4;
 
 /// Serializable snapshot of the entire herdr session.
 #[derive(Serialize, Deserialize)]
@@ -18,6 +18,12 @@ pub struct SessionSnapshot {
     #[serde(default)]
     pub version: u32,
     pub workspaces: Vec<WorkspaceSnapshot>,
+    /// Shared repository identities and repository-local checkout ordering.
+    #[serde(default)]
+    pub repositories: Vec<crate::repository::Repository>,
+    /// Shared top-level Spaces ordering. Older snapshots derive this from workspaces.
+    #[serde(default)]
+    pub space_order: Vec<crate::repository::SpaceRef>,
     pub active: Option<usize>,
     pub selected: usize,
     #[serde(default)]
@@ -53,6 +59,8 @@ pub struct WorkspaceSnapshot {
     #[serde(default)]
     pub custom_name: Option<String>,
     pub identity_cwd: PathBuf,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checkout: Option<crate::repository::CheckoutProvenance>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree_space: Option<crate::workspace::WorktreeSpaceMembership>,
     #[serde(default)]
@@ -157,6 +165,7 @@ impl From<LegacyWorkspaceSnapshot> for WorkspaceSnapshot {
             id: None,
             custom_name: snap.custom_name,
             identity_cwd,
+            checkout: None,
             worktree_space: None,
             public_pane_numbers: HashMap::new(),
             next_public_pane_number: 0,
@@ -175,6 +184,10 @@ struct RawSessionSnapshot {
     #[serde(default)]
     workspaces: Vec<serde_json::Value>,
     #[serde(default)]
+    repositories: Vec<crate::repository::Repository>,
+    #[serde(default)]
+    space_order: Vec<crate::repository::SpaceRef>,
+    #[serde(default)]
     active: Option<usize>,
     #[serde(default)]
     selected: usize,
@@ -187,13 +200,21 @@ struct RawSessionSnapshot {
 }
 
 fn migrate_snapshot(raw: RawSessionSnapshot) -> Result<SessionSnapshot, String> {
+    let workspaces = raw
+        .workspaces
+        .into_iter()
+        .map(migrate_workspace)
+        .collect::<Result<Vec<_>, _>>()?;
+    let (repositories, space_order) = if raw.repositories.is_empty() || raw.space_order.is_empty() {
+        crate::repository::migrate_workspace_projection(&workspaces)
+    } else {
+        (raw.repositories, raw.space_order)
+    };
     Ok(SessionSnapshot {
         version: raw.version,
-        workspaces: raw
-            .workspaces
-            .into_iter()
-            .map(migrate_workspace)
-            .collect::<Result<Vec<_>, _>>()?,
+        workspaces,
+        repositories,
+        space_order,
         active: raw.active,
         selected: raw.selected,
         sidebar_width: raw.sidebar_width,
@@ -251,6 +272,8 @@ fn first_pane_id_in_layout(layout: &LayoutSnapshot) -> Option<u32> {
 /// Capture the current app state into a serializable snapshot.
 pub fn capture(
     workspaces: &[Workspace],
+    repositories: &[crate::repository::Repository],
+    space_order: &[crate::repository::SpaceRef],
     terminals: &std::collections::HashMap<
         crate::terminal::TerminalId,
         crate::terminal::TerminalState,
@@ -265,6 +288,8 @@ pub fn capture(
             .iter()
             .map(|workspace| capture_workspace(workspace, terminals, terminal_runtimes))
             .collect(),
+        repositories: repositories.to_vec(),
+        space_order: space_order.to_vec(),
         active,
         selected,
         sidebar_width: None,
@@ -285,8 +310,12 @@ fn capture_workspace(
         id: Some(ws.id.clone()),
         custom_name: ws.custom_name.clone(),
         identity_cwd: ws
-            .resolved_identity_cwd_from(terminals, terminal_runtimes)
+            .checkout
+            .as_ref()
+            .map(|checkout| checkout.checkout_path.clone())
+            .or_else(|| ws.resolved_identity_cwd_from(terminals, terminal_runtimes))
             .unwrap_or_else(|| ws.identity_cwd.clone()),
+        checkout: ws.checkout.clone(),
         worktree_space: ws.worktree_space.clone(),
         public_pane_numbers: ws
             .public_pane_numbers
@@ -531,6 +560,8 @@ mod tests {
     ) -> SessionSnapshot {
         capture(
             &state.workspaces,
+            &state.repositories,
+            &state.space_order,
             &state.terminals,
             terminal_runtimes,
             state.active,
@@ -590,9 +621,44 @@ mod tests {
     }
 
     #[test]
+    fn checkout_identity_persists_independently_from_live_workspace_cwd() {
+        let mut state = state_with_workspaces(&["checkout"]);
+        let repository_id = "r-checkout".to_owned();
+        let checkout_path = PathBuf::from("/repos/app");
+        state.workspaces[0].identity_cwd = PathBuf::from("/tmp/live-pane-cwd");
+        state.workspaces[0].checkout = Some(crate::repository::CheckoutProvenance {
+            repository_id: repository_id.clone(),
+            checkout_path: checkout_path.clone(),
+            kind: crate::repository::CheckoutKind::Primary,
+        });
+        state.repositories = vec![crate::repository::Repository {
+            id: repository_id.clone(),
+            git_common_dir: PathBuf::from("/repos/app/.git"),
+            label: "app".into(),
+            custom_name: None,
+            preferred_base: None,
+            checkout_workspace_ids: vec![state.workspaces[0].id.clone()],
+            last_focused_workspace_id: Some(state.workspaces[0].id.clone()),
+        }];
+        state.space_order = vec![crate::repository::SpaceRef::Repository(repository_id)];
+
+        let snapshot = capture_from_state(&state);
+
+        assert_eq!(snapshot.workspaces[0].identity_cwd, checkout_path);
+        assert_eq!(
+            snapshot.workspaces[0].checkout,
+            state.workspaces[0].checkout
+        );
+        assert_eq!(snapshot.repositories, state.repositories);
+        assert_eq!(snapshot.space_order, state.space_order);
+    }
+
+    #[test]
     fn round_trip_empty_session() {
         let snap = SessionSnapshot {
             version: SNAPSHOT_VERSION,
+            repositories: Vec::new(),
+            space_order: Vec::new(),
             workspaces: vec![],
             active: None,
             selected: 0,
@@ -657,10 +723,13 @@ mod tests {
         );
 
         let snap = SessionSnapshot {
+            repositories: Vec::new(),
+            space_order: Vec::new(),
             workspaces: vec![WorkspaceSnapshot {
                 id: Some("wproj".to_string()),
                 custom_name: Some("pi-mono".to_string()),
                 identity_cwd: PathBuf::from("/home/can/Projects/herdr"),
+                checkout: None,
                 worktree_space: None,
                 public_pane_numbers: HashMap::from([(0, 1), (1, 2)]),
                 next_public_pane_number: 3,
@@ -1224,10 +1293,13 @@ mod tests {
 
         let snap = SessionSnapshot {
             version: SNAPSHOT_VERSION,
+            repositories: Vec::new(),
+            space_order: Vec::new(),
             workspaces: vec![WorkspaceSnapshot {
                 id: Some("test-ws".to_string()),
                 custom_name: Some("fallback test".to_string()),
                 identity_cwd: PathBuf::from("/tmp"),
+                checkout: None,
                 worktree_space: None,
                 public_pane_numbers: HashMap::new(),
                 next_public_pane_number: 0,

@@ -451,15 +451,10 @@ pub(crate) fn workspace_entries(
     }
     let grouped = members
         .iter()
-        .filter(|(_, indices)| {
-            indices.len() >= 2
-                && indices.iter().any(|index| {
-                    snapshot.workspaces[*index]
-                        .worktree
-                        .as_ref()
-                        .is_some_and(|worktree| !worktree.is_linked_worktree)
-                })
-        })
+        // First-class repository projections may temporarily have no primary
+        // checkout (for example while an unavailable mount is reconnecting).
+        // Keep the remaining checkouts grouped and use the first as the visual root.
+        .filter(|(_, indices)| indices.len() >= 2)
         .map(|(key, _)| *key)
         .collect::<HashSet<_>>();
     let mut emitted = HashSet::<&str>::new();
@@ -528,24 +523,30 @@ pub(crate) fn workspace_entries(
     entries
 }
 
-fn parent_group_key(snapshot: &ClientShellSnapshot, index: usize) -> Option<String> {
+pub(in crate::client::shell) fn parent_group_key(
+    snapshot: &ClientShellSnapshot,
+    index: usize,
+) -> Option<String> {
     let workspace = snapshot.workspaces.get(index)?;
     let worktree = workspace.worktree.as_ref()?;
-    if worktree.is_linked_worktree {
-        return None;
+    let mut count = 0;
+    let mut first = None;
+    let mut primary = None;
+    for (candidate_index, candidate) in snapshot.workspaces.iter().enumerate() {
+        let Some(candidate) = candidate
+            .worktree
+            .as_ref()
+            .filter(|candidate| candidate.key == worktree.key)
+        else {
+            continue;
+        };
+        count += 1;
+        first.get_or_insert(candidate_index);
+        if !candidate.is_linked_worktree {
+            primary.get_or_insert(candidate_index);
+        }
     }
-    (snapshot
-        .workspaces
-        .iter()
-        .filter(|candidate| {
-            candidate
-                .worktree
-                .as_ref()
-                .is_some_and(|candidate| candidate.key == worktree.key)
-        })
-        .count()
-        >= 2)
-        .then(|| worktree.key.clone())
+    (count >= 2 && primary.or(first) == Some(index)).then(|| worktree.key.clone())
 }
 
 pub(in crate::client::shell) fn render_parent_group_toggle(
