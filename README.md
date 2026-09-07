@@ -25,7 +25,7 @@ The integrated alpha is ready for local Linux dogfooding. It currently includes:
 
 The bundled reference formatter is under [`extensions/terminal-inspector`](extensions/terminal-inspector). Link it with `vqro plugin link ./extensions/terminal-inspector`, restart the vqro server, then use **Inspect terminal** from a pane context menu.
 
-This remains an alpha: contracts may evolve, remote vqro deployment is not yet a supported release path, and the retained upstream documentation below still describes Herdr.
+This remains an alpha: contracts may evolve, remote vqro deployment is not yet a supported release path, and inherited agent-integration install/remove commands are disabled until their assets have a fully isolated vqro namespace. Process-based agent detection remains available. The retained upstream documentation below still describes Herdr.
 
 vqro is not affiliated with or endorsed by the Herdr project. It will retain upstream attribution, track useful upstream work where practical, and treat interoperability as an explicit compatibility contract rather than an assumption.
 
