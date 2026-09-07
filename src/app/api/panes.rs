@@ -570,25 +570,23 @@ impl App {
             return encode_error(id, "pane_not_found", "pane not found");
         };
         let sample = self.terminal_telemetry(&terminal_id, shell_pid, std::time::Instant::now());
-        encode_success(
-            id,
-            ResponseResult::PaneTelemetry {
-                telemetry: PaneTelemetry {
-                    pane_id: public_pane_id,
-                    availability: sample.availability,
-                    detail: sample.detail,
-                    cache_age_ms: sample.cache_age_ms,
-                    shell_pid,
-                    foreground_process_group_id: sample.process_group_id,
-                    truncated: sample.truncated,
-                    processes: sample.processes,
-                    agent: pane.agent,
-                    display_agent: pane.display_agent,
-                    agent_status: pane.agent_status,
-                    state_labels: pane.state_labels,
-                },
-            },
-        )
+        let mut telemetry = PaneTelemetry {
+            pane_id: public_pane_id,
+            availability: sample.availability,
+            detail: sample.detail,
+            cache_age_ms: sample.cache_age_ms,
+            shell_pid,
+            foreground_process_group_id: sample.process_group_id,
+            truncated: sample.truncated,
+            processes: sample.processes,
+            agent: pane.agent,
+            display_agent: pane.display_agent,
+            agent_status: pane.agent_status,
+            state_labels: pane.state_labels,
+            document: None,
+        };
+        telemetry.document = self.render_extension_inspector(&telemetry);
+        encode_success(id, ResponseResult::PaneTelemetry { telemetry })
     }
 
     pub(super) fn handle_pane_neighbor(

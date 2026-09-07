@@ -1,7 +1,8 @@
 use crate::api::schema::{
     InstalledPluginInfo, PluginManifestAction, PluginManifestBuild, PluginManifestEventHook,
-    PluginManifestLinkHandler, PluginManifestPane, PluginManifestStartup, PluginPanePlacement,
-    PluginPlatform, PluginSourceInfo, PluginSourceKind,
+    PluginManifestLinkHandler, PluginManifestPane, PluginManifestService, PluginManifestStartup,
+    PluginPanePlacement, PluginPlatform, PluginServiceCapability, PluginSourceInfo,
+    PluginSourceKind,
 };
 use crate::popup_size::PopupSize;
 
@@ -24,6 +25,8 @@ struct RawPluginManifest {
     #[serde(default)]
     startup: Vec<RawPluginManifestStartup>,
     #[serde(default)]
+    services: Vec<RawPluginManifestService>,
+    #[serde(default)]
     actions: Vec<RawPluginManifestAction>,
     #[serde(default)]
     events: Vec<RawPluginManifestEventHook>,
@@ -45,6 +48,16 @@ struct RawPluginManifestStartup {
     #[serde(default)]
     platforms: Option<Vec<RawPlatform>>,
     command: Vec<String>,
+}
+
+#[derive(serde::Deserialize)]
+struct RawPluginManifestService {
+    id: String,
+    #[serde(default)]
+    platforms: Option<Vec<RawPlatform>>,
+    command: Vec<String>,
+    #[serde(default)]
+    provides: Vec<PluginServiceCapability>,
 }
 
 #[derive(serde::Deserialize)]
@@ -163,6 +176,12 @@ pub(crate) fn load_plugin_manifest(
         .into_iter()
         .map(normalize_manifest_startup)
         .collect::<Result<Vec<_>, _>>()?;
+    let services = raw
+        .services
+        .into_iter()
+        .map(normalize_manifest_service)
+        .collect::<Result<Vec<_>, _>>()?;
+    reject_duplicate_service_ids(&services)?;
     let mut actions = raw
         .actions
         .into_iter()
@@ -215,6 +234,7 @@ pub(crate) fn load_plugin_manifest(
         platforms,
         build,
         startup,
+        services,
         actions,
         events,
         panes,
@@ -269,6 +289,46 @@ fn normalize_manifest_startup(
     let platforms = normalize_platforms(startup.platforms)?;
     let command = normalize_command(startup.command)?;
     Ok(PluginManifestStartup { platforms, command })
+}
+
+fn normalize_manifest_service(
+    service: RawPluginManifestService,
+) -> Result<PluginManifestService, (&'static str, String)> {
+    let id = normalize_plugin_id(&service.id).ok_or_else(|| {
+        (
+            "invalid_plugin_service_id",
+            "invalid plugin service id".to_string(),
+        )
+    })?;
+    let platforms = normalize_platforms(service.platforms)?;
+    let command = normalize_command(service.command)?;
+    if service.provides.is_empty() {
+        return Err((
+            "invalid_plugin_service_capability",
+            "plugin service must declare at least one capability".to_string(),
+        ));
+    }
+    Ok(PluginManifestService {
+        id,
+        platforms,
+        command,
+        provides: service.provides,
+    })
+}
+
+fn reject_duplicate_service_ids(
+    services: &[PluginManifestService],
+) -> Result<(), (&'static str, String)> {
+    let mut seen = std::collections::HashSet::new();
+    for service in services {
+        if !seen.insert(service.id.as_str()) {
+            return Err((
+                "duplicate_plugin_service_id",
+                format!("duplicate plugin service id '{}'", service.id),
+            ));
+        }
+    }
+    Ok(())
 }
 
 pub(super) fn normalize_plugin_source(

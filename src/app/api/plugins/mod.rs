@@ -34,6 +34,8 @@ impl App {
             .into_iter()
             .map(|plugin| (plugin.plugin_id.clone(), plugin))
             .collect();
+        self.extension_services =
+            crate::extension_service::supervisors_for_plugins(&self.state.installed_plugins);
     }
 
     fn refresh_installed_plugins(&mut self) -> std::io::Result<()> {
@@ -1445,6 +1447,36 @@ platforms = ["linux", "macos"]
                 crate::api::schema::PluginPlatform::Linux,
                 crate::api::schema::PluginPlatform::Macos,
             ])
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn extension_service_manifest_loads() {
+        let root = unique_temp_path("plugin-service-manifest");
+        write_manifest_content(
+            &root,
+            r#"
+id = "example.inspector"
+name = "Inspector"
+version = "0.1.0"
+min_herdr_version = "0.6.10"
+platforms = ["linux", "macos", "windows"]
+
+[[services]]
+id = "telemetry"
+command = ["python3", "service.py"]
+platforms = ["linux"]
+provides = ["pane_inspector"]
+"#,
+        );
+
+        let plugin = load_plugin_manifest(&root.display().to_string(), true).unwrap();
+        assert_eq!(plugin.services.len(), 1);
+        assert_eq!(plugin.services[0].id, "telemetry");
+        assert_eq!(
+            plugin.services[0].provides,
+            [crate::api::schema::PluginServiceCapability::PaneInspector]
         );
         let _ = std::fs::remove_dir_all(root);
     }

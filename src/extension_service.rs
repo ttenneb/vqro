@@ -6,7 +6,7 @@
 
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
-use std::process::{Child, ChildStdin, Command, Stdio};
+use std::process::{Child, ChildStdin, Stdio};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 pub const EXTENSION_SERVICE_PROTOCOL: u16 = 1;
 const MAX_FRAME_BYTES: usize = 256 * 1024;
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(3);
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(3);
+const REQUEST_TIMEOUT: Duration = Duration::from_millis(750);
 const MAX_RESTARTS: u32 = 3;
 
 #[derive(Debug, Clone)]
@@ -42,6 +42,74 @@ pub struct ExtensionServiceSupervisor {
     failures: u32,
 }
 
+pub fn supervisors_for_plugins(
+    plugins: &crate::app::state::InstalledPluginRegistry,
+) -> std::collections::BTreeMap<String, ExtensionServiceSupervisor> {
+    let mut supervisors = std::collections::BTreeMap::new();
+    for plugin in plugins.values().filter(|plugin| plugin.enabled) {
+        for service in &plugin.services {
+            if !service
+                .provides
+                .contains(&crate::api::schema::PluginServiceCapability::PaneInspector)
+                || !supports_current_platform(service.platforms.as_deref())
+            {
+                continue;
+            }
+            let id = format!("{}.{}", plugin.plugin_id, service.id);
+            let spec = ExtensionServiceSpec {
+                id: id.clone(),
+                command: service.command.clone(),
+                cwd: std::path::PathBuf::from(&plugin.plugin_root),
+            };
+            match ExtensionServiceSupervisor::new(spec) {
+                Ok(supervisor) => {
+                    supervisors.insert(id, supervisor);
+                }
+                Err(error) => {
+                    tracing::warn!(plugin_id = %plugin.plugin_id, service_id = %service.id, %error, "ignoring invalid extension service")
+                }
+            }
+        }
+    }
+    supervisors
+}
+
+impl crate::app::App {
+    pub(crate) fn render_extension_inspector(
+        &mut self,
+        telemetry: &crate::api::schema::PaneTelemetry,
+    ) -> Option<crate::inspector_document::InspectorDocument> {
+        if self.extension_services.is_empty() {
+            return None;
+        }
+        let context = serde_json::to_value(telemetry).ok()?;
+        for (service_id, supervisor) in &mut self.extension_services {
+            match supervisor.inspect(context.clone()) {
+                Ok(document) => return Some(document),
+                Err(error) => {
+                    tracing::warn!(%service_id, %error, "extension inspector unavailable")
+                }
+            }
+        }
+        None
+    }
+}
+
+fn supports_current_platform(platforms: Option<&[crate::api::schema::PluginPlatform]>) -> bool {
+    let Some(platforms) = platforms else {
+        return true;
+    };
+    #[cfg(target_os = "linux")]
+    let current = crate::api::schema::PluginPlatform::Linux;
+    #[cfg(target_os = "macos")]
+    let current = crate::api::schema::PluginPlatform::Macos;
+    #[cfg(windows)]
+    let current = crate::api::schema::PluginPlatform::Windows;
+    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+    return false;
+    platforms.contains(&current)
+}
+
 impl ExtensionServiceSupervisor {
     pub fn new(spec: ExtensionServiceSpec) -> Result<Self, ExtensionServiceError> {
         validate_service_id(&spec.id)?;
@@ -56,10 +124,6 @@ impl ExtensionServiceSupervisor {
             status: ExtensionServiceStatus::Stopped,
             failures: 0,
         })
-    }
-
-    pub fn status(&self) -> &ExtensionServiceStatus {
-        &self.status
     }
 
     pub fn start(&mut self) -> Result<(), ExtensionServiceError> {
@@ -159,10 +223,9 @@ impl ExtensionServiceRuntime {
         let program = spec.command.first().ok_or_else(|| {
             ExtensionServiceError::Configuration("service command must not be empty".into())
         })?;
-        let mut command = Command::new(program);
+        let args = spec.command.iter().skip(1).cloned().collect::<Vec<_>>();
+        let mut command = crate::plugin_command::command_for_argv_in_dir(program, &args, &spec.cwd);
         command
-            .args(spec.command.iter().skip(1))
-            .current_dir(&spec.cwd)
             .env("VQRO_EXTENSION_SERVICE_ID", &spec.id)
             .env(
                 "VQRO_EXTENSION_SERVICE_PROTOCOL",
@@ -420,8 +483,8 @@ printf '{"type":"response","id":%s,"result":{"title":"Processes","sections":[],"
             .inspect(serde_json::json!({"pane_id": "p1"}))
             .unwrap();
         assert_eq!(document.title, "Processes");
-        assert_eq!(supervisor.status(), &ExtensionServiceStatus::Running);
+        assert_eq!(supervisor.status, ExtensionServiceStatus::Running);
         supervisor.stop();
-        assert_eq!(supervisor.status(), &ExtensionServiceStatus::Stopped);
+        assert_eq!(supervisor.status, ExtensionServiceStatus::Stopped);
     }
 }

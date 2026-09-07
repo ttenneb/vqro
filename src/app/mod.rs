@@ -161,6 +161,8 @@ pub struct App {
     endpoint_commands: custom_commands::EndpointCommandRegistry,
     pub(crate) terminal_telemetry_cache:
         HashMap<crate::terminal::TerminalId, terminal_inspector::CachedTerminalTelemetry>,
+    pub(crate) extension_services:
+        std::collections::BTreeMap<String, crate::extension_service::ExtensionServiceSupervisor>,
 }
 
 pub(crate) const APP_EVENT_CHANNEL_CAPACITY: usize = 256;
@@ -473,6 +475,9 @@ impl App {
         let agent_manifest_summaries = Vec::new();
         let theme_runtime = theme_runtime_config(config, true);
         let (theme_palette, theme_name) = resolve_effective_theme(&theme_runtime, None);
+        let installed_plugins = load_plugin_registry(policy.persist_plugin_registry);
+        let extension_services =
+            crate::extension_service::supervisors_for_plugins(&installed_plugins);
 
         let mut state = AppState {
             terminals: std::collections::HashMap::new(),
@@ -549,7 +554,7 @@ impl App {
             integration_recommendations: crate::integration::integration_recommendations(),
             agent_manifest_summaries,
             agent_manifest_update_status: crate::detect::manifest_update::load_status(),
-            installed_plugins: load_plugin_registry(policy.persist_plugin_registry),
+            installed_plugins,
             plugin_panes: std::collections::HashMap::new(),
             popup_pane: None,
             plugin_command_logs: Vec::new(),
@@ -659,6 +664,7 @@ impl App {
             client_shell_keybindings_profile,
             endpoint_commands,
             terminal_telemetry_cache: HashMap::new(),
+            extension_services,
         };
         app.configure_tab_bar_status(&config.ui.tab_bar_right, &config.ui.tab_bar_right_separator);
         app.configure_window_title(&config.ui.window_title);

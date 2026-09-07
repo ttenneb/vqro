@@ -52,6 +52,8 @@ pub struct InstalledPluginInfo {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub startup: Vec<PluginManifestStartup>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub services: Vec<PluginManifestService>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub actions: Vec<PluginManifestAction>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub events: Vec<PluginManifestEventHook>,
@@ -238,6 +240,22 @@ pub struct PluginManifestStartup {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub platforms: Option<Vec<PluginPlatform>>,
     pub command: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct PluginManifestService {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub platforms: Option<Vec<PluginPlatform>>,
+    pub command: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub provides: Vec<PluginServiceCapability>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PluginServiceCapability {
+    PaneInspector,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]

@@ -109,6 +109,112 @@
           ],
           "type": "string"
         },
+        "CollectionInfo": {
+          "properties": {
+            "collection_id": {
+              "type": "string"
+            },
+            "focused": {
+              "type": "boolean"
+            },
+            "label": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "members": {
+              "items": {
+                "$ref": "#/schemas/event/$defs/CollectionMemberInfo"
+              },
+              "type": "array"
+            },
+            "selected_pane_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "tab_id": {
+              "type": "string"
+            },
+            "workspace_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "collection_id",
+            "workspace_id",
+            "tab_id",
+            "focused",
+            "members"
+          ],
+          "type": "object"
+        },
+        "CollectionMemberInfo": {
+          "properties": {
+            "archived": {
+              "type": "boolean"
+            },
+            "index": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "pane_id": {
+              "type": "string"
+            },
+            "selected": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "pane_id",
+            "index",
+            "archived",
+            "selected"
+          ],
+          "type": "object"
+        },
+        "DelegationInfo": {
+          "properties": {
+            "delegation_id": {
+              "type": "string"
+            },
+            "pane_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "parent_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "purpose": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "sibling_rank": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "tombstone": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "delegation_id",
+            "sibling_rank",
+            "tombstone"
+          ],
+          "type": "object"
+        },
         "EventData": {
           "oneOf": [
             {
@@ -475,6 +581,46 @@
             },
             {
               "properties": {
+                "action": {
+                  "type": "string"
+                },
+                "collection": {
+                  "$ref": "#/schemas/event/$defs/CollectionInfo"
+                },
+                "type": {
+                  "const": "collection_updated",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "action",
+                "collection"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "action": {
+                  "type": "string"
+                },
+                "delegation": {
+                  "$ref": "#/schemas/event/$defs/DelegationInfo"
+                },
+                "type": {
+                  "const": "delegation_updated",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "action",
+                "delegation"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
                 "pane": {
                   "$ref": "#/schemas/event/$defs/PaneInfo"
                 },
@@ -774,6 +920,8 @@
             "tab_renamed",
             "tab_moved",
             "tab_focused",
+            "collection_updated",
+            "delegation_updated",
             "pane_created",
             "pane_closed",
             "pane_updated",
@@ -1758,6 +1906,194 @@
           ],
           "type": "object"
         },
+        "CollectionAddParams": {
+          "properties": {
+            "collection_id": {
+              "type": "string"
+            },
+            "pane_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "collection_id",
+            "pane_id"
+          ],
+          "type": "object"
+        },
+        "CollectionCloseDisposition": {
+          "enum": [
+            "cascade_close",
+            "promote_members"
+          ],
+          "type": "string"
+        },
+        "CollectionCloseParams": {
+          "properties": {
+            "collection_id": {
+              "type": "string"
+            },
+            "disposition": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/request/$defs/CollectionCloseDisposition"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "collection_id"
+          ],
+          "type": "object"
+        },
+        "CollectionCreateParams": {
+          "properties": {
+            "direction": {
+              "$ref": "#/schemas/request/$defs/SplitDirection"
+            },
+            "focus": {
+              "default": false,
+              "type": "boolean"
+            },
+            "label": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "ratio": {
+              "format": "float",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "target_pane_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "target_pane_id",
+            "direction"
+          ],
+          "type": "object"
+        },
+        "CollectionListParams": {
+          "properties": {
+            "tab_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "workspace_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "type": "object"
+        },
+        "CollectionMemberTarget": {
+          "properties": {
+            "collection_id": {
+              "type": "string"
+            },
+            "pane_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "collection_id",
+            "pane_id"
+          ],
+          "type": "object"
+        },
+        "CollectionPromoteParams": {
+          "properties": {
+            "direction": {
+              "$ref": "#/schemas/request/$defs/SplitDirection"
+            },
+            "focus": {
+              "default": false,
+              "type": "boolean"
+            },
+            "pane_id": {
+              "type": "string"
+            },
+            "ratio": {
+              "format": "float",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "target_pane_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "pane_id",
+            "target_pane_id",
+            "direction"
+          ],
+          "type": "object"
+        },
+        "CollectionReorderParams": {
+          "properties": {
+            "collection_id": {
+              "type": "string"
+            },
+            "index": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "pane_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "collection_id",
+            "pane_id",
+            "index"
+          ],
+          "type": "object"
+        },
+        "CollectionSelectParams": {
+          "properties": {
+            "collection_id": {
+              "type": "string"
+            },
+            "focus": {
+              "default": false,
+              "type": "boolean"
+            },
+            "pane_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "collection_id",
+            "pane_id"
+          ],
+          "type": "object"
+        },
+        "CollectionTarget": {
+          "properties": {
+            "collection_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "collection_id"
+          ],
+          "type": "object"
+        },
         "CommandInvokeParams": {
           "properties": {
             "command_id": {
@@ -1796,6 +2132,132 @@
           },
           "required": [
             "command_id"
+          ],
+          "type": "object"
+        },
+        "DelegationCreateParams": {
+          "properties": {
+            "pane_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "parent_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "purpose": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "type": "object"
+        },
+        "DelegationReorderParams": {
+          "properties": {
+            "delegation_id": {
+              "type": "string"
+            },
+            "position": {
+              "$ref": "#/schemas/request/$defs/DelegationSiblingPosition"
+            }
+          },
+          "required": [
+            "delegation_id",
+            "position"
+          ],
+          "type": "object"
+        },
+        "DelegationReparentParams": {
+          "properties": {
+            "delegation_id": {
+              "type": "string"
+            },
+            "parent_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "delegation_id"
+          ],
+          "type": "object"
+        },
+        "DelegationSiblingPosition": {
+          "oneOf": [
+            {
+              "properties": {
+                "type": {
+                  "const": "first",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "type": {
+                  "const": "last",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "delegation_id": {
+                  "type": "string"
+                },
+                "type": {
+                  "const": "before",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "delegation_id"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "delegation_id": {
+                  "type": "string"
+                },
+                "type": {
+                  "const": "after",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "delegation_id"
+              ],
+              "type": "object"
+            }
+          ]
+        },
+        "DelegationTarget": {
+          "properties": {
+            "delegation_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "delegation_id"
           ],
           "type": "object"
         },
@@ -5543,6 +6005,278 @@
         {
           "properties": {
             "method": {
+              "const": "collection.list",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/CollectionListParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "collection.get",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/CollectionTarget"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "collection.create",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/CollectionCreateParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "collection.add",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/CollectionAddParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "collection.promote",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/CollectionPromoteParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "collection.select",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/CollectionSelectParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "collection.reorder",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/CollectionReorderParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "collection.archive",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/CollectionMemberTarget"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "collection.restore",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/CollectionMemberTarget"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "collection.close",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/CollectionCloseParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "delegation.create",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/DelegationCreateParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "delegation.get",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/DelegationTarget"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "delegation.tree",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/EmptyParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "delegation.root",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/DelegationTarget"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "delegation.descendants",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/DelegationTarget"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "delegation.reparent",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/DelegationReparentParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "delegation.reorder",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/DelegationReorderParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
               "const": "pane.split",
               "type": "string"
             },
@@ -6960,6 +7694,73 @@
           ],
           "type": "string"
         },
+        "CollectionInfo": {
+          "properties": {
+            "collection_id": {
+              "type": "string"
+            },
+            "focused": {
+              "type": "boolean"
+            },
+            "label": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "members": {
+              "items": {
+                "$ref": "#/schemas/success_response/$defs/CollectionMemberInfo"
+              },
+              "type": "array"
+            },
+            "selected_pane_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "tab_id": {
+              "type": "string"
+            },
+            "workspace_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "collection_id",
+            "workspace_id",
+            "tab_id",
+            "focused",
+            "members"
+          ],
+          "type": "object"
+        },
+        "CollectionMemberInfo": {
+          "properties": {
+            "archived": {
+              "type": "boolean"
+            },
+            "index": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "pane_id": {
+              "type": "string"
+            },
+            "selected": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "pane_id",
+            "index",
+            "archived",
+            "selected"
+          ],
+          "type": "object"
+        },
         "ConfigReloadStatus": {
           "enum": [
             "applied",
@@ -6967,6 +7768,90 @@
             "failed"
           ],
           "type": "string"
+        },
+        "DelegationInfo": {
+          "properties": {
+            "delegation_id": {
+              "type": "string"
+            },
+            "pane_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "parent_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "purpose": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "sibling_rank": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "tombstone": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "delegation_id",
+            "sibling_rank",
+            "tombstone"
+          ],
+          "type": "object"
+        },
+        "DelegationTreeEntry": {
+          "properties": {
+            "delegation_id": {
+              "type": "string"
+            },
+            "depth": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "pane_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "parent_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "purpose": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "sibling_rank": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "tombstone": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "delegation_id",
+            "sibling_rank",
+            "tombstone",
+            "depth"
+          ],
+          "type": "object"
         },
         "EventData": {
           "oneOf": [
@@ -7334,6 +8219,46 @@
             },
             {
               "properties": {
+                "action": {
+                  "type": "string"
+                },
+                "collection": {
+                  "$ref": "#/schemas/success_response/$defs/CollectionInfo"
+                },
+                "type": {
+                  "const": "collection_updated",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "action",
+                "collection"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "action": {
+                  "type": "string"
+                },
+                "delegation": {
+                  "$ref": "#/schemas/success_response/$defs/DelegationInfo"
+                },
+                "type": {
+                  "const": "delegation_updated",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "action",
+                "delegation"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
                 "pane": {
                   "$ref": "#/schemas/success_response/$defs/PaneInfo"
                 },
@@ -7648,6 +8573,8 @@
             "tab_renamed",
             "tab_moved",
             "tab_focused",
+            "collection_updated",
+            "delegation_updated",
             "pane_created",
             "pane_closed",
             "pane_updated",
@@ -7658,6 +8585,246 @@
             "pane_agent_detected",
             "pane_agent_status_changed",
             "layout_updated"
+          ],
+          "type": "string"
+        },
+        "InspectorAction": {
+          "properties": {
+            "destructive": {
+              "default": false,
+              "type": "boolean"
+            },
+            "id": {
+              "type": "string"
+            },
+            "label": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "label"
+          ],
+          "type": "object"
+        },
+        "InspectorBlock": {
+          "oneOf": [
+            {
+              "properties": {
+                "text": {
+                  "type": "string"
+                },
+                "tone": {
+                  "$ref": "#/schemas/success_response/$defs/InspectorTone",
+                  "default": "default"
+                },
+                "type": {
+                  "const": "text",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "text"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "label": {
+                  "type": "string"
+                },
+                "tone": {
+                  "$ref": "#/schemas/success_response/$defs/InspectorTone",
+                  "default": "default"
+                },
+                "type": {
+                  "const": "badge",
+                  "type": "string"
+                },
+                "value": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "label",
+                "value"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "items": {
+                  "items": {
+                    "$ref": "#/schemas/success_response/$defs/InspectorKeyValue"
+                  },
+                  "type": "array"
+                },
+                "type": {
+                  "const": "key_value",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "items"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "columns": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "rows": {
+                  "items": {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "type": "array"
+                },
+                "type": {
+                  "const": "table",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "columns",
+                "rows"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "items": {
+                  "items": {
+                    "$ref": "#/schemas/success_response/$defs/InspectorTimelineItem"
+                  },
+                  "type": "array"
+                },
+                "type": {
+                  "const": "timeline",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "items"
+              ],
+              "type": "object"
+            }
+          ]
+        },
+        "InspectorDocument": {
+          "properties": {
+            "actions": {
+              "default": [],
+              "items": {
+                "$ref": "#/schemas/success_response/$defs/InspectorAction"
+              },
+              "type": "array"
+            },
+            "sections": {
+              "default": [],
+              "items": {
+                "$ref": "#/schemas/success_response/$defs/InspectorSection"
+              },
+              "type": "array"
+            },
+            "subtitle": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "title": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "title"
+          ],
+          "type": "object"
+        },
+        "InspectorKeyValue": {
+          "properties": {
+            "key": {
+              "type": "string"
+            },
+            "tone": {
+              "$ref": "#/schemas/success_response/$defs/InspectorTone",
+              "default": "default"
+            },
+            "value": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "key",
+            "value"
+          ],
+          "type": "object"
+        },
+        "InspectorSection": {
+          "properties": {
+            "blocks": {
+              "default": [],
+              "items": {
+                "$ref": "#/schemas/success_response/$defs/InspectorBlock"
+              },
+              "type": "array"
+            },
+            "id": {
+              "type": "string"
+            },
+            "title": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "id"
+          ],
+          "type": "object"
+        },
+        "InspectorTimelineItem": {
+          "properties": {
+            "detail": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "label": {
+              "type": "string"
+            },
+            "tone": {
+              "$ref": "#/schemas/success_response/$defs/InspectorTone",
+              "default": "default"
+            }
+          },
+          "required": [
+            "label"
+          ],
+          "type": "object"
+        },
+        "InspectorTone": {
+          "enum": [
+            "default",
+            "muted",
+            "accent",
+            "success",
+            "warning",
+            "danger"
           ],
           "type": "string"
         },
@@ -7726,6 +8893,12 @@
             },
             "plugin_root": {
               "type": "string"
+            },
+            "services": {
+              "items": {
+                "$ref": "#/schemas/success_response/$defs/PluginManifestService"
+              },
+              "type": "array"
             },
             "source": {
               "$ref": "#/schemas/success_response/$defs/PluginSourceInfo",
@@ -8696,6 +9869,17 @@
                 "null"
               ]
             },
+            "document": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/success_response/$defs/InspectorDocument"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Optional constrained document supplied by an enabled pane-inspector extension service."
+            },
             "foreground_process_group_id": {
               "format": "uint32",
               "minimum": 0,
@@ -9341,6 +10525,39 @@
           ],
           "type": "object"
         },
+        "PluginManifestService": {
+          "properties": {
+            "command": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "id": {
+              "type": "string"
+            },
+            "platforms": {
+              "items": {
+                "$ref": "#/schemas/success_response/$defs/PluginPlatform"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
+            },
+            "provides": {
+              "items": {
+                "$ref": "#/schemas/success_response/$defs/PluginServiceCapability"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "id",
+            "command"
+          ],
+          "type": "object"
+        },
         "PluginManifestStartup": {
           "properties": {
             "command": {
@@ -9398,6 +10615,12 @@
             "linux",
             "macos",
             "windows"
+          ],
+          "type": "string"
+        },
+        "PluginServiceCapability": {
+          "enum": [
+            "pane_inspector"
           ],
           "type": "string"
         },
@@ -9900,6 +11123,95 @@
               "required": [
                 "type",
                 "active"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "collection": {
+                  "$ref": "#/schemas/success_response/$defs/CollectionInfo"
+                },
+                "type": {
+                  "const": "collection_info",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "collection"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "collections": {
+                  "items": {
+                    "$ref": "#/schemas/success_response/$defs/CollectionInfo"
+                  },
+                  "type": "array"
+                },
+                "type": {
+                  "const": "collection_list",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "collections"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "delegation": {
+                  "$ref": "#/schemas/success_response/$defs/DelegationInfo"
+                },
+                "type": {
+                  "const": "delegation_info",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "delegation"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "delegations": {
+                  "items": {
+                    "$ref": "#/schemas/success_response/$defs/DelegationTreeEntry"
+                  },
+                  "type": "array"
+                },
+                "type": {
+                  "const": "delegation_tree",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "delegations"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "delegations": {
+                  "items": {
+                    "$ref": "#/schemas/success_response/$defs/DelegationInfo"
+                  },
+                  "type": "array"
+                },
+                "type": {
+                  "const": "delegation_list",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "delegations"
               ],
               "type": "object"
             },

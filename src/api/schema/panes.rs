@@ -627,6 +627,9 @@ pub struct PaneTelemetry {
     pub agent_status: AgentStatus,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub state_labels: HashMap<String, String>,
+    /// Optional constrained document supplied by an enabled pane-inspector extension service.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub document: Option<crate::inspector_document::InspectorDocument>,
 }
 
 /// Privacy-safe process telemetry. Command arguments and environment variables are deliberately

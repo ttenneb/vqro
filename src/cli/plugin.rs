@@ -1251,6 +1251,9 @@ fn print_install_preview(
     for startup in &plugin.startup {
         eprintln!("    startup: {}", startup.command.join(" "));
     }
+    for service in &plugin.services {
+        eprintln!("    service {}: {}", service.id, service.command.join(" "));
+    }
     for action in &plugin.actions {
         eprintln!("    action {}: {}", action.id, action.command.join(" "));
     }
@@ -1719,6 +1722,7 @@ mod tests {
             platforms: None,
             build: vec![],
             startup: vec![],
+            services: vec![],
             actions: vec![],
             events: vec![],
             panes: vec![],

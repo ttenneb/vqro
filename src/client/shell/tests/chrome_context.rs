@@ -347,6 +347,7 @@ fn terminal_inspector_opens_from_pane_menu_and_renders_safe_telemetry() {
         display_agent: Some("Pi".into()),
         agent_status: crate::api::schema::AgentStatus::Working,
         state_labels: std::collections::HashMap::new(),
+        document: None,
     };
     assert!(
         state

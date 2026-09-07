@@ -532,6 +532,150 @@ fn render_product_announcement_overlay(
     })
 }
 
+fn render_inspector_document_body(
+    b: &mut Buffer,
+    area: Rect,
+    document: &crate::inspector_document::InspectorDocument,
+    p: &Palette,
+) {
+    let base = Style::default()
+        .bg(p.panel_bg)
+        .remove_modifier(Modifier::DIM);
+    let mut y = area.y;
+    for section in &document.sections {
+        if y >= area.bottom() {
+            break;
+        }
+        if let Some(title) = &section.title {
+            put_text(
+                b,
+                area.x,
+                y,
+                area.width,
+                title,
+                base.fg(p.accent).add_modifier(Modifier::BOLD),
+            );
+            y += 1;
+        }
+        for block in &section.blocks {
+            if y >= area.bottom() {
+                break;
+            }
+            match block {
+                crate::inspector_document::InspectorBlock::Text { text, tone } => {
+                    put_text(
+                        b,
+                        area.x,
+                        y,
+                        area.width,
+                        text,
+                        inspector_tone_style(*tone, p),
+                    );
+                    y += 1;
+                }
+                crate::inspector_document::InspectorBlock::Badge { label, value, tone } => {
+                    put_text(b, area.x, y, 12.min(area.width), label, base.fg(p.overlay0));
+                    put_text(
+                        b,
+                        area.x.saturating_add(13),
+                        y,
+                        area.width.saturating_sub(13),
+                        value,
+                        inspector_tone_style(*tone, p).add_modifier(Modifier::BOLD),
+                    );
+                    y += 1;
+                }
+                crate::inspector_document::InspectorBlock::KeyValue { items } => {
+                    for item in items {
+                        if y >= area.bottom() {
+                            break;
+                        }
+                        put_text(
+                            b,
+                            area.x,
+                            y,
+                            18.min(area.width),
+                            &item.key,
+                            base.fg(p.overlay0),
+                        );
+                        put_text(
+                            b,
+                            area.x.saturating_add(19),
+                            y,
+                            area.width.saturating_sub(19),
+                            &item.value,
+                            inspector_tone_style(item.tone, p),
+                        );
+                        y += 1;
+                    }
+                }
+                crate::inspector_document::InspectorBlock::Table { columns, rows } => {
+                    let width = area.width / u16::try_from(columns.len()).unwrap_or(1).max(1);
+                    for (index, column) in columns.iter().enumerate() {
+                        let x = area.x.saturating_add(
+                            u16::try_from(index)
+                                .unwrap_or(u16::MAX)
+                                .saturating_mul(width),
+                        );
+                        put_text(b, x, y, width, column, base.fg(p.overlay0));
+                    }
+                    y += 1;
+                    for row in rows {
+                        if y >= area.bottom() {
+                            break;
+                        }
+                        for (index, cell) in row.iter().enumerate() {
+                            let x = area.x.saturating_add(
+                                u16::try_from(index)
+                                    .unwrap_or(u16::MAX)
+                                    .saturating_mul(width),
+                            );
+                            put_text(b, x, y, width, cell, base.fg(p.text));
+                        }
+                        y += 1;
+                    }
+                }
+                crate::inspector_document::InspectorBlock::Timeline { items } => {
+                    for item in items {
+                        if y >= area.bottom() {
+                            break;
+                        }
+                        let text = item.detail.as_ref().map_or_else(
+                            || format!("• {}", item.label),
+                            |detail| format!("• {}  ·  {detail}", item.label),
+                        );
+                        put_text(
+                            b,
+                            area.x,
+                            y,
+                            area.width,
+                            &text,
+                            inspector_tone_style(item.tone, p),
+                        );
+                        y += 1;
+                    }
+                }
+            }
+        }
+        y = y.saturating_add(1);
+    }
+}
+
+fn inspector_tone_style(tone: crate::inspector_document::InspectorTone, p: &Palette) -> Style {
+    let color = match tone {
+        crate::inspector_document::InspectorTone::Default => p.text,
+        crate::inspector_document::InspectorTone::Muted => p.overlay0,
+        crate::inspector_document::InspectorTone::Accent => p.accent,
+        crate::inspector_document::InspectorTone::Success => p.green,
+        crate::inspector_document::InspectorTone::Warning => p.yellow,
+        crate::inspector_document::InspectorTone::Danger => p.red,
+    };
+    Style::default()
+        .fg(color)
+        .bg(p.panel_bg)
+        .remove_modifier(Modifier::DIM)
+}
+
 fn render_terminal_inspector_overlay(
     b: &mut Buffer,
     inspector: &ClientTerminalInspectorOverlay,
@@ -613,6 +757,53 @@ fn render_terminal_inspector_overlay(
             muted,
         );
     } else if let Some(telemetry) = inspector.telemetry.as_ref() {
+        if let Some(document) = telemetry.document.as_ref() {
+            put_text(
+                b,
+                inner.x + 1,
+                y,
+                inner.width.saturating_sub(2),
+                &document.title,
+                accent,
+            );
+            y += 1;
+            if let Some(subtitle) = &document.subtitle {
+                put_text(
+                    b,
+                    inner.x + 1,
+                    y,
+                    inner.width.saturating_sub(2),
+                    subtitle,
+                    muted,
+                );
+                y += 2;
+            }
+            render_inspector_document_body(
+                b,
+                Rect::new(
+                    inner.x + 1,
+                    y,
+                    inner.width.saturating_sub(2),
+                    inner.bottom().saturating_sub(y + 2),
+                ),
+                document,
+                p,
+            );
+            let footer_y = inner.bottom().saturating_sub(1);
+            put_text(
+                b,
+                inner.x + 1,
+                footer_y,
+                inner.width.saturating_sub(2),
+                "r refresh  ·  esc close  ·  extension service",
+                muted,
+            );
+            return Some(OverlayRender {
+                primary: close,
+                cancel: close,
+                ..OverlayRender::default()
+            });
+        }
         let agent = telemetry
             .display_agent
             .as_deref()

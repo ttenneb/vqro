@@ -859,6 +859,7 @@ mod tests {
                 platforms: None,
                 build: Vec::new(),
                 startup: Vec::new(),
+                services: Vec::new(),
                 actions: Vec::new(),
                 events: vec![crate::api::schema::PluginManifestEventHook {
                     on: event.into(),
