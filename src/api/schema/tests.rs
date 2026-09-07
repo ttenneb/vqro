@@ -531,6 +531,37 @@ fn pane_process_info_request_round_trips() {
 }
 
 #[test]
+fn pane_telemetry_is_additive_and_omits_sensitive_process_data() {
+    let request = Request {
+        id: "req_telemetry".into(),
+        method: Method::PaneTelemetry(PaneTelemetryParams {
+            pane_id: Some("w1-1".into()),
+        }),
+    };
+    let json = serde_json::to_value(&request).unwrap();
+    assert_eq!(json["method"], "pane.telemetry");
+    assert_eq!(json["params"]["pane_id"], "w1-1");
+
+    let process = PaneTelemetryProcess {
+        pid: 42,
+        name: "cargo".into(),
+        state: Some("R".into()),
+        cpu_time_ms: Some(10),
+        cpu_tenths_percent: None,
+        resident_bytes: Some(0),
+        thread_count: Some(1),
+        read_bytes: None,
+        write_bytes: Some(0),
+    };
+    let json = serde_json::to_value(process).unwrap();
+    assert!(json.get("argv").is_none());
+    assert!(json.get("cmdline").is_none());
+    assert!(json.get("env").is_none());
+    assert_eq!(json["resident_bytes"], 0);
+    assert!(json.get("cpu_tenths_percent").is_none());
+}
+
+#[test]
 fn event_envelope_round_trips() {
     let events = [
         EventEnvelope {

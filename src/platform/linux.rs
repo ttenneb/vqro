@@ -11,7 +11,7 @@ pub(super) const REMOTE_BRIDGE_CLOCK: libc::clockid_t = libc::CLOCK_BOOTTIME;
 
 use super::{
     read_limited_reader, ClipboardCommand, ClipboardImage, ForegroundJob, ForegroundProcess,
-    LimitedRead, Signal,
+    LimitedRead, ProcessTelemetry, Signal, TerminalTelemetrySample,
 };
 
 pub(crate) use super::unix_common::{
@@ -70,6 +70,8 @@ impl ForegroundScanBudget {
         }
     }
 }
+const TELEMETRY_TREE_SCAN_LIMIT: usize = 128;
+const TELEMETRY_TASK_SCAN_LIMIT: usize = 128;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ProcessDetectionMode {
@@ -511,6 +513,134 @@ pub fn foreground_group_leader_job(process_group_id: u32) -> Option<ForegroundJo
             cmdline: argv.as_ref().map(|parts| parts.join(" ")),
             argv,
         }],
+    })
+}
+
+pub(crate) fn sample_terminal_telemetry(
+    shell_pid: u32,
+    max_processes: usize,
+) -> TerminalTelemetrySample {
+    let Some(process_group_id) = foreground_process_group_id(shell_pid) else {
+        return TerminalTelemetrySample::Unavailable("foreground process group is unavailable");
+    };
+    let scan_limit = TELEMETRY_TREE_SCAN_LIMIT.max(max_processes);
+    let candidates = process_tree_pids_bounded([shell_pid, process_group_id], scan_limit);
+    let scan_truncated = candidates.len() == scan_limit;
+    let mut processes = Vec::new();
+    let mut matching = 0usize;
+    for pid in candidates {
+        let Some((pgrp, _)) = process_pgrp_and_comm(pid) else {
+            continue;
+        };
+        if pgrp <= 0 || pgrp as u32 != process_group_id {
+            continue;
+        }
+        matching = matching.saturating_add(1);
+        if processes.len() < max_processes {
+            if let Some(process) = process_telemetry(pid) {
+                processes.push(process);
+            }
+        }
+    }
+    processes.sort_unstable_by_key(|process| process.pid);
+    if processes.is_empty() {
+        return TerminalTelemetrySample::Unavailable("foreground processes exited while sampling");
+    }
+    TerminalTelemetrySample::Available {
+        process_group_id,
+        truncated: scan_truncated || matching > processes.len(),
+        processes,
+    }
+}
+
+fn process_tree_pids_bounded(roots: impl IntoIterator<Item = u32>, max_pids: usize) -> Vec<u32> {
+    let mut pending = VecDeque::new();
+    let mut visited = HashSet::new();
+    for pid in roots {
+        if pid > 0 && visited.insert(pid) {
+            pending.push_back(pid);
+        }
+    }
+    let mut pids = Vec::new();
+    while let Some(pid) = pending.pop_front() {
+        if pids.len() >= max_pids {
+            break;
+        }
+        pids.push(pid);
+        let task_path = format!("/proc/{pid}/task");
+        let tasks = std::fs::read_dir(task_path)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter_map(|entry| numeric_file_name(&entry))
+            .take(TELEMETRY_TASK_SCAN_LIMIT);
+        for tid in tasks {
+            let Some(children) =
+                std::fs::read_to_string(format!("/proc/{pid}/task/{tid}/children")).ok()
+            else {
+                continue;
+            };
+            for child in children
+                .split_whitespace()
+                .filter_map(|value| value.parse::<u32>().ok())
+            {
+                if visited.len() >= max_pids || !visited.insert(child) {
+                    continue;
+                }
+                pending.push_back(child);
+            }
+        }
+    }
+    pids
+}
+
+fn process_telemetry(pid: u32) -> Option<ProcessTelemetry> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let close = stat.rfind(')')?;
+    let name = stat.get(1 + stat.find('(')?..close)?.to_owned();
+    let fields = stat
+        .get(close + 2..)?
+        .split_whitespace()
+        .collect::<Vec<_>>();
+    let state = fields.first().map(|value| (*value).to_owned());
+    let user_ticks = fields.get(11).and_then(|value| value.parse::<u64>().ok());
+    let system_ticks = fields.get(12).and_then(|value| value.parse::<u64>().ok());
+    let cpu_ticks = user_ticks
+        .zip(system_ticks)
+        .map(|(user, system)| user + system);
+    let ticks_per_second = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
+    let cpu_time_ms = (ticks_per_second > 0)
+        .then_some(ticks_per_second as u64)
+        .and_then(|ticks_per_second| {
+            cpu_ticks.map(|ticks| ticks.saturating_mul(1_000) / ticks_per_second)
+        });
+    let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+    let resident_bytes = (page_size > 0)
+        .then_some(page_size as u64)
+        .and_then(|page_size| {
+            fields
+                .get(21)
+                .and_then(|value| value.parse::<u64>().ok())
+                .map(|pages| pages.saturating_mul(page_size))
+        });
+    let thread_count = fields.get(17).and_then(|value| value.parse::<u32>().ok());
+    let io = std::fs::read_to_string(format!("/proc/{pid}/io")).ok();
+    let io_value = |key: &str| {
+        io.as_deref().and_then(|contents| {
+            contents
+                .lines()
+                .find_map(|line| line.strip_prefix(key)?.trim().parse::<u64>().ok())
+        })
+    };
+    Some(ProcessTelemetry {
+        pid,
+        name,
+        state,
+        cpu_time_ms,
+        resident_bytes,
+        thread_count,
+        read_bytes: io_value("read_bytes:"),
+        write_bytes: io_value("write_bytes:"),
     })
 }
 
@@ -1508,6 +1638,16 @@ mod tests {
         for state in ['R', 'S', 'I', 'T', 't'] {
             assert!(process_state_allows_remote_memory_read(state));
         }
+    }
+
+    #[test]
+    fn process_telemetry_reads_safe_numeric_fields_for_current_process() {
+        let process = process_telemetry(std::process::id()).expect("current process telemetry");
+        assert_eq!(process.pid, std::process::id());
+        assert!(!process.name.is_empty());
+        assert!(process.cpu_time_ms.is_some());
+        assert!(process.resident_bytes.is_some());
+        assert!(process.thread_count.is_some());
     }
 
     #[test]

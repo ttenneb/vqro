@@ -52,7 +52,10 @@ impl ClientContextMenuOverlay {
                 right_click_passthrough,
                 ..
             } => {
-                let mut items = vec![item("Rename pane", Action::RenamePane)];
+                let mut items = vec![
+                    item("Inspect terminal...", Action::InspectTerminal),
+                    item("Rename pane", Action::RenamePane),
+                ];
                 if *has_manual_label {
                     items.push(item("Clear pane name", Action::ClearPaneName));
                 }
@@ -382,6 +385,9 @@ impl ClientShellState {
         };
 
         match action {
+            ClientContextMenuAction::InspectTerminal => {
+                self.open_terminal_inspector(pane_id, outcome);
+            }
             ClientContextMenuAction::RenamePane => {
                 let label = self.snapshot.as_deref().and_then(|snapshot| {
                     snapshot
@@ -464,6 +470,53 @@ impl ClientShellState {
                 self.push_endpoint_method(Method::PaneClose(PaneTarget { pane_id }), outcome)
             }
             _ => {}
+        }
+    }
+
+    pub(super) fn open_terminal_inspector(
+        &mut self,
+        pane_id: String,
+        outcome: &mut ClientShellInput,
+    ) {
+        let pane_label = self
+            .snapshot
+            .as_deref()
+            .and_then(|snapshot| snapshot.panes.iter().find(|pane| pane.pane_id == pane_id))
+            .and_then(|pane| pane.label.clone())
+            .unwrap_or_else(|| "Terminal".to_owned());
+        self.overlay = Some(ClientShellOverlay::TerminalInspector(
+            ClientTerminalInspectorOverlay {
+                pane_id: pane_id.clone(),
+                pane_label,
+                loading: true,
+                telemetry: None,
+                error: None,
+            },
+        ));
+        self.refresh_terminal_inspector(pane_id, outcome);
+    }
+
+    pub(super) fn refresh_terminal_inspector(
+        &mut self,
+        pane_id: String,
+        outcome: &mut ClientShellInput,
+    ) {
+        if let Some(ClientShellOverlay::TerminalInspector(inspector)) = self.overlay.as_mut() {
+            inspector.loading = true;
+            inspector.error = None;
+        }
+        let sent = self.push_endpoint_method_with_kind(
+            crate::api::schema::Method::PaneTelemetry(crate::api::schema::PaneTelemetryParams {
+                pane_id: Some(pane_id.clone()),
+            }),
+            PendingEndpointKind::TerminalInspector { pane_id },
+            outcome,
+        );
+        if !sent {
+            if let Some(ClientShellOverlay::TerminalInspector(inspector)) = self.overlay.as_mut() {
+                inspector.loading = false;
+                inspector.error = Some("Telemetry is unavailable from this endpoint.".to_owned());
+            }
         }
     }
 }

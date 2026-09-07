@@ -9,6 +9,7 @@ impl ClientShellState {
                     | ClientShellOverlay::Help(_)
                     | ClientShellOverlay::Navigator(_)
                     | ClientShellOverlay::WorktreeRemove(_)
+                    | ClientShellOverlay::TerminalInspector(_)
                     | ClientShellOverlay::ContextMenu(_)
                     | ClientShellOverlay::GlobalMenu(_)
             );

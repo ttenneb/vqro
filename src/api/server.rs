@@ -436,6 +436,7 @@ pub(crate) fn api_method_name(method: &Method) -> &'static str {
         Method::PaneZoom(_) => "pane.zoom",
         Method::PaneLayout(_) => "pane.layout",
         Method::PaneProcessInfo(_) => "pane.process_info",
+        Method::PaneTelemetry(_) => "pane.telemetry",
         Method::LayoutExport(_) => "layout.export",
         Method::LayoutApply(_) => "layout.apply",
         Method::LayoutSetSplitRatio(_) => "layout.set_split_ratio",

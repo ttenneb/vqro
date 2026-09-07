@@ -9,7 +9,7 @@ use super::integrations::{
 use super::panes::{
     LayoutDescription, PaneEdgesResult, PaneFocusDirectionResult, PaneInfo, PaneLayoutSnapshot,
     PaneMoveResult, PaneNeighborResult, PaneProcessInfo, PaneReadResult, PaneResizeResult,
-    PaneSwapResult, PaneTextPoint, PaneTextRange, PaneZoomResult,
+    PaneSwapResult, PaneTelemetry, PaneTextPoint, PaneTextRange, PaneZoomResult,
 };
 use super::plugins::{
     InstalledPluginInfo, PluginActionInfo, PluginCommandLogInfo, PluginInvocationContext,
@@ -137,6 +137,9 @@ pub enum ResponseResult {
     },
     PaneProcessInfo {
         process_info: PaneProcessInfo,
+    },
+    PaneTelemetry {
+        telemetry: PaneTelemetry,
     },
     LayoutExport {
         layout: LayoutDescription,

@@ -597,6 +597,27 @@ impl ClientShellState {
             return;
         }
 
+        if matches!(self.overlay, Some(ClientShellOverlay::TerminalInspector(_))) {
+            match key.code {
+                KeyCode::Esc | KeyCode::Enter => {
+                    self.overlay = None;
+                    outcome.repaint = true;
+                }
+                KeyCode::Char('r') => {
+                    let pane_id = match self.overlay.as_ref() {
+                        Some(ClientShellOverlay::TerminalInspector(inspector)) => {
+                            inspector.pane_id.clone()
+                        }
+                        _ => return,
+                    };
+                    self.refresh_terminal_inspector(pane_id, outcome);
+                    outcome.repaint = true;
+                }
+                _ => {}
+            }
+            return;
+        }
+
         if self.route_settings_key(key, outcome) {
             return;
         }

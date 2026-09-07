@@ -1658,6 +1658,10 @@ impl ClientShellState {
             if super::contains(self.hits.overlay_primary, point) {
                 match self.overlay.as_ref() {
                     Some(ClientShellOverlay::Rename(_)) => self.save_rename_overlay(outcome),
+                    Some(ClientShellOverlay::TerminalInspector(_)) => {
+                        self.overlay = None;
+                        outcome.repaint = true;
+                    }
                     Some(ClientShellOverlay::ConfirmClose(_)) => {
                         let Some(ClientShellOverlay::ConfirmClose(confirm)) = self.overlay.take()
                         else {

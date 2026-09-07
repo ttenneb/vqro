@@ -77,6 +77,7 @@ pub(crate) fn render_client_overlay(
         ClientShellOverlay::WorktreeRemove(v) => {
             worktree_overlays::render_worktree_remove_overlay(b, v, p)
         }
+        ClientShellOverlay::TerminalInspector(v) => render_terminal_inspector_overlay(b, v, p),
         ClientShellOverlay::ContextMenu(_) | ClientShellOverlay::GlobalMenu(_) => None,
     }
 }
@@ -529,6 +530,255 @@ fn render_product_announcement_overlay(
         product_announcement_max_scroll: max_scroll,
         ..OverlayRender::default()
     })
+}
+
+fn render_terminal_inspector_overlay(
+    b: &mut Buffer,
+    inspector: &ClientTerminalInspectorOverlay,
+    p: &Palette,
+) -> Option<OverlayRender> {
+    let outer = popup(b.area, 76, 24)?;
+    let inner = panel(b, outer, p.accent, p.panel_bg)?;
+    if inner.width < 36 || inner.height < 10 {
+        return Some(OverlayRender::default());
+    }
+    let base = Style::default()
+        .bg(p.panel_bg)
+        .remove_modifier(Modifier::DIM);
+    let title = base.fg(p.text).add_modifier(Modifier::BOLD);
+    let muted = base.fg(p.overlay0);
+    let accent = base.fg(p.accent).add_modifier(Modifier::BOLD);
+    put_text(
+        b,
+        inner.x + 1,
+        inner.y,
+        inner.width.saturating_sub(14),
+        "Terminal inspector",
+        title,
+    );
+    let close = Rect::new(inner.right().saturating_sub(11), inner.y, 11, 1);
+    button(
+        b,
+        close,
+        " esc close ",
+        Style::default()
+            .fg(contrast(p))
+            .bg(p.accent)
+            .add_modifier(Modifier::BOLD)
+            .remove_modifier(Modifier::DIM),
+    );
+    put_text(
+        b,
+        inner.x + 1,
+        inner.y + 1,
+        inner.width.saturating_sub(2),
+        &format!("{}  ·  {}", inspector.pane_label, inspector.pane_id),
+        muted,
+    );
+    let divider_y = inner.y + 3;
+    put_text(
+        b,
+        inner.x,
+        divider_y,
+        inner.width,
+        &"─".repeat(inner.width as usize),
+        base.fg(p.surface1),
+    );
+
+    let mut y = divider_y + 1;
+    if inspector.loading && inspector.telemetry.is_none() {
+        put_text(
+            b,
+            inner.x + 1,
+            y,
+            inner.width.saturating_sub(2),
+            "◌ sampling process telemetry…",
+            accent,
+        );
+    } else if let Some(error) = inspector.error.as_deref() {
+        put_text(
+            b,
+            inner.x + 1,
+            y,
+            inner.width.saturating_sub(2),
+            "Telemetry unavailable",
+            base.fg(p.red).add_modifier(Modifier::BOLD),
+        );
+        put_text(
+            b,
+            inner.x + 1,
+            y + 1,
+            inner.width.saturating_sub(2),
+            error,
+            muted,
+        );
+    } else if let Some(telemetry) = inspector.telemetry.as_ref() {
+        let agent = telemetry
+            .display_agent
+            .as_deref()
+            .or(telemetry.agent.as_deref())
+            .unwrap_or("none");
+        let status = format!("{:?}", telemetry.agent_status).to_ascii_lowercase();
+        put_text(b, inner.x + 1, y, 10, "AGENT", muted);
+        put_text(
+            b,
+            inner.x + 12,
+            y,
+            inner.width.saturating_sub(13),
+            &format!("{agent}  ·  {status}"),
+            accent,
+        );
+        y += 1;
+        if !telemetry.state_labels.is_empty() {
+            let labels = telemetry
+                .state_labels
+                .iter()
+                .map(|(key, value)| format!("{key}: {value}"))
+                .collect::<Vec<_>>()
+                .join("  ·  ");
+            put_text(
+                b,
+                inner.x + 12,
+                y,
+                inner.width.saturating_sub(13),
+                &labels,
+                muted,
+            );
+            y += 1;
+        }
+        put_text(b, inner.x + 1, y, 10, "SAMPLE", muted);
+        put_text(
+            b,
+            inner.x + 12,
+            y,
+            inner.width.saturating_sub(13),
+            &format!(
+                "shell {}  ·  pgrp {}  ·  cache {} ms{}",
+                telemetry
+                    .shell_pid
+                    .map_or_else(|| "—".into(), |value| value.to_string()),
+                telemetry
+                    .foreground_process_group_id
+                    .map_or_else(|| "—".into(), |value| value.to_string()),
+                telemetry.cache_age_ms,
+                if inspector.loading {
+                    "  ·  refreshing"
+                } else {
+                    ""
+                },
+            ),
+            base.fg(p.overlay1),
+        );
+        y += 2;
+        match telemetry.availability {
+            crate::api::schema::PaneTelemetryAvailability::Available => {
+                put_text(b, inner.x + 1, y, 7, "PID", muted);
+                put_text(b, inner.x + 9, y, 20, "PROCESS", muted);
+                put_text(b, inner.x + 30, y, 9, "CPU", muted);
+                put_text(b, inner.x + 40, y, 11, "MEMORY", muted);
+                put_text(b, inner.x + 52, y, 8, "THREADS", muted);
+                put_text(
+                    b,
+                    inner.x + 61,
+                    y,
+                    inner.width.saturating_sub(62),
+                    "I/O",
+                    muted,
+                );
+                y += 1;
+                let available_rows = inner.bottom().saturating_sub(y + 2) as usize;
+                for process in telemetry.processes.iter().take(available_rows) {
+                    let cpu = process.cpu_tenths_percent.map_or_else(
+                        || "—".into(),
+                        |value| format!("{}.{:01}%", value / 10, value % 10),
+                    );
+                    let memory = process
+                        .resident_bytes
+                        .map_or_else(|| "—".into(), format_bytes);
+                    let threads = process
+                        .thread_count
+                        .map_or_else(|| "—".into(), |value| value.to_string());
+                    let io = process.read_bytes.zip(process.write_bytes).map_or_else(
+                        || "—".into(),
+                        |(read, write)| format!("{}↓ {}↑", format_bytes(read), format_bytes(write)),
+                    );
+                    put_text(
+                        b,
+                        inner.x + 1,
+                        y,
+                        7,
+                        &process.pid.to_string(),
+                        base.fg(p.text),
+                    );
+                    put_text(b, inner.x + 9, y, 20, &process.name, base.fg(p.text));
+                    put_text(b, inner.x + 30, y, 9, &cpu, base.fg(p.text));
+                    put_text(b, inner.x + 40, y, 11, &memory, base.fg(p.text));
+                    put_text(b, inner.x + 52, y, 8, &threads, base.fg(p.text));
+                    put_text(
+                        b,
+                        inner.x + 61,
+                        y,
+                        inner.width.saturating_sub(62),
+                        &io,
+                        base.fg(p.overlay1),
+                    );
+                    y += 1;
+                }
+                let hidden = telemetry.processes.len().saturating_sub(available_rows);
+                if telemetry.truncated || hidden > 0 {
+                    put_text(
+                        b,
+                        inner.x + 1,
+                        inner.bottom().saturating_sub(2),
+                        inner.width.saturating_sub(2),
+                        "Process list is bounded; additional processes are not shown.",
+                        muted,
+                    );
+                }
+            }
+            crate::api::schema::PaneTelemetryAvailability::Unavailable
+            | crate::api::schema::PaneTelemetryAvailability::Unsupported => {
+                put_text(
+                    b,
+                    inner.x + 1,
+                    y,
+                    inner.width.saturating_sub(2),
+                    telemetry
+                        .detail
+                        .as_deref()
+                        .unwrap_or("Process telemetry unavailable"),
+                    muted,
+                );
+            }
+        }
+    }
+    put_text(
+        b,
+        inner.x + 1,
+        inner.bottom().saturating_sub(1),
+        inner.width.saturating_sub(2),
+        "argv/env never collected  ·  r refresh  ·  sampled only on demand",
+        muted,
+    );
+    Some(OverlayRender {
+        primary: close,
+        ..OverlayRender::default()
+    })
+}
+
+fn format_bytes(bytes: u64) -> String {
+    const KIB: u64 = 1024;
+    const MIB: u64 = KIB * 1024;
+    const GIB: u64 = MIB * 1024;
+    if bytes >= GIB {
+        format!("{:.1}G", bytes as f64 / GIB as f64)
+    } else if bytes >= MIB {
+        format!("{:.1}M", bytes as f64 / MIB as f64)
+    } else if bytes >= KIB {
+        format!("{:.1}K", bytes as f64 / KIB as f64)
+    } else {
+        format!("{bytes}B")
+    }
 }
 
 fn render_onboarding_overlay(b: &mut Buffer, p: &Palette) -> Option<OverlayRender> {

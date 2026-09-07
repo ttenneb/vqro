@@ -23,6 +23,7 @@ mod runtime;
 mod session;
 pub mod state;
 mod tab_bar_status;
+mod terminal_inspector;
 mod terminal_targets;
 mod terminal_titles;
 mod theme_sync;
@@ -158,6 +159,8 @@ pub struct App {
     pub(crate) config_reloaded_from_disk: bool,
     client_shell_keybindings_profile: Option<String>,
     endpoint_commands: custom_commands::EndpointCommandRegistry,
+    pub(crate) terminal_telemetry_cache:
+        HashMap<crate::terminal::TerminalId, terminal_inspector::CachedTerminalTelemetry>,
 }
 
 pub(crate) const APP_EVENT_CHANNEL_CAPACITY: usize = 256;
@@ -620,6 +623,7 @@ impl App {
             config_reloaded_from_disk: false,
             client_shell_keybindings_profile,
             endpoint_commands,
+            terminal_telemetry_cache: HashMap::new(),
         };
         app.configure_tab_bar_status(&config.ui.tab_bar_right, &config.ui.tab_bar_right_separator);
         app.configure_window_title(&config.ui.window_title);

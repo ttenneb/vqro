@@ -149,6 +149,8 @@ pub enum Method {
     PaneLayout(PaneLayoutParams),
     #[serde(rename = "pane.process_info")]
     PaneProcessInfo(PaneProcessInfoParams),
+    #[serde(rename = "pane.telemetry")]
+    PaneTelemetry(PaneTelemetryParams),
     #[serde(rename = "layout.export")]
     LayoutExport(LayoutExportParams),
     #[serde(rename = "layout.apply")]

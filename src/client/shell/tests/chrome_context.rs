@@ -280,6 +280,111 @@ fn context_menus_capture_stable_targets_and_route_actions() {
 }
 
 #[test]
+fn terminal_inspector_opens_from_pane_menu_and_renders_safe_telemetry() {
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    state.set_snapshot(Box::new(snapshot()));
+    state.set_pane_surface(surface());
+    state.compose(106, 30).expect("composed frame");
+    let pane = state.hits.panes[0].rect;
+    state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Right),
+        column: pane.x + 1,
+        row: pane.y,
+        modifiers: KeyModifiers::empty(),
+    })]);
+    state.compose(106, 30).expect("pane menu");
+    let inspect_index = match state.overlay.as_ref() {
+        Some(ClientShellOverlay::ContextMenu(menu)) => menu
+            .items()
+            .iter()
+            .position(|item| item.action == ClientContextMenuAction::InspectTerminal)
+            .expect("inspector item"),
+        _ => panic!("pane menu"),
+    };
+    let inspect = state.hits.context_menu_rows[inspect_index].0;
+    let open = state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: inspect.x + 1,
+        row: inspect.y,
+        modifiers: KeyModifiers::empty(),
+    })]);
+    let [ClientShellAction::Endpoint { request, .. }] = &open.actions[..] else {
+        panic!("inspector should request endpoint telemetry");
+    };
+    let request_id = request.id.clone();
+    assert!(matches!(
+        &request.method,
+        crate::api::schema::Method::PaneTelemetry(params)
+            if params.pane_id.as_deref() == Some("pane_1")
+    ));
+    assert!(matches!(
+        state.overlay,
+        Some(ClientShellOverlay::TerminalInspector(
+            ClientTerminalInspectorOverlay { loading: true, .. }
+        ))
+    ));
+
+    let telemetry = crate::api::schema::PaneTelemetry {
+        pane_id: "pane_1".into(),
+        availability: crate::api::schema::PaneTelemetryAvailability::Available,
+        detail: None,
+        cache_age_ms: 0,
+        shell_pid: Some(10),
+        foreground_process_group_id: Some(20),
+        truncated: false,
+        processes: vec![crate::api::schema::PaneTelemetryProcess {
+            pid: 20,
+            name: "cargo".into(),
+            state: Some("R".into()),
+            cpu_time_ms: Some(100),
+            cpu_tenths_percent: Some(125),
+            resident_bytes: Some(4 * 1024 * 1024),
+            thread_count: Some(8),
+            read_bytes: Some(0),
+            write_bytes: Some(1024),
+        }],
+        agent: Some("pi".into()),
+        display_agent: Some("Pi".into()),
+        agent_status: crate::api::schema::AgentStatus::Working,
+        state_labels: std::collections::HashMap::new(),
+    };
+    assert!(
+        state
+            .handle_endpoint_result(
+                "boot-1",
+                &request_id,
+                Ok(crate::api::schema::ResponseResult::PaneTelemetry { telemetry }),
+            )
+            .0
+    );
+    let frame = state.compose(106, 30).expect("inspector frame");
+    let text = frame
+        .cells
+        .chunks(frame.width as usize)
+        .map(|row| {
+            row.iter()
+                .map(|cell| cell.symbol.as_str())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(text.contains("Terminal inspector"));
+    assert!(text.contains("Pi  ·  working"));
+    assert!(text.contains("cargo"));
+    assert!(text.contains("12.5%"));
+    assert!(text.contains("argv/env never collected"));
+
+    let refresh = state.handle_input_bytes(b"r");
+    assert!(matches!(
+        refresh.actions.first(),
+        Some(ClientShellAction::Endpoint { request, .. })
+            if matches!(request.method, crate::api::schema::Method::PaneTelemetry(_))
+    ));
+    state.handle_input_bytes(b"\x1b");
+    assert!(state.overlay.is_none());
+}
+
+#[test]
 fn global_menu_opens_from_sidebar_and_routes_client_actions() {
     let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
     state.set_snapshot(Box::new(snapshot()));

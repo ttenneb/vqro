@@ -3384,6 +3384,17 @@
           ],
           "type": "object"
         },
+        "PaneTelemetryParams": {
+          "properties": {
+            "pane_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "type": "object"
+        },
         "PaneTextPoint": {
           "properties": {
             "col": {
@@ -5571,6 +5582,22 @@
             },
             "params": {
               "$ref": "#/schemas/request/$defs/PaneProcessInfoParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "pane.telemetry",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/PaneTelemetryParams"
             }
           },
           "required": [
@@ -8562,6 +8589,163 @@
           ],
           "type": "object"
         },
+        "PaneTelemetry": {
+          "properties": {
+            "agent": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "agent_status": {
+              "$ref": "#/schemas/success_response/$defs/AgentStatus"
+            },
+            "availability": {
+              "$ref": "#/schemas/success_response/$defs/PaneTelemetryAvailability"
+            },
+            "cache_age_ms": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "detail": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "display_agent": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "foreground_process_group_id": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "pane_id": {
+              "type": "string"
+            },
+            "processes": {
+              "items": {
+                "$ref": "#/schemas/success_response/$defs/PaneTelemetryProcess"
+              },
+              "type": "array"
+            },
+            "shell_pid": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "state_labels": {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "type": "object"
+            },
+            "truncated": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "pane_id",
+            "availability",
+            "cache_age_ms",
+            "truncated",
+            "processes",
+            "agent_status"
+          ],
+          "type": "object"
+        },
+        "PaneTelemetryAvailability": {
+          "enum": [
+            "available",
+            "unavailable",
+            "unsupported"
+          ],
+          "type": "string"
+        },
+        "PaneTelemetryProcess": {
+          "description": "Privacy-safe process telemetry. Command arguments and environment variables are deliberately\nnot part of this response; callers must use an explicitly diagnostic API for those values.",
+          "properties": {
+            "cpu_tenths_percent": {
+              "description": "CPU utilization in tenths of a percent, calculated from two interest-driven samples.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "cpu_time_ms": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "name": {
+              "type": "string"
+            },
+            "pid": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "read_bytes": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "resident_bytes": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "state": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "thread_count": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "write_bytes": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "pid",
+            "name"
+          ],
+          "type": "object"
+        },
         "PaneTextPoint": {
           "properties": {
             "col": {
@@ -9734,6 +9918,22 @@
               "required": [
                 "type",
                 "process_info"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "telemetry": {
+                  "$ref": "#/schemas/success_response/$defs/PaneTelemetry"
+                },
+                "type": {
+                  "const": "pane_telemetry",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "telemetry"
               ],
               "type": "object"
             },

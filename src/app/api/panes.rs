@@ -13,8 +13,8 @@ use crate::api::schema::{
     PaneReportMetadataParams, PaneResizeParams, PaneResizeReason, PaneResizeResult,
     PaneScrollParams, PaneSelectionReadParams, PaneSendInputParams, PaneSendKeysParams,
     PaneSendTextParams, PaneSplitParams, PaneSwapParams, PaneSwapReason, PaneSwapResult,
-    PaneTarget, PaneTextPoint, PaneTextRange, PaneZoomMode, PaneZoomParams, PaneZoomReason,
-    PaneZoomResult, ResponseResult,
+    PaneTarget, PaneTelemetry, PaneTelemetryParams, PaneTextPoint, PaneTextRange, PaneZoomMode,
+    PaneZoomParams, PaneZoomReason, PaneZoomResult, ResponseResult,
 };
 use crate::app::actions::{PaneZoomCommand, PaneZoomNoopReason};
 use crate::app::App;
@@ -543,6 +543,49 @@ impl App {
                     foreground_process_group_id,
                     tty: None,
                     foreground_processes,
+                },
+            },
+        )
+    }
+
+    pub(super) fn handle_pane_telemetry(
+        &mut self,
+        id: String,
+        params: PaneTelemetryParams,
+    ) -> String {
+        let Some((ws_idx, pane_id)) = self.resolve_optional_pane(params.pane_id.as_deref()) else {
+            return encode_error(id, "pane_not_found", "pane not found");
+        };
+        let Some(public_pane_id) = self.public_pane_id(ws_idx, pane_id) else {
+            return encode_error(id, "pane_not_found", "pane not found");
+        };
+        let Some(terminal_id) = self.state.terminal_id_for_pane(ws_idx, pane_id) else {
+            return encode_error(id, "pane_not_found", "pane not found");
+        };
+        let shell_pid = self
+            .terminal_runtimes
+            .get(&terminal_id)
+            .and_then(|runtime| runtime.child_pid());
+        let Some(pane) = self.pane_info(ws_idx, pane_id) else {
+            return encode_error(id, "pane_not_found", "pane not found");
+        };
+        let sample = self.terminal_telemetry(&terminal_id, shell_pid, std::time::Instant::now());
+        encode_success(
+            id,
+            ResponseResult::PaneTelemetry {
+                telemetry: PaneTelemetry {
+                    pane_id: public_pane_id,
+                    availability: sample.availability,
+                    detail: sample.detail,
+                    cache_age_ms: sample.cache_age_ms,
+                    shell_pid,
+                    foreground_process_group_id: sample.process_group_id,
+                    truncated: sample.truncated,
+                    processes: sample.processes,
+                    agent: pane.agent,
+                    display_agent: pane.display_agent,
+                    agent_status: pane.agent_status,
+                    state_labels: pane.state_labels,
                 },
             },
         )

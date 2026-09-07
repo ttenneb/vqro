@@ -33,6 +33,7 @@ const CLIENT_SHELL_METHODS: &[&str] = &[
     "pane.selection.read",
     "pane.split",
     "pane.swap",
+    "pane.telemetry",
     "pane.zoom",
     "product_announcement.dismiss",
     "release_notes.dismiss",

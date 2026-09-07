@@ -18,6 +18,39 @@ pub struct ForegroundJob {
     pub processes: Vec<ForegroundProcess>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ProcessTelemetry {
+    pub(crate) pid: u32,
+    pub(crate) name: String,
+    pub(crate) state: Option<String>,
+    pub(crate) cpu_time_ms: Option<u64>,
+    pub(crate) resident_bytes: Option<u64>,
+    pub(crate) thread_count: Option<u32>,
+    pub(crate) read_bytes: Option<u64>,
+    pub(crate) write_bytes: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum TerminalTelemetrySample {
+    Available {
+        process_group_id: u32,
+        processes: Vec<ProcessTelemetry>,
+        truncated: bool,
+    },
+    Unavailable(&'static str),
+    // This variant is produced by non-Linux platform implementations.
+    #[cfg_attr(target_os = "linux", allow(dead_code))]
+    Unsupported,
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn sample_terminal_telemetry(
+    _shell_pid: u32,
+    _max_processes: usize,
+) -> TerminalTelemetrySample {
+    TerminalTelemetrySample::Unsupported
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Signal {
     Hangup,

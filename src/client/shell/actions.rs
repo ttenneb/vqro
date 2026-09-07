@@ -591,6 +591,32 @@ impl ClientShellState {
                     }
                 };
             }
+            PendingEndpointKind::TerminalInspector { pane_id } => {
+                let Some(ClientShellOverlay::TerminalInspector(inspector)) = self.overlay.as_mut()
+                else {
+                    return (false, Vec::new());
+                };
+                if inspector.pane_id != pane_id {
+                    return (false, Vec::new());
+                }
+                inspector.loading = false;
+                match result {
+                    Ok(crate::api::schema::ResponseResult::PaneTelemetry { telemetry })
+                        if telemetry.pane_id == pane_id =>
+                    {
+                        inspector.telemetry = Some(telemetry);
+                        inspector.error = None;
+                    }
+                    Ok(_) => {
+                        inspector.error =
+                            Some("The endpoint returned an unexpected response.".into());
+                    }
+                    Err(error) => {
+                        inspector.error = Some(error.message);
+                    }
+                }
+                return (true, Vec::new());
+            }
             PendingEndpointKind::PaneScroll { pane_id, serial } => {
                 let mut outcome = ClientShellInput::default();
                 let repaint = self.complete_pane_scroll(pane_id, serial, result, &mut outcome);

@@ -340,6 +340,7 @@ pub(super) enum ClientShellOverlayKind {
     WorktreeCreate,
     WorktreeOpen,
     WorktreeRemove,
+    TerminalInspector,
     ContextMenu,
     GlobalMenu,
     Settings,
@@ -574,6 +575,7 @@ pub(super) enum ClientContextMenuAction {
     RemoveWorktree,
     ToggleGroup,
     NewTab,
+    InspectTerminal,
     RenamePane,
     ClearPaneName,
     SwapWithFocusedPane,
@@ -620,6 +622,15 @@ pub(super) struct ClientContextMenuItem {
 }
 
 #[derive(Debug)]
+pub(super) struct ClientTerminalInspectorOverlay {
+    pub(super) pane_id: String,
+    pub(super) pane_label: String,
+    pub(super) loading: bool,
+    pub(super) telemetry: Option<crate::api::schema::PaneTelemetry>,
+    pub(super) error: Option<String>,
+}
+
+#[derive(Debug)]
 pub(super) struct ClientConfirmCloseOverlay {
     pub(super) workspace_id: String,
     pub(super) title: String,
@@ -638,6 +649,7 @@ pub(super) enum ClientShellOverlay {
     WorktreeCreate(ClientWorktreeCreateOverlay),
     WorktreeOpen(ClientWorktreeOpenOverlay),
     WorktreeRemove(ClientWorktreeRemoveOverlay),
+    TerminalInspector(ClientTerminalInspectorOverlay),
     ContextMenu(ClientContextMenuOverlay),
     GlobalMenu(ClientGlobalMenuOverlay),
     Settings(ClientSettingsOverlay),
@@ -656,6 +668,7 @@ impl ClientShellOverlay {
             Self::WorktreeCreate(_) => ClientShellOverlayKind::WorktreeCreate,
             Self::WorktreeOpen(_) => ClientShellOverlayKind::WorktreeOpen,
             Self::WorktreeRemove(_) => ClientShellOverlayKind::WorktreeRemove,
+            Self::TerminalInspector(_) => ClientShellOverlayKind::TerminalInspector,
             Self::ContextMenu(_) => ClientShellOverlayKind::ContextMenu,
             Self::GlobalMenu(_) => ClientShellOverlayKind::GlobalMenu,
             Self::Settings(_) => ClientShellOverlayKind::Settings,
@@ -690,6 +703,9 @@ pub(super) enum PendingEndpointKind {
         forced: bool,
     },
     SelectionCopy,
+    TerminalInspector {
+        pane_id: String,
+    },
     PaneScroll {
         pane_id: String,
         serial: u64,

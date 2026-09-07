@@ -1089,6 +1089,9 @@ impl App {
             Method::PaneProcessInfo(params) => {
                 return self.handle_pane_process_info(request.id, params);
             }
+            Method::PaneTelemetry(params) => {
+                return self.handle_pane_telemetry(request.id, params);
+            }
             Method::LayoutExport(params) => return self.handle_layout_export(request.id, params),
             Method::LayoutApply(params) => return self.handle_layout_apply(request.id, params),
             Method::LayoutSetSplitRatio(params) => {
@@ -1742,6 +1745,45 @@ mod tests {
 
         assert_eq!(response["result"]["type"], "pane_process_info");
         assert_eq!(response["result"]["process_info"]["pane_id"], target);
+    }
+
+    #[tokio::test]
+    async fn pane_telemetry_reports_unavailable_without_conflating_it_with_zero() {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &crate::config::Config::default(),
+            crate::app::AppPolicy::TEST,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        app.state.workspaces = vec![crate::workspace::Workspace::test_new("telemetry")];
+        app.state.ensure_test_terminals();
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let target = app.public_pane_id(0, pane_id).unwrap();
+
+        let response = app.handle_api_request(crate::api::schema::Request {
+            id: "telemetry".into(),
+            method: crate::api::schema::Method::PaneTelemetry(
+                crate::api::schema::PaneTelemetryParams {
+                    pane_id: Some(target.clone()),
+                },
+            ),
+        });
+        let response: serde_json::Value = serde_json::from_str(&response).unwrap();
+
+        assert_eq!(response["result"]["type"], "pane_telemetry");
+        assert_eq!(response["result"]["telemetry"]["pane_id"], target);
+        assert_eq!(
+            response["result"]["telemetry"]["availability"],
+            "unavailable"
+        );
+        assert_eq!(
+            response["result"]["telemetry"]["processes"],
+            serde_json::json!([])
+        );
+        assert!(response.to_string().find("argv").is_none());
+        assert!(response.to_string().find("environ").is_none());
     }
 
     #[test]
