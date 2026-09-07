@@ -1607,7 +1607,7 @@ fn install_source_description_for(
     }
 
     if local_binary_can_seed_remote {
-        "the current local herdr binary".to_string()
+        "the current local vqro binary".to_string()
     } else {
         format!(
             "the {} {} asset for {}",
@@ -4888,7 +4888,7 @@ mod tests {
         };
         assert_eq!(
             install_source_description_for(&platform, Some(Path::new("/tmp/herdr-aarch64")), false),
-            "HERDR_REMOTE_BINARY (/tmp/herdr-aarch64)"
+            "VQRO_REMOTE_BINARY (/tmp/herdr-aarch64)"
         );
     }
 
@@ -4898,7 +4898,7 @@ mod tests {
 
         assert_eq!(
             install_source_description_for(&platform, None, true),
-            "the current local herdr binary"
+            "the current local vqro binary"
         );
     }
 
@@ -4936,7 +4936,7 @@ mod tests {
         assert!(path.starts_with(crate::platform::remote_private_temp_base()));
         assert!(path
             .file_name()
-            .is_some_and(|name| name.to_string_lossy().starts_with("herdr-r-")));
+            .is_some_and(|name| name.to_string_lossy().starts_with("vqro-r-")));
     }
 
     #[cfg(unix)]
@@ -4964,7 +4964,7 @@ mod tests {
             .unwrap_or("")
             .to_string();
         assert!(
-            filename.starts_with("herdr-remote-"),
+            filename.starts_with("vqro-remote-"),
             "expected readable name, got {filename}"
         );
         assert!(filename.contains("-dev-default."), "got {filename}");
@@ -5023,7 +5023,7 @@ mod tests {
         assert!(fits, "fallback path still overflows: {}", path.display());
         assert_eq!(parent.as_deref(), Some(Path::new("/tmp")));
         assert!(
-            filename.starts_with("herdr-r-"),
+            filename.starts_with("vqro-r-"),
             "expected hashed fallback, got {filename}"
         );
     }

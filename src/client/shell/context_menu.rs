@@ -484,7 +484,7 @@ impl ClientShellState {
             .and_then(|snapshot| snapshot.panes.iter().find(|pane| pane.pane_id == pane_id))
             .and_then(|pane| pane.label.clone())
             .unwrap_or_else(|| "Terminal".to_owned());
-        self.overlay = Some(ClientShellOverlay::TerminalInspector(
+        self.overlay = Some(ClientShellOverlay::TerminalInspector(Box::new(
             ClientTerminalInspectorOverlay {
                 pane_id: pane_id.clone(),
                 pane_label,
@@ -492,7 +492,7 @@ impl ClientShellState {
                 telemetry: None,
                 error: None,
             },
-        ));
+        )));
         self.refresh_terminal_inspector(pane_id, outcome);
     }
 

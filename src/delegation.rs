@@ -149,8 +149,13 @@ pub enum DelegationError {
     NotFound(DelegationId),
     ParentNotFound(DelegationId),
     PaneAlreadyAssociated(PaneId),
+    #[cfg(test)]
     PaneNotAssociated(PaneId),
-    PaneMismatch { expected: PaneId, actual: PaneId },
+    #[cfg(test)]
+    PaneMismatch {
+        expected: PaneId,
+        actual: PaneId,
+    },
     SelfParent,
     Cycle,
     CorruptCycle,
@@ -166,9 +171,11 @@ impl fmt::Display for DelegationError {
             Self::PaneAlreadyAssociated(id) => {
                 write!(formatter, "pane {} already has a delegation", id.raw())
             }
+            #[cfg(test)]
             Self::PaneNotAssociated(id) => {
                 write!(formatter, "pane {} has no delegation", id.raw())
             }
+            #[cfg(test)]
             Self::PaneMismatch { expected, actual } => write!(
                 formatter,
                 "delegation is associated with pane {}, not {}",
@@ -282,7 +289,8 @@ impl Delegations {
         Self::default()
     }
 
-    /// Validated construction for persistence and restore integration.
+    /// Validated construction for persistence and restore integration tests.
+    #[cfg(test)]
     pub fn from_records(
         records: impl IntoIterator<Item = DelegationRecord>,
     ) -> Result<Self, DelegationValidationError> {
@@ -440,6 +448,7 @@ impl Delegations {
     }
 
     /// Associate or replace a record's pane after validating session-wide uniqueness.
+    #[cfg(test)]
     pub fn associate_pane(
         &mut self,
         id: DelegationId,
@@ -462,6 +471,7 @@ impl Delegations {
     }
 
     /// Safely replace a restored pane ID without weakening pane uniqueness.
+    #[cfg(test)]
     pub fn remap_pane(
         &mut self,
         old_pane_id: PaneId,
@@ -642,6 +652,7 @@ impl Delegations {
         result
     }
 
+    #[cfg(test)]
     pub fn preorder_for_panes(&self, panes: &HashSet<PaneId>) -> Vec<ProjectionEntry> {
         let included = self
             .records
@@ -657,6 +668,7 @@ impl Delegations {
     }
 
     /// Detach a closed pane but retain its provenance while descendants exist.
+    #[cfg(test)]
     pub fn tombstone_pane(&mut self, pane_id: PaneId) -> Option<DelegationId> {
         let id = self.delegation_for_pane(pane_id)?.id;
         if let Some(record) = self.records.get_mut(&id) {
@@ -667,6 +679,7 @@ impl Delegations {
     }
 
     /// Remove tombstoned leaves, then repeat for newly exposed tombstoned leaves.
+    #[cfg(test)]
     pub fn gc_tombstones(&mut self) -> Vec<DelegationId> {
         let mut removed = Vec::new();
         loop {

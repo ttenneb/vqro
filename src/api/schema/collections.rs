@@ -77,19 +77,6 @@ pub struct CollectionCloseParams {
     pub disposition: Option<CollectionCloseDisposition>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema, Default)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum PanePlacementInfo {
-    #[default]
-    Tiled,
-    Collection {
-        collection_id: String,
-        member_index: usize,
-        archived: bool,
-        selected: bool,
-    },
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct CollectionMemberInfo {
     pub pane_id: String,

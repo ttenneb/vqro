@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use ratatui::layout::Direction;
 use serde::{Deserialize, Serialize};
 
+#[cfg(test)]
 use crate::layout::Node;
 use crate::terminal::TerminalRuntimeRegistry;
 use crate::workspace::Workspace;
@@ -534,6 +535,7 @@ fn capture_typed_node(node: &crate::layout::TypedNode) -> LayoutSnapshot {
     }
 }
 
+#[cfg(test)]
 pub(super) fn capture_node(node: &Node) -> LayoutSnapshot {
     match node {
         Node::Pane(id) => LayoutSnapshot::Pane(id.raw()),

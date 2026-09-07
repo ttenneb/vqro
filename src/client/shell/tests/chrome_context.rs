@@ -319,9 +319,7 @@ fn terminal_inspector_opens_from_pane_menu_and_renders_safe_telemetry() {
     ));
     assert!(matches!(
         state.overlay,
-        Some(ClientShellOverlay::TerminalInspector(
-            ClientTerminalInspectorOverlay { loading: true, .. }
-        ))
+        Some(ClientShellOverlay::TerminalInspector(ref inspector)) if inspector.loading
     ));
 
     let telemetry = crate::api::schema::PaneTelemetry {

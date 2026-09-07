@@ -12,16 +12,20 @@ vqro is exploring an open, terminal-native multiplexer for organizing human and 
 - **Work has structure.** Sessions should organize repositories, checkouts, related terminals, and parallel agents without hiding their underlying capabilities.
 - **Coexistence is safe.** vqro and Herdr must not accidentally share mutable state, sockets, protocols, plugins, or update channels.
 
-## Current status
+## Alpha status
 
-This branch starts from the upstream Herdr implementation. The first milestone is a distinct product identity and fail-closed compatibility isolation; feature work will follow from that foundation.
+The integrated alpha is ready for local Linux dogfooding. It currently includes:
 
-The initial direction includes:
+- an isolated `vqro` binary, config/state directories, sockets, sessions, logs, environment routing, and temporary runtime paths;
+- repository-aware **Spaces** that group primary and linked checkouts while preserving ordinary non-Git workspaces;
+- pane **Collections** with ordered members, selection, archive/restore, promotion, persistence, and delegation provenance;
+- an on-demand terminal inspector with privacy-safe Linux CPU, memory, thread, and I/O telemetry plus agent activity;
+- supervised out-of-process extension services using bounded, versioned JSON framing; and
+- constrained declarative inspector documents rendered and styled by the native client shell.
 
-1. separating session, runtime, and client presentation boundaries;
-2. stabilizing terminal collections and repository-aware workspaces as host-owned primitives;
-3. adding supervised, out-of-process extension services; and
-4. exposing declarative presentation and orchestration through versioned protocols.
+The bundled reference formatter is under [`extensions/terminal-inspector`](extensions/terminal-inspector). Link it with `vqro plugin link ./extensions/terminal-inspector`, restart the vqro server, then use **Inspect terminal** from a pane context menu.
+
+This remains an alpha: contracts may evolve, remote vqro deployment is not yet a supported release path, and the retained upstream documentation below still describes Herdr.
 
 vqro is not affiliated with or endorsed by the Herdr project. It will retain upstream attribution, track useful upstream work where practical, and treat interoperability as an explicit compatibility contract rather than an assumption.
 

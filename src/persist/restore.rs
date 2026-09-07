@@ -8,9 +8,9 @@ use tracing::{error, warn};
 
 use crate::detect::AgentState;
 use crate::events::AppEvent;
-use crate::layout::{
-    CollectionId, LayoutLeaf, Node, PaneCollection, PaneId, TileLayout, TypedNode,
-};
+#[cfg(test)]
+use crate::layout::Node;
+use crate::layout::{CollectionId, LayoutLeaf, PaneCollection, PaneId, TileLayout, TypedNode};
 use crate::pane::{PaneLaunchEnv, PaneState};
 use crate::render_signal::RenderSignal;
 use crate::terminal::{TerminalId, TerminalRuntime, TerminalState};
@@ -878,6 +878,7 @@ fn take_restore_plan_for_snapshot(
         .filter(|plan| resumed_agent_sessions.insert(plan.dedupe_key.clone()))
 }
 
+#[cfg(test)]
 pub(super) fn prune_restored_node(node: Node, surviving: &HashSet<PaneId>) -> Option<Node> {
     match node {
         Node::Pane(id) => surviving.contains(&id).then_some(Node::Pane(id)),
@@ -1091,12 +1092,14 @@ fn recover_typed_layout(
 
 /// Restore a layout tree, remapping every pane ID to a fresh globally unique one.
 /// Returns the new tree and a map of old_raw_id → new PaneId.
+#[cfg(test)]
 pub(super) fn restore_node_remapped(snap: &LayoutSnapshot) -> (Node, HashMap<u32, PaneId>) {
     let mut id_map = HashMap::new();
     let node = remap_inner(snap, &mut id_map);
     (node, id_map)
 }
 
+#[cfg(test)]
 fn remap_inner(snap: &LayoutSnapshot, id_map: &mut HashMap<u32, PaneId>) -> Node {
     match snap {
         LayoutSnapshot::Pane(old_id) => {
@@ -1127,12 +1130,14 @@ fn remap_inner(snap: &LayoutSnapshot, id_map: &mut HashMap<u32, PaneId>) -> Node
     }
 }
 
+#[cfg(test)]
 pub(super) fn collect_pane_ids(node: &Node) -> Vec<PaneId> {
     let mut ids = Vec::new();
     collect_ids_inner(node, &mut ids);
     ids
 }
 
+#[cfg(test)]
 fn collect_ids_inner(node: &Node, ids: &mut Vec<PaneId>) {
     match node {
         Node::Pane(id) => ids.push(*id),

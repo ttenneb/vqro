@@ -132,6 +132,41 @@ pub(super) fn snapshot(
             let pane_id = agent.pane_id;
             let focused = focused_pane_id.as_deref() == Some(pane_id.as_str());
             let mut state_labels = agent.state_labels.into_iter().collect::<Vec<_>>();
+            if let Some((workspace_index, internal_pane_id)) = app.parse_pane_id(&pane_id) {
+                if let Some((collection, member_index)) = app
+                    .state
+                    .workspaces
+                    .get(workspace_index)
+                    .and_then(|workspace| {
+                        let tab_index = workspace.find_tab_index_for_pane(internal_pane_id)?;
+                        let collection_id = match workspace.tabs[tab_index]
+                            .layout
+                            .placement(internal_pane_id)?
+                        {
+                            crate::layout::PanePlacement::Collection(collection_id) => {
+                                collection_id
+                            }
+                            crate::layout::PanePlacement::Tiled => return None,
+                        };
+                        let collection =
+                            workspace.tabs[tab_index].layout.collection(collection_id)?;
+                        let member_index = collection
+                            .members()
+                            .iter()
+                            .position(|candidate| *candidate == internal_pane_id)?;
+                        Some((collection, member_index))
+                    })
+                {
+                    state_labels.push((
+                        "collection".to_owned(),
+                        collection
+                            .label
+                            .clone()
+                            .unwrap_or_else(|| format!("collection_{}", collection.id.raw())),
+                    ));
+                    state_labels.push(("member".to_owned(), (member_index + 1).to_string()));
+                }
+            }
             state_labels.sort_by(|left, right| left.0.cmp(&right.0));
             let mut tokens = agent.tokens.into_iter().collect::<Vec<_>>();
             tokens.sort_by(|left, right| left.0.cmp(&right.0));

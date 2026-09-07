@@ -33,7 +33,6 @@ const CLIENT_SHELL_METHODS: &[&str] = &[
     "pane.selection.read",
     "pane.split",
     "pane.swap",
-    "pane.telemetry",
     "pane.zoom",
     "product_announcement.dismiss",
     "release_notes.dismiss",
@@ -57,7 +56,7 @@ const CLIENT_SHELL_METHODS: &[&str] = &[
 
 /// Optional methods introduced after the frozen generation-1 method set.
 /// Older endpoints simply omit these names and clients disable the actions.
-pub(crate) const CLIENT_SHELL_COLLECTION_METHODS: &[&str] = &[
+pub(crate) const CLIENT_SHELL_OPTIONAL_METHODS: &[&str] = &[
     "collection.add",
     "collection.archive",
     "collection.close",
@@ -75,6 +74,7 @@ pub(crate) const CLIENT_SHELL_COLLECTION_METHODS: &[&str] = &[
     "delegation.reparent",
     "delegation.root",
     "delegation.tree",
+    "pane.telemetry",
 ];
 
 pub(crate) fn supported_client_shell_method_names() -> &'static [&'static str] {
@@ -82,11 +82,11 @@ pub(crate) fn supported_client_shell_method_names() -> &'static [&'static str] {
 }
 
 pub(crate) fn optional_client_shell_method_names() -> &'static [&'static str] {
-    CLIENT_SHELL_COLLECTION_METHODS
+    CLIENT_SHELL_OPTIONAL_METHODS
 }
 
 pub(crate) fn supports_client_shell_method_name(method: &str) -> bool {
-    CLIENT_SHELL_METHODS.contains(&method) || CLIENT_SHELL_COLLECTION_METHODS.contains(&method)
+    CLIENT_SHELL_METHODS.contains(&method) || CLIENT_SHELL_OPTIONAL_METHODS.contains(&method)
 }
 
 pub(crate) fn supports_client_shell_method(method: &Method) -> bool {
@@ -368,15 +368,18 @@ mod tests {
     }
 
     #[test]
-    fn post_v1_collection_methods_are_optional_and_do_not_change_frozen_set() {
-        assert!(CLIENT_SHELL_COLLECTION_METHODS
+    fn post_v1_methods_are_optional_and_do_not_change_frozen_set() {
+        assert!(CLIENT_SHELL_OPTIONAL_METHODS
             .windows(2)
             .all(|pair| pair[0] < pair[1]));
-        assert!(CLIENT_SHELL_COLLECTION_METHODS
+        assert!(CLIENT_SHELL_OPTIONAL_METHODS
             .iter()
             .all(|method| !CLIENT_SHELL_METHODS.contains(method)));
         assert!(supports_client_shell_method(&Method::CollectionList(
             crate::api::schema::CollectionListParams::default()
+        )));
+        assert!(supports_client_shell_method(&Method::PaneTelemetry(
+            crate::api::schema::PaneTelemetryParams::default()
         )));
     }
 

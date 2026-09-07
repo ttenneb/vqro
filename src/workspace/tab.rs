@@ -211,10 +211,6 @@ impl Tab {
         ))
     }
 
-    pub fn pane_count(&self) -> usize {
-        self.panes.len()
-    }
-
     pub fn pane_placement(&self, pane_id: PaneId) -> Option<PanePlacement> {
         self.panes
             .contains_key(&pane_id)

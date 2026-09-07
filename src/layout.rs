@@ -167,17 +167,6 @@ impl PaneCollection {
         self.archived.contains(&pane_id)
     }
 
-    pub(crate) fn revision(&self) -> u64 {
-        self.revision
-    }
-
-    pub fn active_members(&self) -> impl Iterator<Item = PaneId> + '_ {
-        self.members
-            .iter()
-            .copied()
-            .filter(|pane_id| !self.archived.contains(pane_id))
-    }
-
     pub fn archived_members(&self) -> impl Iterator<Item = PaneId> + '_ {
         self.members
             .iter()
@@ -334,19 +323,10 @@ impl TileLayout {
         typed_count(&self.root)
     }
 
-    pub fn is_single_pane_leaf(&self) -> bool {
-        matches!(self.root, TypedNode::Leaf(LayoutLeaf::Pane(_)))
-    }
-
     pub fn leaves(&self) -> Vec<LayoutLeaf> {
         let mut leaves = Vec::new();
         typed_collect_leaves(&self.root, &mut leaves);
         leaves
-    }
-
-    /// Rectangle occupied by a typed top-level leaf.
-    pub fn leaf_rect(&self, leaf: LayoutLeaf, area: Rect) -> Option<Rect> {
-        typed_leaf_rect(&self.root, leaf, area)
     }
 
     pub fn collection_ids(&self) -> Vec<CollectionId> {
@@ -627,25 +607,6 @@ impl TileLayout {
         if changed {
             collection.revision = collection.revision.saturating_add(1);
         }
-        true
-    }
-
-    /// Undo a just-started archived-member restore without advancing the destructive
-    /// confirmation revision. This is deliberately narrower than a general revision setter.
-    pub(crate) fn rollback_member_restore(
-        &mut self,
-        id: CollectionId,
-        pane: PaneId,
-        original_revision: u64,
-    ) -> bool {
-        let Some(collection) = self.collections.get_mut(&id) else {
-            return false;
-        };
-        if !collection.members.contains(&pane) || collection.archived.contains(&pane) {
-            return false;
-        }
-        collection.archived.insert(pane);
-        collection.revision = original_revision;
         true
     }
 
