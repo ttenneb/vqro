@@ -26,7 +26,7 @@ pub use self::{
         derive_label_from_cwd, fallback_label_from_cwd, git_branch, git_space_metadata,
         git_status_cache_key, GitSpaceMetadata, GitStatusCacheEntry, GitStatusRefreshDemand,
     },
-    tab::{NewPane, Tab},
+    tab::{CollectionMutationError, NewPane, Tab},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -1323,6 +1323,7 @@ impl Workspace {
         let mut tab_numbers = std::collections::HashSet::new();
         let mut max_tab_number = 0usize;
         let mut live_panes = std::collections::HashSet::new();
+        let mut collection_ids = std::collections::HashSet::new();
         let mut terminal_ids = std::collections::HashSet::new();
 
         for (tab_idx, tab) in self.tabs.iter().enumerate() {
@@ -1369,6 +1370,27 @@ impl Workspace {
                 "workspace {} tab {} layout panes must exactly match pane states",
                 self.id, tab_idx
             );
+            for collection in tab.layout.collections() {
+                assert!(
+                    collection_ids.insert(collection.id),
+                    "workspace {} collection {:?} appears in more than one tab",
+                    self.id,
+                    collection.id
+                );
+                let unique: std::collections::HashSet<_> =
+                    collection.members().iter().copied().collect();
+                assert_eq!(
+                    unique.len(),
+                    collection.members().len(),
+                    "collection members must be unique"
+                );
+                assert!(collection
+                    .selected()
+                    .is_none_or(|pane| unique.contains(&pane)));
+                assert!(collection
+                    .archived_members()
+                    .all(|pane| unique.contains(&pane)));
+            }
 
             for (pane_id, pane) in &tab.panes {
                 assert!(

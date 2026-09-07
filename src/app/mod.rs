@@ -373,41 +373,71 @@ impl App {
         // Try to restore previous session
         let mut restored_terminals = std::collections::HashMap::new();
         let mut restored_terminal_runtimes = crate::terminal::TerminalRuntimeRegistry::new();
-        let (workspaces, repositories, space_order, active, selected) = if !policy.restore_session {
-            (Vec::new(), Vec::new(), Vec::new(), None, 0)
-        } else if let Some(snap) = crate::persist::load() {
-            let history = config
-                .experimental
-                .pane_history
-                .then(crate::persist::load_history)
-                .flatten();
-            let (ws, terminals, terminal_runtimes) = crate::persist::restore(
-                &snap,
-                history.as_ref(),
-                24,
-                80,
-                config.advanced.scrollback_limit_bytes,
-                &config.terminal.default_shell,
-                config.terminal.shell_mode,
-                config.session.resume_agents_on_restore,
-                event_tx.clone(),
-                render_notify.clone(),
-                render_dirty.clone(),
-            );
-            restored_terminals = terminals;
-            restored_terminal_runtimes = terminal_runtimes.into();
-            if ws.is_empty() {
-                crate::logging::session_restored(0, "empty");
-                (Vec::new(), Vec::new(), Vec::new(), None, 0)
+        let (workspaces, repositories, space_order, active, selected, delegations) =
+            if !policy.restore_session {
+                (
+                    Vec::new(),
+                    Vec::new(),
+                    Vec::new(),
+                    None,
+                    0,
+                    crate::delegation::Delegations::new(),
+                )
+            } else if let Some(snap) = crate::persist::load() {
+                let history = config
+                    .experimental
+                    .pane_history
+                    .then(crate::persist::load_history)
+                    .flatten();
+                let (ws, terminals, terminal_runtimes) = crate::persist::restore(
+                    &snap,
+                    history.as_ref(),
+                    24,
+                    80,
+                    config.advanced.scrollback_limit_bytes,
+                    &config.terminal.default_shell,
+                    config.terminal.shell_mode,
+                    config.session.resume_agents_on_restore,
+                    event_tx.clone(),
+                    render_notify.clone(),
+                    render_dirty.clone(),
+                );
+                restored_terminals = terminals;
+                restored_terminal_runtimes = terminal_runtimes.into();
+                if ws.is_empty() {
+                    crate::logging::session_restored(0, "empty");
+                    (
+                        Vec::new(),
+                        Vec::new(),
+                        Vec::new(),
+                        None,
+                        0,
+                        crate::delegation::Delegations::new(),
+                    )
+                } else {
+                    crate::logging::session_restored(ws.len(), "ok");
+                    let active = snap.active.filter(|&i| i < ws.len());
+                    let selected = snap.selected.min(ws.len().saturating_sub(1));
+                    let delegations = crate::persist::restore_delegations(&snap, &ws);
+                    (
+                        ws,
+                        snap.repositories,
+                        snap.space_order,
+                        active,
+                        selected,
+                        delegations,
+                    )
+                }
             } else {
-                crate::logging::session_restored(ws.len(), "ok");
-                let active = snap.active.filter(|&i| i < ws.len());
-                let selected = snap.selected.min(ws.len().saturating_sub(1));
-                (ws, snap.repositories, snap.space_order, active, selected)
-            }
-        } else {
-            (Vec::new(), Vec::new(), Vec::new(), None, 0)
-        };
+                (
+                    Vec::new(),
+                    Vec::new(),
+                    Vec::new(),
+                    None,
+                    0,
+                    crate::delegation::Delegations::new(),
+                )
+            };
 
         let agent_panel_sort = agent_panel_sort_from_config(config.ui.agent_panel_sort);
 
@@ -452,6 +482,7 @@ impl App {
             workspaces,
             repositories,
             space_order,
+            delegations,
             active,
             previous_pane_focus: None,
             selected,

@@ -797,6 +797,8 @@ pub struct AppState {
     /// Shared repository identities and top-level Spaces ordering.
     pub repositories: Vec<crate::repository::Repository>,
     pub space_order: Vec<crate::repository::SpaceRef>,
+    /// Session-wide delegation provenance, independent of pane placement.
+    pub delegations: crate::delegation::Delegations,
     pub active: Option<usize>,
     pub(crate) previous_pane_focus: Option<PaneFocusTarget>,
     pub selected: usize,
@@ -1062,6 +1064,7 @@ impl AppState {
             workspaces: Vec::new(),
             repositories: Vec::new(),
             space_order: Vec::new(),
+            delegations: crate::delegation::Delegations::new(),
             active: None,
             previous_pane_focus: None,
             selected: 0,

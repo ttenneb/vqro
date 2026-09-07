@@ -32,6 +32,9 @@ pub struct SessionSnapshot {
     pub sidebar_section_split: Option<f32>,
     #[serde(default)]
     pub collapsed_space_keys: std::collections::HashSet<String>,
+    /// Session-wide delegation provenance. Pane IDs refer to pre-restore IDs.
+    #[serde(default)]
+    pub delegations: Vec<crate::delegation::DelegationRecord>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -94,12 +97,36 @@ pub struct TabSnapshot {
     #[serde(default)]
     pub custom_name: Option<String>,
     pub layout: LayoutSnapshot,
+    #[serde(default)]
+    pub collections: Vec<CollectionSnapshot>,
     pub panes: HashMap<u32, PaneSnapshot>,
     pub zoomed: bool,
     #[serde(default)]
     pub focused: Option<u32>,
     #[serde(default)]
+    pub focused_leaf: Option<LayoutLeafSnapshot>,
+    #[serde(default)]
     pub root_pane: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CollectionSnapshot {
+    pub id: crate::layout::CollectionId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    #[serde(default)]
+    pub members: Vec<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected: Option<u32>,
+    #[serde(default)]
+    pub archived: Vec<u32>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "id", rename_all = "snake_case")]
+pub enum LayoutLeafSnapshot {
+    Pane(u32),
+    Collection(crate::layout::CollectionId),
 }
 
 #[derive(Serialize, Deserialize)]
@@ -135,6 +162,7 @@ pub struct PaneHistorySnapshot {
 #[derive(Serialize, Deserialize)]
 pub enum LayoutSnapshot {
     Pane(u32),
+    Collection(crate::layout::CollectionId),
     Split {
         direction: DirectionSnapshot,
         ratio: f32,
@@ -155,9 +183,11 @@ impl From<LegacyWorkspaceSnapshot> for WorkspaceSnapshot {
         let tab = TabSnapshot {
             custom_name: None,
             layout: snap.layout,
+            collections: Vec::new(),
             panes: snap.panes,
             zoomed: snap.zoomed,
             focused: snap.focused,
+            focused_leaf: None,
             root_pane: snap.root_pane,
         };
 
@@ -197,6 +227,8 @@ struct RawSessionSnapshot {
     sidebar_section_split: Option<f32>,
     #[serde(default)]
     collapsed_space_keys: std::collections::HashSet<String>,
+    #[serde(default)]
+    delegations: Vec<crate::delegation::DelegationRecord>,
 }
 
 fn migrate_snapshot(raw: RawSessionSnapshot) -> Result<SessionSnapshot, String> {
@@ -220,6 +252,7 @@ fn migrate_snapshot(raw: RawSessionSnapshot) -> Result<SessionSnapshot, String> 
         sidebar_width: raw.sidebar_width,
         sidebar_section_split: raw.sidebar_section_split,
         collapsed_space_keys: raw.collapsed_space_keys,
+        delegations: raw.delegations,
     })
 }
 
@@ -263,6 +296,7 @@ fn legacy_identity_cwd(snap: &LegacyWorkspaceSnapshot) -> PathBuf {
 fn first_pane_id_in_layout(layout: &LayoutSnapshot) -> Option<u32> {
     match layout {
         LayoutSnapshot::Pane(id) => Some(*id),
+        LayoutSnapshot::Collection(_) => None,
         LayoutSnapshot::Split { first, second, .. } => {
             first_pane_id_in_layout(first).or_else(|| first_pane_id_in_layout(second))
         }
@@ -295,6 +329,7 @@ pub fn capture(
         sidebar_width: None,
         sidebar_section_split: None,
         collapsed_space_keys: std::collections::HashSet::new(),
+        delegations: Vec::new(),
     }
 }
 
@@ -397,12 +432,26 @@ fn capture_tab(
             },
         );
     }
+    let mut collections: Vec<_> = tab
+        .layout
+        .collections()
+        .map(|collection| CollectionSnapshot {
+            id: collection.id,
+            label: collection.label.clone(),
+            members: collection.members().iter().map(|id| id.raw()).collect(),
+            selected: collection.selected().map(|id| id.raw()),
+            archived: collection.archived_members().map(|id| id.raw()).collect(),
+        })
+        .collect();
+    collections.sort_by_key(|collection| collection.id.raw());
     TabSnapshot {
         custom_name: tab.custom_name.clone(),
-        layout: capture_node(tab.layout.root()),
+        layout: capture_typed_node(tab.layout.typed_root()),
+        collections,
         panes,
         zoomed: tab.zoomed,
         focused: Some(tab.layout.focused().raw()),
+        focused_leaf: Some(capture_layout_leaf(tab.layout.focused_leaf())),
         root_pane: Some(tab.root_pane.raw()),
     }
 }
@@ -451,6 +500,38 @@ fn capture_pane_history(
         .snapshot_history()?;
     let lines = ansi.lines().count();
     Some(PaneHistorySnapshot { ansi, lines })
+}
+
+fn capture_layout_leaf(leaf: crate::layout::LayoutLeaf) -> LayoutLeafSnapshot {
+    match leaf {
+        crate::layout::LayoutLeaf::Pane(id) => LayoutLeafSnapshot::Pane(id.raw()),
+        crate::layout::LayoutLeaf::Collection(id) => LayoutLeafSnapshot::Collection(id),
+    }
+}
+
+fn capture_typed_node(node: &crate::layout::TypedNode) -> LayoutSnapshot {
+    match node {
+        crate::layout::TypedNode::Leaf(crate::layout::LayoutLeaf::Pane(id)) => {
+            LayoutSnapshot::Pane(id.raw())
+        }
+        crate::layout::TypedNode::Leaf(crate::layout::LayoutLeaf::Collection(id)) => {
+            LayoutSnapshot::Collection(*id)
+        }
+        crate::layout::TypedNode::Split {
+            direction,
+            ratio,
+            first,
+            second,
+        } => LayoutSnapshot::Split {
+            direction: match direction {
+                Direction::Horizontal => DirectionSnapshot::Horizontal,
+                Direction::Vertical => DirectionSnapshot::Vertical,
+            },
+            ratio: *ratio,
+            first: Box::new(capture_typed_node(first)),
+            second: Box::new(capture_typed_node(second)),
+        },
+    }
 }
 
 pub(super) fn capture_node(node: &Node) -> LayoutSnapshot {
@@ -579,7 +660,7 @@ mod tests {
     fn root_split_ratio(tab: &TabSnapshot) -> Option<f32> {
         match &tab.layout {
             LayoutSnapshot::Split { ratio, .. } => Some(*ratio),
-            LayoutSnapshot::Pane(_) => None,
+            LayoutSnapshot::Pane(_) | LayoutSnapshot::Collection(_) => None,
         }
     }
 
@@ -656,6 +737,7 @@ mod tests {
     #[test]
     fn round_trip_empty_session() {
         let snap = SessionSnapshot {
+            delegations: Vec::new(),
             version: SNAPSHOT_VERSION,
             repositories: Vec::new(),
             space_order: Vec::new(),
@@ -725,6 +807,7 @@ mod tests {
         let snap = SessionSnapshot {
             repositories: Vec::new(),
             space_order: Vec::new(),
+            delegations: Vec::new(),
             workspaces: vec![WorkspaceSnapshot {
                 id: Some("wproj".to_string()),
                 custom_name: Some("pi-mono".to_string()),
@@ -736,6 +819,8 @@ mod tests {
                 public_tab_numbers: vec![1],
                 next_public_tab_number: 2,
                 tabs: vec![TabSnapshot {
+                    collections: Vec::new(),
+                    focused_leaf: None,
                     custom_name: Some("api".to_string()),
                     layout: LayoutSnapshot::Split {
                         direction: DirectionSnapshot::Horizontal,
@@ -1264,6 +1349,33 @@ mod tests {
     }
 
     #[test]
+    fn capture_preserves_empty_collection_identity_and_typed_leaf() {
+        let mut state = state_with_workspaces(&["collections"]);
+        let root = state.workspaces[0].tabs[0].root_pane;
+        let collection = state.workspaces[0].tabs[0]
+            .create_collection_near(
+                crate::layout::LayoutLeaf::Pane(root),
+                Direction::Horizontal,
+                0.5,
+                Some("helpers".into()),
+            )
+            .expect("collection");
+        let snapshot = capture_from_state(&state);
+        let tab = &snapshot.workspaces[0].tabs[0];
+        assert_eq!(tab.collections.len(), 1);
+        assert_eq!(tab.collections[0].id, collection);
+        assert_eq!(tab.collections[0].label.as_deref(), Some("helpers"));
+        assert!(matches!(
+            tab.layout,
+            LayoutSnapshot::Split { ref second, .. }
+                if matches!(second.as_ref(), LayoutSnapshot::Collection(id) if *id == collection)
+        ));
+        let json = serde_json::to_string(&snapshot).expect("serialize");
+        let decoded = parse_snapshot(&json).expect("deserialize");
+        assert_eq!(decoded.workspaces[0].tabs[0].collections[0].id, collection);
+    }
+
+    #[test]
     fn restore_falls_back_to_home_when_cwd_missing() {
         let mut panes = HashMap::new();
         panes.insert(
@@ -1292,6 +1404,7 @@ mod tests {
         );
 
         let snap = SessionSnapshot {
+            delegations: Vec::new(),
             version: SNAPSHOT_VERSION,
             repositories: Vec::new(),
             space_order: Vec::new(),
@@ -1306,6 +1419,8 @@ mod tests {
                 public_tab_numbers: Vec::new(),
                 next_public_tab_number: 0,
                 tabs: vec![TabSnapshot {
+                    collections: Vec::new(),
+                    focused_leaf: None,
                     custom_name: None,
                     layout: LayoutSnapshot::Split {
                         direction: DirectionSnapshot::Horizontal,

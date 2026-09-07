@@ -2,6 +2,8 @@ use std::time::{Duration, Instant};
 
 mod agent_view;
 mod agents;
+mod collections;
+mod delegations;
 mod env;
 mod integrations;
 mod layouts;
@@ -1080,6 +1082,49 @@ impl App {
             Method::AgentExplain(target) => return self.handle_agent_explain(request.id, target),
             Method::AgentSendKeys(params) => {
                 return self.handle_agent_send_keys(request.id, params);
+            }
+            Method::CollectionList(params) => {
+                return self.handle_collection_list(request.id, params)
+            }
+            Method::CollectionGet(params) => return self.handle_collection_get(request.id, params),
+            Method::CollectionCreate(params) => {
+                return self.handle_collection_create(request.id, params)
+            }
+            Method::CollectionAdd(params) => return self.handle_collection_add(request.id, params),
+            Method::CollectionPromote(params) => {
+                return self.handle_collection_promote(request.id, params)
+            }
+            Method::CollectionSelect(params) => {
+                return self.handle_collection_select(request.id, params)
+            }
+            Method::CollectionReorder(params) => {
+                return self.handle_collection_reorder(request.id, params)
+            }
+            Method::CollectionArchive(params) => {
+                return self.handle_collection_archive(request.id, params, true)
+            }
+            Method::CollectionRestore(params) => {
+                return self.handle_collection_archive(request.id, params, false)
+            }
+            Method::CollectionClose(params) => {
+                return self.handle_collection_close(request.id, params)
+            }
+            Method::DelegationCreate(params) => {
+                return self.handle_delegation_create(request.id, params)
+            }
+            Method::DelegationGet(params) => return self.handle_delegation_get(request.id, params),
+            Method::DelegationTree(_) => return self.handle_delegation_tree(request.id),
+            Method::DelegationRoot(params) => {
+                return self.handle_delegation_root(request.id, params)
+            }
+            Method::DelegationDescendants(params) => {
+                return self.handle_delegation_descendants(request.id, params)
+            }
+            Method::DelegationReparent(params) => {
+                return self.handle_delegation_reparent(request.id, params)
+            }
+            Method::DelegationReorder(params) => {
+                return self.handle_delegation_reorder(request.id, params)
             }
             Method::PaneSplit(params) => return self.handle_pane_split(request.id, params),
             Method::PaneSwap(params) => return self.handle_pane_swap(request.id, params),

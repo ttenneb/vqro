@@ -6,7 +6,9 @@ use ratatui::layout::Direction;
 use tokio::sync::{mpsc, Notify};
 
 use crate::events::AppEvent;
-use crate::layout::{Node, PaneId, TileLayout};
+use crate::layout::{
+    CollectionId, LayoutLeaf, Node, PaneCollection, PaneId, PanePlacement, TileLayout,
+};
 use crate::pane::{PaneLaunchEnv, PaneState};
 use crate::render_signal::RenderSignal;
 use crate::terminal::{TerminalId, TerminalRuntime, TerminalRuntimeRegistry, TerminalState};
@@ -22,6 +24,18 @@ pub struct NewPane {
     pub pane_id: PaneId,
     pub terminal: TerminalState,
     pub runtime: TerminalRuntime,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CollectionMutationError {
+    CollectionNotFound,
+    CollectionNotEmpty,
+    PaneNotFound,
+    PaneNotTiled,
+    PaneNotMember,
+    TargetNotTiled,
+    LastLayoutLeaf,
+    LayoutMutationFailed,
 }
 
 enum SplitCommand<'a> {
@@ -195,6 +209,156 @@ impl Tab {
             terminal,
             runtime,
         ))
+    }
+
+    pub fn pane_count(&self) -> usize {
+        self.panes.len()
+    }
+
+    pub fn pane_placement(&self, pane_id: PaneId) -> Option<PanePlacement> {
+        self.panes
+            .contains_key(&pane_id)
+            .then(|| self.layout.placement(pane_id))
+            .flatten()
+    }
+
+    pub fn collection(&self, collection_id: CollectionId) -> Option<&PaneCollection> {
+        self.layout.collection(collection_id)
+    }
+
+    pub fn create_collection_near(
+        &mut self,
+        target: LayoutLeaf,
+        direction: Direction,
+        ratio: f32,
+        label: Option<String>,
+    ) -> Result<CollectionId, CollectionMutationError> {
+        let collection_id =
+            CollectionId::alloc().map_err(|_| CollectionMutationError::LayoutMutationFailed)?;
+        if !self
+            .layout
+            .insert_collection_near(target, collection_id, direction, ratio)
+        {
+            return Err(CollectionMutationError::LayoutMutationFailed);
+        }
+        let _ = self.layout.set_collection_label(collection_id, label);
+        self.zoomed = false;
+        Ok(collection_id)
+    }
+
+    pub fn remove_empty_collection(
+        &mut self,
+        collection_id: CollectionId,
+    ) -> Result<(), CollectionMutationError> {
+        let collection = self
+            .layout
+            .collection(collection_id)
+            .ok_or(CollectionMutationError::CollectionNotFound)?;
+        if !collection.members().is_empty() {
+            return Err(CollectionMutationError::CollectionNotEmpty);
+        }
+        if self.layout.leaf_count() <= 1 {
+            return Err(CollectionMutationError::LastLayoutLeaf);
+        }
+        if !self.layout.remove_collection(collection_id) {
+            return Err(CollectionMutationError::LayoutMutationFailed);
+        }
+        self.zoomed = false;
+        Ok(())
+    }
+
+    pub fn collect_tiled_pane(
+        &mut self,
+        pane_id: PaneId,
+        collection_id: CollectionId,
+    ) -> Result<(), CollectionMutationError> {
+        if !self.panes.contains_key(&pane_id) {
+            return Err(CollectionMutationError::PaneNotFound);
+        }
+        if self.layout.collection(collection_id).is_none() {
+            return Err(CollectionMutationError::CollectionNotFound);
+        }
+        if self.layout.placement(pane_id) != Some(PanePlacement::Tiled) {
+            return Err(CollectionMutationError::PaneNotTiled);
+        }
+        if self.layout.leaf_count() <= 1 {
+            return Err(CollectionMutationError::LastLayoutLeaf);
+        }
+        let mut layout = self.layout.clone();
+        if !layout.remove_tiled_pane_for_collection(pane_id)
+            || !layout.add_collection_member(collection_id, pane_id)
+        {
+            return Err(CollectionMutationError::LayoutMutationFailed);
+        }
+        self.layout = layout;
+        self.zoomed = false;
+        Ok(())
+    }
+
+    pub fn promote_collection_member_near(
+        &mut self,
+        pane_id: PaneId,
+        collection_id: CollectionId,
+        target_pane_id: PaneId,
+        direction: Direction,
+        ratio: f32,
+    ) -> Result<(), CollectionMutationError> {
+        if self.layout.placement(pane_id) != Some(PanePlacement::Collection(collection_id)) {
+            return Err(CollectionMutationError::PaneNotMember);
+        }
+        if self.layout.placement(target_pane_id) != Some(PanePlacement::Tiled) {
+            return Err(CollectionMutationError::TargetNotTiled);
+        }
+        let mut layout = self.layout.clone();
+        if !layout.remove_collection_member(collection_id, pane_id)
+            || !layout.insert_pane_near(target_pane_id, pane_id, direction, ratio, true)
+        {
+            return Err(CollectionMutationError::LayoutMutationFailed);
+        }
+        self.layout = layout;
+        self.zoomed = false;
+        Ok(())
+    }
+
+    pub fn select_collection_member(
+        &mut self,
+        collection_id: CollectionId,
+        pane_id: PaneId,
+    ) -> Result<(), CollectionMutationError> {
+        if !self.layout.select_collection_member(collection_id, pane_id) {
+            return Err(CollectionMutationError::PaneNotMember);
+        }
+        Ok(())
+    }
+
+    pub fn reorder_collection_member(
+        &mut self,
+        collection_id: CollectionId,
+        pane_id: PaneId,
+        index: usize,
+    ) -> Result<(), CollectionMutationError> {
+        if !self
+            .layout
+            .reorder_collection_member(collection_id, pane_id, index)
+        {
+            return Err(CollectionMutationError::PaneNotMember);
+        }
+        Ok(())
+    }
+
+    pub fn set_collection_member_archived(
+        &mut self,
+        collection_id: CollectionId,
+        pane_id: PaneId,
+        archived: bool,
+    ) -> Result<(), CollectionMutationError> {
+        if !self
+            .layout
+            .set_member_archived(collection_id, pane_id, archived)
+        {
+            return Err(CollectionMutationError::PaneNotMember);
+        }
+        Ok(())
     }
 
     pub fn is_auto_named(&self) -> bool {

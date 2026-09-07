@@ -807,6 +807,7 @@ pub(crate) fn handle_client_handshake(
         let welcome = EndpointServerWelcome::compatible(
             crate::server::client_commands::supported_client_shell_method_names()
                 .iter()
+                .chain(crate::server::client_commands::optional_client_shell_method_names())
                 .map(|method| (*method).to_owned())
                 .collect(),
         );

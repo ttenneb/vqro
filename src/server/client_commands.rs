@@ -55,12 +55,38 @@ const CLIENT_SHELL_METHODS: &[&str] = &[
     "worktree.remove",
 ];
 
+/// Optional methods introduced after the frozen generation-1 method set.
+/// Older endpoints simply omit these names and clients disable the actions.
+pub(crate) const CLIENT_SHELL_COLLECTION_METHODS: &[&str] = &[
+    "collection.add",
+    "collection.archive",
+    "collection.close",
+    "collection.create",
+    "collection.get",
+    "collection.list",
+    "collection.promote",
+    "collection.reorder",
+    "collection.restore",
+    "collection.select",
+    "delegation.create",
+    "delegation.descendants",
+    "delegation.get",
+    "delegation.reorder",
+    "delegation.reparent",
+    "delegation.root",
+    "delegation.tree",
+];
+
 pub(crate) fn supported_client_shell_method_names() -> &'static [&'static str] {
     CLIENT_SHELL_METHODS
 }
 
+pub(crate) fn optional_client_shell_method_names() -> &'static [&'static str] {
+    CLIENT_SHELL_COLLECTION_METHODS
+}
+
 pub(crate) fn supports_client_shell_method_name(method: &str) -> bool {
-    CLIENT_SHELL_METHODS.contains(&method)
+    CLIENT_SHELL_METHODS.contains(&method) || CLIENT_SHELL_COLLECTION_METHODS.contains(&method)
 }
 
 pub(crate) fn supports_client_shell_method(method: &Method) -> bool {
@@ -339,6 +365,19 @@ mod tests {
                 "advertised endpoint method {method:?} is absent from the request schema"
             );
         }
+    }
+
+    #[test]
+    fn post_v1_collection_methods_are_optional_and_do_not_change_frozen_set() {
+        assert!(CLIENT_SHELL_COLLECTION_METHODS
+            .windows(2)
+            .all(|pair| pair[0] < pair[1]));
+        assert!(CLIENT_SHELL_COLLECTION_METHODS
+            .iter()
+            .all(|method| !CLIENT_SHELL_METHODS.contains(method)));
+        assert!(supports_client_shell_method(&Method::CollectionList(
+            crate::api::schema::CollectionListParams::default()
+        )));
     }
 
     #[test]

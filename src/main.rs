@@ -21,6 +21,7 @@ mod cli;
 mod client;
 mod config;
 mod copy_mode;
+mod delegation;
 mod detect;
 mod events;
 mod extension_service;

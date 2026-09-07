@@ -208,6 +208,8 @@ pub enum EventKind {
     TabRenamed,
     TabMoved,
     TabFocused,
+    CollectionUpdated,
+    DelegationUpdated,
     PaneCreated,
     PaneClosed,
     PaneUpdated,
@@ -239,6 +241,8 @@ impl EventKind {
             EventKind::TabRenamed => "tab.renamed",
             EventKind::TabMoved => "tab.moved",
             EventKind::TabFocused => "tab.focused",
+            EventKind::CollectionUpdated => "collection.updated",
+            EventKind::DelegationUpdated => "delegation.updated",
             EventKind::PaneCreated => "pane.created",
             EventKind::PaneClosed => "pane.closed",
             EventKind::PaneUpdated => "pane.updated",
@@ -255,6 +259,8 @@ impl EventKind {
 
 #[cfg(test)]
 pub const KNOWN_EVENT_KINDS: &[EventKind] = &[
+    EventKind::CollectionUpdated,
+    EventKind::DelegationUpdated,
     EventKind::WorkspaceCreated,
     EventKind::WorkspaceUpdated,
     EventKind::WorkspaceMetadataUpdated,
@@ -489,6 +495,14 @@ pub enum EventData {
     TabFocused {
         tab_id: String,
         workspace_id: String,
+    },
+    CollectionUpdated {
+        action: String,
+        collection: super::CollectionInfo,
+    },
+    DelegationUpdated {
+        action: String,
+        delegation: super::DelegationInfo,
     },
     PaneCreated {
         pane: PaneInfo,

@@ -1,7 +1,9 @@
 use serde::{Deserialize, Serialize};
 
 use super::agents::AgentInfo;
+use super::collections::CollectionInfo;
 use super::common::{ClientWindowTitleReason, NotificationShowReason};
+use super::delegations::{DelegationInfo, DelegationTreeEntry};
 use super::events::EventEnvelope;
 use super::integrations::{
     IntegrationInstallResult, IntegrationTarget, IntegrationUninstallResult,
@@ -113,6 +115,21 @@ pub enum ResponseResult {
         source: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         label: Option<String>,
+    },
+    CollectionInfo {
+        collection: CollectionInfo,
+    },
+    CollectionList {
+        collections: Vec<CollectionInfo>,
+    },
+    DelegationInfo {
+        delegation: DelegationInfo,
+    },
+    DelegationTree {
+        delegations: Vec<DelegationTreeEntry>,
+    },
+    DelegationList {
+        delegations: Vec<DelegationInfo>,
     },
     PaneInfo {
         pane: PaneInfo,

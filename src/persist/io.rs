@@ -200,6 +200,7 @@ mod tests {
 
     fn empty_snapshot() -> SessionSnapshot {
         SessionSnapshot {
+            delegations: Vec::new(),
             version: SNAPSHOT_VERSION,
             repositories: Vec::new(),
             space_order: Vec::new(),

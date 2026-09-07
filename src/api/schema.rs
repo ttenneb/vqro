@@ -1,8 +1,10 @@
 use serde::{Deserialize, Serialize};
 
 pub mod agents;
+pub mod collections;
 pub mod commands;
 pub mod common;
+pub mod delegations;
 pub mod events;
 pub mod integrations;
 pub mod panes;
@@ -16,8 +18,10 @@ pub mod workspaces;
 pub mod worktrees;
 
 pub use agents::*;
+pub use collections::*;
 pub use commands::*;
 pub use common::*;
+pub use delegations::*;
 pub use events::*;
 pub use integrations::*;
 pub use panes::*;
@@ -139,6 +143,40 @@ pub enum Method {
     AgentPrompt(AgentPromptParams),
     #[serde(rename = "agent.wait")]
     AgentWait(AgentWaitParams),
+    #[serde(rename = "collection.list")]
+    CollectionList(CollectionListParams),
+    #[serde(rename = "collection.get")]
+    CollectionGet(CollectionTarget),
+    #[serde(rename = "collection.create")]
+    CollectionCreate(CollectionCreateParams),
+    #[serde(rename = "collection.add")]
+    CollectionAdd(CollectionAddParams),
+    #[serde(rename = "collection.promote")]
+    CollectionPromote(CollectionPromoteParams),
+    #[serde(rename = "collection.select")]
+    CollectionSelect(CollectionSelectParams),
+    #[serde(rename = "collection.reorder")]
+    CollectionReorder(CollectionReorderParams),
+    #[serde(rename = "collection.archive")]
+    CollectionArchive(CollectionMemberTarget),
+    #[serde(rename = "collection.restore")]
+    CollectionRestore(CollectionMemberTarget),
+    #[serde(rename = "collection.close")]
+    CollectionClose(CollectionCloseParams),
+    #[serde(rename = "delegation.create")]
+    DelegationCreate(DelegationCreateParams),
+    #[serde(rename = "delegation.get")]
+    DelegationGet(DelegationTarget),
+    #[serde(rename = "delegation.tree")]
+    DelegationTree(EmptyParams),
+    #[serde(rename = "delegation.root")]
+    DelegationRoot(DelegationTarget),
+    #[serde(rename = "delegation.descendants")]
+    DelegationDescendants(DelegationTarget),
+    #[serde(rename = "delegation.reparent")]
+    DelegationReparent(DelegationReparentParams),
+    #[serde(rename = "delegation.reorder")]
+    DelegationReorder(DelegationReorderParams),
     #[serde(rename = "pane.split")]
     PaneSplit(PaneSplitParams),
     #[serde(rename = "pane.swap")]
