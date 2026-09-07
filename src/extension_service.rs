@@ -168,9 +168,8 @@ impl ExtensionServiceSupervisor {
             .runtime
             .as_mut()
             .ok_or_else(|| ExtensionServiceError::Protocol("service is not running".into()))?
-            .request("inspector.render", context);
-        match result {
-            Ok(value) => {
+            .request("inspector.render", context)
+            .and_then(|value| {
                 let document: crate::inspector_document::InspectorDocument =
                     serde_json::from_value(value).map_err(|error| {
                         ExtensionServiceError::Protocol(format!(
@@ -181,7 +180,9 @@ impl ExtensionServiceSupervisor {
                     ExtensionServiceError::Protocol(format!("invalid inspector document: {error}"))
                 })?;
                 Ok(document)
-            }
+            });
+        match result {
+            Ok(document) => Ok(document),
             Err(error) => {
                 self.runtime = None;
                 self.record_failure(&error);
@@ -231,9 +232,29 @@ impl ExtensionServiceRuntime {
                 "VQRO_EXTENSION_SERVICE_PROTOCOL",
                 EXTENSION_SERVICE_PROTOCOL.to_string(),
             )
+            .env(
+                crate::api::SOCKET_PATH_ENV_VAR,
+                crate::api::socket_path().as_os_str(),
+            )
+            .env(crate::product::ENV_MARKER, "1")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
+        if let Ok(binary) = std::env::current_exe() {
+            command.env(crate::product::BIN_PATH_ENV, binary);
+        }
+        for key in [
+            "HERDR_ENV",
+            "HERDR_SOCKET_PATH",
+            "HERDR_CLIENT_SOCKET_PATH",
+            "HERDR_SESSION",
+            "HERDR_WORKSPACE_ID",
+            "HERDR_TAB_ID",
+            "HERDR_PANE_ID",
+            "HERDR_BIN_PATH",
+        ] {
+            command.env_remove(key);
+        }
         let mut child = command.spawn().map_err(ExtensionServiceError::Io)?;
         let stdin = child.stdin.take().ok_or_else(|| {
             ExtensionServiceError::Protocol("service stdin was not captured".into())
@@ -461,6 +482,30 @@ mod tests {
             read_bounded_frame(&mut normal).unwrap(),
             b"{\"type\":\"hello\"}"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn invalid_document_retires_service_and_enters_backoff() {
+        let script = r#"
+printf '%s\n' '{"type":"hello","protocol":1,"service_id":"test.invalid"}'
+IFS= read -r request
+id=$(printf '%s' "$request" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
+printf '{"type":"response","id":%s,"result":{"title":"bad\\u001b","sections":[],"actions":[]}}\n' "$id"
+"#;
+        let spec = ExtensionServiceSpec {
+            id: "test.invalid".into(),
+            command: vec!["sh".into(), "-c".into(), script.into()],
+            cwd: PathBuf::from("."),
+        };
+        let mut supervisor = ExtensionServiceSupervisor::new(spec).unwrap();
+        supervisor.start().unwrap();
+        assert!(supervisor.inspect(serde_json::json!({})).is_err());
+        assert!(supervisor.runtime.is_none());
+        assert!(matches!(
+            supervisor.status,
+            ExtensionServiceStatus::Backoff { failures: 1, .. }
+        ));
     }
 
     #[cfg(unix)]
