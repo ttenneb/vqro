@@ -1196,7 +1196,8 @@ mod tests {
 
         let snapshot = capture_from_state_with_runtimes(&state, &terminal_runtimes);
         let encoded = serde_json::to_string(&snapshot).unwrap();
-        assert!(!encoded.contains("alpha"));
+        assert!(!encoded.contains("beta"));
+        assert!(!encoded.contains("gamma"));
         assert!(!encoded.contains("\"history\""));
 
         let history_snapshot = capture_history_from_state_with_runtimes(&state, &terminal_runtimes);
