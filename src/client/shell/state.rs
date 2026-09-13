@@ -204,7 +204,6 @@ pub(super) struct ShellHitMap {
 #[derive(Clone, Debug)]
 pub(super) struct CollectionChromeHit {
     pub(super) rect: Rect,
-    pub(super) body: Rect,
     pub(super) collection_id: String,
     pub(super) selected_pane_id: String,
     pub(super) previous_pane_id: Option<String>,
@@ -1008,7 +1007,6 @@ pub(crate) struct ClientShellState {
     /// presentation used by generation-1 clients.
     pub(super) collection_list_views: HashSet<String>,
     pub(super) collection_expanded_members: HashMap<String, HashSet<String>>,
-    pub(super) collection_list_scroll: HashMap<String, usize>,
     pub(super) collection_preview_heights: HashMap<String, u16>,
     pub(super) collection_entered_pane: Option<String>,
     pub(super) collection_maximized_pane: Option<(String, String)>,
@@ -1183,7 +1181,6 @@ impl ClientShellState {
             remote_collapsed_groups,
             collection_list_views: HashSet::new(),
             collection_expanded_members: HashMap::new(),
-            collection_list_scroll: HashMap::new(),
             collection_preview_heights: HashMap::new(),
             collection_entered_pane: None,
             collection_maximized_pane: None,
@@ -1372,7 +1369,6 @@ impl ClientShellState {
         self.structure = None;
         self.collection_list_views.clear();
         self.collection_expanded_members.clear();
-        self.collection_list_scroll.clear();
         self.collection_preview_heights.clear();
         self.collection_entered_pane = None;
         self.collection_maximized_pane = None;

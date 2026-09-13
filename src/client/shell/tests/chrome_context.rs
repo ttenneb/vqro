@@ -74,7 +74,6 @@ fn assert_shell_hits_within_frame(state: &ClientShellState, frame: &FrameData) {
     for hit in &state.hits.collections {
         for rect in [
             hit.rect,
-            hit.body,
             hit.previous,
             hit.next,
             hit.presentation_toggle,
@@ -952,10 +951,7 @@ fn collection_chrome_renders_members_delegation_and_routes_selection() {
     );
     let maximized = state.compose(106, 24).expect("maximized collection child");
     assert_shell_hits_within_frame(&state, &maximized);
-    assert_eq!(
-        state.hits.collection_members[0].preview,
-        state.hits.collections[0].body
-    );
+    assert!(!state.hits.collection_members[0].preview.is_empty());
     state.collection_entered_pane = None;
     state.handle_input_bytes(b"z");
     assert!(state.collection_maximized_pane.is_none());
@@ -973,21 +969,28 @@ fn collection_chrome_renders_members_delegation_and_routes_selection() {
             if matches!(request.method, crate::api::schema::Method::CollectionArchive(_))
     )));
     let preview = state.hits.collection_members[0].preview;
-    state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
-        kind: MouseEventKind::ScrollUp,
-        column: preview.x,
-        row: preview.y,
-        modifiers: KeyModifiers::ALT,
-    })]);
-    assert!(state.collection_preview_heights.contains_key("pane_1"));
-    let body = state.hits.collections[0].body;
-    state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
-        kind: MouseEventKind::ScrollDown,
-        column: body.right().saturating_sub(1),
-        row: body.bottom().saturating_sub(1),
-        modifiers: KeyModifiers::empty(),
-    })]);
-    assert_eq!(state.collection_list_scroll.get("collection_1"), Some(&1));
+    let unfocused_scroll =
+        state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: preview.x,
+            row: preview.y,
+            modifiers: KeyModifiers::empty(),
+        })]);
+    assert!(unfocused_scroll.requests.is_empty());
+    assert!(unfocused_scroll.actions.is_empty());
+    state.collection_entered_pane = Some("pane_1".into());
+    let focused_scroll =
+        state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: preview.x,
+            row: preview.y,
+            modifiers: KeyModifiers::empty(),
+        })]);
+    assert!(
+        !focused_scroll.requests.is_empty() || !focused_scroll.actions.is_empty(),
+        "wheel input must route only after the inline PTY is focused"
+    );
+    state.collection_entered_pane = None;
     let reorder = state.handle_raw_events(vec![RawInputEvent::Key(
         crate::input::TerminalKey::new(KeyCode::Down, KeyModifiers::CONTROL),
     )]);

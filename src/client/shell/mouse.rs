@@ -1725,85 +1725,13 @@ impl ClientShellState {
             return;
         }
 
-        if matches!(
-            mouse.kind,
-            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
-        ) && mouse
-            .modifiers
-            .contains(crossterm::event::KeyModifiers::ALT)
-        {
-            if let Some(member) = self
-                .hits
-                .collection_members
-                .iter()
-                .find(|member| !member.preview.is_empty() && super::contains(member.preview, point))
-                .cloned()
-            {
-                let height = self
-                    .collection_preview_heights
-                    .entry(member.pane_id)
-                    .or_insert(member.preview.height);
-                *height = match mouse.kind {
-                    MouseEventKind::ScrollUp => height.saturating_add(1).min(40),
-                    MouseEventKind::ScrollDown => height.saturating_sub(1).max(2),
-                    _ => *height,
-                };
-                outcome.repaint = true;
-                return;
-            }
-        }
-
         if let Some(collection) = self
             .hits
             .collections
             .iter()
-            .find(|hit| {
-                super::contains(hit.rect, point)
-                    || (matches!(
-                        mouse.kind,
-                        MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
-                    ) && self.collection_list_views.contains(&hit.collection_id)
-                        && super::contains(hit.body, point)
-                        && !self.hits.collection_members.iter().any(|member| {
-                            self.collection_entered_pane.as_deref() == Some(member.pane_id.as_str())
-                                && !member.preview.is_empty()
-                                && super::contains(member.preview, point)
-                        }))
-            })
+            .find(|hit| super::contains(hit.rect, point))
             .cloned()
         {
-            if self
-                .collection_list_views
-                .contains(&collection.collection_id)
-                && super::contains(collection.body, point)
-                && matches!(
-                    mouse.kind,
-                    MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
-                )
-            {
-                let member_count =
-                    self.structure
-                        .as_deref()
-                        .and_then(|structure| {
-                            structure.collections.iter().find(|candidate| {
-                                candidate.collection_id == collection.collection_id
-                            })
-                        })
-                        .map_or(0, |collection| collection.members.len());
-                let scroll = self
-                    .collection_list_scroll
-                    .entry(collection.collection_id)
-                    .or_default();
-                *scroll = match mouse.kind {
-                    MouseEventKind::ScrollUp => scroll.saturating_sub(1),
-                    MouseEventKind::ScrollDown => {
-                        scroll.saturating_add(1).min(member_count.saturating_sub(1))
-                    }
-                    _ => *scroll,
-                };
-                outcome.repaint = true;
-                return;
-            }
             let target =
                 match mouse.kind {
                     MouseEventKind::Down(MouseButton::Right)
@@ -1963,6 +1891,19 @@ impl ClientShellState {
             {
                 self.collection_entered_pane = Some(member.pane_id);
             }
+        }
+
+        if matches!(
+            mouse.kind,
+            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+        ) && self.hits.collection_members.iter().any(|member| {
+            !member.preview.is_empty()
+                && super::contains(member.preview, point)
+                && self.collection_entered_pane.as_deref() != Some(member.pane_id.as_str())
+        }) {
+            // The collection surface itself never scrolls. Wheel input belongs to a PTY only
+            // after that terminal has explicitly received focus.
+            return;
         }
 
         if super::contains(self.hits.inspector_body, point) {

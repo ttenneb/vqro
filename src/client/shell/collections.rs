@@ -234,7 +234,6 @@ pub(super) fn render_collection_chrome(
         });
         hits.push(CollectionChromeHit {
             rect,
-            body: pane.inner_rect,
             collection_id: collection.collection_id.clone(),
             selected_pane_id: pane.pane_id.clone(),
             previous_pane_id,
@@ -255,7 +254,6 @@ pub(super) fn render_collection_lists(
     panes: &[PaneHit],
     list_views: &HashSet<String>,
     expanded_members: &HashMap<String, HashSet<String>>,
-    list_scroll: &HashMap<String, usize>,
     preview_heights: &HashMap<String, u16>,
     maximized_pane: Option<&(String, String)>,
     terminal_surfaces: &HashMap<String, crate::protocol::endpoint::ServerTerminalViewSurface>,
@@ -357,12 +355,6 @@ pub(super) fn render_collection_lists(
             .iter()
             .map(|member| (member.pane_id.as_str(), member.archived))
             .collect::<HashMap<_, _>>();
-        let scroll = list_scroll
-            .get(&collection.collection_id)
-            .copied()
-            .unwrap_or(0)
-            .min(members.len().saturating_sub(1));
-        let mut skipped = 0usize;
         let mut y = area.y;
         put(
             buffer,
@@ -371,6 +363,7 @@ pub(super) fn render_collection_lists(
             Style::default().fg(palette.overlay0).bg(palette.panel_bg),
         );
         y = y.saturating_add(1);
+        let mut rendered_members = 0usize;
 
         for archived in [false, true] {
             if archived && archived_count > 0 && y < area.bottom() {
@@ -387,10 +380,6 @@ pub(super) fn render_collection_lists(
                 .copied()
                 .filter(|member| member.archived == archived)
             {
-                if skipped < scroll {
-                    skipped = skipped.saturating_add(1);
-                    continue;
-                }
                 if y >= area.bottom().saturating_sub(1) {
                     break;
                 }
@@ -453,9 +442,21 @@ pub(super) fn render_collection_lists(
                 );
                 let disclosure = Rect::new(area.x.saturating_add(2), y, 2.min(area.width), 1);
                 y = y.saturating_add(1);
+                rendered_members = rendered_members.saturating_add(1);
+                let remaining_rows = members
+                    .len()
+                    .saturating_sub(rendered_members)
+                    .saturating_add(usize::from(!archived && archived_count > 0))
+                    .saturating_add(1); // persistent help footer
+                let remaining_rows = u16::try_from(remaining_rows).unwrap_or(u16::MAX);
                 let mut preview = Rect::default();
-                if expanded && y < area.bottom().saturating_sub(2) {
-                    let available = area.bottom().saturating_sub(y + 1);
+                if expanded && y < area.bottom().saturating_sub(remaining_rows) {
+                    // A collection has no list viewport. Reserve space for every remaining row
+                    // (and the archive heading) before assigning height to this terminal.
+                    let available = area
+                        .bottom()
+                        .saturating_sub(y)
+                        .saturating_sub(remaining_rows);
                     let preview_height = preview_heights
                         .get(&member.pane_id)
                         .copied()

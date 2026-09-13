@@ -638,26 +638,6 @@ impl ClientShellState {
                         outcome.repaint = true;
                         None
                     }
-                    KeyCode::PageUp => {
-                        let scroll = self
-                            .collection_list_scroll
-                            .entry(collection.collection_id.clone())
-                            .or_default();
-                        *scroll = scroll.saturating_sub(5);
-                        outcome.repaint = true;
-                        None
-                    }
-                    KeyCode::PageDown => {
-                        let scroll = self
-                            .collection_list_scroll
-                            .entry(collection.collection_id.clone())
-                            .or_default();
-                        *scroll = scroll
-                            .saturating_add(5)
-                            .min(collection.members.len().saturating_sub(1));
-                        outcome.repaint = true;
-                        None
-                    }
                     KeyCode::Up | KeyCode::Char('k') if !members.is_empty() => {
                         Some(&members[(selected_index + members.len() - 1) % members.len()].pane_id)
                     }

@@ -361,7 +361,6 @@ impl ClientShellState {
             &self.hits.panes,
             &self.collection_list_views,
             &self.collection_expanded_members,
-            &self.collection_list_scroll,
             &self.collection_preview_heights,
             self.collection_maximized_pane.as_ref(),
             &self.terminal_view_surfaces,
