@@ -574,17 +574,20 @@ pub(super) fn render_collection_lists(
                 }
                 let resize_handle = if !preview.is_empty() && y < area.bottom() {
                     let handle = Rect::new(preview.x, y, preview.width.saturating_add(1), 1);
+                    let grip_width = 17.min(handle.width);
                     let grip = Rect::new(
-                        handle.x.saturating_add(handle.width.saturating_sub(5) / 2),
+                        handle
+                            .x
+                            .saturating_add(handle.width.saturating_sub(grip_width) / 2),
                         handle.y,
-                        5.min(handle.width),
+                        grip_width,
                         1,
                     );
                     put(
                         buffer,
                         grip,
-                        "──◆──",
-                        Style::default().fg(palette.surface_dim).bg(Color::Reset),
+                        "[ drag height ↕ ]",
+                        Style::default().fg(palette.overlay1).bg(Color::Reset),
                     );
                     y = y.saturating_add(1);
                     handle

@@ -853,6 +853,7 @@ fn collection_chrome_renders_members_delegation_and_routes_selection() {
         .collect::<Vec<_>>()
         .join("\n");
     assert!(preview_text.contains("CHILD PTY"), "{preview_text}");
+    assert!(preview_text.contains("drag height ↕"), "{preview_text}");
     let preview_hit = state.hits.collection_members[0].clone();
     assert_eq!(
         preview_hit.scrollbar.map(|scrollbar| scrollbar.height),
