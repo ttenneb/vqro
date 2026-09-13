@@ -256,6 +256,43 @@ impl HeadlessServer {
             fallback!("non_shell_target");
         }
 
+        let mut terminal_view_updates = HashMap::new();
+        for (client_id, _, cell_size, _, _) in &targets {
+            let Some(client) = self.clients.get(client_id) else {
+                continue;
+            };
+            let Some(interest) = client.shell_terminal_views_interest.as_ref() else {
+                continue;
+            };
+            let Some(target) = self.shell_target_for_client(*client_id) else {
+                continue;
+            };
+            let surface = self.render_terminal_views(
+                target,
+                client.shell_projection_revision,
+                interest,
+                if cell_size.is_known() {
+                    *cell_size
+                } else {
+                    crate::kitty_graphics::HostCellSize::default()
+                },
+                Some(pty_sources),
+            );
+            if surface.views.is_empty() {
+                continue;
+            }
+            let Ok(data) = serde_json::to_string(&surface) else {
+                continue;
+            };
+            let Ok(serialized) = Self::frame_server_message(&ServerMessage::EndpointControl {
+                kind: crate::protocol::endpoint::TERMINAL_VIEWS_SURFACE_KIND.into(),
+                data,
+            }) else {
+                continue;
+            };
+            terminal_view_updates.insert(*client_id, serialized);
+        }
+
         let mut recipients = Vec::with_capacity(targets.len());
         for (client_id, (cols, rows), _, _, _) in &targets {
             let Some(client) = self.clients.get(client_id) else {
@@ -454,7 +491,31 @@ impl HeadlessServer {
             });
         }
         if updates.is_empty() {
-            success!("unchanged");
+            let mut disconnected = Vec::new();
+            for (client_id, serialized) in terminal_view_updates {
+                let Some(client) = self.clients.get_mut(&client_id) else {
+                    continue;
+                };
+                let Some(writer) = client.writer.as_ref() else {
+                    continue;
+                };
+                // Keep an auxiliary terminal-view update behind any already queued base surface;
+                // dropping it merely because that base has not drained yet can leave an expanded
+                // hidden PTY frozen until unrelated client input forces a complete render.
+                match writer.render.send_ordered(serialized) {
+                    Ok(()) => client.clear_deferred_render(),
+                    Err(std::sync::mpsc::TrySendError::Full(_)) => {
+                        client.defer_full_render();
+                    }
+                    Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
+                        disconnected.push(client_id);
+                    }
+                }
+            }
+            for client_id in disconnected {
+                self.remove_client_and_resize_if_needed(client_id);
+            }
+            success!("terminal_views_only");
         }
 
         let mut sent = 0u64;
@@ -511,18 +572,44 @@ impl HeadlessServer {
             crate::render_prof::counter("retained_surface.bytes", serialized.len() as u64);
             match writer.render.try_send(serialized) {
                 Ok(()) => {
+                    let terminal_views_deferred = terminal_view_updates
+                        .remove(&client_id)
+                        .is_some_and(|terminal_views| {
+                            writer.render.send_ordered(terminal_views).is_err()
+                        });
                     let graphics_pending = graphics_delivery
                         .as_ref()
                         .is_some_and(crate::kitty_graphics::surface::DeliveryCache::has_pending);
                     if let Some(delivery) = graphics_delivery {
                         client.shell_graphics_delivery = delivery;
                     }
-                    if graphics_pending {
+                    if graphics_pending || terminal_views_deferred {
                         client.defer_full_render();
                     } else {
                         client.clear_deferred_render();
                     }
                     client.render_state.commit_sent_frame(prepared);
+                    sent += 1;
+                }
+                Err(std::sync::mpsc::TrySendError::Full(_)) => {
+                    client.defer_full_render();
+                    deferred += 1;
+                }
+                Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
+                    disconnected.push(client_id);
+                }
+            }
+        }
+        for (client_id, serialized) in terminal_view_updates {
+            let Some(client) = self.clients.get_mut(&client_id) else {
+                continue;
+            };
+            let Some(writer) = client.writer.as_ref() else {
+                continue;
+            };
+            match writer.render.try_send(serialized) {
+                Ok(()) => {
+                    client.clear_deferred_render();
                     sent += 1;
                 }
                 Err(std::sync::mpsc::TrySendError::Full(_)) => {

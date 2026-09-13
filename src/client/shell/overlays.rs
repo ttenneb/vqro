@@ -28,6 +28,7 @@ pub(crate) struct OverlayRender {
     pub(crate) release_notes_scrollbar: Rect,
     pub(crate) release_notes_scroll_metrics: Option<crate::pane::ScrollMetrics>,
     pub(crate) release_notes_max_scroll: usize,
+    pub(crate) contribution_actions: Vec<(Rect, String)>,
     pub(crate) cursor: Option<crate::protocol::CursorState>,
 }
 
@@ -61,6 +62,17 @@ pub(crate) fn render_client_overlay(
         }
         ClientShellOverlay::Rename(v) => render_rename_overlay(b, v, p),
         ClientShellOverlay::ConfirmClose(v) => render_confirm_close_overlay(b, v, p),
+        ClientShellOverlay::PaneInterruptConfirm(v) => render_confirm_close_overlay(
+            b,
+            &ClientConfirmCloseOverlay {
+                target: ClientConfirmCloseTarget::Workspace {
+                    workspace_id: String::new(),
+                },
+                title: "Interrupt terminal process?".into(),
+                detail: format!("Send Ctrl-C to {}. This cannot be undone.", v.pane_id),
+            },
+            p,
+        ),
         ClientShellOverlay::Help(v) => render_help_overlay(b, v, k, p),
         ClientShellOverlay::Navigator(v) => {
             render_navigator_overlay(b, v, endpoints, active_endpoint_id, p)
@@ -77,7 +89,6 @@ pub(crate) fn render_client_overlay(
         ClientShellOverlay::WorktreeRemove(v) => {
             worktree_overlays::render_worktree_remove_overlay(b, v, p)
         }
-        ClientShellOverlay::TerminalInspector(v) => render_terminal_inspector_overlay(b, v, p),
         ClientShellOverlay::ContextMenu(_) | ClientShellOverlay::GlobalMenu(_) => None,
     }
 }
@@ -223,6 +234,7 @@ fn panel(
     c: ratatui::style::Color,
     bg: ratatui::style::Color,
 ) -> Option<Rect> {
+    let a = a.intersection(b.area);
     if a.width < 2 || a.height < 2 {
         return None;
     }
@@ -230,7 +242,10 @@ fn panel(
     let border = Style::default().fg(c).bg(bg).remove_modifier(Modifier::DIM);
     for y in a.y..a.bottom() {
         for x in a.x..a.right() {
-            b[(x, y)].set_symbol(" ").set_style(background);
+            b[(x, y)]
+                .set_symbol(" ")
+                .set_style(background)
+                .set_skip(false);
         }
     }
     for x in a.x..a.right() {
@@ -260,6 +275,44 @@ fn panel(
     }
     Some(Rect::new(a.x + 1, a.y + 1, a.width - 2, a.height - 2))
 }
+fn pane_section(b: &mut Buffer, area: Rect, bg: ratatui::style::Color) -> Option<Rect> {
+    let area = area.intersection(b.area);
+    if area.width == 0 || area.height == 0 {
+        return None;
+    }
+    let style = Style::default().bg(bg).remove_modifier(Modifier::DIM);
+    for y in area.y..area.bottom() {
+        for x in area.x..area.right() {
+            b[(x, y)].set_symbol(" ").set_style(style).set_skip(false);
+        }
+    }
+    Some(area)
+}
+
+pub(in crate::client::shell) fn render_pane_contribution_divider(
+    b: &mut Buffer,
+    divider: Rect,
+    p: &Palette,
+) {
+    let divider = divider.intersection(b.area);
+    if divider.is_empty() {
+        return;
+    }
+    let style = Style::default()
+        .fg(p.surface1)
+        .bg(p.panel_bg)
+        .remove_modifier(Modifier::DIM);
+    let symbol = if divider.width == 1 { "│" } else { "─" };
+    for y in divider.y..divider.bottom() {
+        for x in divider.x..divider.right() {
+            b[(x, y)]
+                .set_symbol(symbol)
+                .set_style(style)
+                .set_skip(false);
+        }
+    }
+}
+
 fn popup(a: Rect, w: u16, h: u16) -> Option<Rect> {
     let w = w.min(a.width.saturating_sub(4));
     let h = h.min(a.height.saturating_sub(2));
@@ -532,10 +585,10 @@ fn render_product_announcement_overlay(
     })
 }
 
-fn render_inspector_document_body(
+fn render_view_document_body(
     b: &mut Buffer,
     area: Rect,
-    document: &crate::inspector_document::InspectorDocument,
+    document: &crate::view_document::ViewDocument,
     p: &Palette,
 ) {
     let base = Style::default()
@@ -562,7 +615,7 @@ fn render_inspector_document_body(
                 break;
             }
             match block {
-                crate::inspector_document::InspectorBlock::Text { text, tone } => {
+                crate::view_document::ViewBlock::Text { text, tone } => {
                     put_text(
                         b,
                         area.x,
@@ -573,51 +626,64 @@ fn render_inspector_document_body(
                     );
                     y += 1;
                 }
-                crate::inspector_document::InspectorBlock::Badge { label, value, tone } => {
-                    put_text(b, area.x, y, 12.min(area.width), label, base.fg(p.overlay0));
+                crate::view_document::ViewBlock::Badge { label, value, tone } => {
+                    let key_width = 12.min(area.width.saturating_sub(2) / 2).max(1);
+                    put_text(b, area.x, y, key_width, label, base.fg(p.overlay0));
                     put_text(
                         b,
-                        area.x.saturating_add(13),
+                        area.x.saturating_add(key_width + 1),
                         y,
-                        area.width.saturating_sub(13),
+                        area.width.saturating_sub(key_width + 1),
                         value,
                         inspector_tone_style(*tone, p).add_modifier(Modifier::BOLD),
                     );
                     y += 1;
                 }
-                crate::inspector_document::InspectorBlock::KeyValue { items } => {
+                crate::view_document::ViewBlock::KeyValue { items } => {
                     for item in items {
                         if y >= area.bottom() {
                             break;
                         }
+                        let key_width = 18.min(area.width.saturating_sub(2) / 2).max(1);
+                        put_text(b, area.x, y, key_width, &item.key, base.fg(p.overlay0));
                         put_text(
                             b,
-                            area.x,
+                            area.x.saturating_add(key_width + 1),
                             y,
-                            18.min(area.width),
-                            &item.key,
-                            base.fg(p.overlay0),
-                        );
-                        put_text(
-                            b,
-                            area.x.saturating_add(19),
-                            y,
-                            area.width.saturating_sub(19),
+                            area.width.saturating_sub(key_width + 1),
                             &item.value,
                             inspector_tone_style(item.tone, p),
                         );
                         y += 1;
                     }
                 }
-                crate::inspector_document::InspectorBlock::Table { columns, rows } => {
-                    let width = area.width / u16::try_from(columns.len()).unwrap_or(1).max(1);
+                crate::view_document::ViewBlock::Table { columns, rows }
+                    if area.width
+                        < u16::try_from(columns.len())
+                            .unwrap_or(u16::MAX)
+                            .saturating_mul(7) =>
+                {
+                    for row in rows {
+                        for (column, cell) in columns.iter().zip(row) {
+                            if y >= area.bottom() {
+                                break;
+                            }
+                            let text = format!("{column}  {cell}");
+                            put_text(b, area.x, y, area.width, &text, base.fg(p.text));
+                            y += 1;
+                        }
+                    }
+                }
+                crate::view_document::ViewBlock::Table { columns, rows } => {
+                    let stride = area.width / u16::try_from(columns.len()).unwrap_or(1).max(1);
+                    let cell_width = stride.saturating_sub(1).max(1);
                     for (index, column) in columns.iter().enumerate() {
                         let x = area.x.saturating_add(
                             u16::try_from(index)
                                 .unwrap_or(u16::MAX)
-                                .saturating_mul(width),
+                                .saturating_mul(stride),
                         );
-                        put_text(b, x, y, width, column, base.fg(p.overlay0));
+                        put_text(b, x, y, cell_width, column, base.fg(p.overlay0));
                     }
                     y += 1;
                     for row in rows {
@@ -628,14 +694,14 @@ fn render_inspector_document_body(
                             let x = area.x.saturating_add(
                                 u16::try_from(index)
                                     .unwrap_or(u16::MAX)
-                                    .saturating_mul(width),
+                                    .saturating_mul(stride),
                             );
-                            put_text(b, x, y, width, cell, base.fg(p.text));
+                            put_text(b, x, y, cell_width, cell, base.fg(p.text));
                         }
                         y += 1;
                     }
                 }
-                crate::inspector_document::InspectorBlock::Timeline { items } => {
+                crate::view_document::ViewBlock::Timeline { items } => {
                     for item in items {
                         if y >= area.bottom() {
                             break;
@@ -661,14 +727,14 @@ fn render_inspector_document_body(
     }
 }
 
-fn inspector_tone_style(tone: crate::inspector_document::InspectorTone, p: &Palette) -> Style {
+fn inspector_tone_style(tone: crate::view_document::ViewTone, p: &Palette) -> Style {
     let color = match tone {
-        crate::inspector_document::InspectorTone::Default => p.text,
-        crate::inspector_document::InspectorTone::Muted => p.overlay0,
-        crate::inspector_document::InspectorTone::Accent => p.accent,
-        crate::inspector_document::InspectorTone::Success => p.green,
-        crate::inspector_document::InspectorTone::Warning => p.yellow,
-        crate::inspector_document::InspectorTone::Danger => p.red,
+        crate::view_document::ViewTone::Default => p.text,
+        crate::view_document::ViewTone::Muted => p.overlay0,
+        crate::view_document::ViewTone::Accent => p.accent,
+        crate::view_document::ViewTone::Success => p.green,
+        crate::view_document::ViewTone::Warning => p.yellow,
+        crate::view_document::ViewTone::Danger => p.red,
     };
     Style::default()
         .fg(color)
@@ -676,20 +742,143 @@ fn inspector_tone_style(tone: crate::inspector_document::InspectorTone, p: &Pale
         .remove_modifier(Modifier::DIM)
 }
 
-fn render_terminal_inspector_overlay(
+pub(in crate::client::shell) fn render_pane_contribution(
     b: &mut Buffer,
-    inspector: &ClientTerminalInspectorOverlay,
+    outer: Rect,
+    contribution: &crate::pane_contribution::PaneContribution,
     p: &Palette,
 ) -> Option<OverlayRender> {
-    let outer = popup(b.area, 76, 24)?;
-    // At narrow widths, use the full row so clipped sidebar text cannot peek around the modal.
-    let outer = if outer.x <= b.area.x.saturating_add(2) {
-        Rect::new(b.area.x, outer.y, b.area.width, outer.height)
-    } else {
-        outer
-    };
-    let inner = panel(b, outer, p.accent, p.panel_bg)?;
-    if inner.width < 36 || inner.height < 10 {
+    let inner = pane_section(b, outer, p.panel_bg)?;
+    if inner.width < 12 || inner.height < 6 {
+        return Some(OverlayRender::default());
+    }
+    let base = Style::default()
+        .bg(p.panel_bg)
+        .remove_modifier(Modifier::DIM);
+    let title = base.fg(p.text).add_modifier(Modifier::BOLD);
+    let muted = base.fg(p.overlay0);
+    let header = Rect::new(inner.x, inner.y, inner.width, 1);
+    b.set_style(header, base.fg(p.text).bg(p.surface0));
+    let close = Rect::new(inner.right().saturating_sub(3), inner.y, 3, 1);
+    put_text(
+        b,
+        inner.x + 1,
+        inner.y,
+        inner.width.saturating_sub(5),
+        &contribution.document.title,
+        title.bg(p.surface0),
+    );
+    button(b, close, " × ", muted.bg(p.surface0));
+    put_text(
+        b,
+        inner.x + 1,
+        inner.y + 1,
+        inner.width.saturating_sub(2),
+        &format!("extension · {}", contribution.owner_service_id),
+        muted,
+    );
+    put_text(
+        b,
+        inner.x,
+        inner.y + 2,
+        inner.width,
+        &"─".repeat(inner.width as usize),
+        base.fg(p.surface1),
+    );
+    let mut body_y = inner.y.saturating_add(3);
+    if let Some(subtitle) = contribution.document.subtitle.as_deref() {
+        put_text(
+            b,
+            inner.x + 1,
+            body_y,
+            inner.width.saturating_sub(2),
+            subtitle,
+            muted,
+        );
+        body_y = body_y.saturating_add(2);
+    }
+    render_view_document_body(
+        b,
+        Rect::new(
+            inner.x + 1,
+            body_y,
+            inner.width.saturating_sub(2),
+            inner.bottom().saturating_sub(body_y + 1),
+        ),
+        &contribution.document,
+        p,
+    );
+    let footer_y = inner.bottom().saturating_sub(1);
+    let footer = Rect::new(inner.x, footer_y, inner.width, 1);
+    b.set_style(footer, base.bg(p.surface0));
+    let mut action_x = inner.x + 1;
+    let mut action_rows = Vec::new();
+    for (index, action) in contribution.actions.iter().enumerate() {
+        let has_more = index + 1 < contribution.actions.len();
+        let overflow_reserve = if has_more { 9 } else { 0 };
+        let available = inner
+            .right()
+            .saturating_sub(action_x + 1)
+            .saturating_sub(overflow_reserve);
+        if available < 4 {
+            break;
+        }
+        let display = format!("{} {}", index + 1, action.label);
+        let desired_width = u16::try_from(unicode_width::UnicodeWidthStr::width(display.as_str()))
+            .unwrap_or(u16::MAX)
+            .saturating_add(2);
+        if index > 0 && desired_width > available {
+            break;
+        }
+        let width = desired_width.min(available);
+        let rect = Rect::new(action_x, footer_y, width, 1);
+        button(
+            b,
+            rect,
+            &format!(" {display} "),
+            Style::default()
+                .fg(if action.destructive { p.red } else { p.teal })
+                .bg(p.surface0),
+        );
+        action_rows.push((rect, action.id.clone()));
+        action_x = action_x.saturating_add(width + 1);
+    }
+    let hidden_actions = contribution.actions.len().saturating_sub(action_rows.len());
+    if hidden_actions > 0 {
+        put_text(
+            b,
+            inner.right().saturating_sub(8),
+            footer_y,
+            7,
+            &format!("+{hidden_actions} more"),
+            muted.bg(p.surface0),
+        );
+    }
+    if action_rows.is_empty() && hidden_actions == 0 {
+        put_text(
+            b,
+            inner.x + 1,
+            footer_y,
+            inner.width.saturating_sub(2),
+            "esc close",
+            muted.bg(p.surface0),
+        );
+    }
+    Some(OverlayRender {
+        cancel: close,
+        contribution_actions: action_rows,
+        ..OverlayRender::default()
+    })
+}
+
+pub(in crate::client::shell) fn render_terminal_inspector_pending(
+    b: &mut Buffer,
+    outer: Rect,
+    inspector: &ClientTerminalInspectorPane,
+    p: &Palette,
+) -> Option<OverlayRender> {
+    let inner = pane_section(b, outer, p.panel_bg)?;
+    if inner.width < 12 || inner.height < 6 {
         return Some(OverlayRender::default());
     }
     let base = Style::default()
@@ -698,34 +887,38 @@ fn render_terminal_inspector_overlay(
     let title = base.fg(p.text).add_modifier(Modifier::BOLD);
     let muted = base.fg(p.overlay0);
     let accent = base.fg(p.accent).add_modifier(Modifier::BOLD);
+    let header = Rect::new(inner.x, inner.y, inner.width, 1);
+    b.set_style(header, base.fg(p.text).bg(p.surface0));
+    let close = Rect::new(inner.right().saturating_sub(3), inner.y, 3, 1);
     put_text(
         b,
         inner.x + 1,
         inner.y,
-        inner.width.saturating_sub(14),
+        inner.width.saturating_sub(5),
         "Terminal inspector",
-        title,
+        title.bg(p.surface0),
     );
-    let close = Rect::new(inner.right().saturating_sub(11), inner.y, 11, 1);
-    button(
-        b,
-        close,
-        " esc close ",
-        Style::default()
-            .fg(contrast(p))
-            .bg(p.accent)
-            .add_modifier(Modifier::BOLD)
-            .remove_modifier(Modifier::DIM),
-    );
+    button(b, close, " × ", muted.bg(p.surface0));
     put_text(
         b,
         inner.x + 1,
         inner.y + 1,
         inner.width.saturating_sub(2),
-        &format!("{}  ·  {}", inspector.pane_label, inspector.pane_id),
+        &format!(
+            "{} · {} · {}",
+            inspector.pane_label,
+            inspector.pane_id,
+            if inspector.loading {
+                "loading"
+            } else if inspector.error.is_some() {
+                "error"
+            } else {
+                "ready"
+            }
+        ),
         muted,
     );
-    let divider_y = inner.y + 3;
+    let divider_y = inner.y + 2;
     put_text(
         b,
         inner.x,
@@ -763,53 +956,6 @@ fn render_terminal_inspector_overlay(
             muted,
         );
     } else if let Some(telemetry) = inspector.telemetry.as_ref() {
-        if let Some(document) = telemetry.document.as_ref() {
-            put_text(
-                b,
-                inner.x + 1,
-                y,
-                inner.width.saturating_sub(2),
-                &document.title,
-                accent,
-            );
-            y += 1;
-            if let Some(subtitle) = &document.subtitle {
-                put_text(
-                    b,
-                    inner.x + 1,
-                    y,
-                    inner.width.saturating_sub(2),
-                    subtitle,
-                    muted,
-                );
-                y += 2;
-            }
-            render_inspector_document_body(
-                b,
-                Rect::new(
-                    inner.x + 1,
-                    y,
-                    inner.width.saturating_sub(2),
-                    inner.bottom().saturating_sub(y + 2),
-                ),
-                document,
-                p,
-            );
-            let footer_y = inner.bottom().saturating_sub(1);
-            put_text(
-                b,
-                inner.x + 1,
-                footer_y,
-                inner.width.saturating_sub(2),
-                "r refresh  ·  esc close  ·  extension service",
-                muted,
-            );
-            return Some(OverlayRender {
-                primary: close,
-                cancel: close,
-                ..OverlayRender::default()
-            });
-        }
         let agent = telemetry
             .display_agent
             .as_deref()
@@ -949,16 +1095,30 @@ fn render_terminal_inspector_overlay(
             }
         }
     }
+    let footer_y = inner.bottom().saturating_sub(1);
+    let footer = Rect::new(inner.x, footer_y, inner.width, 1);
+    b.set_style(footer, base.bg(p.surface0));
+    let refresh = if inner.width >= 20 {
+        Rect::new(inner.right().saturating_sub(11), footer_y, 10, 1)
+    } else {
+        Rect::default()
+    };
     put_text(
         b,
         inner.x + 1,
-        inner.bottom().saturating_sub(1),
-        inner.width.saturating_sub(2),
-        "argv/env never collected  ·  r refresh  ·  sampled only on demand",
-        muted,
+        footer_y,
+        inner
+            .width
+            .saturating_sub(if refresh.is_empty() { 2 } else { 13 }),
+        "argv/env never collected · on demand",
+        muted.bg(p.surface0),
     );
+    if !refresh.is_empty() {
+        button(b, refresh, " r refresh ", muted.bg(p.surface0));
+    }
     Some(OverlayRender {
-        primary: close,
+        primary: refresh,
+        cancel: close,
         ..OverlayRender::default()
     })
 }

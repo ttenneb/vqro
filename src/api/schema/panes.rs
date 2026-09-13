@@ -629,7 +629,9 @@ pub struct PaneTelemetry {
     pub state_labels: HashMap<String, String>,
     /// Optional constrained document supplied by an enabled pane-inspector extension service.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub document: Option<crate::inspector_document::InspectorDocument>,
+    pub document_owner: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub document: Option<crate::view_document::ViewDocument>,
 }
 
 /// Privacy-safe process telemetry. Command arguments and environment variables are deliberately

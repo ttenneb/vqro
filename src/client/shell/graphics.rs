@@ -49,6 +49,25 @@ impl ClientShellState {
             .popup
             .as_ref()
             .map(|popup| (popup.inner_rect.x, popup.inner_rect.y));
+        let mut suppressed_panes = self
+            .structure
+            .as_deref()
+            .into_iter()
+            .flat_map(|structure| structure.collections.iter())
+            .filter(|collection| {
+                self.collection_list_views
+                    .contains(&collection.collection_id)
+            })
+            .filter_map(|collection| collection.selected_pane_id.as_deref())
+            .collect::<std::collections::HashSet<_>>();
+        if let Some(pane_id) = self
+            .inspector
+            .as_ref()
+            .map(|inspector| inspector.pane_id.as_str())
+        {
+            suppressed_panes.insert(pane_id);
+        }
+        self.graphics.set_suppressed_panes(suppressed_panes);
         frame.graphics = self.graphics.encode(
             visibility,
             (layout.pane_surface.x, layout.pane_surface.y),

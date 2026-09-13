@@ -6,7 +6,17 @@ import os
 import sys
 
 SERVICE_ID = os.environ.get("VQRO_EXTENSION_SERVICE_ID", "vqro.terminal-inspector.telemetry")
-print(json.dumps({"type": "hello", "protocol": 1, "service_id": SERVICE_ID}), flush=True)
+print(json.dumps({
+    "type": "hello",
+    "protocol": 2,
+    "service_id": SERVICE_ID,
+    "requested_capabilities": ["view_contribution", "terminal_interrupt"],
+    "methods": ["view.render", "view.action"],
+}), flush=True)
+welcome = json.loads(sys.stdin.readline())
+if welcome.get("type") != "welcome" or welcome.get("protocol") != 2:
+    raise SystemExit("vqro service handshake failed")
+GRANTS = set(welcome.get("granted_capabilities") or [])
 
 
 def value_or_dash(value):
@@ -61,13 +71,17 @@ def render(telemetry):
         })
 
     return {
-        "title": "Terminal intelligence",
-        "subtitle": f"{telemetry.get('pane_id', 'pane')} · supervised extension",
-        "sections": [
-            {"id": "agent", "title": "Agent activity", "blocks": [{"type": "key_value", "items": agent_items}]},
-            {"id": "processes", "title": "Process telemetry", "blocks": process_blocks},
+        "document": {
+            "title": "Terminal intelligence",
+            "subtitle": f"{telemetry.get('pane_id', 'pane')} · supervised extension",
+            "sections": [
+                {"id": "agent", "title": "Agent activity", "blocks": [{"type": "key_value", "items": agent_items}]},
+                {"id": "processes", "title": "Process telemetry", "blocks": process_blocks},
+            ],
+        },
+        "actions": [
+            {"id": "terminal.interrupt", "label": "Interrupt process", "destructive": True},
         ],
-        "actions": [{"id": "refresh", "label": "Refresh", "destructive": False}],
     }
 
 
@@ -75,9 +89,21 @@ for line in sys.stdin:
     request = {}
     try:
         request = json.loads(line)
-        if request.get("type") != "request" or request.get("method") != "inspector.render":
+        if request.get("type") != "request":
             raise ValueError("unsupported request")
-        response = {"type": "response", "id": request["id"], "result": render(request.get("params") or {})}
+        if request.get("method") == "view.render":
+            if "view_contribution" not in GRANTS:
+                raise PermissionError("view_contribution was not granted")
+            result = render(request.get("params") or {})
+        elif request.get("method") == "view.action":
+            action = (request.get("params") or {}).get("action_id")
+            if action == "terminal.interrupt" and "terminal_interrupt" in GRANTS:
+                result = {"effect": {"type": "terminal_interrupt"}}
+            else:
+                raise PermissionError("action is not granted")
+        else:
+            raise ValueError("unsupported request")
+        response = {"type": "response", "id": request["id"], "result": result}
     except Exception as error:
         response = {"type": "response", "id": request.get("id", 0) if isinstance(request, dict) else 0, "error": str(error)}
     print(json.dumps(response, separators=(",", ":")), flush=True)

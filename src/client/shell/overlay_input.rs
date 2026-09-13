@@ -597,27 +597,6 @@ impl ClientShellState {
             return;
         }
 
-        if matches!(self.overlay, Some(ClientShellOverlay::TerminalInspector(_))) {
-            match key.code {
-                KeyCode::Esc | KeyCode::Enter => {
-                    self.overlay = None;
-                    outcome.repaint = true;
-                }
-                KeyCode::Char('r') => {
-                    let pane_id = match self.overlay.as_ref() {
-                        Some(ClientShellOverlay::TerminalInspector(inspector)) => {
-                            inspector.pane_id.clone()
-                        }
-                        _ => return,
-                    };
-                    self.refresh_terminal_inspector(pane_id, outcome);
-                    outcome.repaint = true;
-                }
-                _ => {}
-            }
-            return;
-        }
-
         if self.route_settings_key(key, outcome) {
             return;
         }
@@ -923,26 +902,88 @@ impl ClientShellState {
             return;
         }
 
+        if matches!(
+            self.overlay,
+            Some(ClientShellOverlay::PaneInterruptConfirm(_))
+        ) {
+            if matches!(
+                key.code,
+                KeyCode::Enter | KeyCode::Char('\r') | KeyCode::Char('\n')
+            ) {
+                let Some(ClientShellOverlay::PaneInterruptConfirm(confirm)) = self.overlay.take()
+                else {
+                    return;
+                };
+                if self.pane_interrupt_confirmation_is_current(&confirm) {
+                    let request = crate::protocol::endpoint::ClientPaneViewConfirm {
+                        boot_id: confirm.boot_id,
+                        confirmation_token: confirm.confirmation_token,
+                    };
+                    if let Ok(data) = serde_json::to_string(&request) {
+                        outcome.actions.push(ClientShellAction::EndpointControl {
+                            endpoint_id: self.active_endpoint_id.clone(),
+                            message: ClientMessage::EndpointControl {
+                                kind: crate::protocol::endpoint::PANE_VIEW_CONFIRM_KIND.into(),
+                                data,
+                            },
+                        });
+                    }
+                }
+                outcome.repaint = true;
+            } else if key.code == KeyCode::Esc {
+                self.overlay = None;
+                outcome.repaint = true;
+            }
+            return;
+        }
+
         if matches!(self.overlay, Some(ClientShellOverlay::ConfirmClose(_))) {
             if key.code == KeyCode::Enter {
                 let Some(ClientShellOverlay::ConfirmClose(confirm)) = self.overlay.take() else {
                     return;
                 };
-                self.push_endpoint_method(
-                    crate::api::schema::Method::WorkspaceClose(
-                        crate::api::schema::WorkspaceCloseParams {
-                            workspace_id: confirm.workspace_id,
-                            close_group: true,
-                        },
-                    ),
-                    outcome,
-                );
+                let method = match confirm.target {
+                    ClientConfirmCloseTarget::Workspace { workspace_id } => {
+                        crate::api::schema::Method::WorkspaceClose(
+                            crate::api::schema::WorkspaceCloseParams {
+                                workspace_id,
+                                close_group: true,
+                            },
+                        )
+                    }
+                    ClientConfirmCloseTarget::Collection { collection_id } => {
+                        crate::api::schema::Method::CollectionClose(
+                            crate::api::schema::CollectionCloseParams {
+                                collection_id,
+                                disposition: Some(
+                                    crate::api::schema::CollectionCloseDisposition::CascadeClose,
+                                ),
+                            },
+                        )
+                    }
+                };
+                self.push_endpoint_method(method, outcome);
                 outcome.repaint = true;
             } else if key.code == KeyCode::Esc {
+                let collection_close = matches!(
+                    self.overlay.as_ref(),
+                    Some(ClientShellOverlay::ConfirmClose(
+                        ClientConfirmCloseOverlay {
+                            target: ClientConfirmCloseTarget::Collection { .. },
+                            ..
+                        }
+                    ))
+                );
                 self.overlay = None;
-                self.mode = ClientShellMode::Navigate;
-                self.navigate_workspace_id = self.focused_navigation_target();
-                self.reveal_navigation_workspace = true;
+                if collection_close {
+                    self.mode = ClientShellMode::Terminal;
+                    self.navigate_workspace_id = None;
+                    self.reveal_navigation_workspace = false;
+                } else {
+                    self.mode = ClientShellMode::Navigate;
+                    self.navigate_workspace_id = self.focused_navigation_target();
+                    self.reveal_navigation_workspace = true;
+                }
                 outcome.repaint = true;
             }
             return;
@@ -1127,7 +1168,7 @@ impl ClientShellState {
         };
         self.overlay = Some(ClientShellOverlay::ConfirmClose(
             ClientConfirmCloseOverlay {
-                workspace_id,
+                target: ClientConfirmCloseTarget::Workspace { workspace_id },
                 title: if closes_group {
                     "Close worktree group?".to_owned()
                 } else {

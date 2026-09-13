@@ -1,4 +1,4 @@
-//! Bounded, declarative inspector content shared by built-in and extension providers.
+//! Bounded declarative view content shared by built-in and extension providers.
 //!
 //! Providers describe information; the client remains responsible for layout, styling,
 //! focus, and input. Control characters and unbounded trees are rejected at the boundary.
@@ -11,73 +11,70 @@ pub const MAX_BLOCKS_PER_SECTION: usize = 32;
 pub const MAX_TABLE_COLUMNS: usize = 12;
 pub const MAX_TABLE_ROWS: usize = 256;
 pub const MAX_TEXT_CHARS: usize = 8 * 1024;
-pub const MAX_ACTIONS: usize = 16;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct InspectorDocument {
+pub struct ViewDocument {
     pub title: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subtitle: Option<String>,
     #[serde(default)]
-    pub sections: Vec<InspectorSection>,
-    #[serde(default)]
-    pub actions: Vec<InspectorAction>,
+    pub sections: Vec<ViewSection>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct InspectorSection {
+pub struct ViewSection {
     pub id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
     #[serde(default)]
-    pub blocks: Vec<InspectorBlock>,
+    pub blocks: Vec<ViewBlock>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
-pub enum InspectorBlock {
+pub enum ViewBlock {
     Text {
         text: String,
         #[serde(default)]
-        tone: InspectorTone,
+        tone: ViewTone,
     },
     Badge {
         label: String,
         value: String,
         #[serde(default)]
-        tone: InspectorTone,
+        tone: ViewTone,
     },
     KeyValue {
-        items: Vec<InspectorKeyValue>,
+        items: Vec<ViewKeyValue>,
     },
     Table {
         columns: Vec<String>,
         rows: Vec<Vec<String>>,
     },
     Timeline {
-        items: Vec<InspectorTimelineItem>,
+        items: Vec<ViewTimelineItem>,
     },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct InspectorKeyValue {
+pub struct ViewKeyValue {
     pub key: String,
     pub value: String,
     #[serde(default)]
-    pub tone: InspectorTone,
+    pub tone: ViewTone,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct InspectorTimelineItem {
+pub struct ViewTimelineItem {
     pub label: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
     #[serde(default)]
-    pub tone: InspectorTone,
+    pub tone: ViewTone,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct InspectorAction {
+pub struct ViewAction {
     pub id: String,
     pub label: String,
     #[serde(default)]
@@ -88,7 +85,7 @@ pub struct InspectorAction {
     Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
 )]
 #[serde(rename_all = "snake_case")]
-pub enum InspectorTone {
+pub enum ViewTone {
     #[default]
     Default,
     Muted,
@@ -99,20 +96,20 @@ pub enum InspectorTone {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct InspectorDocumentError(pub String);
+pub struct ViewDocumentError(pub String);
 
-impl std::fmt::Display for InspectorDocumentError {
+impl std::fmt::Display for ViewDocumentError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(&self.0)
     }
 }
 
-impl std::error::Error for InspectorDocumentError {}
+impl std::error::Error for ViewDocumentError {}
 
-impl InspectorDocument {
-    pub fn validate(&self) -> Result<(), InspectorDocumentError> {
+impl ViewDocument {
+    pub fn validate(&self) -> Result<(), ViewDocumentError> {
         let bytes = serde_json::to_vec(self)
-            .map_err(|error| InspectorDocumentError(format!("cannot encode document: {error}")))?;
+            .map_err(|error| ViewDocumentError(format!("cannot encode document: {error}")))?;
         if bytes.len() > MAX_DOCUMENT_BYTES {
             return Err(invalid("document exceeds byte limit"));
         }
@@ -122,9 +119,6 @@ impl InspectorDocument {
         }
         if self.sections.len() > MAX_SECTIONS {
             return Err(invalid("too many sections"));
-        }
-        if self.actions.len() > MAX_ACTIONS {
-            return Err(invalid("too many actions"));
         }
         let mut section_ids = std::collections::HashSet::new();
         for section in &self.sections {
@@ -142,26 +136,18 @@ impl InspectorDocument {
                 validate_block(block)?;
             }
         }
-        let mut action_ids = std::collections::HashSet::new();
-        for action in &self.actions {
-            validate_id("action id", &action.id)?;
-            validate_text("action label", &action.label)?;
-            if !action_ids.insert(action.id.as_str()) {
-                return Err(invalid("duplicate action id"));
-            }
-        }
         Ok(())
     }
 }
 
-fn validate_block(block: &InspectorBlock) -> Result<(), InspectorDocumentError> {
+fn validate_block(block: &ViewBlock) -> Result<(), ViewDocumentError> {
     match block {
-        InspectorBlock::Text { text, .. } => validate_text("text", text),
-        InspectorBlock::Badge { label, value, .. } => {
+        ViewBlock::Text { text, .. } => validate_text("text", text),
+        ViewBlock::Badge { label, value, .. } => {
             validate_text("badge label", label)?;
             validate_text("badge value", value)
         }
-        InspectorBlock::KeyValue { items } => {
+        ViewBlock::KeyValue { items } => {
             if items.len() > MAX_TABLE_ROWS {
                 return Err(invalid("too many key/value items"));
             }
@@ -171,7 +157,7 @@ fn validate_block(block: &InspectorBlock) -> Result<(), InspectorDocumentError> 
             }
             Ok(())
         }
-        InspectorBlock::Table { columns, rows } => {
+        ViewBlock::Table { columns, rows } => {
             if columns.is_empty() || columns.len() > MAX_TABLE_COLUMNS {
                 return Err(invalid("invalid table column count"));
             }
@@ -191,7 +177,7 @@ fn validate_block(block: &InspectorBlock) -> Result<(), InspectorDocumentError> 
             }
             Ok(())
         }
-        InspectorBlock::Timeline { items } => {
+        ViewBlock::Timeline { items } => {
             if items.len() > MAX_TABLE_ROWS {
                 return Err(invalid("too many timeline items"));
             }
@@ -206,7 +192,7 @@ fn validate_block(block: &InspectorBlock) -> Result<(), InspectorDocumentError> 
     }
 }
 
-fn validate_text(label: &str, value: &str) -> Result<(), InspectorDocumentError> {
+fn validate_text(label: &str, value: &str) -> Result<(), ViewDocumentError> {
     if value.chars().count() > MAX_TEXT_CHARS {
         return Err(invalid(&format!("{label} exceeds character limit")));
     }
@@ -219,7 +205,7 @@ fn validate_text(label: &str, value: &str) -> Result<(), InspectorDocumentError>
     Ok(())
 }
 
-fn validate_id(label: &str, value: &str) -> Result<(), InspectorDocumentError> {
+fn validate_id(label: &str, value: &str) -> Result<(), ViewDocumentError> {
     if value.is_empty()
         || value.len() > 120
         || !value
@@ -231,30 +217,25 @@ fn validate_id(label: &str, value: &str) -> Result<(), InspectorDocumentError> {
     Ok(())
 }
 
-fn invalid(message: &str) -> InspectorDocumentError {
-    InspectorDocumentError(message.to_string())
+fn invalid(message: &str) -> ViewDocumentError {
+    ViewDocumentError(message.to_string())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn document() -> InspectorDocument {
-        InspectorDocument {
+    fn document() -> ViewDocument {
+        ViewDocument {
             title: "Terminal".into(),
             subtitle: Some("pane-1".into()),
-            sections: vec![InspectorSection {
+            sections: vec![ViewSection {
                 id: "processes".into(),
                 title: Some("Processes".into()),
-                blocks: vec![InspectorBlock::Table {
+                blocks: vec![ViewBlock::Table {
                     columns: vec!["PID".into(), "CPU".into()],
                     rows: vec![vec!["42".into(), "1.2%".into()]],
                 }],
-            }],
-            actions: vec![InspectorAction {
-                id: "refresh".into(),
-                label: "Refresh".into(),
-                destructive: false,
             }],
         }
     }
@@ -272,16 +253,12 @@ mod tests {
     }
 
     #[test]
-    fn rejects_ragged_tables_and_duplicate_actions() {
+    fn rejects_ragged_tables() {
         let mut value = document();
-        value.sections[0].blocks = vec![InspectorBlock::Table {
+        value.sections[0].blocks = vec![ViewBlock::Table {
             columns: vec!["one".into(), "two".into()],
             rows: vec![vec!["only one".into()]],
         }];
         assert!(value.validate().is_err());
-
-        let mut value = document();
-        value.actions.push(value.actions[0].clone());
-        assert!(value.validate().unwrap_err().0.contains("duplicate action"));
     }
 }

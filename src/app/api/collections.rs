@@ -78,6 +78,29 @@ impl App {
         })
     }
 
+    pub(crate) fn collection_infos(
+        &self,
+        workspace_filter: Option<usize>,
+        tab_filter: Option<(usize, usize)>,
+    ) -> Vec<CollectionInfo> {
+        let mut collections = Vec::new();
+        for (ws_idx, ws) in self.state.workspaces.iter().enumerate() {
+            for (tab_idx, tab) in ws.tabs.iter().enumerate() {
+                if workspace_filter.is_some_and(|wanted| wanted != ws_idx)
+                    || tab_filter.is_some_and(|wanted| wanted != (ws_idx, tab_idx))
+                {
+                    continue;
+                }
+                for id in tab.layout.collection_ids() {
+                    if let Some(info) = self.collection_info(ws_idx, tab_idx, id) {
+                        collections.push(info);
+                    }
+                }
+            }
+        }
+        collections
+    }
+
     pub(crate) fn handle_collection_list(
         &self,
         request_id: String,
@@ -100,22 +123,12 @@ impl App {
                 "workspace or tab was not found",
             );
         }
-        let mut collections = Vec::new();
-        for (ws_idx, ws) in self.state.workspaces.iter().enumerate() {
-            for (tab_idx, tab) in ws.tabs.iter().enumerate() {
-                if workspace_filter.is_some_and(|wanted| wanted != ws_idx)
-                    || tab_filter.is_some_and(|wanted| wanted != (ws_idx, tab_idx))
-                {
-                    continue;
-                }
-                for id in tab.layout.collection_ids() {
-                    if let Some(info) = self.collection_info(ws_idx, tab_idx, id) {
-                        collections.push(info);
-                    }
-                }
-            }
-        }
-        responses::encode_success(request_id, ResponseResult::CollectionList { collections })
+        responses::encode_success(
+            request_id,
+            ResponseResult::CollectionList {
+                collections: self.collection_infos(workspace_filter, tab_filter),
+            },
+        )
     }
 
     pub(crate) fn handle_collection_get(
@@ -394,26 +407,109 @@ impl App {
             .expect("located collection")
             .members()
             .to_vec();
-        if !members.is_empty()
-            || params.disposition == Some(CollectionCloseDisposition::CascadeClose)
-        {
-            return responses::encode_error(
-                request_id,
-                "collection_not_empty",
-                "archive or promote members before closing the collection",
-            );
-        }
-        if self.state.workspaces[ws_idx].tabs[tab_idx]
-            .remove_empty_collection(collection_id)
-            .is_err()
-        {
-            return responses::encode_error(
-                request_id,
-                "invalid_placement",
-                "collection cannot be removed as the last layout leaf",
-            );
+        if members.is_empty() {
+            if self.state.workspaces[ws_idx].tabs[tab_idx]
+                .remove_empty_collection(collection_id)
+                .is_err()
+            {
+                return responses::encode_error(
+                    request_id,
+                    "invalid_placement",
+                    "collection cannot be removed as the last layout leaf",
+                );
+            }
+        } else {
+            let Some(disposition) = params.disposition else {
+                return responses::encode_error(
+                    request_id,
+                    "collection_disposition_required",
+                    "non-empty collection close requires cascade_close or promote_members",
+                );
+            };
+            match disposition {
+                CollectionCloseDisposition::CascadeClose => {
+                    let public_members = members
+                        .iter()
+                        .filter_map(|pane_id| self.public_pane_id(ws_idx, *pane_id))
+                        .collect::<Vec<_>>();
+                    if public_members.len() != members.len() {
+                        return responses::encode_error(
+                            request_id,
+                            "collection_close_failed",
+                            "collection contains an unaddressable pane",
+                        );
+                    }
+                    for (index, pane_id) in public_members.into_iter().enumerate() {
+                        if let Err(response) = self.close_pane(
+                            format!("{request_id}:member:{index}"),
+                            &crate::api::schema::PaneTarget { pane_id },
+                        ) {
+                            return response;
+                        }
+                    }
+                    if let Some((remaining_ws, remaining_tab)) = self.find_collection(collection_id)
+                    {
+                        if self.state.workspaces[remaining_ws].tabs[remaining_tab]
+                            .remove_empty_collection(collection_id)
+                            .is_err()
+                        {
+                            return responses::encode_error(
+                                request_id,
+                                "collection_close_failed",
+                                "empty collection could not be removed after closing members",
+                            );
+                        }
+                    }
+                }
+                CollectionCloseDisposition::PromoteMembers => {
+                    let (events, render_notify, render_dirty) = {
+                        let tab = &self.state.workspaces[ws_idx].tabs[tab_idx];
+                        (
+                            tab.events.clone(),
+                            tab.render_notify.clone(),
+                            tab.render_dirty.clone(),
+                        )
+                    };
+                    let mut created = Vec::with_capacity(members.len());
+                    for pane_id in members {
+                        let Some(taken) = self.state.workspaces[ws_idx].take_pane_for_move(pane_id)
+                        else {
+                            return responses::encode_error(
+                                request_id,
+                                "collection_close_failed",
+                                "collection member could not be detached",
+                            );
+                        };
+                        let tab_idx = self.state.workspaces[ws_idx].create_tab_from_existing_pane(
+                            taken.moved,
+                            None,
+                            events.clone(),
+                            render_notify.clone(),
+                            render_dirty.clone(),
+                        );
+                        created.push(tab_idx);
+                    }
+                    if let Some((remaining_ws, remaining_tab)) = self.find_collection(collection_id)
+                    {
+                        if self.state.workspaces[remaining_ws].tabs[remaining_tab]
+                            .remove_empty_collection(collection_id)
+                            .is_err()
+                        {
+                            return responses::encode_error(
+                                request_id,
+                                "collection_close_failed",
+                                "empty collection could not be removed after promoting members",
+                            );
+                        }
+                    }
+                    if let Some(first) = created.first().copied() {
+                        self.state.workspaces[ws_idx].active_tab = first;
+                    }
+                }
+            }
         }
         self.state.mark_session_dirty();
+        self.schedule_session_save();
         responses::encode_success(request_id, ResponseResult::Ok {})
     }
 }
@@ -437,6 +533,58 @@ mod tests {
         app.state.selected = 0;
         app.state.ensure_test_terminals();
         app
+    }
+
+    fn app_with_nonempty_collection() -> (App, CollectionId, crate::layout::PaneId) {
+        let mut app = app_with_workspace();
+        let root = app.state.workspaces[0].tabs[0].root_pane;
+        let member = app.state.workspaces[0].test_split(ratatui::layout::Direction::Horizontal);
+        let collection = app.state.workspaces[0].tabs[0]
+            .create_collection_near(
+                crate::layout::LayoutLeaf::Pane(root),
+                ratatui::layout::Direction::Vertical,
+                0.5,
+                Some("helpers".into()),
+            )
+            .unwrap();
+        app.state.workspaces[0].tabs[0]
+            .collect_tiled_pane(member, collection)
+            .unwrap();
+        (app, collection, member)
+    }
+
+    #[test]
+    fn collection_close_cascades_or_promotes_without_restarting_member_identity() {
+        let (mut cascade, collection, member) = app_with_nonempty_collection();
+        let response = cascade.handle_collection_close(
+            "cascade".into(),
+            CollectionCloseParams {
+                collection_id: format!("collection_{}", collection.raw()),
+                disposition: Some(CollectionCloseDisposition::CascadeClose),
+            },
+        );
+        assert!(serde_json::from_str::<crate::api::schema::SuccessResponse>(&response).is_ok());
+        assert!(cascade.state.workspaces[0]
+            .find_tab_index_for_pane(member)
+            .is_none());
+        assert!(cascade.find_collection(collection).is_none());
+
+        let (mut promote, collection, member) = app_with_nonempty_collection();
+        let public_before = promote.public_pane_id(0, member).unwrap();
+        let response = promote.handle_collection_close(
+            "promote".into(),
+            CollectionCloseParams {
+                collection_id: format!("collection_{}", collection.raw()),
+                disposition: Some(CollectionCloseDisposition::PromoteMembers),
+            },
+        );
+        assert!(serde_json::from_str::<crate::api::schema::SuccessResponse>(&response).is_ok());
+        assert!(promote.find_collection(collection).is_none());
+        assert_eq!(
+            promote.public_pane_id(0, member).as_deref(),
+            Some(public_before.as_str())
+        );
+        assert_eq!(promote.state.workspaces[0].tabs.len(), 2);
     }
 
     #[test]

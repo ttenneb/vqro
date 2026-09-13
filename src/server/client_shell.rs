@@ -3,6 +3,52 @@ use ratatui::layout::Rect;
 use crate::app;
 use crate::protocol::{self, FrameData};
 
+pub(super) fn structure_projection(
+    app: &app::App,
+    boot_id: &str,
+    revision: u64,
+) -> protocol::endpoint::ClientShellStructureProjection {
+    let collections = app
+        .collection_infos(None, None)
+        .into_iter()
+        .map(|collection| protocol::endpoint::ClientShellCollection {
+            collection_id: collection.collection_id,
+            workspace_id: collection.workspace_id,
+            tab_id: collection.tab_id,
+            label: collection.label,
+            selected_pane_id: collection.selected_pane_id,
+            members: collection
+                .members
+                .into_iter()
+                .map(|member| protocol::endpoint::ClientShellCollectionMember {
+                    pane_id: member.pane_id,
+                    index: member.index,
+                    archived: member.archived,
+                })
+                .collect(),
+        })
+        .collect();
+    let delegations = app
+        .delegation_tree()
+        .into_iter()
+        .map(|entry| protocol::endpoint::ClientShellDelegation {
+            delegation_id: entry.delegation.delegation_id,
+            pane_id: entry.delegation.pane_id,
+            parent_id: entry.delegation.parent_id,
+            purpose: entry.delegation.purpose,
+            depth: entry.depth,
+            external_parent_id: None,
+        })
+        .collect();
+    protocol::endpoint::ClientShellStructureProjection {
+        session_id: crate::session::active_name().unwrap_or_else(|| "default".into()),
+        boot_id: boot_id.to_owned(),
+        revision,
+        collections,
+        delegations,
+    }
+}
+
 pub(super) fn snapshot(
     app: &app::App,
     boot_id: &str,
@@ -10,7 +56,7 @@ pub(super) fn snapshot(
     config_diagnostic: Option<&str>,
     location: Option<&crate::server::clients::ClientShellLocation>,
 ) -> protocol::ClientShellSnapshot {
-    let snapshot = app.session_snapshot();
+    let snapshot = app.session_snapshot_v1_compat();
     let focused_workspace_id = location
         .and_then(|location| location.focused_workspace_id.clone())
         .or_else(|| snapshot.focused_workspace_id.clone());
@@ -98,7 +144,7 @@ pub(super) fn snapshot(
             }
         })
         .collect();
-    let panes = snapshot
+    let panes: Vec<protocol::ClientShellPane> = snapshot
         .panes
         .into_iter()
         .map(|pane| {
@@ -132,41 +178,6 @@ pub(super) fn snapshot(
             let pane_id = agent.pane_id;
             let focused = focused_pane_id.as_deref() == Some(pane_id.as_str());
             let mut state_labels = agent.state_labels.into_iter().collect::<Vec<_>>();
-            if let Some((workspace_index, internal_pane_id)) = app.parse_pane_id(&pane_id) {
-                if let Some((collection, member_index)) = app
-                    .state
-                    .workspaces
-                    .get(workspace_index)
-                    .and_then(|workspace| {
-                        let tab_index = workspace.find_tab_index_for_pane(internal_pane_id)?;
-                        let collection_id = match workspace.tabs[tab_index]
-                            .layout
-                            .placement(internal_pane_id)?
-                        {
-                            crate::layout::PanePlacement::Collection(collection_id) => {
-                                collection_id
-                            }
-                            crate::layout::PanePlacement::Tiled => return None,
-                        };
-                        let collection =
-                            workspace.tabs[tab_index].layout.collection(collection_id)?;
-                        let member_index = collection
-                            .members()
-                            .iter()
-                            .position(|candidate| *candidate == internal_pane_id)?;
-                        Some((collection, member_index))
-                    })
-                {
-                    state_labels.push((
-                        "collection".to_owned(),
-                        collection
-                            .label
-                            .clone()
-                            .unwrap_or_else(|| format!("collection_{}", collection.id.raw())),
-                    ));
-                    state_labels.push(("member".to_owned(), (member_index + 1).to_string()));
-                }
-            }
             state_labels.sort_by(|left, right| left.0.cmp(&right.0));
             let mut tokens = agent.tokens.into_iter().collect::<Vec<_>>();
             tokens.sort_by(|left, right| left.0.cmp(&right.0));
@@ -194,34 +205,10 @@ pub(super) fn snapshot(
         .agent_view_override
         .as_ref()
         .map(|view| view.label.clone().unwrap_or_else(|| "filtered".to_owned()));
-    // Collection members remain ordinary agents in the client-owned shell list while the
-    // selected member is projected into the collection leaf as the terminal preview.
-    let has_collections = app.state.workspaces.iter().any(|workspace| {
-        workspace
-            .tabs
-            .iter()
-            .any(|tab| tab.layout.collections().next().is_some())
-    });
-    let agent_order = if has_collections {
-        app.state
-            .workspaces
-            .iter()
-            .enumerate()
-            .flat_map(|(ws_idx, workspace)| {
-                workspace.tabs.iter().flat_map(move |tab| {
-                    tab.layout
-                        .pane_ids()
-                        .into_iter()
-                        .filter_map(move |pane_id| app.public_pane_id(ws_idx, pane_id))
-                })
-            })
-            .collect()
-    } else {
-        crate::ui::agent_panel_entries_from(&app.state, &app.terminal_runtimes)
-            .into_iter()
-            .filter_map(|entry| app.public_pane_id(entry.ws_idx, entry.pane_id))
-            .collect()
-    };
+    let agent_order = crate::ui::agent_panel_entries_from(&app.state, &app.terminal_runtimes)
+        .into_iter()
+        .filter_map(|entry| app.public_pane_id(entry.ws_idx, entry.pane_id))
+        .collect();
 
     let zoomed = focused_tab_id
         .as_deref()
@@ -663,6 +650,49 @@ mod tests {
         app.state.integration_recommendations[0].state =
             crate::integration::IntegrationStatusKind::Outdated;
         assert!(snapshot(&app, "boot", 2, None, None).integration_updates_available);
+    }
+
+    #[test]
+    fn collection_non_agents_never_leak_into_filtered_agent_order() {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = crate::app::App::new(
+            &crate::config::Config::default(),
+            crate::app::AppPolicy::TEST,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        let mut workspace = crate::workspace::Workspace::test_new("plain");
+        let root = workspace.tabs[0].root_pane;
+        let member = workspace.test_split(ratatui::layout::Direction::Horizontal);
+        let collection = workspace.tabs[0]
+            .create_collection_near(
+                crate::layout::LayoutLeaf::Pane(root),
+                ratatui::layout::Direction::Vertical,
+                0.5,
+                Some("plain terminals".into()),
+            )
+            .unwrap();
+        workspace.tabs[0]
+            .collect_tiled_pane(member, collection)
+            .unwrap();
+        app.state.workspaces = vec![workspace];
+        app.state.active = Some(0);
+        app.state.agent_view_override = Some(crate::api::schema::AgentViewSetParams {
+            source: "test".into(),
+            label: Some("filtered".into()),
+            filter: None,
+            sort: Vec::new(),
+        });
+
+        let projected = snapshot(&app, "boot", 1, None, None);
+
+        assert_eq!(projected.agent_view_label.as_deref(), Some("filtered"));
+        assert!(projected.agents.is_empty());
+        assert!(projected.agent_order.is_empty());
+        let structure = structure_projection(&app, "boot", 1);
+        assert_eq!(structure.collections.len(), 1);
+        assert_eq!(structure.collections[0].members.len(), 1);
     }
 
     #[test]

@@ -15,11 +15,12 @@ use super::{
 };
 
 pub(crate) use super::unix_common::{
-    configure_status_command, create_remote_private_dir, create_remote_ssh_config_dir,
-    create_remote_ssh_config_file, hostname, local_datetime, remote_bridge_endpoint_path,
-    remote_private_temp_base, remote_reattach_argument, remote_reattach_program,
-    remote_ssh_config_paths, set_default_plugin_pane_pwd, shutdown_client_stream,
-    status_commands_supported, wait_client_stream_readable, write_client_stream,
+    configure_extension_service_command, configure_status_command, create_remote_private_dir,
+    create_remote_ssh_config_dir, create_remote_ssh_config_file, fill_secure_random, hostname,
+    local_datetime, remote_bridge_endpoint_path, remote_private_temp_base,
+    remote_reattach_argument, remote_reattach_program, remote_ssh_config_paths,
+    set_default_plugin_pane_pwd, shutdown_client_stream, status_commands_supported,
+    terminate_extension_service_process_group, wait_client_stream_readable, write_client_stream,
     ClientStreamReader, StatusCommandGuard,
 };
 

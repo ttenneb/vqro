@@ -10,6 +10,10 @@ pub(crate) enum EndpointControlMessage {
     HealthPong,
     AgentViewProjection(DecodedAgentViewProjection),
     Snapshot(Box<crate::protocol::ClientShellSnapshot>),
+    Structure(Box<crate::protocol::endpoint::ClientShellStructureProjection>),
+    TerminalViewsSurface(Box<crate::protocol::endpoint::ServerTerminalViewsSurface>),
+    PaneViewResult(Box<crate::protocol::endpoint::ServerPaneViewResult>),
+    PaneViewActionResult(Box<crate::protocol::endpoint::ServerPaneViewActionResult>),
     Ignored,
 }
 
@@ -46,6 +50,30 @@ pub(crate) fn decode_endpoint_control(
                 view,
             },
         ));
+    }
+    if kind == crate::protocol::endpoint::PANE_VIEW_RESULT_KIND {
+        let result = serde_json::from_str(data)
+            .map_err(|error| format!("invalid pane view result: {error}"))?;
+        return Ok(EndpointControlMessage::PaneViewResult(Box::new(result)));
+    }
+    if kind == crate::protocol::endpoint::PANE_VIEW_ACTION_RESULT_KIND {
+        let result = serde_json::from_str(data)
+            .map_err(|error| format!("invalid pane view action result: {error}"))?;
+        return Ok(EndpointControlMessage::PaneViewActionResult(Box::new(
+            result,
+        )));
+    }
+    if kind == crate::protocol::endpoint::TERMINAL_VIEWS_SURFACE_KIND {
+        let surface = serde_json::from_str(data)
+            .map_err(|error| format!("invalid terminal views surface: {error}"))?;
+        return Ok(EndpointControlMessage::TerminalViewsSurface(Box::new(
+            surface,
+        )));
+    }
+    if kind == crate::protocol::endpoint::SESSION_STRUCTURE_KIND {
+        let projection = serde_json::from_str(data)
+            .map_err(|error| format!("invalid endpoint structure projection: {error}"))?;
+        return Ok(EndpointControlMessage::Structure(Box::new(projection)));
     }
     if kind == crate::protocol::endpoint::ENDPOINT_SNAPSHOT_KIND {
         let snapshot = serde_json::from_str(data)
@@ -132,6 +160,38 @@ mod tests {
             .unwrap(),
             EndpointControlMessage::Ignored
         ));
+    }
+
+    #[test]
+    fn typed_structure_control_preserves_boot_revision_and_pane_identity() {
+        let decoded = decode_endpoint_control(
+            crate::protocol::endpoint::SESSION_STRUCTURE_KIND,
+            r#"{"session_id":"alpha","boot_id":"boot-2","revision":9,"collections":[{"collection_id":"collection_1","workspace_id":"w1","tab_id":"w1:t1","label":null,"selected_pane_id":"w1:p7","members":[{"pane_id":"w1:p7","index":0,"archived":false}]}],"delegations":[]}"#,
+        )
+        .unwrap();
+        let EndpointControlMessage::Structure(projection) = decoded else {
+            panic!("typed structure projection");
+        };
+        assert_eq!(projection.session_id, "alpha");
+        assert_eq!(projection.boot_id, "boot-2");
+        assert_eq!(projection.revision, 9);
+        assert_eq!(projection.collections[0].members[0].pane_id, "w1:p7");
+    }
+
+    #[test]
+    fn terminal_views_surface_is_typed_and_revision_bound() {
+        let decoded = decode_endpoint_control(
+            crate::protocol::endpoint::TERMINAL_VIEWS_SURFACE_KIND,
+            r#"{"boot_id":"boot-2","projection_revision":9,"views":[]}"#,
+        )
+        .unwrap();
+        let EndpointControlMessage::TerminalViewsSurface(surface) = decoded else {
+            panic!("terminal views surface");
+        };
+        assert_eq!(surface.boot_id, "boot-2");
+        assert_eq!(surface.projection_revision, 9);
+        assert!(surface.replace);
+        assert!(surface.views.is_empty());
     }
 
     #[test]

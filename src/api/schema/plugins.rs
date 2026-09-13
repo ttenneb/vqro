@@ -248,14 +248,29 @@ pub struct PluginManifestService {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub platforms: Option<Vec<PluginPlatform>>,
     pub command: Vec<String>,
+    #[serde(default)]
+    pub priority: i32,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub provides: Vec<PluginServiceCapability>,
+    /// Capabilities requested by trusted same-user service code.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub requested_capabilities: Vec<ExtensionServiceCapability>,
+    /// Host-allowlisted protocol grants. These are not an OS sandbox.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub granted_capabilities: Vec<ExtensionServiceCapability>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum PluginServiceCapability {
     PaneInspector,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ExtensionServiceCapability {
+    ViewContribution,
+    TerminalInterrupt,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]

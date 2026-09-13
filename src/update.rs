@@ -3062,7 +3062,7 @@ mod tests {
             "unexpected error: {err}"
         );
         assert!(
-            err.contains("herdr session stop work"),
+            err.contains("vqro session stop work"),
             "unexpected error: {err}"
         );
     }

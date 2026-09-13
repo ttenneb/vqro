@@ -8,5 +8,7 @@ platforms = ["linux"]
 [[services]]
 id = "telemetry"
 command = ["python3", "service.py"]
+priority = 100
 platforms = ["linux"]
 provides = ["pane_inspector"]
+capabilities = ["view_contribution", "terminal_interrupt"]

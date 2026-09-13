@@ -38,6 +38,10 @@ impl EndpointNegotiation {
         self.methods.iter().cloned().collect()
     }
 
+    pub(crate) fn capabilities(&self) -> Vec<String> {
+        self.capabilities.iter().cloned().collect()
+    }
+
     pub(crate) fn supports_method(&self, method: &str) -> bool {
         self.methods.contains(method)
     }

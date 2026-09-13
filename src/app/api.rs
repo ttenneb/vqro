@@ -102,6 +102,13 @@ impl App {
             }
             ev => ev,
         };
+        let ev = match ev {
+            // HeadlessServer consumes service completions before entering App. The standalone
+            // App loop has no client-shell request owner, so there is nothing to fold here.
+            AppEvent::ExtensionServiceFinished(_) => return Vec::new(),
+            ev => ev,
+        };
+
         if matches!(
             &ev,
             AppEvent::TerminalBell { .. } | AppEvent::ClipboardWrite { .. }

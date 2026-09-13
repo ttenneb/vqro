@@ -1,5 +1,14 @@
 use super::*;
 
+fn clip_rect(rect: Rect, bounds: Rect) -> Rect {
+    let clipped = rect.intersection(bounds);
+    if clipped.is_empty() {
+        Rect::default()
+    } else {
+        clipped
+    }
+}
+
 fn restore_mode_bar(
     frame: &mut FrameData,
     bar: Option<Rect>,
@@ -204,43 +213,58 @@ impl ClientShellState {
                 workspace_drop_indicator_row,
             },
         );
+        let frame_bounds = Rect::new(0, 0, cols, rows);
         self.hits.panes = surface
             .panes
             .iter()
-            .map(|pane| PaneHit {
-                rect: Rect::new(
-                    layout.pane_surface.x.saturating_add(pane.rect.x),
-                    layout.pane_surface.y.saturating_add(pane.rect.y),
-                    pane.rect.width,
-                    pane.rect.height,
-                ),
-                inner_rect: Rect::new(
-                    layout.pane_surface.x.saturating_add(pane.inner_rect.x),
-                    layout.pane_surface.y.saturating_add(pane.inner_rect.y),
-                    pane.inner_rect.width,
-                    pane.inner_rect.height,
-                ),
-                scrollbar_rect: pane.scrollbar_rect.map(|rect| {
+            .map(|pane| {
+                let inner_rect = clip_rect(
                     Rect::new(
-                        layout.pane_surface.x.saturating_add(rect.x),
-                        layout.pane_surface.y.saturating_add(rect.y),
-                        rect.width,
-                        rect.height,
-                    )
-                }),
-                scroll: pane.scroll.map(|metrics| crate::pane::ScrollMetrics {
-                    offset_from_bottom: usize::try_from(metrics.offset_from_bottom)
-                        .unwrap_or(usize::MAX),
-                    max_offset_from_bottom: usize::try_from(metrics.max_offset_from_bottom)
-                        .unwrap_or(usize::MAX),
-                    viewport_rows: usize::try_from(metrics.viewport_rows).unwrap_or(usize::MAX),
-                }),
-                pane_id: pane.pane_id.clone(),
-                popup: false,
-                mouse_reporting: pane.mouse_reporting,
-                sgr_pixel_mouse: pane.sgr_pixel_mouse,
-                pixel_width: pane.pixel_width,
-                pixel_height: pane.pixel_height,
+                        layout.pane_surface.x.saturating_add(pane.inner_rect.x),
+                        layout.pane_surface.y.saturating_add(pane.inner_rect.y),
+                        pane.inner_rect.width,
+                        pane.inner_rect.height,
+                    ),
+                    frame_bounds,
+                );
+                PaneHit {
+                    rect: clip_rect(
+                        Rect::new(
+                            layout.pane_surface.x.saturating_add(pane.rect.x),
+                            layout.pane_surface.y.saturating_add(pane.rect.y),
+                            pane.rect.width,
+                            pane.rect.height,
+                        ),
+                        frame_bounds,
+                    ),
+                    inner_rect,
+                    projected_inner_rect: inner_rect,
+                    scrollbar_rect: pane.scrollbar_rect.and_then(|rect| {
+                        let clipped = clip_rect(
+                            Rect::new(
+                                layout.pane_surface.x.saturating_add(rect.x),
+                                layout.pane_surface.y.saturating_add(rect.y),
+                                rect.width,
+                                rect.height,
+                            ),
+                            frame_bounds,
+                        );
+                        (!clipped.is_empty()).then_some(clipped)
+                    }),
+                    scroll: pane.scroll.map(|metrics| crate::pane::ScrollMetrics {
+                        offset_from_bottom: usize::try_from(metrics.offset_from_bottom)
+                            .unwrap_or(usize::MAX),
+                        max_offset_from_bottom: usize::try_from(metrics.max_offset_from_bottom)
+                            .unwrap_or(usize::MAX),
+                        viewport_rows: usize::try_from(metrics.viewport_rows).unwrap_or(usize::MAX),
+                    }),
+                    pane_id: pane.pane_id.clone(),
+                    popup: false,
+                    mouse_reporting: pane.mouse_reporting,
+                    sgr_pixel_mouse: pane.sgr_pixel_mouse,
+                    pixel_width: pane.pixel_width,
+                    pixel_height: pane.pixel_height,
+                }
             })
             .collect();
         let topology_signature = pane_surface_topology_signature(surface);
@@ -257,17 +281,23 @@ impl ClientShellState {
                         layout.pane_surface.y.saturating_add(split.pos)
                     }
                 },
-                area: Rect::new(
-                    layout.pane_surface.x.saturating_add(split.area.x),
-                    layout.pane_surface.y.saturating_add(split.area.y),
-                    split.area.width,
-                    split.area.height,
+                area: clip_rect(
+                    Rect::new(
+                        layout.pane_surface.x.saturating_add(split.area.x),
+                        layout.pane_surface.y.saturating_add(split.area.y),
+                        split.area.width,
+                        split.area.height,
+                    ),
+                    frame_bounds,
                 ),
-                hit_rect: Rect::new(
-                    layout.pane_surface.x.saturating_add(split.hit_rect.x),
-                    layout.pane_surface.y.saturating_add(split.hit_rect.y),
-                    split.hit_rect.width,
-                    split.hit_rect.height,
+                hit_rect: clip_rect(
+                    Rect::new(
+                        layout.pane_surface.x.saturating_add(split.hit_rect.x),
+                        layout.pane_surface.y.saturating_add(split.hit_rect.y),
+                        split.hit_rect.width,
+                        split.hit_rect.height,
+                    ),
+                    frame_bounds,
                 ),
                 path: split.path.clone(),
                 topology_signature,
@@ -315,6 +345,270 @@ impl ClientShellState {
         blit_pane_surface(&mut frame, &surface.frame, layout.pane_surface);
         restore_mode_bar(&mut frame, mode_bar, mode_bar_cells.as_deref());
         let mut occlusion = crate::kitty_graphics::surface::Occlusion::default();
+        let mut composed = frame.to_ratatui_buffer()?;
+        self.hits.collections = collections::render_collection_chrome(
+            &mut composed,
+            snapshot,
+            self.structure.as_deref(),
+            &self.hits.panes,
+            &self.collection_list_views,
+            &self.config.palette,
+        );
+        self.hits.collection_members = collections::render_collection_lists(
+            &mut composed,
+            snapshot,
+            self.structure.as_deref(),
+            &self.hits.panes,
+            &self.collection_list_views,
+            &self.collection_expanded_members,
+            &self.collection_list_scroll,
+            &self.collection_preview_heights,
+            self.collection_maximized_pane.as_ref(),
+            &self.terminal_view_surfaces,
+            &self.config.palette,
+        );
+        if self.supports_endpoint_capability(crate::protocol::endpoint::TERMINAL_VIEWS_CAPABILITY) {
+            let mut total_cells = 0usize;
+            let views = self
+                .hits
+                .collection_members
+                .iter()
+                .filter(|member| !member.preview.is_empty())
+                .filter_map(|member| {
+                    let cells = usize::from(member.preview.width)
+                        .saturating_mul(usize::from(member.preview.height));
+                    if total_cells.saturating_add(cells)
+                        > crate::protocol::endpoint::MAX_TERMINAL_VIEW_CELLS
+                    {
+                        return None;
+                    }
+                    total_cells = total_cells.saturating_add(cells);
+                    Some(crate::protocol::endpoint::ClientTerminalViewInterest {
+                        pane_id: member.pane_id.clone(),
+                        size: crate::protocol::ClientSurfaceSize {
+                            cols: member.preview.width,
+                            rows: member.preview.height,
+                        },
+                    })
+                })
+                .take(crate::protocol::endpoint::MAX_TERMINAL_VIEWS)
+                .collect::<Vec<_>>();
+            let interest = crate::protocol::endpoint::ClientTerminalViewsInterest {
+                boot_id: snapshot.boot_id.clone(),
+                projection_revision: snapshot.revision,
+                views,
+            };
+            if (!interest.views.is_empty() || self.last_terminal_views_interest.is_some())
+                && self.last_terminal_views_interest.as_ref() != Some(&interest)
+            {
+                self.terminal_view_surfaces.retain(|pane_id, surface| {
+                    interest.views.iter().any(|view| {
+                        &view.pane_id == pane_id
+                            && view.size.cols == surface.frame.width
+                            && view.size.rows == surface.frame.height
+                    })
+                });
+                if let Ok(data) = serde_json::to_string(&interest) {
+                    self.pending_endpoint_controls.push((
+                        self.active_endpoint_id.clone(),
+                        ClientMessage::EndpointControl {
+                            kind: crate::protocol::endpoint::TERMINAL_VIEWS_INTEREST_KIND.into(),
+                            data,
+                        },
+                    ));
+                    self.last_terminal_views_interest = Some(interest);
+                }
+            }
+        }
+        let list_pane_ids = self
+            .structure
+            .as_deref()
+            .into_iter()
+            .flat_map(|structure| structure.collections.iter())
+            .filter(|collection| {
+                self.collection_list_views
+                    .contains(&collection.collection_id)
+            })
+            .filter_map(|collection| collection.selected_pane_id.as_deref())
+            .collect::<HashSet<_>>();
+        let mut cursor = frame.cursor.clone().filter(|cursor| {
+            !self.hits.panes.iter().any(|pane| {
+                list_pane_ids.contains(pane.pane_id.as_str())
+                    && contains(pane.inner_rect, (cursor.x, cursor.y))
+            })
+        });
+        for pane in &mut self.hits.panes {
+            if list_pane_ids.contains(pane.pane_id.as_str()) {
+                // The collection list replaces this leaf. Retire the original full-leaf hit
+                // rectangle before installing bounded preview hits below so it cannot shadow a
+                // sibling preview during first-match mouse routing.
+                pane.rect = Rect::default();
+                pane.inner_rect = Rect::default();
+                pane.scrollbar_rect = None;
+                pane.mouse_reporting = false;
+            }
+        }
+        for member in &self.hits.collection_members {
+            if member.preview.is_empty() {
+                continue;
+            }
+            let surface = self.terminal_view_surfaces.get(&member.pane_id);
+            if self.collection_entered_pane.as_deref() == Some(member.pane_id.as_str()) {
+                cursor = surface
+                    .and_then(|surface| surface.frame.cursor.as_ref())
+                    .filter(|surface_cursor| {
+                        surface_cursor.x < member.preview.width
+                            && surface_cursor.y < member.preview.height
+                    })
+                    .map(|surface_cursor| crate::protocol::CursorState {
+                        x: member.preview.x.saturating_add(surface_cursor.x),
+                        y: member.preview.y.saturating_add(surface_cursor.y),
+                        visible: surface_cursor.visible,
+                        shape: surface_cursor.shape,
+                    });
+            }
+            let preview_hit = PaneHit {
+                rect: member.preview,
+                inner_rect: member.preview,
+                projected_inner_rect: member.preview,
+                scrollbar_rect: None,
+                scroll: None,
+                pane_id: member.pane_id.clone(),
+                popup: false,
+                mouse_reporting: surface.is_some_and(|surface| surface.mouse_reporting),
+                sgr_pixel_mouse: surface.is_some_and(|surface| surface.sgr_pixel_mouse),
+                pixel_width: surface.map_or(0, |surface| surface.pixel_width),
+                pixel_height: surface.map_or(0, |surface| surface.pixel_height),
+            };
+            if let Some(pane) = self
+                .hits
+                .panes
+                .iter_mut()
+                .find(|pane| pane.pane_id == member.pane_id)
+            {
+                pane.rect = preview_hit.rect;
+                pane.inner_rect = preview_hit.inner_rect;
+                pane.scrollbar_rect = None;
+                pane.mouse_reporting = preview_hit.mouse_reporting;
+                pane.sgr_pixel_mouse = preview_hit.sgr_pixel_mouse;
+                pane.pixel_width = preview_hit.pixel_width;
+                pane.pixel_height = preview_hit.pixel_height;
+            } else {
+                self.hits.panes.push(preview_hit);
+            }
+        }
+        frame.replace_from_ratatui_buffer_preserving_effects(&composed, cursor.clone());
+        frame.cursor = cursor;
+        self.hits.inspector_body = Rect::default();
+        self.hits.inspector_close = Rect::default();
+        self.hits.inspector_refresh = Rect::default();
+        self.hits.contribution_actions.clear();
+        if let Some(inspector) = self.inspector.as_ref() {
+            if let Some(index) = self
+                .hits
+                .panes
+                .iter()
+                .position(|hit| hit.pane_id == inspector.pane_id)
+            {
+                let area = clip_rect(
+                    self.hits.panes[index].projected_inner_rect,
+                    Rect::new(0, 0, frame.width, frame.height),
+                );
+                // Accessory geometry cannot yet remap and clip target-pane Kitty placements.
+                // Fall back to replacement only for that target; unrelated panes remain visible.
+                let effective_placement = if inspector.placement
+                    == crate::pane_contribution::PaneContributionPlacement::Accessory
+                    && self.graphics.pane_has_graphics(&inspector.pane_id)
+                {
+                    crate::pane_contribution::PaneContributionPlacement::Replacement
+                } else {
+                    inspector.placement
+                };
+                let geometry = contributions::contribution_geometry(area, effective_placement);
+                if self.supports_endpoint_capability(
+                    crate::protocol::endpoint::PANE_VIEWPORT_CAPABILITY,
+                ) {
+                    let request = contributions::viewport_request(
+                        &snapshot.boot_id,
+                        snapshot.revision,
+                        &inspector.pane_id,
+                        geometry.terminal,
+                    );
+                    if self.last_pane_viewport_request.as_ref() != Some(&request) {
+                        if let Ok(data) = serde_json::to_string(&request) {
+                            self.last_pane_viewport_request = Some(request);
+                            self.pending_endpoint_controls.push((
+                                self.active_endpoint_id.clone(),
+                                ClientMessage::EndpointControl {
+                                    kind: crate::protocol::endpoint::PANE_VIEWPORT_KIND.into(),
+                                    data,
+                                },
+                            ));
+                        }
+                    }
+                }
+                if let Some(terminal) = geometry.terminal {
+                    self.hits.panes[index].inner_rect = terminal;
+                    self.hits.panes[index].scrollbar_rect = None;
+                    if self.graphics_cell_size.is_known() {
+                        self.hits.panes[index].pixel_width =
+                            u32::from(terminal.width) * self.graphics_cell_size.width_px;
+                        self.hits.panes[index].pixel_height =
+                            u32::from(terminal.height) * self.graphics_cell_size.height_px;
+                    }
+                } else {
+                    self.hits.panes[index].inner_rect = Rect::new(area.x, area.y, 0, 0);
+                    self.hits.panes[index].scrollbar_rect = None;
+                    self.hits.panes[index].mouse_reporting = false;
+                    self.hits.panes[index].sgr_pixel_mouse = false;
+                    self.hits.panes[index].pixel_width = 0;
+                    self.hits.panes[index].pixel_height = 0;
+                }
+                let mut composed = frame.to_ratatui_buffer()?;
+                if let Some(divider) = geometry.divider {
+                    render::render_pane_contribution_divider(
+                        &mut composed,
+                        divider,
+                        &self.config.palette,
+                    );
+                }
+                let rendered = if let Some(contribution) = inspector.contribution.as_ref() {
+                    render::render_pane_contribution(
+                        &mut composed,
+                        geometry.contribution,
+                        contribution,
+                        &self.config.palette,
+                    )
+                } else {
+                    render::render_terminal_inspector_pending(
+                        &mut composed,
+                        geometry.contribution,
+                        inspector,
+                        &self.config.palette,
+                    )
+                };
+                if let Some(rendered) = rendered {
+                    self.hits.inspector_body = geometry.contribution;
+                    self.hits.inspector_close = rendered.cancel;
+                    self.hits.inspector_refresh = rendered.primary;
+                    self.hits.contribution_actions = rendered.contribution_actions;
+                }
+                let cursor = if inspector.focused || geometry.terminal.is_none() {
+                    None
+                } else {
+                    frame.cursor.clone().filter(|cursor| {
+                        geometry.terminal.is_some_and(|terminal| {
+                            cursor.x >= terminal.x
+                                && cursor.x < terminal.right()
+                                && cursor.y >= terminal.y
+                                && cursor.y < terminal.bottom()
+                        })
+                    })
+                };
+                frame.replace_from_ratatui_buffer_preserving_effects(&composed, cursor.clone());
+                frame.cursor = cursor;
+            }
+        }
         let has_selection = self
             .selection
             .as_ref()
@@ -550,6 +844,7 @@ impl ClientShellState {
                 self.hits.popup = Some(PaneHit {
                     rect: geometry.outer,
                     inner_rect: geometry.inner,
+                    projected_inner_rect: geometry.inner,
                     scrollbar_rect: None,
                     scroll: None,
                     pane_id: popup.terminal_id.clone(),
@@ -684,6 +979,11 @@ impl ClientShellState {
             self.hits.panes.clear();
             self.hits.pane_splits.clear();
             self.hits.popup = None;
+            self.hits.collections.clear();
+            self.hits.inspector_body = Rect::default();
+            self.hits.inspector_close = Rect::default();
+            self.hits.inspector_refresh = Rect::default();
+            self.hits.contribution_actions.clear();
         }
         self.compose_graphics(&mut frame, layout, &occlusion);
         Some(frame)

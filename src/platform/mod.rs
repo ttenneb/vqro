@@ -32,6 +32,8 @@ pub(crate) struct ProcessTelemetry {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum TerminalTelemetrySample {
+    // Process telemetry is implemented only by the Linux platform module.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     Available {
         process_group_id: u32,
         processes: Vec<ProcessTelemetry>,

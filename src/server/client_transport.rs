@@ -94,6 +94,15 @@ fn write_endpoint_rejection(stream: &mut LocalStream, code: &str, message: impl 
     let _ = protocol::write_message(stream, &response);
 }
 
+const MAX_OPTIONAL_CONTROL_BYTES: usize = 64 * 1024;
+
+fn decode_optional_control<T: serde::de::DeserializeOwned>(data: &str) -> Result<T, String> {
+    if data.len() > MAX_OPTIONAL_CONTROL_BYTES {
+        return Err("optional endpoint control exceeds size limit".into());
+    }
+    serde_json::from_str(data).map_err(|error| error.to_string())
+}
+
 fn decode_endpoint_request(request: &str) -> serde_json::Result<DecodedEndpointRequest> {
     let head = serde_json::from_str::<EndpointRequestHead>(request)?;
     if !crate::server::client_commands::supports_client_shell_method_name(&head.method) {
@@ -116,6 +125,8 @@ fn decode_endpoint_request(request: &str) -> serde_json::Result<DecodedEndpointR
 }
 /// Maximum structured input events accepted in one client message.
 const MAX_INPUT_EVENT_BATCH: usize = 4096;
+const MAX_QUEUED_CONTROL_MESSAGES: usize = 256;
+const MAX_QUEUED_CONTROL_BYTES: usize = 8 * 1024 * 1024;
 
 /// Channels owned by the server side of a client writer thread.
 #[derive(Clone, Debug)]
@@ -255,6 +266,7 @@ struct ClientWriterQueue {
 #[derive(Debug, Default)]
 struct ClientWriterQueueState {
     control: VecDeque<Vec<u8>>,
+    control_bytes: usize,
     ordered: VecDeque<Vec<u8>>,
     render: Option<Vec<u8>>,
     senders: usize,
@@ -294,6 +306,18 @@ impl ClientWriterQueue {
         if !state.writer_alive {
             return Err(SendError(data));
         }
+        let exceeds_bound = state.control.len() >= MAX_QUEUED_CONTROL_MESSAGES
+            || state.control_bytes.saturating_add(data.len()) > MAX_QUEUED_CONTROL_BYTES;
+        if exceeds_bound {
+            state.writer_alive = false;
+            state.control.clear();
+            state.control_bytes = 0;
+            state.ordered.clear();
+            state.render = None;
+            self.ready.notify_all();
+            return Err(SendError(data));
+        }
+        state.control_bytes = state.control_bytes.saturating_add(data.len());
         state.control.push_back(data);
         self.ready.notify_one();
         Ok(())
@@ -339,6 +363,7 @@ impl ClientWriterQueue {
         let mut state = self.lock_state();
         loop {
             if let Some(data) = state.control.pop_front() {
+                state.control_bytes = state.control_bytes.saturating_sub(data.len());
                 return Some(ClientWriteItem::Control(data));
             }
             if let Some(data) = state.ordered.pop_front() {
@@ -348,7 +373,7 @@ impl ClientWriterQueue {
             if let Some(data) = state.render.take() {
                 return Some(ClientWriteItem::Render(data));
             }
-            if state.senders == 0 {
+            if !state.writer_alive || state.senders == 0 {
                 return None;
             }
             state = self
@@ -361,6 +386,8 @@ impl ClientWriterQueue {
     fn close_writer(&self) {
         let mut state = self.lock_state();
         state.writer_alive = false;
+        state.control.clear();
+        state.control_bytes = 0;
         state.render = None;
         state.ordered.clear();
         self.ready.notify_all();
@@ -398,6 +425,10 @@ pub(crate) enum ServerEvent {
         endpoint_keybindings: bool,
         mouse_capture: bool,
         surface_active: bool,
+        structure_enabled: bool,
+        pane_viewport_enabled: bool,
+        pane_view_enabled: bool,
+        terminal_views_enabled: bool,
         writer: ClientWriter,
     },
     /// A client sent an input message.
@@ -501,6 +532,30 @@ pub(crate) enum ServerEvent {
     ClientShellMouseCapture { client_id: u64, enabled: bool },
     /// The committed shell asks the server to replay presentation effects before input resumes.
     ClientShellPresentationSync { client_id: u64, token: String },
+    ClientShellPaneViewport {
+        client_id: u64,
+        viewport: crate::protocol::endpoint::ClientPaneViewportRequest,
+    },
+    ClientShellTerminalViewsInterest {
+        client_id: u64,
+        interest: crate::protocol::endpoint::ClientTerminalViewsInterest,
+    },
+    ClientShellPaneViewRequest {
+        client_id: u64,
+        request: crate::protocol::endpoint::ClientPaneViewRequest,
+    },
+    ClientShellPaneViewCancel {
+        client_id: u64,
+        cancel: crate::protocol::endpoint::ClientPaneViewCancel,
+    },
+    ClientShellPaneViewAction {
+        client_id: u64,
+        request: crate::protocol::endpoint::ClientPaneViewActionRequest,
+    },
+    ClientShellPaneViewConfirm {
+        client_id: u64,
+        confirm: crate::protocol::endpoint::ClientPaneViewConfirm,
+    },
     /// A client-owned shell invoked one endpoint operation through this connection.
     ClientShellEndpointRequest {
         client_id: u64,
@@ -763,6 +818,27 @@ pub(crate) fn handle_client_handshake(
                     hello.endpoint_keybindings,
                     hello.mouse_capture,
                     hello.surface_active,
+                    hello
+                        .control_kinds
+                        .iter()
+                        .any(|kind| kind == crate::protocol::endpoint::SESSION_STRUCTURE_KIND),
+                    hello
+                        .control_kinds
+                        .iter()
+                        .any(|kind| kind == crate::protocol::endpoint::PANE_VIEWPORT_KIND),
+                    [
+                        crate::protocol::endpoint::PANE_VIEW_REQUEST_KIND,
+                        crate::protocol::endpoint::PANE_VIEW_RESULT_KIND,
+                        crate::protocol::endpoint::PANE_VIEW_ACTION_RESULT_KIND,
+                    ]
+                    .iter()
+                    .all(|required| hello.control_kinds.iter().any(|kind| kind == required)),
+                    [
+                        crate::protocol::endpoint::TERMINAL_VIEWS_INTEREST_KIND,
+                        crate::protocol::endpoint::TERMINAL_VIEWS_SURFACE_KIND,
+                    ]
+                    .iter()
+                    .all(|required| hello.control_kinds.iter().any(|kind| kind == required)),
                 )),
             )
         }
@@ -804,13 +880,33 @@ pub(crate) fn handle_client_handshake(
         RenderEncoding::TerminalAnsi
     };
     let welcome = if shell_options.is_some() {
-        let welcome = EndpointServerWelcome::compatible(
+        let mut welcome = EndpointServerWelcome::compatible(
             crate::server::client_commands::supported_client_shell_method_names()
                 .iter()
                 .chain(crate::server::client_commands::optional_client_shell_method_names())
                 .map(|method| (*method).to_owned())
                 .collect(),
         );
+        if shell_options.as_ref().is_some_and(|options| options.5) {
+            welcome
+                .capabilities
+                .push(crate::protocol::endpoint::SESSION_STRUCTURE_CAPABILITY.into());
+        }
+        if shell_options.as_ref().is_some_and(|options| options.6) {
+            welcome
+                .capabilities
+                .push(crate::protocol::endpoint::PANE_VIEWPORT_CAPABILITY.into());
+        }
+        if shell_options.as_ref().is_some_and(|options| options.7) {
+            welcome
+                .capabilities
+                .push(crate::protocol::endpoint::PANE_VIEW_CAPABILITY.into());
+        }
+        if shell_options.as_ref().is_some_and(|options| options.8) {
+            welcome
+                .capabilities
+                .push(crate::protocol::endpoint::TERMINAL_VIEWS_CAPABILITY.into());
+        }
         ServerMessage::EndpointControl {
             kind: ENDPOINT_WELCOME_KIND.into(),
             data: serde_json::to_string(&welcome).map_err(io::Error::other)?,
@@ -858,6 +954,10 @@ pub(crate) fn handle_client_handshake(
         endpoint_keybindings,
         mouse_capture,
         surface_active,
+        structure_enabled,
+        pane_viewport_enabled,
+        pane_view_enabled,
+        terminal_views_enabled,
     )) = shell_options
     {
         ServerEvent::ClientShellConnected {
@@ -871,6 +971,10 @@ pub(crate) fn handle_client_handshake(
             endpoint_keybindings,
             mouse_capture,
             surface_active,
+            structure_enabled,
+            pane_viewport_enabled,
+            pane_view_enabled,
+            terminal_views_enabled,
             writer,
         }
     } else {
@@ -1310,6 +1414,84 @@ fn client_read_loop_with_endpoint_controls(
                 }
             }
             ClientMessage::EndpointControl { kind, data }
+                if kind == crate::protocol::endpoint::PANE_VIEW_REQUEST_KIND =>
+            {
+                let request = match decode_optional_control(&data) {
+                    Ok(request) => request,
+                    Err(error) => {
+                        warn!(client_id, %error, "invalid pane view request");
+                        continue;
+                    }
+                };
+                ServerEvent::ClientShellPaneViewRequest { client_id, request }
+            }
+            ClientMessage::EndpointControl { kind, data }
+                if kind == crate::protocol::endpoint::PANE_VIEW_CANCEL_KIND =>
+            {
+                let cancel = match decode_optional_control(&data) {
+                    Ok(cancel) => cancel,
+                    Err(error) => {
+                        warn!(client_id, %error, "invalid pane view cancellation");
+                        continue;
+                    }
+                };
+                ServerEvent::ClientShellPaneViewCancel { client_id, cancel }
+            }
+            ClientMessage::EndpointControl { kind, data }
+                if kind == crate::protocol::endpoint::PANE_VIEW_ACTION_KIND =>
+            {
+                let request = match decode_optional_control(&data) {
+                    Ok(request) => request,
+                    Err(error) => {
+                        warn!(client_id, %error, "invalid pane view action");
+                        continue;
+                    }
+                };
+                ServerEvent::ClientShellPaneViewAction { client_id, request }
+            }
+            ClientMessage::EndpointControl { kind, data }
+                if kind == crate::protocol::endpoint::PANE_VIEW_CONFIRM_KIND =>
+            {
+                let confirm = match decode_optional_control(&data) {
+                    Ok(confirm) => confirm,
+                    Err(error) => {
+                        warn!(client_id, %error, "invalid pane view confirmation");
+                        continue;
+                    }
+                };
+                ServerEvent::ClientShellPaneViewConfirm { client_id, confirm }
+            }
+            ClientMessage::EndpointControl { kind, data }
+                if kind == crate::protocol::endpoint::TERMINAL_VIEWS_INTEREST_KIND =>
+            {
+                let interest = match decode_optional_control(&data) {
+                    Ok(interest) => interest,
+                    Err(error) => {
+                        warn!(client_id, %error, "invalid terminal views interest");
+                        continue;
+                    }
+                };
+                ServerEvent::ClientShellTerminalViewsInterest {
+                    client_id,
+                    interest,
+                }
+            }
+            ClientMessage::EndpointControl { kind, data }
+                if kind == crate::protocol::endpoint::PANE_VIEWPORT_KIND =>
+            {
+                let viewport = match decode_optional_control(&data) {
+                    Ok(viewport) => viewport,
+                    Err(error) => {
+                        warn!(client_id, %error, "invalid pane contribution viewport");
+                        continue;
+                    }
+                };
+                ServerEvent::ClientShellPaneViewport {
+                    client_id,
+                    viewport,
+                }
+            }
+            ClientMessage::EndpointControl { kind, data }
                 if kind == crate::protocol::endpoint::PRESENTATION_EFFECTS_SYNC_KIND =>
             {
                 ServerEvent::ClientShellPresentationSync {
@@ -1449,6 +1631,7 @@ mod tests {
             surface_codecs: vec![crate::protocol::endpoint::SURFACE_CODEC_V1.into()],
             input_codecs: vec![crate::protocol::endpoint::INPUT_CODEC_V1.into()],
             blob_codecs: vec![crate::protocol::endpoint::BLOB_CODEC_V1.into()],
+            control_kinds: Vec::new(),
         };
         ClientMessage::EndpointControl {
             kind: ENDPOINT_HELLO_KIND.into(),
@@ -1519,6 +1702,19 @@ mod tests {
             writer.render.try_send(second),
             Err(TrySendError::Full(_))
         ));
+    }
+
+    #[test]
+    fn client_writer_disconnects_instead_of_growing_control_queue_without_bound() {
+        let (writer, queue) = test_queue_writer();
+        for _ in 0..MAX_QUEUED_CONTROL_MESSAGES {
+            writer.control.send(vec![1]).unwrap();
+        }
+        assert!(writer.control.send(vec![2]).is_err());
+        let state = queue.lock_state();
+        assert!(!state.writer_alive);
+        assert!(state.control.is_empty());
+        assert_eq!(state.control_bytes, 0);
     }
 
     #[test]
@@ -1960,6 +2156,10 @@ mod tests {
                 endpoint_keybindings,
                 mouse_capture,
                 surface_active,
+                structure_enabled,
+                pane_viewport_enabled,
+                pane_view_enabled,
+                terminal_views_enabled,
                 writer,
             } => {
                 assert_eq!(client_id, 43);
@@ -1970,6 +2170,10 @@ mod tests {
                 assert!(endpoint_keybindings);
                 assert!(mouse_capture);
                 assert!(surface_active);
+                assert!(!structure_enabled);
+                assert!(!terminal_views_enabled);
+                assert!(!pane_viewport_enabled);
+                assert!(!pane_view_enabled);
                 drop(writer);
             }
             other => panic!("expected ClientShellConnected, got {other:?}"),
@@ -2075,6 +2279,127 @@ mod tests {
             .join()
             .expect("read thread join")
             .expect("read thread result");
+    }
+
+    #[test]
+    fn client_read_loop_decodes_pane_contribution_controls() {
+        let (mut client_stream, server_stream, _path) =
+            local_stream_pair("client-read-pane-contribution-controls");
+        let (server_event_tx, mut server_event_rx) = mpsc::channel(8);
+        let should_quit = Arc::new(AtomicBool::new(false));
+        let read_quit = should_quit.clone();
+        let handle = std::thread::spawn(move || {
+            client_read_loop(server_stream, 7, &server_event_tx, &read_quit)
+        });
+
+        let controls = [
+            (
+                crate::protocol::endpoint::PANE_VIEW_REQUEST_KIND,
+                serde_json::to_string(&crate::protocol::endpoint::ClientPaneViewRequest {
+                    boot_id: "boot".into(),
+                    projection_revision: 2,
+                    request_id: "view".into(),
+                    pane_id: "w1:p1".into(),
+                    contribution_revision: 3,
+                })
+                .unwrap(),
+            ),
+            (
+                crate::protocol::endpoint::PANE_VIEW_CANCEL_KIND,
+                serde_json::to_string(&crate::protocol::endpoint::ClientPaneViewCancel {
+                    boot_id: "boot".into(),
+                    request_id: "view".into(),
+                    pane_id: "w1:p1".into(),
+                    contribution_revision: 3,
+                })
+                .unwrap(),
+            ),
+            (
+                crate::protocol::endpoint::PANE_VIEW_ACTION_KIND,
+                serde_json::to_string(&crate::protocol::endpoint::ClientPaneViewActionRequest {
+                    boot_id: "boot".into(),
+                    projection_revision: 2,
+                    request_id: "action".into(),
+                    pane_id: "w1:p1".into(),
+                    contribution_revision: 3,
+                    owner_service_id: "test.service".into(),
+                    service_generation: 4,
+                    action_id: "terminal.interrupt".into(),
+                })
+                .unwrap(),
+            ),
+            (
+                crate::protocol::endpoint::PANE_VIEW_CONFIRM_KIND,
+                serde_json::to_string(&crate::protocol::endpoint::ClientPaneViewConfirm {
+                    boot_id: "boot".into(),
+                    confirmation_token: "token".into(),
+                })
+                .unwrap(),
+            ),
+            (
+                crate::protocol::endpoint::PANE_VIEWPORT_KIND,
+                serde_json::to_string(&crate::protocol::endpoint::ClientPaneViewportRequest {
+                    boot_id: "boot".into(),
+                    projection_revision: 2,
+                    pane_id: "w1:p1".into(),
+                    size: Some(crate::protocol::ClientSurfaceSize { cols: 40, rows: 20 }),
+                })
+                .unwrap(),
+            ),
+            (
+                crate::protocol::endpoint::TERMINAL_VIEWS_INTEREST_KIND,
+                serde_json::to_string(&crate::protocol::endpoint::ClientTerminalViewsInterest {
+                    boot_id: "boot".into(),
+                    projection_revision: 2,
+                    views: vec![crate::protocol::endpoint::ClientTerminalViewInterest {
+                        pane_id: "w1:p1".into(),
+                        size: crate::protocol::ClientSurfaceSize { cols: 40, rows: 10 },
+                    }],
+                })
+                .unwrap(),
+            ),
+        ];
+        for (kind, data) in controls {
+            protocol::write_message(
+                &mut client_stream,
+                &ClientMessage::EndpointControl {
+                    kind: kind.into(),
+                    data,
+                },
+            )
+            .unwrap();
+        }
+        protocol::write_message(&mut client_stream, &ClientMessage::Detach).unwrap();
+
+        assert!(matches!(
+            recv_server_event(&mut server_event_rx, "pane view request"),
+            ServerEvent::ClientShellPaneViewRequest { client_id: 7, .. }
+        ));
+        assert!(matches!(
+            recv_server_event(&mut server_event_rx, "pane view cancel"),
+            ServerEvent::ClientShellPaneViewCancel { client_id: 7, .. }
+        ));
+        assert!(matches!(
+            recv_server_event(&mut server_event_rx, "pane view action"),
+            ServerEvent::ClientShellPaneViewAction { client_id: 7, .. }
+        ));
+        assert!(matches!(
+            recv_server_event(&mut server_event_rx, "pane view confirm"),
+            ServerEvent::ClientShellPaneViewConfirm { client_id: 7, .. }
+        ));
+        assert!(matches!(
+            recv_server_event(&mut server_event_rx, "pane viewport"),
+            ServerEvent::ClientShellPaneViewport { client_id: 7, .. }
+        ));
+        assert!(matches!(
+            recv_server_event(&mut server_event_rx, "terminal views interest"),
+            ServerEvent::ClientShellTerminalViewsInterest { client_id: 7, .. }
+        ));
+        assert!(matches!(
+            recv_server_event(&mut server_event_rx, "detach"),
+            ServerEvent::ClientDetach { client_id: 7 }
+        ));
+        handle.join().unwrap().unwrap();
     }
 
     #[test]

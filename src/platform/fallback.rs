@@ -1,6 +1,17 @@
 use std::path::PathBuf;
 use std::process::Command;
 
+pub(crate) fn fill_secure_random(_bytes: &mut [u8]) -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "secure randomness is unavailable on this platform",
+    ))
+}
+
+pub(crate) fn configure_extension_service_command(_command: &mut std::process::Command) {}
+
+pub(crate) fn terminate_extension_service_process_group(_child: &std::process::Child) {}
+
 use super::{ClipboardImage, ForegroundJob, Signal};
 
 #[cfg(unix)]

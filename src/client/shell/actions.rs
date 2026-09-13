@@ -466,6 +466,223 @@ impl ClientShellState {
         repaint
     }
 
+    pub(crate) fn activate_pane_contribution_action(
+        &mut self,
+        action_id: &str,
+        outcome: &mut ClientShellInput,
+    ) {
+        if !self.supports_endpoint_capability(crate::protocol::endpoint::PANE_VIEW_CAPABILITY) {
+            return;
+        }
+        let Some(snapshot) = self.snapshot.as_deref() else {
+            return;
+        };
+        let Some(inspector) = self.inspector.as_ref() else {
+            return;
+        };
+        let Some(contribution) = inspector.contribution.as_ref() else {
+            return;
+        };
+        if !contribution
+            .actions
+            .iter()
+            .any(|action| action.id == action_id)
+        {
+            return;
+        }
+        let Some(service_generation) = inspector.service_generation else {
+            return;
+        };
+        let request_id = format!("action-{}-{}", contribution.revision, action_id);
+        let request = crate::protocol::endpoint::ClientPaneViewActionRequest {
+            boot_id: snapshot.boot_id.clone(),
+            projection_revision: snapshot.revision,
+            request_id: request_id.clone(),
+            pane_id: inspector.pane_id.clone(),
+            contribution_revision: contribution.revision,
+            owner_service_id: contribution.owner_service_id.clone(),
+            service_generation,
+            action_id: action_id.to_owned(),
+        };
+        if let Ok(data) = serde_json::to_string(&request) {
+            if let Some(inspector) = self.inspector.as_mut() {
+                inspector.pending_action = Some(request.clone());
+            }
+            outcome.actions.push(ClientShellAction::EndpointControl {
+                endpoint_id: self.active_endpoint_id.clone(),
+                message: ClientMessage::EndpointControl {
+                    kind: crate::protocol::endpoint::PANE_VIEW_ACTION_KIND.into(),
+                    data,
+                },
+            });
+        }
+    }
+
+    pub(crate) fn handle_pane_view_action_result(
+        &mut self,
+        endpoint_id: &ClientEndpointId,
+        generation: u64,
+        result: crate::protocol::endpoint::ServerPaneViewActionResult,
+    ) -> bool {
+        if endpoint_id != &self.active_endpoint_id {
+            return false;
+        }
+        let Some(snapshot) = self.snapshot.as_deref() else {
+            return false;
+        };
+        if !self.endpoint_snapshot_matches(
+            endpoint_id,
+            generation,
+            &snapshot.boot_id,
+            snapshot.revision,
+        ) {
+            return false;
+        }
+        let snapshot_boot_id = snapshot.boot_id.clone();
+        let snapshot_revision = snapshot.revision;
+        let Some(inspector) = self.inspector.as_mut() else {
+            return false;
+        };
+        let Some(contribution) = inspector.contribution.as_ref() else {
+            return false;
+        };
+        let pending = inspector.pending_action.as_ref();
+        let pending_matches = pending.is_some_and(|pending| {
+            pending.boot_id == snapshot_boot_id
+                && pending.projection_revision == snapshot_revision
+                && pending.request_id == result.request_id
+                && pending.action_id == result.action_id
+                && pending.pane_id == result.pane_id
+                && pending.contribution_revision == result.contribution_revision
+                && pending.owner_service_id == contribution.owner_service_id
+                && Some(pending.service_generation) == inspector.service_generation
+        });
+        if !pending_matches
+            || result.pane_id != inspector.pane_id
+            || result.contribution_revision != contribution.revision
+            || !contribution
+                .actions
+                .iter()
+                .any(|action| action.id == result.action_id)
+        {
+            return false;
+        }
+        let Some(pending) = inspector.pending_action.take() else {
+            return false;
+        };
+        if let Some(error) = result.error {
+            inspector.error = Some(error);
+            return true;
+        }
+        if let Some(token) = result.confirmation_token {
+            let Some(contribution_request_id) = inspector.view_request_id.clone() else {
+                return false;
+            };
+            self.overlay = Some(ClientShellOverlay::PaneInterruptConfirm(
+                ClientPaneInterruptConfirmOverlay {
+                    endpoint_id: self.active_endpoint_id.clone(),
+                    boot_id: pending.boot_id,
+                    projection_revision: pending.projection_revision,
+                    pane_id: pending.pane_id,
+                    contribution_request_id,
+                    contribution_revision: pending.contribution_revision,
+                    owner_service_id: pending.owner_service_id,
+                    service_generation: pending.service_generation,
+                    action_request_id: pending.request_id,
+                    confirmation_token: token,
+                },
+            ));
+            return true;
+        }
+        false
+    }
+
+    pub(super) fn pane_interrupt_confirmation_is_current(
+        &self,
+        confirm: &ClientPaneInterruptConfirmOverlay,
+    ) -> bool {
+        if confirm.endpoint_id != self.active_endpoint_id {
+            return false;
+        }
+        let Some(snapshot) = self.snapshot.as_deref() else {
+            return false;
+        };
+        let Some(inspector) = self.inspector.as_ref() else {
+            return false;
+        };
+        let Some(contribution) = inspector.contribution.as_ref() else {
+            return false;
+        };
+        snapshot.boot_id == confirm.boot_id
+            && snapshot.revision == confirm.projection_revision
+            && inspector.pane_id == confirm.pane_id
+            && inspector.view_request_id.as_deref()
+                == Some(confirm.contribution_request_id.as_str())
+            && contribution.revision == confirm.contribution_revision
+            && contribution.owner_service_id == confirm.owner_service_id
+            && inspector.service_generation == Some(confirm.service_generation)
+            && !confirm.action_request_id.is_empty()
+    }
+
+    pub(crate) fn handle_pane_view_result(
+        &mut self,
+        endpoint_id: &ClientEndpointId,
+        generation: u64,
+        result: crate::protocol::endpoint::ServerPaneViewResult,
+    ) -> bool {
+        if endpoint_id != &self.active_endpoint_id
+            || !self.endpoint_snapshot_matches(
+                endpoint_id,
+                generation,
+                &result.boot_id,
+                result.projection_revision,
+            )
+        {
+            return false;
+        }
+        let Some(snapshot) = self.snapshot.as_deref() else {
+            return false;
+        };
+        let Some(inspector) = self.inspector.as_mut() else {
+            return false;
+        };
+        let matches = result.boot_id == snapshot.boot_id
+            && result.projection_revision == snapshot.revision
+            && result.pane_id == inspector.pane_id
+            && result.contribution_revision == inspector.request_revision
+            && inspector.view_request_id.as_deref() == Some(result.request_id.as_str());
+        if !matches {
+            return false;
+        }
+        inspector.loading = false;
+        if let Some(error) = result.error {
+            inspector.error = Some(error);
+            return true;
+        }
+        let Some(document) = result.document else {
+            inspector.error = Some("Extension returned no view document.".into());
+            return true;
+        };
+        let contribution = crate::pane_contribution::PaneContribution {
+            owner_service_id: result.owner_service_id,
+            target: crate::pane_contribution::PaneContributionTarget::Pane {
+                pane_id: result.pane_id,
+            },
+            placement: inspector.placement,
+            revision: result.contribution_revision,
+            document,
+            actions: result.actions,
+        };
+        if let Err(error) = contribution.validate() {
+            inspector.error = Some(error.to_string());
+            return true;
+        }
+        inspector.service_generation = Some(result.service_generation);
+        inspector.contribution = Some(contribution);
+        inspector.error = None;
+        true
+    }
+
     pub(crate) fn handle_endpoint_result(
         &mut self,
         boot_id: &str,
@@ -592,20 +809,48 @@ impl ClientShellState {
                 };
             }
             PendingEndpointKind::TerminalInspector { pane_id } => {
-                let Some(ClientShellOverlay::TerminalInspector(inspector)) = self.overlay.as_mut()
-                else {
+                let pane_view_pending = self
+                    .supports_endpoint_capability(crate::protocol::endpoint::PANE_VIEW_CAPABILITY);
+                let Some(inspector) = self.inspector.as_mut() else {
                     return (false, Vec::new());
                 };
                 if inspector.pane_id != pane_id {
                     return (false, Vec::new());
                 }
-                inspector.loading = false;
+                inspector.loading = pane_view_pending;
                 match result {
-                    Ok(crate::api::schema::ResponseResult::PaneTelemetry { telemetry })
+                    Ok(crate::api::schema::ResponseResult::PaneTelemetry { mut telemetry })
                         if telemetry.pane_id == pane_id =>
                     {
+                        let unowned_document =
+                            telemetry.document.is_some() && telemetry.document_owner.is_none();
+                        if telemetry.document.is_some() {
+                            inspector.contribution = telemetry
+                                .document
+                                .take()
+                                .zip(telemetry.document_owner.clone())
+                                .and_then(|(document, owner_service_id)| {
+                                    let contribution = crate::pane_contribution::PaneContribution {
+                                        owner_service_id,
+                                        target:
+                                            crate::pane_contribution::PaneContributionTarget::Pane {
+                                                pane_id: pane_id.clone(),
+                                            },
+                                        placement: inspector.placement,
+                                        revision: inspector.request_revision,
+                                        actions: Vec::new(),
+                                        document,
+                                    };
+                                    contribution.validate().ok().map(|_| contribution)
+                                });
+                        }
                         inspector.telemetry = Some(telemetry);
-                        inspector.error = None;
+                        if unowned_document {
+                            inspector.error =
+                                Some("Rejected an unowned extension document.".to_owned());
+                        } else if inspector.contribution.is_none() {
+                            inspector.error = None;
+                        }
                     }
                     Ok(_) => {
                         inspector.error =

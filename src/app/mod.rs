@@ -161,8 +161,7 @@ pub struct App {
     endpoint_commands: custom_commands::EndpointCommandRegistry,
     pub(crate) terminal_telemetry_cache:
         HashMap<crate::terminal::TerminalId, terminal_inspector::CachedTerminalTelemetry>,
-    pub(crate) extension_services:
-        std::collections::BTreeMap<String, crate::extension_service::ExtensionServiceSupervisor>,
+    pub(crate) extension_services: crate::extension_service::ExtensionServiceManager,
 }
 
 pub(crate) const APP_EVENT_CHANNEL_CAPACITY: usize = 256;
@@ -477,7 +476,7 @@ impl App {
         let (theme_palette, theme_name) = resolve_effective_theme(&theme_runtime, None);
         let installed_plugins = load_plugin_registry(policy.persist_plugin_registry);
         let extension_services =
-            crate::extension_service::supervisors_for_plugins(&installed_plugins);
+            crate::extension_service::manager_for_plugins(&installed_plugins, event_tx.clone());
 
         let mut state = AppState {
             terminals: std::collections::HashMap::new(),

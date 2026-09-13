@@ -74,6 +74,53 @@ fn state_with_remote() -> (ClientShellState, ClientEndpointId) {
 }
 
 #[test]
+fn endpoint_switch_and_rollback_restore_matching_cached_structure() {
+    fn structure(
+        session_id: &str,
+        boot_id: &str,
+    ) -> Box<crate::protocol::endpoint::ClientShellStructureProjection> {
+        Box::new(crate::protocol::endpoint::ClientShellStructureProjection {
+            session_id: session_id.into(),
+            boot_id: boot_id.into(),
+            revision: 1,
+            collections: Vec::new(),
+            delegations: Vec::new(),
+        })
+    }
+
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    let profile = remote_profile();
+    let remote = ClientEndpointId::Ssh(profile.id.clone());
+    state.set_endpoint_catalog(&[profile]);
+    state.set_endpoint_status(&remote, ClientEndpointStatus::Online);
+    let local = ClientEndpointId::Local;
+    state.set_endpoint_structure_for_generation(&local, 1, structure("local", "boot-1"));
+    state.set_endpoint_snapshot_for_generation(&local, 1, Box::new(snapshot()));
+
+    let mut remote_snapshot = snapshot();
+    remote_snapshot.boot_id = "remote-boot".into();
+    state.set_endpoint_structure_for_generation(&remote, 1, structure("remote", "remote-boot"));
+    state.set_endpoint_snapshot_for_generation(&remote, 1, Box::new(remote_snapshot));
+
+    assert!(state.activate_endpoint_projection(&remote));
+    assert_eq!(
+        state
+            .structure
+            .as_ref()
+            .map(|value| value.session_id.as_str()),
+        Some("remote")
+    );
+    assert!(state.activate_endpoint_projection(&local));
+    assert_eq!(
+        state
+            .structure
+            .as_ref()
+            .map(|value| value.session_id.as_str()),
+        Some("local")
+    );
+}
+
+#[test]
 fn switching_machines_from_copy_mode_restores_terminal_input() {
     let (mut state, remote) = state_with_remote();
     let mut local_surface = surface();
@@ -1415,6 +1462,75 @@ fn new_connection_generation_accepts_a_lower_same_boot_projection_revision() {
         endpoint.snapshot.as_ref().unwrap().workspaces[0].label,
         "new connection"
     );
+}
+
+#[test]
+fn newer_active_connection_generation_accepts_lower_same_boot_revision_coherently() {
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    let endpoint_id = ClientEndpointId::Local;
+    let mut old = snapshot();
+    old.boot_id = "shared-boot".into();
+    old.revision = 9;
+    old.workspaces[0].label = "old".into();
+    state.set_endpoint_snapshot_for_generation(&endpoint_id, 4, Box::new(old));
+    let mut new = snapshot();
+    new.boot_id = "shared-boot".into();
+    new.revision = 1;
+    new.workspaces[0].label = "new".into();
+    state.set_endpoint_snapshot_for_generation(&endpoint_id, 5, Box::new(new));
+
+    assert_eq!(state.snapshot.as_ref().unwrap().revision, 1);
+    assert_eq!(state.snapshot.as_ref().unwrap().workspaces[0].label, "new");
+    assert!(state.endpoint_snapshot_matches(&endpoint_id, 5, "shared-boot", 1));
+}
+
+#[test]
+fn delayed_older_connection_generation_cannot_replace_snapshot_or_structure() {
+    let (mut state, endpoint_id) = state_with_remote();
+    let mut current = snapshot();
+    current.boot_id = "current-boot".into();
+    current.workspaces[0].label = "current".into();
+    state.cache_endpoint_snapshot_inactive_for_generation(&endpoint_id, 5, Box::new(current));
+    state.set_endpoint_structure_for_generation(
+        &endpoint_id,
+        5,
+        Box::new(crate::protocol::endpoint::ClientShellStructureProjection {
+            session_id: "current".into(),
+            boot_id: "current-boot".into(),
+            revision: 1,
+            collections: Vec::new(),
+            delegations: Vec::new(),
+        }),
+    );
+
+    let mut delayed = snapshot();
+    delayed.boot_id = "delayed-boot".into();
+    delayed.workspaces[0].label = "delayed".into();
+    state.cache_endpoint_snapshot_inactive_for_generation(&endpoint_id, 4, Box::new(delayed));
+    state.set_endpoint_structure_for_generation(
+        &endpoint_id,
+        4,
+        Box::new(crate::protocol::endpoint::ClientShellStructureProjection {
+            session_id: "delayed".into(),
+            boot_id: "delayed-boot".into(),
+            revision: 1,
+            collections: Vec::new(),
+            delegations: Vec::new(),
+        }),
+    );
+
+    let endpoint = state
+        .endpoints
+        .iter()
+        .find(|endpoint| endpoint.endpoint_id == endpoint_id)
+        .unwrap();
+    assert_eq!(endpoint.snapshot_generation, Some(5));
+    assert_eq!(
+        endpoint.snapshot.as_ref().unwrap().workspaces[0].label,
+        "current"
+    );
+    assert_eq!(endpoint.structure_generation, Some(5));
+    assert_eq!(endpoint.structure.as_ref().unwrap().session_id, "current");
 }
 
 #[test]

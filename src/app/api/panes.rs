@@ -548,7 +548,7 @@ impl App {
         )
     }
 
-    pub(super) fn handle_pane_telemetry(
+    pub(crate) fn handle_pane_telemetry(
         &mut self,
         id: String,
         params: PaneTelemetryParams,
@@ -570,7 +570,7 @@ impl App {
             return encode_error(id, "pane_not_found", "pane not found");
         };
         let sample = self.terminal_telemetry(&terminal_id, shell_pid, std::time::Instant::now());
-        let mut telemetry = PaneTelemetry {
+        let telemetry = PaneTelemetry {
             pane_id: public_pane_id,
             availability: sample.availability,
             detail: sample.detail,
@@ -583,9 +583,9 @@ impl App {
             display_agent: pane.display_agent,
             agent_status: pane.agent_status,
             state_labels: pane.state_labels,
+            document_owner: None,
             document: None,
         };
-        telemetry.document = self.render_extension_inspector(&telemetry);
         encode_success(id, ResponseResult::PaneTelemetry { telemetry })
     }
 

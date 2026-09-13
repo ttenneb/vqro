@@ -1658,8 +1658,28 @@ impl ClientShellState {
             if super::contains(self.hits.overlay_primary, point) {
                 match self.overlay.as_ref() {
                     Some(ClientShellOverlay::Rename(_)) => self.save_rename_overlay(outcome),
-                    Some(ClientShellOverlay::TerminalInspector(_)) => {
-                        self.overlay = None;
+                    Some(ClientShellOverlay::PaneInterruptConfirm(_)) => {
+                        let Some(ClientShellOverlay::PaneInterruptConfirm(confirm)) =
+                            self.overlay.take()
+                        else {
+                            return;
+                        };
+                        if self.pane_interrupt_confirmation_is_current(&confirm) {
+                            let request = crate::protocol::endpoint::ClientPaneViewConfirm {
+                                boot_id: confirm.boot_id,
+                                confirmation_token: confirm.confirmation_token,
+                            };
+                            if let Ok(data) = serde_json::to_string(&request) {
+                                outcome.actions.push(ClientShellAction::EndpointControl {
+                                    endpoint_id: self.active_endpoint_id.clone(),
+                                    message: ClientMessage::EndpointControl {
+                                        kind: crate::protocol::endpoint::PANE_VIEW_CONFIRM_KIND
+                                            .into(),
+                                        data,
+                                    },
+                                });
+                            }
+                        }
                         outcome.repaint = true;
                     }
                     Some(ClientShellOverlay::ConfirmClose(_)) => {
@@ -1667,15 +1687,27 @@ impl ClientShellState {
                         else {
                             return;
                         };
-                        self.push_endpoint_method(
-                            crate::api::schema::Method::WorkspaceClose(
-                                crate::api::schema::WorkspaceCloseParams {
-                                    workspace_id: confirm.workspace_id,
-                                    close_group: true,
-                                },
-                            ),
-                            outcome,
-                        );
+                        let method = match confirm.target {
+                            ClientConfirmCloseTarget::Workspace { workspace_id } => {
+                                crate::api::schema::Method::WorkspaceClose(
+                                    crate::api::schema::WorkspaceCloseParams {
+                                        workspace_id,
+                                        close_group: true,
+                                    },
+                                )
+                            }
+                            ClientConfirmCloseTarget::Collection { collection_id } => {
+                                crate::api::schema::Method::CollectionClose(
+                                    crate::api::schema::CollectionCloseParams {
+                                        collection_id,
+                                        disposition: Some(
+                                            crate::api::schema::CollectionCloseDisposition::CascadeClose,
+                                        ),
+                                    },
+                                )
+                            }
+                        };
+                        self.push_endpoint_method(method, outcome);
                         outcome.repaint = true;
                     }
                     _ => {}
@@ -1691,6 +1723,290 @@ impl ClientShellState {
                 outcome.repaint = true;
             }
             return;
+        }
+
+        if matches!(
+            mouse.kind,
+            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+        ) && mouse
+            .modifiers
+            .contains(crossterm::event::KeyModifiers::ALT)
+        {
+            if let Some(member) = self
+                .hits
+                .collection_members
+                .iter()
+                .find(|member| !member.preview.is_empty() && super::contains(member.preview, point))
+                .cloned()
+            {
+                let height = self
+                    .collection_preview_heights
+                    .entry(member.pane_id)
+                    .or_insert(member.preview.height);
+                *height = match mouse.kind {
+                    MouseEventKind::ScrollUp => height.saturating_add(1).min(40),
+                    MouseEventKind::ScrollDown => height.saturating_sub(1).max(2),
+                    _ => *height,
+                };
+                outcome.repaint = true;
+                return;
+            }
+        }
+
+        if let Some(collection) = self
+            .hits
+            .collections
+            .iter()
+            .find(|hit| {
+                super::contains(hit.rect, point)
+                    || (matches!(
+                        mouse.kind,
+                        MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+                    ) && self.collection_list_views.contains(&hit.collection_id)
+                        && super::contains(hit.body, point)
+                        && !self.hits.collection_members.iter().any(|member| {
+                            self.collection_entered_pane.as_deref() == Some(member.pane_id.as_str())
+                                && !member.preview.is_empty()
+                                && super::contains(member.preview, point)
+                        }))
+            })
+            .cloned()
+        {
+            if self
+                .collection_list_views
+                .contains(&collection.collection_id)
+                && super::contains(collection.body, point)
+                && matches!(
+                    mouse.kind,
+                    MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+                )
+            {
+                let member_count =
+                    self.structure
+                        .as_deref()
+                        .and_then(|structure| {
+                            structure.collections.iter().find(|candidate| {
+                                candidate.collection_id == collection.collection_id
+                            })
+                        })
+                        .map_or(0, |collection| collection.members.len());
+                let scroll = self
+                    .collection_list_scroll
+                    .entry(collection.collection_id)
+                    .or_default();
+                *scroll = match mouse.kind {
+                    MouseEventKind::ScrollUp => scroll.saturating_sub(1),
+                    MouseEventKind::ScrollDown => {
+                        scroll.saturating_add(1).min(member_count.saturating_sub(1))
+                    }
+                    _ => *scroll,
+                };
+                outcome.repaint = true;
+                return;
+            }
+            let target =
+                match mouse.kind {
+                    MouseEventKind::Down(MouseButton::Right)
+                        if super::contains(collection.rect, point) =>
+                    {
+                        self.overlay =
+                            Some(ClientShellOverlay::ContextMenu(ClientContextMenuOverlay {
+                                target: ClientContextMenuTarget::Collection {
+                                    collection_id: collection.collection_id,
+                                },
+                                x: mouse.column,
+                                y: mouse.row,
+                                highlighted: 0,
+                            }));
+                        outcome.repaint = true;
+                        return;
+                    }
+                    MouseEventKind::ScrollUp => collection.previous_pane_id.clone(),
+                    MouseEventKind::ScrollDown => collection.next_pane_id.clone(),
+                    MouseEventKind::Down(MouseButton::Left)
+                        if super::contains(collection.previous, point) =>
+                    {
+                        collection.previous_pane_id.clone()
+                    }
+                    MouseEventKind::Down(MouseButton::Left)
+                        if super::contains(collection.next, point) =>
+                    {
+                        collection.next_pane_id.clone()
+                    }
+                    MouseEventKind::Down(MouseButton::Left)
+                        if super::contains(collection.presentation_toggle, point) =>
+                    {
+                        let terminal_views = self.supports_endpoint_capability(
+                            crate::protocol::endpoint::TERMINAL_VIEWS_CAPABILITY,
+                        );
+                        if self
+                            .collection_list_views
+                            .insert(collection.collection_id.clone())
+                        {
+                            if terminal_views {
+                                self.collection_expanded_members
+                                    .entry(collection.collection_id.clone())
+                                    .or_default()
+                                    .insert(collection.selected_pane_id.clone());
+                            }
+                        } else {
+                            self.collection_list_views.remove(&collection.collection_id);
+                            self.collection_entered_pane = None;
+                            if self.collection_maximized_pane.as_ref().is_some_and(
+                                |(collection_id, _)| collection_id == &collection.collection_id,
+                            ) {
+                                self.collection_maximized_pane = None;
+                            }
+                        }
+                        if self.inspector.is_some() {
+                            self.close_terminal_inspector(outcome);
+                        }
+                        outcome.repaint = true;
+                        return;
+                    }
+                    MouseEventKind::Down(MouseButton::Left)
+                        if super::contains(collection.inspect, point) =>
+                    {
+                        if self.inspector.as_ref().is_some_and(|inspector| {
+                            inspector.pane_id == collection.selected_pane_id
+                        }) {
+                            self.close_terminal_inspector(outcome);
+                        } else {
+                            self.open_terminal_inspector(collection.selected_pane_id, outcome);
+                        }
+                        outcome.repaint = true;
+                        return;
+                    }
+                    _ => None,
+                };
+            if let Some(pane_id) = target {
+                self.collection_entered_pane = None;
+                if self.inspector.is_some() {
+                    self.close_terminal_inspector(outcome);
+                }
+                self.push_endpoint_method(
+                    crate::api::schema::Method::CollectionSelect(
+                        crate::api::schema::CollectionSelectParams {
+                            collection_id: collection.collection_id,
+                            pane_id,
+                            focus: true,
+                        },
+                    ),
+                    outcome,
+                );
+                outcome.repaint = true;
+            }
+            return;
+        }
+
+        if mouse.kind == MouseEventKind::Down(MouseButton::Right) {
+            if let Some(member) = self
+                .hits
+                .collection_members
+                .iter()
+                .find(|member| super::contains(member.rect, point))
+                .cloned()
+            {
+                self.open_pane_context_menu(member.pane_id, mouse.column, mouse.row);
+                outcome.repaint = true;
+                return;
+            }
+        }
+
+        if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
+            if let Some(member) = self
+                .hits
+                .collection_members
+                .iter()
+                .find(|member| super::contains(member.rect, point))
+                .cloned()
+            {
+                if super::contains(member.disclosure, point) {
+                    if !self.supports_endpoint_capability(
+                        crate::protocol::endpoint::TERMINAL_VIEWS_CAPABILITY,
+                    ) {
+                        return;
+                    }
+                    let expanded = self
+                        .collection_expanded_members
+                        .entry(member.collection_id)
+                        .or_default();
+                    if !expanded.insert(member.pane_id.clone()) {
+                        expanded.remove(&member.pane_id);
+                        if self.collection_entered_pane.as_deref() == Some(member.pane_id.as_str())
+                        {
+                            self.collection_entered_pane = None;
+                        }
+                    }
+                } else {
+                    self.collection_entered_pane = None;
+                    self.push_endpoint_method(
+                        crate::api::schema::Method::CollectionSelect(
+                            crate::api::schema::CollectionSelectParams {
+                                collection_id: member.collection_id,
+                                pane_id: member.pane_id,
+                                focus: true,
+                            },
+                        ),
+                        outcome,
+                    );
+                }
+                outcome.repaint = true;
+                return;
+            }
+            if let Some(member) = self
+                .hits
+                .collection_members
+                .iter()
+                .find(|member| !member.preview.is_empty() && super::contains(member.preview, point))
+                .cloned()
+            {
+                self.collection_entered_pane = Some(member.pane_id);
+            }
+        }
+
+        if super::contains(self.hits.inspector_body, point) {
+            if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
+                if let Some(inspector) = self.inspector.as_mut() {
+                    inspector.focused = true;
+                }
+                if let Some((_, action_id)) = self
+                    .hits
+                    .contribution_actions
+                    .iter()
+                    .find(|(rect, _)| super::contains(*rect, point))
+                    .cloned()
+                {
+                    self.activate_pane_contribution_action(&action_id, outcome);
+                    outcome.repaint = true;
+                } else if super::contains(self.hits.inspector_close, point) {
+                    if self.inspector.is_some() {
+                        self.close_terminal_inspector(outcome);
+                    }
+                    outcome.repaint = true;
+                } else if super::contains(self.hits.inspector_refresh, point) {
+                    if let Some(pane_id) = self
+                        .inspector
+                        .as_ref()
+                        .map(|inspector| inspector.pane_id.clone())
+                    {
+                        self.refresh_terminal_inspector(pane_id, outcome);
+                        outcome.repaint = true;
+                    }
+                }
+            }
+            return;
+        }
+
+        if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
+            if let Some(inspector) = self.inspector.as_mut() {
+                if self.hits.panes.iter().any(|pane| {
+                    pane.pane_id == inspector.pane_id && super::contains(pane.inner_rect, point)
+                }) {
+                    inspector.focused = false;
+                    outcome.repaint = true;
+                }
+            }
         }
 
         if mouse.kind == MouseEventKind::Drag(MouseButton::Left) {

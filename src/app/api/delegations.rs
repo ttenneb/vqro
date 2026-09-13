@@ -97,10 +97,9 @@ impl App {
         )
     }
 
-    pub(crate) fn handle_delegation_tree(&self, request_id: String) -> String {
+    pub(crate) fn delegation_tree(&self) -> Vec<DelegationTreeEntry> {
         let included = self.state.delegations.records().keys().copied().collect();
-        let delegations = self
-            .state
+        self.state
             .delegations
             .preorder_projection(&included)
             .into_iter()
@@ -110,8 +109,16 @@ impl App {
                     depth: entry.depth,
                 })
             })
-            .collect();
-        responses::encode_success(request_id, ResponseResult::DelegationTree { delegations })
+            .collect()
+    }
+
+    pub(crate) fn handle_delegation_tree(&self, request_id: String) -> String {
+        responses::encode_success(
+            request_id,
+            ResponseResult::DelegationTree {
+                delegations: self.delegation_tree(),
+            },
+        )
     }
 
     pub(crate) fn handle_delegation_root(

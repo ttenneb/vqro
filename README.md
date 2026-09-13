@@ -12,20 +12,26 @@ vqro is exploring an open, terminal-native multiplexer for organizing human and 
 - **Work has structure.** Sessions should organize repositories, checkouts, related terminals, and parallel agents without hiding their underlying capabilities.
 - **Coexistence is safe.** vqro and Herdr must not accidentally share mutable state, sockets, protocols, plugins, or update channels.
 
-## Alpha status
+## Alpha implementation status
 
-The integrated alpha is ready for local Linux dogfooding. It currently includes:
+The integrated slice is under active review and is not yet merge-ready. The current uncommitted dogfood build implements:
 
 - an isolated `vqro` binary, config/state directories, sockets, sessions, logs, environment routing, and temporary runtime paths;
 - repository-aware **Spaces** that group primary and linked checkouts while preserving ordinary non-Git workspaces;
-- pane **Collections** with ordered members, selection, archive/restore, promotion, persistence, and delegation provenance;
-- an on-demand terminal inspector with privacy-safe Linux CPU, memory, thread, and I/O telemetry plus agent activity;
+- pane **Collections** with compact terminal and client-local nested-list presentations, multiple independently interactive inline PTY previews, ordered/delegation-indented members, archive/restore, promotion, persistence, and provenance indicators;
+- an on-demand terminal/resource/agent inspector rendered as an embedded pane component—not a global popup—with privacy-safe Linux CPU, memory, thread, and I/O telemetry;
 - supervised out-of-process extension services using bounded, versioned JSON framing; and
-- constrained declarative inspector documents rendered and styled by the native client shell.
+- constrained declarative pane documents rendered and styled by the native client shell.
 
-The bundled reference formatter is under [`extensions/terminal-inspector`](extensions/terminal-inspector). Link it with `vqro plugin link ./extensions/terminal-inspector`, restart the vqro server, then use **Inspect terminal** from a pane context menu.
+A collection header’s **list** control switches that client from the compact selected-terminal presentation to the nested list. Rows preserve delegation depth and active/archive status. Click a disclosure glyph or press Space to expand a child, click an inline terminal or press Enter to enter it, and use the configured prefix followed by Esc to return to list mode. `z` maximizes/restores the selected child within the collection, `+`/`-` adjust its preview height, `a` archives/restores it, `p` promotes it beside an ordinary pane, and Ctrl+Up/Ctrl+Down reorder it. Mouse wheel or PageUp/PageDown scrolls the list. Each preview remains a real independently addressable PTY; list geometry and interaction state are client-local.
 
-This remains an alpha: contracts may evolve, remote vqro deployment is not yet a supported release path, and inherited agent-integration install/remove commands are disabled until their assets have a fully isolated vqro namespace. Process-based agent detection remains available. The retained upstream documentation below still describes Herdr.
+The bundled reference extension is under [`extensions/terminal-inspector`](extensions/terminal-inspector). Link it with `vqro plugin link ./extensions/terminal-inspector`, restart the vqro server, then use **Inspect terminal** from a pane context menu or the collection header’s **inspect** control. The supervised service returns a bounded declarative contribution; vqro renders it inside the target pane while the rest of the workspace remains interactive.
+
+Extension services are **trusted same-user subprocesses, not sandboxed plugins**. Requested/granted capabilities constrain what the vqro service protocol will perform, but cannot remove the subprocess's ordinary operating-system access. vqro does not inject its API socket by default. The reference extension receives explicit `view_contribution` and `terminal_interrupt` protocol grants; terminal interruption is a host-defined Ctrl-C effect bound to the contribution's exact pane and requires host-rendered user confirmation.
+
+Supervised extension services are Linux-only in this alpha. The Windows host fails closed and does not start them until process trees can be contained with a Job Object; this boundary does not disable the rest of vqro's Windows client/server functionality.
+
+This remains work-in-progress alpha software: contracts may evolve, final project gates are still pending, remote vqro deployment is not yet a supported release path, and inherited agent-integration install/remove commands are disabled until their assets have a fully isolated vqro namespace. Process-based agent detection remains available. The retained upstream documentation below still describes Herdr.
 
 vqro is not affiliated with or endorsed by the Herdr project. It will retain upstream attribution, track useful upstream work where practical, and treat interoperability as an explicit compatibility contract rather than an assumption.
 

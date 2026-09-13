@@ -120,6 +120,94 @@ fn workspace_report_metadata_sends_token_patch() {
 }
 
 #[test]
+fn collection_create_sends_collection_api_request() {
+    let base = unique_test_dir();
+    fs::create_dir_all(&base).unwrap();
+    let socket_path = base.join("vqro.sock");
+    let listener = UnixListener::bind(&socket_path).unwrap();
+
+    let server = thread::spawn(move || {
+        let (mut stream, line) = accept_fake_cli_operation(&listener);
+        stream
+            .write_all(br#"{"id":"cli:collection","result":{"type":"ok"}}"#)
+            .unwrap();
+        stream.write_all(b"\n").unwrap();
+        stream.flush().unwrap();
+        line
+    });
+
+    let run = run_cli(
+        &socket_path,
+        &[
+            "collection",
+            "create",
+            "--target-pane",
+            "w1:p1",
+            "--direction",
+            "right",
+            "--ratio",
+            "0.4",
+            "--label",
+            "reviewers",
+            "--focus",
+        ],
+    );
+    assert!(
+        run.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+
+    let request: serde_json::Value = serde_json::from_str(&server.join().unwrap()).unwrap();
+    assert_eq!(request["id"], "cli:collection");
+    assert_eq!(request["method"], "collection.create");
+    assert_eq!(request["params"]["target_pane_id"], "w1:p1");
+    assert_eq!(request["params"]["direction"], "right");
+    assert_eq!(request["params"]["ratio"], 0.4);
+    assert_eq!(request["params"]["label"], "reviewers");
+    assert_eq!(request["params"]["focus"], true);
+
+    cleanup_test_base(&base);
+}
+
+#[test]
+fn delegation_reorder_sends_delegation_api_request() {
+    let base = unique_test_dir();
+    fs::create_dir_all(&base).unwrap();
+    let socket_path = base.join("vqro.sock");
+    let listener = UnixListener::bind(&socket_path).unwrap();
+
+    let server = thread::spawn(move || {
+        let (mut stream, line) = accept_fake_cli_operation(&listener);
+        stream
+            .write_all(br#"{"id":"cli:delegation","result":{"type":"ok"}}"#)
+            .unwrap();
+        stream.write_all(b"\n").unwrap();
+        stream.flush().unwrap();
+        line
+    });
+
+    let run = run_cli(
+        &socket_path,
+        &["delegation", "reorder", "d2", "--before", "d1"],
+    );
+    assert!(
+        run.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+
+    let request: serde_json::Value = serde_json::from_str(&server.join().unwrap()).unwrap();
+    assert_eq!(request["id"], "cli:delegation");
+    assert_eq!(request["method"], "delegation.reorder");
+    assert_eq!(request["params"]["delegation_id"], "d2");
+    assert_eq!(request["params"]["position"]["type"], "before");
+    assert_eq!(request["params"]["position"]["delegation_id"], "d1");
+
+    cleanup_test_base(&base);
+}
+
+#[test]
 fn pane_report_metadata_sends_presentation_request() {
     let base = unique_test_dir();
     fs::create_dir_all(&base).unwrap();
@@ -437,6 +525,10 @@ fn completion_command_prints_zsh_script_without_session_startup() {
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("#compdef vqro"), "stdout: {stdout}");
+    assert!(
+        stdout.contains("collection") && stdout.contains("delegation"),
+        "zsh completions should include collection and delegation commands: {stdout}"
+    );
     assert!(
         !stdout.contains("--cwd=[]"),
         "zsh completions should not suggest equals-style values unsupported by most manual parsers: {stdout}"

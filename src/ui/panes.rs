@@ -54,6 +54,29 @@ pub(crate) fn pane_inner_rect(area: Rect, borders: Borders) -> Rect {
     }
 }
 
+/// Collections reserve their first inner row for structural chrome. The server
+/// owns this geometry even while clients choose not to render the header.
+fn collection_content_rect(
+    tab: &crate::workspace::Tab,
+    pane_id: crate::layout::PaneId,
+    area: Rect,
+) -> Rect {
+    if !tab
+        .layout
+        .collections()
+        .any(|collection| collection.selected() == Some(pane_id))
+        || area.height == 0
+    {
+        return area;
+    }
+    Rect::new(
+        area.x,
+        area.y.saturating_add(1),
+        area.width,
+        area.height.saturating_sub(1),
+    )
+}
+
 fn ranges_overlap(a_start: u16, a_len: u16, b_start: u16, b_len: u16) -> bool {
     a_start < b_start.saturating_add(b_len) && b_start < a_start.saturating_add(a_len)
 }
@@ -225,7 +248,8 @@ pub(super) fn resize_tab_panes(
             } else {
                 Borders::NONE
             };
-            let pane_inner = pane_inner_rect(area, borders);
+            let pane_inner =
+                collection_content_rect(tab, focused_id, pane_inner_rect(area, borders));
             let inner_rect = terminal_inner_rect(rt, pane_inner, app.pane_scrollbars);
             if !app.direct_attach_resize_locks.contains(terminal_id) {
                 rt.resize(
@@ -245,7 +269,8 @@ pub(super) fn resize_tab_panes(
         app.pane_gaps,
         app.pane_outer_borders,
     ) {
-        let pane_inner = pane_inner_rect(info.rect, info.borders);
+        let pane_inner =
+            collection_content_rect(tab, info.id, pane_inner_rect(info.rect, info.borders));
 
         if let Some((terminal_id, rt)) =
             runtime_for_tab_pane(app, terminal_runtimes, workspace_index, tab, info.id)
@@ -290,7 +315,7 @@ pub(super) fn compute_pane_infos_for_tab(
         } else {
             Borders::NONE
         };
-        let pane_inner = pane_inner_rect(area, borders);
+        let pane_inner = collection_content_rect(tab, focused_id, pane_inner_rect(area, borders));
         let mut inner_rect = pane_inner;
         let mut scrollbar_rect = None;
         if let Some(rt) = app.runtime_for_pane_in_workspace(terminal_runtimes, ws_idx, focused_id) {
@@ -327,7 +352,8 @@ pub(super) fn compute_pane_infos_for_tab(
     );
 
     for info in &mut pane_infos {
-        let pane_inner = pane_inner_rect(info.rect, info.borders);
+        let pane_inner =
+            collection_content_rect(tab, info.id, pane_inner_rect(info.rect, info.borders));
 
         let mut inner_rect = pane_inner;
         let mut scrollbar_rect = None;
@@ -1165,6 +1191,64 @@ mod tests {
         let buffer = terminal.backend().buffer();
         assert_eq!(buffer[(1, 1)].style().fg, Some(app.palette.accent));
         assert_eq!(buffer[(2, 1)].style().fg, Some(app.palette.overlay0));
+    }
+
+    #[tokio::test]
+    async fn collection_preview_reserves_one_header_row_from_terminal_geometry() {
+        let mut app = AppState::test_new();
+        app.pane_borders = false;
+        app.pane_scrollbars = false;
+        let mut workspace = Workspace::test_new("test");
+        let root = workspace.tabs[0].root_pane;
+        let member = workspace.test_split(ratatui::layout::Direction::Horizontal);
+        let collection = workspace.tabs[0]
+            .create_collection_near(
+                crate::layout::LayoutLeaf::Pane(root),
+                ratatui::layout::Direction::Vertical,
+                0.5,
+                Some("reviewers".into()),
+            )
+            .expect("create collection");
+        workspace.tabs[0]
+            .collect_tiled_pane(member, collection)
+            .expect("collect member");
+        workspace.tabs[0].runtimes.insert(
+            member,
+            TerminalRuntime::test_with_scrollback_bytes(40, 8, 1024, b"ready\n"),
+        );
+        app.workspaces = vec![workspace];
+        app.active = Some(0);
+
+        let infos = compute_pane_infos(
+            &app,
+            &TerminalRuntimeRegistry::new(),
+            Rect::new(0, 0, 80, 20),
+            true,
+            crate::kitty_graphics::HostCellSize::default(),
+        );
+        let tiled = infos.iter().find(|info| info.id == root).unwrap();
+        let preview = infos.iter().find(|info| info.id == member).unwrap();
+
+        assert_eq!(tiled.inner_rect, tiled.rect);
+        assert_eq!(preview.inner_rect.y, preview.rect.y + 1);
+        assert_eq!(preview.inner_rect.height, preview.rect.height - 1);
+        assert_eq!(
+            app.workspaces[0].tabs[0].runtimes[&member].current_size(),
+            (preview.inner_rect.height, preview.inner_rect.width)
+        );
+
+        app.workspaces[0].tabs[0].zoomed = true;
+        assert!(app.workspaces[0].tabs[0]
+            .layout
+            .focus_leaf(crate::layout::LayoutLeaf::Collection(collection)));
+        let zoomed = compute_pane_infos(
+            &app,
+            &TerminalRuntimeRegistry::new(),
+            Rect::new(0, 0, 80, 20),
+            true,
+            crate::kitty_graphics::HostCellSize::default(),
+        );
+        assert_eq!(zoomed[0].inner_rect, Rect::new(0, 1, 80, 19));
     }
 
     #[tokio::test]

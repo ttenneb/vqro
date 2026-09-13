@@ -1,8 +1,8 @@
 use crate::api::schema::{
-    InstalledPluginInfo, PluginManifestAction, PluginManifestBuild, PluginManifestEventHook,
-    PluginManifestLinkHandler, PluginManifestPane, PluginManifestService, PluginManifestStartup,
-    PluginPanePlacement, PluginPlatform, PluginServiceCapability, PluginSourceInfo,
-    PluginSourceKind,
+    ExtensionServiceCapability, InstalledPluginInfo, PluginManifestAction, PluginManifestBuild,
+    PluginManifestEventHook, PluginManifestLinkHandler, PluginManifestPane, PluginManifestService,
+    PluginManifestStartup, PluginPanePlacement, PluginPlatform, PluginServiceCapability,
+    PluginSourceInfo, PluginSourceKind,
 };
 use crate::popup_size::PopupSize;
 
@@ -57,7 +57,11 @@ struct RawPluginManifestService {
     platforms: Option<Vec<RawPlatform>>,
     command: Vec<String>,
     #[serde(default)]
+    priority: i32,
+    #[serde(default)]
     provides: Vec<PluginServiceCapability>,
+    #[serde(default)]
+    capabilities: Vec<ExtensionServiceCapability>,
 }
 
 #[derive(serde::Deserialize)]
@@ -308,11 +312,30 @@ fn normalize_manifest_service(
             "plugin service must declare at least one capability".to_string(),
         ));
     }
+    if service
+        .provides
+        .contains(&PluginServiceCapability::PaneInspector)
+        && !service
+            .capabilities
+            .contains(&ExtensionServiceCapability::ViewContribution)
+    {
+        return Err((
+            "missing_plugin_service_capability",
+            "pane inspector services must request view_contribution".to_string(),
+        ));
+    }
+    let requested_capabilities = service.capabilities;
+    // Linking and enabling trusted local code grants only this small protocol allowlist. It does
+    // not sandbox the subprocess from the user's operating-system authority.
+    let granted_capabilities = requested_capabilities.clone();
     Ok(PluginManifestService {
         id,
         platforms,
         command,
+        priority: service.priority,
         provides: service.provides,
+        requested_capabilities,
+        granted_capabilities,
     })
 }
 

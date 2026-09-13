@@ -321,6 +321,13 @@ impl HeadlessServer {
     ///
     /// Returns true if the event changed visual state (requiring a re-render).
     pub(super) fn handle_internal_event_with_forwarding(&mut self, mut ev: AppEvent) -> bool {
+        if matches!(&ev, AppEvent::ExtensionServiceFinished(_)) {
+            let AppEvent::ExtensionServiceFinished(result) = ev else {
+                unreachable!("variant checked above");
+            };
+            self.handle_extension_service_result(*result);
+            return false;
+        }
         let mut focused_worktree_response = if let AppEvent::WorktreeAddFinished(result) = &mut ev {
             result
                 .api_request

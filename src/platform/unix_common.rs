@@ -389,6 +389,27 @@ pub(crate) fn status_commands_supported() -> bool {
     true
 }
 
+pub(crate) fn fill_secure_random(bytes: &mut [u8]) -> std::io::Result<()> {
+    use std::io::Read as _;
+
+    std::fs::File::open("/dev/urandom")?.read_exact(bytes)
+}
+
+pub(crate) fn configure_extension_service_command(command: &mut std::process::Command) {
+    use std::os::unix::process::CommandExt as _;
+    command.process_group(0);
+}
+
+pub(crate) fn terminate_extension_service_process_group(child: &std::process::Child) {
+    if let Ok(pid) = i32::try_from(child.id()) {
+        // The service is launched as its own process group. Killing the group prevents a
+        // descendant from retaining captured stdout/stderr indefinitely.
+        unsafe {
+            libc::kill(-pid, libc::SIGKILL);
+        }
+    }
+}
+
 pub(crate) fn configure_status_command(process: &mut std::process::Command) {
     use std::os::unix::process::CommandExt;
 

@@ -14,6 +14,17 @@ impl App {
     }
 
     pub(crate) fn session_snapshot(&self) -> SessionSnapshot {
+        self.session_snapshot_with_structure(true)
+    }
+
+    /// Build the source used by the frozen endpoint snapshot v1 projection.
+    /// Collection and delegation data are available through the API snapshot,
+    /// but must not be folded into the immutable v1 endpoint codec.
+    pub(crate) fn session_snapshot_v1_compat(&self) -> SessionSnapshot {
+        self.session_snapshot_with_structure(false)
+    }
+
+    fn session_snapshot_with_structure(&self, include_structure: bool) -> SessionSnapshot {
         let focused_workspace_id = self
             .state
             .active
@@ -84,6 +95,16 @@ impl App {
             panes: self.collect_panes_for_workspace(None).unwrap_or_default(),
             layouts,
             agents: self.collect_agent_infos(),
+            collections: if include_structure {
+                self.collection_infos(None, None)
+            } else {
+                Vec::new()
+            },
+            delegations: if include_structure {
+                self.delegation_tree()
+            } else {
+                Vec::new()
+            },
         }
     }
 }
@@ -91,6 +112,7 @@ impl App {
 #[cfg(test)]
 mod tests {
     use crate::api::schema::{EmptyParams, Method, ResponseResult, SuccessResponse};
+    use crate::layout::LayoutLeaf;
     use crate::{config::Config, workspace::Workspace};
 
     fn app_with_two_tabs() -> crate::app::App {
@@ -148,6 +170,64 @@ mod tests {
                 .map(|checkout| checkout.workspace_id.as_str()),
             Some(workspace_id.as_str())
         );
+    }
+
+    #[test]
+    fn session_snapshot_projects_collections_and_delegation_preorder() {
+        let mut app = app_with_two_tabs();
+        let root = app.state.workspaces[0].tabs[0].root_pane;
+        let member = app.state.workspaces[0].test_split(ratatui::layout::Direction::Horizontal);
+        let collection = app.state.workspaces[0].tabs[0]
+            .create_collection_near(
+                LayoutLeaf::Pane(root),
+                ratatui::layout::Direction::Vertical,
+                0.5,
+                Some("reviewers".into()),
+            )
+            .expect("create collection");
+        app.state.workspaces[0].tabs[0]
+            .collect_tiled_pane(member, collection)
+            .expect("collect member");
+        let root_delegation = app
+            .state
+            .delegations
+            .create(Some(root), None, Some("coordinate".into()))
+            .expect("create root delegation");
+        app.state
+            .delegations
+            .create(Some(member), Some(root_delegation), Some("review".into()))
+            .expect("create child delegation");
+
+        let member_public_id = app.public_pane_id(0, member).expect("public member ID");
+        let snapshot = app.session_snapshot();
+
+        assert_eq!(snapshot.collections.len(), 1);
+        assert_eq!(snapshot.collections[0].label.as_deref(), Some("reviewers"));
+        assert_eq!(snapshot.collections[0].members.len(), 1);
+        assert_eq!(snapshot.collections[0].members[0].pane_id, member_public_id);
+        assert_eq!(snapshot.delegations.len(), 2);
+        assert_eq!(snapshot.delegations[0].depth, 0);
+        assert_eq!(snapshot.delegations[1].depth, 1);
+        assert_eq!(
+            snapshot.delegations[1].delegation.parent_id,
+            Some(root_delegation.to_string())
+        );
+
+        let endpoint_v1_source = app.session_snapshot_v1_compat();
+        assert!(endpoint_v1_source.collections.is_empty());
+        assert!(endpoint_v1_source.delegations.is_empty());
+    }
+
+    #[test]
+    fn session_snapshot_structure_projection_is_optional_when_decoding() {
+        let mut value = serde_json::to_value(app_with_two_tabs().session_snapshot()).unwrap();
+        value.as_object_mut().unwrap().remove("collections");
+        value.as_object_mut().unwrap().remove("delegations");
+
+        let decoded: crate::api::schema::SessionSnapshot = serde_json::from_value(value).unwrap();
+
+        assert!(decoded.collections.is_empty());
+        assert!(decoded.delegations.is_empty());
     }
 
     #[test]

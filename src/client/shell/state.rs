@@ -148,6 +148,8 @@ pub(super) struct ShellHitMap {
     pub(super) workspace_max_scroll: usize,
     pub(super) tabs: Vec<(Rect, String)>,
     pub(super) panes: Vec<PaneHit>,
+    pub(super) collections: Vec<CollectionChromeHit>,
+    pub(super) collection_members: Vec<CollectionMemberHit>,
     pub(super) popup: Option<PaneHit>,
     pub(super) pane_splits: Vec<PaneSplitHit>,
     pub(super) agents: Vec<(Rect, String)>,
@@ -175,6 +177,10 @@ pub(super) struct ShellHitMap {
     pub(super) overlay_primary: Rect,
     pub(super) overlay_clear: Rect,
     pub(super) overlay_cancel: Rect,
+    pub(super) inspector_body: Rect,
+    pub(super) inspector_close: Rect,
+    pub(super) inspector_refresh: Rect,
+    pub(super) contribution_actions: Vec<(Rect, String)>,
     pub(super) navigator_popup: Rect,
     pub(super) navigator_search: Rect,
     pub(super) navigator_rows: Vec<(Rect, ClientNavigatorTarget)>,
@@ -195,10 +201,34 @@ pub(super) struct ShellHitMap {
     pub(super) release_notes_max_scroll: usize,
 }
 
+#[derive(Clone, Debug)]
+pub(super) struct CollectionChromeHit {
+    pub(super) rect: Rect,
+    pub(super) body: Rect,
+    pub(super) collection_id: String,
+    pub(super) selected_pane_id: String,
+    pub(super) previous_pane_id: Option<String>,
+    pub(super) next_pane_id: Option<String>,
+    pub(super) previous: Rect,
+    pub(super) next: Rect,
+    pub(super) presentation_toggle: Rect,
+    pub(super) inspect: Rect,
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct CollectionMemberHit {
+    pub(super) rect: Rect,
+    pub(super) disclosure: Rect,
+    pub(super) preview: Rect,
+    pub(super) collection_id: String,
+    pub(super) pane_id: String,
+}
+
 #[derive(Clone)]
 pub(super) struct PaneHit {
     pub(super) rect: Rect,
     pub(super) inner_rect: Rect,
+    pub(super) projected_inner_rect: Rect,
     pub(super) scrollbar_rect: Option<Rect>,
     pub(super) scroll: Option<crate::pane::ScrollMetrics>,
     pub(super) pane_id: String,
@@ -298,6 +328,10 @@ pub(crate) enum ClientShellAction {
         boot_id: String,
         request: Box<crate::api::schema::Request>,
     },
+    EndpointControl {
+        endpoint_id: ClientEndpointId,
+        message: ClientMessage,
+    },
     ClipboardWrite(Vec<u8>),
     OpenSafeWebUrl(String),
     ActivateEndpoint {
@@ -340,7 +374,6 @@ pub(super) enum ClientShellOverlayKind {
     WorktreeCreate,
     WorktreeOpen,
     WorktreeRemove,
-    TerminalInspector,
     ContextMenu,
     GlobalMenu,
     Settings,
@@ -583,6 +616,11 @@ pub(super) enum ClientContextMenuAction {
     SplitDown,
     Zoom,
     ToggleRightClickPassthrough,
+    ArchiveCollectionMember,
+    RestoreCollectionMember,
+    PromoteCollectionMember,
+    PromoteCollectionMembers,
+    CloseCollectionCascade,
     ClosePane,
 }
 
@@ -599,12 +637,17 @@ pub(super) enum ClientContextMenuTarget {
         tab_id: String,
         workspace_id: String,
     },
+    Collection {
+        collection_id: String,
+    },
     Pane {
         pane_id: String,
         workspace_id: String,
         source_pane_id: Option<String>,
         has_manual_label: bool,
         right_click_passthrough: bool,
+        collection_id: Option<String>,
+        collection_archived: bool,
     },
 }
 
@@ -622,19 +665,46 @@ pub(super) struct ClientContextMenuItem {
 }
 
 #[derive(Debug)]
-pub(super) struct ClientTerminalInspectorOverlay {
+pub(super) struct ClientTerminalInspectorPane {
     pub(super) pane_id: String,
     pub(super) pane_label: String,
     pub(super) loading: bool,
+    pub(super) focused: bool,
+    pub(super) request_revision: u64,
+    pub(super) view_request_id: Option<String>,
+    pub(super) service_generation: Option<u64>,
+    pub(super) pending_action: Option<crate::protocol::endpoint::ClientPaneViewActionRequest>,
+    pub(super) placement: crate::pane_contribution::PaneContributionPlacement,
+    pub(super) contribution: Option<crate::pane_contribution::PaneContribution>,
     pub(super) telemetry: Option<crate::api::schema::PaneTelemetry>,
     pub(super) error: Option<String>,
 }
 
 #[derive(Debug)]
+pub(super) enum ClientConfirmCloseTarget {
+    Workspace { workspace_id: String },
+    Collection { collection_id: String },
+}
+
+#[derive(Debug)]
 pub(super) struct ClientConfirmCloseOverlay {
-    pub(super) workspace_id: String,
+    pub(super) target: ClientConfirmCloseTarget,
     pub(super) title: String,
     pub(super) detail: String,
+}
+
+#[derive(Debug)]
+pub(super) struct ClientPaneInterruptConfirmOverlay {
+    pub(super) endpoint_id: ClientEndpointId,
+    pub(super) boot_id: String,
+    pub(super) projection_revision: u64,
+    pub(super) pane_id: String,
+    pub(super) contribution_request_id: String,
+    pub(super) contribution_revision: u64,
+    pub(super) owner_service_id: String,
+    pub(super) service_generation: u64,
+    pub(super) action_request_id: String,
+    pub(super) confirmation_token: String,
 }
 
 #[derive(Debug)]
@@ -644,12 +714,12 @@ pub(super) enum ClientShellOverlay {
     ReleaseNotes(crate::app::state::ReleaseNotesState),
     Rename(ClientRenameOverlay),
     ConfirmClose(ClientConfirmCloseOverlay),
+    PaneInterruptConfirm(ClientPaneInterruptConfirmOverlay),
     Help(ClientHelpOverlay),
     Navigator(ClientNavigatorOverlay),
     WorktreeCreate(ClientWorktreeCreateOverlay),
     WorktreeOpen(ClientWorktreeOpenOverlay),
     WorktreeRemove(ClientWorktreeRemoveOverlay),
-    TerminalInspector(Box<ClientTerminalInspectorOverlay>),
     ContextMenu(ClientContextMenuOverlay),
     GlobalMenu(ClientGlobalMenuOverlay),
     Settings(ClientSettingsOverlay),
@@ -662,13 +732,14 @@ impl ClientShellOverlay {
             Self::ProductAnnouncement(_) => ClientShellOverlayKind::ProductAnnouncement,
             Self::ReleaseNotes(_) => ClientShellOverlayKind::ReleaseNotes,
             Self::Rename(_) => ClientShellOverlayKind::Rename,
-            Self::ConfirmClose(_) => ClientShellOverlayKind::ConfirmClose,
+            Self::ConfirmClose(_) | Self::PaneInterruptConfirm(_) => {
+                ClientShellOverlayKind::ConfirmClose
+            }
             Self::Help(_) => ClientShellOverlayKind::Help,
             Self::Navigator(_) => ClientShellOverlayKind::Navigator,
             Self::WorktreeCreate(_) => ClientShellOverlayKind::WorktreeCreate,
             Self::WorktreeOpen(_) => ClientShellOverlayKind::WorktreeOpen,
             Self::WorktreeRemove(_) => ClientShellOverlayKind::WorktreeRemove,
-            Self::TerminalInspector(_) => ClientShellOverlayKind::TerminalInspector,
             Self::ContextMenu(_) => ClientShellOverlayKind::ContextMenu,
             Self::GlobalMenu(_) => ClientShellOverlayKind::GlobalMenu,
             Self::Settings(_) => ClientShellOverlayKind::Settings,
@@ -812,6 +883,7 @@ pub(super) enum ClientInputTarget {
 pub(super) struct ClientInputContext {
     pub(super) mode: ClientShellMode,
     pub(super) overlay: Option<ClientShellOverlayKind>,
+    pub(super) inspector_pane_id: Option<String>,
     pub(super) popup_terminal_id: Option<String>,
     pub(super) popup_pending: bool,
     pub(super) retained_selection: bool,
@@ -911,6 +983,7 @@ pub(super) struct ClientCopyModeState {
 pub(crate) struct ClientShellState {
     pub(super) config: ClientShellConfig,
     pub(super) snapshot: Option<Box<ClientShellSnapshot>>,
+    pub(super) structure: Option<Box<crate::protocol::endpoint::ClientShellStructureProjection>>,
     pub(super) pane_surface: Option<PaneSurfaceFrame>,
     /// A future projection surface waits here until its matching snapshot arrives. The visible
     /// pane surface always remains an exact snapshot pair.
@@ -931,6 +1004,18 @@ pub(crate) struct ClientShellState {
     pub(super) tab_press: Option<ClientTabPress>,
     pub(super) collapsed_groups: HashSet<String>,
     pub(super) remote_collapsed_groups: HashMap<ClientEndpointId, HashSet<String>>,
+    /// Collection list presentation is local to this client. Absence keeps the compact terminal
+    /// presentation used by generation-1 clients.
+    pub(super) collection_list_views: HashSet<String>,
+    pub(super) collection_expanded_members: HashMap<String, HashSet<String>>,
+    pub(super) collection_list_scroll: HashMap<String, usize>,
+    pub(super) collection_preview_heights: HashMap<String, u16>,
+    pub(super) collection_entered_pane: Option<String>,
+    pub(super) collection_maximized_pane: Option<(String, String)>,
+    pub(super) terminal_view_surfaces:
+        HashMap<String, crate::protocol::endpoint::ServerTerminalViewSurface>,
+    pub(super) last_terminal_views_interest:
+        Option<crate::protocol::endpoint::ClientTerminalViewsInterest>,
     pub(super) workspace_scroll: usize,
     pub(super) agent_scroll: usize,
     pub(super) tab_scroll: usize,
@@ -951,6 +1036,7 @@ pub(crate) struct ClientShellState {
     pub(super) navigate_workspace_id: Option<WorkspaceNavigationTarget>,
     pub(super) reveal_navigation_workspace: bool,
     pub(super) overlay: Option<ClientShellOverlay>,
+    pub(super) inspector: Option<Box<ClientTerminalInspectorPane>>,
     pub(super) previous_pane_id: Option<String>,
     pub(super) pane_mouse_gesture: Option<ClientPaneMouseGesture>,
     pub(super) link_hover: Option<super::link_hover::LinkHover>,
@@ -989,6 +1075,9 @@ pub(crate) struct ClientShellState {
     pub(super) outer_focused: Option<bool>,
     pub(super) ascii_input_source_active: bool,
     pub(super) pending_input_source_changes: Vec<bool>,
+    pub(super) pending_endpoint_controls: Vec<(ClientEndpointId, ClientMessage)>,
+    pub(super) last_pane_viewport_request:
+        Option<crate::protocol::endpoint::ClientPaneViewportRequest>,
     pub(super) host_appearance: Option<crate::terminal_theme::HostAppearance>,
     pub(super) host_appearance_explicit: bool,
     pub(super) host_background: Option<crate::terminal_theme::RgbColor>,
@@ -1070,6 +1159,7 @@ impl ClientShellState {
         Self {
             config,
             snapshot: None,
+            structure: None,
             pane_surface: None,
             pending_pane_surface: None,
             graphics: crate::kitty_graphics::surface::ClientState::default(),
@@ -1091,6 +1181,14 @@ impl ClientShellState {
             tab_press: None,
             collapsed_groups: preferences.collapsed_groups.into_iter().collect(),
             remote_collapsed_groups,
+            collection_list_views: HashSet::new(),
+            collection_expanded_members: HashMap::new(),
+            collection_list_scroll: HashMap::new(),
+            collection_preview_heights: HashMap::new(),
+            collection_entered_pane: None,
+            collection_maximized_pane: None,
+            terminal_view_surfaces: HashMap::new(),
+            last_terminal_views_interest: None,
             workspace_scroll: 0,
             agent_scroll: 0,
             tab_scroll: 0,
@@ -1111,6 +1209,7 @@ impl ClientShellState {
             navigate_workspace_id: None,
             reveal_navigation_workspace: false,
             overlay,
+            inspector: None,
             previous_pane_id: None,
             pane_mouse_gesture: None,
             link_hover: None,
@@ -1149,6 +1248,8 @@ impl ClientShellState {
             outer_focused: None,
             ascii_input_source_active: false,
             pending_input_source_changes: Vec::new(),
+            pending_endpoint_controls: Vec::new(),
+            last_pane_viewport_request: None,
             host_appearance: None,
             host_appearance_explicit: false,
             host_background: None,
@@ -1268,6 +1369,15 @@ impl ClientShellState {
 
     pub(super) fn reset_endpoint_projection(&mut self) {
         self.hits = ShellHitMap::default();
+        self.structure = None;
+        self.collection_list_views.clear();
+        self.collection_expanded_members.clear();
+        self.collection_list_scroll.clear();
+        self.collection_preview_heights.clear();
+        self.collection_entered_pane = None;
+        self.collection_maximized_pane = None;
+        self.terminal_view_surfaces.clear();
+        self.last_terminal_views_interest = None;
         self.pane_surface = None;
         self.pending_pane_surface = None;
         self.input_leases = ClientInputLeases::default();
@@ -1303,6 +1413,7 @@ impl ClientShellState {
             .config
             .startup_onboarding
             .then_some(ClientShellOverlay::Onboarding);
+        self.inspector = None;
         self.previous_pane_id = None;
         self.pane_mouse_gesture = None;
         self.link_hover = None;
@@ -1322,6 +1433,8 @@ impl ClientShellState {
         self.copy_feedback = None;
         self.copy_feedback_deadline = None;
         self.host_mouse_pixels = None;
+        self.pending_endpoint_controls.clear();
+        self.last_pane_viewport_request = None;
         self.dismissed_product_announcement = None;
     }
 
@@ -1342,6 +1455,23 @@ impl ClientShellState {
             })
         {
             return;
+        }
+        let projection_changed = self.snapshot.as_ref().is_some_and(|current| {
+            current.boot_id == snapshot.boot_id && current.revision != snapshot.revision
+        });
+        if projection_changed || endpoint_boot_changed {
+            // Contributions and terminal views are leased to one exact projection identity. Close it explicitly;
+            // preserving it would leave stale content or a permanently loading request.
+            self.inspector = None;
+            self.last_pane_viewport_request = None;
+            self.terminal_view_surfaces.clear();
+            self.last_terminal_views_interest = None;
+            if matches!(
+                self.overlay.as_ref(),
+                Some(ClientShellOverlay::PaneInterruptConfirm(_))
+            ) {
+                self.overlay = None;
+            }
         }
         self.graphics.set_scope(&graphics_scope);
         let command_bindings_changed = self.snapshot.as_ref().is_none_or(|current| {
@@ -1483,6 +1613,14 @@ impl ClientShellState {
             self.selection_highlight_clear_deadline = None;
             self.word_selection_gesture = None;
             self.last_pane_click = None;
+        }
+        if self.inspector.as_ref().is_some_and(|inspector| {
+            !snapshot
+                .panes
+                .iter()
+                .any(|pane| pane.pane_id == inspector.pane_id)
+        }) {
+            self.inspector = None;
         }
         if let Some(copy_pane_id) = self
             .copy_mode

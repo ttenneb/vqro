@@ -34,8 +34,10 @@ impl App {
             .into_iter()
             .map(|plugin| (plugin.plugin_id.clone(), plugin))
             .collect();
-        self.extension_services =
-            crate::extension_service::supervisors_for_plugins(&self.state.installed_plugins);
+        self.extension_services = crate::extension_service::manager_for_plugins(
+            &self.state.installed_plugins,
+            self.event_tx.clone(),
+        );
     }
 
     fn refresh_installed_plugins(&mut self) -> std::io::Result<()> {
@@ -1468,6 +1470,7 @@ id = "telemetry"
 command = ["python3", "service.py"]
 platforms = ["linux"]
 provides = ["pane_inspector"]
+capabilities = ["view_contribution", "terminal_interrupt"]
 "#,
         );
 
@@ -1477,6 +1480,17 @@ provides = ["pane_inspector"]
         assert_eq!(
             plugin.services[0].provides,
             [crate::api::schema::PluginServiceCapability::PaneInspector]
+        );
+        assert_eq!(
+            plugin.services[0].requested_capabilities,
+            [
+                crate::api::schema::ExtensionServiceCapability::ViewContribution,
+                crate::api::schema::ExtensionServiceCapability::TerminalInterrupt,
+            ]
+        );
+        assert_eq!(
+            plugin.services[0].granted_capabilities,
+            plugin.services[0].requested_capabilities
         );
         let _ = std::fs::remove_dir_all(root);
     }

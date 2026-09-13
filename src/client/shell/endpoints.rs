@@ -16,12 +16,15 @@ pub(crate) struct ClientShellEndpoint {
     pub(crate) snapshot: Option<Box<ClientShellSnapshot>>,
     /// Connection generation that produced `snapshot`. `None` is reserved for local tests.
     pub(crate) snapshot_generation: Option<u64>,
+    pub(crate) structure: Option<Box<crate::protocol::endpoint::ClientShellStructureProjection>>,
+    pub(crate) structure_generation: Option<u64>,
     pub(crate) agent_recency: HashMap<String, u64>,
     pub(super) agent_presentation: super::endpoint_agent_state::EndpointAgentPresentation,
     pub(crate) agent_view_projection: Option<ClientEndpointAgentViewProjection>,
     pending_agent_view_projection: Option<ClientEndpointAgentViewProjection>,
     pub(crate) agent_view_projection_supported: bool,
     pub(crate) methods: Option<HashSet<String>>,
+    pub(crate) capabilities: Option<HashSet<String>>,
 }
 
 pub(super) struct MachineHit {
@@ -69,6 +72,8 @@ impl ClientShellState {
                 ),
                 snapshot: previous.and_then(|endpoint| endpoint.snapshot.clone()),
                 snapshot_generation: previous.and_then(|endpoint| endpoint.snapshot_generation),
+                structure: previous.and_then(|endpoint| endpoint.structure.clone()),
+                structure_generation: previous.and_then(|endpoint| endpoint.structure_generation),
                 agent_recency: previous
                     .map(|endpoint| endpoint.agent_recency.clone())
                     .unwrap_or_default(),
@@ -82,6 +87,7 @@ impl ClientShellState {
                 agent_view_projection_supported: previous
                     .is_some_and(|endpoint| endpoint.agent_view_projection_supported),
                 methods: previous.and_then(|endpoint| endpoint.methods.clone()),
+                capabilities: previous.and_then(|endpoint| endpoint.capabilities.clone()),
             });
         }
 
@@ -117,7 +123,10 @@ impl ClientShellState {
             endpoint.status = ClientEndpointStatus::Disabled;
             endpoint.snapshot = None;
             endpoint.snapshot_generation = None;
+            endpoint.structure = None;
+            endpoint.structure_generation = None;
             endpoint.methods = None;
+            endpoint.capabilities = None;
             endpoint.agent_recency.clear();
             endpoint.agent_presentation = Default::default();
             endpoint.agent_view_projection = None;
@@ -131,6 +140,16 @@ impl ClientShellState {
         endpoint_id: &ClientEndpointId,
         status: ClientEndpointStatus,
     ) {
+        if endpoint_id == &self.active_endpoint_id && status != ClientEndpointStatus::Online {
+            self.inspector = None;
+            self.last_pane_viewport_request = None;
+            if matches!(
+                self.overlay.as_ref(),
+                Some(ClientShellOverlay::PaneInterruptConfirm(_))
+            ) {
+                self.overlay = None;
+            }
+        }
         if let Some(endpoint) = self
             .endpoints
             .iter_mut()
@@ -143,6 +162,14 @@ impl ClientShellState {
     pub(crate) fn mark_endpoint_disconnected(&mut self, endpoint_id: &ClientEndpointId) {
         self.set_endpoint_status(endpoint_id, ClientEndpointStatus::Reconnecting);
         if endpoint_id == &self.active_endpoint_id {
+            self.inspector = None;
+            self.last_pane_viewport_request = None;
+            if matches!(
+                self.overlay.as_ref(),
+                Some(ClientShellOverlay::PaneInterruptConfirm(_))
+            ) {
+                self.overlay = None;
+            }
             let pending = self.pending_requests.keys().cloned().collect::<Vec<_>>();
             for request_id in pending {
                 self.cancel_endpoint_request(&request_id);
@@ -186,6 +213,28 @@ impl ClientShellState {
         }
     }
 
+    pub(crate) fn set_endpoint_capabilities_for(
+        &mut self,
+        endpoint_id: &ClientEndpointId,
+        capabilities: Vec<String>,
+    ) {
+        if let Some(endpoint) = self
+            .endpoints
+            .iter_mut()
+            .find(|endpoint| &endpoint.endpoint_id == endpoint_id)
+        {
+            endpoint.capabilities = Some(capabilities.into_iter().collect());
+        }
+    }
+
+    pub(super) fn supports_endpoint_capability(&self, capability: &str) -> bool {
+        self.endpoints
+            .iter()
+            .find(|endpoint| endpoint.endpoint_id == self.active_endpoint_id)
+            .and_then(|endpoint| endpoint.capabilities.as_ref())
+            .is_some_and(|capabilities| capabilities.contains(capability))
+    }
+
     pub(crate) fn endpoint_projection_available(&self, endpoint_id: &ClientEndpointId) -> bool {
         self.endpoints.iter().any(|endpoint| {
             &endpoint.endpoint_id == endpoint_id
@@ -210,10 +259,19 @@ impl ClientShellState {
         };
         if endpoint_id != &self.active_endpoint_id {
             self.active_endpoint_id = endpoint_id.clone();
+            self.inspector = None;
+            self.last_pane_viewport_request = None;
+            if matches!(
+                self.overlay.as_ref(),
+                Some(ClientShellOverlay::PaneInterruptConfirm(_))
+            ) {
+                self.overlay = None;
+            }
             self.pane_surface = None;
             self.pending_pane_surface = None;
         }
         self.apply_active_snapshot(snapshot);
+        self.apply_cached_endpoint_structure(endpoint_id);
         true
     }
 
@@ -507,6 +565,12 @@ impl ClientShellState {
         else {
             return;
         };
+        if matches!(
+            (self.endpoints[index].snapshot_generation, generation),
+            (Some(current), Some(incoming)) if incoming < current
+        ) {
+            return;
+        }
         if self.endpoints[index].snapshot_generation == generation
             && self.endpoints[index]
                 .snapshot
@@ -642,8 +706,184 @@ impl ClientShellState {
         generation: u64,
         snapshot: Box<ClientShellSnapshot>,
     ) {
+        let replaces_active_connection = endpoint_id == &self.active_endpoint_id
+            && self
+                .endpoints
+                .iter()
+                .find(|endpoint| &endpoint.endpoint_id == endpoint_id)
+                .and_then(|endpoint| endpoint.snapshot_generation)
+                .is_some_and(|current| generation > current);
         self.cache_endpoint_snapshot_for_generation(endpoint_id, generation, snapshot);
+        if replaces_active_connection {
+            self.reset_endpoint_projection();
+            self.snapshot = None;
+        }
         self.apply_cached_endpoint_snapshot(endpoint_id);
+    }
+
+    pub(crate) fn set_terminal_views_surface_for_generation(
+        &mut self,
+        endpoint_id: &ClientEndpointId,
+        generation: u64,
+        surface: crate::protocol::endpoint::ServerTerminalViewsSurface,
+    ) -> bool {
+        if endpoint_id != &self.active_endpoint_id
+            || !self.endpoint_snapshot_matches(
+                endpoint_id,
+                generation,
+                &surface.boot_id,
+                surface.projection_revision,
+            )
+            || surface.views.len() > crate::protocol::endpoint::MAX_TERMINAL_VIEWS
+        {
+            return false;
+        }
+        let Some(interest) = self
+            .last_terminal_views_interest
+            .as_ref()
+            .filter(|interest| {
+                interest.boot_id == surface.boot_id
+                    && interest.projection_revision == surface.projection_revision
+            })
+        else {
+            return false;
+        };
+        let expected = interest
+            .views
+            .iter()
+            .map(|view| (view.pane_id.as_str(), view.size))
+            .collect::<HashMap<_, _>>();
+        let mut next = HashMap::new();
+        let mut total_cells = 0usize;
+        for view in surface.views {
+            let Some(size) = expected.get(view.pane_id.as_str()) else {
+                return false;
+            };
+            let expected_cells = usize::from(view.frame.width) * usize::from(view.frame.height);
+            if view.frame.width != size.cols
+                || view.frame.height != size.rows
+                || view.frame.cells.len() != expected_cells
+            {
+                return false;
+            }
+            total_cells = total_cells.saturating_add(expected_cells);
+            if total_cells > crate::protocol::endpoint::MAX_TERMINAL_VIEW_CELLS
+                || next.insert(view.pane_id.clone(), view).is_some()
+            {
+                return false;
+            }
+        }
+        if surface.replace {
+            self.terminal_view_surfaces = next;
+        } else {
+            self.terminal_view_surfaces.extend(next);
+        }
+        true
+    }
+
+    pub(crate) fn set_endpoint_structure_for_generation(
+        &mut self,
+        endpoint_id: &ClientEndpointId,
+        generation: u64,
+        projection: Box<crate::protocol::endpoint::ClientShellStructureProjection>,
+    ) {
+        let Some(endpoint) = self
+            .endpoints
+            .iter_mut()
+            .find(|endpoint| &endpoint.endpoint_id == endpoint_id)
+        else {
+            return;
+        };
+        if endpoint
+            .structure_generation
+            .is_some_and(|current| generation < current)
+        {
+            return;
+        }
+        let stale_or_mismatched = endpoint.structure_generation == Some(generation)
+            && endpoint.structure.as_ref().is_some_and(|current| {
+                current.boot_id == projection.boot_id
+                    && (current.revision > projection.revision
+                        || current.session_id != projection.session_id)
+            });
+        if stale_or_mismatched {
+            return;
+        }
+        endpoint.structure = Some(projection);
+        endpoint.structure_generation = Some(generation);
+        if endpoint_id == &self.active_endpoint_id {
+            self.apply_cached_endpoint_structure(endpoint_id);
+        }
+    }
+
+    fn apply_cached_endpoint_structure(&mut self, endpoint_id: &ClientEndpointId) {
+        let matching = self
+            .endpoints
+            .iter()
+            .find(|endpoint| &endpoint.endpoint_id == endpoint_id)
+            .and_then(|endpoint| {
+                let snapshot = endpoint.snapshot.as_ref()?;
+                (endpoint.structure_generation == endpoint.snapshot_generation)
+                    .then_some(endpoint.structure.as_ref()?)
+                    .filter(|structure| {
+                        structure.boot_id == snapshot.boot_id
+                            && structure.revision == snapshot.revision
+                    })
+                    .cloned()
+            });
+        if let Some(structure) = matching.as_ref() {
+            self.collection_list_views.retain(|collection_id| {
+                structure
+                    .collections
+                    .iter()
+                    .any(|collection| &collection.collection_id == collection_id)
+            });
+            let members = structure
+                .collections
+                .iter()
+                .flat_map(|collection| collection.members.iter())
+                .map(|member| member.pane_id.as_str())
+                .collect::<HashSet<_>>();
+            self.collection_expanded_members
+                .retain(|collection_id, expanded| {
+                    let valid_collection = structure
+                        .collections
+                        .iter()
+                        .any(|collection| &collection.collection_id == collection_id);
+                    expanded.retain(|pane_id| members.contains(pane_id.as_str()));
+                    valid_collection
+                });
+            self.collection_preview_heights
+                .retain(|pane_id, _| members.contains(pane_id.as_str()));
+            if self
+                .collection_entered_pane
+                .as_deref()
+                .is_some_and(|pane_id| {
+                    !structure.collections.iter().any(|collection| {
+                        self.collection_list_views
+                            .contains(&collection.collection_id)
+                            && collection.selected_pane_id.as_deref() == Some(pane_id)
+                    })
+                })
+            {
+                self.collection_entered_pane = None;
+            }
+            if self
+                .collection_maximized_pane
+                .as_ref()
+                .is_some_and(|(collection_id, pane_id)| {
+                    !self.collection_list_views.contains(collection_id)
+                        || !members.contains(pane_id.as_str())
+                        || !structure.collections.iter().any(|collection| {
+                            &collection.collection_id == collection_id
+                                && collection.selected_pane_id.as_deref() == Some(pane_id.as_str())
+                        })
+                })
+            {
+                self.collection_maximized_pane = None;
+            }
+        }
+        self.structure = matching;
     }
 
     fn apply_cached_endpoint_snapshot(&mut self, endpoint_id: &ClientEndpointId) {
@@ -657,6 +897,7 @@ impl ClientShellState {
         };
         if endpoint_id == &self.active_endpoint_id {
             self.apply_active_snapshot(snapshot);
+            self.apply_cached_endpoint_structure(endpoint_id);
         }
     }
 }
@@ -681,11 +922,14 @@ pub(super) fn local_endpoint() -> ClientShellEndpoint {
         status: ClientEndpointStatus::Online,
         snapshot: None,
         snapshot_generation: None,
+        structure: None,
+        structure_generation: None,
         agent_recency: HashMap::new(),
         agent_presentation: Default::default(),
         agent_view_projection: None,
         pending_agent_view_projection: None,
         agent_view_projection_supported: false,
         methods: None,
+        capabilities: None,
     }
 }

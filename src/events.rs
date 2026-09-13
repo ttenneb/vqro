@@ -160,6 +160,8 @@ pub enum AppEvent {
         segment_index: usize,
         result: Result<Option<String>, String>,
     },
+    /// A bounded extension service job completed on its worker thread.
+    ExtensionServiceFinished(Box<crate::extension_service::ExtensionAsyncResult>),
     /// A plugin action or event command finished.
     PluginCommandFinished {
         log_id: String,

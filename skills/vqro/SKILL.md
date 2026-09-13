@@ -51,11 +51,11 @@ Close completed agent panes after incorporating their output.
 
 ## Spaces and collections
 
-Repository identity and checkout grouping are shared server facts projected as Spaces. Non-Git workspaces remain valid. Collection and delegation methods are additive API methods; inspect exact request shapes with `vqro api schema`. A collection is an ordered set of real panes with one selected preview. Splitting a selected member splits the collection leaf.
+Repository identity and checkout grouping are shared server facts projected as Spaces. Non-Git workspaces remain valid. Use `vqro collection --help` and `vqro delegation --help` for orchestration. A collection is an ordered set of real panes with one selected preview. Its in-pane header exposes previous/next member controls, delegation provenance, and inspection. Splitting a selected member splits the collection leaf.
 
 ## Terminal inspector
 
-Right-click a pane and choose **Inspect terminal**. Telemetry is sampled only on request and excludes argv and environment data. Enabled `pane_inspector` extension services may return bounded declarative documents; vqro validates and renders them with native client styling.
+Right-click a pane and choose **Inspect terminal**, or use a collection header’s inspect control. Telemetry is sampled only on request and excludes argv and environment data. Enabled `pane_inspector` extension services may return bounded declarative contributions; vqro validates and renders them as an embedded component inside the target pane. Services are trusted same-user subprocesses, not sandboxes; protocol grants only constrain host effects. Press `r` to refresh and `Esc` to return to the terminal.
 
 ## Named-session isolation
 

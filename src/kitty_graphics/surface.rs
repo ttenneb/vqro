@@ -102,11 +102,25 @@ pub(crate) struct ClientState {
     reset_pending: bool,
     stale_images: Vec<u32>,
     forced_delete_images: Vec<u32>,
+    suppressed_pane_ids: HashSet<String>,
 }
 
 impl ClientState {
     pub(crate) fn scope(&self) -> &str {
         &self.scope
+    }
+
+    pub(crate) fn pane_has_graphics(&self, pane_id: &str) -> bool {
+        self.scene
+            .placements
+            .iter()
+            .any(|placement| source_pane_id(&placement.asset.source) == Some(pane_id))
+    }
+
+    pub(crate) fn set_suppressed_panes<'a>(&mut self, pane_ids: impl IntoIterator<Item = &'a str>) {
+        self.suppressed_pane_ids.clear();
+        self.suppressed_pane_ids
+            .extend(pane_ids.into_iter().map(str::to_owned));
     }
 
     pub(crate) fn set_scope(&mut self, scope: &str) {
@@ -245,6 +259,10 @@ impl ClientState {
             .scene
             .placements
             .iter()
+            .filter(|placement| {
+                source_pane_id(&placement.asset.source)
+                    .is_none_or(|pane_id| !self.suppressed_pane_ids.contains(pane_id))
+            })
             .filter_map(|placement| {
                 client_host_placement(
                     &self.scope,
@@ -272,6 +290,20 @@ impl ClientState {
                 return bytes;
             }
         }
+    }
+}
+
+fn source_pane_id(source: &SurfaceGraphicsSource) -> Option<&str> {
+    match source {
+        SurfaceGraphicsSource::Terminal {
+            target: SurfaceGraphicsTarget::Pane { pane_id },
+            ..
+        }
+        | SurfaceGraphicsSource::PaneLayer { pane_id, .. } => Some(pane_id),
+        SurfaceGraphicsSource::Terminal {
+            target: SurfaceGraphicsTarget::Popup { .. },
+            ..
+        } => None,
     }
 }
 
@@ -968,6 +1000,69 @@ mod tests {
         assert!(!second.contains("a=t,t=d"));
         assert!(second.contains("a=p"));
         assert!(second.contains("\u{1b}[8;12H"));
+    }
+
+    #[test]
+    fn client_suppresses_only_the_inspected_pane_graphics() {
+        let mut state = ClientState::default();
+        state.set_scope("endpoint-a:boot-1");
+        let first = asset(
+            SurfaceGraphicsTarget::Pane {
+                pane_id: "w1:p1".into(),
+            },
+            11,
+            vec![1, 2, 3, 4],
+        );
+        let second = asset(
+            SurfaceGraphicsTarget::Pane {
+                pane_id: "w1:p2".into(),
+            },
+            12,
+            vec![5, 6, 7, 8],
+        );
+        let mut first_scene = scene(first, 1, 1);
+        let second_scene = scene(second, 5, 1);
+        first_scene.placements.extend(second_scene.placements);
+        first_scene.assets.extend(second_scene.assets);
+        state.set_scene(first_scene);
+        assert!(state.pane_has_graphics("w1:p1"));
+        assert!(state.pane_has_graphics("w1:p2"));
+
+        state.set_suppressed_panes(["w1:p1"]);
+        state.encode(
+            Visibility::Main,
+            (0, 0),
+            None,
+            HostCellSize {
+                width_px: 8,
+                height_px: 16,
+            },
+        );
+        assert_eq!(state.host.placements.len(), 1);
+
+        state.set_suppressed_panes(["w1:p1", "w1:p2"]);
+        state.encode(
+            Visibility::Main,
+            (0, 0),
+            None,
+            HostCellSize {
+                width_px: 8,
+                height_px: 16,
+            },
+        );
+        assert!(state.host.placements.is_empty());
+
+        state.set_suppressed_panes(std::iter::empty());
+        state.encode(
+            Visibility::Main,
+            (0, 0),
+            None,
+            HostCellSize {
+                width_px: 8,
+                height_px: 16,
+            },
+        );
+        assert_eq!(state.host.placements.len(), 2);
     }
 
     #[test]

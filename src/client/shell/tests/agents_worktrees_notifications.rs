@@ -869,7 +869,7 @@ fn workspace_actions_preserve_selected_target_and_client_confirmation() {
     assert!(matches!(
         state.overlay.as_ref(),
         Some(ClientShellOverlay::ConfirmClose(ClientConfirmCloseOverlay {
-            workspace_id,
+            target: ClientConfirmCloseTarget::Workspace { workspace_id },
             ..
         })) if workspace_id == "ws_2"
     ));

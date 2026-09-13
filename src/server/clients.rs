@@ -129,6 +129,31 @@ impl ClientShellLocation {
     }
 }
 
+#[derive(Clone)]
+pub(crate) struct PendingPaneView {
+    pub(crate) request: crate::protocol::endpoint::ClientPaneViewRequest,
+    pub(crate) service_id: String,
+    pub(crate) service_generation: u64,
+}
+
+#[derive(Clone)]
+pub(crate) struct PaneContributionLease {
+    pub(crate) identity: crate::extension_service::ExtensionRequestIdentity,
+    pub(crate) service_id: String,
+    pub(crate) service_generation: u64,
+    pub(crate) actions: Vec<crate::view_document::ViewAction>,
+}
+
+#[derive(Clone)]
+pub(crate) struct PendingPaneEffectConfirmation {
+    pub(crate) token: String,
+    pub(crate) expires_at: std::time::Instant,
+    pub(crate) lease: PaneContributionLease,
+    pub(crate) action_id: String,
+    pub(crate) terminal_id: crate::terminal::TerminalId,
+    pub(crate) effect: crate::extension_service::ExtensionHostEffect,
+}
+
 /// A connected client tracked by the server.
 pub(crate) struct ClientConnection {
     /// Whether this connection owns the Herdr shell or one direct terminal stream.
@@ -163,6 +188,21 @@ pub(crate) struct ClientConnection {
     pub(crate) shell_surface_active: bool,
     /// Whether this shell wants host mouse capture without pane demand.
     pub(crate) shell_mouse_capture: bool,
+    /// Whether the client negotiated the optional typed structure control.
+    pub(crate) shell_structure_enabled: bool,
+    /// Whether this client may reserve terminal geometry for pane contributions.
+    pub(crate) shell_pane_viewport_enabled: bool,
+    pub(crate) shell_pane_view_enabled: bool,
+    /// Whether this client negotiated bounded independent terminal views.
+    pub(crate) shell_terminal_views_enabled: bool,
+    pub(crate) shell_terminal_views_interest:
+        Option<crate::protocol::endpoint::ClientTerminalViewsInterest>,
+    /// Current client-local accessory reservation, never persisted in AppState.
+    pub(crate) shell_pane_viewport: Option<crate::protocol::endpoint::ClientPaneViewportRequest>,
+    pub(crate) pending_pane_view: Option<PendingPaneView>,
+    pub(crate) pane_contribution_lease: Option<PaneContributionLease>,
+    pub(crate) pending_pane_action: Option<crate::protocol::endpoint::ClientPaneViewActionRequest>,
+    pub(crate) pending_pane_confirmation: Option<PendingPaneEffectConfirmation>,
     /// Last host mouse capture mode sent to this client.
     pub(crate) host_mouse_capture_active: Option<bool>,
     /// Last SGR pixel provenance mode sent to this client.
@@ -179,6 +219,8 @@ pub(crate) struct ClientConnection {
     pub(crate) shell_snapshot: Option<crate::protocol::ClientShellSnapshot>,
     /// View policy paired with the last coherent shell replacement.
     pub(crate) shell_agent_view: Option<crate::api::schema::AgentViewSetParams>,
+    /// Optional structure control paired to the same boot and revision as the snapshot.
+    pub(crate) shell_structure: Option<crate::protocol::endpoint::ClientShellStructureProjection>,
     /// Monotonic shell replacement revision for this connection.
     pub(crate) shell_projection_revision: u64,
     /// Whether this shell is waiting for one ordered endpoint command response.
@@ -239,6 +281,16 @@ impl ClientConnection {
             render_pending: false,
             shell_surface_active: true,
             shell_mouse_capture: false,
+            shell_structure_enabled: false,
+            shell_pane_viewport_enabled: false,
+            shell_pane_view_enabled: false,
+            shell_terminal_views_enabled: false,
+            shell_terminal_views_interest: None,
+            shell_pane_viewport: None,
+            pending_pane_view: None,
+            pane_contribution_lease: None,
+            pending_pane_action: None,
+            pending_pane_confirmation: None,
             host_mouse_capture_active: None,
             host_sgr_pixels_active: None,
             host_keyboard_protocol_active: None,
@@ -247,6 +299,7 @@ impl ClientConnection {
             shell_location: None,
             shell_snapshot: None,
             shell_agent_view: None,
+            shell_structure: None,
             shell_projection_revision: 0,
             shell_endpoint_command_in_flight: false,
             shell_endpoint_command_surface_revision: None,

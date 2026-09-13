@@ -8588,243 +8588,10 @@
           ],
           "type": "string"
         },
-        "InspectorAction": {
-          "properties": {
-            "destructive": {
-              "default": false,
-              "type": "boolean"
-            },
-            "id": {
-              "type": "string"
-            },
-            "label": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "id",
-            "label"
-          ],
-          "type": "object"
-        },
-        "InspectorBlock": {
-          "oneOf": [
-            {
-              "properties": {
-                "text": {
-                  "type": "string"
-                },
-                "tone": {
-                  "$ref": "#/schemas/success_response/$defs/InspectorTone",
-                  "default": "default"
-                },
-                "type": {
-                  "const": "text",
-                  "type": "string"
-                }
-              },
-              "required": [
-                "type",
-                "text"
-              ],
-              "type": "object"
-            },
-            {
-              "properties": {
-                "label": {
-                  "type": "string"
-                },
-                "tone": {
-                  "$ref": "#/schemas/success_response/$defs/InspectorTone",
-                  "default": "default"
-                },
-                "type": {
-                  "const": "badge",
-                  "type": "string"
-                },
-                "value": {
-                  "type": "string"
-                }
-              },
-              "required": [
-                "type",
-                "label",
-                "value"
-              ],
-              "type": "object"
-            },
-            {
-              "properties": {
-                "items": {
-                  "items": {
-                    "$ref": "#/schemas/success_response/$defs/InspectorKeyValue"
-                  },
-                  "type": "array"
-                },
-                "type": {
-                  "const": "key_value",
-                  "type": "string"
-                }
-              },
-              "required": [
-                "type",
-                "items"
-              ],
-              "type": "object"
-            },
-            {
-              "properties": {
-                "columns": {
-                  "items": {
-                    "type": "string"
-                  },
-                  "type": "array"
-                },
-                "rows": {
-                  "items": {
-                    "items": {
-                      "type": "string"
-                    },
-                    "type": "array"
-                  },
-                  "type": "array"
-                },
-                "type": {
-                  "const": "table",
-                  "type": "string"
-                }
-              },
-              "required": [
-                "type",
-                "columns",
-                "rows"
-              ],
-              "type": "object"
-            },
-            {
-              "properties": {
-                "items": {
-                  "items": {
-                    "$ref": "#/schemas/success_response/$defs/InspectorTimelineItem"
-                  },
-                  "type": "array"
-                },
-                "type": {
-                  "const": "timeline",
-                  "type": "string"
-                }
-              },
-              "required": [
-                "type",
-                "items"
-              ],
-              "type": "object"
-            }
-          ]
-        },
-        "InspectorDocument": {
-          "properties": {
-            "actions": {
-              "default": [],
-              "items": {
-                "$ref": "#/schemas/success_response/$defs/InspectorAction"
-              },
-              "type": "array"
-            },
-            "sections": {
-              "default": [],
-              "items": {
-                "$ref": "#/schemas/success_response/$defs/InspectorSection"
-              },
-              "type": "array"
-            },
-            "subtitle": {
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "title": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "title"
-          ],
-          "type": "object"
-        },
-        "InspectorKeyValue": {
-          "properties": {
-            "key": {
-              "type": "string"
-            },
-            "tone": {
-              "$ref": "#/schemas/success_response/$defs/InspectorTone",
-              "default": "default"
-            },
-            "value": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "key",
-            "value"
-          ],
-          "type": "object"
-        },
-        "InspectorSection": {
-          "properties": {
-            "blocks": {
-              "default": [],
-              "items": {
-                "$ref": "#/schemas/success_response/$defs/InspectorBlock"
-              },
-              "type": "array"
-            },
-            "id": {
-              "type": "string"
-            },
-            "title": {
-              "type": [
-                "string",
-                "null"
-              ]
-            }
-          },
-          "required": [
-            "id"
-          ],
-          "type": "object"
-        },
-        "InspectorTimelineItem": {
-          "properties": {
-            "detail": {
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "label": {
-              "type": "string"
-            },
-            "tone": {
-              "$ref": "#/schemas/success_response/$defs/InspectorTone",
-              "default": "default"
-            }
-          },
-          "required": [
-            "label"
-          ],
-          "type": "object"
-        },
-        "InspectorTone": {
+        "ExtensionServiceCapability": {
           "enum": [
-            "default",
-            "muted",
-            "accent",
-            "success",
-            "warning",
-            "danger"
+            "view_contribution",
+            "terminal_interrupt"
           ],
           "type": "string"
         },
@@ -9872,13 +9639,19 @@
             "document": {
               "anyOf": [
                 {
-                  "$ref": "#/schemas/success_response/$defs/InspectorDocument"
+                  "$ref": "#/schemas/success_response/$defs/ViewDocument"
                 },
                 {
                   "type": "null"
                 }
-              ],
-              "description": "Optional constrained document supplied by an enabled pane-inspector extension service."
+              ]
+            },
+            "document_owner": {
+              "description": "Optional constrained document supplied by an enabled pane-inspector extension service.",
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "foreground_process_group_id": {
               "format": "uint32",
@@ -10533,6 +10306,13 @@
               },
               "type": "array"
             },
+            "granted_capabilities": {
+              "description": "Host-allowlisted protocol grants. These are not an OS sandbox.",
+              "items": {
+                "$ref": "#/schemas/success_response/$defs/ExtensionServiceCapability"
+              },
+              "type": "array"
+            },
             "id": {
               "type": "string"
             },
@@ -10545,9 +10325,21 @@
                 "null"
               ]
             },
+            "priority": {
+              "default": 0,
+              "format": "int32",
+              "type": "integer"
+            },
             "provides": {
               "items": {
                 "$ref": "#/schemas/success_response/$defs/PluginServiceCapability"
+              },
+              "type": "array"
+            },
+            "requested_capabilities": {
+              "description": "Capabilities requested by trusted same-user service code.",
+              "items": {
+                "$ref": "#/schemas/success_response/$defs/ExtensionServiceCapability"
               },
               "type": "array"
             }
@@ -12254,6 +12046,20 @@
               },
               "type": "array"
             },
+            "collections": {
+              "description": "Authoritative collection organization, omitted when the session has none.",
+              "items": {
+                "$ref": "#/schemas/success_response/$defs/CollectionInfo"
+              },
+              "type": "array"
+            },
+            "delegations": {
+              "description": "Authoritative delegation forest in deterministic preorder, omitted when empty.",
+              "items": {
+                "$ref": "#/schemas/success_response/$defs/DelegationTreeEntry"
+              },
+              "type": "array"
+            },
             "focused_pane_id": {
               "type": [
                 "string",
@@ -12409,6 +12215,220 @@
             "agent_status"
           ],
           "type": "object"
+        },
+        "ViewBlock": {
+          "oneOf": [
+            {
+              "properties": {
+                "text": {
+                  "type": "string"
+                },
+                "tone": {
+                  "$ref": "#/schemas/success_response/$defs/ViewTone",
+                  "default": "default"
+                },
+                "type": {
+                  "const": "text",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "text"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "label": {
+                  "type": "string"
+                },
+                "tone": {
+                  "$ref": "#/schemas/success_response/$defs/ViewTone",
+                  "default": "default"
+                },
+                "type": {
+                  "const": "badge",
+                  "type": "string"
+                },
+                "value": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "label",
+                "value"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "items": {
+                  "items": {
+                    "$ref": "#/schemas/success_response/$defs/ViewKeyValue"
+                  },
+                  "type": "array"
+                },
+                "type": {
+                  "const": "key_value",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "items"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "columns": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "rows": {
+                  "items": {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "type": "array"
+                },
+                "type": {
+                  "const": "table",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "columns",
+                "rows"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "items": {
+                  "items": {
+                    "$ref": "#/schemas/success_response/$defs/ViewTimelineItem"
+                  },
+                  "type": "array"
+                },
+                "type": {
+                  "const": "timeline",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "items"
+              ],
+              "type": "object"
+            }
+          ]
+        },
+        "ViewDocument": {
+          "properties": {
+            "sections": {
+              "default": [],
+              "items": {
+                "$ref": "#/schemas/success_response/$defs/ViewSection"
+              },
+              "type": "array"
+            },
+            "subtitle": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "title": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "title"
+          ],
+          "type": "object"
+        },
+        "ViewKeyValue": {
+          "properties": {
+            "key": {
+              "type": "string"
+            },
+            "tone": {
+              "$ref": "#/schemas/success_response/$defs/ViewTone",
+              "default": "default"
+            },
+            "value": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "key",
+            "value"
+          ],
+          "type": "object"
+        },
+        "ViewSection": {
+          "properties": {
+            "blocks": {
+              "default": [],
+              "items": {
+                "$ref": "#/schemas/success_response/$defs/ViewBlock"
+              },
+              "type": "array"
+            },
+            "id": {
+              "type": "string"
+            },
+            "title": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "id"
+          ],
+          "type": "object"
+        },
+        "ViewTimelineItem": {
+          "properties": {
+            "detail": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "label": {
+              "type": "string"
+            },
+            "tone": {
+              "$ref": "#/schemas/success_response/$defs/ViewTone",
+              "default": "default"
+            }
+          },
+          "required": [
+            "label"
+          ],
+          "type": "object"
+        },
+        "ViewTone": {
+          "enum": [
+            "default",
+            "muted",
+            "accent",
+            "success",
+            "warning",
+            "danger"
+          ],
+          "type": "string"
         },
         "WorkspaceInfo": {
           "properties": {

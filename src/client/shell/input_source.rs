@@ -2,14 +2,17 @@ use super::*;
 
 impl ClientShellState {
     fn wants_ascii_input(&self) -> bool {
+        if self.inspector.is_some() {
+            return true;
+        }
         if let Some(overlay) = self.overlay.as_ref() {
             return matches!(
                 overlay,
                 ClientShellOverlay::ConfirmClose(_)
+                    | ClientShellOverlay::PaneInterruptConfirm(_)
                     | ClientShellOverlay::Help(_)
                     | ClientShellOverlay::Navigator(_)
                     | ClientShellOverlay::WorktreeRemove(_)
-                    | ClientShellOverlay::TerminalInspector(_)
                     | ClientShellOverlay::ContextMenu(_)
                     | ClientShellOverlay::GlobalMenu(_)
             );
@@ -38,5 +41,11 @@ impl ClientShellState {
 
     pub(crate) fn take_input_source_changes(&mut self) -> Vec<bool> {
         std::mem::take(&mut self.pending_input_source_changes)
+    }
+
+    pub(crate) fn take_pending_endpoint_controls(
+        &mut self,
+    ) -> Vec<(ClientEndpointId, ClientMessage)> {
+        std::mem::take(&mut self.pending_endpoint_controls)
     }
 }

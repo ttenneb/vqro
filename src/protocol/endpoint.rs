@@ -29,7 +29,22 @@ pub const HEALTH_PING_KIND: &str = "endpoint.health.ping.v1";
 pub const HEALTH_PONG_KIND: &str = "endpoint.health.pong.v1";
 pub const AGENT_VIEW_PROJECTION_CAPABILITY: &str = "agent_view_projection";
 pub const AGENT_VIEW_PROJECTION_KIND: &str = "endpoint.agent-view.v1";
-
+pub const SESSION_STRUCTURE_CAPABILITY: &str = "session_structure_v1";
+pub const SESSION_STRUCTURE_KIND: &str = "session.structure.v1";
+pub const PANE_VIEWPORT_CAPABILITY: &str = "pane_viewport_v1";
+pub const PANE_VIEW_CAPABILITY: &str = "pane_view_v1";
+pub const PANE_VIEWPORT_KIND: &str = "pane.viewport.v1";
+pub const PANE_VIEW_REQUEST_KIND: &str = "pane.view.request.v1";
+pub const PANE_VIEW_CANCEL_KIND: &str = "pane.view.cancel.v1";
+pub const PANE_VIEW_RESULT_KIND: &str = "pane.view.result.v1";
+pub const PANE_VIEW_ACTION_KIND: &str = "pane.view.action.v1";
+pub const PANE_VIEW_ACTION_RESULT_KIND: &str = "pane.view.action-result.v1";
+pub const PANE_VIEW_CONFIRM_KIND: &str = "pane.view.confirm.v1";
+pub const TERMINAL_VIEWS_CAPABILITY: &str = "terminal_views_v1";
+pub const TERMINAL_VIEWS_INTEREST_KIND: &str = "terminal.views.interest.v1";
+pub const TERMINAL_VIEWS_SURFACE_KIND: &str = "terminal.views.surface.v1";
+pub const MAX_TERMINAL_VIEWS: usize = 16;
+pub const MAX_TERMINAL_VIEW_CELLS: usize = 32_768;
 fn default_true() -> bool {
     true
 }
@@ -54,6 +69,9 @@ pub struct EndpointClientHello {
     pub input_codecs: Vec<String>,
     #[serde(default)]
     pub blob_codecs: Vec<String>,
+    /// Optional controls the client understands; absent for generation-1 clients.
+    #[serde(default)]
+    pub control_kinds: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -70,6 +88,145 @@ pub struct EndpointAgentViewProjection {
     pub revision: u64,
     #[serde(default)]
     pub view: Option<serde_json::Value>,
+}
+
+/// Optional, revision-bound runtime structure projected alongside the frozen shell snapshot.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClientShellStructureProjection {
+    pub session_id: String,
+    pub boot_id: String,
+    pub revision: u64,
+    pub collections: Vec<ClientShellCollection>,
+    pub delegations: Vec<ClientShellDelegation>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClientShellCollection {
+    pub collection_id: String,
+    pub workspace_id: String,
+    pub tab_id: String,
+    pub label: Option<String>,
+    pub selected_pane_id: Option<String>,
+    pub members: Vec<ClientShellCollectionMember>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClientShellCollectionMember {
+    pub pane_id: String,
+    pub index: usize,
+    pub archived: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClientShellDelegation {
+    pub delegation_id: String,
+    pub pane_id: Option<String>,
+    pub parent_id: Option<String>,
+    pub purpose: Option<String>,
+    pub depth: usize,
+    pub external_parent_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClientTerminalViewsInterest {
+    pub boot_id: String,
+    pub projection_revision: u64,
+    pub views: Vec<ClientTerminalViewInterest>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClientTerminalViewInterest {
+    pub pane_id: String,
+    pub size: ClientSurfaceSize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ServerTerminalViewsSurface {
+    pub boot_id: String,
+    pub projection_revision: u64,
+    /// Complete interest replacement versus a retained update for only the listed views.
+    #[serde(default = "default_true")]
+    pub replace: bool,
+    pub views: Vec<ServerTerminalViewSurface>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ServerTerminalViewSurface {
+    pub pane_id: String,
+    pub frame: crate::protocol::FrameData,
+    pub mouse_reporting: bool,
+    pub sgr_pixel_mouse: bool,
+    pub pixel_width: u32,
+    pub pixel_height: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClientPaneViewportRequest {
+    pub boot_id: String,
+    pub projection_revision: u64,
+    pub pane_id: String,
+    /// Effective PTY viewport requested by this connection; `None` restores layout geometry.
+    pub size: Option<ClientSurfaceSize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClientPaneViewRequest {
+    pub boot_id: String,
+    pub projection_revision: u64,
+    pub request_id: String,
+    pub pane_id: String,
+    pub contribution_revision: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClientPaneViewCancel {
+    pub boot_id: String,
+    pub request_id: String,
+    pub pane_id: String,
+    pub contribution_revision: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ServerPaneViewResult {
+    pub boot_id: String,
+    pub projection_revision: u64,
+    pub request_id: String,
+    pub pane_id: String,
+    pub contribution_revision: u64,
+    pub owner_service_id: String,
+    pub service_generation: u64,
+    pub document: Option<crate::view_document::ViewDocument>,
+    #[serde(default)]
+    pub actions: Vec<crate::view_document::ViewAction>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClientPaneViewActionRequest {
+    pub boot_id: String,
+    pub projection_revision: u64,
+    pub request_id: String,
+    pub pane_id: String,
+    pub contribution_revision: u64,
+    pub owner_service_id: String,
+    pub service_generation: u64,
+    pub action_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ServerPaneViewActionResult {
+    pub request_id: String,
+    pub pane_id: String,
+    pub contribution_revision: u64,
+    pub action_id: String,
+    pub confirmation_token: Option<String>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClientPaneViewConfirm {
+    pub boot_id: String,
+    pub confirmation_token: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -108,6 +265,15 @@ pub fn agent_view_projection_message(
     Ok(ServerMessage::EndpointControl {
         kind: AGENT_VIEW_PROJECTION_KIND.into(),
         data: serde_json::to_string(&projection)?,
+    })
+}
+
+pub fn structure_message(
+    projection: &ClientShellStructureProjection,
+) -> serde_json::Result<ServerMessage> {
+    Ok(ServerMessage::EndpointControl {
+        kind: SESSION_STRUCTURE_KIND.into(),
+        data: serde_json::to_string(projection)?,
     })
 }
 
@@ -185,6 +351,7 @@ mod tests {
             surface_codecs: vec![SURFACE_CODEC_V1.into()],
             input_codecs: vec![INPUT_CODEC_V1.into()],
             blob_codecs: vec![BLOB_CODEC_V1.into()],
+            control_kinds: Vec::new(),
         }
     }
 
@@ -320,6 +487,45 @@ mod tests {
         assert_eq!(
             decoded.commands[0].action,
             crate::protocol::ClientShellCommandAction::Unknown
+        );
+    }
+
+    #[test]
+    fn optional_structure_control_round_trips_revision_and_identity() {
+        let projection = ClientShellStructureProjection {
+            session_id: "alpha".into(),
+            boot_id: "boot-7".into(),
+            revision: 42,
+            collections: vec![ClientShellCollection {
+                collection_id: "collection_3".into(),
+                workspace_id: "w1".into(),
+                tab_id: "w1:t1".into(),
+                label: Some("review".into()),
+                selected_pane_id: Some("w1:p2".into()),
+                members: vec![ClientShellCollectionMember {
+                    pane_id: "w1:p2".into(),
+                    index: 0,
+                    archived: false,
+                }],
+            }],
+            delegations: vec![ClientShellDelegation {
+                delegation_id: "d1".into(),
+                pane_id: Some("w1:p2".into()),
+                parent_id: None,
+                purpose: Some("test".into()),
+                depth: 0,
+                external_parent_id: None,
+            }],
+        };
+        let ServerMessage::EndpointControl { kind, data } =
+            structure_message(&projection).expect("structure control")
+        else {
+            panic!("endpoint control");
+        };
+        assert_eq!(kind, SESSION_STRUCTURE_KIND);
+        assert_eq!(
+            serde_json::from_str::<ClientShellStructureProjection>(&data).unwrap(),
+            projection
         );
     }
 

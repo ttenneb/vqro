@@ -312,6 +312,38 @@ fn print_token_rule_profiles() {
     }
 }
 
+fn print_terminal_views_profile() {
+    println!("independent terminal view projection");
+    for count in [1usize, 15] {
+        let runtimes = (0..count)
+            .map(|index| {
+                TerminalRuntime::test_with_screen_bytes(
+                    40,
+                    8,
+                    format!("nested terminal {index}").as_bytes(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let mut samples = Vec::with_capacity(SAMPLE_COUNT);
+        for sample in 0..WARMUP_COUNT + SAMPLE_COUNT {
+            let started = Instant::now();
+            for runtime in &runtimes {
+                let rendered =
+                    super::render_stream::render_terminal_virtual(runtime, Rect::new(0, 0, 40, 8));
+                black_box(rendered);
+            }
+            if sample >= WARMUP_COUNT {
+                samples.push(started.elapsed());
+            }
+        }
+        let stats = summarize(samples);
+        println!(
+            "  views={count:>2} median_us={:>6} p95_us={:>6} max_us={:>6}",
+            stats.median_us, stats.p95_us, stats.max_us
+        );
+    }
+}
+
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "manual client-rendered pipeline scaling profile"]
 async fn render_scale_profile() {
@@ -320,4 +352,5 @@ async fn render_scale_profile() {
     print_profiles("active panes (one workspace)", active_panes);
     print_snapshot_encoding_profiles("active panes", active_panes);
     print_token_rule_profiles();
+    print_terminal_views_profile();
 }

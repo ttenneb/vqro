@@ -73,7 +73,7 @@ pub(super) fn apply_reload(
     } else {
         (None, None)
     };
-    apply_client_shell_input_source_changes(state, prefix_input_source);
+    apply_client_shell_input_source_changes(state, endpoints, prefix_input_source);
     if let Some(resize) = resize {
         if let Some(activation) = pending_activation.as_mut() {
             if let Err(error) = activation.update_resize(resize, endpoints) {

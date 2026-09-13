@@ -209,6 +209,21 @@ use windows_sys::{
     },
 };
 
+pub(crate) fn fill_secure_random(_bytes: &mut [u8]) -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "supervised extension effects are disabled on Windows",
+    ))
+}
+
+// Kept as the platform contract while the Windows manager fails closed until Job Objects exist.
+#[allow(dead_code)]
+pub(crate) fn configure_extension_service_command(_command: &mut std::process::Command) {}
+
+// Kept as the platform contract while the Windows manager fails closed until Job Objects exist.
+#[allow(dead_code)]
+pub(crate) fn terminate_extension_service_process_group(_child: &std::process::Child) {}
+
 use super::{ClipboardImage, ForegroundJob, Signal};
 
 const STILL_ACTIVE: u32 = 259;
