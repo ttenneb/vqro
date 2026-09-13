@@ -307,7 +307,9 @@ pub(super) fn render_collection_lists(
         else {
             continue;
         };
-        let base = Style::default().fg(palette.text).bg(palette.panel_bg);
+        // Collection lists use the host terminal's default background. Clear replaced PTY cells
+        // without introducing a list panel or card behind the hierarchy.
+        let base = Style::default().fg(palette.text);
         buffer.set_style(area, base);
         for y in area.y..area.bottom() {
             for x in area.x..area.right() {
@@ -360,7 +362,7 @@ pub(super) fn render_collection_lists(
             buffer,
             Rect::new(area.x + 1, y, area.width.saturating_sub(2), 1),
             &format!("active {active_count}"),
-            Style::default().fg(palette.overlay0).bg(palette.panel_bg),
+            Style::default().fg(palette.overlay0),
         );
         y = y.saturating_add(1);
         let mut rendered_members = 0usize;
@@ -371,7 +373,7 @@ pub(super) fn render_collection_lists(
                     buffer,
                     Rect::new(area.x + 1, y, area.width.saturating_sub(2), 1),
                     &format!("archive {archived_count}"),
-                    Style::default().fg(palette.overlay0).bg(palette.surface0),
+                    Style::default().fg(palette.overlay0),
                 );
                 y = y.saturating_add(1);
             }
@@ -435,9 +437,15 @@ pub(super) fn render_collection_lists(
                     row,
                     &text,
                     if selected {
-                        Style::default().fg(palette.text).bg(palette.surface0)
+                        Style::default().fg(palette.text)
                     } else {
-                        status_style(state, palette)
+                        Style::default().fg(match state {
+                            crate::api::schema::AgentStatus::Working => palette.green,
+                            crate::api::schema::AgentStatus::Blocked => palette.yellow,
+                            crate::api::schema::AgentStatus::Done => palette.teal,
+                            crate::api::schema::AgentStatus::Idle => palette.overlay0,
+                            crate::api::schema::AgentStatus::Unknown => palette.subtext0,
+                        })
                     },
                 );
                 let disclosure = Rect::new(area.x.saturating_add(2), y, 2.min(area.width), 1);
@@ -466,10 +474,7 @@ pub(super) fn render_collection_lists(
                     let preview_width = area.width.saturating_sub(2);
                     if preview_height >= 2 && preview_width >= 4 {
                         preview = Rect::new(area.x + 1, y, preview_width, preview_height);
-                        buffer.set_style(
-                            preview,
-                            Style::default().fg(palette.text).bg(palette.surface0),
-                        );
+                        buffer.set_style(preview, Style::default().fg(palette.text));
                         if let Some(surface) = terminal_surfaces.get(&member.pane_id) {
                             if let Some(source) = surface.frame.to_ratatui_buffer() {
                                 let height = preview.height.min(source.area.height);
@@ -497,7 +502,7 @@ pub(super) fn render_collection_lists(
                                     1,
                                 ),
                                 "loading terminal…",
-                                Style::default().fg(palette.overlay0).bg(palette.surface0),
+                                Style::default().fg(palette.overlay0),
                             );
                         }
                         y = y.saturating_add(preview_height);
@@ -522,7 +527,7 @@ pub(super) fn render_collection_lists(
                     1,
                 ),
                 "enter terminal · space expand · z maximize · a archive · p promote",
-                Style::default().fg(palette.overlay0).bg(palette.panel_bg),
+                Style::default().fg(palette.overlay0),
             );
         }
     }

@@ -700,7 +700,21 @@ fn collection_chrome_renders_members_delegation_and_routes_selection() {
         "list must replace the compact terminal surface"
     );
     assert_eq!(state.hits.collection_members.len(), 2);
+    let selected_row = state.hits.collection_members[0].rect;
+    for x in selected_row.x..selected_row.right() {
+        let index = usize::from(selected_row.y) * usize::from(frame.width) + usize::from(x);
+        assert_eq!(
+            frame.cells[index].bg, 0,
+            "list rows must not paint a background"
+        );
+    }
     let selected_preview = state.hits.collection_members[0].preview;
+    let preview_index = usize::from(selected_preview.y) * usize::from(frame.width)
+        + usize::from(selected_preview.x);
+    assert_eq!(
+        frame.cells[preview_index].bg, 0,
+        "empty preview space must use the terminal's default background"
+    );
     assert_eq!(
         state
             .hits
