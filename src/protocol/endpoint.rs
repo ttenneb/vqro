@@ -154,6 +154,8 @@ pub struct ServerTerminalViewsSurface {
 pub struct ServerTerminalViewSurface {
     pub pane_id: String,
     pub frame: crate::protocol::FrameData,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scroll: Option<crate::protocol::PaneSurfaceScrollMetrics>,
     pub mouse_reporting: bool,
     pub sgr_pixel_mouse: bool,
     pub pixel_width: u32,

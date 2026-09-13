@@ -363,6 +363,7 @@ impl ClientShellState {
             &self.collection_expanded_members,
             &self.collection_preview_heights,
             self.collection_maximized_pane.as_ref(),
+            self.collection_entered_pane.as_deref(),
             &self.terminal_view_surfaces,
             &self.config.palette,
         );
@@ -470,8 +471,8 @@ impl ClientShellState {
                 rect: member.preview,
                 inner_rect: member.preview,
                 projected_inner_rect: member.preview,
-                scrollbar_rect: None,
-                scroll: None,
+                scrollbar_rect: member.scrollbar,
+                scroll: member.scroll,
                 pane_id: member.pane_id.clone(),
                 popup: false,
                 mouse_reporting: surface.is_some_and(|surface| surface.mouse_reporting),
@@ -487,7 +488,8 @@ impl ClientShellState {
             {
                 pane.rect = preview_hit.rect;
                 pane.inner_rect = preview_hit.inner_rect;
-                pane.scrollbar_rect = None;
+                pane.scrollbar_rect = preview_hit.scrollbar_rect;
+                pane.scroll = preview_hit.scroll;
                 pane.mouse_reporting = preview_hit.mouse_reporting;
                 pane.sgr_pixel_mouse = preview_hit.sgr_pixel_mouse;
                 pane.pixel_width = preview_hit.pixel_width;

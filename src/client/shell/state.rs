@@ -219,6 +219,9 @@ pub(super) struct CollectionMemberHit {
     pub(super) rect: Rect,
     pub(super) disclosure: Rect,
     pub(super) preview: Rect,
+    pub(super) resize_handle: Rect,
+    pub(super) scrollbar: Option<Rect>,
+    pub(super) scroll: Option<crate::pane::ScrollMetrics>,
     pub(super) collection_id: String,
     pub(super) pane_id: String,
 }
@@ -296,6 +299,11 @@ pub(super) enum ClientChromeDrag {
     Workspace {
         source_workspace_id: String,
         target: Option<(Option<String>, u16)>,
+    },
+    CollectionPreviewHeight {
+        pane_id: String,
+        start_row: u16,
+        start_height: u16,
     },
     PaneSplit {
         hit: PaneSplitHit,

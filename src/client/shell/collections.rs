@@ -1,4 +1,17 @@
+use ratatui::style::Color;
+
 use super::*;
+
+fn terminal_scroll_metrics(
+    surface: &crate::protocol::endpoint::ServerTerminalViewSurface,
+) -> Option<crate::pane::ScrollMetrics> {
+    let scroll = surface.scroll?;
+    Some(crate::pane::ScrollMetrics {
+        offset_from_bottom: usize::try_from(scroll.offset_from_bottom).ok()?,
+        max_offset_from_bottom: usize::try_from(scroll.max_offset_from_bottom).ok()?,
+        viewport_rows: usize::try_from(scroll.viewport_rows).ok()?,
+    })
+}
 
 fn member_name(
     pane_id: &str,
@@ -256,6 +269,7 @@ pub(super) fn render_collection_lists(
     expanded_members: &HashMap<String, HashSet<String>>,
     preview_heights: &HashMap<String, u16>,
     maximized_pane: Option<&(String, String)>,
+    entered_pane: Option<&str>,
     terminal_surfaces: &HashMap<String, crate::protocol::endpoint::ServerTerminalViewSurface>,
     palette: &Palette,
 ) -> Vec<CollectionMemberHit> {
@@ -302,14 +316,27 @@ pub(super) fn render_collection_lists(
         let Some(area) = panes
             .iter()
             .find(|pane| pane.pane_id == selected_pane_id)
-            .map(|pane| pane.inner_rect.intersection(buffer.area))
+            .map(|pane| {
+                let right = pane
+                    .scrollbar_rect
+                    .map_or(pane.inner_rect.right(), |scrollbar| scrollbar.right())
+                    .max(pane.inner_rect.right());
+                Rect::new(
+                    pane.inner_rect.x,
+                    pane.inner_rect.y,
+                    right.saturating_sub(pane.inner_rect.x),
+                    pane.inner_rect.height,
+                )
+                .intersection(buffer.area)
+            })
             .filter(|area| !area.is_empty())
         else {
             continue;
         };
-        // Collection lists use the host terminal's default background. Clear replaced PTY cells
-        // without introducing a list panel or card behind the hierarchy.
-        let base = Style::default().fg(palette.text);
+        // Clear list-owned cells to the terminal's configured default background. Color::Reset is
+        // explicit: unlike an unset Style background, it erases stale child colors while retaining
+        // the user's normal terminal transparency or background.
+        let base = Style::default().fg(palette.text).bg(Color::Reset);
         buffer.set_style(area, base);
         for y in area.y..area.bottom() {
             for x in area.x..area.right() {
@@ -323,26 +350,45 @@ pub(super) fn render_collection_lists(
         if let Some((_, pane_id)) =
             maximized_pane.filter(|(collection_id, _)| collection_id == &collection.collection_id)
         {
-            if let Some(surface) = terminal_surfaces.get(pane_id) {
+            let surface = terminal_surfaces.get(pane_id);
+            let scroll = surface.and_then(terminal_scroll_metrics);
+            let preview = Rect::new(area.x, area.y, area.width.saturating_sub(1), area.height);
+            if let Some(surface) = surface {
                 if let Some(source) = surface.frame.to_ratatui_buffer() {
-                    let height = area.height.min(source.area.height);
-                    let width = area.width.min(source.area.width);
+                    let height = preview.height.min(source.area.height);
+                    let width = preview.width.min(source.area.width);
                     for preview_y in 0..height {
                         for preview_x in 0..width {
-                            buffer[(area.x + preview_x, area.y + preview_y)] = source
+                            buffer[(preview.x + preview_x, preview.y + preview_y)] = source
                                 [(source.area.x + preview_x, source.area.y + preview_y)]
                                 .clone();
-                            buffer[(area.x + preview_x, area.y + preview_y)].set_skip(false);
+                            buffer[(preview.x + preview_x, preview.y + preview_y)].set_skip(false);
                         }
                     }
                 }
             } else {
-                put(buffer, area, "loading terminal…", base);
+                put(buffer, preview, "loading terminal…", base);
             }
+            let scrollbar = scroll
+                .filter(|metrics| metrics.max_offset_from_bottom > 0)
+                .map(|metrics| {
+                    let track = Rect::new(preview.right(), preview.y, 1, preview.height);
+                    crate::ui::render_pane_scrollbar_buffer(
+                        buffer,
+                        metrics,
+                        track,
+                        palette,
+                        entered_pane == Some(pane_id.as_str()),
+                    );
+                    track
+                });
             hits.push(CollectionMemberHit {
                 rect: Rect::default(),
                 disclosure: Rect::default(),
-                preview: area,
+                preview,
+                resize_handle: Rect::default(),
+                scrollbar,
+                scroll,
                 collection_id: collection.collection_id.clone(),
                 pane_id: pane_id.clone(),
             });
@@ -362,7 +408,7 @@ pub(super) fn render_collection_lists(
             buffer,
             Rect::new(area.x + 1, y, area.width.saturating_sub(2), 1),
             &format!("active {active_count}"),
-            Style::default().fg(palette.overlay0),
+            Style::default().fg(palette.overlay0).bg(Color::Reset),
         );
         y = y.saturating_add(1);
         let mut rendered_members = 0usize;
@@ -373,7 +419,7 @@ pub(super) fn render_collection_lists(
                     buffer,
                     Rect::new(area.x + 1, y, area.width.saturating_sub(2), 1),
                     &format!("archive {archived_count}"),
-                    Style::default().fg(palette.overlay0),
+                    Style::default().fg(palette.overlay0).bg(Color::Reset),
                 );
                 y = y.saturating_add(1);
             }
@@ -437,15 +483,17 @@ pub(super) fn render_collection_lists(
                     row,
                     &text,
                     if selected {
-                        Style::default().fg(palette.text)
+                        Style::default().fg(palette.text).bg(Color::Reset)
                     } else {
-                        Style::default().fg(match state {
-                            crate::api::schema::AgentStatus::Working => palette.green,
-                            crate::api::schema::AgentStatus::Blocked => palette.yellow,
-                            crate::api::schema::AgentStatus::Done => palette.teal,
-                            crate::api::schema::AgentStatus::Idle => palette.overlay0,
-                            crate::api::schema::AgentStatus::Unknown => palette.subtext0,
-                        })
+                        Style::default()
+                            .fg(match state {
+                                crate::api::schema::AgentStatus::Working => palette.green,
+                                crate::api::schema::AgentStatus::Blocked => palette.yellow,
+                                crate::api::schema::AgentStatus::Done => palette.teal,
+                                crate::api::schema::AgentStatus::Idle => palette.overlay0,
+                                crate::api::schema::AgentStatus::Unknown => palette.subtext0,
+                            })
+                            .bg(Color::Reset)
                     },
                 );
                 let disclosure = Rect::new(area.x.saturating_add(2), y, 2.min(area.width), 1);
@@ -464,17 +512,19 @@ pub(super) fn render_collection_lists(
                     let available = area
                         .bottom()
                         .saturating_sub(y)
-                        .saturating_sub(remaining_rows);
+                        .saturating_sub(remaining_rows)
+                        .saturating_sub(1); // terminal resize handle
                     let preview_height = preview_heights
                         .get(&member.pane_id)
                         .copied()
                         .unwrap_or_else(|| (area.height / 2).clamp(4, 12))
                         .clamp(2, area.height.saturating_sub(2).max(2))
                         .min(available);
-                    let preview_width = area.width.saturating_sub(2);
+                    let preview_width = area.width.saturating_sub(3);
                     if preview_height >= 2 && preview_width >= 4 {
                         preview = Rect::new(area.x + 1, y, preview_width, preview_height);
-                        buffer.set_style(preview, Style::default().fg(palette.text));
+                        buffer
+                            .set_style(preview, Style::default().fg(palette.text).bg(Color::Reset));
                         if let Some(surface) = terminal_surfaces.get(&member.pane_id) {
                             if let Some(source) = surface.frame.to_ratatui_buffer() {
                                 let height = preview.height.min(source.area.height);
@@ -502,16 +552,52 @@ pub(super) fn render_collection_lists(
                                     1,
                                 ),
                                 "loading terminal…",
-                                Style::default().fg(palette.overlay0),
+                                Style::default().fg(palette.overlay0).bg(Color::Reset),
                             );
                         }
                         y = y.saturating_add(preview_height);
                     }
                 }
+                let surface = terminal_surfaces.get(&member.pane_id);
+                let scroll = surface.and_then(terminal_scroll_metrics);
+                let scrollbar = (!preview.is_empty()
+                    && scroll.is_some_and(|metrics| metrics.max_offset_from_bottom > 0))
+                .then(|| Rect::new(preview.right(), preview.y, 1, preview.height));
+                if let (Some(track), Some(metrics)) = (scrollbar, scroll) {
+                    crate::ui::render_pane_scrollbar_buffer(
+                        buffer,
+                        metrics,
+                        track,
+                        palette,
+                        entered_pane == Some(member.pane_id.as_str()),
+                    );
+                }
+                let resize_handle = if !preview.is_empty() && y < area.bottom() {
+                    let handle = Rect::new(preview.x, y, preview.width.saturating_add(1), 1);
+                    let grip = Rect::new(
+                        handle.x.saturating_add(handle.width.saturating_sub(5) / 2),
+                        handle.y,
+                        5.min(handle.width),
+                        1,
+                    );
+                    put(
+                        buffer,
+                        grip,
+                        "──◆──",
+                        Style::default().fg(palette.surface_dim).bg(Color::Reset),
+                    );
+                    y = y.saturating_add(1);
+                    handle
+                } else {
+                    Rect::default()
+                };
                 hits.push(CollectionMemberHit {
                     rect: row,
                     disclosure,
                     preview,
+                    resize_handle,
+                    scrollbar,
+                    scroll,
                     collection_id: collection.collection_id.clone(),
                     pane_id: member.pane_id.clone(),
                 });
@@ -527,7 +613,7 @@ pub(super) fn render_collection_lists(
                     1,
                 ),
                 "enter terminal · space expand · z maximize · a archive · p promote",
-                Style::default().fg(palette.overlay0),
+                Style::default().fg(palette.overlay0).bg(Color::Reset),
             );
         }
     }

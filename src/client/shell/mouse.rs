@@ -1057,6 +1057,18 @@ impl ClientShellState {
                     self.chrome_drag = None;
                     return;
                 }
+                Some(ClientChromeDrag::CollectionPreviewHeight {
+                    pane_id,
+                    start_row,
+                    start_height,
+                }) => {
+                    let delta = i32::from(mouse.row) - i32::from(*start_row);
+                    let height = (i32::from(*start_height) + delta).clamp(2, 40) as u16;
+                    self.collection_preview_heights
+                        .insert(pane_id.clone(), height);
+                    outcome.repaint = true;
+                    return;
+                }
                 Some(ClientChromeDrag::PaneScrollbar {
                     hit,
                     grab_row_offset,
@@ -1259,6 +1271,9 @@ impl ClientShellState {
                                 self.push_endpoint_method(method, outcome);
                             }
                         }
+                        outcome.repaint = true;
+                    }
+                    ClientChromeDrag::CollectionPreviewHeight { .. } => {
                         outcome.repaint = true;
                     }
                     ClientChromeDrag::PaneScrollbar {
@@ -1827,6 +1842,38 @@ impl ClientShellState {
             return;
         }
 
+        if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
+            if let Some(member) = self
+                .hits
+                .collection_members
+                .iter()
+                .find(|member| {
+                    !member.resize_handle.is_empty() && super::contains(member.resize_handle, point)
+                })
+                .cloned()
+            {
+                self.chrome_drag = Some(ClientChromeDrag::CollectionPreviewHeight {
+                    pane_id: member.pane_id,
+                    start_row: mouse.row,
+                    start_height: member.preview.height,
+                });
+                return;
+            }
+        }
+
+        if matches!(
+            mouse.kind,
+            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+        ) && self.hits.collection_members.iter().any(|member| {
+            (super::contains(member.preview, point)
+                || member
+                    .scrollbar
+                    .is_some_and(|scrollbar| super::contains(scrollbar, point)))
+                && self.collection_entered_pane.as_deref() != Some(member.pane_id.as_str())
+        }) {
+            return;
+        }
+
         if mouse.kind == MouseEventKind::Down(MouseButton::Right) {
             if let Some(member) = self
                 .hits
@@ -2385,6 +2432,11 @@ impl ClientShellState {
                     })
                     .cloned();
                 if let Some(hit) = scrollbar_hit {
+                    if self.hits.collection_members.iter().any(|member| {
+                        member.pane_id == hit.pane_id && member.scrollbar == hit.scrollbar_rect
+                    }) {
+                        self.collection_entered_pane = Some(hit.pane_id.clone());
+                    }
                     self.mode = ClientShellMode::Terminal;
                     self.push_endpoint_method(
                         crate::api::schema::Method::PaneFocus(crate::api::schema::PaneTarget {

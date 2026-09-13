@@ -86,6 +86,11 @@ fn assert_shell_hits_within_frame(state: &ClientShellState, frame: &FrameData) {
         assert_rect_within(hit.rect, bounds);
         assert_rect_within(hit.disclosure, bounds);
         assert_rect_within(hit.preview, bounds);
+        assert_rect_within(hit.resize_handle, bounds);
+        if let Some(scrollbar) = hit.scrollbar {
+            assert_rect_within(scrollbar, bounds);
+            assert_eq!(scrollbar.height, hit.preview.height);
+        }
     }
     for split in &state.hits.pane_splits {
         assert_rect_within(split.area, bounds);
@@ -700,20 +705,21 @@ fn collection_chrome_renders_members_delegation_and_routes_selection() {
         "list must replace the compact terminal surface"
     );
     assert_eq!(state.hits.collection_members.len(), 2);
+    let pane_background = crate::protocol::color_to_u32(ratatui::style::Color::Reset);
     let selected_row = state.hits.collection_members[0].rect;
     for x in selected_row.x..selected_row.right() {
         let index = usize::from(selected_row.y) * usize::from(frame.width) + usize::from(x);
         assert_eq!(
-            frame.cells[index].bg, 0,
-            "list rows must not paint a background"
+            frame.cells[index].bg, pane_background,
+            "list rows must explicitly reset to the normal terminal background"
         );
     }
     let selected_preview = state.hits.collection_members[0].preview;
     let preview_index = usize::from(selected_preview.y) * usize::from(frame.width)
         + usize::from(selected_preview.x);
     assert_eq!(
-        frame.cells[preview_index].bg, 0,
-        "empty preview space must use the terminal's default background"
+        frame.cells[preview_index].bg, pane_background,
+        "empty preview space must reset stale colors to the normal terminal background"
     );
     assert_eq!(
         state
@@ -796,6 +802,11 @@ fn collection_chrome_renders_members_delegation_and_routes_selection() {
                     }),
                     &[],
                 ),
+                scroll: Some(crate::protocol::PaneSurfaceScrollMetrics {
+                    offset_from_bottom: 2,
+                    max_offset_from_bottom: 20,
+                    viewport_rows: u64::from(size.rows),
+                }),
                 mouse_reporting: false,
                 sgr_pixel_mouse: false,
                 pixel_width: 0,
@@ -821,6 +832,7 @@ fn collection_chrome_renders_members_delegation_and_routes_selection() {
                     hyperlinks: Vec::new(),
                     graphics: Vec::new(),
                 },
+                scroll: None,
                 mouse_reporting: false,
                 sgr_pixel_mouse: false,
                 pixel_width: 0,
@@ -841,6 +853,13 @@ fn collection_chrome_renders_members_delegation_and_routes_selection() {
         .collect::<Vec<_>>()
         .join("\n");
     assert!(preview_text.contains("CHILD PTY"), "{preview_text}");
+    let preview_hit = state.hits.collection_members[0].clone();
+    assert_eq!(
+        preview_hit.scrollbar.map(|scrollbar| scrollbar.height),
+        Some(preview_hit.preview.height),
+        "an inline terminal scrollbar must be bounded to that terminal"
+    );
+    assert!(!preview_hit.resize_handle.is_empty());
     state
         .collection_expanded_members
         .get_mut("collection_1")
@@ -880,6 +899,7 @@ fn collection_chrome_renders_members_delegation_and_routes_selection() {
             views: vec![crate::protocol::endpoint::ServerTerminalViewSurface {
                 pane_id: "pane_2".into(),
                 frame: FrameData::from_ratatui_buffer_with_hyperlinks(&second_preview, None, &[],),
+                scroll: None,
                 mouse_reporting: false,
                 sgr_pixel_mouse: false,
                 pixel_width: 0,
@@ -888,6 +908,31 @@ fn collection_chrome_renders_members_delegation_and_routes_selection() {
         }
     ));
     assert_eq!(state.terminal_view_surfaces.len(), 2);
+    state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: preview_hit.resize_handle.x,
+        row: preview_hit.resize_handle.y,
+        modifiers: KeyModifiers::empty(),
+    })]);
+    state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
+        kind: MouseEventKind::Drag(MouseButton::Left),
+        column: preview_hit.resize_handle.x,
+        row: preview_hit.resize_handle.y.saturating_sub(2),
+        modifiers: KeyModifiers::empty(),
+    })]);
+    assert_eq!(
+        state.collection_preview_heights.get("pane_1"),
+        Some(&preview_hit.preview.height.saturating_sub(2).max(2))
+    );
+    state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
+        kind: MouseEventKind::Up(MouseButton::Left),
+        column: preview_hit.resize_handle.x,
+        row: preview_hit.resize_handle.y.saturating_sub(2),
+        modifiers: KeyModifiers::empty(),
+    })]);
+    state.collection_preview_heights.remove("pane_1");
+    state.compose(106, 24).expect("restored preview height");
+    let _ = state.take_pending_endpoint_controls();
     let first_row = state.hits.collection_members[0].rect;
     state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
         kind: MouseEventKind::Down(MouseButton::Right),

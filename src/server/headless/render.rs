@@ -52,6 +52,13 @@ impl HeadlessServer {
                         cursor,
                         &hyperlinks,
                     ),
+                    scroll: runtime.scroll_metrics().map(|metrics| {
+                        crate::protocol::PaneSurfaceScrollMetrics {
+                            offset_from_bottom: metrics.offset_from_bottom as u64,
+                            max_offset_from_bottom: metrics.max_offset_from_bottom as u64,
+                            viewport_rows: metrics.viewport_rows as u64,
+                        }
+                    }),
                     mouse_reporting: runtime.mouse_reporting_enabled(),
                     sgr_pixel_mouse: runtime.sgr_pixel_mouse_enabled(),
                     pixel_width: u32::from(view.size.cols) * cell_size.width_px,
