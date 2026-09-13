@@ -13,6 +13,30 @@ fn terminal_scroll_metrics(
     })
 }
 
+fn render_preview_scrollbar(
+    buffer: &mut Buffer,
+    metrics: crate::pane::ScrollMetrics,
+    track: Rect,
+    palette: &Palette,
+    focused: bool,
+) {
+    crate::ui::render_pane_scrollbar_buffer(buffer, metrics, track, palette, focused);
+    // Pane scrollbars use right-edge block glyphs. Preview resize borders use box drawing, so
+    // normalize this scrollbar to matching vertical glyphs that visibly join the lower corner.
+    for y in track.y..track.bottom() {
+        let cell = &mut buffer[(track.x, y)];
+        match cell.symbol() {
+            "▐" => {
+                cell.set_symbol("┃");
+            }
+            "▕" => {
+                cell.set_symbol("│");
+            }
+            _ => {}
+        }
+    }
+}
+
 fn member_name(
     pane_id: &str,
     delegation: Option<&crate::protocol::endpoint::ClientShellDelegation>,
@@ -38,7 +62,7 @@ fn status_style(status: crate::api::schema::AgentStatus, palette: &Palette) -> S
         crate::api::schema::AgentStatus::Idle => palette.yellow,
         crate::api::schema::AgentStatus::Unknown => palette.overlay0,
     };
-    Style::default().fg(color).bg(palette.panel_bg)
+    Style::default().fg(color).bg(Color::Reset)
 }
 
 fn put(buffer: &mut Buffer, rect: Rect, text: &str, style: Style) {
@@ -66,6 +90,7 @@ pub(super) fn render_collection_chrome(
     structure: Option<&crate::protocol::endpoint::ClientShellStructureProjection>,
     panes: &[PaneHit],
     list_views: &HashSet<String>,
+    maximized_pane: Option<&(String, String)>,
     palette: &Palette,
 ) -> Vec<CollectionChromeHit> {
     let Some(structure) = structure.filter(|structure| {
@@ -124,7 +149,7 @@ pub(super) fn render_collection_chrome(
             continue;
         }
         let rect = Rect::new(pane.inner_rect.x, header_y, pane.inner_rect.width, 1);
-        let base = Style::default().fg(palette.text).bg(palette.panel_bg);
+        let base = Style::default().fg(palette.text).bg(Color::Reset);
         buffer.set_style(rect, base);
         for x in rect.x..rect.right() {
             buffer[(x, rect.y)]
@@ -136,7 +161,13 @@ pub(super) fn render_collection_chrome(
         let previous = Rect::new(rect.x, rect.y, 3.min(rect.width), 1);
         let next = Rect::new(rect.right().saturating_sub(3), rect.y, 3.min(rect.width), 1);
         let inspect_width = if rect.width >= 72 { 10 } else { 3 };
-        let presentation_width = if rect.width >= 60 { 9 } else { 3 };
+        let presentation_width = if rect.width >= 76 {
+            14
+        } else if rect.width >= 44 {
+            10
+        } else {
+            3
+        };
         let inspect = Rect::new(
             next.x.saturating_sub(inspect_width),
             rect.y,
@@ -153,29 +184,38 @@ pub(super) fn render_collection_chrome(
             buffer,
             previous,
             " ‹ ",
-            Style::default().fg(palette.accent).bg(palette.surface0),
+            Style::default().fg(palette.accent).bg(Color::Reset),
         );
         put(
             buffer,
             next,
             " › ",
-            Style::default().fg(palette.accent).bg(palette.surface0),
+            Style::default().fg(palette.accent).bg(Color::Reset),
         );
+        let shows_terminal = list_views.contains(&collection.collection_id)
+            && maximized_pane
+                .is_none_or(|(collection_id, _)| collection_id != &collection.collection_id);
         put(
             buffer,
             presentation_toggle,
-            if presentation_width >= 9 {
-                if list_views.contains(&collection.collection_id) {
-                    " terminal"
+            if presentation_width >= 14 {
+                if shows_terminal {
+                    "[ t terminal ]"
                 } else {
-                    " list    "
+                    "[ ≡ list ]    "
                 }
-            } else if list_views.contains(&collection.collection_id) {
-                " t "
+            } else if presentation_width >= 10 {
+                if shows_terminal {
+                    "[ t term ]"
+                } else {
+                    "[ ≡ list ]"
+                }
+            } else if shows_terminal {
+                "[t]"
             } else {
-                " ≡ "
+                "[≡]"
             },
-            Style::default().fg(palette.accent).bg(palette.surface0),
+            Style::default().fg(palette.overlay1).bg(Color::Reset),
         );
         put(
             buffer,
@@ -185,7 +225,7 @@ pub(super) fn render_collection_chrome(
             } else {
                 " i "
             },
-            Style::default().fg(palette.teal).bg(palette.surface0),
+            Style::default().fg(palette.teal).bg(Color::Reset),
         );
 
         let content_x = previous.right().saturating_add(1);
@@ -373,7 +413,7 @@ pub(super) fn render_collection_lists(
                 .filter(|metrics| metrics.max_offset_from_bottom > 0)
                 .map(|metrics| {
                     let track = Rect::new(preview.right(), preview.y, 1, preview.height);
-                    crate::ui::render_pane_scrollbar_buffer(
+                    render_preview_scrollbar(
                         buffer,
                         metrics,
                         track,
@@ -520,7 +560,7 @@ pub(super) fn render_collection_lists(
                         .unwrap_or_else(|| (area.height / 2).clamp(4, 12))
                         .clamp(2, area.height.saturating_sub(2).max(2))
                         .min(available);
-                    let preview_width = area.width.saturating_sub(3);
+                    let preview_width = area.width.saturating_sub(2);
                     if preview_height >= 2 && preview_width >= 4 {
                         preview = Rect::new(area.x + 1, y, preview_width, preview_height);
                         buffer
@@ -564,7 +604,7 @@ pub(super) fn render_collection_lists(
                     && scroll.is_some_and(|metrics| metrics.max_offset_from_bottom > 0))
                 .then(|| Rect::new(preview.right(), preview.y, 1, preview.height));
                 if let (Some(track), Some(metrics)) = (scrollbar, scroll) {
-                    crate::ui::render_pane_scrollbar_buffer(
+                    render_preview_scrollbar(
                         buffer,
                         metrics,
                         track,
@@ -573,7 +613,10 @@ pub(super) fn render_collection_lists(
                     );
                 }
                 let resize_handle = if !preview.is_empty() && y < area.bottom() {
-                    let handle = Rect::new(preview.x, y, preview.width.saturating_add(1), 1);
+                    // Span the full list interior so both corners align with its edges. The
+                    // terminal remains inset by one cell, and its scrollbar lands on the same
+                    // column as the lower-right corner.
+                    let handle = Rect::new(area.x, y, area.width, 1);
                     let grip_width = 17.min(handle.width);
                     let grip = Rect::new(
                         handle
@@ -583,11 +626,21 @@ pub(super) fn render_collection_lists(
                         grip_width,
                         1,
                     );
+                    let edge_style = Style::default().fg(palette.overlay1).bg(Color::Reset);
+                    buffer.set_style(handle, edge_style);
+                    for x in handle.x..handle.right() {
+                        buffer[(x, handle.y)]
+                            .set_symbol("─")
+                            .set_style(edge_style)
+                            .set_skip(false);
+                    }
+                    put(buffer, grip, "[ drag height ↕ ]", edge_style);
+                    put(buffer, Rect::new(handle.x, handle.y, 1, 1), "└", edge_style);
                     put(
                         buffer,
-                        grip,
-                        "[ drag height ↕ ]",
-                        Style::default().fg(palette.overlay1).bg(Color::Reset),
+                        Rect::new(handle.right().saturating_sub(1), handle.y, 1, 1),
+                        "┘",
+                        edge_style,
                     );
                     y = y.saturating_add(1);
                     handle

@@ -615,8 +615,17 @@ fn collection_chrome_renders_members_delegation_and_routes_selection() {
         .join("\n");
     assert!(text.contains("Alpha workflow"), "{text}");
     assert!(text.contains("1/2"), "{text}");
+    assert!(text.contains("[ ≡ list ]"), "{text}");
     assert!(text.contains("coordinate"), "{text}");
     let chrome = state.hits.collections[0].clone();
+    let header_background = crate::protocol::color_to_u32(ratatui::style::Color::Reset);
+    for x in chrome.rect.x..chrome.rect.right() {
+        let index = usize::from(chrome.rect.y) * usize::from(frame.width) + usize::from(x);
+        assert_eq!(
+            frame.cells[index].bg, header_background,
+            "the entire collection header must preserve the terminal background"
+        );
+    }
     let outcome =
         state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
@@ -698,6 +707,7 @@ fn collection_chrome_renders_members_delegation_and_routes_selection() {
         .collect::<Vec<_>>()
         .join("\n");
     assert!(text.contains("active 2"), "{text}");
+    assert!(text.contains("[ t term ]"), "{text}");
     assert!(text.contains("coordinate"), "{text}");
     assert!(text.contains("run tests"), "{text}");
     assert!(
@@ -861,6 +871,41 @@ fn collection_chrome_renders_members_delegation_and_routes_selection() {
         "an inline terminal scrollbar must be bounded to that terminal"
     );
     assert!(!preview_hit.resize_handle.is_empty());
+    let scrollbar = preview_hit.scrollbar.expect("scrollbar");
+    for y in scrollbar.y..scrollbar.bottom() {
+        let symbol = &preview_frame.cells
+            [usize::from(y) * usize::from(preview_frame.width) + usize::from(scrollbar.x)]
+        .symbol;
+        assert!(
+            matches!(symbol.as_str(), "│" | "┃"),
+            "preview scrollbar must use box-drawing glyphs that join its corner: {symbol:?}"
+        );
+    }
+    assert_eq!(
+        preview_hit.resize_handle.x.saturating_add(1),
+        preview_hit.preview.x,
+        "the lower-left corner must align with the outer list edge"
+    );
+    assert_eq!(
+        preview_hit.scrollbar.map(|scrollbar| scrollbar.x),
+        Some(preview_hit.resize_handle.right().saturating_sub(1)),
+        "the lower-right corner must sit directly beneath the scrollbar"
+    );
+    let handle_row = usize::from(preview_hit.resize_handle.y) * usize::from(preview_frame.width);
+    assert_eq!(
+        preview_frame.cells[handle_row + usize::from(preview_hit.resize_handle.x)].symbol,
+        "└"
+    );
+    assert_eq!(
+        preview_frame.cells[handle_row + usize::from(preview_hit.resize_handle.x + 1)].symbol,
+        "─"
+    );
+    assert_eq!(
+        preview_frame.cells
+            [handle_row + usize::from(preview_hit.resize_handle.right().saturating_sub(1))]
+        .symbol,
+        "┘"
+    );
     state
         .collection_expanded_members
         .get_mut("collection_1")
@@ -1012,6 +1057,29 @@ fn collection_chrome_renders_members_delegation_and_routes_selection() {
     let maximized = state.compose(106, 24).expect("maximized collection child");
     assert_shell_hits_within_frame(&state, &maximized);
     assert!(!state.hits.collection_members[0].preview.is_empty());
+    let maximized_text = maximized
+        .cells
+        .chunks(maximized.width as usize)
+        .map(|row| {
+            row.iter()
+                .map(|cell| cell.symbol.as_str())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(maximized_text.contains("[ ≡ list ]"), "{maximized_text}");
+    let presentation_toggle = state.hits.collections[0].presentation_toggle;
+    state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: presentation_toggle.x,
+        row: presentation_toggle.y,
+        modifiers: KeyModifiers::empty(),
+    })]);
+    assert!(state.collection_maximized_pane.is_none());
+    assert!(state.collection_list_views.contains("collection_1"));
+
+    state.handle_input_bytes(b"z");
+    assert!(state.collection_maximized_pane.is_some());
     state.collection_entered_pane = None;
     state.handle_input_bytes(b"z");
     assert!(state.collection_maximized_pane.is_none());

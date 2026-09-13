@@ -1782,7 +1782,18 @@ impl ClientShellState {
                         let terminal_views = self.supports_endpoint_capability(
                             crate::protocol::endpoint::TERMINAL_VIEWS_CAPABILITY,
                         );
-                        if self
+                        let maximized = self.collection_maximized_pane.as_ref().is_some_and(
+                            |(collection_id, _)| collection_id == &collection.collection_id,
+                        );
+                        if maximized {
+                            // A maximized child is already a terminal presentation. Its header
+                            // switch returns to the collection list rather than skipping past it
+                            // into the compact terminal presentation.
+                            self.collection_maximized_pane = None;
+                            self.collection_entered_pane = None;
+                            self.collection_list_views
+                                .insert(collection.collection_id.clone());
+                        } else if self
                             .collection_list_views
                             .insert(collection.collection_id.clone())
                         {
@@ -1795,11 +1806,6 @@ impl ClientShellState {
                         } else {
                             self.collection_list_views.remove(&collection.collection_id);
                             self.collection_entered_pane = None;
-                            if self.collection_maximized_pane.as_ref().is_some_and(
-                                |(collection_id, _)| collection_id == &collection.collection_id,
-                            ) {
-                                self.collection_maximized_pane = None;
-                            }
                         }
                         if self.inspector.is_some() {
                             self.close_terminal_inspector(outcome);

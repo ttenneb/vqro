@@ -352,6 +352,7 @@ impl ClientShellState {
             self.structure.as_deref(),
             &self.hits.panes,
             &self.collection_list_views,
+            self.collection_maximized_pane.as_ref(),
             &self.config.palette,
         );
         self.hits.collection_members = collections::render_collection_lists(
