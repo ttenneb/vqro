@@ -556,6 +556,10 @@ pub(super) fn capture_node(node: &Node) -> LayoutSnapshot {
     }
 }
 
+pub(crate) fn validate_snapshot(content: &str) -> Result<(), String> {
+    parse_snapshot(content).map(drop)
+}
+
 pub(super) fn parse_snapshot(content: &str) -> Result<SessionSnapshot, String> {
     let raw = serde_json::from_str::<RawSessionSnapshot>(content).map_err(|e| e.to_string())?;
     if raw.version > SNAPSHOT_VERSION {

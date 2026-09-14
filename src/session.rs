@@ -1,4 +1,4 @@
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -14,6 +14,7 @@ const MAX_SESSION_NAME_LEN: usize = 64;
 const STOP_WAIT_TIMEOUT: Duration = Duration::from_secs(15);
 const STOP_WAIT_POLL: Duration = Duration::from_millis(25);
 const MIN_SOCKET_TIMEOUT: Duration = Duration::from_millis(1);
+const MAX_IMPORTED_SNAPSHOT_BYTES: u64 = 64 * 1024 * 1024;
 
 static EXPLICIT_SESSION_REQUESTED: AtomicBool = AtomicBool::new(false);
 
@@ -24,6 +25,14 @@ pub struct SessionInfo {
     pub running: bool,
     pub socket_path: String,
     pub session_dir: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ImportedHerdrSession {
+    pub source: String,
+    pub target: String,
+    pub source_snapshot: String,
+    pub target_snapshot: String,
 }
 
 pub fn configure_from_args(args: &[String]) -> Result<Vec<String>, String> {
@@ -165,6 +174,213 @@ pub fn data_dir_for(name: Option<&str>) -> PathBuf {
         Some(name) => config_dir.join("sessions").join(name),
         None => config_dir,
     }
+}
+
+fn strip_imported_agent_resume_metadata(snapshot: &mut serde_json::Value) {
+    let Some(workspaces) = snapshot
+        .get_mut("workspaces")
+        .and_then(|value| value.as_array_mut())
+    else {
+        return;
+    };
+    for workspace in workspaces {
+        let Some(tabs) = workspace
+            .get_mut("tabs")
+            .and_then(|value| value.as_array_mut())
+        else {
+            continue;
+        };
+        for tab in tabs {
+            let Some(panes) = tab.get_mut("panes").and_then(|value| value.as_object_mut()) else {
+                continue;
+            };
+            for pane in panes.values_mut() {
+                if let Some(pane) = pane.as_object_mut() {
+                    pane.remove("agent_session");
+                    pane.remove("launch_argv");
+                }
+            }
+        }
+    }
+}
+
+pub fn import_herdr_session(
+    source_name: Option<&str>,
+    target_name: &str,
+) -> Result<ImportedHerdrSession, String> {
+    let vqro_root = crate::config::config_dir();
+    let config_parent = vqro_root
+        .parent()
+        .ok_or_else(|| "vqro config directory has no parent".to_string())?;
+    import_herdr_session_from_roots(
+        &config_parent.join("herdr"),
+        &vqro_root,
+        source_name,
+        target_name,
+    )
+}
+
+fn import_herdr_session_from_roots(
+    herdr_root: &Path,
+    vqro_root: &Path,
+    source_name: Option<&str>,
+    target_name: &str,
+) -> Result<ImportedHerdrSession, String> {
+    let source_name = match source_name {
+        Some(name) => parse_target_name(name)?,
+        None => None,
+    };
+    if target_name == DEFAULT_SESSION_NAME {
+        return Err("import target must be a new named vqro session".to_string());
+    }
+    validate_name(target_name)?;
+
+    let source_dir = source_name.as_deref().map_or_else(
+        || herdr_root.to_path_buf(),
+        |name| herdr_root.join("sessions").join(name),
+    );
+    let source_snapshot = source_dir.join("session.json");
+    let canonical_herdr_root = std::fs::canonicalize(herdr_root).map_err(|err| {
+        format!(
+            "cannot resolve Herdr data directory {}: {err}",
+            herdr_root.display()
+        )
+    })?;
+    let canonical_source = std::fs::canonicalize(&source_snapshot).map_err(|err| {
+        format!(
+            "cannot resolve Herdr session snapshot {}: {err}",
+            source_snapshot.display()
+        )
+    })?;
+    if !canonical_source.starts_with(&canonical_herdr_root) {
+        return Err(format!(
+            "Herdr session snapshot escapes the Herdr data directory: {}",
+            source_snapshot.display()
+        ));
+    }
+    let source_file = std::fs::File::open(&canonical_source)
+        .map_err(|err| format!("cannot open {}: {err}", source_snapshot.display()))?;
+    let metadata = source_file.metadata().map_err(|err| {
+        format!(
+            "cannot read Herdr session snapshot {}: {err}",
+            source_snapshot.display()
+        )
+    })?;
+    if !metadata.is_file() {
+        return Err(format!(
+            "Herdr session snapshot is not a regular file: {}",
+            source_snapshot.display()
+        ));
+    }
+    if metadata.len() > MAX_IMPORTED_SNAPSHOT_BYTES {
+        return Err(format!(
+            "Herdr session snapshot exceeds the {} MiB import limit",
+            MAX_IMPORTED_SNAPSHOT_BYTES / (1024 * 1024)
+        ));
+    }
+    let mut content = String::new();
+    source_file
+        .take(MAX_IMPORTED_SNAPSHOT_BYTES + 1)
+        .read_to_string(&mut content)
+        .map_err(|err| format!("cannot read {}: {err}", source_snapshot.display()))?;
+    if content.len() as u64 > MAX_IMPORTED_SNAPSHOT_BYTES {
+        return Err(format!(
+            "Herdr session snapshot exceeds the {} MiB import limit",
+            MAX_IMPORTED_SNAPSHOT_BYTES / (1024 * 1024)
+        ));
+    }
+    crate::persist::validate_snapshot(&content)
+        .map_err(|err| format!("incompatible Herdr session snapshot: {err}"))?;
+    let mut imported_value = serde_json::from_str(&content)
+        .map_err(|err| format!("cannot prepare Herdr session snapshot: {err}"))?;
+    strip_imported_agent_resume_metadata(&mut imported_value);
+    content = serde_json::to_string_pretty(&imported_value)
+        .map_err(|err| format!("cannot encode imported session snapshot: {err}"))?;
+    content.push('\n');
+
+    std::fs::create_dir_all(vqro_root)
+        .map_err(|err| format!("cannot create {}: {err}", vqro_root.display()))?;
+    let canonical_vqro_root = std::fs::canonicalize(vqro_root)
+        .map_err(|err| format!("cannot resolve {}: {err}", vqro_root.display()))?;
+    let sessions_dir = vqro_root.join("sessions");
+    match std::fs::symlink_metadata(&sessions_dir) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+            return Err(format!(
+                "vqro sessions path is not a real directory: {}",
+                sessions_dir.display()
+            ));
+        }
+        Ok(_) => {}
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            std::fs::create_dir(&sessions_dir)
+                .map_err(|err| format!("cannot create {}: {err}", sessions_dir.display()))?;
+        }
+        Err(err) => return Err(format!("cannot inspect {}: {err}", sessions_dir.display())),
+    }
+    let canonical_sessions_dir = std::fs::canonicalize(&sessions_dir)
+        .map_err(|err| format!("cannot resolve {}: {err}", sessions_dir.display()))?;
+    if !canonical_sessions_dir.starts_with(&canonical_vqro_root) {
+        return Err("vqro sessions directory escapes the vqro data directory".to_string());
+    }
+    let target_dir = sessions_dir.join(target_name);
+    match std::fs::symlink_metadata(&target_dir) {
+        Ok(_) => {
+            return Err(format!(
+                "vqro session {target_name} already exists; choose a new name"
+            ));
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => return Err(format!("cannot inspect import target: {err}")),
+    }
+    let staging_dir = vqro_root.join(format!(
+        ".session-import-{target_name}-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    ));
+    std::fs::create_dir(&staging_dir)
+        .map_err(|err| format!("cannot create import staging directory: {err}"))?;
+    let staging_snapshot = staging_dir.join("session.json");
+    let result = (|| -> Result<(), String> {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&staging_snapshot)
+            .map_err(|err| format!("cannot create imported snapshot: {err}"))?;
+        file.write_all(content.as_bytes())
+            .map_err(|err| format!("cannot write imported snapshot: {err}"))?;
+        file.sync_all()
+            .map_err(|err| format!("cannot sync imported snapshot: {err}"))?;
+        match std::fs::symlink_metadata(&target_dir) {
+            Ok(_) => {
+                return Err(format!(
+                    "vqro session {target_name} already exists; choose a new name"
+                ));
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => return Err(format!("cannot inspect import target: {err}")),
+        }
+        std::fs::rename(&staging_dir, &target_dir)
+            .map_err(|err| format!("cannot publish imported session: {err}"))?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&staging_snapshot);
+        let _ = std::fs::remove_dir(&staging_dir);
+    }
+    result?;
+
+    Ok(ImportedHerdrSession {
+        source: source_name
+            .as_deref()
+            .unwrap_or(DEFAULT_SESSION_NAME)
+            .to_owned(),
+        target: target_name.to_owned(),
+        source_snapshot: source_snapshot.display().to_string(),
+        target_snapshot: target_dir.join("session.json").display().to_string(),
+    })
 }
 
 pub fn api_socket_path_for(name: Option<&str>) -> PathBuf {
@@ -493,6 +709,96 @@ mod tests {
         let client = crate::ipc::connect_local_stream(&path).unwrap();
         let server = listener.accept().unwrap();
         (client, server, path)
+    }
+
+    #[test]
+    fn herdr_import_copies_default_and_named_snapshots_without_overwrite() {
+        let root = std::env::temp_dir().join(format!(
+            "vqro-session-import-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let herdr_root = root.join("herdr");
+        let vqro_root = root.join("vqro");
+        let snapshot = r#"{"version":4,"workspaces":[],"repositories":[],"space_order":[],"active":null,"selected":0}"#;
+        std::fs::create_dir_all(herdr_root.join("sessions/source")).unwrap();
+        std::fs::write(herdr_root.join("session.json"), snapshot).unwrap();
+        std::fs::write(herdr_root.join("sessions/source/session.json"), snapshot).unwrap();
+
+        let imported =
+            import_herdr_session_from_roots(&herdr_root, &vqro_root, None, "from-default").unwrap();
+        assert_eq!(imported.source, DEFAULT_SESSION_NAME);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(
+                &std::fs::read_to_string(vqro_root.join("sessions/from-default/session.json"))
+                    .unwrap()
+            )
+            .unwrap(),
+            serde_json::from_str::<serde_json::Value>(snapshot).unwrap()
+        );
+        let named =
+            import_herdr_session_from_roots(&herdr_root, &vqro_root, Some("source"), "from-named")
+                .unwrap();
+        assert_eq!(named.source, "source");
+        assert_eq!(
+            import_herdr_session_from_roots(&herdr_root, &vqro_root, None, "from-default")
+                .unwrap_err(),
+            "vqro session from-default already exists; choose a new name"
+        );
+        assert_eq!(
+            std::fs::read_to_string(herdr_root.join("session.json")).unwrap(),
+            snapshot
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn herdr_import_strips_agent_resume_metadata() {
+        let mut snapshot = serde_json::json!({
+            "workspaces": [{
+                "tabs": [{
+                    "panes": {
+                        "1": {
+                            "cwd": "/tmp",
+                            "agent_session": { "agent": "pi", "value": "shared" },
+                            "launch_argv": ["pi", "--resume"]
+                        }
+                    }
+                }]
+            }]
+        });
+
+        strip_imported_agent_resume_metadata(&mut snapshot);
+
+        let pane = &snapshot["workspaces"][0]["tabs"][0]["panes"]["1"];
+        assert!(pane.get("agent_session").is_none());
+        assert!(pane.get("launch_argv").is_none());
+        assert_eq!(pane["cwd"], "/tmp");
+    }
+
+    #[test]
+    fn herdr_import_rejects_incompatible_snapshot_before_creating_target() {
+        let root = std::env::temp_dir().join(format!(
+            "vqro-session-import-invalid-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let herdr_root = root.join("herdr");
+        let vqro_root = root.join("vqro");
+        std::fs::create_dir_all(&herdr_root).unwrap();
+        std::fs::write(herdr_root.join("session.json"), r#"{"version":999}"#).unwrap();
+
+        let error = import_herdr_session_from_roots(&herdr_root, &vqro_root, None, "incompatible")
+            .unwrap_err();
+        assert!(error.contains("newer than supported"), "{error}");
+        assert!(!vqro_root.join("sessions/incompatible").exists());
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

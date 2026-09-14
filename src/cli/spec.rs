@@ -880,6 +880,21 @@ fn session_command() -> Command {
                 .arg(required("name", "NAME"))
                 .arg(json_flag()),
         )
+        .subcommand(
+            Command::new("import-herdr")
+                .about("Copy a persisted Herdr session into a new named vqro session")
+                .arg(
+                    Arg::new("source")
+                        .value_name("HERDR_SESSION")
+                        .help("Herdr session name; omit or use default for its default session"),
+                )
+                .arg(
+                    option("name", "VQRO_SESSION")
+                        .required(true)
+                        .help("New vqro session name"),
+                )
+                .arg(json_flag()),
+        )
 }
 
 fn integration_command() -> Command {

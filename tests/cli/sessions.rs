@@ -761,3 +761,45 @@ fn server_start_restores_legacy_session_through_api_identity() {
 
     cleanup_spawned_herdr(herdr, base);
 }
+
+#[test]
+fn session_import_herdr_copies_into_a_new_named_session() {
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let herdr_root = config_home.join("herdr");
+    fs::create_dir_all(&herdr_root).unwrap();
+    fs::write(
+        herdr_root.join("session.json"),
+        r#"{"version":4,"workspaces":[],"repositories":[],"space_order":[],"active":null,"selected":0}"#,
+    )
+    .unwrap();
+
+    let imported = run_named_cli(
+        &config_home,
+        &runtime_dir,
+        &["session", "import-herdr", "--name", "from-herdr", "--json"],
+    );
+    assert!(
+        imported.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&imported.stderr)
+    );
+    let imported: serde_json::Value = serde_json::from_slice(&imported.stdout).unwrap();
+    assert_eq!(imported["imported"]["source"], "default");
+    assert_eq!(imported["imported"]["target"], "from-herdr");
+    assert!(config_home
+        .join(app_dir_name())
+        .join("sessions/from-herdr/session.json")
+        .is_file());
+
+    let duplicate = run_named_cli(
+        &config_home,
+        &runtime_dir,
+        &["session", "import-herdr", "--name=from-herdr"],
+    );
+    assert_eq!(duplicate.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&duplicate.stderr).contains("already exists"));
+
+    cleanup_test_base(&base);
+}

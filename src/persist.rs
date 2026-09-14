@@ -13,6 +13,7 @@ pub use self::io::{clear, clear_history, load, load_history, save};
 #[cfg(unix)]
 pub use self::restore::{handoff_pane_aliases, restore_handoff};
 pub use self::restore::{restore, restore_delegations};
+pub(crate) use self::snapshot::validate_snapshot;
 pub use self::snapshot::{
     capture, capture_history, DirectionSnapshot, LayoutSnapshot, SessionHistorySnapshot,
     SessionSnapshot, TabSnapshot, WorkspaceSnapshot,
