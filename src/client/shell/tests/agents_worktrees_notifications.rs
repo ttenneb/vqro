@@ -242,6 +242,14 @@ fn typed_repository_projection_drives_space_identity_git_context_and_compact_cou
     assert!(text.contains("feature/sidebar"), "{text}");
     assert!(text.contains("└─  feature/sidebar"), "{text}");
     assert!(!text.contains("└─ · feature/sidebar"), "{text}");
+    let child_hit = &state.hits.workspaces[1];
+    let child_status = usize::from(child_hit.rect.y) * usize::from(frame.width)
+        + usize::from(child_hit.rect.x.saturating_add(1));
+    assert_eq!(
+        frame.cells[child_status].symbol,
+        status_icon(AgentStatus::Blocked, state.config.status_indicators),
+        "linked checkouts keep their own base-depth attention bubble"
+    );
     assert!(text.contains("↑2 ↓1"), "{text}");
     assert!(state.hits.workspaces[0].group_toggle.is_some());
 

@@ -1106,25 +1106,41 @@ pub(in crate::client::shell) fn render_workspace_rows(
         }
         let mut x = area.x;
         if entry.indented {
-            let prefix = if row_index == 0 {
-                if entry.last_child {
-                    "   └─ "
-                } else {
-                    "   ├─ "
-                }
-            } else if entry.last_child {
-                "        "
+            if row_index == 0 {
+                put_text(
+                    buffer,
+                    area.x.saturating_add(1),
+                    y,
+                    area.width.saturating_sub(1).min(1),
+                    status_icon(status, indicators),
+                    Style::default().fg(status_color(status, palette)),
+                );
+                x = put_segment(
+                    buffer,
+                    area.x.saturating_add(3),
+                    y,
+                    area.right(),
+                    if entry.last_child {
+                        "└─ "
+                    } else {
+                        "├─ "
+                    },
+                    Style::default().fg(palette.overlay0),
+                );
             } else {
-                "   │    "
-            };
-            x = put_segment(
-                buffer,
-                x,
-                y,
-                area.right(),
-                prefix,
-                Style::default().fg(palette.overlay0),
-            );
+                x = put_segment(
+                    buffer,
+                    x,
+                    y,
+                    area.right(),
+                    if entry.last_child {
+                        "        "
+                    } else {
+                        "   │    "
+                    },
+                    Style::default().fg(palette.overlay0),
+                );
+            }
         } else if row_index == 0 {
             x = x.saturating_add(1);
         } else {
