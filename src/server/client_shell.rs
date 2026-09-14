@@ -8,6 +8,85 @@ pub(super) fn structure_projection(
     boot_id: &str,
     revision: u64,
 ) -> protocol::endpoint::ClientShellStructureProjection {
+    let workspace_index = app
+        .state
+        .workspaces
+        .iter()
+        .map(|workspace| (workspace.id.as_str(), workspace))
+        .collect::<std::collections::HashMap<_, _>>();
+    let git_identity_for_workspace = |workspace_id: &str| {
+        let fingerprint = workspace_index
+            .get(workspace_id)
+            .and_then(|workspace| app.git_status_cache.get(&workspace.cached_git_status_key))
+            .and_then(|entry| entry.fingerprint.as_ref());
+        let upstream = fingerprint
+            .and_then(|fingerprint| fingerprint.upstream.as_ref())
+            .map(|upstream| {
+                upstream
+                    .full_ref
+                    .strip_prefix("refs/remotes/")
+                    .unwrap_or(&upstream.full_ref)
+                    .to_owned()
+            });
+        let detached_head = fingerprint.and_then(|fingerprint| match &fingerprint.head {
+            crate::workspace::GitHeadIdentity::Detached { oid } => {
+                Some(oid.chars().take(8).collect())
+            }
+            crate::workspace::GitHeadIdentity::Branch { .. } => None,
+        });
+        (upstream, detached_head)
+    };
+    let repositories = app
+        .state
+        .repositories
+        .iter()
+        .map(|repository| protocol::endpoint::ClientShellRepository {
+            repository_id: repository.id.clone(),
+            label: repository.display_label().to_owned(),
+            checkouts: repository
+                .checkout_workspace_ids
+                .iter()
+                .filter_map(|workspace_id| {
+                    let workspace = workspace_index.get(workspace_id.as_str())?;
+                    let kind = match workspace.checkout.as_ref()?.kind {
+                        crate::repository::CheckoutKind::Primary => {
+                            protocol::endpoint::ClientShellCheckoutKind::Primary
+                        }
+                        crate::repository::CheckoutKind::Linked => {
+                            protocol::endpoint::ClientShellCheckoutKind::Linked
+                        }
+                    };
+                    let (upstream, detached_head) = git_identity_for_workspace(workspace_id);
+                    Some(protocol::endpoint::ClientShellRepositoryCheckout {
+                        workspace_id: workspace_id.clone(),
+                        kind,
+                        upstream,
+                        detached_head,
+                    })
+                })
+                .collect(),
+            last_focused_workspace_id: repository.last_focused_workspace_id.clone(),
+        })
+        .collect();
+    let space_order = app
+        .state
+        .space_order
+        .iter()
+        .map(|space| match space {
+            crate::repository::SpaceRef::Repository(id) => {
+                protocol::endpoint::ClientShellSpaceRef {
+                    kind: protocol::endpoint::ClientShellSpaceKind::Repository,
+                    id: id.clone(),
+                }
+            }
+            crate::repository::SpaceRef::StandaloneWorkspace(id) => {
+                protocol::endpoint::ClientShellSpaceRef {
+                    kind: protocol::endpoint::ClientShellSpaceKind::StandaloneWorkspace,
+                    id: id.clone(),
+                }
+            }
+        })
+        .collect();
     let collections = app
         .collection_infos(None, None)
         .into_iter()
@@ -46,6 +125,8 @@ pub(super) fn structure_projection(
         revision,
         collections,
         delegations,
+        repositories,
+        space_order,
     }
 }
 
@@ -650,6 +731,66 @@ mod tests {
         app.state.integration_recommendations[0].state =
             crate::integration::IntegrationStatusKind::Outdated;
         assert!(snapshot(&app, "boot", 2, None, None).integration_updates_available);
+    }
+
+    #[test]
+    fn structure_projects_authoritative_repository_spaces_and_checkout_order() {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = crate::app::App::new(
+            &crate::config::Config::default(),
+            crate::app::AppPolicy::TEST,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        let mut primary = crate::workspace::Workspace::test_new("primary");
+        let mut linked = crate::workspace::Workspace::test_new("linked");
+        let primary_id = primary.id.clone();
+        let linked_id = linked.id.clone();
+        primary.checkout = Some(crate::repository::CheckoutProvenance {
+            repository_id: "repo_1".into(),
+            checkout_path: "/repo".into(),
+            kind: crate::repository::CheckoutKind::Primary,
+        });
+        linked.checkout = Some(crate::repository::CheckoutProvenance {
+            repository_id: "repo_1".into(),
+            checkout_path: "/repo-feature".into(),
+            kind: crate::repository::CheckoutKind::Linked,
+        });
+        app.state.workspaces = vec![primary, linked];
+        app.state.repositories = vec![crate::repository::Repository {
+            id: "repo_1".into(),
+            git_common_dir: "/repo/.git".into(),
+            label: "repo".into(),
+            custom_name: Some("custom repo".into()),
+            preferred_base: None,
+            checkout_workspace_ids: vec![primary_id.clone(), linked_id.clone()],
+            last_focused_workspace_id: Some(linked_id.clone()),
+        }];
+        app.state.space_order = vec![crate::repository::SpaceRef::Repository("repo_1".into())];
+
+        let projected = structure_projection(&app, "boot", 3);
+
+        assert_eq!(projected.repositories.len(), 1);
+        assert_eq!(projected.repositories[0].label, "custom repo");
+        assert_eq!(
+            projected.repositories[0]
+                .checkouts
+                .iter()
+                .map(|checkout| (checkout.workspace_id.as_str(), checkout.kind))
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    primary_id.as_str(),
+                    protocol::endpoint::ClientShellCheckoutKind::Primary,
+                ),
+                (
+                    linked_id.as_str(),
+                    protocol::endpoint::ClientShellCheckoutKind::Linked,
+                ),
+            ]
+        );
+        assert_eq!(projected.space_order[0].id, "repo_1");
     }
 
     #[test]

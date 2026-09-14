@@ -12,22 +12,36 @@ impl ClientShellState {
     }
 
     pub(super) fn endpoint_workspace_is_draggable(&self, press: &ClientWorkspacePress) -> bool {
-        press.endpoint_id == self.active_endpoint_id
-            && self
-                .snapshot
-                .as_deref()
-                .and_then(|snapshot| {
-                    snapshot
-                        .workspaces
-                        .iter()
-                        .find(|workspace| workspace.workspace_id == press.workspace_id)
-                })
-                .is_some_and(|workspace| {
-                    !workspace
-                        .worktree
-                        .as_ref()
-                        .is_some_and(|worktree| worktree.is_linked_worktree)
-                })
+        if press.endpoint_id != self.active_endpoint_id {
+            return false;
+        }
+        let Some(snapshot) = self.snapshot.as_deref() else {
+            return false;
+        };
+        if let Some(structure) = self.structure.as_deref().filter(|structure| {
+            structure.boot_id == snapshot.boot_id
+                && structure.revision == snapshot.revision
+                && (!structure.repositories.is_empty() || !structure.space_order.is_empty())
+        }) {
+            return super::sidebar::workspace_entries_with_structure(
+                snapshot,
+                Some(structure),
+                &HashSet::new(),
+            )
+            .into_iter()
+            .filter(|entry| !entry.indented)
+            .any(|entry| snapshot.workspaces[entry.index].workspace_id == press.move_workspace_id);
+        }
+        snapshot
+            .workspaces
+            .iter()
+            .find(|workspace| workspace.workspace_id == press.move_workspace_id)
+            .is_some_and(|workspace| {
+                !workspace
+                    .worktree
+                    .as_ref()
+                    .is_some_and(|worktree| worktree.is_linked_worktree)
+            })
     }
 
     pub(super) fn finish_endpoint_workspace_press(
@@ -140,17 +154,37 @@ impl ClientShellState {
                         .snapshot
                         .as_deref()
                         .map_or_else(Vec::new, |snapshot| {
-                            render::workspace_entries(snapshot, &HashSet::new())
-                                .into_iter()
-                                .filter_map(|entry| {
-                                    snapshot.workspaces.get(entry.index).map(|workspace| {
-                                        (
-                                            endpoint.endpoint_id.clone(),
-                                            workspace.workspace_id.clone(),
-                                        )
-                                    })
+                            let collapsed = super::endpoint_sidebar::collapsed_repository_ids(
+                                endpoint,
+                                &self.collapsed_groups,
+                            );
+                            render::workspace_entries_with_structure(
+                                snapshot,
+                                endpoint.current_structure(),
+                                &collapsed,
+                            )
+                            .into_iter()
+                            .filter_map(|entry| {
+                                snapshot.workspaces.get(entry.index).map(|workspace| {
+                                    let repository_collapsed =
+                                        super::endpoint_sidebar::repository_entry_is_collapsed(
+                                            endpoint,
+                                            &entry,
+                                            &self.collapsed_groups,
+                                        );
+                                    (
+                                        endpoint.endpoint_id.clone(),
+                                        super::sidebar::projected_workspace_target(
+                                            snapshot,
+                                            workspace,
+                                            &entry,
+                                            endpoint.current_structure(),
+                                            repository_collapsed,
+                                        ),
+                                    )
                                 })
-                                .collect()
+                            })
+                            .collect()
                         })
                 })
                 .collect::<Vec<_>>();

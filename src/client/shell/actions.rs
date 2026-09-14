@@ -1161,11 +1161,7 @@ impl ClientShellState {
             }
             KeybindAction::SwitchWorkspace(index) => {
                 let entries = self.navigation_workspace_entries(snapshot);
-                let workspace_id = snapshot
-                    .workspaces
-                    .get(entries.get(index)?.index)?
-                    .workspace_id
-                    .clone();
+                let workspace_id = self.navigation_workspace_id(snapshot, entries.get(index)?);
                 self.reveal_workspace(&workspace_id);
                 Some(Method::WorkspaceFocus(WorkspaceTarget { workspace_id }))
             }
@@ -1177,7 +1173,7 @@ impl ClientShellState {
                 let current = entries
                     .iter()
                     .position(|entry| {
-                        snapshot.workspaces[entry.index].workspace_id == focused_workspace
+                        self.navigation_workspace_id(snapshot, entry) == focused_workspace
                     })
                     .unwrap_or(0);
                 let delta = if action == KeybindAction::PreviousWorkspace {
@@ -1186,9 +1182,7 @@ impl ClientShellState {
                     1
                 };
                 let next = (current as isize + delta).rem_euclid(entries.len() as isize) as usize;
-                let workspace_id = snapshot.workspaces[entries[next].index]
-                    .workspace_id
-                    .clone();
+                let workspace_id = self.navigation_workspace_id(snapshot, &entries[next]);
                 self.reveal_workspace(&workspace_id);
                 Some(Method::WorkspaceFocus(WorkspaceTarget { workspace_id }))
             }

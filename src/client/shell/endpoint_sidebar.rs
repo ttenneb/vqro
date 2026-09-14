@@ -12,6 +12,40 @@ fn collapsed_groups_for_endpoint<'a>(
     }
 }
 
+pub(super) fn collapsed_repository_ids(
+    endpoint: &ClientShellEndpoint,
+    collapsed_groups: &HashSet<String>,
+) -> HashSet<String> {
+    endpoint
+        .current_structure()
+        .into_iter()
+        .flat_map(|structure| &structure.repositories)
+        .filter(|repository| {
+            collapsed_groups.contains(&super::sidebar::repository_group_key(
+                &endpoint.endpoint_id,
+                &repository.repository_id,
+            ))
+        })
+        .map(|repository| repository.repository_id.clone())
+        .collect()
+}
+
+pub(super) fn repository_entry_is_collapsed(
+    endpoint: &ClientShellEndpoint,
+    entry: &WorkspaceEntry,
+    collapsed_groups: &HashSet<String>,
+) -> bool {
+    entry
+        .repository_index
+        .and_then(|index| endpoint.current_structure()?.repositories.get(index))
+        .is_some_and(|repository| {
+            collapsed_groups.contains(&super::sidebar::repository_group_key(
+                &endpoint.endpoint_id,
+                &repository.repository_id,
+            ))
+        })
+}
+
 pub(super) fn render_collapsed(
     buffer: &mut Buffer,
     area: Rect,
@@ -107,7 +141,23 @@ pub(super) fn render_collapsed(
         let Some(snapshot) = endpoint.snapshot.as_deref() else {
             continue;
         };
-        for workspace in &snapshot.workspaces {
+        let collapsed_repositories = endpoint
+            .current_structure()
+            .map(|structure| {
+                structure
+                    .repositories
+                    .iter()
+                    .map(|repository| repository.repository_id.clone())
+                    .collect::<HashSet<_>>()
+            })
+            .unwrap_or_default();
+        let spaces = super::sidebar::workspace_entries_with_structure(
+            snapshot,
+            endpoint.current_structure(),
+            &collapsed_repositories,
+        );
+        let workspace_index = super::sidebar::workspace_projection_index(snapshot);
+        for (space_index, entry) in spaces.iter().filter(|entry| !entry.indented).enumerate() {
             if skip > 0 {
                 skip -= 1;
                 continue;
@@ -115,11 +165,30 @@ pub(super) fn render_collapsed(
             if y >= workspace_area.bottom() {
                 break;
             }
+            let Some(workspace) = snapshot.workspaces.get(entry.index) else {
+                continue;
+            };
             let rect = Rect::new(workspace_area.x, y, workspace_area.width, 1);
-            let focused = active && workspace.focused;
-            let selected = state.selected_workspace_id.is_some_and(|target| {
-                target.matches(&endpoint.endpoint_id, &workspace.workspace_id)
+            let repository = entry.repository_index.and_then(|repository_index| {
+                endpoint
+                    .current_structure()
+                    .and_then(|structure| structure.repositories.get(repository_index))
             });
+            let target_workspace_id = repository
+                .and_then(|repository| repository.last_focused_workspace_id.as_deref())
+                .filter(|workspace_id| workspace_index.contains_key(*workspace_id))
+                .unwrap_or(&workspace.workspace_id);
+            let focused = active
+                && repository.map_or(workspace.focused, |repository| {
+                    repository.checkouts.iter().any(|checkout| {
+                        workspace_index
+                            .get(checkout.workspace_id.as_str())
+                            .is_some_and(|candidate| candidate.focused)
+                    })
+                });
+            let selected = state
+                .selected_workspace_id
+                .is_some_and(|target| target.matches(&endpoint.endpoint_id, target_workspace_id));
             let selection_background = if palette.selection_bg == ratatui::style::Color::Reset {
                 palette.active_row_bg
             } else {
@@ -131,7 +200,7 @@ pub(super) fn render_collapsed(
                 buffer.set_style(rect, Style::default().bg(palette.active_row_bg));
             }
             let stale = endpoint.status != ClientEndpointStatus::Online;
-            let number = format!(" {}", workspace.number);
+            let number = format!(" {}", space_index + 1);
             let number_width = super::render::display_width(&number).min(rect.width);
             let dim = if stale {
                 Modifier::DIM
@@ -152,24 +221,48 @@ pub(super) fn render_collapsed(
                     })
                     .add_modifier(dim),
             );
+            let status = super::sidebar::projected_workspace_status(
+                snapshot,
+                workspace,
+                entry,
+                endpoint.current_structure(),
+                &collapsed_repositories,
+                entry.repository_index.is_some(),
+                Some(&workspace_index),
+            );
             put_text(
                 buffer,
                 rect.x.saturating_add(number_width),
                 rect.y,
                 rect.width.saturating_sub(number_width),
-                status_icon(workspace.agent_status, config.status_indicators),
+                status_icon(status, config.status_indicators),
                 Style::default()
                     .fg(if stale {
                         palette.overlay0
                     } else {
-                        status_color(workspace.agent_status, palette)
+                        status_color(status, palette)
                     })
                     .add_modifier(dim),
             );
+            let target_workspace_id = repository
+                .and_then(|repository| repository.last_focused_workspace_id.as_deref())
+                .filter(|workspace_id| workspace_index.contains_key(*workspace_id))
+                .or_else(|| {
+                    repository.and_then(|repository| {
+                        repository.checkouts.iter().find_map(|checkout| {
+                            workspace_index
+                                .get(checkout.workspace_id.as_str())
+                                .filter(|workspace| workspace.focused)
+                                .map(|workspace| workspace.workspace_id.as_str())
+                        })
+                    })
+                })
+                .unwrap_or(&workspace.workspace_id);
             hits.workspaces.push(WorkspaceHit {
                 rect,
                 endpoint_id: endpoint.endpoint_id.clone(),
-                workspace_id: workspace.workspace_id.clone(),
+                workspace_id: target_workspace_id.to_owned(),
+                move_workspace_id: workspace.workspace_id.clone(),
                 indented: false,
                 group_toggle: None,
             });
@@ -262,16 +355,37 @@ pub(super) fn render_expanded(
         if let Some(snapshot) = endpoint.snapshot.as_deref() {
             let collapsed_groups = collapsed_groups_for_endpoint(state, &endpoint.endpoint_id)
                 .unwrap_or(&empty_collapsed_groups);
+            let repository_groups = collapsed_repository_ids(endpoint, collapsed_groups);
             rows.extend(
-                super::sidebar::workspace_entries(snapshot, collapsed_groups)
-                    .into_iter()
-                    .map(|entry| Row::Workspace {
-                        endpoint: endpoint_index,
-                        entry,
-                    }),
+                super::sidebar::workspace_entries_with_structure(
+                    snapshot,
+                    endpoint.current_structure(),
+                    if endpoint.current_structure().is_some_and(|structure| {
+                        !structure.repositories.is_empty() || !structure.space_order.is_empty()
+                    }) {
+                        &repository_groups
+                    } else {
+                        collapsed_groups
+                    },
+                )
+                .into_iter()
+                .map(|entry| Row::Workspace {
+                    endpoint: endpoint_index,
+                    entry,
+                }),
             );
         }
     }
+    let workspace_indexes = state
+        .endpoints
+        .iter()
+        .map(|endpoint| {
+            endpoint
+                .snapshot
+                .as_deref()
+                .map(super::sidebar::workspace_projection_index)
+        })
+        .collect::<Vec<_>>();
     let body = Rect::new(
         workspace_area.x,
         workspace_area.y.saturating_add(WORKSPACE_HEADER_ROWS),
@@ -285,8 +399,11 @@ pub(super) fn render_expanded(
         .iter()
         .map(|row| match row {
             Row::Endpoint(_) => 1,
-            Row::Workspace { endpoint, entry } => {
-                let endpoint = &state.endpoints[*endpoint];
+            Row::Workspace {
+                endpoint: endpoint_index,
+                entry,
+            } => {
+                let endpoint = &state.endpoints[*endpoint_index];
                 let collapsed_groups = collapsed_groups_for_endpoint(state, &endpoint.endpoint_id)
                     .unwrap_or(&empty_collapsed_groups);
                 endpoint
@@ -294,15 +411,32 @@ pub(super) fn render_expanded(
                     .as_deref()
                     .and_then(|snapshot| {
                         let workspace = snapshot.workspaces.get(entry.index)?;
+                        let repository_groups =
+                            collapsed_repository_ids(endpoint, collapsed_groups);
+                        let projection_groups =
+                            if endpoint.current_structure().is_some_and(|structure| {
+                                !structure.repositories.is_empty()
+                                    || !structure.space_order.is_empty()
+                            }) {
+                                &repository_groups
+                            } else {
+                                collapsed_groups
+                            };
+                        let status = super::sidebar::projected_workspace_status(
+                            snapshot,
+                            workspace,
+                            entry,
+                            endpoint.current_structure(),
+                            projection_groups,
+                            repository_entry_is_collapsed(endpoint, entry, collapsed_groups),
+                            workspace_indexes[*endpoint_index].as_ref(),
+                        );
                         Some(
-                            super::sidebar::workspace_rows(
+                            super::sidebar::projected_workspace_rows(
                                 workspace,
-                                super::sidebar::displayed_workspace_status(
-                                    snapshot,
-                                    workspace,
-                                    collapsed_groups,
-                                ),
-                                entry.indented,
+                                status,
+                                entry,
+                                endpoint.current_structure(),
                                 &config.spaces,
                             )
                             .len()
@@ -337,8 +471,18 @@ pub(super) fn render_expanded(
                     .as_deref()
                     .and_then(|snapshot| snapshot.workspaces.get(entry.index))
                     .is_some_and(|workspace| {
+                        let collapsed_groups =
+                            collapsed_groups_for_endpoint(state, &endpoint.endpoint_id)
+                                .unwrap_or(&empty_collapsed_groups);
+                        let target_workspace_id = super::sidebar::projected_workspace_target(
+                            snapshot,
+                            workspace,
+                            entry,
+                            endpoint.current_structure(),
+                            repository_entry_is_collapsed(endpoint, entry, collapsed_groups),
+                        );
                         state.selected_workspace_id.is_some_and(|target| {
-                            target.matches(&endpoint.endpoint_id, &workspace.workspace_id)
+                            target.matches(&endpoint.endpoint_id, &target_workspace_id)
                         })
                     })
             }
@@ -401,7 +545,8 @@ pub(super) fn render_expanded(
                     .saturating_add(gaps.get(row_index).copied().unwrap_or(0));
             }
             Row::Workspace { endpoint, entry } => {
-                let endpoint = &state.endpoints[*endpoint];
+                let endpoint_index = *endpoint;
+                let endpoint = &state.endpoints[endpoint_index];
                 let Some(snapshot) = endpoint.snapshot.as_deref() else {
                     continue;
                 };
@@ -410,15 +555,30 @@ pub(super) fn render_expanded(
                 };
                 let collapsed_groups = collapsed_groups_for_endpoint(state, &endpoint.endpoint_id)
                     .unwrap_or(&empty_collapsed_groups);
-                let status = super::sidebar::displayed_workspace_status(
+                let repository_groups = collapsed_repository_ids(endpoint, collapsed_groups);
+                let repository_collapsed =
+                    repository_entry_is_collapsed(endpoint, entry, collapsed_groups);
+                let projection_groups = if endpoint.current_structure().is_some_and(|structure| {
+                    !structure.repositories.is_empty() || !structure.space_order.is_empty()
+                }) {
+                    &repository_groups
+                } else {
+                    collapsed_groups
+                };
+                let status = super::sidebar::projected_workspace_status(
                     snapshot,
                     workspace,
-                    collapsed_groups,
+                    entry,
+                    endpoint.current_structure(),
+                    projection_groups,
+                    repository_collapsed,
+                    workspace_indexes[endpoint_index].as_ref(),
                 );
-                let tokens = super::sidebar::workspace_rows(
+                let tokens = super::sidebar::projected_workspace_rows(
                     workspace,
                     status,
-                    entry.indented,
+                    entry,
+                    endpoint.current_structure(),
                     &config.spaces,
                 );
                 let height = (tokens.len().max(1).min(u16::MAX as usize) as u16).min(body.height);
@@ -433,18 +593,40 @@ pub(super) fn render_expanded(
                     rect.height,
                 );
                 let endpoint_active = &endpoint.endpoint_id == state.active_endpoint_id;
+                let target_workspace_id = super::sidebar::projected_workspace_target(
+                    snapshot,
+                    workspace,
+                    entry,
+                    endpoint.current_structure(),
+                    repository_collapsed,
+                );
                 let selected = state.selected_workspace_id.is_some_and(|target| {
-                    target.matches(&endpoint.endpoint_id, &workspace.workspace_id)
+                    target.matches(&endpoint.endpoint_id, &target_workspace_id)
                 });
+                let focused = endpoint_active
+                    && if repository_collapsed {
+                        entry
+                            .repository_index
+                            .and_then(|index| endpoint.current_structure()?.repositories.get(index))
+                            .is_some_and(|repository| {
+                                repository.checkouts.iter().any(|checkout| {
+                                    workspace_indexes[endpoint_index]
+                                        .as_ref()
+                                        .and_then(|index| index.get(checkout.workspace_id.as_str()))
+                                        .is_some_and(|candidate| candidate.focused)
+                                })
+                            })
+                    } else {
+                        workspace.focused
+                    };
                 super::sidebar::render_workspace_rows(
                     buffer,
                     nested,
-                    workspace,
                     status,
                     config.status_indicators,
                     entry,
                     tokens,
-                    endpoint_active,
+                    focused,
                     selected,
                     false,
                     palette,
@@ -460,18 +642,48 @@ pub(super) fn render_expanded(
                             .add_modifier(Modifier::DIM),
                     );
                 }
-                let group_toggle = super::sidebar::render_parent_group_toggle(
-                    buffer,
-                    rect,
-                    snapshot,
-                    entry.index,
-                    collapsed_groups,
-                    palette,
-                );
+                let group_toggle = (!entry.indented && entry.repository_has_children)
+                    .then_some(entry.repository_index)
+                    .flatten()
+                    .and_then(|repository_index| {
+                        endpoint
+                            .current_structure()?
+                            .repositories
+                            .get(repository_index)
+                    })
+                    .map(|repository| {
+                        let toggle = Rect::new(rect.right().saturating_sub(1), rect.y, 1, 1);
+                        put_text(
+                            buffer,
+                            toggle.x,
+                            toggle.y,
+                            toggle.width,
+                            if repository_entry_is_collapsed(endpoint, entry, collapsed_groups) {
+                                "▸"
+                            } else {
+                                "▾"
+                            },
+                            Style::default().fg(palette.accent),
+                        );
+                        (
+                            toggle,
+                            super::sidebar::repository_group_key(
+                                &endpoint.endpoint_id,
+                                &repository.repository_id,
+                            ),
+                        )
+                    });
                 hits.workspaces.push(WorkspaceHit {
                     rect,
                     endpoint_id: endpoint.endpoint_id.clone(),
-                    workspace_id: workspace.workspace_id.clone(),
+                    workspace_id: super::sidebar::projected_workspace_target(
+                        snapshot,
+                        workspace,
+                        entry,
+                        endpoint.current_structure(),
+                        repository_collapsed,
+                    ),
+                    move_workspace_id: workspace.workspace_id.clone(),
                     indented: entry.indented,
                     group_toggle,
                 });

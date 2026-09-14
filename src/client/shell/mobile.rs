@@ -754,7 +754,11 @@ fn mobile_items(
         palette,
     ));
     for endpoint in super::aggregate_navigation::cached_endpoint_snapshots(endpoints) {
-        for entry in super::render::workspace_entries(endpoint.snapshot, &HashSet::new()) {
+        for entry in super::render::workspace_entries_with_structure(
+            endpoint.snapshot,
+            endpoint.structure,
+            &HashSet::new(),
+        ) {
             let Some(workspace) = endpoint.snapshot.workspaces.get(entry.index) else {
                 continue;
             };
@@ -781,16 +785,45 @@ fn mobile_items(
             } else {
                 ""
             };
+            let repository = entry.repository_index.and_then(|index| {
+                endpoint
+                    .structure
+                    .and_then(|structure| structure.repositories.get(index))
+            });
+            let checkout = entry
+                .checkout_index
+                .and_then(|index| repository?.checkouts.get(index));
             let name = if entry.indented && !workspace.custom_label {
                 workspace
                     .branch
                     .as_deref()
-                    .and_then(|branch| branch.strip_prefix("worktree/").or(Some(branch)))
+                    .map(|branch| branch.strip_prefix("worktree/").unwrap_or(branch))
                     .unwrap_or(&workspace.label)
+            } else if !entry.indented {
+                repository.map_or(workspace.label.as_str(), |repository| {
+                    repository.label.as_str()
+                })
             } else {
                 &workspace.label
             };
-            let branch = workspace.branch.as_deref().unwrap_or("shell");
+            let branch = match (
+                workspace.branch.as_deref(),
+                checkout.and_then(|checkout| checkout.upstream.as_deref()),
+            ) {
+                (Some(branch), Some(upstream)) if branch != upstream => {
+                    format!("{branch} → {upstream}")
+                }
+                (Some(branch), _) => branch.to_owned(),
+                (None, _) => checkout.map_or_else(
+                    || "shell".to_owned(),
+                    |checkout| {
+                        checkout
+                            .detached_head
+                            .as_deref()
+                            .map_or_else(|| "git".to_owned(), |head| format!("detached@{head}"))
+                    },
+                ),
+            };
             let detail_prefix = if entry.indented {
                 if entry.last_child {
                     "       "

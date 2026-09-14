@@ -453,6 +453,8 @@ fn structure_projection_applies_only_to_matching_generation_boot_and_revision() 
             revision,
             collections: Vec::new(),
             delegations: Vec::new(),
+            repositories: Vec::new(),
+            space_order: Vec::new(),
         })
     }
 
@@ -588,6 +590,8 @@ fn collection_chrome_renders_members_delegation_and_routes_selection() {
                 external_parent_id: None,
             },
         ],
+        repositories: Vec::new(),
+        space_order: Vec::new(),
     };
 
     let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
@@ -1334,6 +1338,8 @@ fn stale_large_surface_resize_clips_integrated_contributions_and_all_hits() {
                 }],
             }],
             delegations: Vec::new(),
+            repositories: Vec::new(),
+            space_order: Vec::new(),
         },
     ));
     let stale_buffer = Buffer::empty(Rect::new(0, 0, 220, 90));

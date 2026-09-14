@@ -523,14 +523,30 @@ impl ClientShellState {
             .workspaces
             .iter()
             .filter(|hit| hit.endpoint_id == self.active_endpoint_id && !hit.indented)
-            .map(|hit| (Some(hit.workspace_id.clone()), hit.rect.y.saturating_sub(1)))
+            .map(|hit| {
+                (
+                    Some(hit.move_workspace_id.clone()),
+                    hit.rect.y.saturating_sub(1),
+                )
+            })
             .collect::<Vec<_>>();
         let snapshot = self.snapshot.as_deref()?;
         let empty_collapsed_groups = HashSet::new();
         let collapsed_groups = self
             .collapsed_groups_for_endpoint(&self.active_endpoint_id)
             .unwrap_or(&empty_collapsed_groups);
-        let entries = render::workspace_entries(snapshot, collapsed_groups);
+        let collapsed_repositories = self.navigation_collapsed_repository_ids();
+        let entries = render::workspace_entries_with_structure(
+            snapshot,
+            self.structure.as_deref(),
+            if self.structure.as_ref().is_some_and(|structure| {
+                !structure.repositories.is_empty() || !structure.space_order.is_empty()
+            }) {
+                &collapsed_repositories
+            } else {
+                collapsed_groups
+            },
+        );
         let last_hit = self
             .hits
             .workspaces
@@ -541,7 +557,7 @@ impl ClientShellState {
             snapshot
                 .workspaces
                 .get(entry.index)
-                .is_some_and(|workspace| workspace.workspace_id == last_hit.workspace_id)
+                .is_some_and(|workspace| workspace.workspace_id == last_hit.move_workspace_id)
         })?;
         let next = entries.get(last_position + 1);
         if !next.is_some_and(|entry| entry.indented) {
@@ -563,11 +579,103 @@ impl ClientShellState {
             .map(|(_, target)| target)
     }
 
-    fn workspace_move_method(
+    fn projected_workspace_move_method(
+        &self,
+        source_workspace_id: &str,
+        before_workspace_id: Option<&str>,
+    ) -> Option<Option<crate::api::schema::Method>> {
+        let snapshot = self.snapshot.as_deref()?;
+        let structure = self.structure.as_deref().filter(|structure| {
+            structure.boot_id == snapshot.boot_id
+                && structure.revision == snapshot.revision
+                && (!structure.repositories.is_empty() || !structure.space_order.is_empty())
+        })?;
+        let entries = super::sidebar::workspace_entries_with_structure(
+            snapshot,
+            Some(structure),
+            &HashSet::new(),
+        );
+        let roots = entries
+            .iter()
+            .filter(|entry| !entry.indented)
+            .filter_map(|entry| {
+                snapshot
+                    .workspaces
+                    .get(entry.index)
+                    .map(|workspace| (entry, workspace))
+            })
+            .collect::<Vec<_>>();
+        let source_position = roots
+            .iter()
+            .position(|(_, workspace)| workspace.workspace_id == source_workspace_id)?;
+        let (source_entry, source) = roots[source_position];
+        if before_workspace_id == Some(source_workspace_id) {
+            return Some(None);
+        }
+        let remaining = roots
+            .iter()
+            .copied()
+            .filter(|(_, workspace)| workspace.workspace_id != source_workspace_id)
+            .collect::<Vec<_>>();
+        let insert_position = match before_workspace_id {
+            Some(target) => remaining
+                .iter()
+                .position(|(_, workspace)| workspace.workspace_id == target)?,
+            None => remaining.len(),
+        };
+        if insert_position == source_position {
+            return Some(None);
+        }
+        if let Some(repository) = source_entry
+            .repository_index
+            .and_then(|index| structure.repositories.get(index))
+        {
+            let workspace_ids = repository
+                .checkouts
+                .iter()
+                .filter(|checkout| {
+                    snapshot
+                        .workspaces
+                        .iter()
+                        .any(|workspace| workspace.workspace_id == checkout.workspace_id)
+                })
+                .map(|checkout| checkout.workspace_id.clone())
+                .collect::<Vec<_>>();
+            return Some((!workspace_ids.is_empty()).then(|| {
+                crate::api::schema::Method::WorkspaceMoveBlock(
+                    crate::api::schema::WorkspaceMoveBlockParams {
+                        workspace_ids,
+                        before_workspace_id: before_workspace_id.map(str::to_owned),
+                    },
+                )
+            }));
+        }
+        let insert_index = before_workspace_id
+            .and_then(|target| {
+                snapshot
+                    .workspaces
+                    .iter()
+                    .position(|workspace| workspace.workspace_id == target)
+            })
+            .unwrap_or(snapshot.workspaces.len());
+        Some(Some(crate::api::schema::Method::WorkspaceMove(
+            crate::api::schema::WorkspaceMoveParams {
+                workspace_id: source.workspace_id.clone(),
+                insert_index,
+            },
+        )))
+    }
+
+    pub(super) fn workspace_move_method(
         &self,
         source_workspace_id: &str,
         before_workspace_id: Option<&str>,
     ) -> Option<crate::api::schema::Method> {
+        if let Some(projected) =
+            self.projected_workspace_move_method(source_workspace_id, before_workspace_id)
+        {
+            return projected;
+        }
         let snapshot = self.snapshot.as_deref()?;
         let source = snapshot
             .workspaces
@@ -1189,7 +1297,7 @@ impl ClientShellState {
                     .abs_diff(press.start_column)
                     .max(mouse.row.abs_diff(press.start_row));
                 if delta >= 1 {
-                    let source_workspace_id = press.workspace_id.clone();
+                    let source_workspace_id = press.move_workspace_id.clone();
                     let draggable = self.endpoint_workspace_is_draggable(press);
                     if draggable {
                         if let Some(target) = self.workspace_drop_target_at(point) {
@@ -2372,6 +2480,7 @@ impl ClientShellState {
                     .map(|hit| ClientWorkspacePress {
                         endpoint_id: hit.endpoint_id.clone(),
                         workspace_id: hit.workspace_id.clone(),
+                        move_workspace_id: hit.move_workspace_id.clone(),
                         start_column: mouse.column,
                         start_row: mouse.row,
                     });

@@ -100,7 +100,10 @@ impl App {
     }
 
     fn git_refresh_demand(&self) -> GitStatusRefreshDemand {
-        let mut demand = GitStatusRefreshDemand::default();
+        let mut demand = GitStatusRefreshDemand {
+            upstream: !self.state.repositories.is_empty(),
+            ..GitStatusRefreshDemand::default()
+        };
         for token in self.state.sidebar_spaces.rows.iter().flatten() {
             match token.parts().0 {
                 crate::config::SpaceSidebarToken::Branch => demand.branch = true,
@@ -402,6 +405,7 @@ mod tests {
                 GitStatusRefreshDemand {
                     branch: true,
                     ahead_behind: false,
+                    upstream: false,
                 },
             ),
             (
@@ -409,6 +413,7 @@ mod tests {
                 GitStatusRefreshDemand {
                     branch: false,
                     ahead_behind: true,
+                    upstream: false,
                 },
             ),
         ];

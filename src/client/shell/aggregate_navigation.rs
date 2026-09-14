@@ -10,6 +10,7 @@ pub(super) struct CachedEndpointSnapshot<'a> {
     pub(super) label: &'a str,
     pub(super) status: ClientEndpointStatus,
     pub(super) snapshot: &'a ClientShellSnapshot,
+    pub(super) structure: Option<&'a crate::protocol::endpoint::ClientShellStructureProjection>,
     pub(super) agent_recency: &'a HashMap<String, u64>,
     pub(super) agent_presentation: &'a super::endpoint_agent_state::EndpointAgentPresentation,
 }
@@ -36,6 +37,7 @@ pub(super) fn cached_endpoint_snapshots(
                     label: &endpoint.label,
                     status: endpoint.status,
                     snapshot,
+                    structure: endpoint.current_structure(),
                     agent_recency: &endpoint.agent_recency,
                     agent_presentation: &endpoint.agent_presentation,
                 })

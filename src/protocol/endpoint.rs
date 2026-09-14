@@ -98,6 +98,53 @@ pub struct ClientShellStructureProjection {
     pub revision: u64,
     pub collections: Vec<ClientShellCollection>,
     pub delegations: Vec<ClientShellDelegation>,
+    /// Additive repository-space data. Older generation-1 servers omit this field.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub repositories: Vec<ClientShellRepository>,
+    /// Authoritative ordering of repository and standalone-workspace Spaces.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub space_order: Vec<ClientShellSpaceRef>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClientShellRepository {
+    pub repository_id: String,
+    pub label: String,
+    pub checkouts: Vec<ClientShellRepositoryCheckout>,
+    pub last_focused_workspace_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClientShellRepositoryCheckout {
+    pub workspace_id: String,
+    pub kind: ClientShellCheckoutKind,
+    pub upstream: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detached_head: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClientShellCheckoutKind {
+    Primary,
+    Linked,
+    #[serde(other)]
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClientShellSpaceRef {
+    pub kind: ClientShellSpaceKind,
+    pub id: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClientShellSpaceKind {
+    Repository,
+    StandaloneWorkspace,
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -517,6 +564,21 @@ mod tests {
                 purpose: Some("test".into()),
                 depth: 0,
                 external_parent_id: None,
+            }],
+            repositories: vec![ClientShellRepository {
+                repository_id: "repo_1".into(),
+                label: "vqro".into(),
+                checkouts: vec![ClientShellRepositoryCheckout {
+                    workspace_id: "w1".into(),
+                    kind: ClientShellCheckoutKind::Primary,
+                    upstream: Some("origin/main".into()),
+                    detached_head: None,
+                }],
+                last_focused_workspace_id: Some("w1".into()),
+            }],
+            space_order: vec![ClientShellSpaceRef {
+                kind: ClientShellSpaceKind::Repository,
+                id: "repo_1".into(),
             }],
         };
         let ServerMessage::EndpointControl { kind, data } =

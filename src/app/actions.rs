@@ -2669,6 +2669,7 @@ mod tests {
                 demand: crate::workspace::GitStatusRefreshDemand {
                     branch: false,
                     ahead_behind: true,
+                    upstream: true,
                 },
                 auto_label: "one".into(),
                 branch: Some("new".into()),

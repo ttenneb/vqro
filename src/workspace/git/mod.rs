@@ -15,6 +15,7 @@ pub use self::{
     },
     status::{
         git_status_cache_key, git_status_cache_key_for_space,
-        git_status_snapshot_for_cwd_with_demand, GitStatusCacheEntry, GitStatusRefreshDemand,
+        git_status_snapshot_for_cwd_with_demand, GitHeadIdentity, GitStatusCacheEntry,
+        GitStatusRefreshDemand,
     },
 };

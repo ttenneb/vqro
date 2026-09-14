@@ -122,28 +122,63 @@ impl ClientShellState {
             return;
         };
         let worktree = workspace.worktree.as_ref();
-        let has_worktree_children = worktree.is_some_and(|worktree| {
-            !worktree.is_linked_worktree
-                && snapshot
-                    .workspaces
+        let repository = self.structure.as_deref().and_then(|structure| {
+            structure.repositories.iter().find(|repository| {
+                repository
+                    .checkouts
                     .iter()
-                    .filter(|candidate| {
-                        candidate
-                            .worktree
-                            .as_ref()
-                            .is_some_and(|candidate| candidate.key == worktree.key)
-                    })
-                    .count()
-                    >= 2
+                    .any(|checkout| checkout.workspace_id == workspace_id)
+            })
         });
-        let collapsed = worktree.is_some_and(|worktree| {
-            self.group_is_collapsed(&self.active_endpoint_id, &worktree.key)
+        let checkout = repository.and_then(|repository| {
+            repository
+                .checkouts
+                .iter()
+                .find(|checkout| checkout.workspace_id == workspace_id)
         });
+        let repository_group_key = repository.map(|repository| {
+            super::sidebar::repository_group_key(
+                &self.active_endpoint_id,
+                &repository.repository_id,
+            )
+        });
+        let has_worktree_children = repository.map_or_else(
+            || {
+                worktree.is_some_and(|worktree| {
+                    !worktree.is_linked_worktree
+                        && snapshot
+                            .workspaces
+                            .iter()
+                            .filter(|candidate| {
+                                candidate
+                                    .worktree
+                                    .as_ref()
+                                    .is_some_and(|candidate| candidate.key == worktree.key)
+                            })
+                            .count()
+                            >= 2
+                })
+            },
+            |repository| repository.checkouts.len() >= 2,
+        );
+        let collapsed = repository_group_key.as_ref().map_or_else(
+            || {
+                worktree.is_some_and(|worktree| {
+                    self.group_is_collapsed(&self.active_endpoint_id, &worktree.key)
+                })
+            },
+            |key| self.group_is_collapsed(&self.active_endpoint_id, key),
+        );
         self.overlay = Some(ClientShellOverlay::ContextMenu(ClientContextMenuOverlay {
             target: ClientContextMenuTarget::Workspace {
                 workspace_id,
-                is_git: worktree.is_some() || workspace.branch.is_some(),
-                is_linked_worktree: worktree.is_some_and(|worktree| worktree.is_linked_worktree),
+                is_git: repository.is_some() || worktree.is_some() || workspace.branch.is_some(),
+                is_linked_worktree: checkout.map_or_else(
+                    || worktree.is_some_and(|worktree| worktree.is_linked_worktree),
+                    |checkout| {
+                        checkout.kind == crate::protocol::endpoint::ClientShellCheckoutKind::Linked
+                    },
+                ),
                 has_worktree_children,
                 collapsed,
             },
@@ -356,14 +391,33 @@ impl ClientShellState {
                 self.begin_worktree_action_for(KeybindAction::RemoveWorktree, workspace_id, outcome)
             }
             ClientContextMenuAction::ToggleGroup => {
-                let key = self.snapshot.as_deref().and_then(|snapshot| {
-                    snapshot
-                        .workspaces
-                        .iter()
-                        .find(|workspace| workspace.workspace_id == workspace_id)
-                        .and_then(|workspace| workspace.worktree.as_ref())
-                        .map(|worktree| worktree.key.clone())
-                });
+                let key = self
+                    .structure
+                    .as_deref()
+                    .and_then(|structure| {
+                        structure.repositories.iter().find_map(|repository| {
+                            repository
+                                .checkouts
+                                .iter()
+                                .any(|checkout| checkout.workspace_id == workspace_id)
+                                .then(|| {
+                                    super::sidebar::repository_group_key(
+                                        &self.active_endpoint_id,
+                                        &repository.repository_id,
+                                    )
+                                })
+                        })
+                    })
+                    .or_else(|| {
+                        self.snapshot.as_deref().and_then(|snapshot| {
+                            snapshot
+                                .workspaces
+                                .iter()
+                                .find(|workspace| workspace.workspace_id == workspace_id)
+                                .and_then(|workspace| workspace.worktree.as_ref())
+                                .map(|worktree| worktree.key.clone())
+                        })
+                    });
                 if let Some(key) = key {
                     let endpoint_id = self.active_endpoint_id.clone();
                     self.toggle_collapsed_group(&endpoint_id, key);

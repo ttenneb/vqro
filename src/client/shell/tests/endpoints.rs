@@ -85,6 +85,8 @@ fn endpoint_switch_and_rollback_restore_matching_cached_structure() {
             revision: 1,
             collections: Vec::new(),
             delegations: Vec::new(),
+            repositories: Vec::new(),
+            space_order: Vec::new(),
         })
     }
 
@@ -1500,6 +1502,8 @@ fn delayed_older_connection_generation_cannot_replace_snapshot_or_structure() {
             revision: 1,
             collections: Vec::new(),
             delegations: Vec::new(),
+            repositories: Vec::new(),
+            space_order: Vec::new(),
         }),
     );
 
@@ -1516,6 +1520,8 @@ fn delayed_older_connection_generation_cannot_replace_snapshot_or_structure() {
             revision: 1,
             collections: Vec::new(),
             delegations: Vec::new(),
+            repositories: Vec::new(),
+            space_order: Vec::new(),
         }),
     );
 
@@ -1531,6 +1537,32 @@ fn delayed_older_connection_generation_cannot_replace_snapshot_or_structure() {
     );
     assert_eq!(endpoint.structure_generation, Some(5));
     assert_eq!(endpoint.structure.as_ref().unwrap().session_id, "current");
+}
+
+#[test]
+fn endpoint_repository_structure_is_hidden_across_connection_generations() {
+    let (mut state, endpoint_id) = state_with_remote();
+    let endpoint = state
+        .endpoints
+        .iter_mut()
+        .find(|endpoint| endpoint.endpoint_id == endpoint_id)
+        .expect("remote endpoint");
+    let snapshot = endpoint.snapshot.as_ref().expect("snapshot");
+    endpoint.snapshot_generation = Some(8);
+    endpoint.structure_generation = Some(7);
+    endpoint.structure = Some(Box::new(
+        crate::protocol::endpoint::ClientShellStructureProjection {
+            session_id: "stale".into(),
+            boot_id: snapshot.boot_id.clone(),
+            revision: snapshot.revision,
+            collections: Vec::new(),
+            delegations: Vec::new(),
+            repositories: Vec::new(),
+            space_order: Vec::new(),
+        },
+    ));
+
+    assert!(endpoint.current_structure().is_none());
 }
 
 #[test]

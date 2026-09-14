@@ -27,6 +27,19 @@ pub(crate) struct ClientShellEndpoint {
     pub(crate) capabilities: Option<HashSet<String>>,
 }
 
+impl ClientShellEndpoint {
+    pub(super) fn current_structure(
+        &self,
+    ) -> Option<&crate::protocol::endpoint::ClientShellStructureProjection> {
+        let snapshot = self.snapshot.as_ref()?;
+        (self.structure_generation == self.snapshot_generation)
+            .then_some(self.structure.as_deref()?)
+            .filter(|structure| {
+                structure.boot_id == snapshot.boot_id && structure.revision == snapshot.revision
+            })
+    }
+}
+
 pub(super) struct MachineHit {
     pub(super) rect: Rect,
     pub(super) collapse_toggle: Rect,
@@ -821,16 +834,7 @@ impl ClientShellState {
             .endpoints
             .iter()
             .find(|endpoint| &endpoint.endpoint_id == endpoint_id)
-            .and_then(|endpoint| {
-                let snapshot = endpoint.snapshot.as_ref()?;
-                (endpoint.structure_generation == endpoint.snapshot_generation)
-                    .then_some(endpoint.structure.as_ref()?)
-                    .filter(|structure| {
-                        structure.boot_id == snapshot.boot_id
-                            && structure.revision == snapshot.revision
-                    })
-                    .cloned()
-            });
+            .and_then(|endpoint| endpoint.current_structure().cloned().map(Box::new));
         if let Some(structure) = matching.as_ref() {
             self.collection_list_views.retain(|collection_id| {
                 structure

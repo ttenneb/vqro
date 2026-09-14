@@ -262,6 +262,7 @@ pub(super) struct ClientPaneMouseGesture {
 pub(super) struct ClientWorkspacePress {
     pub(super) endpoint_id: ClientEndpointId,
     pub(super) workspace_id: String,
+    pub(super) move_workspace_id: String,
     pub(super) start_column: u16,
     pub(super) start_row: u16,
 }
@@ -324,6 +325,7 @@ pub(super) struct WorkspaceHit {
     pub(super) rect: Rect,
     pub(super) endpoint_id: ClientEndpointId,
     pub(super) workspace_id: String,
+    pub(super) move_workspace_id: String,
     pub(super) indented: bool,
     pub(super) group_toggle: Option<(Rect, String)>,
 }
@@ -1123,6 +1125,10 @@ pub(super) struct WorkspaceEntry {
     pub(super) index: usize,
     pub(super) indented: bool,
     pub(super) last_child: bool,
+    /// Index into the negotiated repository projection when this row belongs to one.
+    pub(super) repository_index: Option<usize>,
+    pub(super) checkout_index: Option<usize>,
+    pub(super) repository_has_children: bool,
 }
 
 impl ClientShellState {
@@ -1319,20 +1325,83 @@ impl ClientShellState {
         }
     }
 
+    pub(super) fn navigation_collapsed_repository_ids(&self) -> HashSet<String> {
+        let collapsed_groups = self
+            .collapsed_groups_for_endpoint(&self.active_endpoint_id)
+            .unwrap_or(&self.collapsed_groups);
+        self.structure
+            .as_deref()
+            .into_iter()
+            .flat_map(|structure| &structure.repositories)
+            .filter(|repository| {
+                collapsed_groups.contains(&super::sidebar::repository_group_key(
+                    &self.active_endpoint_id,
+                    &repository.repository_id,
+                ))
+            })
+            .map(|repository| repository.repository_id.clone())
+            .collect()
+    }
+
     pub(super) fn navigation_workspace_entries(
         &self,
         snapshot: &ClientShellSnapshot,
     ) -> Vec<WorkspaceEntry> {
         let empty_collapsed_groups = HashSet::new();
         if self.mobile_layout_active() {
-            render::workspace_entries(snapshot, &empty_collapsed_groups)
-        } else {
-            render::workspace_entries(
+            render::workspace_entries_with_structure(
                 snapshot,
+                self.structure.as_deref(),
+                &empty_collapsed_groups,
+            )
+        } else if self.structure.as_ref().is_some_and(|structure| {
+            !structure.repositories.is_empty() || !structure.space_order.is_empty()
+        }) {
+            render::workspace_entries_with_structure(
+                snapshot,
+                self.structure.as_deref(),
+                &self.navigation_collapsed_repository_ids(),
+            )
+        } else {
+            render::workspace_entries_with_structure(
+                snapshot,
+                self.structure.as_deref(),
                 self.collapsed_groups_for_endpoint(&self.active_endpoint_id)
                     .unwrap_or(&empty_collapsed_groups),
             )
         }
+    }
+
+    pub(super) fn navigation_workspace_id(
+        &self,
+        snapshot: &ClientShellSnapshot,
+        entry: &WorkspaceEntry,
+    ) -> String {
+        let Some(workspace) = snapshot.workspaces.get(entry.index) else {
+            return String::new();
+        };
+        if self.mobile_layout_active() {
+            return workspace.workspace_id.clone();
+        }
+        let collapsed_groups = self
+            .collapsed_groups_for_endpoint(&self.active_endpoint_id)
+            .unwrap_or(&self.collapsed_groups);
+        let repository_collapsed = entry
+            .repository_index
+            .and_then(|index| self.structure.as_deref()?.repositories.get(index))
+            .is_some_and(|repository| {
+                collapsed_groups.contains(&super::sidebar::repository_group_key(
+                    &self.active_endpoint_id,
+                    &repository.repository_id,
+                ))
+            });
+        super::sidebar::projected_workspace_target(
+            snapshot,
+            workspace,
+            entry,
+            self.structure.as_deref(),
+            repository_collapsed,
+        )
     }
 
     pub(super) fn reveal_workspace(&mut self, workspace_id: &str) {
@@ -1347,7 +1416,7 @@ impl ClientShellState {
         let target = self.snapshot.as_deref().and_then(|snapshot| {
             self.navigation_workspace_entries(snapshot)
                 .iter()
-                .position(|entry| snapshot.workspaces[entry.index].workspace_id == workspace_id)
+                .position(|entry| self.navigation_workspace_id(snapshot, entry) == workspace_id)
         });
         if let Some(target) = target {
             self.workspace_scroll = target.min(self.hits.workspace_max_scroll);

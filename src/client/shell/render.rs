@@ -13,7 +13,9 @@ pub(super) use overlays::{
     render_client_overlay, render_context_menu, render_global_menu, render_pane_contribution,
     render_pane_contribution_divider, render_terminal_inspector_pending,
 };
-pub(super) use sidebar::{render_collapsed_sidebar, render_sidebar, workspace_entries};
+pub(super) use sidebar::{
+    render_collapsed_sidebar, render_sidebar, workspace_entries_with_structure,
+};
 pub(super) use tabs::{render_tab_bar, tab_bar_status_width};
 
 pub(in crate::client::shell) fn render_sidebar_background(
@@ -271,10 +273,16 @@ pub(super) fn render_shell(
                 );
             }
         } else if state.sidebar_collapsed {
+            let structure = state
+                .endpoints
+                .iter()
+                .find(|endpoint| &endpoint.endpoint_id == state.active_endpoint_id)
+                .and_then(|endpoint| endpoint.current_structure());
             render_collapsed_sidebar(
                 buffer,
                 layout.sidebar,
                 snapshot,
+                structure,
                 config,
                 state
                     .selected_workspace_id

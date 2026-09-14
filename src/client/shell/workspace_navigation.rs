@@ -72,30 +72,57 @@ impl ClientShellState {
             let Some(snapshot) = endpoint.snapshot.as_deref() else {
                 continue;
             };
-            let entries = if self.sidebar_collapsed && !mobile && surface_available {
-                snapshot
-                    .workspaces
-                    .iter()
-                    .enumerate()
-                    .map(|(index, _)| WorkspaceEntry {
-                        index,
-                        indented: false,
-                        last_child: false,
-                    })
-                    .collect()
+            let collapsed_groups = if mobile && surface_available {
+                &empty_collapsed_groups
             } else {
-                let collapsed_groups = if mobile && surface_available {
-                    &empty_collapsed_groups
-                } else {
-                    self.collapsed_groups_for_endpoint(&endpoint.endpoint_id)
-                        .unwrap_or(&empty_collapsed_groups)
-                };
-                render::workspace_entries(snapshot, collapsed_groups)
+                self.collapsed_groups_for_endpoint(&endpoint.endpoint_id)
+                    .unwrap_or(&empty_collapsed_groups)
             };
-            for entry in entries {
+            let collapsed_repositories =
+                super::endpoint_sidebar::collapsed_repository_ids(endpoint, collapsed_groups);
+            let compact = self.sidebar_collapsed && !mobile && surface_available;
+            let compact_repositories = endpoint
+                .current_structure()
+                .into_iter()
+                .flat_map(|structure| &structure.repositories)
+                .map(|repository| repository.repository_id.clone())
+                .collect::<HashSet<_>>();
+            let structured = endpoint.current_structure().is_some_and(|structure| {
+                !structure.repositories.is_empty() || !structure.space_order.is_empty()
+            });
+            let entries = render::workspace_entries_with_structure(
+                snapshot,
+                endpoint.current_structure(),
+                if compact {
+                    &compact_repositories
+                } else if structured {
+                    &collapsed_repositories
+                } else {
+                    collapsed_groups
+                },
+            );
+            for entry in entries
+                .into_iter()
+                .filter(|entry| !compact || !entry.indented)
+            {
+                let Some(workspace) = snapshot.workspaces.get(entry.index) else {
+                    continue;
+                };
+                let repository_collapsed = (compact && entry.repository_index.is_some())
+                    || super::endpoint_sidebar::repository_entry_is_collapsed(
+                        endpoint,
+                        &entry,
+                        collapsed_groups,
+                    );
                 targets.push(WorkspaceNavigationTarget {
                     endpoint_id: endpoint.endpoint_id.clone(),
-                    workspace_id: snapshot.workspaces[entry.index].workspace_id.clone(),
+                    workspace_id: super::sidebar::projected_workspace_target(
+                        snapshot,
+                        workspace,
+                        &entry,
+                        endpoint.current_structure(),
+                        repository_collapsed,
+                    ),
                     boot_id: snapshot.boot_id.clone(),
                     generation: endpoint.snapshot_generation,
                 });

@@ -176,6 +176,8 @@ mod tests {
         assert_eq!(projection.boot_id, "boot-2");
         assert_eq!(projection.revision, 9);
         assert_eq!(projection.collections[0].members[0].pane_id, "w1:p7");
+        assert!(projection.repositories.is_empty());
+        assert!(projection.space_order.is_empty());
     }
 
     #[test]

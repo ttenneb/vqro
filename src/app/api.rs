@@ -58,6 +58,22 @@ impl App {
         cache_updates: Vec<(std::path::PathBuf, crate::workspace::GitStatusCacheEntry)>,
     ) -> bool {
         self.git_refresh_in_flight = false;
+        let projected_identity = |entry: &crate::workspace::GitStatusCacheEntry| {
+            let fingerprint = entry.fingerprint.as_ref();
+            let upstream = fingerprint
+                .and_then(|fingerprint| fingerprint.upstream.as_ref())
+                .map(|upstream| upstream.full_ref.clone());
+            let detached = fingerprint.and_then(|fingerprint| match &fingerprint.head {
+                crate::workspace::GitHeadIdentity::Detached { oid } => Some(oid.clone()),
+                crate::workspace::GitHeadIdentity::Branch { .. } => None,
+            });
+            (upstream, detached)
+        };
+        let projected_identity_changed = cache_updates.iter().any(|(key, entry)| {
+            self.git_status_cache
+                .get(key)
+                .is_none_or(|current| projected_identity(current) != projected_identity(entry))
+        });
         for (key, entry) in cache_updates {
             self.git_status_cache.insert(key, entry);
         }
@@ -69,7 +85,8 @@ impl App {
         }
         let changed = self
             .state
-            .apply_workspace_git_statuses(&self.terminal_runtimes, results);
+            .apply_workspace_git_statuses(&self.terminal_runtimes, results)
+            || projected_identity_changed;
         if changed {
             self.render_dirty.request_generic();
             self.render_notify.notify_one();

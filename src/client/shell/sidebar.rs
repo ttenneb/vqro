@@ -24,10 +24,21 @@ pub(in crate::client::shell) fn collapsed_sidebar_sections(
     )
 }
 
+pub(in crate::client::shell) fn workspace_projection_index(
+    snapshot: &ClientShellSnapshot,
+) -> HashMap<&str, &ClientShellWorkspace> {
+    snapshot
+        .workspaces
+        .iter()
+        .map(|workspace| (workspace.workspace_id.as_str(), workspace))
+        .collect()
+}
+
 pub(crate) fn render_collapsed_sidebar(
     buffer: &mut Buffer,
     area: Rect,
     snapshot: &ClientShellSnapshot,
+    structure: Option<&crate::protocol::endpoint::ClientShellStructureProjection>,
     config: &ClientShellConfig,
     selected_workspace_id: Option<&str>,
     hits: &mut ShellHitMap,
@@ -35,35 +46,78 @@ pub(crate) fn render_collapsed_sidebar(
     let palette = &config.palette;
     render_sidebar_background(buffer, area, palette);
     let (workspace_area, divider_y, detail_area) = collapsed_sidebar_sections(area);
-    for (index, workspace) in snapshot
-        .workspaces
+    let collapsed_repositories = structure
+        .map(|structure| {
+            structure
+                .repositories
+                .iter()
+                .map(|repository| repository.repository_id.clone())
+                .collect::<HashSet<_>>()
+        })
+        .unwrap_or_default();
+    let spaces = workspace_entries_with_structure(snapshot, structure, &collapsed_repositories);
+    let workspace_index = workspace_projection_index(snapshot);
+    for (index, entry) in spaces
         .iter()
+        .filter(|entry| !entry.indented)
         .take(workspace_area.height as usize)
         .enumerate()
     {
+        let Some(workspace) = snapshot.workspaces.get(entry.index) else {
+            continue;
+        };
         let rect = Rect::new(
             workspace_area.x,
             workspace_area.y + index as u16,
             workspace_area.width,
             1,
         );
-        let selected = selected_workspace_id == Some(workspace.workspace_id.as_str());
+        let repository = entry
+            .repository_index
+            .and_then(|index| structure?.repositories.get(index));
+        let selected = selected_workspace_id == Some(workspace.workspace_id.as_str())
+            || repository.is_some_and(|repository| {
+                repository
+                    .checkouts
+                    .iter()
+                    .any(|checkout| selected_workspace_id == Some(checkout.workspace_id.as_str()))
+            });
+        let repository_workspace = |workspace_id: &str| workspace_index.get(workspace_id).copied();
+        let focused = repository.map_or(workspace.focused, |repository| {
+            repository.checkouts.iter().any(|checkout| {
+                repository_workspace(&checkout.workspace_id)
+                    .is_some_and(|workspace| workspace.focused)
+            })
+        });
+        let target_workspace_id = repository
+            .and_then(|repository| repository.last_focused_workspace_id.as_deref())
+            .filter(|workspace_id| repository_workspace(workspace_id).is_some())
+            .or_else(|| {
+                repository.and_then(|repository| {
+                    repository.checkouts.iter().find_map(|checkout| {
+                        repository_workspace(&checkout.workspace_id)
+                            .filter(|workspace| workspace.focused)
+                            .map(|workspace| workspace.workspace_id.as_str())
+                    })
+                })
+            })
+            .unwrap_or(&workspace.workspace_id);
         let selection_background =
-            if workspace.focused && palette.selection_bg == ratatui::style::Color::Reset {
+            if focused && palette.selection_bg == ratatui::style::Color::Reset {
                 palette.active_row_bg
             } else {
                 palette.selection_bg
             };
         if selected {
             buffer.set_style(rect, Style::default().bg(selection_background));
-        } else if workspace.focused {
+        } else if focused {
             buffer.set_style(rect, Style::default().bg(palette.active_row_bg));
         }
         let number_style = if selected {
             Style::default()
                 .fg(palette.overlay1)
                 .bg(selection_background)
-        } else if workspace.focused {
+        } else if focused {
             Style::default().fg(palette.text).bg(palette.active_row_bg)
         } else {
             Style::default().fg(palette.overlay0)
@@ -76,7 +130,15 @@ pub(crate) fn render_collapsed_sidebar(
             &format!("{:<2}", index + 1),
             number_style,
         );
-        let status = workspace.agent_status;
+        let status = projected_workspace_status(
+            snapshot,
+            workspace,
+            entry,
+            structure,
+            &collapsed_repositories,
+            projected_repository_is_collapsed(entry, structure, &collapsed_repositories),
+            Some(&workspace_index),
+        );
         put_text(
             buffer,
             rect.x.saturating_add(2),
@@ -88,7 +150,8 @@ pub(crate) fn render_collapsed_sidebar(
         hits.workspaces.push(WorkspaceHit {
             rect,
             endpoint_id: ClientEndpointId::Local,
-            workspace_id: workspace.workspace_id.clone(),
+            workspace_id: target_workspace_id.to_owned(),
+            move_workspace_id: workspace.workspace_id.clone(),
             indented: false,
             group_toggle: None,
         });
@@ -210,7 +273,13 @@ pub(crate) fn render_sidebar(
             .add_modifier(Modifier::BOLD),
     );
 
-    let entries = workspace_entries(snapshot, state.collapsed_groups);
+    let structure = state
+        .endpoints
+        .iter()
+        .find(|endpoint| &endpoint.endpoint_id == state.active_endpoint_id)
+        .and_then(|endpoint| endpoint.current_structure());
+    let entries = workspace_entries_with_structure(snapshot, structure, state.collapsed_groups);
+    let workspace_index = workspace_projection_index(snapshot);
     let body = Rect::new(
         workspace_area.x,
         workspace_area.y.saturating_add(WORKSPACE_HEADER_ROWS),
@@ -227,10 +296,23 @@ pub(crate) fn render_sidebar(
                 .workspaces
                 .get(entry.index)
                 .map(|workspace| {
-                    workspace_rows(
+                    projected_workspace_rows(
                         workspace,
-                        displayed_workspace_status(snapshot, workspace, state.collapsed_groups),
-                        entry.indented,
+                        projected_workspace_status(
+                            snapshot,
+                            workspace,
+                            entry,
+                            structure,
+                            state.collapsed_groups,
+                            projected_repository_is_collapsed(
+                                entry,
+                                structure,
+                                state.collapsed_groups,
+                            ),
+                            Some(&workspace_index),
+                        ),
+                        entry,
+                        structure,
                         &config.spaces,
                     )
                     .len()
@@ -287,49 +369,90 @@ pub(crate) fn render_sidebar(
         let Some(workspace) = snapshot.workspaces.get(entry.index) else {
             continue;
         };
-        let status = displayed_workspace_status(snapshot, workspace, state.collapsed_groups);
-        let rows = workspace_rows(workspace, status, entry.indented, &config.spaces);
+        let repository_collapsed =
+            projected_repository_is_collapsed(entry, structure, state.collapsed_groups);
+        let navigation_target =
+            projected_workspace_target(snapshot, workspace, entry, structure, repository_collapsed);
+        let status = projected_workspace_status(
+            snapshot,
+            workspace,
+            entry,
+            structure,
+            state.collapsed_groups,
+            repository_collapsed,
+            Some(&workspace_index),
+        );
+        let rows = projected_workspace_rows(workspace, status, entry, structure, &config.spaces);
         let row_height = (rows.len().max(1).min(u16::MAX as usize) as u16).min(body.height);
         if y.saturating_add(row_height) > body.bottom() {
             break;
         }
         let rect = Rect::new(body.x, y, content_width, row_height);
-        let selected = state.selected_workspace_id.is_some_and(|target| {
-            target.matches(state.active_endpoint_id, &workspace.workspace_id)
-        });
+        let selected = state
+            .selected_workspace_id
+            .is_some_and(|target| target.matches(state.active_endpoint_id, &navigation_target));
         let dragged = state.dragged_workspace_id == Some(workspace.workspace_id.as_str());
+        let focused = if repository_collapsed {
+            entry
+                .repository_index
+                .and_then(|index| structure?.repositories.get(index))
+                .is_some_and(|repository| {
+                    repository.checkouts.iter().any(|checkout| {
+                        workspace_index
+                            .get(checkout.workspace_id.as_str())
+                            .is_some_and(|candidate| candidate.focused)
+                    })
+                })
+        } else {
+            workspace.focused
+        };
         if selected {
             buffer.set_style(rect, Style::default().bg(palette.selection_bg));
         } else if dragged {
             buffer.set_style(rect, Style::default().bg(palette.surface1));
-        } else if workspace.focused {
+        } else if focused {
             buffer.set_style(rect, Style::default().bg(palette.active_row_bg));
         }
         render_workspace_rows(
             buffer,
             rect,
-            workspace,
             status,
             config.status_indicators,
             entry,
             rows,
-            true,
+            focused,
             selected,
             dragged,
             palette,
         );
-        let group_toggle = render_parent_group_toggle(
-            buffer,
-            rect,
-            snapshot,
-            entry.index,
-            state.collapsed_groups,
-            palette,
-        );
+        let projected_group = (!entry.indented && entry.repository_has_children)
+            .then_some(entry.repository_index)
+            .flatten()
+            .and_then(|repository_index| structure?.repositories.get(repository_index))
+            .map(|repository| repository.repository_id.clone());
+        let group_toggle = projected_group
+            .or_else(|| parent_group_key(snapshot, entry.index))
+            .map(|key| {
+                let rect = Rect::new(rect.right().saturating_sub(1), rect.y, 1, 1);
+                put_text(
+                    buffer,
+                    rect.x,
+                    rect.y,
+                    rect.width,
+                    if state.collapsed_groups.contains(&key) {
+                        "▸"
+                    } else {
+                        "▾"
+                    },
+                    Style::default().fg(palette.accent),
+                );
+                (rect, key)
+            });
         hits.workspaces.push(WorkspaceHit {
             rect,
             endpoint_id: ClientEndpointId::Local,
-            workspace_id: workspace.workspace_id.clone(),
+            workspace_id: navigation_target,
+            move_workspace_id: workspace.workspace_id.clone(),
             indented: entry.indented,
             group_toggle,
         });
@@ -439,7 +562,187 @@ pub(crate) fn render_sidebar(
     );
 }
 
+#[cfg(test)]
 pub(crate) fn workspace_entries(
+    snapshot: &ClientShellSnapshot,
+    collapsed_groups: &HashSet<String>,
+) -> Vec<WorkspaceEntry> {
+    workspace_entries_with_structure(snapshot, None, collapsed_groups)
+}
+
+pub(crate) fn workspace_entries_with_structure(
+    snapshot: &ClientShellSnapshot,
+    structure: Option<&crate::protocol::endpoint::ClientShellStructureProjection>,
+    collapsed_groups: &HashSet<String>,
+) -> Vec<WorkspaceEntry> {
+    let Some(structure) = structure.filter(|structure| {
+        structure.boot_id == snapshot.boot_id
+            && structure.revision == snapshot.revision
+            && (!structure.repositories.is_empty() || !structure.space_order.is_empty())
+    }) else {
+        return compatibility_workspace_entries(snapshot, collapsed_groups);
+    };
+    let workspace_indexes = snapshot
+        .workspaces
+        .iter()
+        .enumerate()
+        .map(|(index, workspace)| (workspace.workspace_id.as_str(), index))
+        .collect::<HashMap<_, _>>();
+    let repository_indexes = structure
+        .repositories
+        .iter()
+        .enumerate()
+        .map(|(index, repository)| (repository.repository_id.as_str(), index))
+        .collect::<HashMap<_, _>>();
+    let mut emitted_repositories = HashSet::new();
+    let mut emitted_workspaces = HashSet::new();
+    let mut entries = Vec::new();
+
+    for space in &structure.space_order {
+        match space.kind {
+            crate::protocol::endpoint::ClientShellSpaceKind::Repository => {
+                if let Some(index) = repository_indexes.get(space.id.as_str()).copied() {
+                    append_repository_entries(
+                        snapshot,
+                        structure,
+                        index,
+                        &workspace_indexes,
+                        collapsed_groups,
+                        &mut emitted_repositories,
+                        &mut emitted_workspaces,
+                        &mut entries,
+                    );
+                }
+            }
+            crate::protocol::endpoint::ClientShellSpaceKind::StandaloneWorkspace => {
+                if let Some(index) = workspace_indexes.get(space.id.as_str()).copied() {
+                    if emitted_workspaces.insert(index) {
+                        entries.push(plain_workspace_entry(index));
+                    }
+                }
+            }
+            crate::protocol::endpoint::ClientShellSpaceKind::Unknown => {}
+        }
+    }
+    for repository_index in 0..structure.repositories.len() {
+        append_repository_entries(
+            snapshot,
+            structure,
+            repository_index,
+            &workspace_indexes,
+            collapsed_groups,
+            &mut emitted_repositories,
+            &mut emitted_workspaces,
+            &mut entries,
+        );
+    }
+    for index in 0..snapshot.workspaces.len() {
+        if emitted_workspaces.insert(index) {
+            entries.push(plain_workspace_entry(index));
+        }
+    }
+    entries
+}
+
+fn append_repository_entries(
+    snapshot: &ClientShellSnapshot,
+    structure: &crate::protocol::endpoint::ClientShellStructureProjection,
+    repository_index: usize,
+    workspace_indexes: &HashMap<&str, usize>,
+    collapsed_groups: &HashSet<String>,
+    emitted_repositories: &mut HashSet<usize>,
+    emitted_workspaces: &mut HashSet<usize>,
+    entries: &mut Vec<WorkspaceEntry>,
+) {
+    if !emitted_repositories.insert(repository_index) {
+        return;
+    }
+    let Some(repository) = structure.repositories.get(repository_index) else {
+        return;
+    };
+    let checkouts = repository
+        .checkouts
+        .iter()
+        .enumerate()
+        .filter_map(|(checkout_index, checkout)| {
+            workspace_indexes
+                .get(checkout.workspace_id.as_str())
+                .copied()
+                .map(|workspace_index| (checkout_index, workspace_index))
+        })
+        .collect::<Vec<_>>();
+    let Some((root_checkout_index, root_workspace_index)) = checkouts
+        .iter()
+        .copied()
+        .find(|(checkout_index, _)| {
+            repository.checkouts[*checkout_index].kind
+                == crate::protocol::endpoint::ClientShellCheckoutKind::Primary
+        })
+        .or_else(|| checkouts.first().copied())
+    else {
+        return;
+    };
+    let has_children = checkouts.len() > 1;
+    // Membership is authoritative even when a collapsed group hides most checkout rows.
+    for (_, workspace_index) in &checkouts {
+        emitted_workspaces.insert(*workspace_index);
+    }
+    entries.push(WorkspaceEntry {
+        index: root_workspace_index,
+        indented: false,
+        last_child: false,
+        repository_index: Some(repository_index),
+        checkout_index: Some(root_checkout_index),
+        repository_has_children: has_children,
+    });
+    if collapsed_groups.contains(&repository.repository_id) {
+        if let Some((checkout_index, workspace_index)) =
+            checkouts.iter().copied().find(|(_, workspace_index)| {
+                *workspace_index != root_workspace_index
+                    && snapshot.workspaces[*workspace_index].focused
+            })
+        {
+            emitted_workspaces.insert(workspace_index);
+            entries.push(WorkspaceEntry {
+                index: workspace_index,
+                indented: true,
+                last_child: true,
+                repository_index: Some(repository_index),
+                checkout_index: Some(checkout_index),
+                repository_has_children: has_children,
+            });
+        }
+        return;
+    }
+    let children = checkouts
+        .into_iter()
+        .filter(|(_, workspace_index)| *workspace_index != root_workspace_index)
+        .collect::<Vec<_>>();
+    for (position, (checkout_index, workspace_index)) in children.iter().copied().enumerate() {
+        emitted_workspaces.insert(workspace_index);
+        entries.push(WorkspaceEntry {
+            index: workspace_index,
+            indented: true,
+            last_child: position + 1 == children.len(),
+            repository_index: Some(repository_index),
+            checkout_index: Some(checkout_index),
+            repository_has_children: has_children,
+        });
+    }
+}
+
+fn plain_workspace_entry(index: usize) -> WorkspaceEntry {
+    WorkspaceEntry {
+        index,
+        indented: false,
+        last_child: false,
+        repository_index: None,
+        checkout_index: None,
+        repository_has_children: false,
+    }
+}
+
+fn compatibility_workspace_entries(
     snapshot: &ClientShellSnapshot,
     collapsed_groups: &HashSet<String>,
 ) -> Vec<WorkspaceEntry> {
@@ -451,9 +754,6 @@ pub(crate) fn workspace_entries(
     }
     let grouped = members
         .iter()
-        // First-class repository projections may temporarily have no primary
-        // checkout (for example while an unavailable mount is reconnecting).
-        // Keep the remaining checkouts grouped and use the first as the visual root.
         .filter(|(_, indices)| indices.len() >= 2)
         .map(|(key, _)| *key)
         .collect::<HashSet<_>>();
@@ -465,11 +765,7 @@ pub(crate) fn workspace_entries(
             .as_ref()
             .filter(|worktree| grouped.contains(worktree.key.as_str()))
         else {
-            entries.push(WorkspaceEntry {
-                index,
-                indented: false,
-                last_child: false,
-            });
+            entries.push(plain_workspace_entry(index));
             continue;
         };
         if !emitted.insert(&worktree.key) {
@@ -492,6 +788,9 @@ pub(crate) fn workspace_entries(
             index: parent,
             indented: false,
             last_child: false,
+            repository_index: None,
+            checkout_index: None,
+            repository_has_children: true,
         });
         if collapsed_groups.contains(&worktree.key) {
             if let Some(active) = group_members
@@ -503,6 +802,9 @@ pub(crate) fn workspace_entries(
                     index: active,
                     indented: true,
                     last_child: true,
+                    repository_index: None,
+                    checkout_index: None,
+                    repository_has_children: true,
                 });
             }
             continue;
@@ -517,6 +819,9 @@ pub(crate) fn workspace_entries(
                 index: *child,
                 indented: true,
                 last_child: child_index + 1 == children.len(),
+                repository_index: None,
+                checkout_index: None,
+                repository_has_children: true,
             });
         }
     }
@@ -549,34 +854,100 @@ pub(in crate::client::shell) fn parent_group_key(
     (count >= 2 && primary.or(first) == Some(index)).then(|| worktree.key.clone())
 }
 
-pub(in crate::client::shell) fn render_parent_group_toggle(
-    buffer: &mut Buffer,
-    workspace_rect: Rect,
-    snapshot: &ClientShellSnapshot,
-    workspace_index: usize,
+pub(in crate::client::shell) fn repository_group_key(
+    endpoint_id: &ClientEndpointId,
+    repository_id: &str,
+) -> String {
+    if endpoint_id.is_local() {
+        repository_id.to_owned()
+    } else {
+        format!("{}\0{repository_id}", endpoint_id.storage_key())
+    }
+}
+
+fn projected_repository_is_collapsed(
+    entry: &WorkspaceEntry,
+    structure: Option<&crate::protocol::endpoint::ClientShellStructureProjection>,
     collapsed_groups: &HashSet<String>,
-    palette: &Palette,
-) -> Option<(Rect, String)> {
-    let key = parent_group_key(snapshot, workspace_index)?;
-    let toggle = Rect::new(
-        workspace_rect.right().saturating_sub(1),
-        workspace_rect.y,
-        1,
-        1,
-    );
-    put_text(
-        buffer,
-        toggle.x,
-        toggle.y,
-        toggle.width,
-        if collapsed_groups.contains(&key) {
-            "▸"
-        } else {
-            "▾"
-        },
-        Style::default().fg(palette.accent),
-    );
-    Some((toggle, key))
+) -> bool {
+    entry
+        .repository_index
+        .and_then(|index| structure?.repositories.get(index))
+        .is_some_and(|repository| collapsed_groups.contains(&repository.repository_id))
+}
+
+pub(in crate::client::shell) fn projected_workspace_target(
+    snapshot: &ClientShellSnapshot,
+    workspace: &ClientShellWorkspace,
+    entry: &WorkspaceEntry,
+    structure: Option<&crate::protocol::endpoint::ClientShellStructureProjection>,
+    repository_collapsed: bool,
+) -> String {
+    if !repository_collapsed {
+        return workspace.workspace_id.clone();
+    }
+    let Some(repository) = entry
+        .repository_index
+        .and_then(|index| structure?.repositories.get(index))
+    else {
+        return workspace.workspace_id.clone();
+    };
+    repository
+        .last_focused_workspace_id
+        .as_deref()
+        .filter(|workspace_id| {
+            snapshot
+                .workspaces
+                .iter()
+                .any(|candidate| candidate.workspace_id == *workspace_id)
+        })
+        .or_else(|| {
+            repository.checkouts.iter().find_map(|checkout| {
+                snapshot
+                    .workspaces
+                    .iter()
+                    .find(|candidate| {
+                        candidate.workspace_id == checkout.workspace_id && candidate.focused
+                    })
+                    .map(|candidate| candidate.workspace_id.as_str())
+            })
+        })
+        .unwrap_or(&workspace.workspace_id)
+        .to_owned()
+}
+
+pub(in crate::client::shell) fn projected_workspace_status(
+    snapshot: &ClientShellSnapshot,
+    workspace: &ClientShellWorkspace,
+    entry: &WorkspaceEntry,
+    structure: Option<&crate::protocol::endpoint::ClientShellStructureProjection>,
+    collapsed_groups: &HashSet<String>,
+    repository_collapsed: bool,
+    workspace_index: Option<&HashMap<&str, &ClientShellWorkspace>>,
+) -> crate::api::schema::AgentStatus {
+    if let Some(repository) = entry
+        .repository_index
+        .and_then(|index| structure?.repositories.get(index))
+        .filter(|_| repository_collapsed)
+    {
+        return repository
+            .checkouts
+            .iter()
+            .filter_map(|checkout| {
+                workspace_index
+                    .and_then(|index| index.get(checkout.workspace_id.as_str()).copied())
+                    .or_else(|| {
+                        snapshot
+                            .workspaces
+                            .iter()
+                            .find(|candidate| candidate.workspace_id == checkout.workspace_id)
+                    })
+            })
+            .map(|candidate| candidate.agent_status)
+            .max_by_key(|status| status_priority(*status))
+            .unwrap_or(workspace.agent_status);
+    }
+    displayed_workspace_status(snapshot, workspace, collapsed_groups)
 }
 
 pub(in crate::client::shell) fn displayed_workspace_status(
@@ -632,7 +1003,86 @@ pub(in crate::client::shell) fn workspace_rows(
             state_text: status_text(status),
             ahead_behind: workspace.git_ahead_behind,
             tokens: &token_values,
-            suppress_git_details: indented,
+            suppress_branch: indented,
+        },
+    )
+}
+
+pub(in crate::client::shell) fn projected_workspace_rows(
+    workspace: &ClientShellWorkspace,
+    status: crate::api::schema::AgentStatus,
+    entry: &WorkspaceEntry,
+    structure: Option<&crate::protocol::endpoint::ClientShellStructureProjection>,
+    config: &SpacesSidebarConfig,
+) -> Vec<Vec<crate::ui::ResolvedToken>> {
+    let repository = entry
+        .repository_index
+        .and_then(|index| structure?.repositories.get(index));
+    let checkout = entry
+        .checkout_index
+        .and_then(|index| repository?.checkouts.get(index));
+    let label = if entry.indented && !workspace.custom_label {
+        workspace.branch.as_deref().map_or_else(
+            || {
+                checkout
+                    .and_then(|checkout| checkout.detached_head.as_deref())
+                    .map_or_else(
+                        || workspace.label.clone(),
+                        |head| {
+                            format!(
+                                "detached@{}",
+                                head.strip_prefix("detached@").unwrap_or(head)
+                            )
+                        },
+                    )
+            },
+            |branch| {
+                branch
+                    .strip_prefix("worktree/")
+                    .unwrap_or(branch)
+                    .to_owned()
+            },
+        )
+    } else if !entry.indented {
+        repository.map_or_else(
+            || workspace.label.clone(),
+            |repository| repository.label.clone(),
+        )
+    } else {
+        workspace.label.clone()
+    };
+    let branch_with_upstream = (!entry.indented)
+        .then(|| {
+            if let Some(branch) = workspace.branch.as_deref() {
+                return Some(
+                    match checkout.and_then(|checkout| checkout.upstream.as_deref()) {
+                        Some(upstream) if upstream != branch => format!("{branch} → {upstream}"),
+                        _ => branch.to_owned(),
+                    },
+                );
+            }
+            checkout.and_then(|checkout| {
+                checkout.detached_head.as_deref().map(|head| {
+                    format!(
+                        "detached@{}",
+                        head.strip_prefix("detached@").unwrap_or(head)
+                    )
+                })
+            })
+        })
+        .flatten();
+    let token_values = workspace.tokens.iter().cloned().collect::<HashMap<_, _>>();
+    crate::ui::sidebar_space_rows(
+        config,
+        crate::ui::SpaceTokenContext {
+            workspace: &label,
+            branch: branch_with_upstream
+                .as_deref()
+                .or(workspace.branch.as_deref()),
+            state_text: status_text(status),
+            ahead_behind: workspace.git_ahead_behind,
+            tokens: &token_values,
+            suppress_branch: entry.indented,
         },
     )
 }
@@ -640,12 +1090,11 @@ pub(in crate::client::shell) fn workspace_rows(
 pub(in crate::client::shell) fn render_workspace_rows(
     buffer: &mut Buffer,
     area: Rect,
-    workspace: &ClientShellWorkspace,
     status: crate::api::schema::AgentStatus,
     indicators: crate::config::StatusIndicatorStyle,
     entry: &WorkspaceEntry,
     rows: Vec<Vec<crate::ui::ResolvedToken>>,
-    endpoint_active: bool,
+    focused: bool,
     selected: bool,
     dragged: bool,
     palette: &Palette,
@@ -681,7 +1130,7 @@ pub(in crate::client::shell) fn render_workspace_rows(
         } else {
             x = x.saturating_add(3);
         }
-        let highlighted = endpoint_active && workspace.focused || dragged;
+        let highlighted = focused || dragged;
         let workspace_style = Style::default()
             .fg(if highlighted {
                 palette.text
@@ -693,18 +1142,32 @@ pub(in crate::client::shell) fn render_workspace_rows(
             } else {
                 Modifier::empty()
             });
-        let secondary_style = Style::default().fg(if endpoint_active && workspace.focused {
+        let secondary_style = Style::default().fg(if focused {
             palette.mauve
         } else {
             palette.overlay0
         });
-        let spans = crate::ui::resolved_token_spans(
-            row,
+        let state_icon = if entry.indented && entry.checkout_index.is_some() {
+            (
+                "",
+                Style::default().fg(if focused || selected {
+                    palette.mauve
+                } else {
+                    palette.overlay0
+                }),
+            )
+        } else {
             (
                 status_icon(status, indicators),
                 Style::default().fg(status_color(status, palette)),
-            ),
-            Style::default().fg(status_color(status, palette)),
+            )
+        };
+        let spans = crate::ui::resolved_token_spans(
+            row,
+            state_icon,
+            Style::default()
+                .fg(status_color(status, palette))
+                .add_modifier(Modifier::DIM),
             workspace_style,
             secondary_style,
             Style::default().fg(palette.overlay1),
@@ -721,7 +1184,7 @@ pub(in crate::client::shell) fn render_workspace_rows(
         Some(palette.selection_bg)
     } else if dragged {
         Some(palette.surface1)
-    } else if endpoint_active && workspace.focused {
+    } else if focused {
         Some(palette.active_row_bg)
     } else {
         None
