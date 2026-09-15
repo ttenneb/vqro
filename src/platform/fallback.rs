@@ -12,6 +12,18 @@ pub(crate) fn fill_secure_random(_bytes: &mut [u8]) -> std::io::Result<()> {
     ))
 }
 
+#[derive(Debug)]
+pub(crate) struct ExtensionServiceContainment;
+
+impl ExtensionServiceContainment {
+    pub(crate) fn new(_child: &std::process::Child) -> std::io::Result<Self> {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "extension service containment is unavailable on this platform",
+        ))
+    }
+}
+
 pub(crate) fn configure_extension_service_command(_command: &mut std::process::Command) {}
 
 pub(crate) fn terminate_extension_service_process_group(_child: &std::process::Child) {}

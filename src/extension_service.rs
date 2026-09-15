@@ -4,10 +4,6 @@
 //! renderer callbacks or terminal escape surface; inspector providers return validated
 //! [`crate::view_document::ViewDocument`] values.
 
-// Supervised services intentionally compile but are unreachable on Windows until Job Object
-// containment exists; keep the shared protocol types available for cross-target checking.
-#![cfg_attr(windows, allow(dead_code))]
-
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, Stdio};
@@ -112,21 +108,6 @@ pub struct ExtensionServiceManager {
 
 static NEXT_SERVICE_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
-#[cfg(windows)]
-pub fn manager_for_plugins(
-    _plugins: &crate::app::state::InstalledPluginRegistry,
-    _event_tx: tokio::sync::mpsc::Sender<crate::events::AppEvent>,
-) -> ExtensionServiceManager {
-    // The alpha cannot guarantee descendant containment without a Job Object.
-    ExtensionServiceManager {
-        workers: std::collections::BTreeMap::new(),
-        provider: None,
-        admissions: Arc::new(Mutex::new(std::collections::HashMap::new())),
-        cancellation_tombstones: Arc::new(Mutex::new(std::collections::VecDeque::new())),
-    }
-}
-
-#[cfg(not(windows))]
 pub fn manager_for_plugins(
     plugins: &crate::app::state::InstalledPluginRegistry,
     event_tx: tokio::sync::mpsc::Sender<crate::events::AppEvent>,
@@ -668,6 +649,7 @@ impl ExtensionServiceSupervisor {
 #[derive(Debug)]
 struct ExtensionServiceRuntime {
     child: Child,
+    _containment: crate::platform::ExtensionServiceContainment,
     stdin: ChildStdin,
     frames: mpsc::Receiver<Result<Vec<u8>, ExtensionServiceError>>,
     next_request_id: u64,
@@ -713,6 +695,14 @@ impl ExtensionServiceRuntime {
         }
         crate::platform::configure_extension_service_command(&mut command);
         let mut child = command.spawn().map_err(ExtensionServiceError::Io)?;
+        let containment = match crate::platform::ExtensionServiceContainment::new(&child) {
+            Ok(containment) => containment,
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(ExtensionServiceError::Io(error));
+            }
+        };
         let stdin = child.stdin.take().ok_or_else(|| {
             ExtensionServiceError::Protocol("service stdin was not captured".into())
         })?;
@@ -737,6 +727,7 @@ impl ExtensionServiceRuntime {
         });
         let mut runtime = Self {
             child,
+            _containment: containment,
             stdin,
             frames,
             next_request_id: 1,

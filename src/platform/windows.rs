@@ -220,13 +220,71 @@ pub(crate) fn fill_secure_random(_bytes: &mut [u8]) -> std::io::Result<()> {
     ))
 }
 
-// Kept as the platform contract while the Windows manager fails closed until Job Objects exist.
-#[allow(dead_code)]
-pub(crate) fn configure_extension_service_command(_command: &mut std::process::Command) {}
+pub(crate) fn configure_extension_service_command(command: &mut std::process::Command) {
+    use std::os::windows::process::CommandExt;
 
-// Kept as the platform contract while the Windows manager fails closed until Job Objects exist.
-#[allow(dead_code)]
-pub(crate) fn terminate_extension_service_process_group(_child: &std::process::Child) {}
+    // No extension code may run before kill-on-close containment is installed.
+    command.creation_flags(CREATE_NO_WINDOW | CREATE_SUSPENDED);
+}
+
+#[derive(Debug)]
+pub(crate) struct ExtensionServiceContainment {
+    job: usize,
+}
+
+impl ExtensionServiceContainment {
+    pub(crate) fn new(child: &std::process::Child) -> std::io::Result<Self> {
+        use std::os::windows::io::AsRawHandle;
+
+        let job = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+        if job.is_null() {
+            return Err(std::io::Error::last_os_error());
+        }
+        let result = (|| {
+            let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
+            limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            let size = u32::try_from(size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>())
+                .map_err(|_| std::io::Error::other("job limits size exceeds u32"))?;
+            if unsafe {
+                SetInformationJobObject(
+                    job,
+                    JobObjectExtendedLimitInformation,
+                    std::ptr::from_ref(&limits).cast(),
+                    size,
+                )
+            } == 0
+            {
+                return Err(std::io::Error::last_os_error());
+            }
+            if unsafe { AssignProcessToJobObject(job, child.as_raw_handle().cast()) } == 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            resume_suspended_process(Some(child.id()))?;
+            Ok(Self { job: job as usize })
+        })();
+        if result.is_err() {
+            unsafe {
+                CloseHandle(job);
+            }
+        }
+        result
+    }
+}
+
+impl Drop for ExtensionServiceContainment {
+    fn drop(&mut self) {
+        if self.job != 0 {
+            unsafe {
+                CloseHandle(self.job as HANDLE);
+            }
+            self.job = 0;
+        }
+    }
+}
+
+pub(crate) fn terminate_extension_service_process_group(_child: &std::process::Child) {
+    // Dropping ExtensionServiceContainment closes the kill-on-close Job Object.
+}
 
 use super::{ClipboardImage, ForegroundJob, Signal};
 

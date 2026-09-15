@@ -401,6 +401,15 @@ pub(crate) fn fill_secure_random(bytes: &mut [u8]) -> std::io::Result<()> {
     std::fs::File::open("/dev/urandom")?.read_exact(bytes)
 }
 
+#[derive(Debug)]
+pub(crate) struct ExtensionServiceContainment;
+
+impl ExtensionServiceContainment {
+    pub(crate) fn new(_child: &std::process::Child) -> std::io::Result<Self> {
+        Ok(Self)
+    }
+}
+
 pub(crate) fn configure_extension_service_command(command: &mut std::process::Command) {
     use std::os::unix::process::CommandExt as _;
     command.process_group(0);
