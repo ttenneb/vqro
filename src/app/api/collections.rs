@@ -21,7 +21,7 @@ fn collection_id_text(id: CollectionId) -> String {
 }
 
 impl App {
-    fn emit_collection_event(&mut self, action: &str, collection: CollectionInfo) {
+    pub(super) fn emit_collection_event(&mut self, action: &str, collection: CollectionInfo) {
         if let Some((ws_idx, tab_idx)) = self.parse_tab_id(&collection.tab_id) {
             let revision = self.event_hub.current_sequence().saturating_add(1).max(1);
             if let Ok(snapshot) = self.collections_shadow_snapshot(ws_idx, tab_idx, 1, revision) {

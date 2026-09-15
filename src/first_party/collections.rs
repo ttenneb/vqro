@@ -56,7 +56,7 @@ pub(crate) fn project(
                 flags: HostDocumentItemFlags {
                     selected: group.selected_terminal_id.as_deref()
                         == Some(member.terminal.terminal_id.as_str()),
-                    disabled: member.lifecycle == HostTerminalLifecycle::Archived,
+                    disabled: false,
                     ..Default::default()
                 },
             });
@@ -72,6 +72,38 @@ pub(crate) fn project(
                 confirmation: HostConfirmation::None,
             });
         }
+    }
+    for member in &snapshot.ungrouped {
+        let item_id = format!("terminal:{}", member.terminal.terminal_id);
+        let action_id = format!("focus:{}", member.terminal.terminal_id);
+        items.push(HostDocumentItem {
+            id: item_id.clone(),
+            parent_id: None,
+            role: HostItemRole::Terminal,
+            label: member.label.clone(),
+            detail: Some(
+                match member.lifecycle {
+                    HostTerminalLifecycle::Live => "live",
+                    HostTerminalLifecycle::Exited => "exited",
+                    HostTerminalLifecycle::Archived => "archived",
+                }
+                .into(),
+            ),
+            terminal: Some(member.terminal.clone()),
+            action_ids: vec![action_id.clone()],
+            flags: HostDocumentItemFlags::default(),
+        });
+        actions.push(HostDocumentAction {
+            id: action_id,
+            label: "Focus terminal".into(),
+            operation: HostDocumentOperation::Host {
+                effect: HostEffect::FocusTerminal {
+                    terminal_id: member.terminal.terminal_id.clone(),
+                },
+            },
+            subject_id: Some(item_id),
+            confirmation: HostConfirmation::None,
+        });
     }
     let document = HostDocumentV1 {
         contract: HOST_DOCUMENT_CONTRACT_V1.into(),
@@ -114,10 +146,7 @@ pub(crate) fn fallback(
             detail: None,
             terminal: Some(member.terminal.clone()),
             action_ids: vec![action_id.clone()],
-            flags: HostDocumentItemFlags {
-                disabled: member.lifecycle == HostTerminalLifecycle::Archived,
-                ..Default::default()
-            },
+            flags: HostDocumentItemFlags::default(),
         });
         actions.push(HostDocumentAction {
             id: action_id,
@@ -295,14 +324,28 @@ mod tests {
             ["term_a", "term_b", "term_c"]
         );
         cache.disable();
-        assert_eq!(
-            cache
-                .document_or_fallback(&snapshot(4))
-                .unwrap()
-                .items
-                .len(),
-            3
-        );
+        let mut archived_snapshot = snapshot(4);
+        archived_snapshot.groups[0].members[0].lifecycle = HostTerminalLifecycle::Archived;
+        let fallback = cache.document_or_fallback(&archived_snapshot).unwrap();
+        assert_eq!(fallback.items.len(), 3);
+        let archived = fallback
+            .items
+            .iter()
+            .find(|item| {
+                item.terminal
+                    .as_ref()
+                    .is_some_and(|terminal| terminal.terminal_id == "term_a")
+            })
+            .unwrap();
+        assert!(!archived.flags.disabled);
+        fallback
+            .authorize_host_effect_dispatch(
+                archived.action_ids.first().unwrap(),
+                &archived_snapshot,
+                &HashSet::from([HostCapability::FocusTerminal]),
+                true,
+            )
+            .unwrap();
     }
 
     #[test]

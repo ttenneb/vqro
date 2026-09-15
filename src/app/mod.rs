@@ -400,6 +400,36 @@ impl App {
         let mut restored_terminals = std::collections::HashMap::new();
         let mut restored_terminal_runtimes = crate::terminal::TerminalRuntimeRegistry::new();
         let mut session_persistence_blocked = false;
+        let mut loaded_snapshot = None;
+        let mut loaded_history = None;
+        if policy.restore_session {
+            match crate::persist::load_for_startup() {
+                crate::persist::StartupSessionLoad::Loaded(snapshot) => {
+                    loaded_snapshot = Some(snapshot);
+                }
+                crate::persist::StartupSessionLoad::Rejected(error) => {
+                    session_persistence_blocked = true;
+                    tracing::error!(
+                        %error,
+                        "session load rejected; durable snapshot is preserved and saving is disabled"
+                    );
+                }
+                crate::persist::StartupSessionLoad::Missing => {}
+            }
+            match crate::persist::load_history_for_startup() {
+                crate::persist::StartupHistoryLoad::Loaded(history) => {
+                    loaded_history = Some(history);
+                }
+                crate::persist::StartupHistoryLoad::Rejected(error) => {
+                    session_persistence_blocked = true;
+                    tracing::error!(
+                        %error,
+                        "session history load rejected; durable snapshots are preserved and saving is disabled"
+                    );
+                }
+                crate::persist::StartupHistoryLoad::Missing => {}
+            }
+        }
         let (workspaces, repositories, space_order, active, selected, delegations) = if !policy
             .restore_session
         {
@@ -411,11 +441,11 @@ impl App {
                 0,
                 crate::delegation::Delegations::new(),
             )
-        } else if let Some(snap) = crate::persist::load() {
+        } else if let Some(snap) = loaded_snapshot {
             let history = config
                 .experimental
                 .pane_history
-                .then(crate::persist::load_history)
+                .then_some(loaded_history)
                 .flatten();
             match crate::persist::restore(
                 &snap,
@@ -750,6 +780,7 @@ impl App {
 
         app.state.pane_id_aliases = pane_id_aliases;
         app.state.workspaces = workspaces;
+        app.restore_handoff_delegations(snapshot);
         app.state.repositories = snapshot.repositories.clone();
         app.state.space_order = snapshot.space_order.clone();
         app.state.terminals = terminals;
@@ -774,6 +805,12 @@ impl App {
                 .and_then(|ws| ws.focused_pane_id().map(|pane_id| (idx, pane_id)))
         });
         Ok(app)
+    }
+
+    #[cfg(unix)]
+    fn restore_handoff_delegations(&mut self, snapshot: &crate::persist::SessionSnapshot) {
+        self.state.delegations =
+            crate::persist::restore_delegations(snapshot, &self.state.workspaces);
     }
 
     #[cfg(unix)]
@@ -3219,6 +3256,65 @@ mod tests {
         let _ = std::fs::remove_dir_all(config_home);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn handoff_install_restores_delegation_relationships_against_new_pane_ids() {
+        use crate::persist::{LayoutSnapshot, SessionSnapshot, TabSnapshot, WorkspaceSnapshot};
+
+        let mut app = test_app();
+        app.state.workspaces = vec![Workspace::test_new("handoff")];
+        let restored_pane = app.state.workspaces[0].tabs[0].root_pane;
+        let relationship = crate::delegation::Delegations::new()
+            .create(None, None, Some("handoff relationship".into()))
+            .unwrap();
+        let snapshot = SessionSnapshot {
+            version: 5,
+            workspaces: vec![WorkspaceSnapshot {
+                id: Some(app.state.workspaces[0].id.clone()),
+                custom_name: None,
+                identity_cwd: std::path::PathBuf::from("/tmp"),
+                checkout: None,
+                worktree_space: None,
+                public_pane_numbers: std::collections::HashMap::from([(77, 1)]),
+                next_public_pane_number: 2,
+                public_tab_numbers: vec![1],
+                next_public_tab_number: 2,
+                tabs: vec![TabSnapshot {
+                    custom_name: None,
+                    layout: LayoutSnapshot::Pane(77),
+                    collections: Vec::new(),
+                    panes: std::collections::HashMap::new(),
+                    zoomed: false,
+                    focused: Some(77),
+                    focused_leaf: None,
+                    root_pane: Some(77),
+                }],
+                active_tab: 0,
+            }],
+            repositories: Vec::new(),
+            space_order: Vec::new(),
+            active: Some(0),
+            selected: 0,
+            sidebar_width: None,
+            sidebar_section_split: None,
+            collapsed_space_keys: Default::default(),
+            delegations: vec![crate::delegation::DelegationRecord {
+                id: relationship,
+                pane_id: Some(crate::layout::PaneId::from_raw(77)),
+                parent_id: None,
+                purpose: Some("handoff relationship".into()),
+                sibling_rank: 0,
+                tombstone: false,
+            }],
+        };
+
+        app.restore_handoff_delegations(&snapshot);
+
+        let restored = app.state.delegations.get(relationship).unwrap();
+        assert_eq!(restored.pane_id, Some(restored_pane));
+        assert_eq!(restored.purpose.as_deref(), Some("handoff relationship"));
+    }
+
     #[test]
     fn rejected_restore_blocks_overwriting_the_original_snapshot_bytes() {
         let _guard = crate::config::test_config_env_lock().lock().unwrap();
@@ -3226,16 +3322,25 @@ mod tests {
         std::env::set_var("XDG_CONFIG_HOME", &config_home);
         std::env::remove_var(crate::session::SESSION_ENV_VAR);
 
-        let mut app = test_app();
-        app.policy.persist_session = true;
-        app.state.workspaces = vec![Workspace::test_new("original")];
-        app.state.active = Some(0);
-        app.state.ensure_test_terminals();
-        app.save_session_now();
         let session_path = crate::session::data_dir().join("session.json");
-        let original = std::fs::read(&session_path).unwrap();
+        std::fs::create_dir_all(session_path.parent().unwrap()).unwrap();
+        let original = b"{ definitely not a session }".to_vec();
+        std::fs::write(&session_path, &original).unwrap();
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &crate::config::Config::default(),
+            AppPolicy {
+                restore_session: true,
+                persist_session: true,
+                persist_plugin_registry: false,
+                background_updates: false,
+            },
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        assert!(app.session_persistence_blocked);
 
-        app.session_persistence_blocked = true;
         app.state
             .workspaces
             .push(Workspace::test_new("replacement"));

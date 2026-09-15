@@ -9,7 +9,12 @@ pub mod plugin_registry;
 mod restore;
 mod snapshot;
 
-pub use self::io::{clear, clear_history, load, load_history, save};
+#[cfg(test)]
+pub use self::io::load;
+pub use self::io::{clear, clear_history, save};
+pub(crate) use self::io::{
+    load_for_startup, load_history_for_startup, StartupHistoryLoad, StartupSessionLoad,
+};
 pub(crate) use self::restore::validate_snapshot_admission;
 #[cfg(unix)]
 pub use self::restore::{handoff_pane_aliases, restore_handoff};

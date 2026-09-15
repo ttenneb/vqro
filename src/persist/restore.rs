@@ -117,7 +117,7 @@ pub(crate) fn validate_snapshot_admission(snapshot: &SessionSnapshot) -> Result<
     for workspace in &snapshot.workspaces {
         let mut workspace_panes = 0usize;
         for tab in &workspace.tabs {
-            let tab_panes = tab.panes.len();
+            let tab_panes = restored_tab_identity_count(tab);
             crate::admission::panes(session_panes, workspace_panes, 0, tab_panes)
                 .map_err(|error| error.to_string())?;
             session_panes = session_panes
@@ -147,6 +147,25 @@ pub(crate) fn validate_snapshot_admission(snapshot: &SessionSnapshot) -> Result<
     )
     .map_err(|error| error.to_string())?;
     crate::admission::relationships(&relationships).map_err(|error| error.to_string())
+}
+
+fn restored_tab_identity_count(tab: &super::snapshot::TabSnapshot) -> usize {
+    fn collect_layout_ids(layout: &super::snapshot::LayoutSnapshot, ids: &mut HashSet<u32>) {
+        match layout {
+            super::snapshot::LayoutSnapshot::Pane(id) => {
+                ids.insert(*id);
+            }
+            super::snapshot::LayoutSnapshot::Collection(_) => {}
+            super::snapshot::LayoutSnapshot::Split { first, second, .. } => {
+                collect_layout_ids(first, ids);
+                collect_layout_ids(second, ids);
+            }
+        }
+    }
+
+    let mut ids = tab.panes.keys().copied().collect::<HashSet<_>>();
+    collect_layout_ids(&tab.layout, &mut ids);
+    ids.len()
 }
 
 /// Restore workspaces from a snapshot. Each pane gets a fresh shell in its saved cwd.
@@ -1396,21 +1415,26 @@ mod tests {
     fn oversized_snapshot_is_rejected_before_terminal_or_pane_identity_allocation() {
         use super::super::snapshot::{PaneSnapshot, TabSnapshot, WorkspaceSnapshot};
 
-        let panes = (1..=crate::admission::MAX_SESSION_PANES as u32 + 1)
-            .map(|id| {
-                (
-                    id,
-                    PaneSnapshot {
-                        cwd: std::path::PathBuf::from("/tmp"),
-                        label: None,
-                        agent_name: None,
-                        managed_agent_kind: None,
-                        agent_session: None,
-                        launch_argv: None,
-                    },
-                )
-            })
-            .collect();
+        let panes = HashMap::from([(
+            1,
+            PaneSnapshot {
+                cwd: std::path::PathBuf::from("/tmp"),
+                label: None,
+                agent_name: None,
+                managed_agent_kind: None,
+                agent_session: None,
+                launch_argv: None,
+            },
+        )]);
+        let mut layout = super::super::snapshot::LayoutSnapshot::Pane(1);
+        for id in 2..=crate::admission::MAX_TAB_PANES as u32 + 1 {
+            layout = super::super::snapshot::LayoutSnapshot::Split {
+                direction: super::super::snapshot::DirectionSnapshot::Horizontal,
+                ratio: 0.5,
+                first: Box::new(layout),
+                second: Box::new(super::super::snapshot::LayoutSnapshot::Pane(id)),
+            };
+        }
         let snapshot = SessionSnapshot {
             version: super::super::snapshot::SNAPSHOT_VERSION,
             workspaces: vec![WorkspaceSnapshot {
@@ -1425,7 +1449,7 @@ mod tests {
                 next_public_tab_number: 2,
                 tabs: vec![TabSnapshot {
                     custom_name: None,
-                    layout: super::super::snapshot::LayoutSnapshot::Pane(1),
+                    layout,
                     collections: Vec::new(),
                     panes,
                     zoomed: false,

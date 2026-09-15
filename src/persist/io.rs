@@ -110,65 +110,83 @@ pub fn clear_history() {
     }
 }
 
-pub fn load() -> Option<SessionSnapshot> {
-    let path = session_path();
+pub(crate) enum StartupSessionLoad {
+    Missing,
+    Loaded(SessionSnapshot),
+    Rejected(String),
+}
+
+pub(crate) fn load_for_startup() -> StartupSessionLoad {
+    load_for_startup_from_path(&session_path())
+}
+
+fn load_for_startup_from_path(path: &Path) -> StartupSessionLoad {
     if !path.exists() {
-        return None;
+        return StartupSessionLoad::Missing;
     }
-    let content = match std::fs::read_to_string(&path) {
+    let content = match std::fs::read_to_string(path) {
         Ok(content) => content,
         Err(err) => {
-            warn!(err = %err, "failed to read session file");
-            return None;
+            let diagnostic = format!("failed to read existing session file: {err}");
+            warn!(%diagnostic);
+            return StartupSessionLoad::Rejected(diagnostic);
         }
     };
     match parse_snapshot(&content) {
-        Ok(snapshot) => Some(snapshot),
+        Ok(snapshot) => StartupSessionLoad::Loaded(snapshot),
         Err(err) => {
-            if let Some(version) = snapshot_file_version(&content) {
+            let diagnostic = if let Some(version) = snapshot_file_version(&content) {
                 if version > SNAPSHOT_VERSION {
-                    warn!(
-                        file_version = version,
-                        supported = SNAPSHOT_VERSION,
-                        "session file is from a newer herdr version, ignoring"
-                    );
-                    return None;
+                    format!(
+                        "session file version {version} is newer than supported {SNAPSHOT_VERSION}"
+                    )
+                } else {
+                    format!("failed to parse existing session file: {err}")
                 }
-            }
-            warn!(err = %err, "failed to parse session file, ignoring");
-            None
+            } else {
+                format!("failed to parse existing session file: {err}")
+            };
+            warn!(%diagnostic);
+            StartupSessionLoad::Rejected(diagnostic)
         }
     }
 }
 
-pub fn load_history() -> Option<SessionHistorySnapshot> {
-    let path = session_history_path();
-    if !path.exists() {
-        return None;
+#[cfg(test)]
+pub fn load() -> Option<SessionSnapshot> {
+    match load_for_startup() {
+        StartupSessionLoad::Loaded(snapshot) => Some(snapshot),
+        StartupSessionLoad::Missing | StartupSessionLoad::Rejected(_) => None,
     }
-    let content = match std::fs::read_to_string(&path) {
+}
+
+pub(crate) enum StartupHistoryLoad {
+    Missing,
+    Loaded(SessionHistorySnapshot),
+    Rejected(String),
+}
+
+pub(crate) fn load_history_for_startup() -> StartupHistoryLoad {
+    load_history_for_startup_from_path(&session_history_path())
+}
+
+fn load_history_for_startup_from_path(path: &Path) -> StartupHistoryLoad {
+    if !path.exists() {
+        return StartupHistoryLoad::Missing;
+    }
+    let content = match std::fs::read_to_string(path) {
         Ok(content) => content,
         Err(err) => {
-            warn!(err = %err, "failed to read session history file");
-            return None;
+            return StartupHistoryLoad::Rejected(format!(
+                "failed to read existing session history file: {err}"
+            ));
         }
     };
     match parse_history_snapshot(&content) {
-        Ok(snapshot) => Some(snapshot),
-        Err(err) => {
-            if let Some(version) = snapshot_file_version(&content) {
-                if version > SNAPSHOT_VERSION {
-                    warn!(
-                        file_version = version,
-                        supported = SNAPSHOT_VERSION,
-                        "session history file is from a newer herdr version, ignoring"
-                    );
-                    return None;
-                }
-            }
-            warn!(err = %err, "failed to parse session history file, ignoring");
-            None
-        }
+        Ok(snapshot) => StartupHistoryLoad::Loaded(snapshot),
+        Err(err) => StartupHistoryLoad::Rejected(format!(
+            "failed to parse existing session history file: {err}"
+        )),
     }
 }
 
@@ -211,6 +229,80 @@ mod tests {
             sidebar_section_split: Some(0.5),
             collapsed_space_keys: std::collections::HashSet::new(),
         }
+    }
+
+    #[test]
+    fn startup_load_distinguishes_every_existing_unrestorable_snapshot() {
+        let malformed = temp_session_path("malformed-load");
+        std::fs::create_dir_all(malformed.parent().unwrap()).unwrap();
+        std::fs::write(&malformed, b"not json").unwrap();
+        assert!(matches!(
+            load_for_startup_from_path(&malformed),
+            StartupSessionLoad::Rejected(_)
+        ));
+        assert_eq!(std::fs::read(&malformed).unwrap(), b"not json");
+
+        let newer = temp_session_path("newer-load");
+        std::fs::create_dir_all(newer.parent().unwrap()).unwrap();
+        let newer_bytes = format!("{{\"version\":{}}}", SNAPSHOT_VERSION + 1);
+        std::fs::write(&newer, &newer_bytes).unwrap();
+        assert!(matches!(
+            load_for_startup_from_path(&newer),
+            StartupSessionLoad::Rejected(_)
+        ));
+        assert_eq!(std::fs::read_to_string(&newer).unwrap(), newer_bytes);
+
+        let unreadable = temp_session_path("unreadable-load");
+        std::fs::create_dir_all(&unreadable).unwrap();
+        assert!(matches!(
+            load_for_startup_from_path(&unreadable),
+            StartupSessionLoad::Rejected(_)
+        ));
+
+        let _ = std::fs::remove_dir_all(malformed.parent().unwrap());
+        let _ = std::fs::remove_dir_all(newer.parent().unwrap());
+        let history_malformed =
+            temp_session_path("malformed-history").with_file_name("session-history.json");
+        std::fs::create_dir_all(history_malformed.parent().unwrap()).unwrap();
+        std::fs::write(&history_malformed, b"not history json").unwrap();
+        assert!(matches!(
+            load_history_for_startup_from_path(&history_malformed),
+            StartupHistoryLoad::Rejected(_)
+        ));
+        assert_eq!(
+            std::fs::read(&history_malformed).unwrap(),
+            b"not history json"
+        );
+
+        let history_newer =
+            temp_session_path("newer-history").with_file_name("session-history.json");
+        std::fs::create_dir_all(history_newer.parent().unwrap()).unwrap();
+        let newer_history_bytes =
+            format!("{{\"version\":{},\"workspaces\":[]}}", SNAPSHOT_VERSION + 1);
+        std::fs::write(&history_newer, &newer_history_bytes).unwrap();
+        assert!(matches!(
+            load_history_for_startup_from_path(&history_newer),
+            StartupHistoryLoad::Rejected(_)
+        ));
+        assert_eq!(
+            std::fs::read_to_string(&history_newer).unwrap(),
+            newer_history_bytes
+        );
+
+        let history_unreadable =
+            temp_session_path("unreadable-history").with_file_name("session-history.json");
+        std::fs::create_dir_all(&history_unreadable).unwrap();
+        assert!(matches!(
+            load_history_for_startup_from_path(&history_unreadable),
+            StartupHistoryLoad::Rejected(_)
+        ));
+
+        let _ = std::fs::remove_dir_all(malformed.parent().unwrap());
+        let _ = std::fs::remove_dir_all(newer.parent().unwrap());
+        let _ = std::fs::remove_dir_all(unreadable.parent().unwrap());
+        let _ = std::fs::remove_dir_all(history_malformed.parent().unwrap());
+        let _ = std::fs::remove_dir_all(history_newer.parent().unwrap());
+        let _ = std::fs::remove_dir_all(history_unreadable.parent().unwrap());
     }
 
     fn history_snapshot(secret: &str) -> SessionHistorySnapshot {

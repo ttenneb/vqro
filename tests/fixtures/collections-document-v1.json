@@ -39,6 +39,18 @@
       },
       "action_ids": ["focus:term_b"],
       "flags": { "selected": true, "expanded": false, "disabled": false, "attention": false }
+    },
+    {
+      "id": "terminal:term_c",
+      "role": "terminal",
+      "label": "Shell",
+      "detail": "live",
+      "terminal": {
+        "terminal_id": "term_c",
+        "placement": { "pane_id": "w1:p9", "workspace_id": "w1", "tab_id": "w1:t2" }
+      },
+      "action_ids": ["focus:term_c"],
+      "flags": { "selected": false, "expanded": false, "disabled": false, "attention": false }
     }
   ],
   "actions": [
@@ -54,6 +66,13 @@
       "label": "Focus terminal",
       "operation": { "kind": "host", "effect": { "kind": "focus_terminal", "terminal_id": "term_b" } },
       "subject_id": "terminal:term_b",
+      "confirmation": "none"
+    },
+    {
+      "id": "focus:term_c",
+      "label": "Focus terminal",
+      "operation": { "kind": "host", "effect": { "kind": "focus_terminal", "terminal_id": "term_c" } },
+      "subject_id": "terminal:term_c",
       "confirmation": "none"
     }
   ],

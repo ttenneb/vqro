@@ -182,7 +182,7 @@ impl HostEffect {
 
     /// Re-check authority at effect dispatch. A document's declaration is not
     /// a grant and must never be used as one.
-    pub fn authorize_dispatch(
+    fn authorize_dispatch(
         &self,
         granted_capabilities: &HashSet<HostCapability>,
         confirmed: bool,
@@ -257,6 +257,59 @@ impl HostTerminalGroupsV1 {
 }
 
 impl HostDocumentV1 {
+    /// Authorize one host effect against both the provider grant and the
+    /// identities/scope in this validated document.
+    pub fn authorize_host_effect_dispatch(
+        &self,
+        action_id: &str,
+        host_snapshot: &HostTerminalGroupsV1,
+        granted_capabilities: &HashSet<HostCapability>,
+        confirmed: bool,
+    ) -> Result<&HostEffect, HostDocumentError> {
+        self.validate()?;
+        host_snapshot.validate()?;
+        if self.generation != host_snapshot.generation || self.revision != host_snapshot.revision {
+            return invalid("host effect document does not match host snapshot revision");
+        }
+        let action = self
+            .actions
+            .iter()
+            .find(|action| action.id == action_id)
+            .ok_or_else(|| HostDocumentError("document action not found".into()))?;
+        let HostDocumentOperation::Host { effect } = &action.operation else {
+            return invalid("document action is not a host effect");
+        };
+        effect.authorize_dispatch(granted_capabilities, confirmed)?;
+        let terminal_id = match effect {
+            HostEffect::FocusTerminal { terminal_id }
+            | HostEffect::TerminalInterrupt { terminal_id } => terminal_id,
+        };
+        let subject = action
+            .subject_id
+            .as_deref()
+            .and_then(|subject| self.items.iter().find(|item| item.id == subject))
+            .ok_or_else(|| HostDocumentError("host effect requires a document subject".into()))?;
+        let terminal = subject
+            .terminal
+            .as_ref()
+            .filter(|terminal| terminal.terminal_id == *terminal_id)
+            .ok_or_else(|| {
+                HostDocumentError("host effect terminal is outside its subject".into())
+            })?;
+        let host_terminal = host_snapshot
+            .groups
+            .iter()
+            .flat_map(|group| &group.members)
+            .chain(&host_snapshot.ungrouped)
+            .map(|member| &member.terminal)
+            .find(|candidate| candidate.terminal_id == *terminal_id)
+            .ok_or_else(|| HostDocumentError("host effect terminal is not host-owned".into()))?;
+        if terminal != host_terminal || !terminal_ref_matches_target(host_terminal, &self.target) {
+            return invalid("host effect terminal is outside document scope");
+        }
+        Ok(effect)
+    }
+
     pub fn validate(&self) -> Result<(), HostDocumentError> {
         if self.contract != HOST_DOCUMENT_CONTRACT_V1 {
             return invalid("unsupported host document contract");
@@ -380,6 +433,24 @@ fn validate_text(value: &str) -> Result<(), HostDocumentError> {
     Ok(())
 }
 
+fn terminal_ref_matches_target(terminal: &HostTerminalRef, target: &HostTarget) -> bool {
+    match target {
+        HostTarget::Session => true,
+        HostTarget::Workspace { workspace_id } => terminal
+            .placement
+            .as_ref()
+            .is_some_and(|placement| placement.workspace_id == *workspace_id),
+        HostTarget::Tab { tab_id } => terminal
+            .placement
+            .as_ref()
+            .is_some_and(|placement| placement.tab_id == *tab_id),
+        HostTarget::Pane { pane_id } => terminal
+            .placement
+            .as_ref()
+            .is_some_and(|placement| placement.pane_id == *pane_id),
+    }
+}
+
 fn validate_terminal_ref(terminal: &HostTerminalRef) -> Result<(), HostDocumentError> {
     validate_stable_ref(&terminal.terminal_id)?;
     if let Some(placement) = &terminal.placement {
@@ -467,6 +538,26 @@ mod tests {
                 confirmation: HostConfirmation::None,
             }],
             required_capabilities: Vec::new(),
+        }
+    }
+
+    fn host_snapshot() -> HostTerminalGroupsV1 {
+        HostTerminalGroupsV1 {
+            contract: "host.terminal-groups.v1".into(),
+            generation: 7,
+            revision: 2,
+            scope_id: "w1:t1".into(),
+            groups: vec![HostTerminalGroup {
+                group_id: "collection_1".into(),
+                label: Some("Review".into()),
+                selected_terminal_id: Some("term_7".into()),
+                members: vec![HostTerminalGroupMember {
+                    terminal: document().items[1].terminal.clone().unwrap(),
+                    label: "Agent".into(),
+                    lifecycle: HostTerminalLifecycle::Live,
+                }],
+            }],
+            ungrouped: Vec::new(),
         }
     }
 
@@ -559,6 +650,27 @@ mod tests {
         let grants = HashSet::from([HostCapability::TerminalInterrupt]);
         assert!(effect.authorize_dispatch(&grants, false).is_err());
         effect.authorize_dispatch(&grants, true).unwrap();
+        document
+            .authorize_host_effect_dispatch("select:1", &host_snapshot(), &grants, true)
+            .unwrap();
+
+        let mut escaped = document.clone();
+        escaped.required_capabilities = vec![HostCapability::FocusTerminal];
+        escaped.actions[0].operation = HostDocumentOperation::Host {
+            effect: HostEffect::FocusTerminal {
+                terminal_id: "term_outside".into(),
+            },
+        };
+        assert!(escaped
+            .authorize_host_effect_dispatch(
+                "select:1",
+                &host_snapshot(),
+                &HashSet::from([HostCapability::FocusTerminal]),
+                true,
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("outside"));
     }
 
     #[test]
