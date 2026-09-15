@@ -64,6 +64,11 @@ impl App {
             },
             None => None,
         };
+        if let Err(error) =
+            crate::admission::relationship_create(&self.state.delegations, parent_id)
+        {
+            return responses::encode_error(request_id, "resource_limit", error.to_string());
+        }
         let Ok(id) = self
             .state
             .delegations
@@ -187,6 +192,11 @@ impl App {
             },
             None => None,
         };
+        if let Err(error) =
+            crate::admission::relationship_parent(&self.state.delegations, Some(id), parent)
+        {
+            return responses::encode_error(request_id, "resource_limit", error.to_string());
+        }
         if self.state.delegations.reparent(id, parent).is_err() {
             return responses::encode_error(
                 request_id,

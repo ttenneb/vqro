@@ -813,6 +813,11 @@ impl Workspace {
         argv: Option<&[String]>,
     ) -> Option<std::io::Result<(usize, crate::workspace::tab::NewPane)>> {
         let tab_idx = self.find_tab_index_for_pane(pane_id)?;
+        let workspace_panes = self.tabs.iter().map(|tab| tab.panes.len()).sum::<usize>();
+        let tab_panes = self.tabs[tab_idx].panes.len();
+        if let Err(error) = crate::admission::pane(0, workspace_panes, tab_panes) {
+            return Some(Err(std::io::Error::other(error.to_string())));
+        }
         let pane_number = self.next_public_pane_number;
         let tab_number = self.tabs[tab_idx].number;
         let launch_env = self.launch_env_for_new_pane(tab_number, pane_number, extra_env);

@@ -164,6 +164,13 @@ impl App {
         let Some(tab_idx) = self.state.workspaces[ws_idx].find_tab_index_for_pane(pane_id) else {
             return responses::encode_error(request_id, "not_found", "target tab was not found");
         };
+        let group_count = self.state.workspaces[ws_idx].tabs[tab_idx]
+            .layout
+            .collections()
+            .count();
+        if let Err(error) = crate::admission::group(group_count) {
+            return responses::encode_error(request_id, "resource_limit", error.to_string());
+        }
         let created = self.state.workspaces[ws_idx].tabs[tab_idx].create_collection_near(
             LayoutLeaf::Pane(pane_id),
             direction(params.direction),
@@ -213,6 +220,13 @@ impl App {
                 "cross_tab_unsupported",
                 "the first port only collects panes from the same tab",
             );
+        }
+        let member_count = self.state.workspaces[ws_idx].tabs[tab_idx]
+            .collection(collection_id)
+            .map(|collection| collection.members().len())
+            .unwrap_or(0);
+        if let Err(error) = crate::admission::group_member(member_count) {
+            return responses::encode_error(request_id, "resource_limit", error.to_string());
         }
         if self.state.workspaces[ws_idx].tabs[tab_idx]
             .collect_tiled_pane(pane_id, collection_id)

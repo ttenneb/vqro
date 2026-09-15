@@ -486,6 +486,9 @@ impl Tab {
         launch_env: &PaneLaunchEnv,
         command: Option<SplitCommand<'_>>,
     ) -> std::io::Result<NewPane> {
+        if self.panes.len() >= crate::admission::MAX_TAB_PANES {
+            return Err(std::io::Error::other("tab pane limit reached"));
+        }
         let Some(new_id) = self
             .layout
             .split_pane(target, direction, ratio.unwrap_or(0.5))
