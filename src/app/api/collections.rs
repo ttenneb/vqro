@@ -22,6 +22,28 @@ fn collection_id_text(id: CollectionId) -> String {
 
 impl App {
     fn emit_collection_event(&mut self, action: &str, collection: CollectionInfo) {
+        if let Some((ws_idx, tab_idx)) = self.parse_tab_id(&collection.tab_id) {
+            let revision = self.event_hub.current_sequence().saturating_add(1).max(1);
+            if let Ok(snapshot) = self.collections_shadow_snapshot(ws_idx, tab_idx, 1, revision) {
+                let tab_id = snapshot.scope_id.clone();
+                let grants = std::collections::HashSet::from([
+                    crate::extension_contract::HostCapability::FocusTerminal,
+                ]);
+                let cache = self.collections_shadow_documents.entry(tab_id).or_default();
+                match crate::first_party::collections::project(&snapshot)
+                    .and_then(|document| cache.publish(1, &grants, document))
+                {
+                    Ok(()) => {
+                        let _ = cache.document_or_fallback(&snapshot);
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, "Collections shadow provider rejected host state");
+                        cache.disable();
+                        let _ = cache.document_or_fallback(&snapshot);
+                    }
+                }
+            }
+        }
         self.emit_event(crate::api::schema::EventEnvelope {
             event: crate::api::schema::EventKind::CollectionUpdated,
             data: crate::api::schema::EventData::CollectionUpdated {
@@ -29,6 +51,104 @@ impl App {
                 collection,
             },
         });
+    }
+
+    fn collections_shadow_snapshot(
+        &self,
+        ws_idx: usize,
+        tab_idx: usize,
+        generation: u64,
+        revision: u64,
+    ) -> Result<
+        crate::extension_contract::HostTerminalGroupsV1,
+        crate::extension_contract::HostDocumentError,
+    > {
+        use crate::extension_contract::{
+            HostTerminalGroup, HostTerminalGroupMember, HostTerminalGroupsV1,
+            HostTerminalLifecycle, HostTerminalPlacement, HostTerminalRef,
+        };
+        use crate::layout::PanePlacement;
+
+        let workspace = &self.state.workspaces[ws_idx];
+        let tab = &workspace.tabs[tab_idx];
+        let workspace_id = self.public_workspace_id(ws_idx);
+        let tab_id = self.public_tab_id(ws_idx, tab_idx).ok_or_else(|| {
+            crate::extension_contract::HostDocumentError("tab has no stable id".into())
+        })?;
+        let member = |pane_id: crate::layout::PaneId, archived: bool| {
+            let pane = tab.panes.get(&pane_id)?;
+            let terminal = self.state.terminals.get(&pane.attached_terminal_id)?;
+            Some(HostTerminalGroupMember {
+                terminal: HostTerminalRef {
+                    terminal_id: terminal.id.to_string(),
+                    placement: Some(HostTerminalPlacement {
+                        pane_id: self.public_pane_id(ws_idx, pane_id)?,
+                        workspace_id: workspace_id.clone(),
+                        tab_id: tab_id.clone(),
+                    }),
+                },
+                label: terminal
+                    .manual_label
+                    .as_ref()
+                    .or(terminal.agent_name.as_ref())
+                    .or(terminal.terminal_title.as_ref())
+                    .cloned()
+                    .unwrap_or_else(|| format!("Terminal {}", pane_id.raw())),
+                lifecycle: if archived {
+                    HostTerminalLifecycle::Archived
+                } else {
+                    HostTerminalLifecycle::Live
+                },
+            })
+        };
+        let groups = tab
+            .layout
+            .collections()
+            .map(|collection| HostTerminalGroup {
+                group_id: collection_id_text(collection.id),
+                label: collection.label.clone(),
+                selected_terminal_id: collection.selected().and_then(|pane_id| {
+                    tab.panes
+                        .get(&pane_id)
+                        .map(|pane| pane.attached_terminal_id.to_string())
+                }),
+                members: collection
+                    .members()
+                    .iter()
+                    .filter_map(|pane_id| member(*pane_id, collection.is_archived(*pane_id)))
+                    .collect(),
+            })
+            .collect();
+        let ungrouped = tab
+            .panes
+            .keys()
+            .copied()
+            .filter(|pane_id| tab.pane_placement(*pane_id) == Some(PanePlacement::Tiled))
+            .filter_map(|pane_id| member(pane_id, false))
+            .collect();
+        Ok(HostTerminalGroupsV1 {
+            contract: "host.terminal-groups.v1".into(),
+            generation,
+            revision,
+            scope_id: tab_id,
+            groups,
+            ungrouped,
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn collections_shadow_document(
+        &self,
+        ws_idx: usize,
+        tab_idx: usize,
+        generation: u64,
+        revision: u64,
+    ) -> Result<
+        crate::extension_contract::HostDocumentV1,
+        crate::extension_contract::HostDocumentError,
+    > {
+        let snapshot = self.collections_shadow_snapshot(ws_idx, tab_idx, generation, revision)?;
+        crate::first_party::collections::project(&snapshot)
     }
 
     fn find_collection(&self, id: CollectionId) -> Option<(usize, usize)> {
@@ -566,6 +686,55 @@ mod tests {
             .unwrap();
         app.state.ensure_test_terminals();
         (app, collection, member)
+    }
+
+    #[test]
+    fn collection_shadow_uses_stable_terminal_identity_and_generic_contracts() {
+        let (app, collection, member) = app_with_nonempty_collection();
+        let terminal_id = app.state.workspaces[0].tabs[0].panes[&member]
+            .attached_terminal_id
+            .to_string();
+
+        let document = app.collections_shadow_document(0, 0, 4, 9).unwrap();
+
+        assert_eq!(
+            document.namespace,
+            crate::first_party::collections::NAMESPACE
+        );
+        assert_eq!(document.generation, 4);
+        assert_eq!(document.revision, 9);
+        let group = document
+            .items
+            .iter()
+            .find(|item| item.id == collection_id_text(collection))
+            .or_else(|| {
+                document
+                    .items
+                    .iter()
+                    .find(|item| item.id == format!("group:{}", collection_id_text(collection)))
+            })
+            .expect("collection group projection");
+        assert_eq!(group.role, crate::extension_contract::HostItemRole::Group);
+        let projected = document
+            .items
+            .iter()
+            .find(|item| {
+                item.terminal
+                    .as_ref()
+                    .is_some_and(|terminal| terminal.terminal_id == terminal_id)
+            })
+            .expect("member terminal projection");
+        assert_eq!(
+            projected
+                .terminal
+                .as_ref()
+                .unwrap()
+                .placement
+                .as_ref()
+                .unwrap()
+                .pane_id,
+            app.public_pane_id(0, member).unwrap()
+        );
     }
 
     #[test]

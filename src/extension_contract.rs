@@ -21,6 +21,8 @@ pub struct HostTerminalGroupsV1 {
     pub revision: u64,
     pub scope_id: String,
     pub groups: Vec<HostTerminalGroup>,
+    #[serde(default)]
+    pub ungrouped: Vec<HostTerminalGroupMember>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -223,6 +225,12 @@ impl HostTerminalGroupsV1 {
         validate_stable_ref(&self.scope_id)?;
         let mut group_ids = HashSet::new();
         let mut terminal_ids = HashSet::new();
+        for member in &self.ungrouped {
+            validate_terminal_ref(&member.terminal)?;
+            if !terminal_ids.insert(member.terminal.terminal_id.as_str()) {
+                return invalid("a terminal may appear only once in a group snapshot");
+            }
+        }
         for group in &self.groups {
             validate_stable_ref(&group.group_id)?;
             if !group_ids.insert(group.group_id.as_str()) {

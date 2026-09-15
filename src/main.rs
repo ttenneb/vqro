@@ -27,6 +27,7 @@ mod detect;
 mod events;
 pub mod extension_contract;
 mod extension_service;
+mod first_party;
 mod ghostty;
 mod handoff_runtime;
 mod input;

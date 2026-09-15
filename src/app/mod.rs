@@ -165,6 +165,8 @@ pub struct App {
     pub(crate) terminal_telemetry_cache:
         HashMap<crate::terminal::TerminalId, terminal_inspector::CachedTerminalTelemetry>,
     pub(crate) extension_services: crate::extension_service::ExtensionServiceManager,
+    pub(crate) collections_shadow_documents:
+        HashMap<String, crate::first_party::collections::ShadowDocumentCache>,
 }
 
 pub(crate) const APP_EVENT_CHANNEL_CAPACITY: usize = 256;
@@ -708,6 +710,7 @@ impl App {
             endpoint_commands,
             terminal_telemetry_cache: HashMap::new(),
             extension_services,
+            collections_shadow_documents: HashMap::new(),
         };
         app.configure_tab_bar_status(&config.ui.tab_bar_right, &config.ui.tab_bar_right_separator);
         app.configure_window_title(&config.ui.window_title);
