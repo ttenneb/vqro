@@ -12,6 +12,40 @@ pub const MAX_DOCUMENT_ITEMS: usize = 512;
 pub const MAX_DOCUMENT_ACTIONS: usize = 256;
 pub const MAX_DOCUMENT_TEXT_CHARS: usize = 4096;
 
+/// A host-owned terminal-group projection supplied to document providers.
+/// It contains stable identities and semantic state, never PTYs or geometry.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostTerminalGroupsV1 {
+    pub contract: String,
+    pub generation: u64,
+    pub revision: u64,
+    pub scope_id: String,
+    pub groups: Vec<HostTerminalGroup>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostTerminalGroup {
+    pub group_id: String,
+    pub label: Option<String>,
+    pub members: Vec<HostTerminalGroupMember>,
+    pub selected_terminal_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostTerminalGroupMember {
+    pub terminal: HostTerminalRef,
+    pub label: String,
+    pub lifecycle: HostTerminalLifecycle,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HostTerminalLifecycle {
+    Live,
+    Exited,
+    Archived,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HostDocumentV1 {
     pub contract: String,
@@ -49,6 +83,7 @@ pub struct HostDocumentItem {
     pub id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_id: Option<String>,
+    pub role: HostItemRole,
     pub label: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
@@ -58,6 +93,16 @@ pub struct HostDocumentItem {
     pub action_ids: Vec<String>,
     #[serde(default)]
     pub flags: HostDocumentItemFlags,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HostItemRole {
+    Group,
+    Terminal,
+    Section,
+    Command,
+    Status,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -115,25 +160,38 @@ pub enum HostDocumentOperation {
 #[serde(rename_all = "snake_case")]
 pub enum HostCapability {
     FocusTerminal,
-    FocusWorkspace,
-    OpenExternalUrl,
+    TerminalInterrupt,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum HostEffect {
     FocusTerminal { terminal_id: String },
-    FocusWorkspace { workspace_id: String },
-    OpenExternalUrl { url: String },
+    TerminalInterrupt { terminal_id: String },
 }
 
 impl HostEffect {
     fn required_capability(&self) -> HostCapability {
         match self {
             Self::FocusTerminal { .. } => HostCapability::FocusTerminal,
-            Self::FocusWorkspace { .. } => HostCapability::FocusWorkspace,
-            Self::OpenExternalUrl { .. } => HostCapability::OpenExternalUrl,
+            Self::TerminalInterrupt { .. } => HostCapability::TerminalInterrupt,
         }
+    }
+
+    /// Re-check authority at effect dispatch. A document's declaration is not
+    /// a grant and must never be used as one.
+    pub fn authorize_dispatch(
+        &self,
+        granted_capabilities: &HashSet<HostCapability>,
+        confirmed: bool,
+    ) -> Result<(), HostDocumentError> {
+        if !granted_capabilities.contains(&self.required_capability()) {
+            return invalid("host effect capability was not granted");
+        }
+        if matches!(self, Self::TerminalInterrupt { .. }) && !confirmed {
+            return invalid("terminal interrupt was not confirmed");
+        }
+        Ok(())
     }
 }
 
@@ -151,6 +209,42 @@ pub struct HostDocumentError(pub String);
 impl std::fmt::Display for HostDocumentError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(&self.0)
+    }
+}
+
+impl HostTerminalGroupsV1 {
+    pub fn validate(&self) -> Result<(), HostDocumentError> {
+        if self.contract != "host.terminal-groups.v1" {
+            return invalid("unsupported terminal-group contract");
+        }
+        if self.generation == 0 || self.revision == 0 {
+            return invalid("terminal-group generation and revision must be non-zero");
+        }
+        validate_stable_ref(&self.scope_id)?;
+        let mut group_ids = HashSet::new();
+        let mut terminal_ids = HashSet::new();
+        for group in &self.groups {
+            validate_stable_ref(&group.group_id)?;
+            if !group_ids.insert(group.group_id.as_str()) {
+                return invalid("terminal group ids must be unique");
+            }
+            for member in &group.members {
+                validate_terminal_ref(&member.terminal)?;
+                if !terminal_ids.insert(member.terminal.terminal_id.as_str()) {
+                    return invalid("a terminal may appear only once in a group snapshot");
+                }
+            }
+            if let Some(selected) = group.selected_terminal_id.as_deref() {
+                if !group
+                    .members
+                    .iter()
+                    .any(|member| member.terminal.terminal_id == selected)
+                {
+                    return invalid("selected terminal must be a group member");
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -181,12 +275,7 @@ impl HostDocumentV1 {
                 return invalid("document item ids must be unique");
             }
             if let Some(terminal) = &item.terminal {
-                validate_stable_ref(&terminal.terminal_id)?;
-                if let Some(placement) = &terminal.placement {
-                    validate_stable_ref(&placement.pane_id)?;
-                    validate_stable_ref(&placement.workspace_id)?;
-                    validate_stable_ref(&placement.tab_id)?;
-                }
+                validate_terminal_ref(terminal)?;
             }
         }
         for item in &self.items {
@@ -220,13 +309,11 @@ impl HostDocumentV1 {
                         HostEffect::FocusTerminal { terminal_id } => {
                             validate_stable_ref(terminal_id)?
                         }
-                        HostEffect::FocusWorkspace { workspace_id } => {
-                            validate_stable_ref(workspace_id)?
-                        }
-                        HostEffect::OpenExternalUrl { url }
-                            if url.starts_with("https://") || url.starts_with("http://") => {}
-                        HostEffect::OpenExternalUrl { .. } => {
-                            return invalid("external URL effect must use HTTP or HTTPS")
+                        HostEffect::TerminalInterrupt { terminal_id } => {
+                            validate_stable_ref(terminal_id)?;
+                            if action.confirmation != HostConfirmation::Required {
+                                return invalid("terminal interrupt requires confirmation");
+                            }
                         }
                     }
                 }
@@ -285,6 +372,16 @@ fn validate_text(value: &str) -> Result<(), HostDocumentError> {
     Ok(())
 }
 
+fn validate_terminal_ref(terminal: &HostTerminalRef) -> Result<(), HostDocumentError> {
+    validate_stable_ref(&terminal.terminal_id)?;
+    if let Some(placement) = &terminal.placement {
+        validate_stable_ref(&placement.pane_id)?;
+        validate_stable_ref(&placement.workspace_id)?;
+        validate_stable_ref(&placement.tab_id)?;
+    }
+    Ok(())
+}
+
 fn validate_item_cycles(items: &[HostDocumentItem]) -> Result<(), HostDocumentError> {
     for item in items {
         let mut current = item.parent_id.as_deref();
@@ -324,6 +421,7 @@ mod tests {
                 HostDocumentItem {
                     id: "group:1".into(),
                     parent_id: None,
+                    role: HostItemRole::Group,
                     label: "Review".into(),
                     detail: None,
                     terminal: None,
@@ -336,6 +434,7 @@ mod tests {
                 HostDocumentItem {
                     id: "member:1".into(),
                     parent_id: Some("group:1".into()),
+                    role: HostItemRole::Terminal,
                     label: "Agent".into(),
                     detail: None,
                     terminal: Some(HostTerminalRef {
@@ -431,6 +530,27 @@ mod tests {
             .required_capabilities
             .push(HostCapability::FocusTerminal);
         document.validate().unwrap();
+
+        document.required_capabilities = vec![HostCapability::TerminalInterrupt];
+        document.actions[0].operation = HostDocumentOperation::Host {
+            effect: HostEffect::TerminalInterrupt {
+                terminal_id: "term_7".into(),
+            },
+        };
+        assert_eq!(
+            document.validate().unwrap_err().to_string(),
+            "terminal interrupt requires confirmation"
+        );
+        document.actions[0].confirmation = HostConfirmation::Required;
+        document.validate().unwrap();
+        let effect = match &document.actions[0].operation {
+            HostDocumentOperation::Host { effect } => effect,
+            HostDocumentOperation::Extension { .. } => unreachable!(),
+        };
+        assert!(effect.authorize_dispatch(&HashSet::new(), true).is_err());
+        let grants = HashSet::from([HostCapability::TerminalInterrupt]);
+        assert!(effect.authorize_dispatch(&grants, false).is_err());
+        effect.authorize_dispatch(&grants, true).unwrap();
     }
 
     #[test]

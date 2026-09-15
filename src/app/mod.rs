@@ -139,6 +139,9 @@ pub struct App {
     pub(crate) pending_agent_resume_deadline: Option<Instant>,
     pub(crate) session_save_deadline: Option<Instant>,
     pub(crate) session_save_thread: Option<std::thread::JoinHandle<()>>,
+    /// Set when startup rejects the durable snapshot. The original bytes stay
+    /// authoritative until an operator repairs or removes them.
+    session_persistence_blocked: bool,
     pane_exit_checkpoint_pending: bool,
     pub(crate) detached_process_children: Vec<std::process::Child>,
     tab_bar_status_generation: u64,
@@ -394,39 +397,43 @@ impl App {
         // Try to restore previous session
         let mut restored_terminals = std::collections::HashMap::new();
         let mut restored_terminal_runtimes = crate::terminal::TerminalRuntimeRegistry::new();
-        let (workspaces, repositories, space_order, active, selected, delegations) =
-            if !policy.restore_session {
-                (
-                    Vec::new(),
-                    Vec::new(),
-                    Vec::new(),
-                    None,
-                    0,
-                    crate::delegation::Delegations::new(),
-                )
-            } else if let Some(snap) = crate::persist::load() {
-                let history = config
-                    .experimental
-                    .pane_history
-                    .then(crate::persist::load_history)
-                    .flatten();
-                let (ws, terminals, terminal_runtimes) = crate::persist::restore(
-                    &snap,
-                    history.as_ref(),
-                    24,
-                    80,
-                    config.advanced.scrollback_limit_bytes,
-                    &config.terminal.default_shell,
-                    config.terminal.shell_mode,
-                    config.session.resume_agents_on_restore,
-                    event_tx.clone(),
-                    render_notify.clone(),
-                    render_dirty.clone(),
-                );
-                restored_terminals = terminals;
-                restored_terminal_runtimes = terminal_runtimes.into();
-                if ws.is_empty() {
-                    crate::logging::session_restored(0, "empty");
+        let mut session_persistence_blocked = false;
+        let (workspaces, repositories, space_order, active, selected, delegations) = if !policy
+            .restore_session
+        {
+            (
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                None,
+                0,
+                crate::delegation::Delegations::new(),
+            )
+        } else if let Some(snap) = crate::persist::load() {
+            let history = config
+                .experimental
+                .pane_history
+                .then(crate::persist::load_history)
+                .flatten();
+            match crate::persist::restore(
+                &snap,
+                history.as_ref(),
+                24,
+                80,
+                config.advanced.scrollback_limit_bytes,
+                &config.terminal.default_shell,
+                config.terminal.shell_mode,
+                config.session.resume_agents_on_restore,
+                event_tx.clone(),
+                render_notify.clone(),
+                render_dirty.clone(),
+            ) {
+                Err(error) => {
+                    session_persistence_blocked = true;
+                    tracing::error!(
+                        %error,
+                        "session restore rejected; durable snapshot is preserved and saving is disabled"
+                    );
                     (
                         Vec::new(),
                         Vec::new(),
@@ -435,30 +442,46 @@ impl App {
                         0,
                         crate::delegation::Delegations::new(),
                     )
-                } else {
-                    crate::logging::session_restored(ws.len(), "ok");
-                    let active = snap.active.filter(|&i| i < ws.len());
-                    let selected = snap.selected.min(ws.len().saturating_sub(1));
-                    let delegations = crate::persist::restore_delegations(&snap, &ws);
-                    (
-                        ws,
-                        snap.repositories,
-                        snap.space_order,
-                        active,
-                        selected,
-                        delegations,
-                    )
                 }
-            } else {
-                (
-                    Vec::new(),
-                    Vec::new(),
-                    Vec::new(),
-                    None,
-                    0,
-                    crate::delegation::Delegations::new(),
-                )
-            };
+                Ok((ws, terminals, terminal_runtimes)) => {
+                    restored_terminals = terminals;
+                    restored_terminal_runtimes = terminal_runtimes.into();
+                    if ws.is_empty() {
+                        crate::logging::session_restored(0, "empty");
+                        (
+                            Vec::new(),
+                            Vec::new(),
+                            Vec::new(),
+                            None,
+                            0,
+                            crate::delegation::Delegations::new(),
+                        )
+                    } else {
+                        crate::logging::session_restored(ws.len(), "ok");
+                        let active = snap.active.filter(|&i| i < ws.len());
+                        let selected = snap.selected.min(ws.len().saturating_sub(1));
+                        let delegations = crate::persist::restore_delegations(&snap, &ws);
+                        (
+                            ws,
+                            snap.repositories,
+                            snap.space_order,
+                            active,
+                            selected,
+                            delegations,
+                        )
+                    }
+                }
+            }
+        } else {
+            (
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                None,
+                0,
+                crate::delegation::Delegations::new(),
+            )
+        };
 
         let agent_panel_sort = agent_panel_sort_from_config(config.ui.agent_panel_sort);
 
@@ -661,6 +684,7 @@ impl App {
             pending_agent_resume_deadline: None,
             session_save_deadline: None,
             session_save_thread: None,
+            session_persistence_blocked,
             pane_exit_checkpoint_pending: false,
             detached_process_children: Vec::new(),
             tab_bar_status_generation: 0,
@@ -3188,6 +3212,34 @@ mod tests {
         assert_eq!(snapshot.workspaces.len(), 1);
         assert_eq!(snapshot.workspaces[0].tabs[0].panes.len(), 2);
 
+        std::env::remove_var("XDG_CONFIG_HOME");
+        let _ = std::fs::remove_dir_all(config_home);
+    }
+
+    #[test]
+    fn rejected_restore_blocks_overwriting_the_original_snapshot_bytes() {
+        let _guard = crate::config::test_config_env_lock().lock().unwrap();
+        let config_home = unique_temp_path("rejected-restore-preserves-snapshot");
+        std::env::set_var("XDG_CONFIG_HOME", &config_home);
+        std::env::remove_var(crate::session::SESSION_ENV_VAR);
+
+        let mut app = test_app();
+        app.policy.persist_session = true;
+        app.state.workspaces = vec![Workspace::test_new("original")];
+        app.state.active = Some(0);
+        app.state.ensure_test_terminals();
+        app.save_session_now();
+        let session_path = crate::session::data_dir().join("session.json");
+        let original = std::fs::read(&session_path).unwrap();
+
+        app.session_persistence_blocked = true;
+        app.state
+            .workspaces
+            .push(Workspace::test_new("replacement"));
+        app.save_session_now();
+
+        assert_eq!(std::fs::read(&session_path).unwrap(), original);
+        assert!(app.session_save_deadline.is_none());
         std::env::remove_var("XDG_CONFIG_HOME");
         let _ = std::fs::remove_dir_all(config_home);
     }

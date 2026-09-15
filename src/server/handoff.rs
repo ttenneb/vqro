@@ -262,6 +262,12 @@ pub(crate) fn receive(socket_path: &Path, token: &str) -> io::Result<ReceivedHan
             crate::build_info::version()
         )));
     }
+    crate::persist::validate_snapshot_admission(&manifest.snapshot).map_err(|error| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("handoff rejected before terminal ownership transfer: {error}"),
+        )
+    })?;
     stream.write_all(b"validated\n")?;
     stream.flush()?;
     let fds = recv_fds(&stream, manifest.panes.len())?;

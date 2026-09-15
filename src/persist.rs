@@ -10,6 +10,7 @@ mod restore;
 mod snapshot;
 
 pub use self::io::{clear, clear_history, load, load_history, save};
+pub(crate) use self::restore::validate_snapshot_admission;
 #[cfg(unix)]
 pub use self::restore::{handoff_pane_aliases, restore_handoff};
 pub use self::restore::{restore, restore_delegations};

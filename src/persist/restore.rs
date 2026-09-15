@@ -112,7 +112,7 @@ pub fn restore_delegations(
     ))
 }
 
-pub(super) fn validate_snapshot_admission(snapshot: &SessionSnapshot) -> Result<(), String> {
+pub(crate) fn validate_snapshot_admission(snapshot: &SessionSnapshot) -> Result<(), String> {
     let mut session_panes = 0usize;
     for workspace in &snapshot.workspaces {
         let mut workspace_panes = 0usize;
@@ -162,13 +162,10 @@ pub fn restore(
     events: mpsc::Sender<AppEvent>,
     render_notify: Arc<Notify>,
     render_dirty: Arc<RenderSignal>,
-) -> RestoredSession {
-    if let Err(error) = validate_snapshot_admission(snapshot) {
-        warn!(%error, "session snapshot exceeds resource admission limits");
-        return (Vec::new(), HashMap::new(), HashMap::new());
-    }
+) -> Result<RestoredSession, String> {
+    validate_snapshot_admission(snapshot)?;
     let mut imported_panes = HashMap::new();
-    restore_with_imports(
+    Ok(restore_with_imports(
         snapshot,
         history,
         rows,
@@ -180,7 +177,7 @@ pub fn restore(
         events,
         render_notify,
         render_dirty,
-    )
+    ))
 }
 
 #[cfg(unix)]
@@ -1396,6 +1393,84 @@ mod tests {
     }
 
     #[test]
+    fn oversized_snapshot_is_rejected_before_terminal_or_pane_identity_allocation() {
+        use super::super::snapshot::{PaneSnapshot, TabSnapshot, WorkspaceSnapshot};
+
+        let panes = (1..=crate::admission::MAX_SESSION_PANES as u32 + 1)
+            .map(|id| {
+                (
+                    id,
+                    PaneSnapshot {
+                        cwd: std::path::PathBuf::from("/tmp"),
+                        label: None,
+                        agent_name: None,
+                        managed_agent_kind: None,
+                        agent_session: None,
+                        launch_argv: None,
+                    },
+                )
+            })
+            .collect();
+        let snapshot = SessionSnapshot {
+            version: super::super::snapshot::SNAPSHOT_VERSION,
+            workspaces: vec![WorkspaceSnapshot {
+                id: Some("oversized".into()),
+                custom_name: None,
+                identity_cwd: std::path::PathBuf::from("/tmp"),
+                checkout: None,
+                worktree_space: None,
+                public_pane_numbers: HashMap::new(),
+                next_public_pane_number: 1,
+                public_tab_numbers: vec![1],
+                next_public_tab_number: 2,
+                tabs: vec![TabSnapshot {
+                    custom_name: None,
+                    layout: super::super::snapshot::LayoutSnapshot::Pane(1),
+                    collections: Vec::new(),
+                    panes,
+                    zoomed: false,
+                    focused: Some(1),
+                    focused_leaf: None,
+                    root_pane: Some(1),
+                }],
+                active_tab: 0,
+            }],
+            repositories: Vec::new(),
+            space_order: Vec::new(),
+            active: Some(0),
+            selected: 0,
+            sidebar_width: None,
+            sidebar_section_split: None,
+            collapsed_space_keys: HashSet::new(),
+            delegations: Vec::new(),
+        };
+        let pane_identity = PaneId::next_for_test();
+        let terminal_identity = TerminalId::next_for_test();
+        let (events, _event_rx) = mpsc::channel(4);
+
+        let error = match restore(
+            &snapshot,
+            None,
+            24,
+            80,
+            0,
+            test_restore_shell(),
+            crate::config::ShellModeConfig::NonLogin,
+            false,
+            events,
+            Arc::new(Notify::new()),
+            Arc::new(RenderSignal::new()),
+        ) {
+            Err(error) => error,
+            Ok(_) => panic!("oversized restore unexpectedly succeeded"),
+        };
+
+        assert!(error.contains("pane limit"));
+        assert_eq!(PaneId::next_for_test(), pane_identity);
+        assert_eq!(TerminalId::next_for_test(), terminal_identity);
+    }
+
+    #[test]
     fn pane_restore_startup_keeps_history_without_native_agent_resume() {
         let session = super::super::snapshot::PaneAgentSessionSnapshot {
             source: "herdr:pi".into(),
@@ -1517,7 +1592,8 @@ mod tests {
             events,
             Arc::new(Notify::new()),
             Arc::new(RenderSignal::new()),
-        );
+        )
+        .unwrap();
 
         let terminal = terminals
             .values()
@@ -1616,7 +1692,8 @@ mod tests {
             events,
             Arc::new(Notify::new()),
             Arc::new(RenderSignal::new()),
-        );
+        )
+        .unwrap();
 
         let workspace = workspaces.first().expect("workspace should restore");
         let mut public_numbers: Vec<_> = workspace.public_pane_numbers.values().copied().collect();
@@ -1735,7 +1812,8 @@ mod tests {
             events,
             Arc::new(Notify::new()),
             Arc::new(RenderSignal::new()),
-        );
+        )
+        .unwrap();
 
         let workspace = workspaces.first().expect("workspace should restore");
         assert_eq!(workspace.active_tab, 3);
@@ -1855,7 +1933,8 @@ mod tests {
             events,
             Arc::new(Notify::new()),
             Arc::new(RenderSignal::new()),
-        );
+        )
+        .unwrap();
 
         let terminal = terminals
             .values()
@@ -1918,7 +1997,8 @@ mod tests {
             events,
             render_notify,
             render_dirty,
-        );
+        )
+        .unwrap();
         let runtime = runtimes
             .values()
             .next()
@@ -1956,7 +2036,8 @@ mod tests {
             events,
             render_notify,
             render_dirty,
-        );
+        )
+        .unwrap();
         let runtime = runtimes
             .values()
             .next()

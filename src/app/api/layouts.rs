@@ -68,8 +68,13 @@ impl App {
         if let Err(message) = validate_layout_tree(&params.root) {
             return encode_error(id, "invalid_layout", message);
         }
-        let additional_panes = layout_pane_count(&params.root);
-        if let Err(error) = self.admit_new_panes(Some(ws_idx), None, additional_panes) {
+        let requested_panes = layout_pane_count(&params.root);
+        let replaced_panes = replace_target.map_or(0, |(_, tab_idx)| {
+            self.state.workspaces[ws_idx].tabs[tab_idx].panes.len()
+        });
+        let additional_panes = replacement_pane_increase(requested_panes, replaced_panes);
+        let destination_tab = replace_target.map(|(_, tab_idx)| tab_idx);
+        if let Err(error) = self.admit_new_panes(Some(ws_idx), destination_tab, additional_panes) {
             return encode_error(id, "resource_limit", error.to_string());
         }
 
@@ -534,6 +539,10 @@ fn layout_command(pane: &LayoutPane) -> Result<Option<Vec<String>>, String> {
     }
 }
 
+fn replacement_pane_increase(requested: usize, replaced: usize) -> usize {
+    requested.saturating_sub(replaced)
+}
+
 fn layout_pane_count(node: &LayoutNode) -> usize {
     match node {
         LayoutNode::Pane { .. } => 1,
@@ -918,6 +927,19 @@ mod tests {
         let error: ErrorResponse = serde_json::from_str(&response).unwrap();
         assert_eq!(error.error.code, "invalid_layout");
         assert_eq!(app.state.workspaces[0].tabs.len(), original_tab_count);
+    }
+
+    #[test]
+    fn same_size_replacement_is_admitted_at_every_pane_limit() {
+        let additional = replacement_pane_increase(MAX_LAYOUT_PANES, MAX_LAYOUT_PANES);
+        assert_eq!(additional, 0);
+        assert!(crate::admission::panes(
+            crate::admission::MAX_SESSION_PANES,
+            crate::admission::MAX_WORKSPACE_PANES,
+            crate::admission::MAX_TAB_PANES,
+            additional,
+        )
+        .is_ok());
     }
 
     #[test]

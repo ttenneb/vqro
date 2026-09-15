@@ -980,7 +980,8 @@ mod tests {
             events,
             std::sync::Arc::new(tokio::sync::Notify::new()),
             std::sync::Arc::new(crate::render_signal::RenderSignal::new()),
-        );
+        )
+        .unwrap();
         assert_eq!(
             workspaces[0].custom_name.as_deref(),
             Some("manual workspace")
