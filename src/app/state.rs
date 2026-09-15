@@ -958,6 +958,10 @@ impl AppState {
             })
     }
 
+    pub fn pane_count(&self) -> usize {
+        self.workspaces.iter().map(Workspace::pane_count).sum()
+    }
+
     pub fn estimate_pane_size(&self) -> (u16, u16) {
         if let Some(info) = self.view.pane_infos.first() {
             (info.rect.height, info.rect.width)

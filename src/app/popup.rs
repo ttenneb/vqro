@@ -116,6 +116,8 @@ impl App {
         if self.state.popup_pane.is_some() {
             return Err(std::io::Error::other("popup already open"));
         }
+        self.admit_new_panes(None, None, 1)
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
         let Some(ws_idx) = self.state.active else {
             return Err(std::io::Error::other("no active workspace"));
         };

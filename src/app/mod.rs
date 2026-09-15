@@ -358,6 +358,26 @@ pub(crate) fn client_palette_for_appearance(
 }
 
 impl App {
+    pub(crate) fn admit_new_panes(
+        &self,
+        workspace_index: Option<usize>,
+        tab_index: Option<usize>,
+        additional: usize,
+    ) -> Result<(), crate::admission::AdmissionError> {
+        let workspace_panes = workspace_index
+            .and_then(|index| self.state.workspaces.get(index))
+            .map_or(0, crate::workspace::Workspace::pane_count);
+        let tab_panes = workspace_index
+            .zip(tab_index)
+            .and_then(|(workspace, tab)| self.state.workspaces.get(workspace)?.tabs.get(tab))
+            .map_or(0, |tab| tab.panes.len());
+        let session_panes = self
+            .state
+            .pane_count()
+            .saturating_add(usize::from(self.state.popup_pane.is_some()));
+        crate::admission::panes(session_panes, workspace_panes, tab_panes, additional)
+    }
+
     pub fn new(
         config: &Config,
         policy: AppPolicy,

@@ -373,6 +373,14 @@ impl App {
         let new_rows = rows.max(4);
         let new_cols = cols.max(10);
         let (env, _) = self.custom_command_env();
+        let tab_idx = self
+            .state
+            .workspaces
+            .get(ws_idx)
+            .map(|workspace| workspace.active_tab_index())
+            .ok_or_else(|| std::io::Error::other("active workspace disappeared"))?;
+        self.admit_new_panes(Some(ws_idx), Some(tab_idx), 1)
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
 
         let ws = self
             .state
@@ -451,6 +459,14 @@ impl App {
         let (rows, cols) = self.state.estimate_pane_size();
         let new_rows = rows.max(4);
         let new_cols = cols.max(10);
+        let tab_idx = self
+            .state
+            .workspaces
+            .get(ws_idx)
+            .map(|workspace| workspace.active_tab_index())
+            .ok_or_else(|| std::io::Error::other("active workspace disappeared"))?;
+        self.admit_new_panes(Some(ws_idx), Some(tab_idx), 1)
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
 
         let ws = self
             .state

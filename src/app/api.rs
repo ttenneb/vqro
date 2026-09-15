@@ -1150,7 +1150,16 @@ impl App {
             Method::DelegationReorder(params) => {
                 return self.handle_delegation_reorder(request.id, params)
             }
-            Method::PaneSplit(params) => return self.handle_pane_split(request.id, params),
+            Method::PaneSplit(params) => {
+                if let Err(error) = self.admit_new_panes(None, None, 1) {
+                    return responses::encode_error(
+                        request.id,
+                        "resource_limit",
+                        error.to_string(),
+                    );
+                }
+                return self.handle_pane_split(request.id, params);
+            }
             Method::PaneSwap(params) => return self.handle_pane_swap(request.id, params),
             Method::PaneMove(params) => return self.handle_pane_move(request.id, params),
             Method::PaneZoom(params) => return self.handle_pane_zoom(request.id, params),

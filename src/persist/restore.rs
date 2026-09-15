@@ -112,6 +112,43 @@ pub fn restore_delegations(
     ))
 }
 
+pub(super) fn validate_snapshot_admission(snapshot: &SessionSnapshot) -> Result<(), String> {
+    let mut session_panes = 0usize;
+    for workspace in &snapshot.workspaces {
+        let mut workspace_panes = 0usize;
+        for tab in &workspace.tabs {
+            let tab_panes = tab.panes.len();
+            crate::admission::panes(session_panes, workspace_panes, 0, tab_panes)
+                .map_err(|error| error.to_string())?;
+            session_panes = session_panes
+                .checked_add(tab_panes)
+                .ok_or_else(|| "session pane count overflow".to_string())?;
+            workspace_panes = workspace_panes
+                .checked_add(tab_panes)
+                .ok_or_else(|| "workspace pane count overflow".to_string())?;
+            if tab.collections.len() > crate::admission::MAX_GROUPS_PER_TAB {
+                return Err("terminal group limit reached during restore".into());
+            }
+            if tab
+                .collections
+                .iter()
+                .any(|collection| collection.members.len() > crate::admission::MAX_GROUP_MEMBERS)
+            {
+                return Err("terminal group member limit reached during restore".into());
+            }
+        }
+    }
+    let relationships = crate::delegation::Delegations::from_keyed_records(
+        snapshot
+            .delegations
+            .iter()
+            .cloned()
+            .map(|record| (record.id, record)),
+    )
+    .map_err(|error| error.to_string())?;
+    crate::admission::relationships(&relationships).map_err(|error| error.to_string())
+}
+
 /// Restore workspaces from a snapshot. Each pane gets a fresh shell in its saved cwd.
 pub fn restore(
     snapshot: &SessionSnapshot,
@@ -126,6 +163,10 @@ pub fn restore(
     render_notify: Arc<Notify>,
     render_dirty: Arc<RenderSignal>,
 ) -> RestoredSession {
+    if let Err(error) = validate_snapshot_admission(snapshot) {
+        warn!(%error, "session snapshot exceeds resource admission limits");
+        return (Vec::new(), HashMap::new(), HashMap::new());
+    }
     let mut imported_panes = HashMap::new();
     restore_with_imports(
         snapshot,
@@ -153,6 +194,8 @@ pub fn restore_handoff(
     render_notify: Arc<Notify>,
     render_dirty: Arc<RenderSignal>,
 ) -> std::io::Result<RestoredSession> {
+    validate_snapshot_admission(snapshot)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
     restore_with_imports_strict(
         snapshot,
         None,

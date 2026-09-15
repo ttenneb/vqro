@@ -101,6 +101,13 @@ impl App {
                 format!("pane {target_pane_id} not found"),
             );
         };
+        let Some(tab_idx) = self.state.workspaces[ws_idx].find_tab_index_for_pane(target_pane)
+        else {
+            return encode_error(id, "pane_not_found", "pane not found");
+        };
+        if let Err(error) = self.admit_new_panes(Some(ws_idx), Some(tab_idx), 1) {
+            return encode_error(id, "resource_limit", error.to_string());
+        }
         let context = self.plugin_context_for_pane(ws_idx, target_pane, "plugin-pane");
         let cwd = self.plugin_pane_cwd(plugin, params.cwd);
         let extra_env =
@@ -188,6 +195,9 @@ impl App {
                 None => return encode_error(id, "no_active_workspace", "no active workspace"),
             },
         };
+        if let Err(error) = self.admit_new_panes(Some(ws_idx), None, 1) {
+            return encode_error(id, "resource_limit", error.to_string());
+        }
         let cwd = self.plugin_pane_cwd(plugin, params.cwd);
         let context = self.plugin_context_for_workspace(ws_idx, "plugin-pane");
         let extra_env =

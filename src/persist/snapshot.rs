@@ -557,7 +557,8 @@ pub(super) fn capture_node(node: &Node) -> LayoutSnapshot {
 }
 
 pub(crate) fn validate_snapshot(content: &str) -> Result<(), String> {
-    parse_snapshot(content).map(drop)
+    let snapshot = parse_snapshot(content)?;
+    super::restore::validate_snapshot_admission(&snapshot)
 }
 
 pub(super) fn parse_snapshot(content: &str) -> Result<SessionSnapshot, String> {

@@ -25,6 +25,11 @@ impl PaneId {
         self.0
     }
 
+    #[cfg(test)]
+    pub(crate) fn next_for_test() -> u32 {
+        NEXT_PANE_ID.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     /// Reconstruct from a saved u32 (persistence only).
     pub fn from_raw(id: u32) -> Self {
         Self(id)

@@ -62,6 +62,9 @@ impl App {
         } else {
             return encode_error(id, "workspace_not_found", "no active workspace");
         };
+        if let Err(error) = self.admit_new_panes(Some(ws_idx), None, 1) {
+            return encode_error(id, "resource_limit", error.to_string());
+        }
         let cwd = cwd.map(PathBuf::from).unwrap_or_else(|| {
             self.resolve_new_terminal_cwd(self.focused_pane_cwd_in_workspace(ws_idx))
         });

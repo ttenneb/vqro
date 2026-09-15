@@ -68,6 +68,10 @@ impl App {
         if let Err(message) = validate_layout_tree(&params.root) {
             return encode_error(id, "invalid_layout", message);
         }
+        let additional_panes = layout_pane_count(&params.root);
+        if let Err(error) = self.admit_new_panes(Some(ws_idx), None, additional_panes) {
+            return encode_error(id, "resource_limit", error.to_string());
+        }
 
         let replacement_label = params.tab_label.clone().or_else(|| {
             let (_, tab_idx) = replace_target?;
@@ -527,6 +531,15 @@ fn layout_command(pane: &LayoutPane) -> Result<Option<Vec<String>>, String> {
         Some(command) if command.is_empty() => Err("pane command must not be empty".into()),
         Some(command) => Ok(Some(command.clone())),
         None => Ok(None),
+    }
+}
+
+fn layout_pane_count(node: &LayoutNode) -> usize {
+    match node {
+        LayoutNode::Pane { .. } => 1,
+        LayoutNode::Split { first, second, .. } => {
+            layout_pane_count(first).saturating_add(layout_pane_count(second))
+        }
     }
 }
 

@@ -815,7 +815,7 @@ impl Workspace {
         let tab_idx = self.find_tab_index_for_pane(pane_id)?;
         let workspace_panes = self.tabs.iter().map(|tab| tab.panes.len()).sum::<usize>();
         let tab_panes = self.tabs[tab_idx].panes.len();
-        if let Err(error) = crate::admission::pane(0, workspace_panes, tab_panes) {
+        if let Err(error) = crate::admission::workspace_pane(workspace_panes, tab_panes) {
             return Some(Err(std::io::Error::other(error.to_string())));
         }
         let pane_number = self.next_public_pane_number;
@@ -1125,6 +1125,10 @@ impl Workspace {
         self.tabs
             .iter_mut()
             .find_map(|tab| tab.panes.get_mut(&pane_id))
+    }
+
+    pub fn pane_count(&self) -> usize {
+        self.tabs.iter().map(|tab| tab.panes.len()).sum()
     }
 
     pub fn terminal_id(&self, pane_id: PaneId) -> Option<&TerminalId> {

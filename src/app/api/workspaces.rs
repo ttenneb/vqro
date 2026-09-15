@@ -55,6 +55,9 @@ impl App {
                 None => self.workspace_creation_source(),
             }
         };
+        if let Err(error) = self.admit_new_panes(None, None, 1) {
+            return encode_error(id, "resource_limit", error.to_string());
+        }
         let cwd = params.cwd.map(PathBuf::from).unwrap_or_else(|| {
             source_workspace_index.map_or_else(
                 || self.resolve_new_terminal_cwd(None),

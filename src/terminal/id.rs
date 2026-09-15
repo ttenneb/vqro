@@ -24,6 +24,11 @@ impl TerminalId {
     pub(crate) fn as_str(&self) -> &str {
         &self.0
     }
+
+    #[cfg(test)]
+    pub(crate) fn next_for_test() -> u64 {
+        NEXT_TERMINAL_ID.load(Ordering::Relaxed)
+    }
 }
 
 impl fmt::Display for TerminalId {

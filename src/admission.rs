@@ -7,7 +7,7 @@
 use crate::delegation::{DelegationId, Delegations};
 
 pub(crate) const MAX_SESSION_PANES: usize = 256;
-pub(crate) const MAX_WORKSPACE_PANES: usize = 64;
+pub(crate) const MAX_WORKSPACE_PANES: usize = 128;
 pub(crate) const MAX_TAB_PANES: usize = 32;
 pub(crate) const MAX_GROUPS_PER_TAB: usize = 32;
 pub(crate) const MAX_GROUP_MEMBERS: usize = 64;
@@ -31,18 +31,43 @@ impl std::fmt::Display for AdmissionError {
     }
 }
 
-fn admit_one(current: usize, limit: usize, resource: &'static str) -> Result<(), AdmissionError> {
-    (current < limit)
-        .then_some(())
+fn admit(
+    current: usize,
+    additional: usize,
+    limit: usize,
+    resource: &'static str,
+) -> Result<(), AdmissionError> {
+    current
+        .checked_add(additional)
+        .filter(|next| *next <= limit)
+        .map(|_| ())
         .ok_or(AdmissionError { resource, limit })
 }
 
-pub(crate) fn pane(
+fn admit_one(current: usize, limit: usize, resource: &'static str) -> Result<(), AdmissionError> {
+    admit(current, 1, limit, resource)
+}
+
+pub(crate) fn panes(
     session_panes: usize,
     workspace_panes: usize,
     tab_panes: usize,
+    additional: usize,
 ) -> Result<(), AdmissionError> {
-    admit_one(session_panes, MAX_SESSION_PANES, "session pane")?;
+    admit(session_panes, additional, MAX_SESSION_PANES, "session pane")?;
+    admit(
+        workspace_panes,
+        additional,
+        MAX_WORKSPACE_PANES,
+        "workspace pane",
+    )?;
+    admit(tab_panes, additional, MAX_TAB_PANES, "tab pane")
+}
+
+pub(crate) fn workspace_pane(
+    workspace_panes: usize,
+    tab_panes: usize,
+) -> Result<(), AdmissionError> {
     admit_one(workspace_panes, MAX_WORKSPACE_PANES, "workspace pane")?;
     admit_one(tab_panes, MAX_TAB_PANES, "tab pane")
 }
@@ -53,6 +78,35 @@ pub(crate) fn group(groups_in_tab: usize) -> Result<(), AdmissionError> {
 
 pub(crate) fn group_member(members: usize) -> Result<(), AdmissionError> {
     admit_one(members, MAX_GROUP_MEMBERS, "terminal group member")
+}
+
+pub(crate) fn relationships(relationships: &Delegations) -> Result<(), AdmissionError> {
+    if relationships.records().len() > MAX_RELATIONSHIPS {
+        return Err(AdmissionError {
+            resource: "relationship",
+            limit: MAX_RELATIONSHIPS,
+        });
+    }
+    for id in relationships.records().keys().copied() {
+        if ancestor_count(relationships, id)? > MAX_RELATIONSHIP_DEPTH {
+            return Err(AdmissionError {
+                resource: "relationship depth",
+                limit: MAX_RELATIONSHIP_DEPTH,
+            });
+        }
+        let children = relationships
+            .records()
+            .values()
+            .filter(|record| record.parent_id == Some(id))
+            .count();
+        if children > MAX_RELATIONSHIP_FAN_OUT {
+            return Err(AdmissionError {
+                resource: "relationship child fan-out",
+                limit: MAX_RELATIONSHIP_FAN_OUT,
+            });
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn relationship_create(
@@ -149,21 +203,25 @@ mod tests {
 
     #[test]
     fn pane_admission_rejects_each_scope_at_the_boundary() {
-        assert!(pane(
+        assert!(panes(
             MAX_SESSION_PANES - 1,
             MAX_WORKSPACE_PANES - 1,
-            MAX_TAB_PANES - 1
+            MAX_TAB_PANES - 1,
+            1,
         )
         .is_ok());
         assert_eq!(
-            pane(MAX_SESSION_PANES, 0, 0).unwrap_err().resource,
+            panes(MAX_SESSION_PANES, 0, 0, 1).unwrap_err().resource,
             "session pane"
         );
         assert_eq!(
-            pane(0, MAX_WORKSPACE_PANES, 0).unwrap_err().resource,
+            panes(0, MAX_WORKSPACE_PANES, 0, 1).unwrap_err().resource,
             "workspace pane"
         );
-        assert_eq!(pane(0, 0, MAX_TAB_PANES).unwrap_err().resource, "tab pane");
+        assert_eq!(
+            panes(0, 0, MAX_TAB_PANES, 1).unwrap_err().resource,
+            "tab pane"
+        );
     }
 
     #[test]

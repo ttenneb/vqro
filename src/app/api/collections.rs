@@ -564,6 +564,7 @@ mod tests {
         app.state.workspaces[0].tabs[0]
             .collect_tiled_pane(member, collection)
             .unwrap();
+        app.state.ensure_test_terminals();
         (app, collection, member)
     }
 
@@ -585,6 +586,11 @@ mod tests {
 
         let (mut promote, collection, member) = app_with_nonempty_collection();
         let public_before = promote.public_pane_id(0, member).unwrap();
+        let terminal_before = promote.state.workspaces[0]
+            .terminal_id(member)
+            .expect("member terminal")
+            .clone();
+        assert!(promote.state.terminals.contains_key(&terminal_before));
         let response = promote.handle_collection_close(
             "promote".into(),
             CollectionCloseParams {
@@ -599,6 +605,11 @@ mod tests {
             Some(public_before.as_str())
         );
         assert_eq!(promote.state.workspaces[0].tabs.len(), 2);
+        assert_eq!(
+            promote.state.workspaces[0].terminal_id(member),
+            Some(&terminal_before)
+        );
+        assert!(promote.state.terminals.contains_key(&terminal_before));
     }
 
     #[test]
