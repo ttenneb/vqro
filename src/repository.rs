@@ -46,6 +46,91 @@ pub enum SpaceRef {
     StandaloneWorkspace(String),
 }
 
+fn compatibility_repo_root(common_dir: &Path, checkout_path: &Path) -> PathBuf {
+    if common_dir == checkout_path {
+        return checkout_path.to_path_buf();
+    }
+    if common_dir.file_name().is_some_and(|name| name == ".git") {
+        common_dir.parent().unwrap_or(checkout_path).to_path_buf()
+    } else {
+        checkout_path.to_path_buf()
+    }
+}
+
+pub(crate) fn canonical_repository_web_url(remote: &str) -> Option<String> {
+    let remote = remote.trim();
+    if remote.is_empty()
+        || remote
+            .chars()
+            .any(|ch| ch.is_control() || ch.is_whitespace())
+    {
+        return None;
+    }
+    let (host, path) = if let Some(rest) = remote
+        .strip_prefix("https://")
+        .or_else(|| remote.strip_prefix("http://"))
+    {
+        let (authority, path) = rest.split_once('/')?;
+        if authority.contains('@') {
+            return None;
+        }
+        (authority, path)
+    } else if let Some(rest) = remote.strip_prefix("ssh://") {
+        let (authority, path) = rest.split_once('/')?;
+        let host = authority
+            .rsplit_once('@')
+            .map_or(authority, |(_, host)| host);
+        (host.split(':').next()?, path)
+    } else {
+        let (authority, path) = remote.split_once(':')?;
+        let (_, host) = authority.rsplit_once('@')?;
+        (host, path)
+    };
+    let host = host.trim_end_matches('.').to_ascii_lowercase();
+    if host.is_empty()
+        || !host
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-'))
+    {
+        return None;
+    }
+    let path = path
+        .trim_matches('/')
+        .strip_suffix(".git")
+        .unwrap_or(path.trim_matches('/'));
+    if path.is_empty()
+        || path
+            .split('/')
+            .any(|part| part.is_empty() || part == "." || part == "..")
+        || path.contains(['?', '#', '\\'])
+    {
+        return None;
+    }
+    Some(format!("https://{host}/{path}"))
+}
+
+pub(crate) fn repository_branch_web_url(repository_url: &str, branch: &str) -> Option<String> {
+    let host = repository_url.strip_prefix("https://")?.split('/').next()?;
+    let separator = match host {
+        "github.com" => "/tree/",
+        "gitlab.com" => "/-/tree/",
+        "bitbucket.org" => "/src/",
+        _ => return None,
+    };
+    let encoded = branch
+        .as_bytes()
+        .iter()
+        .map(|byte| {
+            if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
+                (*byte as char).to_string()
+            } else {
+                format!("%{byte:02X}")
+            }
+        })
+        .collect::<String>();
+    (!encoded.is_empty()).then(|| format!("{repository_url}{separator}{encoded}"))
+}
+
 pub(crate) fn stable_repository_id(common_dir: &Path) -> RepositoryId {
     let mut hash = 0xcbf29ce484222325u64;
     for byte in common_dir.to_string_lossy().as_bytes() {
@@ -196,11 +281,7 @@ pub(crate) fn reconcile(
                 workspace.worktree_space = Some(crate::workspace::WorktreeSpaceMembership {
                     key: common_dir.display().to_string(),
                     label: repository.label.clone(),
-                    repo_root: repository
-                        .git_common_dir
-                        .parent()
-                        .unwrap_or(&checkout_path)
-                        .to_path_buf(),
+                    repo_root: compatibility_repo_root(&repository.git_common_dir, &checkout_path),
                     checkout_path,
                     is_linked_worktree: kind == CheckoutKind::Linked,
                 });
@@ -475,6 +556,105 @@ mod tests {
         assert_eq!(
             order,
             vec![SpaceRef::Repository(repositories[0].id.clone())]
+        );
+    }
+
+    #[test]
+    fn compatibility_projection_uses_checkout_for_bare_repository_root() {
+        let mut workspaces = vec![checkout(
+            "bare",
+            "/repos/archive.git",
+            "/repos/archive.git",
+            false,
+        )];
+        let mut repositories = Vec::new();
+        let mut order = Vec::new();
+
+        reconcile(&mut workspaces, &mut repositories, &mut order, None);
+
+        assert_eq!(
+            workspaces[0].worktree_space.as_ref().unwrap().repo_root,
+            PathBuf::from("/repos/archive.git")
+        );
+    }
+
+    #[test]
+    fn hosted_git_remotes_normalize_without_credentials_or_unsafe_paths() {
+        for (remote, expected) in [
+            (
+                "git@github.com:owner/repo.git",
+                "https://github.com/owner/repo",
+            ),
+            (
+                "ssh://git@gitlab.com/owner/repo.git",
+                "https://gitlab.com/owner/repo",
+            ),
+            (
+                "https://bitbucket.org/owner/repo.git",
+                "https://bitbucket.org/owner/repo",
+            ),
+        ] {
+            assert_eq!(
+                canonical_repository_web_url(remote).as_deref(),
+                Some(expected)
+            );
+        }
+        for remote in [
+            "https://token@github.com/owner/repo.git",
+            "git@github.com:../secret.git",
+            "file:///repo",
+            "https://github.com/owner/repo.git#fragment",
+        ] {
+            assert_eq!(canonical_repository_web_url(remote), None, "{remote}");
+        }
+        assert_eq!(
+            repository_branch_web_url("https://github.com/owner/repo", "feature/a b").as_deref(),
+            Some("https://github.com/owner/repo/tree/feature%2Fa%20b")
+        );
+        assert_eq!(
+            repository_branch_web_url("https://gitlab.com/owner/repo", "main").as_deref(),
+            Some("https://gitlab.com/owner/repo/-/tree/main")
+        );
+        assert_eq!(
+            repository_branch_web_url("https://bitbucket.org/owner/repo", "main").as_deref(),
+            Some("https://bitbucket.org/owner/repo/src/main")
+        );
+        assert_eq!(
+            repository_branch_web_url("https://git.example/owner/repo", "main"),
+            None
+        );
+    }
+
+    #[test]
+    fn compatibility_projection_keeps_dot_git_named_bare_repository_root() {
+        let mut workspaces = vec![checkout(
+            "bare-dot-git",
+            "/repos/.git",
+            "/repos/.git",
+            false,
+        )];
+        let mut repositories = Vec::new();
+        let mut order = Vec::new();
+
+        reconcile(&mut workspaces, &mut repositories, &mut order, None);
+
+        assert_eq!(
+            workspaces[0].worktree_space.as_ref().unwrap().repo_root,
+            PathBuf::from("/repos/.git")
+        );
+    }
+
+    #[test]
+    fn compatibility_projection_uses_parent_of_ordinary_dot_git_dir() {
+        let mut workspaces = vec![checkout("ordinary", "/repos/app/.git", "/repos/app", false)];
+        let mut repositories = Vec::new();
+        let mut order = Vec::new();
+
+        reconcile(&mut workspaces, &mut repositories, &mut order, None);
+
+        assert_eq!(
+            workspaces[0].worktree_space.as_ref().unwrap().repo_root,
+            PathBuf::from("/repos/app")
         );
     }
 

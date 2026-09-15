@@ -1028,6 +1028,7 @@ mod tests {
         assert!(state.pane_has_graphics("w1:p1"));
         assert!(state.pane_has_graphics("w1:p2"));
 
+        let occlusion = Occlusion::default();
         state.set_suppressed_panes(["w1:p1"]);
         state.encode(
             Visibility::Main,
@@ -1037,6 +1038,7 @@ mod tests {
                 width_px: 8,
                 height_px: 16,
             },
+            &occlusion,
         );
         assert_eq!(state.host.placements.len(), 1);
 
@@ -1049,6 +1051,7 @@ mod tests {
                 width_px: 8,
                 height_px: 16,
             },
+            &occlusion,
         );
         assert!(state.host.placements.is_empty());
 
@@ -1061,6 +1064,7 @@ mod tests {
                 width_px: 8,
                 height_px: 16,
             },
+            &occlusion,
         );
         assert_eq!(state.host.placements.len(), 2);
     }

@@ -414,7 +414,7 @@ fn shutdown_preserves_session_after_shell_is_signaled() {
     child.child.wait().expect("server should stop cleanly");
 
     let session: serde_json::Value = serde_json::from_slice(
-        &fs::read(config_home.join("herdr-dev/session.json")).expect("saved session"),
+        &fs::read(config_home.join("vqro-dev/session.json")).expect("saved session"),
     )
     .expect("valid session json");
     assert_eq!(session["workspaces"].as_array().map(Vec::len), Some(1));

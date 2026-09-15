@@ -1,6 +1,10 @@
 use std::path::PathBuf;
 use std::process::Command;
 
+pub(crate) fn local_listener_accept_error_is_resource_exhaustion(_error: &std::io::Error) -> bool {
+    false
+}
+
 pub(crate) fn fill_secure_random(_bytes: &mut [u8]) -> std::io::Result<()> {
     Err(std::io::Error::new(
         std::io::ErrorKind::Unsupported,
@@ -244,6 +248,14 @@ pub fn write_clipboard(_bytes: &[u8]) -> bool {
 /// Unsupported platform stub.
 pub fn read_clipboard_text() -> Option<String> {
     None
+}
+
+/// Unsupported platform stub.
+pub fn open_path(_path: &std::path::Path) -> std::io::Result<Option<std::process::Child>> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "opening paths is not supported on this platform",
+    ))
 }
 
 /// Unsupported platform stub.

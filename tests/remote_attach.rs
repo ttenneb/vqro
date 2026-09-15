@@ -86,7 +86,7 @@ if [ ! -e "$FAKE_SSH_FIRST_DONE" ]; then
     : > "$FAKE_SSH_FIRST_DONE"
     if [ "$FAKE_SSH_FRAMED" = 0 ]; then authenticate; fi
     /bin/cat >/dev/null
-    printf 'login banner\nherdr-remote-output-ready:1\nLinux\nx86_64\n'
+    printf 'login banner\nvqro-remote-output-ready:1\nLinux\nx86_64\n'
     exit 0
 fi
 if [ "$FAKE_SSH_FRAMED" = 1 ] && [ ! -e "$FAKE_SSH_STARTED" ]; then
@@ -105,7 +105,7 @@ exit 255
 
     let inherited_path = std::env::var("PATH").unwrap_or_default();
     let path = format!("{}:{inherited_path}", temp_dir.display());
-    let child = Command::new(env!("CARGO_BIN_EXE_herdr"))
+    let child = Command::new(env!("CARGO_BIN_EXE_vqro"))
         .args(["--remote", "check-host"])
         .env("PATH", path)
         .env("FAKE_SSH_FRAMED", if framed_shell { "1" } else { "0" })
@@ -113,12 +113,12 @@ exit 255
         .env("FAKE_SSH_APPROVED", &approval_path)
         .env("FAKE_SSH_ADVANCED", &advanced_path)
         .env("FAKE_SSH_FIRST_DONE", &first_done_path)
-        .env("HERDR_CONFIG_PATH", temp_dir.join("config.toml"))
-        .env_remove("HERDR_ENV")
-        .env_remove("HERDR_SESSION")
-        .env_remove("HERDR_SOCKET_PATH")
-        .env_remove("HERDR_CLIENT_SOCKET_PATH")
-        .env_remove("HERDR_REMOTE_BINARY")
+        .env("VQRO_CONFIG_PATH", temp_dir.join("config.toml"))
+        .env_remove("VQRO_ENV")
+        .env_remove("VQRO_SESSION")
+        .env_remove("VQRO_SOCKET_PATH")
+        .env_remove("VQRO_CLIENT_SOCKET_PATH")
+        .env_remove("VQRO_REMOTE_BINARY")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())

@@ -154,14 +154,28 @@ impl ClientShellState {
                         .snapshot
                         .as_deref()
                         .map_or_else(Vec::new, |snapshot| {
-                            let collapsed = super::endpoint_sidebar::collapsed_repository_ids(
-                                endpoint,
-                                &self.collapsed_groups,
-                            );
+                            let empty_collapsed_groups = HashSet::new();
+                            let collapsed_groups = self
+                                .collapsed_groups_for_endpoint(&endpoint.endpoint_id)
+                                .unwrap_or(&empty_collapsed_groups);
+                            let collapsed_repositories =
+                                super::endpoint_sidebar::collapsed_repository_ids(
+                                    endpoint,
+                                    collapsed_groups,
+                                );
+                            let structured =
+                                endpoint.current_structure().is_some_and(|structure| {
+                                    !structure.repositories.is_empty()
+                                        || !structure.space_order.is_empty()
+                                });
                             render::workspace_entries_with_structure(
                                 snapshot,
                                 endpoint.current_structure(),
-                                &collapsed,
+                                if structured {
+                                    &collapsed_repositories
+                                } else {
+                                    collapsed_groups
+                                },
                             )
                             .into_iter()
                             .filter_map(|entry| {
@@ -170,7 +184,7 @@ impl ClientShellState {
                                         super::endpoint_sidebar::repository_entry_is_collapsed(
                                             endpoint,
                                             &entry,
-                                            &self.collapsed_groups,
+                                            collapsed_groups,
                                         );
                                     (
                                         endpoint.endpoint_id.clone(),

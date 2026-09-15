@@ -2462,6 +2462,28 @@ impl ClientShellState {
                     self.persist_chrome_preferences(outcome);
                     return;
                 }
+                // Some terminals reserve Shift for selection and report a
+                // Ctrl+Shift click to mouse-aware applications as Ctrl-only.
+                let space_link = mouse
+                    .modifiers
+                    .contains(crossterm::event::KeyModifiers::CONTROL)
+                    .then(|| {
+                        self.hits
+                            .space_links
+                            .iter()
+                            .find(|hit| super::contains(hit.rect, point))
+                            .map(|hit| hit.target.clone())
+                    })
+                    .flatten();
+                if let Some(target) = space_link {
+                    outcome.actions.push(match target {
+                        SpaceLinkTarget::LocalDirectory(path) => {
+                            ClientShellAction::OpenLocalDirectory(path)
+                        }
+                        SpaceLinkTarget::WebUrl(url) => ClientShellAction::OpenSafeWebUrl(url),
+                    });
+                    return;
+                }
                 let group_toggle = self.hits.workspaces.iter().find_map(|hit| {
                     let (rect, key) = hit.group_toggle.as_ref()?;
                     super::contains(*rect, point).then(|| (hit.endpoint_id.clone(), key.clone()))

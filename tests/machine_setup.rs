@@ -28,10 +28,10 @@ case "$last" in
     'tee '*) cat >/dev/null; exit 0 ;;
 esac
 case "$last" in
-    *'herdr-remote-output-ready:1'*) script=$last ;;
+    *'vqro-remote-output-ready:1'*) script=$last ;;
     *) script=$(cat) ;;
 esac
-printf '\n%s\n' 'herdr-remote-output-ready:1'
+printf '\n%s\n' 'vqro-remote-output-ready:1'
 case "$script" in
     *'uname -s'*) uname -s; uname -m ;;
     *'version='*) echo /home/remote/.local/bin/herdr ;;
@@ -85,9 +85,9 @@ fn setup_with_strict_host_key_failure(
         strict_host_key_failure
     ));
     let app = if cfg!(debug_assertions) {
-        "herdr-dev"
+        "vqro-dev"
     } else {
-        "herdr"
+        "vqro"
     };
     fs::create_dir_all(root.join("bin")).unwrap();
     fs::create_dir_all(root.join("config").join(app)).unwrap();
@@ -98,14 +98,14 @@ fn setup_with_strict_host_key_failure(
         "onboarding = false\n[remote]\nmanage_ssh_config = false\n",
     )
     .unwrap();
-    let status = Command::new(env!("CARGO_BIN_EXE_herdr"))
+    let status = Command::new(env!("CARGO_BIN_EXE_vqro"))
         .args(["status", "client", "--json"])
         .output()
         .unwrap();
     assert!(status.status.success());
 
     let pair = native_pty_system().openpty(PtySize::default()).unwrap();
-    let mut command = CommandBuilder::new(env!("CARGO_BIN_EXE_herdr"));
+    let mut command = CommandBuilder::new(env!("CARGO_BIN_EXE_vqro"));
     if handoff {
         command.args(["--remote", "fake-host", "--handoff"]);
     } else {
@@ -130,12 +130,12 @@ fn setup_with_strict_host_key_failure(
         String::from_utf8(status.stdout).unwrap(),
     );
     for name in [
-        "HERDR_ENV",
-        "HERDR_SESSION",
-        "HERDR_SOCKET_PATH",
-        "HERDR_CLIENT_SOCKET_PATH",
-        "HERDR_REMOTE_BINARY",
-        "HERDR_CONFIG_PATH",
+        "VQRO_ENV",
+        "VQRO_SESSION",
+        "VQRO_SOCKET_PATH",
+        "VQRO_CLIENT_SOCKET_PATH",
+        "VQRO_REMOTE_BINARY",
+        "VQRO_CONFIG_PATH",
     ] {
         command.env_remove(name);
     }
@@ -217,9 +217,9 @@ fn machine_add_accepts_help_argument_order() {
     ));
     fs::create_dir(&root).unwrap();
     let app = if cfg!(debug_assertions) {
-        "herdr-dev"
+        "vqro-dev"
     } else {
-        "herdr"
+        "vqro"
     };
     fs::create_dir_all(root.join("config").join(app)).unwrap();
     fs::write(
@@ -227,7 +227,7 @@ fn machine_add_accepts_help_argument_order() {
         "onboarding = false\n[remote]\nmanage_ssh_config = false\n",
     )
     .unwrap();
-    let mut command = Command::new(env!("CARGO_BIN_EXE_herdr"));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_vqro"));
     command.args(["machine", "add", "--label", "coder", "workstation.coder"]);
     // Reach remote preparation, but never execute SSH or start a server.
     command.env("PATH", root.join("no-executables"));
@@ -236,12 +236,12 @@ fn machine_add_accepts_help_argument_order() {
     command.env("XDG_STATE_HOME", root.join("state"));
     command.env("XDG_RUNTIME_DIR", &root);
     for name in [
-        "HERDR_ENV",
-        "HERDR_SESSION",
-        "HERDR_SOCKET_PATH",
-        "HERDR_CLIENT_SOCKET_PATH",
-        "HERDR_REMOTE_BINARY",
-        "HERDR_CONFIG_PATH",
+        "VQRO_ENV",
+        "VQRO_SESSION",
+        "VQRO_SOCKET_PATH",
+        "VQRO_CLIENT_SOCKET_PATH",
+        "VQRO_REMOTE_BINARY",
+        "VQRO_CONFIG_PATH",
     ] {
         command.env_remove(name);
     }

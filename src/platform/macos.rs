@@ -17,11 +17,11 @@ use super::{
 pub(crate) use super::unix_common::{
     configure_extension_service_command, configure_status_command, create_remote_private_dir,
     create_remote_ssh_config_dir, create_remote_ssh_config_file, fill_secure_random, hostname,
-    local_datetime, remote_bridge_endpoint_path, remote_private_temp_base,
-    remote_reattach_argument, remote_reattach_program, remote_ssh_config_paths,
-    set_default_plugin_pane_pwd, shutdown_client_stream, status_commands_supported,
-    terminate_extension_service_process_group, wait_client_stream_readable, write_client_stream,
-    ClientStreamReader, StatusCommandGuard,
+    local_datetime, local_listener_accept_error_is_resource_exhaustion,
+    remote_bridge_endpoint_path, remote_private_temp_base, remote_reattach_argument,
+    remote_reattach_program, remote_ssh_config_paths, set_default_plugin_pane_pwd,
+    shutdown_client_stream, status_commands_supported, terminate_extension_service_process_group,
+    wait_client_stream_readable, write_client_stream, ClientStreamReader, StatusCommandGuard,
 };
 
 const PROC_PGRP_ONLY: u32 = 2;
@@ -528,8 +528,12 @@ pub fn read_clipboard_text() -> Option<String> {
 }
 
 pub fn open_url(url: &str) -> std::io::Result<Option<std::process::Child>> {
+    open_path(std::path::Path::new(url))
+}
+
+pub fn open_path(path: &std::path::Path) -> std::io::Result<Option<std::process::Child>> {
     Command::new("open")
-        .arg(url)
+        .arg(path)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())

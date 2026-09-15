@@ -1,4 +1,4 @@
-# herdr task runner
+# vqro task runner
 set windows-shell := ["cmd.exe", "/d", "/s", "/c"]
 
 python := if os() == "windows" { "python" } else { "python3" }
@@ -79,12 +79,12 @@ build:
 
 # Non-gating full-render scaling profile for background workspaces and active panes
 bench-render-scale:
-    cargo test --release --locked --bin herdr render_scale_profile -- --ignored --nocapture --test-threads=1
+    cargo test --release --locked --bin vqro render_scale_profile -- --ignored --nocapture --test-threads=1
 
 # ~3-5 minute CPU comparison; downloads stable unless HERDR_PERF_BASELINE_BIN is set
 bench-release-smoke:
     cargo build --release --locked
-    scripts/release_perf_smoke.sh "${CARGO_TARGET_DIR:-target}/release/herdr"
+    scripts/release_perf_smoke.sh "${CARGO_TARGET_DIR:-target}/release/vqro"
 
 # Test public documentation snapshot and release lifecycle tooling
 docs-contract-test:

@@ -1,5 +1,73 @@
 use super::*;
 
+fn percent_encode_uri_path(path: &str) -> String {
+    let mut encoded = String::with_capacity(path.len());
+    for byte in path.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b':' | b'-' | b'_' | b'.' | b'~') {
+            encoded.push(char::from(byte));
+        } else {
+            use std::fmt::Write;
+            let _ = write!(encoded, "%{byte:02X}");
+        }
+    }
+    encoded
+}
+
+fn local_directory_uri(path: &str) -> Option<String> {
+    if !std::path::Path::new(path).is_absolute() {
+        return None;
+    }
+    #[cfg(windows)]
+    let path = path.replace('\\', "/");
+    let encoded = percent_encode_uri_path(path);
+    #[cfg(windows)]
+    let uri = if encoded.starts_with("//") {
+        format!("file:{encoded}")
+    } else {
+        format!("file:///{encoded}")
+    };
+    #[cfg(not(windows))]
+    let uri = format!("file://{encoded}");
+    Some(uri)
+}
+
+fn apply_space_link_hyperlinks(frame: &mut FrameData, hits: &[SpaceLinkHit]) {
+    for hit in hits {
+        let uri = match &hit.target {
+            SpaceLinkTarget::LocalDirectory(path) => local_directory_uri(path),
+            SpaceLinkTarget::WebUrl(url)
+                if url.starts_with("https://") || url.starts_with("http://") =>
+            {
+                Some(url.clone())
+            }
+            SpaceLinkTarget::WebUrl(_) => None,
+        };
+        let Some(uri) = uri else {
+            continue;
+        };
+        let hyperlink = frame
+            .hyperlinks
+            .iter()
+            .position(|existing| existing == &uri)
+            .map(|index| index as u32)
+            .unwrap_or_else(|| {
+                let index = frame.hyperlinks.len() as u32;
+                frame.hyperlinks.push(uri);
+                index
+            });
+        let right = hit.rect.right().min(frame.width);
+        let bottom = hit.rect.bottom().min(frame.height);
+        for y in hit.rect.y..bottom {
+            for x in hit.rect.x..right {
+                let index = usize::from(y) * usize::from(frame.width) + usize::from(x);
+                if let Some(cell) = frame.cells.get_mut(index) {
+                    cell.hyperlink = Some(hyperlink);
+                }
+            }
+        }
+    }
+}
+
 fn clip_rect(rect: Rect, bounds: Rect) -> Rect {
     let clipped = rect.intersection(bounds);
     if clipped.is_empty() {
@@ -338,6 +406,7 @@ impl ClientShellState {
             self.hits.tab_scroll_right = Rect::default();
         }
         let mut frame = FrameData::from_ratatui_buffer_with_hyperlinks(&buffer, None, &[]);
+        apply_space_link_hyperlinks(&mut frame, &self.hits.space_links);
         let mode_bar_cells = mode_bar.map(|bar| {
             let start = usize::from(bar.y) * usize::from(frame.width) + usize::from(bar.x);
             frame.cells[start..start + usize::from(bar.width)].to_vec()

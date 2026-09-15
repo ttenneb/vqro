@@ -142,6 +142,7 @@ pub(super) enum ClientMobileTarget {
 pub(super) struct ShellHitMap {
     pub(super) machines: Vec<MachineHit>,
     pub(super) workspaces: Vec<WorkspaceHit>,
+    pub(super) space_links: Vec<SpaceLinkHit>,
     pub(super) workspace_body: Rect,
     pub(super) workspace_scrollbar: Rect,
     pub(super) workspace_scroll_metrics: Option<crate::pane::ScrollMetrics>,
@@ -321,6 +322,17 @@ pub(super) enum ClientChromeDrag {
     },
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum SpaceLinkTarget {
+    LocalDirectory(String),
+    WebUrl(String),
+}
+
+pub(super) struct SpaceLinkHit {
+    pub(super) rect: Rect,
+    pub(super) target: SpaceLinkTarget,
+}
+
 pub(super) struct WorkspaceHit {
     pub(super) rect: Rect,
     pub(super) endpoint_id: ClientEndpointId,
@@ -343,6 +355,7 @@ pub(crate) enum ClientShellAction {
     },
     ClipboardWrite(Vec<u8>),
     OpenSafeWebUrl(String),
+    OpenLocalDirectory(String),
     ActivateEndpoint {
         endpoint_id: ClientEndpointId,
         target: Option<ClientEndpointFocusTarget>,

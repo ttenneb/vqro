@@ -17,11 +17,11 @@ use super::{
 pub(crate) use super::unix_common::{
     configure_extension_service_command, configure_status_command, create_remote_private_dir,
     create_remote_ssh_config_dir, create_remote_ssh_config_file, fill_secure_random, hostname,
-    local_datetime, remote_bridge_endpoint_path, remote_private_temp_base,
-    remote_reattach_argument, remote_reattach_program, remote_ssh_config_paths,
-    set_default_plugin_pane_pwd, shutdown_client_stream, status_commands_supported,
-    terminate_extension_service_process_group, wait_client_stream_readable, write_client_stream,
-    ClientStreamReader, StatusCommandGuard,
+    local_datetime, local_listener_accept_error_is_resource_exhaustion,
+    remote_bridge_endpoint_path, remote_private_temp_base, remote_reattach_argument,
+    remote_reattach_program, remote_ssh_config_paths, set_default_plugin_pane_pwd,
+    shutdown_client_stream, status_commands_supported, terminate_extension_service_process_group,
+    wait_client_stream_readable, write_client_stream, ClientStreamReader, StatusCommandGuard,
 };
 
 const WSL_MARKER_ENV_VARS: &[&str] = &["WSL_DISTRO_NAME", "WSL_INTEROP"];
@@ -530,7 +530,7 @@ pub(crate) fn sample_terminal_telemetry(
     let mut processes = Vec::new();
     let mut matching = 0usize;
     for pid in candidates {
-        let Some((pgrp, _)) = process_pgrp_and_comm(pid) else {
+        let Some((pgrp, _, _)) = process_pgrp_comm_and_state(pid) else {
             continue;
         };
         if pgrp <= 0 || pgrp as u32 != process_group_id {
@@ -793,8 +793,12 @@ pub fn read_clipboard_text() -> Option<String> {
 }
 
 pub fn open_url(url: &str) -> std::io::Result<Option<std::process::Child>> {
+    open_path(std::path::Path::new(url))
+}
+
+pub fn open_path(path: &std::path::Path) -> std::io::Result<Option<std::process::Child>> {
     Command::new("xdg-open")
-        .arg(url)
+        .arg(path)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -902,7 +906,10 @@ fn show_desktop_notification_with_command(
     }
 
     let mut cmd = command("notify-send");
-    cmd.arg("--app-name").arg("Herdr").arg("--").arg(title);
+    cmd.arg("--app-name")
+        .arg(crate::product::DISPLAY_NAME)
+        .arg("--")
+        .arg(title);
     if let Some(body) = body.filter(|body| !body.is_empty()) {
         cmd.arg(body);
     }
@@ -2162,7 +2169,7 @@ mod tests {
         assert!(shown);
         let args = std::fs::read_to_string(&path).expect("args file");
         let _ = std::fs::remove_file(&path);
-        assert_eq!(args, "--app-name\nHerdr\n--\n-danger\nbody\n");
+        assert_eq!(args, "--app-name\nvqro\n--\n-danger\nbody\n");
     }
 
     #[test]

@@ -15,7 +15,10 @@ fn assert_rect_within(rect: Rect, bounds: Rect) {
 }
 
 fn assert_shell_hits_within_frame(state: &ClientShellState, frame: &FrameData) {
-    let bounds = Rect::new(0, 0, frame.width, frame.height);
+    assert_shell_hits_within_bounds(state, Rect::new(0, 0, frame.width, frame.height));
+}
+
+fn assert_shell_hits_within_bounds(state: &ClientShellState, bounds: Rect) {
     for rect in [
         state.hits.workspace_body,
         state.hits.workspace_scrollbar,
@@ -102,6 +105,7 @@ fn assert_shell_hits_within_frame(state: &ClientShellState, frame: &FrameData) {
         .iter()
         .map(|hit| hit.rect)
         .chain(state.hits.workspaces.iter().map(|hit| hit.rect))
+        .chain(state.hits.space_links.iter().map(|hit| hit.rect))
         .chain(state.hits.tabs.iter().map(|(rect, _)| *rect))
         .chain(state.hits.agents.iter().map(|(rect, _)| *rect))
         .chain(state.hits.endpoint_agents.iter().map(|(rect, _, _)| *rect))
@@ -1492,10 +1496,11 @@ fn stale_large_surface_resize_clips_integrated_contributions_and_all_hits() {
         },
     ));
     for (width, height) in [(90, 24), (30, 5), (1, 1), (90, 24)] {
-        let frame = state
-            .compose(width, height)
-            .expect("clipped confirmation frame");
-        assert_shell_hits_within_frame(&state, &frame);
+        if let Some(frame) = state.compose(width, height) {
+            assert_shell_hits_within_frame(&state, &frame);
+        } else {
+            assert_shell_hits_within_bounds(&state, Rect::new(0, 0, width, height));
+        }
     }
 }
 

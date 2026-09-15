@@ -34,7 +34,7 @@ const STABLE_UPDATE_MANIFEST_URL: &str = "https://herdr.dev/latest.json";
 const PREVIEW_UPDATE_MANIFEST_URL: &str = "https://herdr.dev/preview.json";
 const REMOTE_BINARY_ENV_VAR: &str = "VQRO_REMOTE_BINARY";
 const REMOTE_OUTPUT_READY_MARKER: &str = "vqro-remote-output-ready:1";
-const REMOTE_SERVER_READY_MARKER: &str = "vqro-remote-server-ready:1";
+const WINDOWS_REMOTE_PATH_MARKER: &str = "vqro-remote-path:1:";
 const WINDOWS_REMOTE_INSTALL_DIR_MARKER: &str = "vqro-remote-install-dir:1:";
 const WINDOWS_REMOTE_INSTALL_RESULT_MARKER: &str = "vqro-remote-install-result:1:";
 const SSH_CONTROL_SOCKET_NAME: &str = "ctl";
@@ -4216,7 +4216,7 @@ mod tests {
     fn remote_output_framing_discards_any_banner_and_preserves_binary() {
         let payload = [0, 1, 2, 0xff, b'\n'];
         let mut input = vec![b'x'; 4 * 1024 * 1024];
-        input.extend_from_slice(b"\r\nherdr-remote-output-ready:1\r\n");
+        input.extend_from_slice(b"\r\nvqro-remote-output-ready:1\r\n");
         input.extend_from_slice(&payload);
         let mut reader = io::BufReader::with_capacity(17, io::Cursor::new(input));
 
@@ -4230,7 +4230,7 @@ mod tests {
         normalize_remote_stdout(&mut missing, false).unwrap();
         assert_eq!(missing, b"profile output without marker");
 
-        let mut platform = b"profile output\nherdr-remote-output-ready:1\nLinux\nx86_64\n".to_vec();
+        let mut platform = b"profile output\nvqro-remote-output-ready:1\nLinux\nx86_64\n".to_vec();
         normalize_remote_stdout(&mut platform, true).unwrap();
         let platform = String::from_utf8(platform).unwrap();
         let mut lines = platform.lines();
@@ -4352,7 +4352,7 @@ mod tests {
             remote_herdr
                 .executable
                 .bridge_command(crate::session::DEFAULT_SESSION_NAME),
-            "printf '\n%s\n' 'herdr-remote-output-ready:1'\nexec \"$HOME/.local/bin/herdr\" remote-client-bridge"
+            "printf '\n%s\n' 'vqro-remote-output-ready:1'\nexec \"$HOME/.local/bin/herdr\" remote-client-bridge"
         );
         assert_eq!(
             remote_herdr.executable.saved_bridge_command("agents"),
@@ -4373,7 +4373,7 @@ mod tests {
             remote_herdr
                 .executable
                 .bridge_command(crate::session::DEFAULT_SESSION_NAME),
-            "printf '\n%s\n' 'herdr-remote-output-ready:1'\nexec /usr/bin/herdr remote-client-bridge"
+            "printf '\n%s\n' 'vqro-remote-output-ready:1'\nexec /usr/bin/herdr remote-client-bridge"
         );
     }
 
@@ -4391,7 +4391,7 @@ mod tests {
             remote_herdr
                 .executable
                 .bridge_command(crate::session::DEFAULT_SESSION_NAME),
-            "printf '\n%s\n' 'herdr-remote-output-ready:1'\nexec '/opt/herdr bin/herdr' remote-client-bridge"
+            "printf '\n%s\n' 'vqro-remote-output-ready:1'\nexec '/opt/herdr bin/herdr' remote-client-bridge"
         );
     }
 
@@ -4409,7 +4409,7 @@ mod tests {
             remote_herdr
                 .executable
                 .bridge_command(crate::session::DEFAULT_SESSION_NAME),
-            "printf '\n%s\n' 'herdr-remote-output-ready:1'\nexec /opt/homebrew/bin/herdr remote-client-bridge"
+            "printf '\n%s\n' 'vqro-remote-output-ready:1'\nexec /opt/homebrew/bin/herdr remote-client-bridge"
         );
         assert_eq!(remote_herdr.platform.asset_key(), "macos-aarch64");
     }
@@ -4506,7 +4506,7 @@ mod tests {
             remote_herdr
                 .executable
                 .bridge_command(crate::session::DEFAULT_SESSION_NAME),
-            "printf '\n%s\n' 'herdr-remote-output-ready:1'\nexec '/opt/herdr'\\''s/bin/herdr' remote-client-bridge"
+            "printf '\n%s\n' 'vqro-remote-output-ready:1'\nexec '/opt/herdr'\\''s/bin/herdr' remote-client-bridge"
         );
     }
 

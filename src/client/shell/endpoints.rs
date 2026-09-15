@@ -726,12 +726,19 @@ impl ClientShellState {
                 .find(|endpoint| &endpoint.endpoint_id == endpoint_id)
                 .and_then(|endpoint| endpoint.snapshot_generation)
                 .is_some_and(|current| generation > current);
+        let preserve_navigation_mode =
+            replaces_active_connection && self.mode == ClientShellMode::Navigate;
         self.cache_endpoint_snapshot_for_generation(endpoint_id, generation, snapshot);
         if replaces_active_connection {
+            let navigation_preview = self.navigate_workspace_id.take();
             self.reset_endpoint_projection();
+            self.navigate_workspace_id = navigation_preview;
             self.snapshot = None;
         }
         self.apply_cached_endpoint_snapshot(endpoint_id);
+        if preserve_navigation_mode && self.navigate_workspace_id.is_some() {
+            self.mode = ClientShellMode::Navigate;
+        }
     }
 
     pub(crate) fn set_terminal_views_surface_for_generation(

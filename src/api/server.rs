@@ -30,6 +30,8 @@ pub(super) const APP_RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
 const INITIAL_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 const STREAM_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_INITIAL_REQUEST_BYTES: usize = 1024 * 1024;
+const ACCEPT_RETRY_INITIAL_BACKOFF: Duration = Duration::from_millis(25);
+const ACCEPT_RETRY_MAX_BACKOFF: Duration = Duration::from_secs(1);
 
 pub struct ServerHandle {
     _thread: std::thread::JoinHandle<()>,
@@ -91,9 +93,11 @@ fn start_server_inner(
     let running = Arc::new(AtomicBool::new(true));
     let listener_running = Arc::clone(&running);
     let thread = std::thread::spawn(move || {
+        let mut resource_failures = 0u32;
         for stream in listener.incoming() {
             match stream {
                 Ok(stream) => {
+                    resource_failures = 0;
                     let api_tx = api_tx.clone();
                     let event_hub = event_hub.clone();
                     let capabilities = capabilities.clone();
@@ -112,6 +116,23 @@ fn start_server_inner(
                         }
                     });
                 }
+                Err(err) if err.kind() == std::io::ErrorKind::Interrupted => {
+                    if !listener_running.load(Ordering::Relaxed) {
+                        break;
+                    }
+                }
+                Err(err)
+                    if crate::platform::local_listener_accept_error_is_resource_exhaustion(
+                        &err,
+                    ) =>
+                {
+                    resource_failures = resource_failures.saturating_add(1);
+                    let delay = accept_retry_backoff(resource_failures);
+                    warn!(err = %err, ?delay, "api listener temporarily exhausted; retrying");
+                    if !wait_for_accept_retry(&listener_running, delay) {
+                        break;
+                    }
+                }
                 Err(err) => {
                     error!(err = %err, "api listener accept failed");
                     break;
@@ -127,6 +148,25 @@ fn start_server_inner(
         identity,
         running,
     })
+}
+
+fn accept_retry_backoff(failures: u32) -> Duration {
+    let shift = failures.saturating_sub(1).min(6);
+    ACCEPT_RETRY_INITIAL_BACKOFF
+        .saturating_mul(1u32 << shift)
+        .min(ACCEPT_RETRY_MAX_BACKOFF)
+}
+
+fn wait_for_accept_retry(running: &AtomicBool, delay: Duration) -> bool {
+    let deadline = Instant::now() + delay;
+    while running.load(Ordering::Relaxed) {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return true;
+        }
+        std::thread::sleep(remaining.min(CONNECTION_POLL_INTERVAL));
+    }
+    false
 }
 
 fn prepare_socket_path(path: &Path) -> std::io::Result<()> {
@@ -954,6 +994,19 @@ fn caller_timeout_dispatch_uses_timeout_error() {
     );
     let error: ErrorResponse = serde_json::from_str(&response).unwrap();
     assert_eq!(error.error.code, "timeout");
+}
+
+#[cfg(test)]
+#[test]
+fn listener_resource_backoff_is_bounded_and_shutdown_interruptible() {
+    assert_eq!(accept_retry_backoff(1), Duration::from_millis(25));
+    assert_eq!(accept_retry_backoff(2), Duration::from_millis(50));
+    assert_eq!(accept_retry_backoff(100), ACCEPT_RETRY_MAX_BACKOFF);
+
+    let running = AtomicBool::new(false);
+    let started = Instant::now();
+    assert!(!wait_for_accept_retry(&running, ACCEPT_RETRY_MAX_BACKOFF));
+    assert!(started.elapsed() < CONNECTION_POLL_INTERVAL);
 }
 
 fn error_response_json(id: String, code: &str, message: String) -> String {

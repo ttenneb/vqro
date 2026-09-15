@@ -1,5 +1,11 @@
 use std::path::{Path, PathBuf};
 
+pub(crate) fn local_listener_accept_error_is_resource_exhaustion(error: &std::io::Error) -> bool {
+    error
+        .raw_os_error()
+        .is_some_and(|code| code == libc::EMFILE || code == libc::ENFILE)
+}
+
 pub(crate) fn classify_child_exit(status: &portable_pty::ExitStatus) -> super::ChildExitReason {
     if status.signal().is_some() {
         super::ChildExitReason::Interrupted
@@ -477,6 +483,19 @@ pub(crate) fn set_default_plugin_pane_pwd(env: &mut Vec<(String, String)>, cwd: 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn listener_resource_exhaustion_classifies_descriptor_limits_only() {
+        assert!(local_listener_accept_error_is_resource_exhaustion(
+            &std::io::Error::from_raw_os_error(libc::EMFILE)
+        ));
+        assert!(local_listener_accept_error_is_resource_exhaustion(
+            &std::io::Error::from_raw_os_error(libc::ENFILE)
+        ));
+        assert!(!local_listener_accept_error_is_resource_exhaustion(
+            &std::io::Error::from_raw_os_error(libc::ECONNABORTED)
+        ));
+    }
 
     #[test]
     fn plugin_pane_pwd_defaults_to_cwd_without_overriding_explicit_env() {

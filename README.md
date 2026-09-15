@@ -14,7 +14,7 @@ vqro is exploring an open, terminal-native multiplexer for organizing human and 
 
 ## Alpha implementation status
 
-The integrated slice is under active review and is not yet merge-ready. The current uncommitted dogfood build implements:
+The integrated slice is under active review and is not yet merge-ready. The current `feature/integrated-alpha` branch implements:
 
 - an isolated `vqro` binary, config/state directories, sockets, sessions, logs, environment routing, and temporary runtime paths;
 - repository-aware **Spaces** that group primary and linked checkouts while preserving ordinary non-Git workspaces;

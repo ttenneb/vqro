@@ -233,6 +233,26 @@ fn fingerprint(mut repo: RepoContext, include_upstream: bool) -> Option<GitStatu
 }
 
 impl GitStatusFingerprint {
+    fn remote_url(&self, remote: &str) -> Option<&str> {
+        self.repository_context
+            .3
+            .as_ref()?
+            .1
+            .as_ref()?
+            .remote_urls
+            .iter()
+            .rev()
+            .find_map(|(name, url)| (name == remote).then_some(url.as_str()))
+    }
+
+    pub(crate) fn preferred_repository_remote_url(&self) -> Option<&str> {
+        self.remote_url("origin").or_else(|| {
+            self.upstream
+                .as_ref()
+                .and_then(|upstream| self.remote_url(&upstream.remote))
+        })
+    }
+
     fn branch_name(&self) -> Option<&str> {
         match &self.head {
             GitHeadIdentity::Branch { short_name, .. } => Some(short_name.as_str()),

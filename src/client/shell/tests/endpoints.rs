@@ -74,6 +74,92 @@ fn state_with_remote() -> (ClientShellState, ClientEndpointId) {
 }
 
 #[test]
+fn remote_repository_rows_expose_web_links_but_not_local_directory_links() {
+    fn structure(
+        boot_id: &str,
+        path: &str,
+        url: &str,
+    ) -> Box<crate::protocol::endpoint::ClientShellStructureProjection> {
+        Box::new(crate::protocol::endpoint::ClientShellStructureProjection {
+            session_id: "alpha".into(),
+            boot_id: boot_id.into(),
+            revision: 1,
+            collections: Vec::new(),
+            delegations: Vec::new(),
+            repositories: vec![crate::protocol::endpoint::ClientShellRepository {
+                repository_id: "repo_1".into(),
+                label: "repo".into(),
+                repository_path: Some(path.into()),
+                web_url: Some(url.into()),
+                checkouts: vec![crate::protocol::endpoint::ClientShellRepositoryCheckout {
+                    workspace_id: "ws_1".into(),
+                    checkout_path: Some(path.into()),
+                    kind: crate::protocol::endpoint::ClientShellCheckoutKind::Primary,
+                    upstream: Some("origin/main".into()),
+                    upstream_web_url: Some(format!("{url}/tree/main")),
+                    detached_head: None,
+                }],
+                last_focused_workspace_id: Some("ws_1".into()),
+            }],
+            space_order: vec![crate::protocol::endpoint::ClientShellSpaceRef {
+                kind: crate::protocol::endpoint::ClientShellSpaceKind::Repository,
+                id: "repo_1".into(),
+            }],
+        })
+    }
+
+    let (mut state, remote) = state_with_remote();
+    for endpoint in &mut state.endpoints {
+        let Some(snapshot) = endpoint.snapshot.as_deref_mut() else {
+            continue;
+        };
+        snapshot.workspaces[0].branch = Some("main".into());
+        let projected = if endpoint.endpoint_id.is_local() {
+            structure("boot-1", "/local/repo", "https://github.com/local/repo")
+        } else {
+            structure(
+                "remote-boot",
+                "/remote/repo",
+                "https://github.com/remote/repo",
+            )
+        };
+        endpoint.structure = Some(projected.clone());
+        if endpoint.endpoint_id.is_local() {
+            state.structure = Some(projected);
+        }
+    }
+    state
+        .compose(120, 30)
+        .expect("multi-endpoint repository rows");
+
+    let directory_targets = state
+        .hits
+        .space_links
+        .iter()
+        .filter_map(|hit| match &hit.target {
+            SpaceLinkTarget::LocalDirectory(path) => Some(path.as_str()),
+            SpaceLinkTarget::WebUrl(_) => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(directory_targets, vec!["/local/repo", "/local/repo"]);
+    let web_targets = state
+        .hits
+        .space_links
+        .iter()
+        .filter_map(|hit| match &hit.target {
+            SpaceLinkTarget::WebUrl(url) => Some(url.as_str()),
+            SpaceLinkTarget::LocalDirectory(_) => None,
+        })
+        .collect::<Vec<_>>();
+    assert!(web_targets.contains(&"https://github.com/local/repo/tree/main"));
+    assert!(web_targets.contains(&"https://github.com/remote/repo/tree/main"));
+    assert!(state
+        .endpoints
+        .iter()
+        .any(|endpoint| endpoint.endpoint_id == remote));
+}
+
+#[test]
 fn endpoint_switch_and_rollback_restore_matching_cached_structure() {
     fn structure(
         session_id: &str,

@@ -47,6 +47,7 @@ pub(crate) fn render_collapsed_sidebar(
     render_sidebar_background(buffer, area, palette);
     let (workspace_area, divider_y, detail_area) = collapsed_sidebar_sections(area);
     let collapsed_repositories = structure
+        .filter(|structure| !structure.repositories.is_empty() || !structure.space_order.is_empty())
         .map(|structure| {
             structure
                 .repositories
@@ -54,7 +55,14 @@ pub(crate) fn render_collapsed_sidebar(
                 .map(|repository| repository.repository_id.clone())
                 .collect::<HashSet<_>>()
         })
-        .unwrap_or_default();
+        .unwrap_or_else(|| {
+            snapshot
+                .workspaces
+                .iter()
+                .enumerate()
+                .filter_map(|(index, _)| parent_group_key(snapshot, index))
+                .collect()
+        });
     let spaces = workspace_entries_with_structure(snapshot, structure, &collapsed_repositories);
     let workspace_index = workspace_projection_index(snapshot);
     for (index, entry) in spaces
@@ -413,7 +421,16 @@ pub(crate) fn render_sidebar(
         } else if focused {
             buffer.set_style(rect, Style::default().bg(palette.active_row_bg));
         }
-        render_workspace_rows(
+        let repository = entry
+            .repository_index
+            .and_then(|index| structure?.repositories.get(index));
+        let checkout = repository.and_then(|repository| {
+            repository
+                .checkouts
+                .iter()
+                .find(|checkout| checkout.workspace_id == workspace.workspace_id)
+        });
+        let rendered_links = render_workspace_rows(
             buffer,
             rect,
             status,
@@ -424,7 +441,40 @@ pub(crate) fn render_sidebar(
             selected,
             dragged,
             palette,
+            WorkspaceLinkLabels {
+                repository: repository.map(|repository| repository.label.as_str()),
+                branch: workspace.branch.as_deref(),
+                upstream: checkout.and_then(|checkout| checkout.upstream.as_deref()),
+            },
         );
+        if let Some((link_rect, path)) = rendered_links
+            .repository
+            .zip(repository.and_then(|repository| repository.repository_path.as_ref()))
+        {
+            hits.space_links.push(SpaceLinkHit {
+                rect: link_rect,
+                target: SpaceLinkTarget::LocalDirectory(path.clone()),
+            });
+        }
+        if let Some((link_rect, path)) = rendered_links.branch.zip(
+            checkout
+                .and_then(|checkout| checkout.checkout_path.as_ref())
+                .or_else(|| repository.and_then(|repository| repository.repository_path.as_ref())),
+        ) {
+            hits.space_links.push(SpaceLinkHit {
+                rect: link_rect,
+                target: SpaceLinkTarget::LocalDirectory(path.clone()),
+            });
+        }
+        if let Some((link_rect, url)) = rendered_links
+            .upstream
+            .zip(checkout.and_then(|checkout| checkout.upstream_web_url.as_ref()))
+        {
+            hits.space_links.push(SpaceLinkHit {
+                rect: link_rect,
+                target: SpaceLinkTarget::WebUrl(url.clone()),
+            });
+        }
         let projected_group = (!entry.indented && entry.repository_has_children)
             .then_some(entry.repository_index)
             .flatten()
@@ -979,35 +1029,6 @@ pub(in crate::client::shell) fn displayed_workspace_status(
         .unwrap_or(workspace.agent_status)
 }
 
-pub(in crate::client::shell) fn workspace_rows(
-    workspace: &ClientShellWorkspace,
-    status: crate::api::schema::AgentStatus,
-    indented: bool,
-    config: &SpacesSidebarConfig,
-) -> Vec<Vec<crate::ui::ResolvedToken>> {
-    let label = if indented && !workspace.custom_label {
-        workspace
-            .branch
-            .as_deref()
-            .and_then(|branch| branch.strip_prefix("worktree/").or(Some(branch)))
-            .unwrap_or(&workspace.label)
-    } else {
-        &workspace.label
-    };
-    let token_values = workspace.tokens.iter().cloned().collect::<HashMap<_, _>>();
-    crate::ui::sidebar_space_rows(
-        config,
-        crate::ui::SpaceTokenContext {
-            workspace: label,
-            branch: workspace.branch.as_deref(),
-            state_text: status_text(status),
-            ahead_behind: workspace.git_ahead_behind,
-            tokens: &token_values,
-            suppress_branch: indented,
-        },
-    )
-}
-
 pub(in crate::client::shell) fn projected_workspace_rows(
     workspace: &ClientShellWorkspace,
     status: crate::api::schema::AgentStatus,
@@ -1087,6 +1108,19 @@ pub(in crate::client::shell) fn projected_workspace_rows(
     )
 }
 
+pub(in crate::client::shell) struct WorkspaceLinkLabels<'a> {
+    pub(in crate::client::shell) repository: Option<&'a str>,
+    pub(in crate::client::shell) branch: Option<&'a str>,
+    pub(in crate::client::shell) upstream: Option<&'a str>,
+}
+
+#[derive(Default)]
+pub(in crate::client::shell) struct WorkspaceRenderedLinks {
+    pub(in crate::client::shell) repository: Option<Rect>,
+    pub(in crate::client::shell) branch: Option<Rect>,
+    pub(in crate::client::shell) upstream: Option<Rect>,
+}
+
 pub(in crate::client::shell) fn render_workspace_rows(
     buffer: &mut Buffer,
     area: Rect,
@@ -1098,7 +1132,9 @@ pub(in crate::client::shell) fn render_workspace_rows(
     selected: bool,
     dragged: bool,
     palette: &Palette,
-) {
+    link_labels: WorkspaceLinkLabels<'_>,
+) -> WorkspaceRenderedLinks {
+    let mut links = WorkspaceRenderedLinks::default();
     for (row_index, row) in rows.iter().enumerate() {
         let y = area.y + row_index as u16;
         if y >= area.bottom() {
@@ -1163,7 +1199,7 @@ pub(in crate::client::shell) fn render_workspace_rows(
         } else {
             palette.overlay0
         });
-        let state_icon = if entry.indented && entry.checkout_index.is_some() {
+        let state_icon = if entry.indented {
             (
                 "",
                 Style::default().fg(if focused || selected {
@@ -1181,15 +1217,55 @@ pub(in crate::client::shell) fn render_workspace_rows(
         let spans = crate::ui::resolved_token_spans(
             row,
             state_icon,
-            Style::default()
-                .fg(status_color(status, palette))
-                .add_modifier(Modifier::DIM),
+            Style::default().fg(status_color(status, palette)),
             workspace_style,
             secondary_style,
             Style::default().fg(palette.overlay1),
             palette,
             area.right().saturating_sub(2).saturating_sub(x) as usize,
         );
+        let link_rect = |needle: &str| {
+            let mut span_offset = 0;
+            for span in &spans {
+                let text = span.content.as_ref();
+                if let Some(byte_offset) = text.find(needle) {
+                    let column_offset =
+                        span_offset + super::render::display_width(&text[..byte_offset]);
+                    let width = super::render::display_width(needle);
+                    return (width > 0)
+                        .then(|| Rect::new(x.saturating_add(column_offset), y, width, 1));
+                }
+                span_offset += super::render::display_width(text);
+            }
+            None
+        };
+        if links.repository.is_none() {
+            links.repository = link_labels.repository.and_then(link_rect);
+        }
+        if links.branch.is_none() {
+            links.branch = link_labels.branch.and_then(link_rect);
+        }
+        if links.upstream.is_none() {
+            links.upstream = link_labels.upstream.and_then(|upstream| {
+                link_rect(upstream).or_else(|| {
+                    let marker = " → ";
+                    let mut span_offset = 0;
+                    for span in &spans {
+                        let text = span.content.as_ref();
+                        if let Some(byte_offset) = text.rfind(marker) {
+                            let byte_offset = byte_offset + marker.len();
+                            let column_offset =
+                                span_offset + super::render::display_width(&text[..byte_offset]);
+                            let width = super::render::display_width(&text[byte_offset..]);
+                            return (width > 0)
+                                .then(|| Rect::new(x.saturating_add(column_offset), y, width, 1));
+                        }
+                        span_offset += super::render::display_width(text);
+                    }
+                    None
+                })
+            });
+        }
         Paragraph::new(Line::from(spans)).render(
             Rect::new(x, y, area.right().saturating_sub(2).saturating_sub(x), 1),
             buffer,
@@ -1212,4 +1288,5 @@ pub(in crate::client::shell) fn render_workspace_rows(
             }
         }
     }
+    links
 }

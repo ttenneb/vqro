@@ -1196,7 +1196,7 @@ mod tests {
     #[tokio::test]
     async fn collection_preview_reserves_one_header_row_from_terminal_geometry() {
         let mut app = AppState::test_new();
-        app.pane_borders = false;
+        app.pane_borders = PaneBordersConfig::Off;
         app.pane_scrollbars = false;
         let mut workspace = Workspace::test_new("test");
         let root = workspace.tabs[0].root_pane;

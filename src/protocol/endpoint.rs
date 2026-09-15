@@ -110,6 +110,10 @@ pub struct ClientShellStructureProjection {
 pub struct ClientShellRepository {
     pub repository_id: String,
     pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub web_url: Option<String>,
     pub checkouts: Vec<ClientShellRepositoryCheckout>,
     pub last_focused_workspace_id: Option<String>,
 }
@@ -117,8 +121,12 @@ pub struct ClientShellRepository {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClientShellRepositoryCheckout {
     pub workspace_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checkout_path: Option<String>,
     pub kind: ClientShellCheckoutKind,
     pub upstream: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream_web_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detached_head: Option<String>,
 }
@@ -568,10 +576,14 @@ mod tests {
             repositories: vec![ClientShellRepository {
                 repository_id: "repo_1".into(),
                 label: "vqro".into(),
+                repository_path: Some("/repo".into()),
+                web_url: Some("https://github.com/example/vqro".into()),
                 checkouts: vec![ClientShellRepositoryCheckout {
                     workspace_id: "w1".into(),
+                    checkout_path: Some("/repo".into()),
                     kind: ClientShellCheckoutKind::Primary,
                     upstream: Some("origin/main".into()),
+                    upstream_web_url: Some("https://github.com/example/vqro/tree/main".into()),
                     detached_head: None,
                 }],
                 last_focused_workspace_id: Some("w1".into()),
@@ -591,6 +603,26 @@ mod tests {
             serde_json::from_str::<ClientShellStructureProjection>(&data).unwrap(),
             projection
         );
+
+        let mut legacy = serde_json::to_value(&projection).unwrap();
+        let repository = legacy["repositories"][0].as_object_mut().unwrap();
+        repository.remove("repository_path");
+        repository.remove("web_url");
+        repository["checkouts"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("upstream_web_url");
+        repository["checkouts"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("checkout_path");
+        let legacy: ClientShellStructureProjection = serde_json::from_value(legacy).unwrap();
+        assert!(legacy.repositories[0].repository_path.is_none());
+        assert!(legacy.repositories[0].web_url.is_none());
+        assert!(legacy.repositories[0].checkouts[0]
+            .upstream_web_url
+            .is_none());
+        assert!(legacy.repositories[0].checkouts[0].checkout_path.is_none());
     }
 
     #[test]

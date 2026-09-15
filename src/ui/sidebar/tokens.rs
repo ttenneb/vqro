@@ -378,7 +378,7 @@ rows = [[{ token = "$load", rules = [{ lt = 50, hide = true }] }], ["workspace"]
                     branch: None,
                     state_text: "working",
                     ahead_behind: None,
-                    suppress_git_details: false,
+                    suppress_branch: false,
                     tokens: &entry.tokens,
                 },
             );

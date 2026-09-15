@@ -10,7 +10,7 @@ pub(super) struct BranchConfig {
     pub(super) remote: String,
     pub(super) merge_ref: String,
     fetch_refspecs: Vec<(String, String)>,
-    remote_urls: Vec<(String, String)>,
+    pub(super) remote_urls: Vec<(String, String)>,
 }
 
 type FileStamp = Option<(Option<SystemTime>, u64)>;

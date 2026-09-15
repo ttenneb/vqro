@@ -1,6 +1,6 @@
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use interprocess::local_socket::traits::Stream as _;
@@ -17,6 +17,7 @@ const MIN_SOCKET_TIMEOUT: Duration = Duration::from_millis(1);
 const MAX_IMPORTED_SNAPSHOT_BYTES: u64 = 64 * 1024 * 1024;
 
 static EXPLICIT_SESSION_REQUESTED: AtomicBool = AtomicBool::new(false);
+static IMPORT_STAGING_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct SessionInfo {
@@ -196,6 +197,8 @@ fn strip_imported_agent_resume_metadata(snapshot: &mut serde_json::Value) {
             };
             for pane in panes.values_mut() {
                 if let Some(pane) = pane.as_object_mut() {
+                    pane.remove("agent_name");
+                    pane.remove("managed_agent_kind");
                     pane.remove("agent_session");
                     pane.remove("launch_argv");
                 }
@@ -218,6 +221,15 @@ pub fn import_herdr_session(
         source_name,
         target_name,
     )
+}
+
+fn publish_import_snapshot_no_replace(
+    staging_snapshot: &Path,
+    target_snapshot: &Path,
+) -> std::io::Result<()> {
+    // Both paths live below the same sessions directory. A hard link publishes the already
+    // synced inode atomically and fails if any creator won the destination name first.
+    std::fs::hard_link(staging_snapshot, target_snapshot)
 }
 
 fn import_herdr_session_from_roots(
@@ -312,8 +324,23 @@ fn import_herdr_session_from_roots(
         }
         Ok(_) => {}
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-            std::fs::create_dir(&sessions_dir)
-                .map_err(|err| format!("cannot create {}: {err}", sessions_dir.display()))?;
+            match std::fs::create_dir(&sessions_dir) {
+                Ok(()) => {}
+                Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+                    let metadata = std::fs::symlink_metadata(&sessions_dir).map_err(|err| {
+                        format!("cannot inspect {}: {err}", sessions_dir.display())
+                    })?;
+                    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                        return Err(format!(
+                            "vqro sessions path is not a real directory: {}",
+                            sessions_dir.display()
+                        ));
+                    }
+                }
+                Err(err) => {
+                    return Err(format!("cannot create {}: {err}", sessions_dir.display()));
+                }
+            }
         }
         Err(err) => return Err(format!("cannot inspect {}: {err}", sessions_dir.display())),
     }
@@ -323,26 +350,12 @@ fn import_herdr_session_from_roots(
         return Err("vqro sessions directory escapes the vqro data directory".to_string());
     }
     let target_dir = sessions_dir.join(target_name);
-    match std::fs::symlink_metadata(&target_dir) {
-        Ok(_) => {
-            return Err(format!(
-                "vqro session {target_name} already exists; choose a new name"
-            ));
-        }
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-        Err(err) => return Err(format!("cannot inspect import target: {err}")),
-    }
-    let staging_dir = vqro_root.join(format!(
-        ".session-import-{target_name}-{}-{}",
+    // Keep staging on the destination filesystem so hard-link publication cannot cross devices.
+    let staging_snapshot = sessions_dir.join(format!(
+        ".session-import-{target_name}-{}-{}.json",
         std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos()
+        IMPORT_STAGING_SEQUENCE.fetch_add(1, Ordering::Relaxed)
     ));
-    std::fs::create_dir(&staging_dir)
-        .map_err(|err| format!("cannot create import staging directory: {err}"))?;
-    let staging_snapshot = staging_dir.join("session.json");
     let result = (|| -> Result<(), String> {
         let mut file = std::fs::OpenOptions::new()
             .write(true)
@@ -353,22 +366,51 @@ fn import_herdr_session_from_roots(
             .map_err(|err| format!("cannot write imported snapshot: {err}"))?;
         file.sync_all()
             .map_err(|err| format!("cannot sync imported snapshot: {err}"))?;
-        match std::fs::symlink_metadata(&target_dir) {
-            Ok(_) => {
+        drop(file);
+
+        match std::fs::create_dir(&target_dir) {
+            Ok(()) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
                 return Err(format!(
                     "vqro session {target_name} already exists; choose a new name"
                 ));
             }
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-            Err(err) => return Err(format!("cannot inspect import target: {err}")),
+            Err(err) => return Err(format!("cannot reserve imported session: {err}")),
         }
-        std::fs::rename(&staging_dir, &target_dir)
-            .map_err(|err| format!("cannot publish imported session: {err}"))?;
+        if let Err(err) = crate::platform::sync_parent_directory(&sessions_dir) {
+            let _ = std::fs::remove_dir(&target_dir);
+            return Err(format!("cannot sync imported session reservation: {err}"));
+        }
+        let target_snapshot = target_dir.join("session.json");
+        if let Err(err) = publish_import_snapshot_no_replace(&staging_snapshot, &target_snapshot) {
+            // Never recurse: another creator may have populated this directory after reservation.
+            let _ = std::fs::remove_dir(&target_dir);
+            if err.kind() == std::io::ErrorKind::AlreadyExists {
+                return Err(format!(
+                    "vqro session {target_name} already exists; choose a new name"
+                ));
+            }
+            return Err(format!("cannot publish imported session: {err}"));
+        }
+        crate::platform::sync_parent_directory(&target_dir)
+            .map_err(|err| format!("cannot sync imported session: {err}"))?;
+        if let Err(err) = std::fs::remove_file(&staging_snapshot) {
+            tracing::warn!(
+                path = %staging_snapshot.display(),
+                %err,
+                "could not remove imported session staging link"
+            );
+        } else if let Err(err) = crate::platform::sync_parent_directory(&sessions_dir) {
+            tracing::warn!(
+                path = %sessions_dir.display(),
+                %err,
+                "could not sync imported session staging cleanup"
+            );
+        }
         Ok(())
     })();
     if result.is_err() {
         let _ = std::fs::remove_file(&staging_snapshot);
-        let _ = std::fs::remove_dir(&staging_dir);
     }
     result?;
 
@@ -712,6 +754,34 @@ mod tests {
     }
 
     #[test]
+    fn imported_snapshot_publication_never_replaces_an_existing_file() {
+        let root = std::env::temp_dir().join(format!(
+            "vqro-session-publish-no-replace-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let staging = root.join("staging.json");
+        let target = root.join("session.json");
+        std::fs::write(&staging, "imported").unwrap();
+        std::fs::write(&target, "creator").unwrap();
+
+        let error = publish_import_snapshot_no_replace(&staging, &target).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "creator");
+        assert_eq!(std::fs::read_to_string(&staging).unwrap(), "imported");
+
+        std::fs::remove_file(&target).unwrap();
+        publish_import_snapshot_no_replace(&staging, &target).unwrap();
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "imported");
+        assert_eq!(std::fs::read_to_string(&staging).unwrap(), "imported");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn herdr_import_copies_default_and_named_snapshots_without_overwrite() {
         let root = std::env::temp_dir().join(format!(
             "vqro-session-import-{}-{}",
@@ -763,6 +833,9 @@ mod tests {
                     "panes": {
                         "1": {
                             "cwd": "/tmp",
+                            "label": "manual label",
+                            "agent_name": "reviewer",
+                            "managed_agent_kind": "pi",
                             "agent_session": { "agent": "pi", "value": "shared" },
                             "launch_argv": ["pi", "--resume"]
                         }
@@ -774,9 +847,226 @@ mod tests {
         strip_imported_agent_resume_metadata(&mut snapshot);
 
         let pane = &snapshot["workspaces"][0]["tabs"][0]["panes"]["1"];
+        assert!(pane.get("agent_name").is_none());
+        assert!(pane.get("managed_agent_kind").is_none());
         assert!(pane.get("agent_session").is_none());
         assert!(pane.get("launch_argv").is_none());
         assert_eq!(pane["cwd"], "/tmp");
+        assert_eq!(pane["label"], "manual label");
+    }
+
+    #[tokio::test]
+    async fn nonempty_herdr_import_restores_structure_without_agent_projection() {
+        let root = std::env::temp_dir().join(format!(
+            "vqro-session-import-restore-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let herdr_root = root.join("herdr");
+        let vqro_root = root.join("vqro");
+        let cwd = root.join("checkout");
+        std::fs::create_dir_all(&cwd).unwrap();
+        std::fs::create_dir_all(&herdr_root).unwrap();
+        let source = serde_json::json!({
+            "version": 4,
+            "workspaces": [{
+                "id": "w-imported",
+                "custom_name": "manual workspace",
+                "identity_cwd": cwd,
+                "checkout": {
+                    "repository_id": "repo-imported",
+                    "checkout_path": cwd,
+                    "kind": "primary"
+                },
+                "public_pane_numbers": {"7": 1},
+                "next_public_pane_number": 2,
+                "public_tab_numbers": [1],
+                "next_public_tab_number": 2,
+                "tabs": [{
+                    "custom_name": "manual tab",
+                    "layout": {"Collection": "collection_77"},
+                    "collections": [{
+                        "id": "collection_77",
+                        "label": "review group",
+                        "members": [7],
+                        "selected": 7,
+                        "archived": []
+                    }],
+                    "panes": {"7": {
+                        "cwd": cwd,
+                        "label": "manual pane",
+                        "agent_name": "reviewer",
+                        "managed_agent_kind": "pi",
+                        "agent_session": {
+                            "source": "herdr:pi",
+                            "agent": "pi",
+                            "kind": "path",
+                            "value": "/tmp/shared-agent-session"
+                        },
+                        "launch_argv": ["pi", "--resume"]
+                    }},
+                    "zoomed": false,
+                    "focused": 7,
+                    "focused_leaf": {"type": "collection", "id": "collection_77"},
+                    "root_pane": 7
+                }],
+                "active_tab": 0
+            }],
+            "repositories": [{
+                "id": "repo-imported",
+                "git_common_dir": cwd.join(".git"),
+                "label": "repository label",
+                "custom_name": "manual repository",
+                "preferred_base": "main",
+                "checkout_workspace_ids": ["w-imported"],
+                "last_focused_workspace_id": "w-imported"
+            }],
+            "space_order": [{"kind": "repository", "id": "repo-imported"}],
+            "active": 0,
+            "selected": 0,
+            "delegations": [{
+                "id": "d77",
+                "pane_id": 7,
+                "parent_id": null,
+                "purpose": "preserved purpose",
+                "sibling_rank": 0,
+                "tombstone": false
+            }]
+        });
+        std::fs::write(
+            herdr_root.join("session.json"),
+            serde_json::to_vec_pretty(&source).unwrap(),
+        )
+        .unwrap();
+
+        import_herdr_session_from_roots(&herdr_root, &vqro_root, None, "restored").unwrap();
+        let imported: crate::persist::SessionSnapshot = serde_json::from_slice(
+            &std::fs::read(vqro_root.join("sessions/restored/session.json")).unwrap(),
+        )
+        .unwrap();
+        let pane = &imported.workspaces[0].tabs[0].panes[&7];
+        assert_eq!(pane.cwd, cwd);
+        assert_eq!(pane.label.as_deref(), Some("manual pane"));
+        assert!(pane.agent_name.is_none());
+        assert!(pane.managed_agent_kind.is_none());
+        assert!(pane.agent_session.is_none());
+        assert!(pane.launch_argv.is_none());
+        assert_eq!(
+            imported.repositories[0].custom_name.as_deref(),
+            Some("manual repository")
+        );
+        assert_eq!(
+            imported.repositories[0].preferred_base.as_deref(),
+            Some("main")
+        );
+        assert_eq!(
+            imported.delegations[0].purpose.as_deref(),
+            Some("preserved purpose")
+        );
+
+        let (events, _event_rx) = tokio::sync::mpsc::channel(16);
+        let (workspaces, terminals, runtimes) = crate::persist::restore(
+            &imported,
+            None,
+            24,
+            80,
+            1024 * 1024,
+            "/bin/sh",
+            crate::config::ShellModeConfig::NonLogin,
+            true,
+            events,
+            std::sync::Arc::new(tokio::sync::Notify::new()),
+            std::sync::Arc::new(crate::render_signal::RenderSignal::new()),
+        );
+        assert_eq!(
+            workspaces[0].custom_name.as_deref(),
+            Some("manual workspace")
+        );
+        assert_eq!(workspaces[0].identity_cwd, cwd);
+        assert_eq!(
+            workspaces[0].tabs[0].custom_name.as_deref(),
+            Some("manual tab")
+        );
+        assert_eq!(workspaces[0].tabs[0].layout.collection_ids().len(), 1);
+        let restored_pane = *workspaces[0].tabs[0].panes.keys().next().unwrap();
+        let terminal_id = &workspaces[0].tabs[0].panes[&restored_pane].attached_terminal_id;
+        let terminal = &terminals[terminal_id];
+        assert_eq!(terminal.cwd, cwd);
+        assert_eq!(terminal.manual_label.as_deref(), Some("manual pane"));
+        assert!(terminal.agent_name.is_none());
+        assert!(terminal.managed_agent_kind().is_none());
+        assert!(terminal.persisted_agent_session.is_none());
+        assert!(terminal.pending_agent_resume_plan.is_none());
+        assert!(terminal.launch_argv.is_none());
+        let delegations = crate::persist::restore_delegations(&imported, &workspaces);
+        assert_eq!(delegations.records().len(), 1);
+        assert_eq!(
+            delegations
+                .records()
+                .values()
+                .next()
+                .unwrap()
+                .purpose
+                .as_deref(),
+            Some("preserved purpose")
+        );
+        drop(runtimes);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn concurrent_herdr_imports_reserve_the_target_without_overwrite() {
+        let root = std::env::temp_dir().join(format!(
+            "vqro-session-import-race-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let herdr_root = root.join("herdr");
+        let vqro_root = root.join("vqro");
+        let snapshot = r#"{"version":4,"workspaces":[],"repositories":[],"space_order":[],"active":null,"selected":0}"#;
+        std::fs::create_dir_all(&herdr_root).unwrap();
+        std::fs::write(herdr_root.join("session.json"), snapshot).unwrap();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+        let mut imports = Vec::new();
+        for _ in 0..8 {
+            let barrier = std::sync::Arc::clone(&barrier);
+            let herdr_root = herdr_root.clone();
+            let vqro_root = vqro_root.clone();
+            imports.push(std::thread::spawn(move || {
+                barrier.wait();
+                import_herdr_session_from_roots(&herdr_root, &vqro_root, None, "shared")
+            }));
+        }
+        let results = imports
+            .into_iter()
+            .map(|import| import.join().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+        assert_eq!(results.iter().filter(|result| result.is_err()).count(), 7);
+        assert!(results
+            .iter()
+            .filter_map(|result| result.as_ref().err())
+            .all(|error| error == "vqro session shared already exists; choose a new name"));
+        crate::persist::validate_snapshot(
+            &std::fs::read_to_string(vqro_root.join("sessions/shared/session.json")).unwrap(),
+        )
+        .unwrap();
+        assert!(std::fs::read_dir(vqro_root.join("sessions"))
+            .unwrap()
+            .all(|entry| {
+                !entry
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".session-import-")
+            }));
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

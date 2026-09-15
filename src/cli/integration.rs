@@ -86,9 +86,15 @@ fn describe_integration_state(
 }
 
 fn integration_install(args: &[String]) -> std::io::Result<i32> {
-    let Some(_target) = parse_integration_target(args, "install")? else {
+    let Some(target) = parse_integration_target(args, "install")? else {
         return Ok(2);
     };
+    match &target {
+        IntegrationCommandTarget::Builtin(target) => {
+            let _ = target;
+        }
+        IntegrationCommandTarget::Letta => {}
+    }
     eprintln!(
         "vqro integration installation is disabled until integrations use the vqro namespace"
     );
@@ -96,9 +102,15 @@ fn integration_install(args: &[String]) -> std::io::Result<i32> {
 }
 
 fn integration_uninstall(args: &[String]) -> std::io::Result<i32> {
-    let Some(_target) = parse_integration_target(args, "uninstall")? else {
+    let Some(target) = parse_integration_target(args, "uninstall")? else {
         return Ok(2);
     };
+    match &target {
+        IntegrationCommandTarget::Builtin(target) => {
+            let _ = target;
+        }
+        IntegrationCommandTarget::Letta => {}
+    }
     eprintln!("vqro integration removal is disabled to avoid modifying Herdr-owned integrations");
     Ok(1)
 }

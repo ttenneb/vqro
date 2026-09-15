@@ -194,17 +194,23 @@ fn typed_repository_projection_drives_space_identity_git_context_and_compact_cou
         repositories: vec![crate::protocol::endpoint::ClientShellRepository {
             repository_id: "repo_1".into(),
             label: "custom repository".into(),
+            repository_path: Some("/repo/custom".into()),
+            web_url: Some("https://github.com/example/custom".into()),
             checkouts: vec![
                 crate::protocol::endpoint::ClientShellRepositoryCheckout {
                     workspace_id: "ws_1".into(),
+                    checkout_path: Some("/repo/custom".into()),
                     kind: crate::protocol::endpoint::ClientShellCheckoutKind::Primary,
                     upstream: Some("origin/main".into()),
+                    upstream_web_url: Some("https://github.com/example/custom/tree/main".into()),
                     detached_head: None,
                 },
                 crate::protocol::endpoint::ClientShellRepositoryCheckout {
                     workspace_id: "ws_2".into(),
+                    checkout_path: Some("/repo/linked".into()),
                     kind: crate::protocol::endpoint::ClientShellCheckoutKind::Linked,
                     upstream: None,
+                    upstream_web_url: None,
                     detached_head: None,
                 },
             ],
@@ -252,6 +258,93 @@ fn typed_repository_projection_drives_space_identity_git_context_and_compact_cou
     );
     assert!(text.contains("↑2 ↓1"), "{text}");
     assert!(state.hits.workspaces[0].group_toggle.is_some());
+    assert_eq!(
+        state
+            .hits
+            .space_links
+            .iter()
+            .filter(|hit| matches!(hit.target, SpaceLinkTarget::LocalDirectory(_)))
+            .count(),
+        3,
+        "the repository and both local branch labels open the checkout"
+    );
+    for hit in &state.hits.space_links {
+        let index = usize::from(hit.rect.y) * usize::from(frame.width) + usize::from(hit.rect.x);
+        let hyperlink = frame.cells[index].hyperlink.expect("OSC 8 link") as usize;
+        let expected = match &hit.target {
+            SpaceLinkTarget::LocalDirectory(path) => format!("file://{path}"),
+            SpaceLinkTarget::WebUrl(_) => "https://github.com/example/custom/tree/main".to_string(),
+        };
+        assert_eq!(frame.hyperlinks[hyperlink], expected);
+    }
+    assert!(state.hits.space_links.iter().any(|hit| matches!(
+        &hit.target,
+        SpaceLinkTarget::LocalDirectory(path) if path == "/repo/linked"
+    )));
+    let repository_link = state
+        .hits
+        .space_links
+        .iter()
+        .find(|hit| matches!(hit.target, SpaceLinkTarget::LocalDirectory(_)))
+        .expect("repository directory link");
+    assert!(matches!(
+        &repository_link.target,
+        SpaceLinkTarget::LocalDirectory(path) if path == "/repo/custom"
+    ));
+    let upstream_link = state
+        .hits
+        .space_links
+        .iter()
+        .find(|hit| matches!(hit.target, SpaceLinkTarget::WebUrl(_)))
+        .expect("upstream web link");
+    assert!(matches!(
+        &upstream_link.target,
+        SpaceLinkTarget::WebUrl(url)
+            if url == "https://github.com/example/custom/tree/main"
+    ));
+    let repository_rect = repository_link.rect;
+    let upstream_rect = upstream_link.rect;
+    for (rect, expected) in [
+        (
+            repository_rect,
+            SpaceLinkTarget::LocalDirectory("/repo/custom".into()),
+        ),
+        (
+            upstream_rect,
+            SpaceLinkTarget::WebUrl("https://github.com/example/custom/tree/main".into()),
+        ),
+    ] {
+        let click =
+            state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: rect.x,
+                row: rect.y,
+                modifiers: KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+            })]);
+        assert!(
+            matches!(
+                (&click.actions[..], &expected),
+                ([ClientShellAction::OpenLocalDirectory(actual)], SpaceLinkTarget::LocalDirectory(expected))
+                    if actual == expected
+            ) || matches!(
+                (&click.actions[..], &expected),
+                ([ClientShellAction::OpenSafeWebUrl(actual)], SpaceLinkTarget::WebUrl(expected))
+                    if actual == expected
+            )
+        );
+    }
+    let ctrl_only_click =
+        state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: upstream_rect.x,
+            row: upstream_rect.y,
+            modifiers: KeyModifiers::CONTROL,
+        })]);
+    assert!(matches!(
+        &ctrl_only_click.actions[..],
+        [ClientShellAction::OpenSafeWebUrl(url)]
+            if url == "https://github.com/example/custom/tree/main"
+    ));
 
     state.collapsed_groups.insert("repo_1".into());
     state.compose(106, 24).expect("collapsed repository space");
@@ -359,10 +452,14 @@ fn typed_single_checkout_repository_is_still_a_repository_space() {
         repositories: vec![crate::protocol::endpoint::ClientShellRepository {
             repository_id: "repo_1".into(),
             label: "stable repository label".into(),
+            repository_path: None,
+            web_url: None,
             checkouts: vec![crate::protocol::endpoint::ClientShellRepositoryCheckout {
                 workspace_id: "ws_1".into(),
+                checkout_path: None,
                 kind: crate::protocol::endpoint::ClientShellCheckoutKind::Primary,
                 upstream: None,
+                upstream_web_url: None,
                 detached_head: Some("abc1234".into()),
             }],
             last_focused_workspace_id: Some("ws_1".into()),
@@ -465,17 +562,23 @@ fn typed_repository_drag_moves_all_checkouts_when_visual_root_is_linked() {
         repositories: vec![crate::protocol::endpoint::ClientShellRepository {
             repository_id: "repo_1".into(),
             label: "repo".into(),
+            repository_path: None,
+            web_url: None,
             checkouts: vec![
                 crate::protocol::endpoint::ClientShellRepositoryCheckout {
                     workspace_id: "ws_1".into(),
+                    checkout_path: None,
                     kind: crate::protocol::endpoint::ClientShellCheckoutKind::Linked,
                     upstream: None,
+                    upstream_web_url: None,
                     detached_head: None,
                 },
                 crate::protocol::endpoint::ClientShellRepositoryCheckout {
                     workspace_id: "ws_2".into(),
+                    checkout_path: None,
                     kind: crate::protocol::endpoint::ClientShellCheckoutKind::Linked,
                     upstream: None,
+                    upstream_web_url: None,
                     detached_head: None,
                 },
             ],
@@ -1457,7 +1560,7 @@ fn worktree_action_errors_expire_without_more_input() {
         crate::input::KeybindMatch::Action(crate::input::KeybindAction::RemoveWorktree),
         &mut guard,
     );
-    let message = "This workspace is not a Herdr-managed worktree checkout.";
+    let message = "This workspace is not a vqro-managed worktree checkout.";
     assert_eq!(state.endpoint_error.as_deref(), Some(message));
 
     let deadline = state.endpoint_error_deadline.expect("deadline");
@@ -1496,7 +1599,7 @@ fn worktree_prepare_rejection_notice_expires() {
         &request_id,
         Err(ClientShellEndpointError {
             code: Some("not_git_worktree".into()),
-            message: "Herdr worktree actions require a workspace inside a Git work tree".into(),
+            message: "vqro worktree actions require a workspace inside a Git work tree".into(),
         }),
     );
     let notice = state

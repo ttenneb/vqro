@@ -55,6 +55,18 @@ pub(super) fn dispatch_client_shell_actions(
                     }
                 }
             }
+            shell::ClientShellAction::OpenLocalDirectory(path) => {
+                let path = std::path::PathBuf::from(path);
+                if path.is_absolute() && path.is_dir() {
+                    match crate::platform::open_path(&path) {
+                        Ok(Some(child)) => detached_process_children.push(child),
+                        Ok(None) => {}
+                        Err(err) => {
+                            warn!(err = %err, path = %path.display(), "failed to open repository directory")
+                        }
+                    }
+                }
+            }
             shell::ClientShellAction::ReplayMouse(events) => replay_mouse.extend(events),
             shell::ClientShellAction::Keybind(action) => {
                 debug!(

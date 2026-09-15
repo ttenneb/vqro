@@ -774,6 +774,10 @@ async fn client_shell_pairs_agent_view_set_replacement_and_clear_with_snapshots(
             endpoint_keybindings: false,
             mouse_capture: false,
             surface_active: false,
+            structure_enabled: false,
+            pane_viewport_enabled: false,
+            pane_view_enabled: false,
+            terminal_views_enabled: false,
             writer,
         })
     );

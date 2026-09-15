@@ -294,6 +294,10 @@ async fn background_surface_activation_preserves_focused_viewer_geometry() {
             endpoint_keybindings: false,
             mouse_capture: false,
             surface_active: false,
+            structure_enabled: false,
+            pane_viewport_enabled: false,
+            pane_view_enabled: false,
+            terminal_views_enabled: false,
             writer,
         })
     );

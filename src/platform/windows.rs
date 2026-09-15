@@ -15,6 +15,10 @@ use std::{
 
 mod clipboard_image;
 
+pub(crate) fn local_listener_accept_error_is_resource_exhaustion(error: &std::io::Error) -> bool {
+    error.raw_os_error() == Some(10024) // WSAEMFILE
+}
+
 pub(crate) fn classify_child_exit(status: &portable_pty::ExitStatus) -> super::ChildExitReason {
     // STATUS_CONTROL_C_EXIT is reported without a Unix signal by portable-pty.
     if status.exit_code() == 0xC000013A {
@@ -2080,6 +2084,13 @@ pub fn write_clipboard(bytes: &[u8]) -> bool {
 
 pub fn read_clipboard_text() -> Option<String> {
     None
+}
+
+pub fn open_path(path: &std::path::Path) -> std::io::Result<Option<std::process::Child>> {
+    std::process::Command::new("explorer.exe")
+        .arg(path)
+        .spawn()
+        .map(Some)
 }
 
 pub fn open_url(url: &str) -> std::io::Result<Option<std::process::Child>> {

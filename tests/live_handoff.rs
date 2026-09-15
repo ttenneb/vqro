@@ -688,7 +688,7 @@ fn live_handoff_unknown_pane_exit_preserves_session_on_shutdown() {
     }
 
     let session: serde_json::Value = serde_json::from_slice(
-        &fs::read(config_home.join("herdr-dev/session.json")).expect("saved session"),
+        &fs::read(config_home.join("vqro-dev/session.json")).expect("saved session"),
     )
     .expect("valid session json");
     assert_eq!(session["workspaces"].as_array().map(Vec::len), Some(1));

@@ -24,6 +24,8 @@ pub(crate) fn install_target(
 
 /// Experimental Letta install that bypasses the frozen client endpoint
 /// `IntegrationTarget` enum. Fold into the agent registry when it lands.
+// Retained from upstream while vqro's alpha product boundary disables integration mutation.
+#[allow(dead_code)]
 pub(crate) fn install_experimental_letta() -> io::Result<Vec<String>> {
     let result = install_letta().map(|installed| {
         vec![
@@ -43,6 +45,8 @@ pub(crate) fn install_experimental_letta() -> io::Result<Vec<String>> {
 }
 
 /// Experimental Letta uninstall counterpart.
+// Retained from upstream while vqro's alpha product boundary disables integration mutation.
+#[allow(dead_code)]
 pub(crate) fn uninstall_experimental_letta() -> io::Result<Vec<String>> {
     let result = uninstall_letta().map(|result| {
         let mut messages = Vec::new();

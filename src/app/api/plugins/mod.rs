@@ -1815,12 +1815,12 @@ platforms = ["linux"]
 [[actions]]
 id = "probe"
 title = "Probe executable"
-command = ["sh", "-c", '"$HERDR_BIN_PATH" --list >/dev/null; printf "%s\n" "$?" > action-status']
+command = ["sh", "-c", '"$VQRO_BIN_PATH" --list >/dev/null; printf "%s\n" "$?" > action-status']
 
 [[panes]]
 id = "probe"
 title = "Probe executable"
-command = ["sh", "-c", '"$HERDR_BIN_PATH" --list >/dev/null; printf "%s\n" "$?" > pane-status']
+command = ["sh", "-c", '"$VQRO_BIN_PATH" --list >/dev/null; printf "%s\n" "$?" > pane-status']
 "#,
             );
             link_manifest(&mut app, &plugin_root);
@@ -1856,13 +1856,13 @@ command = ["sh", "-c", '"$HERDR_BIN_PATH" --list >/dev/null; printf "%s\n" "$?" 
             assert_eq!(
                 (action_status.trim(), pane_status.trim()),
                 ("0", "0"),
-                "plugin action and pane must launch Herdr after its executable is replaced"
+                "plugin action and pane must launch vqro after its executable is replaced"
             );
             return;
         }
 
         let root = std::path::PathBuf::from("/var/tmp").join(format!(
-            "herdr-plugin-update-{}-{}",
+            "vqro-plugin-update-{}-{}",
             std::process::id(),
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -1870,7 +1870,7 @@ command = ["sh", "-c", '"$HERDR_BIN_PATH" --list >/dev/null; printf "%s\n" "$?" 
                 .as_nanos()
         ));
         std::fs::create_dir_all(&root).unwrap();
-        let executable = root.join("herdr test");
+        let executable = root.join("vqro test");
         std::fs::copy(std::env::current_exe().unwrap(), &executable).unwrap();
         let result = std::process::Command::new(&executable)
             .args([

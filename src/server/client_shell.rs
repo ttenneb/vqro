@@ -28,27 +28,45 @@ pub(super) fn structure_projection(
                     .unwrap_or(&upstream.full_ref)
                     .to_owned()
             });
+        let repository_web_url = fingerprint.and_then(|fingerprint| {
+            crate::repository::canonical_repository_web_url(
+                fingerprint.preferred_repository_remote_url()?,
+            )
+        });
+        let upstream_web_url = fingerprint.and_then(|fingerprint| {
+            let branch = fingerprint
+                .upstream
+                .as_ref()?
+                .merge_ref
+                .strip_prefix("refs/heads/")?;
+            crate::repository::repository_branch_web_url(repository_web_url.as_deref()?, branch)
+        });
         let detached_head = fingerprint.and_then(|fingerprint| match &fingerprint.head {
             crate::workspace::GitHeadIdentity::Detached { oid } => {
                 Some(oid.chars().take(8).collect())
             }
             crate::workspace::GitHeadIdentity::Branch { .. } => None,
         });
-        (upstream, detached_head)
+        (
+            upstream,
+            repository_web_url,
+            upstream_web_url,
+            detached_head,
+        )
     };
     let repositories = app
         .state
         .repositories
         .iter()
-        .map(|repository| protocol::endpoint::ClientShellRepository {
-            repository_id: repository.id.clone(),
-            label: repository.display_label().to_owned(),
-            checkouts: repository
+        .map(|repository| {
+            let mut web_url = None;
+            let checkouts = repository
                 .checkout_workspace_ids
                 .iter()
                 .filter_map(|workspace_id| {
                     let workspace = workspace_index.get(workspace_id.as_str())?;
-                    let kind = match workspace.checkout.as_ref()?.kind {
+                    let checkout = workspace.checkout.as_ref()?;
+                    let kind = match checkout.kind {
                         crate::repository::CheckoutKind::Primary => {
                             protocol::endpoint::ClientShellCheckoutKind::Primary
                         }
@@ -56,16 +74,43 @@ pub(super) fn structure_projection(
                             protocol::endpoint::ClientShellCheckoutKind::Linked
                         }
                     };
-                    let (upstream, detached_head) = git_identity_for_workspace(workspace_id);
+                    let (upstream, repository_web_url, upstream_web_url, detached_head) =
+                        git_identity_for_workspace(workspace_id);
+                    if web_url.is_none() {
+                        web_url = repository_web_url;
+                    }
                     Some(protocol::endpoint::ClientShellRepositoryCheckout {
                         workspace_id: workspace_id.clone(),
+                        checkout_path: Some(checkout.checkout_path.display().to_string()),
                         kind,
                         upstream,
+                        upstream_web_url,
                         detached_head,
                     })
                 })
-                .collect(),
-            last_focused_workspace_id: repository.last_focused_workspace_id.clone(),
+                .collect::<Vec<_>>();
+            let repository_path = repository
+                .checkout_workspace_ids
+                .iter()
+                .filter_map(|workspace_id| workspace_index.get(workspace_id.as_str()))
+                .filter_map(|workspace| workspace.checkout.as_ref())
+                .find(|checkout| checkout.kind == crate::repository::CheckoutKind::Primary)
+                .or_else(|| {
+                    repository
+                        .checkout_workspace_ids
+                        .iter()
+                        .filter_map(|workspace_id| workspace_index.get(workspace_id.as_str()))
+                        .find_map(|workspace| workspace.checkout.as_ref())
+                })
+                .map(|checkout| checkout.checkout_path.display().to_string());
+            protocol::endpoint::ClientShellRepository {
+                repository_id: repository.id.clone(),
+                label: repository.display_label().to_owned(),
+                repository_path,
+                web_url,
+                checkouts,
+                last_focused_workspace_id: repository.last_focused_workspace_id.clone(),
+            }
         })
         .collect();
     let space_order = app
@@ -774,18 +819,28 @@ mod tests {
         assert_eq!(projected.repositories.len(), 1);
         assert_eq!(projected.repositories[0].label, "custom repo");
         assert_eq!(
+            projected.repositories[0].repository_path.as_deref(),
+            Some("/repo")
+        );
+        assert_eq!(
             projected.repositories[0]
                 .checkouts
                 .iter()
-                .map(|checkout| (checkout.workspace_id.as_str(), checkout.kind))
+                .map(|checkout| (
+                    checkout.workspace_id.as_str(),
+                    checkout.checkout_path.as_deref(),
+                    checkout.kind,
+                ))
                 .collect::<Vec<_>>(),
             vec![
                 (
                     primary_id.as_str(),
+                    Some("/repo"),
                     protocol::endpoint::ClientShellCheckoutKind::Primary,
                 ),
                 (
                     linked_id.as_str(),
+                    Some("/repo-feature"),
                     protocol::endpoint::ClientShellCheckoutKind::Linked,
                 ),
             ]
