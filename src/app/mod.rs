@@ -909,6 +909,10 @@ impl App {
                 .get(idx)
                 .and_then(|ws| ws.focused_pane_id().map(|pane_id| (idx, pane_id)))
         });
+        // App::new builds provider catalogs before imported state exists. Re-project
+        // every source after ownership transfer so a replacement server never serves
+        // empty startup documents until an unrelated mutation happens.
+        app.refresh_collection_documents();
         Ok(app)
     }
 

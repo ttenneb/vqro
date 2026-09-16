@@ -62,6 +62,9 @@ pub enum ResponseResult {
     ExtensionStateEvents {
         page: crate::extension_state::ExtensionStateEventPageV1,
     },
+    HostDocumentList {
+        documents: Vec<super::HostDocumentProjection>,
+    },
     WorkspaceInfo {
         workspace: WorkspaceInfo,
     },

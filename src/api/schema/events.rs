@@ -82,6 +82,10 @@ pub enum Subscription {
     PaneScrollChanged { pane_id: String },
     #[serde(rename = "layout.updated")]
     LayoutUpdated {},
+    #[serde(rename = "host.document.updated")]
+    HostDocumentUpdated {},
+    #[serde(rename = "extension.state.committed")]
+    ExtensionStateCommitted {},
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -187,6 +191,16 @@ pub enum EventMatch {
         pane_id: String,
         agent_status: AgentStatus,
     },
+    HostDocumentUpdated {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        namespace: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scope_id: Option<String>,
+    },
+    ExtensionStateCommitted {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        namespace: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -220,6 +234,8 @@ pub enum EventKind {
     PaneAgentDetected,
     PaneAgentStatusChanged,
     LayoutUpdated,
+    HostDocumentUpdated,
+    ExtensionStateCommitted,
 }
 
 impl EventKind {
@@ -253,6 +269,8 @@ impl EventKind {
             EventKind::PaneAgentDetected => "pane.agent_detected",
             EventKind::PaneAgentStatusChanged => "pane.agent_status_changed",
             EventKind::LayoutUpdated => "layout.updated",
+            EventKind::HostDocumentUpdated => "host.document.updated",
+            EventKind::ExtensionStateCommitted => "extension.state.committed",
         }
     }
 }
@@ -287,6 +305,8 @@ pub const KNOWN_EVENT_KINDS: &[EventKind] = &[
     EventKind::PaneAgentDetected,
     EventKind::PaneAgentStatusChanged,
     EventKind::LayoutUpdated,
+    EventKind::HostDocumentUpdated,
+    EventKind::ExtensionStateCommitted,
 ];
 
 pub const PLUGIN_HOOK_EVENT_KINDS: &[EventKind] = &[
@@ -503,6 +523,21 @@ pub enum EventData {
     DelegationUpdated {
         action: String,
         delegation: super::DelegationInfo,
+    },
+    HostDocumentUpdated {
+        namespace: String,
+        scope_id: String,
+        generation: u64,
+        revision: u64,
+        available: bool,
+    },
+    ExtensionStateCommitted {
+        namespace: String,
+        store_id: String,
+        store_generation: u64,
+        namespace_revision: u64,
+        first_sequence: u64,
+        last_sequence: u64,
     },
     PaneCreated {
         pane: PaneInfo,

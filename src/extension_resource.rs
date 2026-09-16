@@ -93,7 +93,7 @@ struct ClientInterests {
     interests: BTreeSet<TerminalResourceInterestV1>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct TerminalResourceProjectionV1 {
     pub registry_revision: u64,
     pub provider: ResourceProviderV1,

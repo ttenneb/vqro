@@ -30,19 +30,10 @@ fn rewrite_schema_refs(value: &mut serde_json::Value, schema_name: &str) {
 }
 
 fn protocol_schema_document() -> serde_json::Value {
-    serde_json::json!({
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "title": "Herdr API",
-        "schema_version": 1,
-        "protocol": crate::protocol::PROTOCOL_VERSION,
-        "schemas": {
-            "request": protocol_schema_entry::<Request>("request"),
-            "success_response": protocol_schema_entry::<SuccessResponse>("success_response"),
-            "error_response": protocol_schema_entry::<ErrorResponse>("error_response"),
-            "event": protocol_schema_entry::<EventEnvelope>("event"),
-            "subscription_event": protocol_schema_entry::<SubscriptionEventEnvelope>("subscription_event"),
-        },
-    })
+    // The Herdr schema is a published generation-1 compatibility fixture. Native
+    // vqro additions belong only in native_api_schema_document().
+    serde_json::from_str(include_str!("../../../docs/next/api/herdr-api.schema.json"))
+        .expect("frozen Herdr API schema is valid JSON")
 }
 
 fn native_api_schema_document() -> serde_json::Value {
@@ -220,29 +211,13 @@ fn bundled_protocol_schema_refs_resolve_inside_bundle() {
 }
 
 #[test]
-fn generated_protocol_schema_artifact_is_current() {
-    let actual = format!(
-        "{}\n",
-        serde_json::to_string_pretty(&protocol_schema_document()).unwrap()
-    );
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("docs/next/api/herdr-api.schema.json");
+fn frozen_protocol_schema_artifact_is_unchanged() {
+    use sha2::{Digest, Sha256};
 
-    if std::env::var_os("HERDR_UPDATE_API_SCHEMA").is_some() {
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(&path, &actual).unwrap();
-        return;
-    }
-
-    let expected = std::fs::read_to_string(&path).unwrap_or_else(|err| {
-        panic!(
-            "failed to read {}; run `HERDR_UPDATE_API_SCHEMA=1 just test-one generated_protocol_schema_artifact_is_current`: {err}",
-            path.display()
-        )
-    });
+    let bytes = include_bytes!("../../../docs/next/api/herdr-api.schema.json");
     assert_eq!(
-        expected, actual,
-        "generated API schema artifact is stale; run `HERDR_UPDATE_API_SCHEMA=1 just test-one generated_protocol_schema_artifact_is_current`"
+        format!("{:x}", Sha256::digest(bytes)),
+        "a275001298cb2726fb496e5d49924fe39b73ca9dd34971909b6f4f5b34a6c633"
     );
 }
 

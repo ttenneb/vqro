@@ -622,6 +622,86 @@
             },
             {
               "properties": {
+                "available": {
+                  "type": "boolean"
+                },
+                "generation": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "namespace": {
+                  "type": "string"
+                },
+                "revision": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "scope_id": {
+                  "type": "string"
+                },
+                "type": {
+                  "const": "host_document_updated",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "namespace",
+                "scope_id",
+                "generation",
+                "revision",
+                "available"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "first_sequence": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "last_sequence": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "namespace": {
+                  "type": "string"
+                },
+                "namespace_revision": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "store_generation": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "store_id": {
+                  "type": "string"
+                },
+                "type": {
+                  "const": "extension_state_committed",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "namespace",
+                "store_id",
+                "store_generation",
+                "namespace_revision",
+                "first_sequence",
+                "last_sequence"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
                 "pane": {
                   "$ref": "#/schemas/event/$defs/PaneInfo"
                 },
@@ -932,7 +1012,9 @@
             "pane_exited",
             "pane_agent_detected",
             "pane_agent_status_changed",
-            "layout_updated"
+            "layout_updated",
+            "host_document_updated",
+            "extension_state_committed"
           ],
           "type": "string"
         },
@@ -2618,6 +2700,48 @@
                 "agent_status"
               ],
               "type": "object"
+            },
+            {
+              "properties": {
+                "event": {
+                  "const": "host_document_updated",
+                  "type": "string"
+                },
+                "namespace": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "scope_id": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "event"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "event": {
+                  "const": "extension_state_committed",
+                  "type": "string"
+                },
+                "namespace": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "event"
+              ],
+              "type": "object"
             }
           ]
         },
@@ -2785,6 +2909,23 @@
             "revision",
             "action_id"
           ],
+          "type": "object"
+        },
+        "HostDocumentListParams": {
+          "properties": {
+            "namespace": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "scope_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
           "type": "object"
         },
         "IntegrationInstallParams": {
@@ -4986,6 +5127,30 @@
                 "type"
               ],
               "type": "object"
+            },
+            {
+              "properties": {
+                "type": {
+                  "const": "host.document.updated",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "type": {
+                  "const": "extension.state.committed",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type"
+              ],
+              "type": "object"
             }
           ]
         },
@@ -6240,6 +6405,22 @@
             },
             "params": {
               "$ref": "#/schemas/request/$defs/CollectionPromoteParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "host.document.list",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/HostDocumentListParams"
             }
           },
           "required": [
@@ -8441,6 +8622,86 @@
             },
             {
               "properties": {
+                "available": {
+                  "type": "boolean"
+                },
+                "generation": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "namespace": {
+                  "type": "string"
+                },
+                "revision": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "scope_id": {
+                  "type": "string"
+                },
+                "type": {
+                  "const": "host_document_updated",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "namespace",
+                "scope_id",
+                "generation",
+                "revision",
+                "available"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "first_sequence": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "last_sequence": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "namespace": {
+                  "type": "string"
+                },
+                "namespace_revision": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "store_generation": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "store_id": {
+                  "type": "string"
+                },
+                "type": {
+                  "const": "extension_state_committed",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "namespace",
+                "store_id",
+                "store_generation",
+                "namespace_revision",
+                "first_sequence",
+                "last_sequence"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
                 "pane": {
                   "$ref": "#/schemas/success_response/$defs/PaneInfo"
                 },
@@ -8766,7 +9027,9 @@
             "pane_exited",
             "pane_agent_detected",
             "pane_agent_status_changed",
-            "layout_updated"
+            "layout_updated",
+            "host_document_updated",
+            "extension_state_committed"
           ],
           "type": "string"
         },
@@ -8938,6 +9201,187 @@
           ],
           "type": "object"
         },
+        "HostCapability": {
+          "enum": [
+            "focus_terminal",
+            "terminal_interrupt"
+          ],
+          "type": "string"
+        },
+        "HostConfirmation": {
+          "enum": [
+            "none",
+            "required"
+          ],
+          "type": "string"
+        },
+        "HostDocumentAction": {
+          "properties": {
+            "confirmation": {
+              "$ref": "#/schemas/success_response/$defs/HostConfirmation",
+              "default": "none"
+            },
+            "id": {
+              "type": "string"
+            },
+            "label": {
+              "type": "string"
+            },
+            "operation": {
+              "$ref": "#/schemas/success_response/$defs/HostDocumentOperation"
+            },
+            "subject_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "id",
+            "label",
+            "operation"
+          ],
+          "type": "object"
+        },
+        "HostDocumentItem": {
+          "properties": {
+            "action_ids": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "detail": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "flags": {
+              "$ref": "#/schemas/success_response/$defs/HostDocumentItemFlags",
+              "default": {
+                "attention": false,
+                "disabled": false,
+                "expanded": false,
+                "selected": false
+              }
+            },
+            "id": {
+              "type": "string"
+            },
+            "label": {
+              "type": "string"
+            },
+            "parent_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "role": {
+              "$ref": "#/schemas/success_response/$defs/HostItemRole"
+            },
+            "terminal": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/success_response/$defs/HostTerminalRef"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "id",
+            "role",
+            "label"
+          ],
+          "type": "object"
+        },
+        "HostDocumentItemFlags": {
+          "properties": {
+            "attention": {
+              "default": false,
+              "type": "boolean"
+            },
+            "disabled": {
+              "default": false,
+              "type": "boolean"
+            },
+            "expanded": {
+              "default": false,
+              "type": "boolean"
+            },
+            "selected": {
+              "default": false,
+              "type": "boolean"
+            }
+          },
+          "type": "object"
+        },
+        "HostDocumentOperation": {
+          "oneOf": [
+            {
+              "description": "Routed only to the provider identified by the enclosing document's\nnamespace and generation. `name` is never resolved globally.",
+              "properties": {
+                "kind": {
+                  "const": "extension",
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind",
+                "name"
+              ],
+              "type": "object"
+            },
+            {
+              "description": "A fixed host-owned effect. The provider must hold the corresponding\ncapability and the host still validates the referenced identity.",
+              "properties": {
+                "effect": {
+                  "$ref": "#/schemas/success_response/$defs/HostEffect"
+                },
+                "kind": {
+                  "const": "host",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind",
+                "effect"
+              ],
+              "type": "object"
+            }
+          ]
+        },
+        "HostDocumentProjection": {
+          "properties": {
+            "confirmation_tokens": {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "type": "object"
+            },
+            "document": {
+              "$ref": "#/schemas/success_response/$defs/HostDocumentV1"
+            },
+            "provider_priority": {
+              "format": "int32",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "provider_priority",
+            "document"
+          ],
+          "type": "object"
+        },
         "HostDocumentSourceKind": {
           "enum": [
             "terminal_groups",
@@ -8947,6 +9391,221 @@
             "unknown"
           ],
           "type": "string"
+        },
+        "HostDocumentV1": {
+          "properties": {
+            "actions": {
+              "default": [],
+              "items": {
+                "$ref": "#/schemas/success_response/$defs/HostDocumentAction"
+              },
+              "type": "array"
+            },
+            "contract": {
+              "type": "string"
+            },
+            "generation": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "items": {
+              "default": [],
+              "items": {
+                "$ref": "#/schemas/success_response/$defs/HostDocumentItem"
+              },
+              "type": "array"
+            },
+            "namespace": {
+              "type": "string"
+            },
+            "required_capabilities": {
+              "default": [],
+              "items": {
+                "$ref": "#/schemas/success_response/$defs/HostCapability"
+              },
+              "type": "array"
+            },
+            "revision": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "surface": {
+              "$ref": "#/schemas/success_response/$defs/HostSurface"
+            },
+            "target": {
+              "$ref": "#/schemas/success_response/$defs/HostTarget"
+            }
+          },
+          "required": [
+            "contract",
+            "namespace",
+            "generation",
+            "revision",
+            "surface",
+            "target"
+          ],
+          "type": "object"
+        },
+        "HostEffect": {
+          "oneOf": [
+            {
+              "properties": {
+                "kind": {
+                  "const": "focus_terminal",
+                  "type": "string"
+                },
+                "terminal_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind",
+                "terminal_id"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "kind": {
+                  "const": "terminal_interrupt",
+                  "type": "string"
+                },
+                "terminal_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind",
+                "terminal_id"
+              ],
+              "type": "object"
+            }
+          ]
+        },
+        "HostItemRole": {
+          "enum": [
+            "group",
+            "terminal",
+            "section",
+            "command",
+            "status"
+          ],
+          "type": "string"
+        },
+        "HostSurface": {
+          "enum": [
+            "navigation",
+            "pane"
+          ],
+          "type": "string"
+        },
+        "HostTarget": {
+          "oneOf": [
+            {
+              "properties": {
+                "kind": {
+                  "const": "session",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "kind": {
+                  "const": "workspace",
+                  "type": "string"
+                },
+                "workspace_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind",
+                "workspace_id"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "kind": {
+                  "const": "tab",
+                  "type": "string"
+                },
+                "tab_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind",
+                "tab_id"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "kind": {
+                  "const": "pane",
+                  "type": "string"
+                },
+                "pane_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind",
+                "pane_id"
+              ],
+              "type": "object"
+            }
+          ]
+        },
+        "HostTerminalPlacement": {
+          "properties": {
+            "pane_id": {
+              "type": "string"
+            },
+            "tab_id": {
+              "type": "string"
+            },
+            "workspace_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "pane_id",
+            "workspace_id",
+            "tab_id"
+          ],
+          "type": "object"
+        },
+        "HostTerminalRef": {
+          "properties": {
+            "placement": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/success_response/$defs/HostTerminalPlacement"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Optional, ephemeral placement context for resolving host interactions."
+            },
+            "terminal_id": {
+              "description": "Stable runtime identity. It does not change when a pane moves, is\npromoted from a group, or is shown by another client.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "terminal_id"
+          ],
+          "type": "object"
         },
         "InstalledPluginInfo": {
           "properties": {
@@ -11000,6 +11659,25 @@
               "required": [
                 "type",
                 "page"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "documents": {
+                  "items": {
+                    "$ref": "#/schemas/success_response/$defs/HostDocumentProjection"
+                  },
+                  "type": "array"
+                },
+                "type": {
+                  "const": "host_document_list",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "documents"
               ],
               "type": "object"
             },

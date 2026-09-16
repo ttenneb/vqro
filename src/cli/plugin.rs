@@ -148,13 +148,19 @@ fn plugin_validate(args: &[String], run_services: bool) -> std::io::Result<i32> 
                 )
                 .map_err(|error| error.to_string())?;
                 supervisor.start().map_err(|error| error.to_string())?;
-                if service
-                    .provides
-                    .contains(&PluginServiceCapability::HostDocument)
-                {
-                    let fixture =
-                        PathBuf::from(&manifest.plugin_root).join("fixtures/terminal-groups.json");
-                    if fixture.is_file() {
+                let result = (|| {
+                    if service
+                        .provides
+                        .contains(&PluginServiceCapability::HostDocument)
+                    {
+                        let fixture = PathBuf::from(&manifest.plugin_root)
+                            .join("fixtures/terminal-groups.json");
+                        if !fixture.is_file() {
+                            return Err(
+                                "host document conformance requires fixtures/terminal-groups.json"
+                                    .into(),
+                            );
+                        }
                         let bytes = std::fs::read(&fixture).map_err(|error| error.to_string())?;
                         let params =
                             serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
@@ -166,22 +172,24 @@ fn plugin_validate(args: &[String], run_services: bool) -> std::io::Result<i32> 
                         document.validate().map_err(|error| error.to_string())?;
                         let expected =
                             PathBuf::from(&manifest.plugin_root).join("fixtures/document.json");
-                        if expected.is_file() {
-                            let bytes =
-                                std::fs::read(expected).map_err(|error| error.to_string())?;
-                            let expected: crate::extension_contract::HostDocumentV1 =
-                                serde_json::from_slice(&bytes)
-                                    .map_err(|error| error.to_string())?;
-                            if document != expected {
-                                return Err(
-                                    "host document does not match fixtures/document.json".into()
-                                );
-                            }
+                        if !expected.is_file() {
+                            return Err(
+                                "host document conformance requires fixtures/document.json".into(),
+                            );
+                        }
+                        let bytes = std::fs::read(expected).map_err(|error| error.to_string())?;
+                        let expected: crate::extension_contract::HostDocumentV1 =
+                            serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
+                        if document != expected {
+                            return Err(
+                                "host document does not match fixtures/document.json".into()
+                            );
                         }
                     }
-                }
+                    Ok(())
+                })();
                 supervisor.stop();
-                Ok(())
+                result
             })();
             if let Err(message) = check {
                 return plugin_validation_failure(

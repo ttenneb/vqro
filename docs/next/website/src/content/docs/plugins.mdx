@@ -283,7 +283,9 @@ native generic projection. The `spaces`, `relationships`, and `agent_activity` d
 host-derived repository, relationship, or attributed activity facts and are
 currently restricted to their matching bundled providers. Their bounded
 `host.spaces.v1`, `host.relationships.v1`, and `host.agent-activity.v1` JSON
-contracts remain the versioned service boundary. Agent activity is neutral
+contracts remain the versioned service boundary and are included in the
+publishable extension contract bundle even though registration for those
+host-derived sources is restricted. Agent activity is neutral
 (`idle`, `working`, `blocked`, or `unknown`); each client still derives `done`
 from its own acknowledgement cursor. User document providers use the public
 terminal-group source. The namespaces `vqro.collections`, `vqro.spaces`,
@@ -422,6 +424,17 @@ name an action declared by the same plugin. Link handler actions receive
 `HERDR_PLUGIN_CLICKED_URL` and `HERDR_PLUGIN_LINK_HANDLER_ID`. Handlers are
 checked in manifest order inside each plugin.
 
+## Native document API and events
+
+Non-TUI clients can read the same cached projection with
+`host.document.list`, optionally filtered by `namespace` and `scope_id`.
+Responses contain validated documents, provider priority, and any short-lived
+host-issued confirmation tokens needed by `host.document.action`; providers are
+never called from the list request. Subscribe to `host.document.updated` and
+re-list after each matching event. The event carries namespace, scope,
+generation, revision, and availability, while the list remains the authoritative
+bounded snapshot.
+
 ## Durable extension state
 
 Herdr exposes the additive `host.extension-state.v1` contract through
@@ -433,8 +446,11 @@ key updates atomically. A successful response is returned only after the
 candidate store has been atomically persisted. Failed validation or persistence
 leaves the previous store unchanged.
 
-Events have a bounded replay tail and an explicit `gap` result. Consumers must
-request a new snapshot after a gap or store-identity change rather than assuming
+Events have a bounded replay tail and an explicit `gap` result. Successful
+publication also emits `extension.state.committed` through the normal event
+subscription API; the event identifies the store, namespace revision, and
+committed sequence. Consumers must request a new snapshot after a gap or
+store-identity change rather than assuming
 missing events. Rejected persisted bytes remain authoritative and block writes
 until repaired or removed. Namespacing prevents accidental collisions; it is
 not a security boundary between plugins, which already execute as the same OS

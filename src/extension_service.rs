@@ -186,7 +186,28 @@ pub struct ExtensionServiceManager {
     cancellation_tombstones: Arc<Mutex<std::collections::VecDeque<ExtensionRequestIdentity>>>,
 }
 
-static NEXT_SERVICE_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+static NEXT_SERVICE_GENERATION: std::sync::OnceLock<std::sync::atomic::AtomicU64> =
+    std::sync::OnceLock::new();
+
+fn next_service_generation() -> u64 {
+    let counter = NEXT_SERVICE_GENERATION.get_or_init(|| {
+        let mut seed = [0_u8; 8];
+        let value = if crate::platform::fill_secure_random(&mut seed).is_ok() {
+            u64::from_le_bytes(seed)
+        } else {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos() as u64
+        };
+        // A process-unique high range keeps action leases from colliding across
+        // restart or live handoff while retaining cheap monotonic generations.
+        std::sync::atomic::AtomicU64::new((value & (u64::MAX >> 1)).max(1))
+    });
+    counter
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        .max(1)
+}
 static NEXT_MANAGER_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 static EXTENSION_WORK_SLOTS: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
@@ -638,22 +659,14 @@ impl HostDocumentServiceCatalog {
     ) -> Self {
         let mut generations = host_document_specs(plugins)
             .into_iter()
-            .map(|(namespace, _, _, _)| {
-                (
-                    namespace,
-                    NEXT_SERVICE_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
-                )
-            })
+            .map(|(namespace, _, _, _)| (namespace, next_service_generation()))
             .collect::<std::collections::BTreeMap<_, _>>();
         for namespace in [
             crate::first_party::collections::NAMESPACE,
             crate::first_party::spaces::NAMESPACE,
         ] {
             if !disabled.contains(namespace) {
-                generations.insert(
-                    namespace.into(),
-                    NEXT_SERVICE_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
-                );
+                generations.insert(namespace.into(), next_service_generation());
             }
         }
         Self {
@@ -896,8 +909,7 @@ impl HostDocumentServiceCatalog {
                     HostDocumentProvider {
                         source,
                         priority,
-                        generation: NEXT_SERVICE_GENERATION
-                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+                        generation: next_service_generation(),
                         supervisor,
                         grants,
                     },
@@ -927,8 +939,7 @@ impl HostDocumentServiceCatalog {
                         HostDocumentProvider {
                             source: crate::api::schema::HostDocumentSourceKind::TerminalGroups,
                             priority: 100,
-                            generation: NEXT_SERVICE_GENERATION
-                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+                            generation: next_service_generation(),
                             supervisor,
                             grants: std::collections::HashSet::from([
                                 crate::extension_contract::HostCapability::FocusTerminal,
@@ -964,8 +975,7 @@ impl HostDocumentServiceCatalog {
                         HostDocumentProvider {
                             source: crate::api::schema::HostDocumentSourceKind::Spaces,
                             priority: 100,
-                            generation: NEXT_SERVICE_GENERATION
-                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+                            generation: next_service_generation(),
                             supervisor,
                             grants: std::collections::HashSet::new(),
                         },
@@ -1010,8 +1020,7 @@ impl HostDocumentServiceCatalog {
                     HostDocumentProvider {
                         source,
                         priority: 100,
-                        generation: NEXT_SERVICE_GENERATION
-                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+                        generation: next_service_generation(),
                         supervisor,
                         grants: std::collections::HashSet::new(),
                     },
@@ -1884,9 +1893,8 @@ fn manager_for_specs(
             tracing::warn!("ignoring invalid extension service specification");
             continue;
         };
-        let generation = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(
-            NEXT_SERVICE_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
-        ));
+        let generation =
+            std::sync::Arc::new(std::sync::atomic::AtomicU64::new(next_service_generation()));
         let thread_generation = generation.clone();
         let granted_capabilities = supervisor.spec.granted_capabilities.clone();
         let service_id = supervisor.spec.id.clone();
@@ -1959,8 +1967,7 @@ fn manager_for_specs(
                                 | ExtensionAsyncResultKind::Action(Err(_))
                         );
                     if retired_runtime {
-                        let next = NEXT_SERVICE_GENERATION
-                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        let next = next_service_generation();
                         let _ = thread_generation.compare_exchange(
                             service_generation,
                             next,
@@ -3414,6 +3421,7 @@ done
         assert!(error.contains("result queue unavailable"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn cancel_and_replace_refresh_is_admitted_for_queued_and_inflight_work() {
         let script = r#"
@@ -4554,6 +4562,14 @@ printf '%s\n' '{"type":"response","id":2,"result":{"accepted":true}}'
             Err(ExtensionServiceError::Protocol(message))
                 if message.contains("generation is stale")
         ));
+    }
+
+    #[test]
+    fn service_generations_are_nonzero_and_monotonic_within_a_process() {
+        let first = next_service_generation();
+        let second = next_service_generation();
+        assert!(first > 0);
+        assert_eq!(second, first + 1);
     }
 
     #[test]

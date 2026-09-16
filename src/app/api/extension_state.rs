@@ -11,6 +11,23 @@ pub(crate) struct ExtensionStatePersistResult {
 }
 
 impl App {
+    fn emit_extension_state_committed(
+        &self,
+        commit: &crate::extension_state::ExtensionStateCommitV1,
+    ) {
+        self.event_hub.push(crate::api::schema::EventEnvelope {
+            event: crate::api::schema::EventKind::ExtensionStateCommitted,
+            data: crate::api::schema::EventData::ExtensionStateCommitted {
+                namespace: commit.namespace.clone(),
+                store_id: commit.store_id.clone(),
+                store_generation: commit.store_generation,
+                namespace_revision: commit.revision,
+                first_sequence: commit.sequence,
+                last_sequence: commit.sequence,
+            },
+        });
+    }
+
     pub(super) fn handle_extension_state_snapshot(
         &self,
         request_id: String,
@@ -79,6 +96,7 @@ impl App {
             }
         }
         self.extension_state = candidate;
+        self.emit_extension_state_committed(&commit);
         responses::encode_success(
             request_id,
             ResponseResult::ExtensionStateCommitted { commit },
@@ -121,6 +139,7 @@ impl App {
         };
         let Some(path) = self.extension_state_path.clone() else {
             self.extension_state = candidate;
+            self.emit_extension_state_committed(&commit);
             let _ = respond_to.send(responses::encode_success(
                 request_id,
                 ResponseResult::ExtensionStateCommitted { commit },
@@ -172,6 +191,7 @@ impl App {
         let response = match result.persisted {
             Ok(()) => {
                 self.extension_state = result.candidate;
+                self.emit_extension_state_committed(&result.commit);
                 responses::encode_success(
                     result.request_id,
                     ResponseResult::ExtensionStateCommitted {
@@ -289,6 +309,17 @@ mod tests {
             panic!("expected extension state commit");
         };
         assert_eq!(commit.revision, 1);
+        let live_events = app.event_hub.events_after(0);
+        assert!(live_events.iter().any(|(_, event)| {
+            matches!(
+                &event.data,
+                crate::api::schema::EventData::ExtensionStateCommitted {
+                    namespace,
+                    namespace_revision: 1,
+                    ..
+                } if namespace == "example.extension"
+            )
+        }));
 
         let page = app.extension_state.events_after(0, 10);
         assert_eq!(page.events.len(), 1);

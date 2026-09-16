@@ -12,3 +12,4 @@ command = ["python3", "service.py"]
 document_source = "terminal_groups"
 provides = ["host_document"]
 capabilities = ["host_document", "focus_terminal"]
+priority = 200

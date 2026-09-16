@@ -7,8 +7,21 @@ This package is the minimal language-neutral reference for
 `example.reference-document`.
 
 Validate without execution with `vqro plugin validate .`. Explicitly run the
-production handshake with `vqro plugin conformance .`. Python 3 is required, so
-the manifest claims only Linux and macOS.
+production handshake and canonical render fixture with `vqro plugin conformance
+.`. Both fixture files are required for host-document conformance. Python 3 is
+required, so the manifest claims only Linux and macOS.
+
+To exercise the package in a development checkout:
+
+```bash
+vqro plugin link ./extensions/reference-host-document
+vqro plugin list
+```
+
+The service priority is intentionally higher than the bundled Collections
+provider, so its terminal-group navigation document becomes the selected
+projection while linked. Disable or unlink it to return immediately to the
+bundled provider; existing PTYs remain reachable throughout.
 
 Extensions run as trusted same-user code. Capability grants fence protocol host
 effects; they are not an OS sandbox. This example receives stable terminal

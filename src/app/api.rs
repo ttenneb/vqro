@@ -1230,6 +1230,9 @@ impl App {
             Method::CollectionPromote(params) => {
                 return self.handle_collection_promote(request.id, params)
             }
+            Method::HostDocumentList(params) => {
+                return self.handle_host_document_list(request.id, params)
+            }
             Method::HostDocumentAction(params) => {
                 let action = match self.authorize_host_document_action(&params) {
                     Ok(action) => action,

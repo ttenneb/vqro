@@ -3,6 +3,313 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "manifest_contract": "vqro.extension-manifest.v1",
   "schemas": {
+    "action_choice_invocation": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "action_id": {
+          "type": "string"
+        },
+        "choice_id": {
+          "type": "string"
+        },
+        "choice_revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "choice_set_id": {
+          "type": "string"
+        },
+        "context_revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "contract": {
+          "type": "string"
+        },
+        "provider_generation": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "request_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "contract",
+        "request_id",
+        "action_id",
+        "choice_set_id",
+        "choice_revision",
+        "choice_id",
+        "provider_generation",
+        "context_revision"
+      ],
+      "title": "ActionChoiceInvocationV1",
+      "type": "object"
+    },
+    "action_choice_set": {
+      "$defs": {
+        "ActionChoiceKindV1": {
+          "enum": [
+            "command",
+            "boolean",
+            "enum_value",
+            "unknown"
+          ],
+          "type": "string"
+        },
+        "ActionChoiceV1": {
+          "properties": {
+            "choice_id": {
+              "type": "string"
+            },
+            "confirmation_required": {
+              "default": false,
+              "type": "boolean"
+            },
+            "description": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "disabled": {
+              "default": false,
+              "type": "boolean"
+            },
+            "kind": {
+              "$ref": "#/schemas/action_choice_set/$defs/ActionChoiceKindV1"
+            },
+            "label": {
+              "type": "string"
+            },
+            "selected": {
+              "default": false,
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "choice_id",
+            "label",
+            "kind"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "action_id": {
+          "type": "string"
+        },
+        "choice_set_id": {
+          "type": "string"
+        },
+        "choices": {
+          "items": {
+            "$ref": "#/schemas/action_choice_set/$defs/ActionChoiceV1"
+          },
+          "type": "array"
+        },
+        "context_revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "contract": {
+          "type": "string"
+        },
+        "provider_generation": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "request_id": {
+          "type": "string"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "contract",
+        "request_id",
+        "action_id",
+        "choice_set_id",
+        "revision",
+        "provider_generation",
+        "context_revision",
+        "choices"
+      ],
+      "title": "ActionChoiceSetV1",
+      "type": "object"
+    },
+    "action_choices_request": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "action_id": {
+          "type": "string"
+        },
+        "context": true,
+        "context_revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "contract": {
+          "type": "string"
+        },
+        "provider_generation": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "request_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "contract",
+        "request_id",
+        "action_id",
+        "provider_generation",
+        "context_revision",
+        "context"
+      ],
+      "title": "ActionChoicesRequestV1",
+      "type": "object"
+    },
+    "agent_activity": {
+      "$defs": {
+        "HostAgentActivityRecord": {
+          "properties": {
+            "activity": {
+              "$ref": "#/schemas/agent_activity/$defs/HostAgentActivityState"
+            },
+            "evidence_kind": {
+              "description": "Evidence kind. Unknown kinds remain round-trippable strings.",
+              "type": "string"
+            },
+            "labels": {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "type": "object"
+            },
+            "source": {
+              "description": "Stable identity of the evidence publisher.",
+              "type": "string"
+            },
+            "state_change_seq": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "terminal": {
+              "$ref": "#/schemas/agent_activity/$defs/HostTerminalRef"
+            }
+          },
+          "required": [
+            "terminal",
+            "activity",
+            "source",
+            "evidence_kind",
+            "state_change_seq"
+          ],
+          "type": "object"
+        },
+        "HostAgentActivityState": {
+          "enum": [
+            "idle",
+            "working",
+            "blocked",
+            "unknown"
+          ],
+          "type": "string"
+        },
+        "HostTerminalPlacement": {
+          "properties": {
+            "pane_id": {
+              "type": "string"
+            },
+            "tab_id": {
+              "type": "string"
+            },
+            "workspace_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "pane_id",
+            "workspace_id",
+            "tab_id"
+          ],
+          "type": "object"
+        },
+        "HostTerminalRef": {
+          "properties": {
+            "placement": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/agent_activity/$defs/HostTerminalPlacement"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Optional, ephemeral placement context for resolving host interactions."
+            },
+            "terminal_id": {
+              "description": "Stable runtime identity. It does not change when a pane moves, is\npromoted from a group, or is shown by another client.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "terminal_id"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "Session-scoped, attributed agent activity after host arbitration. This is\nintentionally smaller than any agent-specific state model.",
+      "properties": {
+        "activities": {
+          "default": [],
+          "items": {
+            "$ref": "#/schemas/agent_activity/$defs/HostAgentActivityRecord"
+          },
+          "type": "array"
+        },
+        "contract": {
+          "type": "string"
+        },
+        "generation": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "scope_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "contract",
+        "generation",
+        "revision",
+        "scope_id"
+      ],
+      "title": "HostAgentActivityV1",
+      "type": "object"
+    },
     "host_document": {
       "$defs": {
         "HostCapability": {
@@ -859,6 +1166,139 @@
       "title": "vqro extension manifest v1",
       "type": "object"
     },
+    "relationships": {
+      "$defs": {
+        "HostRelationship": {
+          "properties": {
+            "kind": {
+              "type": "string"
+            },
+            "lifecycle": {
+              "$ref": "#/schemas/relationships/$defs/HostRelationshipLifecycle"
+            },
+            "metadata": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "parent_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "relationship_id": {
+              "type": "string"
+            },
+            "sibling_rank": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "terminal": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/relationships/$defs/HostTerminalRef"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "relationship_id",
+            "kind",
+            "sibling_rank",
+            "lifecycle"
+          ],
+          "type": "object"
+        },
+        "HostRelationshipLifecycle": {
+          "enum": [
+            "active",
+            "retained"
+          ],
+          "type": "string"
+        },
+        "HostTerminalPlacement": {
+          "properties": {
+            "pane_id": {
+              "type": "string"
+            },
+            "tab_id": {
+              "type": "string"
+            },
+            "workspace_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "pane_id",
+            "workspace_id",
+            "tab_id"
+          ],
+          "type": "object"
+        },
+        "HostTerminalRef": {
+          "properties": {
+            "placement": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/relationships/$defs/HostTerminalPlacement"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Optional, ephemeral placement context for resolving host interactions."
+            },
+            "terminal_id": {
+              "description": "Stable runtime identity. It does not change when a pane moves, is\npromoted from a group, or is shown by another client.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "terminal_id"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "A session-scoped, host-owned relationship forest. Relationship kinds and\nmetadata keys are namespaces so consumers can safely ignore semantics they\ndo not understand while retaining the records unchanged.",
+      "properties": {
+        "contract": {
+          "type": "string"
+        },
+        "generation": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "relationships": {
+          "default": [],
+          "items": {
+            "$ref": "#/schemas/relationships/$defs/HostRelationship"
+          },
+          "type": "array"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "scope_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "contract",
+        "generation",
+        "revision",
+        "scope_id"
+      ],
+      "title": "HostRelationshipsV1",
+      "type": "object"
+    },
     "service": {
       "$id": "https://vqro.dev/schema/extension-service/v1",
       "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -1048,6 +1488,132 @@
       "title": "vqro extension service protocol v1",
       "transport": "bounded newline-delimited JSON over stdio"
     },
+    "spaces": {
+      "$defs": {
+        "HostSpaceOrderRef": {
+          "oneOf": [
+            {
+              "properties": {
+                "kind": {
+                  "const": "repository",
+                  "type": "string"
+                },
+                "repository_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind",
+                "repository_id"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "kind": {
+                  "const": "standalone_workspace",
+                  "type": "string"
+                },
+                "workspace_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind",
+                "workspace_id"
+              ],
+              "type": "object"
+            }
+          ]
+        },
+        "HostSpaceRepository": {
+          "properties": {
+            "label": {
+              "type": "string"
+            },
+            "repository_id": {
+              "type": "string"
+            },
+            "workspaces": {
+              "default": [],
+              "items": {
+                "$ref": "#/schemas/spaces/$defs/HostSpaceWorkspaceRef"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "repository_id",
+            "label"
+          ],
+          "type": "object"
+        },
+        "HostSpaceWorkspaceRef": {
+          "properties": {
+            "label": {
+              "type": "string"
+            },
+            "workspace_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "workspace_id",
+            "label"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "A host-owned session projection supplied to Spaces document providers.\nRepository membership and labels are semantic state; paths and Git internals\nare intentionally excluded.",
+      "properties": {
+        "contract": {
+          "type": "string"
+        },
+        "generation": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "order": {
+          "default": [],
+          "items": {
+            "$ref": "#/schemas/spaces/$defs/HostSpaceOrderRef"
+          },
+          "type": "array"
+        },
+        "repositories": {
+          "default": [],
+          "items": {
+            "$ref": "#/schemas/spaces/$defs/HostSpaceRepository"
+          },
+          "type": "array"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "scope_id": {
+          "type": "string"
+        },
+        "standalone": {
+          "default": [],
+          "items": {
+            "$ref": "#/schemas/spaces/$defs/HostSpaceWorkspaceRef"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "contract",
+        "generation",
+        "revision",
+        "scope_id"
+      ],
+      "title": "HostSpacesV1",
+      "type": "object"
+    },
     "terminal_groups": {
       "$defs": {
         "HostTerminalGroup": {
@@ -1191,6 +1757,227 @@
         "groups"
       ],
       "title": "HostTerminalGroupsV1",
+      "type": "object"
+    },
+    "terminal_resource_interests": {
+      "$defs": {
+        "TerminalResourceInterestV1": {
+          "properties": {
+            "kind": {
+              "type": "string"
+            },
+            "terminal_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "terminal_id",
+            "kind"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "client_generation": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "client_id": {
+          "type": "string"
+        },
+        "contract": {
+          "type": "string"
+        },
+        "interests": {
+          "items": {
+            "$ref": "#/schemas/terminal_resource_interests/$defs/TerminalResourceInterestV1"
+          },
+          "type": "array"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "contract",
+        "client_id",
+        "client_generation",
+        "revision",
+        "interests"
+      ],
+      "title": "ClientResourceInterestsV1",
+      "type": "object"
+    },
+    "terminal_resource_projection": {
+      "$defs": {
+        "ResourceProviderV1": {
+          "properties": {
+            "generation": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "namespace": {
+              "type": "string"
+            },
+            "service_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "namespace",
+            "service_id",
+            "generation"
+          ],
+          "type": "object"
+        },
+        "TerminalResourceV1": {
+          "properties": {
+            "kind": {
+              "type": "string"
+            },
+            "payload": true,
+            "resource_id": {
+              "type": "string"
+            },
+            "schema": {
+              "type": "string"
+            },
+            "terminal_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "terminal_id",
+            "resource_id",
+            "kind",
+            "schema",
+            "payload"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "provider": {
+          "$ref": "#/schemas/terminal_resource_projection/$defs/ResourceProviderV1"
+        },
+        "publication_revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "registry_revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "resource": {
+          "$ref": "#/schemas/terminal_resource_projection/$defs/TerminalResourceV1"
+        }
+      },
+      "required": [
+        "registry_revision",
+        "provider",
+        "publication_revision",
+        "resource"
+      ],
+      "title": "TerminalResourceProjectionV1",
+      "type": "object"
+    },
+    "terminal_resource_replacement": {
+      "$defs": {
+        "ResourceProviderV1": {
+          "properties": {
+            "generation": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "namespace": {
+              "type": "string"
+            },
+            "service_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "namespace",
+            "service_id",
+            "generation"
+          ],
+          "type": "object"
+        },
+        "TerminalResourceV1": {
+          "properties": {
+            "kind": {
+              "type": "string"
+            },
+            "payload": true,
+            "resource_id": {
+              "type": "string"
+            },
+            "schema": {
+              "type": "string"
+            },
+            "terminal_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "terminal_id",
+            "resource_id",
+            "kind",
+            "schema",
+            "payload"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "Complete atomic replacement for one provider generation and aggregate interest revision.",
+      "properties": {
+        "contract": {
+          "type": "string"
+        },
+        "interest_revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "provider": {
+          "$ref": "#/schemas/terminal_resource_replacement/$defs/ResourceProviderV1"
+        },
+        "publication_revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "resources": {
+          "items": {
+            "$ref": "#/schemas/terminal_resource_replacement/$defs/TerminalResourceV1"
+          },
+          "type": "array"
+        },
+        "valid_for_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "contract",
+        "provider",
+        "interest_revision",
+        "publication_revision",
+        "valid_for_ms",
+        "resources"
+      ],
+      "title": "TerminalResourceReplacementV1",
       "type": "object"
     }
   },

@@ -3,6 +3,22 @@ use serde::{Deserialize, Serialize};
 use super::SplitDirection;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct HostDocumentListParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub namespace: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct HostDocumentProjection {
+    pub provider_priority: i32,
+    pub document: crate::extension_contract::HostDocumentV1,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub confirmation_tokens: std::collections::BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct HostDocumentActionParams {
     pub namespace: String,
     pub scope_id: String,

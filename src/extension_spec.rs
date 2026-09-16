@@ -101,9 +101,18 @@ pub fn extension_schema_document() -> serde_json::Value {
         "schemas": {
             "manifest": manifest_schema_document(),
             "service": service_schema_document(),
+            "spaces": scoped_schema::<crate::extension_contract::HostSpacesV1>("spaces"),
+            "relationships": scoped_schema::<crate::extension_contract::HostRelationshipsV1>("relationships"),
+            "agent_activity": scoped_schema::<crate::extension_contract::HostAgentActivityV1>("agent_activity"),
             "terminal_groups": scoped_schema::<crate::extension_contract::HostTerminalGroupsV1>("terminal_groups"),
             "host_document": scoped_schema::<crate::extension_contract::HostDocumentV1>("host_document"),
             "host_document_action": scoped_schema::<crate::extension_contract::HostDocumentExtensionActionV1>("host_document_action"),
+            "terminal_resource_replacement": scoped_schema::<crate::extension_resource::TerminalResourceReplacementV1>("terminal_resource_replacement"),
+            "terminal_resource_interests": scoped_schema::<crate::extension_resource::ClientResourceInterestsV1>("terminal_resource_interests"),
+            "terminal_resource_projection": scoped_schema::<crate::extension_resource::TerminalResourceProjectionV1>("terminal_resource_projection"),
+            "action_choices_request": scoped_schema::<crate::action_choices::ActionChoicesRequestV1>("action_choices_request"),
+            "action_choice_set": scoped_schema::<crate::action_choices::ActionChoiceSetV1>("action_choice_set"),
+            "action_choice_invocation": scoped_schema::<crate::action_choices::ActionChoiceInvocationV1>("action_choice_invocation"),
         },
     })
 }
@@ -208,7 +217,20 @@ mod tests {
             assert_refs_resolve_against(&schema, &schema);
         }
         let bundle = extension_schema_document();
-        for name in ["terminal_groups", "host_document", "host_document_action"] {
+        for name in [
+            "spaces",
+            "relationships",
+            "agent_activity",
+            "terminal_groups",
+            "host_document",
+            "host_document_action",
+            "terminal_resource_replacement",
+            "terminal_resource_interests",
+            "terminal_resource_projection",
+            "action_choices_request",
+            "action_choice_set",
+            "action_choice_invocation",
+        ] {
             let schema = bundle
                 .pointer(&format!("/schemas/{name}"))
                 .expect("bundle schema");

@@ -706,6 +706,26 @@ impl App {
         }
     }
 
+    fn emit_host_document_updated(
+        &self,
+        namespace: String,
+        scope_id: String,
+        generation: u64,
+        revision: u64,
+        available: bool,
+    ) {
+        self.event_hub.push(crate::api::schema::EventEnvelope {
+            event: crate::api::schema::EventKind::HostDocumentUpdated,
+            data: crate::api::schema::EventData::HostDocumentUpdated {
+                namespace,
+                scope_id,
+                generation,
+                revision,
+                available,
+            },
+        });
+    }
+
     pub(crate) fn handle_host_relationships_document_result(
         &mut self,
         mut result: crate::extension_service::HostRelationshipsDocumentAsyncResult,
@@ -748,6 +768,24 @@ impl App {
                     tracing::warn!(%error, "Delegation document render failed; using relationship fallback");
                 }
             }
+        }
+        if current
+            && self
+                .collections_shadow_documents
+                .get(&(result.namespace.clone(), result.snapshot.scope_id.clone()))
+                .and_then(|cache| cache.current())
+                .is_some_and(|document| {
+                    document.generation == result.snapshot.generation
+                        && document.revision == result.snapshot.revision
+                })
+        {
+            self.emit_host_document_updated(
+                result.namespace.clone(),
+                result.snapshot.scope_id.clone(),
+                result.snapshot.generation,
+                result.snapshot.revision,
+                true,
+            );
         }
         drop(render_slot);
         self.retry_one_host_document_render();
@@ -796,6 +834,24 @@ impl App {
                 }
             }
         }
+        if current
+            && self
+                .collections_shadow_documents
+                .get(&(result.namespace.clone(), result.snapshot.scope_id.clone()))
+                .and_then(|cache| cache.current())
+                .is_some_and(|document| {
+                    document.generation == result.snapshot.generation
+                        && document.revision == result.snapshot.revision
+                })
+        {
+            self.emit_host_document_updated(
+                result.namespace.clone(),
+                result.snapshot.scope_id.clone(),
+                result.snapshot.generation,
+                result.snapshot.revision,
+                true,
+            );
+        }
         drop(render_slot);
         self.retry_one_host_document_render();
     }
@@ -842,6 +898,24 @@ impl App {
                     tracing::warn!(%error, "Spaces document render failed; using native fallback");
                 }
             }
+        }
+        if current
+            && self
+                .collections_shadow_documents
+                .get(&(result.namespace.clone(), result.snapshot.scope_id.clone()))
+                .and_then(|cache| cache.current())
+                .is_some_and(|document| {
+                    document.generation == result.snapshot.generation
+                        && document.revision == result.snapshot.revision
+                })
+        {
+            self.emit_host_document_updated(
+                result.namespace.clone(),
+                result.snapshot.scope_id.clone(),
+                result.snapshot.generation,
+                result.snapshot.revision,
+                true,
+            );
         }
         drop(render_slot);
         self.retry_one_host_document_render();
@@ -981,46 +1055,56 @@ impl App {
         if current_generation != Some(result.snapshot.generation) || !is_current_request {
             return;
         }
-        let cache = self
-            .collections_shadow_documents
-            .entry((result.namespace.clone(), result.snapshot.scope_id.clone()))
-            .or_default();
-        if cache.current().is_some_and(|current| {
-            current.generation > result.snapshot.generation
-                || (current.generation == result.snapshot.generation
-                    && current.revision >= result.snapshot.revision)
-        }) {
-            return;
-        }
-        let published = result.result.and_then(|document| {
-            if document.revision != result.snapshot.revision
-                || !matches!(
-                    &document.target,
-                    crate::extension_contract::HostTarget::Tab { tab_id }
-                        if tab_id == &result.snapshot.scope_id
-                )
-            {
-                return Err("document result does not match requested revision or scope".into());
+        let available = {
+            let cache = self
+                .collections_shadow_documents
+                .entry((result.namespace.clone(), result.snapshot.scope_id.clone()))
+                .or_default();
+            if cache.current().is_some_and(|current| {
+                current.generation > result.snapshot.generation
+                    || (current.generation == result.snapshot.generation
+                        && current.revision >= result.snapshot.revision)
+            }) {
+                return;
             }
-            cache
-                .publish_for_namespace(
-                    &result.namespace,
-                    result.snapshot.generation,
-                    result.provider_priority,
-                    &result.grants,
-                    document,
-                )
-                .map_err(|error| error.to_string())
-        });
-        if let Err(error) = published {
-            cache.disable();
-            if result.namespace == crate::first_party::collections::NAMESPACE {
-                tracing::warn!(%error, "Collections provider result rejected; using generic fallback");
-                let _ = cache.install_fallback(&result.snapshot);
-            } else {
-                tracing::warn!(namespace = %result.namespace, %error, "host document provider result rejected");
+            let published = result.result.and_then(|document| {
+                if document.revision != result.snapshot.revision
+                    || !matches!(
+                        &document.target,
+                        crate::extension_contract::HostTarget::Tab { tab_id }
+                            if tab_id == &result.snapshot.scope_id
+                    )
+                {
+                    return Err("document result does not match requested revision or scope".into());
+                }
+                cache
+                    .publish_for_namespace(
+                        &result.namespace,
+                        result.snapshot.generation,
+                        result.provider_priority,
+                        &result.grants,
+                        document,
+                    )
+                    .map_err(|error| error.to_string())
+            });
+            if let Err(error) = published {
+                cache.disable();
+                if result.namespace == crate::first_party::collections::NAMESPACE {
+                    tracing::warn!(%error, "Collections provider result rejected; using generic fallback");
+                    let _ = cache.install_fallback(&result.snapshot);
+                } else {
+                    tracing::warn!(namespace = %result.namespace, %error, "host document provider result rejected");
+                }
             }
-        }
+            cache.current().is_some()
+        };
+        self.emit_host_document_updated(
+            result.namespace,
+            result.snapshot.scope_id,
+            result.snapshot.generation,
+            result.snapshot.revision,
+            available,
+        );
     }
 
     pub(super) fn authorize_host_document_action(
@@ -1226,6 +1310,48 @@ impl App {
                 false
             }
         }
+    }
+
+    pub(super) fn handle_host_document_list(
+        &mut self,
+        id: String,
+        params: crate::api::schema::HostDocumentListParams,
+    ) -> String {
+        let documents = self
+            .host_documents()
+            .into_iter()
+            .filter(|entry| {
+                params
+                    .namespace
+                    .as_ref()
+                    .is_none_or(|namespace| entry.document.namespace == *namespace)
+                    && params.scope_id.as_ref().is_none_or(|scope_id| {
+                        match &entry.document.target {
+                            crate::extension_contract::HostTarget::Session => {
+                                scope_id == crate::first_party::spaces::SESSION_SCOPE_ID
+                            }
+                            crate::extension_contract::HostTarget::Workspace { workspace_id } => {
+                                scope_id == workspace_id
+                            }
+                            crate::extension_contract::HostTarget::Tab { tab_id } => {
+                                scope_id == tab_id
+                            }
+                            crate::extension_contract::HostTarget::Pane { pane_id } => {
+                                scope_id == pane_id
+                            }
+                        }
+                    })
+            })
+            .map(|entry| crate::api::schema::HostDocumentProjection {
+                provider_priority: entry.provider_priority,
+                document: entry.document,
+                confirmation_tokens: entry.confirmation_tokens,
+            })
+            .collect();
+        responses::encode_success(
+            id,
+            crate::api::schema::ResponseResult::HostDocumentList { documents },
+        )
     }
 
     pub(crate) fn host_documents(
@@ -2158,6 +2284,61 @@ mod tests {
             })
             .unwrap();
         assert!(matches!(action, AuthorizedHostDocumentAction::Focus(_)));
+    }
+
+    #[test]
+    fn native_host_document_list_filters_public_projection() {
+        let mut app = app_with_workspace();
+        app.host_document_services =
+            crate::extension_service::HostDocumentServiceCatalog::with_test_provider(
+                crate::first_party::collections::NAMESPACE,
+                9,
+            );
+        let snapshot = app.collections_shadow_snapshot(0, 0, 9, 1).unwrap();
+        let scope_id = snapshot.scope_id.clone();
+        let document = crate::first_party::collections::project(&snapshot).unwrap();
+        handle_current_result(
+            &mut app,
+            crate::extension_service::HostDocumentAsyncResult {
+                _render_slot: None,
+                namespace: crate::first_party::collections::NAMESPACE.into(),
+                provider_priority: 100,
+                snapshot,
+                result: Ok(document),
+                grants: std::collections::HashSet::from([
+                    crate::extension_contract::HostCapability::FocusTerminal,
+                ]),
+            },
+        );
+
+        let response = app.handle_host_document_list(
+            "documents".into(),
+            crate::api::schema::HostDocumentListParams {
+                namespace: Some(crate::first_party::collections::NAMESPACE.into()),
+                scope_id: Some(scope_id),
+            },
+        );
+        let response: crate::api::schema::SuccessResponse =
+            serde_json::from_str(&response).unwrap();
+        let crate::api::schema::ResponseResult::HostDocumentList { documents } = response.result
+        else {
+            panic!("expected host document list");
+        };
+        assert_eq!(documents.len(), 1);
+        assert_eq!(
+            documents[0].document.namespace,
+            crate::first_party::collections::NAMESPACE
+        );
+        assert!(app.event_hub.events_after(0).iter().any(|(_, event)| {
+            matches!(
+                &event.data,
+                crate::api::schema::EventData::HostDocumentUpdated {
+                    namespace,
+                    available: true,
+                    ..
+                } if namespace == crate::first_party::collections::NAMESPACE
+            )
+        }));
     }
 
     #[test]
