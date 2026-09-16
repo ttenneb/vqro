@@ -442,6 +442,15 @@
         "inventory_sha256": {
           "type": "string"
         },
+        "manifest_sha256": {
+          "type": "string"
+        },
+        "namespaces": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
         "package_id": {
           "type": "string"
         },
@@ -455,6 +464,8 @@
       "required": [
         "package_id",
         "version",
+        "manifest_sha256",
+        "namespaces",
         "inventory_sha256",
         "canonical_root",
         "provenance"

@@ -172,6 +172,8 @@ pub struct InstalledPackageV1 {
 pub struct LinkedPackageV1 {
     pub package_id: String,
     pub version: String,
+    pub manifest_sha256: String,
+    pub namespaces: Vec<String>,
     pub inventory_sha256: String,
     pub canonical_root: String,
     pub provenance: PackageProvenanceV1,
@@ -791,6 +793,7 @@ pub fn register_developer_link(
     source: &Path,
     trust_id: String,
     explicitly_trusted: bool,
+    occupied: &BTreeMap<String, String>,
 ) -> Result<LinkedPackageV1, String> {
     if !explicitly_trusted || trust_id.trim().is_empty() || trust_id.len() > 256 {
         return Err("developer link requires an explicit bounded trust approval".into());
@@ -812,14 +815,40 @@ pub fn register_developer_link(
         trust_id,
         trusted: true,
     };
-    validate_namespace_claims(&validated.manifest, &provenance, &BTreeMap::new())?;
+    validate_namespace_claims(&validated.manifest, &provenance, occupied)?;
     Ok(LinkedPackageV1 {
         package_id: validated.manifest.id,
         version: validated.manifest.version,
+        manifest_sha256: validated.manifest_sha256,
+        namespaces: validated.manifest.namespaces,
         inventory_sha256: validated.package_sha256,
         canonical_root: canonical_text,
         provenance,
     })
+}
+
+pub fn revalidate_developer_link(
+    record: &PackageLifecycleRecordV1,
+    occupied: &BTreeMap<String, String>,
+) -> Result<LinkedPackageV1, String> {
+    let PackageProvenanceV1::Link {
+        canonical_path,
+        trust_id,
+        trusted,
+    } = &record.source
+    else {
+        return Err("package is not a developer link".into());
+    };
+    let linked = register_developer_link(
+        Path::new(canonical_path),
+        trust_id.clone(),
+        *trusted,
+        occupied,
+    )?;
+    if linked.package_id != record.package_id || linked.namespaces != record.namespaces {
+        return Err("developer link package identity or namespace claims changed".into());
+    }
+    Ok(linked)
 }
 
 pub fn validate_directory_package(root: &Path) -> Result<ValidatedPackageV1, String> {
@@ -2375,13 +2404,36 @@ mod tests {
             }
             fs::write(output, bytes).unwrap();
         }
-        assert!(register_developer_link(&root, "approval".into(), false).is_err());
-        let linked = register_developer_link(&root, "approval".into(), true).unwrap();
+        assert!(
+            register_developer_link(&root, "approval".into(), false, &BTreeMap::new()).is_err()
+        );
+        let linked =
+            register_developer_link(&root, "approval".into(), true, &BTreeMap::new()).unwrap();
         assert_eq!(linked.package_id, "example.link");
+        let record = PackageLifecycleRecordV1 {
+            package_id: linked.package_id.clone(),
+            source: linked.provenance.clone(),
+            previous_source: None,
+            namespaces: linked.namespaces.clone(),
+            revision: 1,
+            status: PackageLifecycleStatusV1::Disabled,
+            active: None,
+            previous: None,
+            activation_error: None,
+            retained_data: true,
+        };
+        assert_eq!(
+            revalidate_developer_link(&record, &BTreeMap::new())
+                .unwrap()
+                .inventory_sha256,
+            linked.inventory_sha256
+        );
         #[cfg(unix)]
         {
             std::os::unix::fs::symlink(PACKAGE_MANIFEST_FILE, root.join("linked-file")).unwrap();
-            assert!(register_developer_link(&root, "approval".into(), true).is_err());
+            assert!(
+                register_developer_link(&root, "approval".into(), true, &BTreeMap::new()).is_err()
+            );
         }
         fs::remove_dir_all(root).unwrap();
     }
