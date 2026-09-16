@@ -86,8 +86,25 @@ impl App {
             }
         }
         self.host_document_services.retain_scopes(&live_tab_ids);
+        let retired_documents = self
+            .collections_shadow_documents
+            .iter()
+            .filter(|((_, scope_id), _)| !live_tab_ids.contains(scope_id))
+            .filter_map(|((_, scope_id), cache)| {
+                let document = cache.current()?;
+                Some((
+                    document.namespace.clone(),
+                    scope_id.clone(),
+                    document.generation,
+                    document.revision,
+                ))
+            })
+            .collect::<Vec<_>>();
         self.collections_shadow_documents
             .retain(|(_, scope_id), _| live_tab_ids.contains(scope_id));
+        for (namespace, scope_id, generation, revision) in retired_documents {
+            self.emit_host_document_updated(namespace, scope_id, generation, revision, false);
+        }
         self.host_document_request_watermarks
             .retain(|(_, scope_id), _| live_tab_ids.contains(scope_id));
         self.host_document_retry_snapshots
@@ -447,9 +464,7 @@ impl App {
         let key = (namespace.to_string(), scope_id);
         self.host_document_request_watermarks
             .insert(key.clone(), (generation, revision));
-        if let Some(cache) = self.collections_shadow_documents.get_mut(&key) {
-            cache.disable();
-        }
+        self.disable_host_document_projection(&key, generation, revision);
         match self
             .host_document_services
             .request_spaces(namespace, snapshot.clone())
@@ -562,9 +577,7 @@ impl App {
         self.host_relationships_last_desired = Some(snapshot.clone());
         self.host_document_request_watermarks
             .insert(key.clone(), (generation, snapshot.revision));
-        if let Some(cache) = self.collections_shadow_documents.get_mut(&key) {
-            cache.disable();
-        }
+        self.disable_host_document_projection(&key, generation, snapshot.revision);
         match self
             .host_document_services
             .request_relationships(namespace, snapshot.clone())
@@ -681,9 +694,7 @@ impl App {
         self.host_agent_activity_last_desired = Some(snapshot.clone());
         self.host_document_request_watermarks
             .insert(key.clone(), (generation, snapshot.revision));
-        if let Some(cache) = self.collections_shadow_documents.get_mut(&key) {
-            cache.disable();
-        }
+        self.disable_host_document_projection(&key, generation, snapshot.revision);
         match self
             .host_document_services
             .request_agent_activity(namespace, snapshot.clone())
@@ -703,6 +714,31 @@ impl App {
                 self.schedule_host_semantic_retry(namespace);
                 tracing::warn!(%error, "Agent Status provider unavailable; using native fallback");
             }
+        }
+    }
+
+    fn disable_host_document_projection(
+        &mut self,
+        key: &(String, String),
+        generation: u64,
+        revision: u64,
+    ) {
+        let was_available = self
+            .collections_shadow_documents
+            .get(key)
+            .and_then(|cache| cache.current())
+            .is_some();
+        if let Some(cache) = self.collections_shadow_documents.get_mut(key) {
+            cache.disable();
+        }
+        if was_available {
+            self.emit_host_document_updated(
+                key.0.clone(),
+                key.1.clone(),
+                generation,
+                revision,
+                false,
+            );
         }
     }
 
@@ -2315,7 +2351,7 @@ mod tests {
             "documents".into(),
             crate::api::schema::HostDocumentListParams {
                 namespace: Some(crate::first_party::collections::NAMESPACE.into()),
-                scope_id: Some(scope_id),
+                scope_id: Some(scope_id.clone()),
             },
         );
         let response: crate::api::schema::SuccessResponse =
@@ -2339,6 +2375,26 @@ mod tests {
                 } if namespace == crate::first_party::collections::NAMESPACE
             )
         }));
+        let sequence = app.event_hub.current_sequence();
+        app.disable_host_document_projection(
+            &(crate::first_party::collections::NAMESPACE.into(), scope_id),
+            9,
+            2,
+        );
+        assert!(app
+            .event_hub
+            .events_after(sequence)
+            .iter()
+            .any(|(_, event)| {
+                matches!(
+                    &event.data,
+                    crate::api::schema::EventData::HostDocumentUpdated {
+                        available: false,
+                        revision: 2,
+                        ..
+                    }
+                )
+            }));
     }
 
     #[test]

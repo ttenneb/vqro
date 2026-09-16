@@ -191,16 +191,6 @@ pub enum EventMatch {
         pane_id: String,
         agent_status: AgentStatus,
     },
-    HostDocumentUpdated {
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        namespace: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        scope_id: Option<String>,
-    },
-    ExtensionStateCommitted {
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        namespace: Option<String>,
-    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]

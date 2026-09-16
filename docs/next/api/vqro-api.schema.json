@@ -2700,48 +2700,6 @@
                 "agent_status"
               ],
               "type": "object"
-            },
-            {
-              "properties": {
-                "event": {
-                  "const": "host_document_updated",
-                  "type": "string"
-                },
-                "namespace": {
-                  "type": [
-                    "string",
-                    "null"
-                  ]
-                },
-                "scope_id": {
-                  "type": [
-                    "string",
-                    "null"
-                  ]
-                }
-              },
-              "required": [
-                "event"
-              ],
-              "type": "object"
-            },
-            {
-              "properties": {
-                "event": {
-                  "const": "extension_state_committed",
-                  "type": "string"
-                },
-                "namespace": {
-                  "type": [
-                    "string",
-                    "null"
-                  ]
-                }
-              },
-              "required": [
-                "event"
-              ],
-              "type": "object"
             }
           ]
         },

@@ -63,7 +63,32 @@ impl App {
         self.extension_services = extension_services;
         self.host_document_services = host_document_services;
         self.extension_catalog_rebuilt = true;
+        let retired_documents = self
+            .collections_shadow_documents
+            .iter()
+            .filter_map(|((_, scope_id), cache)| {
+                let document = cache.current()?;
+                Some((
+                    document.namespace.clone(),
+                    scope_id.clone(),
+                    document.generation,
+                    document.revision,
+                ))
+            })
+            .collect::<Vec<_>>();
         self.collections_shadow_documents.clear();
+        for (namespace, scope_id, generation, revision) in retired_documents {
+            self.event_hub.push(crate::api::schema::EventEnvelope {
+                event: crate::api::schema::EventKind::HostDocumentUpdated,
+                data: crate::api::schema::EventData::HostDocumentUpdated {
+                    namespace,
+                    scope_id,
+                    generation,
+                    revision,
+                    available: false,
+                },
+            });
+        }
         self.host_document_request_watermarks.clear();
         self.host_document_confirmation_grants.clear();
         self.host_document_retry_snapshots.clear();

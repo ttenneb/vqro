@@ -570,6 +570,9 @@ impl HeadlessServer {
                                 actions: view.actions.clone(),
                             };
                             if !allowed_actions || contribution.validate().is_err() {
+                                self.app
+                                    .extension_services
+                                    .fail_over_view_provider(&result.service_id);
                                 response.error =
                                     Some("extension returned an invalid contribution".into());
                             } else {
