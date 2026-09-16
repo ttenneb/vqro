@@ -3,6 +3,7 @@ use super::*;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ClientGlobalMenuAction {
     Binding(crate::input::KeybindAction),
+    Extensions,
     WhatsNew,
 }
 
@@ -23,6 +24,7 @@ pub(super) fn global_menu_items(
     snapshot: &ClientShellSnapshot,
 ) -> Vec<(&'static str, ClientGlobalMenuAction)> {
     let mut items = vec![
+        ("extensions", ClientGlobalMenuAction::Extensions),
         (
             "settings",
             ClientGlobalMenuAction::Binding(crate::input::KeybindAction::Settings),
@@ -103,6 +105,7 @@ impl ClientShellState {
             ClientGlobalMenuAction::Binding(binding) => {
                 self.record_binding(crate::input::KeybindMatch::Action(binding), outcome)
             }
+            ClientGlobalMenuAction::Extensions => self.open_extensions_overlay(outcome),
             ClientGlobalMenuAction::WhatsNew => self.open_release_notes(),
         }
         outcome.repaint = true;

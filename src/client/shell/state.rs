@@ -194,6 +194,11 @@ pub(super) struct ShellHitMap {
     pub(super) settings_popup: Rect,
     pub(super) settings_tabs: Vec<(Rect, ClientSettingsSection)>,
     pub(super) settings_choices: Vec<(Rect, usize)>,
+    pub(super) extensions_popup: Rect,
+    pub(super) extensions_tabs: Vec<(Rect, ClientExtensionsTab)>,
+    pub(super) extensions_categories: Vec<(Rect, Option<String>)>,
+    pub(super) extensions_rows: Vec<(Rect, usize)>,
+    pub(super) extensions_search: Rect,
     pub(super) product_announcement_scrollbar: Rect,
     pub(super) product_announcement_scroll_metrics: Option<crate::pane::ScrollMetrics>,
     pub(super) product_announcement_max_scroll: usize,
@@ -400,6 +405,7 @@ pub(super) enum ClientShellOverlayKind {
     ContextMenu,
     GlobalMenu,
     Settings,
+    Extensions,
 }
 
 #[derive(Debug)]
@@ -492,6 +498,68 @@ pub(super) struct ClientHelpOverlay {
 #[derive(Debug)]
 pub(super) struct ClientGlobalMenuOverlay {
     pub(super) highlighted: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ClientExtensionsTab {
+    Browse,
+    Installed,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ClientExtensionConfirmation {
+    Install,
+    Remove,
+    DeleteData,
+    Update,
+    Rollback,
+}
+
+#[derive(Debug)]
+pub(super) struct ClientExtensionsOverlay {
+    pub(super) tab: ClientExtensionsTab,
+    pub(super) query: String,
+    pub(super) search_focused: bool,
+    pub(super) category: Option<String>,
+    pub(super) selected: usize,
+    pub(super) extensions: Vec<crate::api::schema::ExtensionInfo>,
+    pub(super) loading: bool,
+    pub(super) mutating: bool,
+    pub(super) confirmation: Option<ClientExtensionConfirmation>,
+    pub(super) message: Option<String>,
+}
+
+impl ClientExtensionsOverlay {
+    pub(super) fn filtered_indices(&self) -> Vec<usize> {
+        let query = self.query.trim().to_ascii_lowercase();
+        self.extensions
+            .iter()
+            .enumerate()
+            .filter(|(_, extension)| self.tab == ClientExtensionsTab::Browse || extension.installed)
+            .filter(|(_, extension)| {
+                self.category.as_ref().is_none_or(|category| {
+                    extension
+                        .categories
+                        .iter()
+                        .any(|candidate| candidate == category)
+                })
+            })
+            .filter(|(_, extension)| {
+                query.is_empty()
+                    || extension.name.to_ascii_lowercase().contains(&query)
+                    || extension.id.to_ascii_lowercase().contains(&query)
+                    || extension.summary.to_ascii_lowercase().contains(&query)
+                    || extension.repository.to_ascii_lowercase().contains(&query)
+            })
+            .map(|(index, _)| index)
+            .collect()
+    }
+
+    pub(super) fn selected_extension(&self) -> Option<&crate::api::schema::ExtensionInfo> {
+        let filtered = self.filtered_indices();
+        let index = filtered.get(self.selected).or_else(|| filtered.first())?;
+        self.extensions.get(*index)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -747,6 +815,7 @@ pub(super) enum ClientShellOverlay {
     ContextMenu(ClientContextMenuOverlay),
     GlobalMenu(ClientGlobalMenuOverlay),
     Settings(ClientSettingsOverlay),
+    Extensions(ClientExtensionsOverlay),
 }
 
 impl ClientShellOverlay {
@@ -767,6 +836,7 @@ impl ClientShellOverlay {
             Self::ContextMenu(_) => ClientShellOverlayKind::ContextMenu,
             Self::GlobalMenu(_) => ClientShellOverlayKind::GlobalMenu,
             Self::Settings(_) => ClientShellOverlayKind::Settings,
+            Self::Extensions(_) => ClientShellOverlayKind::Extensions,
         }
     }
 }
@@ -783,6 +853,8 @@ pub(super) enum PendingEndpointKind {
     ReloadConfig,
     IntegrationList,
     IntegrationInstall,
+    ExtensionList,
+    ExtensionMutation,
     PrepareWorktreeCreate {
         workspace_id: String,
     },

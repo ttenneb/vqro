@@ -475,6 +475,11 @@ impl ClientShellState {
                     search_focused: true,
                     ..
                 }))
+                | Some(ClientShellOverlay::Extensions(ClientExtensionsOverlay {
+                    search_focused: true,
+                    mutating: false,
+                    ..
+                }))
         )
     }
 

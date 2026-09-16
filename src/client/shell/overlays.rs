@@ -1,5 +1,6 @@
 use super::*;
 
+mod extensions_overlay;
 mod settings_overlay;
 mod worktree_overlays;
 
@@ -22,6 +23,11 @@ pub(crate) struct OverlayRender {
     pub(crate) settings_popup: Rect,
     pub(crate) settings_tabs: Vec<(Rect, ClientSettingsSection)>,
     pub(crate) settings_choices: Vec<(Rect, usize)>,
+    pub(crate) extensions_popup: Rect,
+    pub(crate) extensions_tabs: Vec<(Rect, ClientExtensionsTab)>,
+    pub(crate) extensions_categories: Vec<(Rect, Option<String>)>,
+    pub(crate) extensions_rows: Vec<(Rect, usize)>,
+    pub(crate) extensions_search: Rect,
     pub(crate) product_announcement_scrollbar: Rect,
     pub(crate) product_announcement_scroll_metrics: Option<crate::pane::ScrollMetrics>,
     pub(crate) product_announcement_max_scroll: usize,
@@ -80,6 +86,7 @@ pub(crate) fn render_client_overlay(
         ClientShellOverlay::Settings(v) => {
             settings_overlay::render_settings_overlay(b, v, s.integration_updates_available, p)
         }
+        ClientShellOverlay::Extensions(v) => extensions_overlay::render_extensions_overlay(b, v, p),
         ClientShellOverlay::WorktreeCreate(v) => {
             worktree_overlays::render_worktree_create_overlay(b, v, p)
         }
