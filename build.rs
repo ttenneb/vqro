@@ -52,6 +52,10 @@ fn main() {
 
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
     let vendored_dir = manifest_dir.join("vendor/libghostty-vt");
+    let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR"));
+    let zig_prefix = out_dir.join("libghostty-vt");
+    let zig_cache = out_dir.join("zig-cache");
+    let zig_global_cache = out_dir.join("zig-global-cache");
     let optimize = env::var("LIBGHOSTTY_VT_OPTIMIZE").unwrap_or_else(|_| "ReleaseFast".into());
     let simd = env_bool("LIBGHOSTTY_VT_SIMD").unwrap_or(true);
     let target = env::var("TARGET").expect("TARGET");
@@ -70,7 +74,15 @@ fn main() {
         .arg(format!("-Dsimd={simd}"))
         .arg(format!("-Dtarget={zig_target}"))
         .arg(format!("-Dversion-string={version_string}"))
-        .arg("-Demit-xcframework=false");
+        .arg("-Demit-xcframework=false")
+        // A build script must never write into the packaged source tree. Keep
+        // Zig's install output and both caches under Cargo's designated OUT_DIR.
+        .arg("--prefix")
+        .arg(&zig_prefix)
+        .arg("--cache-dir")
+        .arg(&zig_cache)
+        .arg("--global-cache-dir")
+        .arg(&zig_global_cache);
     if target.ends_with("windows-msvc") {
         if let Some(libc_file) = env::var_os("LIBGHOSTTY_VT_WINDOWS_LIBC") {
             println!(
@@ -105,7 +117,7 @@ fn main() {
          or set ZIG to the path of a Zig 0.16.0 binary, then retry"
     );
 
-    let lib_dir = vendored_dir.join("zig-out/lib");
+    let lib_dir = zig_prefix.join("lib");
     println!("cargo:rustc-link-search=native={}", lib_dir.display());
     if target.contains("apple-darwin") {
         let static_lib = lib_dir.join("libghostty-vt.a");
