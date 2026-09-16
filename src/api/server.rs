@@ -555,6 +555,15 @@ pub(crate) fn api_method_name(method: &Method) -> &'static str {
         Method::PluginPaneOpen(_) => "plugin.pane.open",
         Method::PluginPaneFocus(_) => "plugin.pane.focus",
         Method::PluginPaneClose(_) => "plugin.pane.close",
+        Method::ExtensionList(_) => "extension.list",
+        Method::ExtensionInstall(_) => "extension.install",
+        Method::ExtensionEnable(_) => "extension.enable",
+        Method::ExtensionRemove(_) => "extension.remove",
+        Method::ExtensionDataDelete(_) => "extension.data.delete",
+        Method::ExtensionReorder(_) => "extension.reorder",
+        Method::ExtensionRepositoryOverrideSet(_) => "extension.repository_override.set",
+        Method::ExtensionUpdate(_) => "extension.update",
+        Method::ExtensionRollback(_) => "extension.rollback",
     }
 }
 

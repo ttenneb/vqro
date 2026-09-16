@@ -32,6 +32,7 @@ pub mod extension_resource;
 mod extension_service;
 pub mod extension_spec;
 pub mod extension_state;
+mod extensions;
 mod first_party;
 mod ghostty;
 mod handoff_runtime;

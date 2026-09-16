@@ -181,6 +181,8 @@ pub struct App {
         HashMap<crate::terminal::TerminalId, terminal_inspector::CachedTerminalTelemetry>,
     pub(crate) extension_services: crate::extension_service::ExtensionServiceManager,
     pub(crate) host_document_services: crate::extension_service::HostDocumentServiceCatalog,
+    pub(crate) extension_index: crate::extensions::CuratedIndex,
+    pub(crate) extension_state: crate::extensions::ExtensionStateFile,
     pub(crate) disabled_extensions: std::collections::BTreeSet<String>,
     pub(crate) collections_shadow_documents:
         HashMap<(String, String), crate::first_party::collections::ShadowDocumentCache>,
@@ -590,10 +592,22 @@ impl App {
         let theme_runtime = theme_runtime_config(config, true);
         let (theme_palette, theme_name) = resolve_effective_theme(&theme_runtime, None);
         let installed_plugins = load_plugin_registry(policy.persist_plugin_registry);
+        let extension_index = crate::extensions::CuratedIndex::bundled()
+            .expect("bundled extension index is validated by tests");
+        let extension_state = if policy.persist_plugin_registry {
+            crate::extensions::load_state(&extension_index)
+        } else {
+            crate::extensions::ExtensionStateFile::defaults(&extension_index)
+        };
+        let mut disabled_extensions =
+            crate::extensions::disabled_bundled_providers(&extension_index, &extension_state);
+        // Preserve the legacy config as an additive kill switch while clients migrate
+        // to the global extension registry.
+        disabled_extensions.extend(config.extensions.disabled.iter().cloned());
         let extension_services =
             crate::extension_service::manager_for_plugins(&installed_plugins, event_tx.clone());
         let host_document_services = crate::extension_service::HostDocumentServiceCatalog::bundled(
-            &config.extensions.disabled,
+            &disabled_extensions,
             &installed_plugins,
             event_tx.clone(),
         );
@@ -829,7 +843,9 @@ impl App {
             terminal_telemetry_cache: HashMap::new(),
             extension_services,
             host_document_services,
-            disabled_extensions: config.extensions.disabled.clone(),
+            extension_index,
+            extension_state,
+            disabled_extensions,
             collections_shadow_documents: HashMap::new(),
             next_host_document_revision: 1,
             next_host_spaces_document_revision: 1,
@@ -1184,7 +1200,12 @@ impl App {
         }
 
         if !invalid_section("extensions") {
-            self.disabled_extensions = config.extensions.disabled.clone();
+            self.disabled_extensions = crate::extensions::disabled_bundled_providers(
+                &self.extension_index,
+                &self.extension_state,
+            );
+            self.disabled_extensions
+                .extend(config.extensions.disabled.iter().cloned());
             self.rebuild_extension_catalogs();
         }
 

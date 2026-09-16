@@ -8,6 +8,7 @@ pub(crate) use collections::HostDocumentConfirmationGrant;
 mod delegations;
 mod env;
 pub(crate) mod extension_state;
+mod extensions;
 mod integrations;
 mod layouts;
 mod pane_graphics;
@@ -1482,6 +1483,33 @@ impl App {
             }
             Method::PluginPaneClose(params) => {
                 return self.handle_plugin_pane_close(request.id, params);
+            }
+            Method::ExtensionList(params) => {
+                return self.handle_extension_list(request.id, params);
+            }
+            Method::ExtensionInstall(params) => {
+                return self.handle_extension_install(request.id, params);
+            }
+            Method::ExtensionEnable(params) => {
+                return self.handle_extension_enable(request.id, params);
+            }
+            Method::ExtensionRemove(params) => {
+                return self.handle_extension_remove(request.id, params);
+            }
+            Method::ExtensionDataDelete(params) => {
+                return self.handle_extension_data_delete(request.id, params);
+            }
+            Method::ExtensionReorder(params) => {
+                return self.handle_extension_reorder(request.id, params);
+            }
+            Method::ExtensionRepositoryOverrideSet(params) => {
+                return self.handle_extension_repository_override_set(request.id, params);
+            }
+            Method::ExtensionUpdate(params) => {
+                return self.handle_extension_update(request.id, params);
+            }
+            Method::ExtensionRollback(params) => {
+                return self.handle_extension_rollback(request.id, params);
             }
             _ => {
                 return responses::encode_error(

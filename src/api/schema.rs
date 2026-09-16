@@ -7,6 +7,7 @@ pub mod common;
 pub mod delegations;
 pub mod events;
 pub mod extension_state;
+pub mod extensions;
 pub mod integrations;
 pub mod panes;
 pub mod plugins;
@@ -25,6 +26,7 @@ pub use common::*;
 pub use delegations::*;
 pub use events::*;
 pub use extension_state::*;
+pub use extensions::*;
 pub use integrations::*;
 pub use panes::*;
 pub use plugins::*;
@@ -320,6 +322,24 @@ pub enum Method {
     PluginPaneFocus(PluginPaneFocusParams),
     #[serde(rename = "plugin.pane.close")]
     PluginPaneClose(PluginPaneCloseParams),
+    #[serde(rename = "extension.list")]
+    ExtensionList(ExtensionListParams),
+    #[serde(rename = "extension.install")]
+    ExtensionInstall(ExtensionConfirmedParams),
+    #[serde(rename = "extension.enable")]
+    ExtensionEnable(ExtensionSetEnabledParams),
+    #[serde(rename = "extension.remove")]
+    ExtensionRemove(ExtensionConfirmedParams),
+    #[serde(rename = "extension.data.delete")]
+    ExtensionDataDelete(ExtensionConfirmedParams),
+    #[serde(rename = "extension.reorder")]
+    ExtensionReorder(ExtensionReorderParams),
+    #[serde(rename = "extension.repository_override.set")]
+    ExtensionRepositoryOverrideSet(ExtensionRepositoryOverrideParams),
+    #[serde(rename = "extension.update")]
+    ExtensionUpdate(ExtensionUpdateParams),
+    #[serde(rename = "extension.rollback")]
+    ExtensionRollback(ExtensionConfirmedParams),
 }
 
 #[cfg(test)]

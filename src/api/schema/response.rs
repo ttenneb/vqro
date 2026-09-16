@@ -298,6 +298,15 @@ pub enum ResponseResult {
     PluginDisabled {
         plugin: InstalledPluginInfo,
     },
+    ExtensionList {
+        extensions: Vec<super::extensions::ExtensionInfo>,
+    },
+    ExtensionChanged {
+        extension: super::extensions::ExtensionInfo,
+    },
+    ExtensionDataDeleted {
+        repository: String,
+    },
     PluginActionList {
         actions: Vec<PluginActionInfo>,
     },
