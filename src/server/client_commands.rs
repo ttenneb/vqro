@@ -74,6 +74,7 @@ pub(crate) const CLIENT_SHELL_OPTIONAL_METHODS: &[&str] = &[
     "delegation.reparent",
     "delegation.root",
     "delegation.tree",
+    "host.document.action",
     "pane.telemetry",
 ];
 

@@ -107,6 +107,12 @@ pub fn maybe_run(args: &[String]) -> std::io::Result<CommandOutcome> {
     }
 
     let exit_code = match command {
+        "_extension-service" => {
+            let Some(provider) = args.get(2) else {
+                return Ok(CommandOutcome::Handled(2));
+            };
+            crate::first_party::service::run(provider)?
+        }
         "server" => {
             let Some(exit_code) = server::run_server_command(&args[2..])? else {
                 return Ok(CommandOutcome::NotCli);

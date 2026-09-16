@@ -305,6 +305,14 @@ pub fn validated_sidebar_bounds(min: u16, max: u16) -> Option<(u16, u16)> {
     }
 }
 
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct ExtensionsConfig {
+    /// Bundled provider namespaces disabled by the user. Bundled providers are
+    /// otherwise enabled by default and are never persisted as user plugins.
+    pub disabled: BTreeSet<String>,
+}
+
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 pub struct Config {
@@ -320,6 +328,7 @@ pub struct Config {
     pub advanced: AdvancedConfig,
     pub experimental: ExperimentalConfig,
     pub remote: RemoteConfig,
+    pub extensions: ExtensionsConfig,
 }
 
 #[derive(Debug)]
@@ -1445,6 +1454,17 @@ status_indicators = "symbols"
         )
         .unwrap();
         assert_eq!(config.ui.status_indicators, StatusIndicatorStyle::Symbols);
+    }
+
+    #[test]
+    fn bundled_extensions_are_enabled_by_default_and_disableable_by_namespace() {
+        let defaults: Config = toml::from_str("").unwrap();
+        assert!(defaults.extensions.disabled.is_empty());
+        let disabled: Config =
+            toml::from_str("[extensions]\ndisabled = [\"vqro.collections\", \"vqro.spaces\"]")
+                .unwrap();
+        assert!(disabled.extensions.disabled.contains("vqro.collections"));
+        assert!(disabled.extensions.disabled.contains("vqro.spaces"));
     }
 
     #[test]

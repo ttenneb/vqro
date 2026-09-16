@@ -30,14 +30,44 @@ impl App {
             crate::persist::plugin_registry::reload_manifests(entries, |path, enabled| {
                 load_plugin_manifest(path, enabled).map_err(|(_, message)| message)
             });
-        self.state.installed_plugins = entries
+        let installed_plugins = entries
             .into_iter()
             .map(|plugin| (plugin.plugin_id.clone(), plugin))
             .collect();
-        self.extension_services = crate::extension_service::manager_for_plugins(
+        if self.state.installed_plugins != installed_plugins {
+            self.state.installed_plugins = installed_plugins;
+            self.rebuild_extension_catalogs();
+        } else if self.extension_catalog_rebuild_pending {
+            self.rebuild_extension_catalogs();
+        }
+    }
+
+    pub(crate) fn rebuild_extension_catalogs(&mut self) {
+        let extension_services = crate::extension_service::manager_for_plugins(
             &self.state.installed_plugins,
             self.event_tx.clone(),
         );
+        let host_document_services = crate::extension_service::HostDocumentServiceCatalog::bundled(
+            &self.disabled_extensions,
+            &self.state.installed_plugins,
+            self.event_tx.clone(),
+        );
+        let complete = extension_services.is_complete() && host_document_services.is_complete();
+        self.extension_catalog_rebuild_pending = !complete;
+        if !complete {
+            tracing::warn!(
+                "extension catalog rebuild is capacity-limited; retiring the old catalog and retrying"
+            );
+        }
+        self.extension_services = extension_services;
+        self.host_document_services = host_document_services;
+        self.extension_catalog_rebuilt = true;
+        self.collections_shadow_documents.clear();
+        self.host_document_request_watermarks.clear();
+        self.host_document_confirmation_grants.clear();
+        self.host_document_retry_snapshots.clear();
+        self.host_document_retry_order.clear();
+        self.refresh_collection_documents();
     }
 
     fn refresh_installed_plugins(&mut self) -> std::io::Result<()> {
@@ -54,7 +84,12 @@ impl App {
         mutation: impl FnOnce(&mut crate::app::state::InstalledPluginRegistry) -> T,
     ) -> std::io::Result<T> {
         if !self.policy.persist_plugin_registry {
-            return Ok(mutation(&mut self.state.installed_plugins));
+            let before = self.state.installed_plugins.clone();
+            let result = mutation(&mut self.state.installed_plugins);
+            if self.state.installed_plugins != before {
+                self.rebuild_extension_catalogs();
+            }
+            return Ok(result);
         }
         let (result, entries) = crate::persist::plugin_registry::update(|entries| {
             let mut registry = entries
@@ -1561,6 +1596,135 @@ capabilities = ["view_contribution", "terminal_interrupt"]
         };
         assert!(plugin.enabled);
 
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn reserved_host_document_namespaces_are_rejected() {
+        for namespace in ["vqro.collections", "host.fallback"] {
+            let root = unique_temp_path("reserved-host-document-namespace");
+            write_manifest_content(
+                &root,
+                &format!(
+                    r#"
+id = "{namespace}"
+name = "Reserved"
+version = "0.1.0"
+min_herdr_version = "0.9.0"
+
+[[services]]
+id = "documents"
+command = ["document-service"]
+provides = ["host_document"]
+capabilities = ["host_document"]
+"#
+                ),
+            );
+            let error = load_plugin_manifest(root.to_str().unwrap(), true).unwrap_err();
+            assert_eq!(error.0, "reserved_host_document_namespace");
+            let _ = std::fs::remove_dir_all(root);
+        }
+    }
+
+    #[test]
+    fn provider_capacity_event_retries_deferred_catalog_rebuild() {
+        let mut app = test_app();
+        app.extension_catalog_rebuild_pending = true;
+        app.extension_catalog_rebuilt = false;
+        app.handle_internal_event(crate::events::AppEvent::ExtensionCatalogCapacityAvailable);
+        assert!(!app.extension_catalog_rebuild_pending);
+        assert!(app.extension_catalog_rebuilt);
+    }
+
+    #[test]
+    fn plugin_lifecycle_atomically_rebuilds_and_revokes_host_document_provider() {
+        let mut app = test_app();
+        let root = unique_temp_path("plugin-host-document-lifecycle");
+        write_manifest_content(
+            &root,
+            r#"
+id = "example.documents"
+name = "Documents"
+version = "0.1.0"
+min_herdr_version = "0.9.0"
+platforms = ["linux", "macos", "windows"]
+
+[[services]]
+id = "documents"
+command = ["document-service"]
+priority = 200
+provides = ["host_document"]
+capabilities = ["host_document", "focus_terminal"]
+"#,
+        );
+        link_manifest(&mut app, &root);
+        let enabled_generation = app
+            .host_document_services
+            .generation("example.documents")
+            .expect("linked provider is cataloged");
+        app.host_document_confirmation_grants.insert(
+            (
+                "example.documents".into(),
+                "w1:t1".into(),
+                enabled_generation,
+                1,
+                "interrupt".into(),
+            ),
+            crate::app::api::HostDocumentConfirmationGrant {
+                token: "retired-token".into(),
+                terminal_id: "term-retired".into(),
+                expires_at: std::time::Instant::now() + std::time::Duration::from_secs(30),
+            },
+        );
+
+        let disabled = app.handle_api_request(Request {
+            id: "disable-docs".into(),
+            method: Method::PluginDisable(PluginSetEnabledParams {
+                plugin_id: "example.documents".into(),
+            }),
+        });
+        assert!(matches!(
+            response_result(&disabled),
+            ResponseResult::PluginDisabled { .. }
+        ));
+        assert_eq!(
+            app.host_document_services.generation("example.documents"),
+            None
+        );
+        assert!(app
+            .collections_shadow_documents
+            .keys()
+            .all(|(namespace, _)| namespace != "example.documents"));
+        assert!(app.host_document_confirmation_grants.is_empty());
+
+        let enabled = app.handle_api_request(Request {
+            id: "enable-docs".into(),
+            method: Method::PluginEnable(PluginSetEnabledParams {
+                plugin_id: "example.documents".into(),
+            }),
+        });
+        assert!(matches!(
+            response_result(&enabled),
+            ResponseResult::PluginEnabled { .. }
+        ));
+        assert_ne!(
+            app.host_document_services
+                .generation("example.documents")
+                .unwrap(),
+            enabled_generation
+        );
+
+        // Read paths reload manifests to notice on-disk changes, but identical effective
+        // catalogs must preserve worker generations and in-flight client requests.
+        app.extension_catalog_rebuilt = false;
+        let manager_generation = app.extension_services.manager_generation();
+        let unchanged = app.state.installed_plugins.values().cloned().collect();
+        app.replace_installed_plugins(unchanged);
+        assert_eq!(
+            app.extension_services.manager_generation(),
+            manager_generation
+        );
+        assert!(!app.extension_catalog_rebuilt);
         let _ = std::fs::remove_dir_all(root);
     }
 

@@ -225,6 +225,7 @@ pub(super) struct CollectionMemberHit {
     pub(super) scroll: Option<crate::pane::ScrollMetrics>,
     pub(super) collection_id: String,
     pub(super) pane_id: String,
+    pub(super) host_document_action: Option<crate::api::schema::HostDocumentActionParams>,
 }
 
 #[derive(Clone)]
@@ -706,6 +707,7 @@ pub(super) struct ClientTerminalInspectorPane {
 pub(super) enum ClientConfirmCloseTarget {
     Workspace { workspace_id: String },
     Collection { collection_id: String },
+    HostDocumentAction(crate::api::schema::HostDocumentActionParams),
 }
 
 #[derive(Debug)]

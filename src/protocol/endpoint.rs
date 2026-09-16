@@ -31,6 +31,7 @@ pub const AGENT_VIEW_PROJECTION_CAPABILITY: &str = "agent_view_projection";
 pub const AGENT_VIEW_PROJECTION_KIND: &str = "endpoint.agent-view.v1";
 pub const SESSION_STRUCTURE_CAPABILITY: &str = "session_structure_v1";
 pub const SESSION_STRUCTURE_KIND: &str = "session.structure.v1";
+pub const HOST_DOCUMENTS_KIND: &str = "host.documents.v1";
 pub const PANE_VIEWPORT_CAPABILITY: &str = "pane_viewport_v1";
 pub const PANE_VIEW_CAPABILITY: &str = "pane_view_v1";
 pub const PANE_VIEWPORT_KIND: &str = "pane.viewport.v1";
@@ -72,6 +73,62 @@ pub struct EndpointClientHello {
     /// Optional controls the client understands; absent for generation-1 clients.
     #[serde(default)]
     pub control_kinds: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostDocumentsProjectionV1 {
+    pub boot_id: String,
+    pub revision: u64,
+    #[serde(default)]
+    pub documents: Vec<HostDocumentProjectionEntryV1>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostDocumentProjectionEntryV1 {
+    pub provider_priority: i32,
+    pub document: crate::extension_contract::HostDocumentV1,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub confirmation_tokens: std::collections::BTreeMap<String, String>,
+}
+
+impl HostDocumentsProjectionV1 {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.boot_id.is_empty() || self.boot_id.len() > 128 || self.revision == 0 {
+            return Err("invalid host document projection identity".into());
+        }
+        let max_documents =
+            crate::admission::MAX_SESSION_PANES * crate::extension_contract::MAX_DOCUMENT_PROVIDERS;
+        if self.documents.len() > max_documents {
+            return Err("host document projection has too many entries".into());
+        }
+        let mut identities = std::collections::BTreeSet::new();
+        for entry in &self.documents {
+            entry
+                .document
+                .validate()
+                .map_err(|error| error.to_string())?;
+            if !identities.insert((
+                entry.document.namespace.clone(),
+                entry.document.target.clone(),
+            )) {
+                return Err("host document projection identities must be unique".into());
+            }
+            for (action_id, token) in &entry.confirmation_tokens {
+                if token.is_empty()
+                    || token.len() > 256
+                    || !token.bytes().all(|byte| byte.is_ascii_alphanumeric())
+                    || !entry
+                        .document
+                        .actions
+                        .iter()
+                        .any(|action| action.id == *action_id)
+                {
+                    return Err("invalid host document confirmation token".into());
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -330,6 +387,15 @@ pub fn structure_message(
 ) -> serde_json::Result<ServerMessage> {
     Ok(ServerMessage::EndpointControl {
         kind: SESSION_STRUCTURE_KIND.into(),
+        data: serde_json::to_string(projection)?,
+    })
+}
+
+pub fn host_documents_message(
+    projection: &HostDocumentsProjectionV1,
+) -> serde_json::Result<ServerMessage> {
+    Ok(ServerMessage::EndpointControl {
+        kind: HOST_DOCUMENTS_KIND.into(),
         data: serde_json::to_string(projection)?,
     })
 }

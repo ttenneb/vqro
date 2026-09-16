@@ -180,17 +180,37 @@ pub(crate) fn fallback(
 #[derive(Debug, Default)]
 pub(crate) struct ShadowDocumentCache {
     document: Option<HostDocumentV1>,
+    provider_priority: i32,
+    grants: HashSet<HostCapability>,
 }
 
 impl ShadowDocumentCache {
+    #[cfg(test)]
     pub(crate) fn publish(
         &mut self,
         expected_generation: u64,
         granted_capabilities: &HashSet<HostCapability>,
         document: HostDocumentV1,
     ) -> Result<(), HostDocumentError> {
+        self.publish_for_namespace(
+            NAMESPACE,
+            expected_generation,
+            100,
+            granted_capabilities,
+            document,
+        )
+    }
+
+    pub(crate) fn publish_for_namespace(
+        &mut self,
+        expected_namespace: &str,
+        expected_generation: u64,
+        provider_priority: i32,
+        granted_capabilities: &HashSet<HostCapability>,
+        document: HostDocumentV1,
+    ) -> Result<(), HostDocumentError> {
         document.validate()?;
-        if document.namespace != NAMESPACE || document.generation != expected_generation {
+        if document.namespace != expected_namespace || document.generation != expected_generation {
             return Err(HostDocumentError(
                 "document provider or generation mismatch".into(),
             ));
@@ -212,6 +232,8 @@ impl ShadowDocumentCache {
             return Err(HostDocumentError("stale document revision".into()));
         }
         self.document = Some(document);
+        self.provider_priority = provider_priority;
+        self.grants = granted_capabilities.clone();
         Ok(())
     }
 
@@ -219,6 +241,29 @@ impl ShadowDocumentCache {
         self.document = None;
     }
 
+    pub(crate) fn install_fallback(
+        &mut self,
+        snapshot: &HostTerminalGroupsV1,
+    ) -> Result<(), HostDocumentError> {
+        self.document = Some(fallback(snapshot)?);
+        self.provider_priority = i32::MIN;
+        self.grants = HashSet::from([HostCapability::FocusTerminal]);
+        Ok(())
+    }
+
+    pub(crate) fn current(&self) -> Option<&HostDocumentV1> {
+        self.document.as_ref()
+    }
+
+    pub(crate) fn provider_priority(&self) -> i32 {
+        self.provider_priority
+    }
+
+    pub(crate) fn grants(&self) -> &HashSet<HostCapability> {
+        &self.grants
+    }
+
+    #[cfg(test)]
     pub(crate) fn document_or_fallback(
         &self,
         snapshot: &HostTerminalGroupsV1,

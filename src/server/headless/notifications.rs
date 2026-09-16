@@ -321,6 +321,13 @@ impl HeadlessServer {
     ///
     /// Returns true if the event changed visual state (requiring a re-render).
     pub(super) fn handle_internal_event_with_forwarding(&mut self, mut ev: AppEvent) -> bool {
+        if matches!(&ev, AppEvent::HostDocumentFinished(_)) {
+            let AppEvent::HostDocumentFinished(result) = ev else {
+                unreachable!("variant checked above");
+            };
+            self.app.handle_host_document_result(*result);
+            return true;
+        }
         if matches!(&ev, AppEvent::ExtensionServiceFinished(_)) {
             let AppEvent::ExtensionServiceFinished(result) = ev else {
                 unreachable!("variant checked above");
@@ -341,7 +348,7 @@ impl HeadlessServer {
         } else {
             None
         };
-        match &ev {
+        let changed = match &ev {
             AppEvent::TerminalBell { pane_id, count } => {
                 if !self.send_to_foreground_client(ServerMessage::TerminalBell { count: *count }) {
                     debug!(
@@ -720,7 +727,11 @@ impl HeadlessServer {
                 true
             }
             _ => self.app.handle_internal_event_with_render_impact(ev),
+        };
+        if std::mem::take(&mut self.app.extension_catalog_rebuilt) {
+            self.retire_client_extension_requests("extension catalog was replaced");
         }
+        changed
     }
 
     /// Drains internal events, forwarding clipboard, sound, and toast

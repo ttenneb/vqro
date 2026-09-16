@@ -1021,6 +1021,67 @@ impl HeadlessServer {
         }
     }
 
+    fn retire_client_extension_requests(&mut self, reason: &str) {
+        let client_ids = self.clients.keys().copied().collect::<Vec<_>>();
+        for client_id in client_ids {
+            let (pending_view, pending_action) = self
+                .clients
+                .get_mut(&client_id)
+                .map(|client| {
+                    client.pending_pane_confirmation = None;
+                    client.pane_contribution_lease = None;
+                    (
+                        client.pending_pane_view.take(),
+                        client.pending_pane_action.take(),
+                    )
+                })
+                .unwrap_or((None, None));
+            if let Some(pending) = pending_view {
+                let request = pending.request;
+                let response = crate::protocol::endpoint::ServerPaneViewResult {
+                    boot_id: request.boot_id,
+                    projection_revision: request.projection_revision,
+                    request_id: request.request_id,
+                    pane_id: request.pane_id,
+                    contribution_revision: request.contribution_revision,
+                    owner_service_id: pending.service_id,
+                    service_generation: pending.service_generation,
+                    document: None,
+                    actions: Vec::new(),
+                    error: Some(reason.into()),
+                };
+                if let Ok(data) = serde_json::to_string(&response) {
+                    self.send_to_client(
+                        client_id,
+                        crate::protocol::ServerMessage::EndpointControl {
+                            kind: crate::protocol::endpoint::PANE_VIEW_RESULT_KIND.into(),
+                            data,
+                        },
+                    );
+                }
+            }
+            if let Some(request) = pending_action {
+                let response = crate::protocol::endpoint::ServerPaneViewActionResult {
+                    request_id: request.request_id,
+                    pane_id: request.pane_id,
+                    contribution_revision: request.contribution_revision,
+                    action_id: request.action_id,
+                    confirmation_token: None,
+                    error: Some(reason.into()),
+                };
+                if let Ok(data) = serde_json::to_string(&response) {
+                    self.send_to_client(
+                        client_id,
+                        crate::protocol::ServerMessage::EndpointControl {
+                            kind: crate::protocol::endpoint::PANE_VIEW_ACTION_RESULT_KIND.into(),
+                            data,
+                        },
+                    );
+                }
+            }
+        }
+    }
+
     fn remove_client(&mut self, client_id: u64) -> bool {
         self.cancel_client_extension_work(client_id);
         self.retire_direct_graphics_for_client(client_id);
@@ -1977,6 +2038,7 @@ impl HeadlessServer {
                 mouse_capture,
                 surface_active,
                 structure_enabled,
+                host_documents_enabled,
                 pane_viewport_enabled,
                 pane_view_enabled,
                 terminal_views_enabled,
@@ -2025,6 +2087,7 @@ impl HeadlessServer {
                 connection.shell_uses_endpoint_keybindings = endpoint_keybindings;
                 connection.shell_mouse_capture = mouse_capture;
                 connection.shell_structure_enabled = structure_enabled;
+                connection.shell_host_documents_enabled = host_documents_enabled;
                 connection.shell_pane_viewport_enabled = pane_viewport_enabled;
                 connection.shell_pane_view_enabled = pane_view_enabled;
                 connection.shell_terminal_views_enabled = terminal_views_enabled;
@@ -2529,6 +2592,31 @@ impl HeadlessServer {
                 true
             }
             ServerEvent::ClientShellPaneViewAction { client_id, request } => {
+                if !self
+                    .clients
+                    .get(&client_id)
+                    .is_some_and(|client| client.shell_pane_view_enabled)
+                {
+                    let response = crate::protocol::endpoint::ServerPaneViewActionResult {
+                        request_id: request.request_id,
+                        pane_id: request.pane_id,
+                        contribution_revision: request.contribution_revision,
+                        action_id: request.action_id,
+                        confirmation_token: None,
+                        error: Some("pane view actions were not negotiated".into()),
+                    };
+                    if let Ok(data) = serde_json::to_string(&response) {
+                        self.send_to_client(
+                            client_id,
+                            crate::protocol::ServerMessage::EndpointControl {
+                                kind: crate::protocol::endpoint::PANE_VIEW_ACTION_RESULT_KIND
+                                    .into(),
+                                data,
+                            },
+                        );
+                    }
+                    return false;
+                }
                 let Some(lease) = self
                     .clients
                     .get(&client_id)
@@ -3606,6 +3694,14 @@ impl HeadlessServer {
                 .handle_deferred_agent_api_request(msg.request, msg.respond_to);
             return changed | deferred_changed;
         }
+        if let api::schema::Method::HostDocumentAction(params) = msg.request.method.clone() {
+            return changed
+                | self.app.handle_deferred_host_document_api_request(
+                    msg.request.id,
+                    params,
+                    msg.respond_to,
+                );
+        }
         if matches!(
             &msg.request.method,
             api::schema::Method::WorktreeCreate(_) | api::schema::Method::WorktreeRemove(_)
@@ -3649,6 +3745,9 @@ impl HeadlessServer {
             self.app
                 .handle_api_request_after_internal_events_drained(msg.request)
         };
+        if std::mem::take(&mut self.app.extension_catalog_rebuilt) {
+            self.retire_client_extension_requests("extension catalog was replaced");
+        }
         if let Some(snapshot) = frozen_alt_screen_read {
             if let Ok(mut success) = serde_json::from_str::<api::schema::SuccessResponse>(&response)
             {

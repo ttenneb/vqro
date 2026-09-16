@@ -9,6 +9,27 @@ use crate::api::schema::{
 };
 use crate::layout::{CollectionId, LayoutLeaf};
 
+const MAX_HOST_DOCUMENT_CONFIRMATION_GRANTS: usize = 8_192;
+
+#[derive(Debug)]
+pub(super) enum AuthorizedHostDocumentAction {
+    Focus(crate::api::schema::PaneTarget),
+    Interrupt(crate::api::schema::PaneTarget),
+    Provider(
+        Box<(
+            crate::extension_contract::HostTerminalGroupsV1,
+            crate::extension_contract::HostDocumentExtensionActionV1,
+        )>,
+    ),
+}
+
+#[derive(Clone)]
+pub(crate) struct HostDocumentConfirmationGrant {
+    pub(crate) token: String,
+    pub(crate) terminal_id: String,
+    pub(crate) expires_at: std::time::Instant,
+}
+
 fn direction(value: crate::api::schema::SplitDirection) -> Direction {
     match value {
         crate::api::schema::SplitDirection::Right => Direction::Horizontal,
@@ -23,26 +44,7 @@ fn collection_id_text(id: CollectionId) -> String {
 impl App {
     pub(super) fn emit_collection_event(&mut self, action: &str, collection: CollectionInfo) {
         if let Some((ws_idx, tab_idx)) = self.parse_tab_id(&collection.tab_id) {
-            let revision = self.event_hub.current_sequence().saturating_add(1).max(1);
-            if let Ok(snapshot) = self.collections_shadow_snapshot(ws_idx, tab_idx, 1, revision) {
-                let tab_id = snapshot.scope_id.clone();
-                let grants = std::collections::HashSet::from([
-                    crate::extension_contract::HostCapability::FocusTerminal,
-                ]);
-                let cache = self.collections_shadow_documents.entry(tab_id).or_default();
-                match crate::first_party::collections::project(&snapshot)
-                    .and_then(|document| cache.publish(1, &grants, document))
-                {
-                    Ok(()) => {
-                        let _ = cache.document_or_fallback(&snapshot);
-                    }
-                    Err(error) => {
-                        tracing::warn!(%error, "Collections shadow provider rejected host state");
-                        cache.disable();
-                        let _ = cache.document_or_fallback(&snapshot);
-                    }
-                }
-            }
+            self.refresh_collection_document(ws_idx, tab_idx);
         }
         self.emit_event(crate::api::schema::EventEnvelope {
             event: crate::api::schema::EventKind::CollectionUpdated,
@@ -51,6 +53,513 @@ impl App {
                 collection,
             },
         });
+    }
+
+    pub(crate) fn refresh_collection_documents(&mut self) {
+        let mut live_tab_ids = std::collections::HashSet::new();
+        for (ws_idx, workspace) in self.state.workspaces.iter().enumerate() {
+            for tab_idx in 0..workspace.tabs.len() {
+                if let Some(tab_id) = self.public_tab_id(ws_idx, tab_idx) {
+                    live_tab_ids.insert(tab_id);
+                }
+            }
+        }
+        self.host_document_services.retain_scopes(&live_tab_ids);
+        self.collections_shadow_documents
+            .retain(|(_, scope_id), _| live_tab_ids.contains(scope_id));
+        self.host_document_request_watermarks
+            .retain(|(_, scope_id), _| live_tab_ids.contains(scope_id));
+        self.host_document_retry_snapshots
+            .retain(|(_, scope_id), _| live_tab_ids.contains(scope_id));
+        self.host_document_retry_order.retain(|key| {
+            live_tab_ids.contains(&key.1) && self.host_document_retry_snapshots.contains_key(key)
+        });
+        let tabs = self
+            .state
+            .workspaces
+            .iter()
+            .enumerate()
+            .flat_map(|(ws_idx, workspace)| {
+                (0..workspace.tabs.len()).map(move |tab_idx| (ws_idx, tab_idx))
+            })
+            .collect::<Vec<_>>();
+        for (ws_idx, tab_idx) in tabs {
+            self.refresh_collection_document(ws_idx, tab_idx);
+        }
+    }
+
+    fn next_host_document_revision(&mut self) -> u64 {
+        let revision = self.next_host_document_revision.max(1);
+        self.next_host_document_revision = revision.saturating_add(1).max(1);
+        revision
+    }
+
+    fn refresh_collection_document(&mut self, ws_idx: usize, tab_idx: usize) {
+        let revision = self.next_host_document_revision();
+        let mut namespaces = self
+            .host_document_services
+            .namespaces()
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        if !namespaces
+            .iter()
+            .any(|namespace| namespace == crate::first_party::collections::NAMESPACE)
+        {
+            namespaces.push(crate::first_party::collections::NAMESPACE.into());
+        }
+        for namespace in namespaces {
+            let generation = self
+                .host_document_services
+                .generation(&namespace)
+                .unwrap_or(1);
+            let Ok(snapshot) =
+                self.collections_shadow_snapshot(ws_idx, tab_idx, generation, revision)
+            else {
+                continue;
+            };
+            let scope_id = snapshot.scope_id.clone();
+            self.host_document_confirmation_grants.retain(
+                |(grant_namespace, grant_scope, _, _, _), _| {
+                    grant_namespace != &namespace || grant_scope != &scope_id
+                },
+            );
+            self.host_document_request_watermarks.insert(
+                (namespace.clone(), scope_id.clone()),
+                (generation, revision),
+            );
+            let request_key = (namespace.clone(), scope_id.clone());
+            let cache = self
+                .collections_shadow_documents
+                .entry(request_key.clone())
+                .or_default();
+            cache.disable();
+            if namespace == crate::first_party::collections::NAMESPACE {
+                let _ = cache.install_fallback(&snapshot);
+            }
+            if let Err(error) = self
+                .host_document_services
+                .request(&namespace, snapshot.clone())
+            {
+                if error.contains("global document render queue is full") {
+                    self.defer_host_document_render(request_key.clone(), snapshot.clone());
+                }
+                if namespace == crate::first_party::collections::NAMESPACE {
+                    tracing::warn!(%error, "Collections provider unavailable; using generic fallback");
+                } else {
+                    tracing::warn!(%namespace, %error, "host document provider unavailable");
+                }
+            } else {
+                self.host_document_retry_snapshots.remove(&request_key);
+            }
+        }
+    }
+
+    fn defer_host_document_render(
+        &mut self,
+        key: (String, String),
+        snapshot: crate::extension_contract::HostTerminalGroupsV1,
+    ) {
+        if !self.host_document_retry_snapshots.contains_key(&key) {
+            if self.host_document_retry_snapshots.len()
+                >= crate::admission::MAX_SESSION_PANES
+                    * crate::extension_contract::MAX_DOCUMENT_PROVIDERS
+            {
+                return;
+            }
+            self.host_document_retry_order.push_back(key.clone());
+        }
+        self.host_document_retry_snapshots.insert(key, snapshot);
+    }
+
+    fn retry_one_host_document_render(&mut self) {
+        while let Some(key) = self.host_document_retry_order.pop_front() {
+            let Some(snapshot) = self.host_document_retry_snapshots.remove(&key) else {
+                continue;
+            };
+            match self
+                .host_document_services
+                .request(&key.0, snapshot.clone())
+            {
+                Ok(()) => return,
+                Err(error) if error.contains("global document render queue is full") => {
+                    self.host_document_retry_snapshots
+                        .insert(key.clone(), snapshot);
+                    self.host_document_retry_order.push_back(key);
+                    return;
+                }
+                Err(_) => continue,
+            }
+        }
+    }
+
+    pub(crate) fn handle_host_document_result(
+        &mut self,
+        mut result: crate::extension_service::HostDocumentAsyncResult,
+    ) {
+        let render_slot = result._render_slot.take();
+        self.apply_host_document_result(result);
+        drop(render_slot);
+        self.retry_one_host_document_render();
+    }
+
+    fn apply_host_document_result(
+        &mut self,
+        result: crate::extension_service::HostDocumentAsyncResult,
+    ) {
+        self.host_document_services.complete_render(
+            &result.namespace,
+            &result.snapshot.scope_id,
+            result.snapshot.generation,
+            result.snapshot.revision,
+        );
+        let current_generation = self.host_document_services.generation(&result.namespace);
+        let request_key = (result.namespace.clone(), result.snapshot.scope_id.clone());
+        let is_current_request = self
+            .host_document_request_watermarks
+            .get(&request_key)
+            .is_some_and(|watermark| {
+                *watermark == (result.snapshot.generation, result.snapshot.revision)
+            });
+        if current_generation != Some(result.snapshot.generation) || !is_current_request {
+            return;
+        }
+        let cache = self
+            .collections_shadow_documents
+            .entry((result.namespace.clone(), result.snapshot.scope_id.clone()))
+            .or_default();
+        if cache.current().is_some_and(|current| {
+            current.generation > result.snapshot.generation
+                || (current.generation == result.snapshot.generation
+                    && current.revision >= result.snapshot.revision)
+        }) {
+            return;
+        }
+        let published = result.result.and_then(|document| {
+            if document.revision != result.snapshot.revision
+                || !matches!(
+                    &document.target,
+                    crate::extension_contract::HostTarget::Tab { tab_id }
+                        if tab_id == &result.snapshot.scope_id
+                )
+            {
+                return Err("document result does not match requested revision or scope".into());
+            }
+            cache
+                .publish_for_namespace(
+                    &result.namespace,
+                    result.snapshot.generation,
+                    result.provider_priority,
+                    &result.grants,
+                    document,
+                )
+                .map_err(|error| error.to_string())
+        });
+        if let Err(error) = published {
+            cache.disable();
+            if result.namespace == crate::first_party::collections::NAMESPACE {
+                tracing::warn!(%error, "Collections provider result rejected; using generic fallback");
+                let _ = cache.install_fallback(&result.snapshot);
+            } else {
+                tracing::warn!(namespace = %result.namespace, %error, "host document provider result rejected");
+            }
+        }
+    }
+
+    pub(super) fn authorize_host_document_action(
+        &mut self,
+        params: &crate::api::schema::HostDocumentActionParams,
+    ) -> Result<AuthorizedHostDocumentAction, String> {
+        let cache = self
+            .collections_shadow_documents
+            .get(&(params.namespace.clone(), params.scope_id.clone()))
+            .or_else(|| {
+                self.collections_shadow_documents
+                    .iter()
+                    .find(|((_, scope_id), cache)| {
+                        scope_id == &params.scope_id
+                            && cache
+                                .current()
+                                .is_some_and(|document| document.namespace == params.namespace)
+                    })
+                    .map(|(_, cache)| cache)
+            })
+            .ok_or_else(|| "host document scope is unavailable".to_string())?;
+        if self
+            .host_document_request_watermarks
+            .get(&(params.namespace.clone(), params.scope_id.clone()))
+            .is_some_and(|watermark| *watermark != (params.generation, params.revision))
+        {
+            return Err("host document action revision was superseded".into());
+        }
+        let grants = cache.grants().clone();
+        let document = cache
+            .current()
+            .filter(|document| {
+                document.namespace == params.namespace
+                    && document.generation == params.generation
+                    && document.revision == params.revision
+            })
+            .cloned()
+            .ok_or_else(|| "host document action revision is stale".to_string())?;
+        let (ws_idx, tab_idx) = self
+            .state
+            .workspaces
+            .iter()
+            .enumerate()
+            .find_map(|(ws_idx, workspace)| {
+                workspace.tabs.iter().enumerate().find_map(|(tab_idx, _)| {
+                    (self.public_tab_id(ws_idx, tab_idx).as_deref()
+                        == Some(params.scope_id.as_str()))
+                    .then_some((ws_idx, tab_idx))
+                })
+            })
+            .ok_or_else(|| "host document scope no longer exists".to_string())?;
+        let snapshot = self
+            .collections_shadow_snapshot(ws_idx, tab_idx, params.generation, params.revision)
+            .map_err(|error| error.to_string())?;
+        let Some(action) = document
+            .actions
+            .iter()
+            .find(|action| action.id == params.action_id)
+        else {
+            return Err("document action not found".into());
+        };
+        if matches!(
+            action.operation,
+            crate::extension_contract::HostDocumentOperation::Extension { .. }
+        ) {
+            let action = document
+                .authorize_extension_action_dispatch(&params.action_id, &snapshot)
+                .map_err(|error| error.to_string())?;
+            return Ok(AuthorizedHostDocumentAction::Provider(Box::new((
+                snapshot, action,
+            ))));
+        }
+        let confirmed = if action.confirmation
+            == crate::extension_contract::HostConfirmation::Required
+        {
+            let key = (
+                params.namespace.clone(),
+                params.scope_id.clone(),
+                params.generation,
+                params.revision,
+                params.action_id.clone(),
+            );
+            let grant = self
+                .host_document_confirmation_grants
+                .get(&key)
+                .filter(|grant| grant.expires_at > std::time::Instant::now())
+                .cloned()
+                .ok_or_else(|| {
+                    "host-issued confirmation token is missing or expired".to_string()
+                })?;
+            let expected_terminal = match &action.operation {
+                crate::extension_contract::HostDocumentOperation::Host {
+                    effect: crate::extension_contract::HostEffect::TerminalInterrupt { terminal_id },
+                } => terminal_id,
+                _ => return Err("confirmation grant is not bound to an interrupt action".into()),
+            };
+            if !params.confirmed
+                || params.confirmation_token.as_deref() != Some(grant.token.as_str())
+                || &grant.terminal_id != expected_terminal
+            {
+                return Err("host-issued confirmation token is invalid".into());
+            }
+            true
+        } else {
+            params.confirmed
+        };
+        let effect = document
+            .authorize_host_effect_dispatch(&params.action_id, &snapshot, &grants, confirmed)
+            .map_err(|error| error.to_string())?;
+        if action.confirmation == crate::extension_contract::HostConfirmation::Required {
+            self.host_document_confirmation_grants.remove(&(
+                params.namespace.clone(),
+                params.scope_id.clone(),
+                params.generation,
+                params.revision,
+                params.action_id.clone(),
+            ));
+        }
+        let terminal_id = match effect {
+            crate::extension_contract::HostEffect::FocusTerminal { terminal_id }
+            | crate::extension_contract::HostEffect::TerminalInterrupt { terminal_id } => {
+                terminal_id
+            }
+        };
+        let pane_id = snapshot
+            .groups
+            .iter()
+            .flat_map(|group| &group.members)
+            .chain(&snapshot.ungrouped)
+            .find(|member| member.terminal.terminal_id == *terminal_id)
+            .and_then(|member| member.terminal.placement.as_ref())
+            .map(|placement| placement.pane_id.clone())
+            .ok_or_else(|| "host document terminal placement is unavailable".to_string())?;
+        let pane = crate::api::schema::PaneTarget { pane_id };
+        Ok(match effect {
+            crate::extension_contract::HostEffect::FocusTerminal { .. } => {
+                AuthorizedHostDocumentAction::Focus(pane)
+            }
+            crate::extension_contract::HostEffect::TerminalInterrupt { .. } => {
+                AuthorizedHostDocumentAction::Interrupt(pane)
+            }
+        })
+    }
+
+    pub(crate) fn handle_deferred_host_document_api_request(
+        &mut self,
+        request_id: String,
+        params: crate::api::schema::HostDocumentActionParams,
+        respond_to: std::sync::mpsc::Sender<String>,
+    ) -> bool {
+        let action = match self.authorize_host_document_action(&params) {
+            Ok(action) => action,
+            Err(error) => {
+                let confirmation_rejected = error.contains("confirmation token");
+                if confirmation_rejected {
+                    self.host_document_confirmation_grants.remove(&(
+                        params.namespace.clone(),
+                        params.scope_id.clone(),
+                        params.generation,
+                        params.revision,
+                        params.action_id.clone(),
+                    ));
+                }
+                let _ = respond_to.send(responses::encode_error(
+                    request_id,
+                    "host_document_action_rejected",
+                    &error,
+                ));
+                return confirmation_rejected;
+            }
+        };
+        match action {
+            AuthorizedHostDocumentAction::Focus(pane) => {
+                let response = self.handle_pane_focus(request_id, pane);
+                let _ = respond_to.send(response);
+                true
+            }
+            AuthorizedHostDocumentAction::Interrupt(pane) => {
+                let response = self.handle_pane_send_keys(
+                    request_id,
+                    crate::api::schema::PaneSendKeysParams {
+                        pane_id: pane.pane_id,
+                        keys: vec!["ctrl+c".into()],
+                    },
+                );
+                let _ = respond_to.send(response);
+                true
+            }
+            AuthorizedHostDocumentAction::Provider(provider_action) => {
+                let (snapshot, action) = *provider_action;
+                if let Err(error) = self.host_document_services.request_action_deferred(
+                    snapshot,
+                    action,
+                    request_id.clone(),
+                    respond_to.clone(),
+                ) {
+                    let _ = respond_to.send(responses::encode_error(
+                        request_id,
+                        "host_document_action_rejected",
+                        &error,
+                    ));
+                }
+                false
+            }
+        }
+    }
+
+    pub(crate) fn host_documents(
+        &mut self,
+    ) -> Vec<crate::protocol::endpoint::HostDocumentProjectionEntryV1> {
+        let mut live_tab_ids = std::collections::HashSet::new();
+        for (ws_idx, workspace) in self.state.workspaces.iter().enumerate() {
+            for tab_idx in 0..workspace.tabs.len() {
+                if let Some(tab_id) = self.public_tab_id(ws_idx, tab_idx) {
+                    live_tab_ids.insert(tab_id);
+                }
+            }
+        }
+        let now = std::time::Instant::now();
+        self.host_document_confirmation_grants
+            .retain(|(_, scope_id, _, _, _), grant| {
+                live_tab_ids.contains(scope_id) && grant.expires_at > now
+            });
+        let mut documents = Vec::new();
+        for ((_, scope_id), cache) in &self.collections_shadow_documents {
+            if !live_tab_ids.contains(scope_id) {
+                continue;
+            }
+            let Some(document) = cache.current().cloned() else {
+                continue;
+            };
+            let mut confirmation_tokens = std::collections::BTreeMap::new();
+            for action in &document.actions {
+                let action_is_reachable = action.subject_id.as_deref().is_some_and(|subject_id| {
+                    document.items.iter().any(|item| {
+                        item.id == subject_id
+                            && !item.flags.disabled
+                            && item.action_ids.iter().any(|id| id == &action.id)
+                    })
+                });
+                if !action_is_reachable {
+                    continue;
+                }
+                let crate::extension_contract::HostDocumentOperation::Host {
+                    effect: crate::extension_contract::HostEffect::TerminalInterrupt { terminal_id },
+                } = &action.operation
+                else {
+                    continue;
+                };
+                if action.confirmation != crate::extension_contract::HostConfirmation::Required {
+                    continue;
+                }
+                let key = (
+                    document.namespace.clone(),
+                    scope_id.clone(),
+                    document.generation,
+                    document.revision,
+                    action.id.clone(),
+                );
+                if !self.host_document_confirmation_grants.contains_key(&key) {
+                    if self.host_document_confirmation_grants.len()
+                        >= MAX_HOST_DOCUMENT_CONFIRMATION_GRANTS
+                    {
+                        continue;
+                    }
+                    let mut bytes = [0_u8; 24];
+                    if crate::platform::fill_secure_random(&mut bytes).is_err() {
+                        continue;
+                    }
+                    let token = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
+                    self.host_document_confirmation_grants.insert(
+                        key.clone(),
+                        HostDocumentConfirmationGrant {
+                            token,
+                            terminal_id: terminal_id.clone(),
+                            expires_at: now + std::time::Duration::from_secs(30),
+                        },
+                    );
+                }
+                if let Some(grant) = self.host_document_confirmation_grants.get(&key) {
+                    confirmation_tokens.insert(action.id.clone(), grant.token.clone());
+                }
+            }
+            documents.push(crate::protocol::endpoint::HostDocumentProjectionEntryV1 {
+                provider_priority: cache.provider_priority(),
+                document,
+                confirmation_tokens,
+            });
+        }
+        documents.sort_by(|left, right| {
+            right
+                .provider_priority
+                .cmp(&left.provider_priority)
+                .then_with(|| left.document.namespace.cmp(&right.document.namespace))
+                .then_with(|| left.document.target.cmp(&right.document.target))
+        });
+        documents
     }
 
     fn collections_shadow_snapshot(
@@ -644,6 +1153,7 @@ impl App {
         }
         self.state.mark_session_dirty();
         self.schedule_session_save();
+        self.refresh_collection_documents();
         responses::encode_success(request_id, ResponseResult::Ok {})
     }
 }
@@ -652,6 +1162,17 @@ impl App {
 mod tests {
     use super::*;
     use crate::api::schema::{Method, Request, SplitDirection};
+
+    fn handle_current_result(
+        app: &mut App,
+        result: crate::extension_service::HostDocumentAsyncResult,
+    ) {
+        app.host_document_request_watermarks.insert(
+            (result.namespace.clone(), result.snapshot.scope_id.clone()),
+            (result.snapshot.generation, result.snapshot.revision),
+        );
+        app.handle_host_document_result(result);
+    }
 
     fn app_with_workspace() -> App {
         let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -740,6 +1261,7 @@ mod tests {
     #[test]
     fn collection_close_cascades_or_promotes_without_restarting_member_identity() {
         let (mut cascade, collection, member) = app_with_nonempty_collection();
+        let closed_pane_id = cascade.public_pane_id(0, member).unwrap();
         let response = cascade.handle_collection_close(
             "cascade".into(),
             CollectionCloseParams {
@@ -752,6 +1274,14 @@ mod tests {
             .find_tab_index_for_pane(member)
             .is_none());
         assert!(cascade.find_collection(collection).is_none());
+        assert!(cascade.host_documents().iter().all(|entry| {
+            entry.document.items.iter().all(|item| {
+                item.terminal
+                    .as_ref()
+                    .and_then(|terminal| terminal.placement.as_ref())
+                    .is_none_or(|placement| placement.pane_id != closed_pane_id)
+            })
+        }));
 
         let (mut promote, collection, member) = app_with_nonempty_collection();
         let public_before = promote.public_pane_id(0, member).unwrap();
@@ -779,6 +1309,579 @@ mod tests {
             Some(&terminal_before)
         );
         assert!(promote.state.terminals.contains_key(&terminal_before));
+    }
+
+    #[test]
+    fn host_document_revisions_are_monotonic_from_first_publication() {
+        let mut app = app_with_workspace();
+        assert_eq!(app.next_host_document_revision(), 1);
+        assert_eq!(app.next_host_document_revision(), 2);
+        assert_eq!(app.next_host_document_revision(), 3);
+    }
+
+    #[test]
+    fn third_party_document_is_projected_and_authorizes_its_declared_action() {
+        let mut app = app_with_workspace();
+        let namespace = "example.collections";
+        app.host_document_services =
+            crate::extension_service::HostDocumentServiceCatalog::with_test_providers(&[
+                (namespace, 9),
+                (crate::first_party::collections::NAMESPACE, 10),
+            ]);
+        let snapshot = app.collections_shadow_snapshot(0, 0, 9, 1).unwrap();
+        let mut document = crate::first_party::collections::project(&snapshot).unwrap();
+        document.namespace = namespace.into();
+        let action_id = document.actions[0].id.clone();
+        let scope_id = snapshot.scope_id.clone();
+        handle_current_result(
+            &mut app,
+            crate::extension_service::HostDocumentAsyncResult {
+                _render_slot: None,
+                namespace: namespace.into(),
+                provider_priority: 200,
+                snapshot,
+                result: Ok(document),
+                grants: std::collections::HashSet::from([
+                    crate::extension_contract::HostCapability::FocusTerminal,
+                ]),
+            },
+        );
+        let builtin_snapshot = app.collections_shadow_snapshot(0, 0, 10, 1).unwrap();
+        let builtin_document = crate::first_party::collections::project(&builtin_snapshot).unwrap();
+        handle_current_result(
+            &mut app,
+            crate::extension_service::HostDocumentAsyncResult {
+                _render_slot: None,
+                namespace: crate::first_party::collections::NAMESPACE.into(),
+                provider_priority: 100,
+                snapshot: builtin_snapshot,
+                result: Ok(builtin_document),
+                grants: std::collections::HashSet::from([
+                    crate::extension_contract::HostCapability::FocusTerminal,
+                ]),
+            },
+        );
+        let documents = app.host_documents();
+        assert_eq!(documents.len(), 2);
+        assert_eq!(documents[0].provider_priority, 200);
+        assert_eq!(documents[0].document.namespace, namespace);
+        let action = app
+            .authorize_host_document_action(&crate::api::schema::HostDocumentActionParams {
+                namespace: namespace.into(),
+                scope_id,
+                generation: 9,
+                revision: 1,
+                action_id,
+                confirmed: false,
+                confirmation_token: None,
+            })
+            .unwrap();
+        assert!(matches!(action, AuthorizedHostDocumentAction::Focus(_)));
+    }
+
+    #[test]
+    fn terminal_interrupt_requires_confirmation_before_dispatch() {
+        let mut app = app_with_workspace();
+        let namespace = "example.interrupt";
+        app.host_document_services =
+            crate::extension_service::HostDocumentServiceCatalog::with_test_provider(namespace, 8);
+        let snapshot = app.collections_shadow_snapshot(0, 0, 8, 2).unwrap();
+        let mut document = crate::first_party::collections::project(&snapshot).unwrap();
+        document.namespace = namespace.into();
+        let terminal_id = document.items[0]
+            .terminal
+            .as_ref()
+            .expect("ungrouped terminal")
+            .terminal_id
+            .clone();
+        document.required_capabilities =
+            vec![crate::extension_contract::HostCapability::TerminalInterrupt];
+        document.actions[0].operation = crate::extension_contract::HostDocumentOperation::Host {
+            effect: crate::extension_contract::HostEffect::TerminalInterrupt { terminal_id },
+        };
+        document.actions[0].confirmation = crate::extension_contract::HostConfirmation::Required;
+        let action_id = document.actions[0].id.clone();
+        let scope_id = snapshot.scope_id.clone();
+        handle_current_result(
+            &mut app,
+            crate::extension_service::HostDocumentAsyncResult {
+                _render_slot: None,
+                namespace: namespace.into(),
+                provider_priority: 200,
+                snapshot,
+                result: Ok(document),
+                grants: std::collections::HashSet::from([
+                    crate::extension_contract::HostCapability::TerminalInterrupt,
+                ]),
+            },
+        );
+        app.host_document_request_watermarks
+            .insert((namespace.into(), scope_id.clone()), (8, 3));
+        let stale_params = crate::api::schema::HostDocumentActionParams {
+            namespace: namespace.into(),
+            scope_id: scope_id.clone(),
+            generation: 8,
+            revision: 2,
+            action_id: action_id.clone(),
+            confirmed: false,
+            confirmation_token: None,
+        };
+        assert!(app
+            .authorize_host_document_action(&stale_params)
+            .unwrap_err()
+            .contains("superseded"));
+        app.host_document_request_watermarks
+            .insert((namespace.into(), scope_id.clone()), (8, 2));
+        let confirmation_token = app
+            .host_documents()
+            .into_iter()
+            .find(|entry| entry.document.namespace == namespace)
+            .and_then(|entry| entry.confirmation_tokens.get(&action_id).cloned())
+            .expect("host-issued confirmation token");
+        let mut params = crate::api::schema::HostDocumentActionParams {
+            namespace: namespace.into(),
+            scope_id,
+            generation: 8,
+            revision: 2,
+            action_id,
+            confirmed: false,
+            confirmation_token: None,
+        };
+        assert!(app.authorize_host_document_action(&params).is_err());
+        params.confirmed = true;
+        assert!(app.authorize_host_document_action(&params).is_err());
+        params.confirmation_token = Some(confirmation_token);
+        assert!(matches!(
+            app.authorize_host_document_action(&params).unwrap(),
+            AuthorizedHostDocumentAction::Interrupt(_)
+        ));
+        let (respond_to, response_rx) = std::sync::mpsc::channel();
+        assert!(app.handle_deferred_host_document_api_request(
+            "replay".into(),
+            params.clone(),
+            respond_to,
+        ));
+        let response: crate::api::schema::ErrorResponse =
+            serde_json::from_str(&response_rx.recv().unwrap()).unwrap();
+        assert_eq!(response.error.code, "host_document_action_rejected");
+        let replacement = app
+            .host_documents()
+            .into_iter()
+            .find(|entry| entry.document.namespace == namespace)
+            .expect("replacement projection");
+        assert_eq!(replacement.document.revision, 2);
+        let replacement_token = replacement
+            .confirmation_tokens
+            .values()
+            .next()
+            .expect("replacement confirmation token");
+        assert_ne!(
+            replacement_token,
+            params.confirmation_token.as_ref().unwrap()
+        );
+    }
+
+    #[test]
+    fn host_fallback_namespace_action_remains_authorized() {
+        let mut app = app_with_workspace();
+        app.refresh_collection_documents();
+        let entry = app
+            .host_documents()
+            .into_iter()
+            .find(|entry| entry.document.namespace == "host.fallback")
+            .expect("disabled test worker installs host fallback");
+        let document = entry.document;
+        let action = document.actions.first().unwrap();
+        assert!(matches!(
+            app.authorize_host_document_action(&crate::api::schema::HostDocumentActionParams {
+                namespace: document.namespace.clone(),
+                scope_id: match &document.target {
+                    crate::extension_contract::HostTarget::Tab { tab_id } => tab_id.clone(),
+                    _ => panic!("tab fallback"),
+                },
+                generation: document.generation,
+                revision: document.revision,
+                action_id: action.id.clone(),
+                confirmed: false,
+                confirmation_token: None,
+            })
+            .unwrap(),
+            AuthorizedHostDocumentAction::Focus(_)
+        ));
+    }
+
+    #[test]
+    fn provider_owned_action_is_fenced_and_correlated_to_its_catalog_generation() {
+        let mut app = app_with_workspace();
+        let namespace = "example.actions";
+        app.host_document_services =
+            crate::extension_service::HostDocumentServiceCatalog::with_test_action_sink(
+                namespace, 12,
+            );
+        let snapshot = app.collections_shadow_snapshot(0, 0, 12, 4).unwrap();
+        let mut document = crate::first_party::collections::project(&snapshot).unwrap();
+        document.namespace = namespace.into();
+        document.required_capabilities.clear();
+        document.actions[0].operation =
+            crate::extension_contract::HostDocumentOperation::Extension {
+                name: "refresh".into(),
+            };
+        let params = crate::api::schema::HostDocumentActionParams {
+            namespace: namespace.into(),
+            scope_id: snapshot.scope_id.clone(),
+            generation: 12,
+            revision: 4,
+            action_id: document.actions[0].id.clone(),
+            confirmed: false,
+            confirmation_token: None,
+        };
+        handle_current_result(
+            &mut app,
+            crate::extension_service::HostDocumentAsyncResult {
+                _render_slot: None,
+                namespace: namespace.into(),
+                provider_priority: 200,
+                snapshot,
+                result: Ok(document),
+                grants: std::collections::HashSet::new(),
+            },
+        );
+        let AuthorizedHostDocumentAction::Provider(provider_action) =
+            app.authorize_host_document_action(&params).unwrap()
+        else {
+            panic!("expected provider action")
+        };
+        let (snapshot, action) = *provider_action;
+        assert!(app
+            .host_document_services
+            .request_action(snapshot, action)
+            .unwrap()
+            .recv()
+            .unwrap()
+            .is_ok());
+        app.host_document_services =
+            crate::extension_service::HostDocumentServiceCatalog::with_test_action_result(
+                namespace,
+                12,
+                Err("provider rejected action".into()),
+            );
+        let AuthorizedHostDocumentAction::Provider(provider_action) =
+            app.authorize_host_document_action(&params).unwrap()
+        else {
+            panic!("expected provider action")
+        };
+        let (snapshot, action) = *provider_action;
+        assert!(app
+            .host_document_services
+            .request_action(snapshot, action)
+            .unwrap()
+            .recv()
+            .unwrap()
+            .unwrap_err()
+            .contains("provider rejected action"));
+        let mut stale = params;
+        stale.generation = 11;
+        assert!(app.authorize_host_document_action(&stale).is_err());
+    }
+
+    #[test]
+    fn pane_focus_refreshes_document_revision_and_selection() {
+        let (mut app, _collection, member) = app_with_nonempty_collection();
+        let root = app.state.workspaces[0].tabs[0].root_pane;
+        app.state.focus_pane_in_workspace(0, root);
+        app.refresh_collection_documents();
+        let before = app.host_documents()[0].document.revision;
+        let pane_id = app.public_pane_id(0, member).unwrap();
+        let response =
+            app.handle_pane_focus("focus".into(), crate::api::schema::PaneTarget { pane_id });
+        let _: crate::api::schema::SuccessResponse = serde_json::from_str(&response).unwrap();
+        let document = &app.host_documents()[0].document;
+        assert!(document.revision > before);
+        assert_eq!(app.state.workspaces[0].focused_pane_id(), Some(member));
+    }
+
+    #[test]
+    fn stalled_provider_action_does_not_block_unrelated_host_api_work() {
+        let mut app = app_with_workspace();
+        let namespace = "example.slow-actions";
+        app.host_document_services =
+            crate::extension_service::HostDocumentServiceCatalog::with_test_delayed_action(
+                namespace,
+                12,
+                app.event_tx.clone(),
+                std::time::Duration::from_millis(200),
+            );
+        let snapshot = app.collections_shadow_snapshot(0, 0, 12, 4).unwrap();
+        app.host_document_services.set_desired_revision_for_test(
+            namespace,
+            snapshot.scope_id.clone(),
+            snapshot.generation,
+            snapshot.revision,
+        );
+        let mut document = crate::first_party::collections::project(&snapshot).unwrap();
+        document.namespace = namespace.into();
+        document.required_capabilities.clear();
+        document.actions[0].operation =
+            crate::extension_contract::HostDocumentOperation::Extension {
+                name: "slow".into(),
+            };
+        let params = crate::api::schema::HostDocumentActionParams {
+            namespace: namespace.into(),
+            scope_id: snapshot.scope_id.clone(),
+            generation: 12,
+            revision: 4,
+            action_id: document.actions[0].id.clone(),
+            confirmed: false,
+            confirmation_token: None,
+        };
+        handle_current_result(
+            &mut app,
+            crate::extension_service::HostDocumentAsyncResult {
+                _render_slot: None,
+                namespace: namespace.into(),
+                provider_priority: 200,
+                snapshot,
+                result: Ok(document),
+                grants: std::collections::HashSet::new(),
+            },
+        );
+        let (respond_to, response_rx) = std::sync::mpsc::channel();
+        let started = std::time::Instant::now();
+        assert!(!app.handle_deferred_host_document_api_request(
+            "slow-action".into(),
+            params,
+            respond_to,
+        ));
+        let pane_id = app
+            .public_pane_id(0, app.state.workspaces[0].focused_pane_id().unwrap())
+            .unwrap();
+        let response =
+            app.handle_pane_focus("focus".into(), crate::api::schema::PaneTarget { pane_id });
+        let _: crate::api::schema::SuccessResponse = serde_json::from_str(&response).unwrap();
+        assert!(started.elapsed() < std::time::Duration::from_millis(100));
+        let completion = app.event_rx.blocking_recv().unwrap();
+        app.handle_internal_event(completion);
+        let response = response_rx.recv().unwrap();
+        let _: crate::api::schema::SuccessResponse = serde_json::from_str(&response).unwrap();
+    }
+
+    #[test]
+    fn pane_rename_refreshes_document_and_removed_target_is_retired() {
+        let mut app = app_with_workspace();
+        let pane_id = app
+            .public_pane_id(0, app.state.workspaces[0].focused_pane_id().unwrap())
+            .unwrap();
+        let response = app.handle_pane_rename(
+            "rename".into(),
+            crate::api::schema::PaneRenameParams {
+                pane_id,
+                label: Some("renamed terminal".into()),
+            },
+        );
+        assert!(serde_json::from_str::<crate::api::schema::SuccessResponse>(&response).is_ok());
+        let documents = app.host_documents();
+        assert_eq!(documents.len(), 1);
+        assert!(documents[0]
+            .document
+            .items
+            .iter()
+            .any(|item| item.label == "renamed terminal"));
+        app.state.workspaces[0].tabs.clear();
+        app.refresh_collection_documents();
+        assert!(app.collections_shadow_documents.is_empty());
+        assert!(app.host_documents().is_empty());
+    }
+
+    #[test]
+    fn documents_for_removed_targets_are_retired_from_projection() {
+        let mut app = app_with_workspace();
+        let namespace = crate::first_party::collections::NAMESPACE;
+        app.host_document_services =
+            crate::extension_service::HostDocumentServiceCatalog::with_test_provider(namespace, 4);
+        let snapshot = app.collections_shadow_snapshot(0, 0, 4, 1).unwrap();
+        let document = crate::first_party::collections::project(&snapshot).unwrap();
+        let late_snapshot = snapshot.clone();
+        let late_document = document.clone();
+        handle_current_result(
+            &mut app,
+            crate::extension_service::HostDocumentAsyncResult {
+                _render_slot: None,
+                namespace: namespace.into(),
+                provider_priority: 200,
+                snapshot,
+                result: Ok(document),
+                grants: std::collections::HashSet::from([
+                    crate::extension_contract::HostCapability::FocusTerminal,
+                ]),
+            },
+        );
+        assert_eq!(app.host_documents().len(), 1);
+        app.state.workspaces[0].tabs.clear();
+        app.refresh_collection_documents();
+        assert!(app.host_document_request_watermarks.is_empty());
+        assert!(app.host_documents().is_empty());
+        app.handle_host_document_result(crate::extension_service::HostDocumentAsyncResult {
+            _render_slot: None,
+            namespace: namespace.into(),
+            provider_priority: 200,
+            snapshot: late_snapshot,
+            result: Ok(late_document),
+            grants: std::collections::HashSet::from([
+                crate::extension_contract::HostCapability::FocusTerminal,
+            ]),
+        });
+        assert!(app.collections_shadow_documents.is_empty());
+    }
+
+    #[test]
+    fn provider_cannot_choose_result_revision_or_scope() {
+        let mut app = app_with_workspace();
+        let namespace = crate::first_party::collections::NAMESPACE;
+        app.host_document_services =
+            crate::extension_service::HostDocumentServiceCatalog::with_test_provider(namespace, 7);
+        let snapshot = app.collections_shadow_snapshot(0, 0, 7, 1).unwrap();
+        let mut document = crate::first_party::collections::project(&snapshot).unwrap();
+        document.revision = 99;
+        document.target = crate::extension_contract::HostTarget::Tab {
+            tab_id: "other-tab".into(),
+        };
+        handle_current_result(
+            &mut app,
+            crate::extension_service::HostDocumentAsyncResult {
+                _render_slot: None,
+                namespace: namespace.into(),
+                provider_priority: 100,
+                snapshot,
+                result: Ok(document),
+                grants: std::collections::HashSet::from([
+                    crate::extension_contract::HostCapability::FocusTerminal,
+                ]),
+            },
+        );
+        let documents = app.host_documents();
+        assert_eq!(documents.len(), 1);
+        assert_eq!(documents[0].document.namespace, "host.fallback");
+        assert_eq!(documents[0].document.revision, 1);
+    }
+
+    #[test]
+    fn saturated_new_scope_is_retried_when_a_global_render_slot_releases() {
+        let mut app = app_with_workspace();
+        let namespace = crate::first_party::collections::NAMESPACE;
+        app.host_document_services = crate::extension_service::HostDocumentServiceCatalog::
+            with_test_saturated_render_provider(namespace, 7);
+        app.refresh_collection_documents();
+        assert_eq!(app.host_document_retry_snapshots.len(), 1);
+        assert_eq!(
+            app.host_document_services
+                .pending_render_count_for_test(namespace),
+            0
+        );
+        app.host_document_services.release_test_render_slot();
+        app.retry_one_host_document_render();
+        assert!(app.host_document_retry_snapshots.is_empty());
+        assert_eq!(
+            app.host_document_services
+                .pending_render_count_for_test(namespace),
+            1
+        );
+    }
+
+    #[test]
+    fn retired_provider_action_completion_is_final_fenced_on_actor() {
+        let mut app = app_with_workspace();
+        let namespace = crate::first_party::collections::NAMESPACE;
+        app.host_document_services =
+            crate::extension_service::HostDocumentServiceCatalog::with_test_provider(namespace, 7);
+        let snapshot = app.collections_shadow_snapshot(0, 0, 7, 3).unwrap();
+        app.host_document_request_watermarks.insert(
+            (namespace.into(), snapshot.scope_id.clone()),
+            (snapshot.generation, snapshot.revision),
+        );
+        let (respond_to, response) = std::sync::mpsc::channel();
+        app.host_document_request_watermarks.clear();
+        app.handle_internal_event(
+            crate::events::AppEvent::HostDocumentProviderActionFinished {
+                request_id: "retired-action".into(),
+                namespace: namespace.into(),
+                scope_id: snapshot.scope_id,
+                generation: snapshot.generation,
+                revision: snapshot.revision,
+                holds_action_slot: false,
+                result: Ok(()),
+                respond_to,
+            },
+        );
+        let rejected: crate::api::schema::ErrorResponse =
+            serde_json::from_str(&response.recv().unwrap()).unwrap();
+        assert_eq!(rejected.error.code, "host_document_action_rejected");
+        assert!(rejected.error.message.contains("retired"));
+    }
+
+    #[test]
+    fn rejected_newest_request_watermark_blocks_older_completion() {
+        let mut app = app_with_workspace();
+        let namespace = crate::first_party::collections::NAMESPACE;
+        app.host_document_services =
+            crate::extension_service::HostDocumentServiceCatalog::with_test_provider(namespace, 7);
+        let newest = app.collections_shadow_snapshot(0, 0, 7, 2).unwrap();
+        app.host_document_request_watermarks.insert(
+            (namespace.into(), newest.scope_id.clone()),
+            (newest.generation, newest.revision),
+        );
+        let older = app.collections_shadow_snapshot(0, 0, 7, 1).unwrap();
+        let older_document = crate::first_party::collections::project(&older).unwrap();
+        app.handle_host_document_result(crate::extension_service::HostDocumentAsyncResult {
+            _render_slot: None,
+            namespace: namespace.into(),
+            provider_priority: 100,
+            snapshot: older,
+            result: Ok(older_document),
+            grants: std::collections::HashSet::from([
+                crate::extension_contract::HostCapability::FocusTerminal,
+            ]),
+        });
+        let key = (namespace.to_string(), newest.scope_id);
+        assert_eq!(
+            app.host_document_request_watermarks.get(&key),
+            Some(&(7, 2))
+        );
+        assert!(app.host_documents().is_empty());
+    }
+
+    #[test]
+    fn stale_async_document_completion_cannot_replace_newer_publication() {
+        let mut app = app_with_workspace();
+        let namespace = crate::first_party::collections::NAMESPACE;
+        app.host_document_services =
+            crate::extension_service::HostDocumentServiceCatalog::with_test_provider(namespace, 7);
+        let newer_snapshot = app.collections_shadow_snapshot(0, 0, 7, 2).unwrap();
+        let newer_document = crate::first_party::collections::project(&newer_snapshot).unwrap();
+        handle_current_result(
+            &mut app,
+            crate::extension_service::HostDocumentAsyncResult {
+                _render_slot: None,
+                namespace: namespace.into(),
+                provider_priority: 200,
+                snapshot: newer_snapshot,
+                result: Ok(newer_document),
+                grants: std::collections::HashSet::from([
+                    crate::extension_contract::HostCapability::FocusTerminal,
+                ]),
+            },
+        );
+        let stale_snapshot = app.collections_shadow_snapshot(0, 0, 7, 1).unwrap();
+        app.handle_host_document_result(crate::extension_service::HostDocumentAsyncResult {
+            _render_slot: None,
+            namespace: namespace.into(),
+            provider_priority: 200,
+            snapshot: stale_snapshot,
+            result: Err("late failure".into()),
+            grants: std::collections::HashSet::new(),
+        });
+        let documents = app.host_documents();
+        assert_eq!(documents.len(), 1);
+        assert_eq!(documents[0].document.revision, 2);
     }
 
     #[test]

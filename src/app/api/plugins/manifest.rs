@@ -154,46 +154,64 @@ pub(crate) fn load_plugin_manifest(
         })?);
     let content = std::fs::read_to_string(&manifest_path)
         .map_err(|err| ("plugin_manifest_read_failed", err.to_string()))?;
-    let raw: RawPluginManifest = toml::from_str(&content)
+    let manifest_source: RawPluginManifest = toml::from_str(&content)
         .map_err(|err| ("plugin_manifest_parse_failed", err.to_string()))?;
-    let plugin_id = normalize_plugin_id(&raw.id)
+    let plugin_id = normalize_plugin_id(&manifest_source.id)
         .ok_or_else(|| ("invalid_plugin_id", "invalid plugin id".to_string()))?;
-    let name = non_empty_trimmed(&raw.name, "invalid_plugin_name", "plugin name is required")?;
+    let name = non_empty_trimmed(
+        &manifest_source.name,
+        "invalid_plugin_name",
+        "plugin name is required",
+    )?;
     let version = non_empty_trimmed(
-        &raw.version,
+        &manifest_source.version,
         "invalid_plugin_version",
         "plugin version is required",
     )?;
-    let min_herdr_version = validate_min_herdr_version(raw.min_herdr_version.as_deref())?;
-    let description = raw
+    let min_herdr_version =
+        validate_min_herdr_version(manifest_source.min_herdr_version.as_deref())?;
+    let description = manifest_source
         .description
         .map(|description| description.trim().to_string())
         .filter(|description| !description.is_empty());
-    let platforms = normalize_platforms(raw.platforms)?;
-    let build = raw
+    let platforms = normalize_platforms(manifest_source.platforms)?;
+    let build = manifest_source
         .build
         .into_iter()
         .map(normalize_manifest_build)
         .collect::<Result<Vec<_>, _>>()?;
-    let startup = raw
+    let startup = manifest_source
         .startup
         .into_iter()
         .map(normalize_manifest_startup)
         .collect::<Result<Vec<_>, _>>()?;
-    let services = raw
+    let services = manifest_source
         .services
         .into_iter()
         .map(normalize_manifest_service)
         .collect::<Result<Vec<_>, _>>()?;
     reject_duplicate_service_ids(&services)?;
-    let mut actions = raw
+    let reserved_document_namespace =
+        plugin_id == "vqro.collections" || plugin_id == "host.fallback";
+    let publishes_host_documents = services.iter().any(|service| {
+        service
+            .provides
+            .contains(&PluginServiceCapability::HostDocument)
+    });
+    if reserved_document_namespace && publishes_host_documents {
+        return Err((
+            "reserved_host_document_namespace",
+            format!("plugin namespace {plugin_id} is reserved by the host"),
+        ));
+    }
+    let mut actions = manifest_source
         .actions
         .into_iter()
         .map(normalize_manifest_action)
         .collect::<Result<Vec<_>, _>>()?;
     reject_duplicate_action_ids(&actions)?;
     actions.sort_by(|a, b| a.id.cmp(&b.id));
-    let mut events = raw
+    let mut events = manifest_source
         .events
         .into_iter()
         .map(normalize_manifest_event)
@@ -206,14 +224,14 @@ pub(crate) fn load_plugin_manifest(
                 .cmp(b.command.iter().map(|arg| arg.trim()))
         })
     });
-    let mut panes = raw
+    let mut panes = manifest_source
         .panes
         .into_iter()
         .map(normalize_manifest_pane)
         .collect::<Result<Vec<_>, _>>()?;
     reject_duplicate_pane_ids(&panes)?;
     panes.sort_by(|a, b| a.id.cmp(&b.id));
-    let link_handlers = raw
+    let link_handlers = manifest_source
         .link_handlers
         .into_iter()
         .map(normalize_manifest_link_handler)
@@ -322,6 +340,18 @@ fn normalize_manifest_service(
         return Err((
             "missing_plugin_service_capability",
             "pane inspector services must request view_contribution".to_string(),
+        ));
+    }
+    if service
+        .provides
+        .contains(&PluginServiceCapability::HostDocument)
+        && !service
+            .capabilities
+            .contains(&ExtensionServiceCapability::HostDocument)
+    {
+        return Err((
+            "missing_plugin_service_capability",
+            "host document services must request host_document".to_string(),
         ));
     }
     let requested_capabilities = service.capabilities;
@@ -574,9 +604,9 @@ fn normalize_manifest_link_handler(
 }
 
 fn normalize_platforms(
-    raw: Option<Vec<RawPlatform>>,
+    raw_platforms: Option<Vec<RawPlatform>>,
 ) -> Result<Option<Vec<PluginPlatform>>, (&'static str, String)> {
-    match raw {
+    match raw_platforms {
         None => Ok(None),
         Some(list) if list.is_empty() => Err((
             "invalid_plugin_platform",

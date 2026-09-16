@@ -160,13 +160,24 @@ pub struct App {
     pub(crate) full_redraw_pending: bool,
     pub(crate) overlay_panes: HashMap<crate::layout::PaneId, OverlayPaneState>,
     pub(crate) config_reloaded_from_disk: bool,
+    pub(crate) extension_catalog_rebuilt: bool,
+    pub(crate) extension_catalog_rebuild_pending: bool,
     client_shell_keybindings_profile: Option<String>,
     endpoint_commands: custom_commands::EndpointCommandRegistry,
     pub(crate) terminal_telemetry_cache:
         HashMap<crate::terminal::TerminalId, terminal_inspector::CachedTerminalTelemetry>,
     pub(crate) extension_services: crate::extension_service::ExtensionServiceManager,
+    pub(crate) host_document_services: crate::extension_service::HostDocumentServiceCatalog,
+    pub(crate) disabled_extensions: std::collections::BTreeSet<String>,
     pub(crate) collections_shadow_documents:
-        HashMap<String, crate::first_party::collections::ShadowDocumentCache>,
+        HashMap<(String, String), crate::first_party::collections::ShadowDocumentCache>,
+    pub(crate) next_host_document_revision: u64,
+    pub(crate) host_document_request_watermarks: HashMap<(String, String), (u64, u64)>,
+    pub(crate) host_document_retry_snapshots:
+        HashMap<(String, String), crate::extension_contract::HostTerminalGroupsV1>,
+    pub(crate) host_document_retry_order: std::collections::VecDeque<(String, String)>,
+    pub(crate) host_document_confirmation_grants:
+        HashMap<(String, String, u64, u64, String), api::HostDocumentConfirmationGrant>,
 }
 
 pub(crate) const APP_EVENT_CHANNEL_CAPACITY: usize = 256;
@@ -552,6 +563,11 @@ impl App {
         let installed_plugins = load_plugin_registry(policy.persist_plugin_registry);
         let extension_services =
             crate::extension_service::manager_for_plugins(&installed_plugins, event_tx.clone());
+        let host_document_services = crate::extension_service::HostDocumentServiceCatalog::bundled(
+            &config.extensions.disabled,
+            &installed_plugins,
+            event_tx.clone(),
+        );
 
         let mut state = AppState {
             terminals: std::collections::HashMap::new(),
@@ -736,14 +752,24 @@ impl App {
             full_redraw_pending: false,
             overlay_panes: HashMap::new(),
             config_reloaded_from_disk: false,
+            extension_catalog_rebuilt: false,
+            extension_catalog_rebuild_pending: false,
             client_shell_keybindings_profile,
             endpoint_commands,
             terminal_telemetry_cache: HashMap::new(),
             extension_services,
+            host_document_services,
+            disabled_extensions: config.extensions.disabled.clone(),
             collections_shadow_documents: HashMap::new(),
+            next_host_document_revision: 1,
+            host_document_request_watermarks: HashMap::new(),
+            host_document_retry_snapshots: HashMap::new(),
+            host_document_retry_order: std::collections::VecDeque::new(),
+            host_document_confirmation_grants: HashMap::new(),
         };
         app.configure_tab_bar_status(&config.ui.tab_bar_right, &config.ui.tab_bar_right_separator);
         app.configure_window_title(&config.ui.window_title);
+        app.refresh_collection_documents();
         app
     }
 
@@ -1067,6 +1093,11 @@ impl App {
         if !invalid_section("theme") {
             self.state.theme_runtime = theme_runtime_config(config, !invalid_section("ui"));
             self.refresh_effective_app_theme();
+        }
+
+        if !invalid_section("extensions") {
+            self.disabled_extensions = config.extensions.disabled.clone();
+            self.rebuild_extension_catalogs();
         }
 
         let status = if diagnostics.is_empty() {

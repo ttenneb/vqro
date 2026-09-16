@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
 pub const HOST_DOCUMENT_CONTRACT_V1: &str = "host.document.v1";
+pub const MAX_DOCUMENT_PROVIDERS: usize = 16;
 pub const MAX_DOCUMENT_ITEMS: usize = 512;
 pub const MAX_DOCUMENT_ACTIONS: usize = 256;
 pub const MAX_DOCUMENT_TEXT_CHARS: usize = 4096;
@@ -71,7 +72,7 @@ pub enum HostSurface {
     Pane,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum HostTarget {
     Session,
@@ -134,6 +135,19 @@ pub struct HostDocumentItemFlags {
     pub disabled: bool,
     #[serde(default)]
     pub attention: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostDocumentExtensionActionV1 {
+    pub contract: String,
+    pub namespace: String,
+    pub generation: u64,
+    pub revision: u64,
+    pub scope_id: String,
+    pub action_id: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subject_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -257,6 +271,58 @@ impl HostTerminalGroupsV1 {
 }
 
 impl HostDocumentV1 {
+    pub fn authorize_extension_action_dispatch(
+        &self,
+        action_id: &str,
+        host_snapshot: &HostTerminalGroupsV1,
+    ) -> Result<HostDocumentExtensionActionV1, HostDocumentError> {
+        self.validate()?;
+        host_snapshot.validate()?;
+        if self.generation != host_snapshot.generation || self.revision != host_snapshot.revision {
+            return invalid("extension action document does not match host snapshot revision");
+        }
+        if !matches!(
+            &self.target,
+            HostTarget::Tab { tab_id } if tab_id == &host_snapshot.scope_id
+        ) {
+            return invalid("extension action document is outside host snapshot scope");
+        }
+        let action = self
+            .actions
+            .iter()
+            .find(|action| action.id == action_id)
+            .ok_or_else(|| HostDocumentError("document action not found".into()))?;
+        let HostDocumentOperation::Extension { name } = &action.operation else {
+            return invalid("document action is not provider-owned");
+        };
+        let enabled_references = self.items.iter().filter(|item| {
+            !item.flags.disabled && item.action_ids.iter().any(|id| id == &action.id)
+        });
+        if let Some(subject_id) = action.subject_id.as_deref() {
+            if !enabled_references
+                .into_iter()
+                .any(|item| item.id == subject_id)
+            {
+                return invalid("document action subject is disabled or unavailable");
+            }
+        } else if enabled_references.count() == 0 {
+            return invalid("document action is not reachable from an enabled item");
+        }
+        if action.confirmation == HostConfirmation::Required {
+            return invalid("provider-owned destructive actions require a host effect contract");
+        }
+        Ok(HostDocumentExtensionActionV1 {
+            contract: HOST_DOCUMENT_CONTRACT_V1.into(),
+            namespace: self.namespace.clone(),
+            generation: self.generation,
+            revision: self.revision,
+            scope_id: host_snapshot.scope_id.clone(),
+            action_id: action.id.clone(),
+            name: name.clone(),
+            subject_id: action.subject_id.clone(),
+        })
+    }
+
     /// Authorize one host effect against both the provider grant and the
     /// identities/scope in this validated document.
     pub fn authorize_host_effect_dispatch(
@@ -289,6 +355,12 @@ impl HostDocumentV1 {
             .as_deref()
             .and_then(|subject| self.items.iter().find(|item| item.id == subject))
             .ok_or_else(|| HostDocumentError("host effect requires a document subject".into()))?;
+        if subject.flags.disabled {
+            return invalid("host effect subject is disabled");
+        }
+        if !subject.action_ids.iter().any(|id| id == &action.id) {
+            return invalid("host effect is not reachable from its subject");
+        }
         let terminal = subject
             .terminal
             .as_ref()
@@ -384,12 +456,18 @@ impl HostDocumentV1 {
             }
         }
         for item in &self.items {
-            if item
-                .action_ids
-                .iter()
-                .any(|action| !action_ids.contains(action.as_str()))
-            {
-                return invalid("document item references an unknown action");
+            for action_id in &item.action_ids {
+                let Some(action) = self.actions.iter().find(|action| action.id == *action_id)
+                else {
+                    return invalid("document item references an unknown action");
+                };
+                if action
+                    .subject_id
+                    .as_deref()
+                    .is_some_and(|subject_id| subject_id != item.id)
+                {
+                    return invalid("document item references an action for another subject");
+                }
             }
         }
         Ok(())
@@ -653,6 +731,33 @@ mod tests {
         document
             .authorize_host_effect_dispatch("select:1", &host_snapshot(), &grants, true)
             .unwrap();
+        let mut disabled = document.clone();
+        let subject_id = disabled.actions[0].subject_id.clone().unwrap();
+        disabled
+            .items
+            .iter_mut()
+            .find(|item| item.id == subject_id)
+            .unwrap()
+            .flags
+            .disabled = true;
+        assert!(disabled
+            .authorize_host_effect_dispatch("select:1", &host_snapshot(), &grants, true)
+            .unwrap_err()
+            .to_string()
+            .contains("disabled"));
+        let mut hidden = document.clone();
+        hidden
+            .items
+            .iter_mut()
+            .find(|item| item.id == subject_id)
+            .unwrap()
+            .action_ids
+            .clear();
+        assert!(hidden
+            .authorize_host_effect_dispatch("select:1", &host_snapshot(), &grants, true)
+            .unwrap_err()
+            .to_string()
+            .contains("reachable"));
 
         let mut escaped = document.clone();
         escaped.required_capabilities = vec![HostCapability::FocusTerminal];
@@ -675,9 +780,38 @@ mod tests {
 
     #[test]
     fn document_rejects_unknown_actions_and_hierarchy_cycles() {
+        let mut disabled = document();
+        let subject_id = disabled.actions[0].subject_id.clone().unwrap();
+        disabled
+            .items
+            .iter_mut()
+            .find(|item| item.id == subject_id)
+            .unwrap()
+            .flags
+            .disabled = true;
+        assert!(disabled
+            .authorize_extension_action_dispatch("select:1", &host_snapshot())
+            .unwrap_err()
+            .to_string()
+            .contains("disabled"));
+        disabled.actions[0].subject_id = None;
+        assert!(disabled
+            .authorize_extension_action_dispatch("select:1", &host_snapshot())
+            .unwrap_err()
+            .to_string()
+            .contains("enabled item"));
+
         let mut unknown = document();
         unknown.items[1].action_ids = vec!["missing".into()];
         assert!(unknown.validate().is_err());
+
+        let mut crossed = document();
+        crossed.items[0].action_ids = vec![crossed.actions[0].id.clone()];
+        assert!(crossed
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("another subject"));
 
         let mut cyclic = document();
         cyclic.items[0].parent_id = Some("member:1".into());

@@ -424,10 +424,18 @@ impl ClientShellState {
             self.collection_maximized_pane.as_ref(),
             &self.config.palette,
         );
+        let host_documents = self
+            .endpoints
+            .iter()
+            .find(|endpoint| endpoint.endpoint_id == self.active_endpoint_id)
+            .and_then(ClientShellEndpoint::current_host_documents);
         self.hits.collection_members = collections::render_collection_lists(
             &mut composed,
             snapshot,
-            self.structure.as_deref(),
+            collections::CollectionProjection {
+                structure: self.structure.as_deref(),
+                host_documents,
+            },
             &self.hits.panes,
             &self.collection_list_views,
             &self.collection_expanded_members,

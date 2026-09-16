@@ -778,16 +778,18 @@ impl ClientShellState {
                     _ => None,
                 };
                 if let Some(pane_id) = target {
-                    self.push_endpoint_method(
-                        crate::api::schema::Method::CollectionSelect(
-                            crate::api::schema::CollectionSelectParams {
-                                collection_id: collection.collection_id,
-                                pane_id: pane_id.clone(),
-                                focus: true,
-                            },
-                        ),
-                        outcome,
+                    let fallback = crate::api::schema::Method::CollectionSelect(
+                        crate::api::schema::CollectionSelectParams {
+                            collection_id: collection.collection_id,
+                            pane_id: pane_id.clone(),
+                            focus: true,
+                        },
                     );
+                    if let Some(action) = self.host_document_action_for_pane(pane_id) {
+                        self.route_host_document_action(action, fallback, outcome);
+                    } else {
+                        self.push_endpoint_method(fallback, outcome);
+                    }
                     outcome.repaint = true;
                 }
             }

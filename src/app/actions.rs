@@ -1717,9 +1717,11 @@ impl AppState {
             AppEvent::WorktreeAddFinished(_) => Vec::new(),
             AppEvent::WorktreeRemoveFinished(_) => Vec::new(),
             AppEvent::TabBarCommandFinished { .. } => Vec::new(),
-            AppEvent::PluginCommandFinished { .. } | AppEvent::ExtensionServiceFinished(_) => {
-                Vec::new()
-            }
+            AppEvent::PluginCommandFinished { .. }
+            | AppEvent::ExtensionCatalogCapacityAvailable
+            | AppEvent::ExtensionServiceFinished(_)
+            | AppEvent::HostDocumentFinished(_)
+            | AppEvent::HostDocumentProviderActionFinished { .. } => Vec::new(),
         }
     }
 

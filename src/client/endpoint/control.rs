@@ -11,6 +11,7 @@ pub(crate) enum EndpointControlMessage {
     AgentViewProjection(DecodedAgentViewProjection),
     Snapshot(Box<crate::protocol::ClientShellSnapshot>),
     Structure(Box<crate::protocol::endpoint::ClientShellStructureProjection>),
+    HostDocuments(Box<crate::protocol::endpoint::HostDocumentsProjectionV1>),
     TerminalViewsSurface(Box<crate::protocol::endpoint::ServerTerminalViewsSurface>),
     PaneViewResult(Box<crate::protocol::endpoint::ServerPaneViewResult>),
     PaneViewActionResult(Box<crate::protocol::endpoint::ServerPaneViewActionResult>),
@@ -69,6 +70,15 @@ pub(crate) fn decode_endpoint_control(
         return Ok(EndpointControlMessage::TerminalViewsSurface(Box::new(
             surface,
         )));
+    }
+    if kind == crate::protocol::endpoint::HOST_DOCUMENTS_KIND {
+        let projection: crate::protocol::endpoint::HostDocumentsProjectionV1 =
+            serde_json::from_str(data)
+                .map_err(|error| format!("invalid host document projection: {error}"))?;
+        projection
+            .validate()
+            .map_err(|error| format!("invalid host document projection: {error}"))?;
+        return Ok(EndpointControlMessage::HostDocuments(Box::new(projection)));
     }
     if kind == crate::protocol::endpoint::SESSION_STRUCTURE_KIND {
         let projection = serde_json::from_str(data)
@@ -194,6 +204,32 @@ mod tests {
         assert_eq!(surface.projection_revision, 9);
         assert!(surface.replace);
         assert!(surface.views.is_empty());
+    }
+
+    #[test]
+    fn malformed_host_document_projection_is_rejected_before_caching() {
+        let document: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/collections-document-v1.json"
+        ))
+        .unwrap();
+        let entry = serde_json::json!({
+            "provider_priority": 100,
+            "document": document,
+            "confirmation_tokens": {}
+        });
+        let projection = serde_json::json!({
+            "boot_id": "boot-1",
+            "revision": 1,
+            "documents": [entry.clone(), entry]
+        });
+        let error = match decode_endpoint_control(
+            crate::protocol::endpoint::HOST_DOCUMENTS_KIND,
+            &projection.to_string(),
+        ) {
+            Ok(_) => panic!("malformed projection was accepted"),
+            Err(error) => error,
+        };
+        assert!(error.contains("identities must be unique"));
     }
 
     #[test]

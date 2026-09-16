@@ -122,6 +122,7 @@ impl App {
                 }
                 self.schedule_session_save();
                 self.emit_tab_created_events(ws_idx, tab_idx);
+                self.refresh_collection_documents();
                 encode_success(
                     id,
                     self.tab_created_result(ws_idx, tab_idx)
@@ -262,6 +263,7 @@ impl App {
                     workspace: Some(workspace),
                 },
             });
+            self.refresh_collection_documents();
             return encode_success(id, ResponseResult::Ok {});
         }
 
@@ -286,6 +288,7 @@ impl App {
                 workspace_id,
             },
         });
+        self.refresh_collection_documents();
 
         encode_success(id, ResponseResult::Ok {})
     }
@@ -467,6 +470,7 @@ mod tests {
 
         let success: SuccessResponse = serde_json::from_str(&response).unwrap();
         assert!(matches!(success.result, ResponseResult::TabCreated { .. }));
+        assert_eq!(app.host_documents().len(), 2);
         let created = &app.state.workspaces[0].tabs[1];
         let created_terminal_id = created.terminal_id(created.root_pane).unwrap();
         let created_cwd = &app.state.terminals.get(created_terminal_id).unwrap().cwd;

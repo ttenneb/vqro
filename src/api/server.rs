@@ -475,6 +475,7 @@ pub(crate) fn api_method_name(method: &Method) -> &'static str {
         Method::CollectionCreate(_) => "collection.create",
         Method::CollectionAdd(_) => "collection.add",
         Method::CollectionPromote(_) => "collection.promote",
+        Method::HostDocumentAction(_) => "host.document.action",
         Method::CollectionSelect(_) => "collection.select",
         Method::CollectionReorder(_) => "collection.reorder",
         Method::CollectionArchive(_) => "collection.archive",

@@ -130,6 +130,7 @@ impl App {
             data: EventData::PaneCreated { pane: pane.clone() },
         });
         self.emit_layout_updated_event(ws_idx, target_tab_idx);
+        self.refresh_collection_documents();
 
         encode_success(id, ResponseResult::PaneInfo { pane })
     }
@@ -473,9 +474,12 @@ impl App {
             return pane_not_found(id, &target.pane_id);
         };
 
-        self.state.focus_pane_in_workspace(ws_idx, pane_id);
+        let focus_changed = self.state.focus_pane_in_workspace(ws_idx, pane_id);
         self.state.mark_active_tab_seen();
         self.state.mode = crate::app::Mode::Terminal;
+        if focus_changed {
+            self.refresh_collection_documents();
+        }
 
         let Some(pane) = self.pane_info(ws_idx, pane_id) else {
             return pane_not_found(id, &target.pane_id);
@@ -912,8 +916,8 @@ impl App {
         }
 
         let source_public_id = match params.source_pane_id {
-            Some(raw) => self
-                .parse_pane_id(&raw)
+            Some(raw_id) => self
+                .parse_pane_id(&raw_id)
                 .and_then(|(idx, pane_id)| {
                     self.state
                         .workspaces
@@ -921,14 +925,14 @@ impl App {
                         .find_tab_index_for_pane(pane_id)?;
                     self.public_pane_id(idx, pane_id)
                 })
-                .unwrap_or(raw),
+                .unwrap_or(raw_id),
             None => self
                 .public_pane_id(ws_idx, source_pane_id)
                 .unwrap_or_default(),
         };
         let target_public_id = match params.target_pane_id {
-            Some(raw) => self
-                .parse_pane_id(&raw)
+            Some(raw_id) => self
+                .parse_pane_id(&raw_id)
                 .and_then(|(idx, pane_id)| {
                     self.state
                         .workspaces
@@ -936,7 +940,7 @@ impl App {
                         .find_tab_index_for_pane(pane_id)?;
                     self.public_pane_id(idx, pane_id)
                 })
-                .or(Some(raw)),
+                .or(Some(raw_id)),
             None => target_pane_id.and_then(|pane_id| self.public_pane_id(ws_idx, pane_id)),
         };
         let Some(layout) = self.pane_layout_snapshot(ws_idx, tab_idx) else {
@@ -1090,12 +1094,12 @@ impl App {
                     );
                 }
                 let target_pane_id = match target_pane_id {
-                    Some(raw) => {
-                        let Some((pane_ws_idx, pane_id)) = self.parse_pane_id(&raw) else {
+                    Some(raw_id) => {
+                        let Some((pane_ws_idx, pane_id)) = self.parse_pane_id(&raw_id) else {
                             return encode_error(
                                 id,
                                 "target_pane_not_found",
-                                format!("target pane {raw} not found"),
+                                format!("target pane {raw_id} not found"),
                             );
                         };
                         let pane_tab_idx =
@@ -1104,7 +1108,7 @@ impl App {
                             return encode_error(
                                 id,
                                 "target_pane_not_found",
-                                format!("target pane {raw} is not in tab {tab_id}"),
+                                format!("target pane {raw_id} is not in tab {tab_id}"),
                             );
                         }
                         pane_id
@@ -1380,6 +1384,7 @@ impl App {
             self.emit_layout_updated_snapshot(source_layout);
         }
         self.emit_layout_updated_snapshot((*move_result.target_layout).clone());
+        self.refresh_collection_documents();
 
         encode_success(id, ResponseResult::PaneMove { move_result })
     }
@@ -1523,6 +1528,7 @@ impl App {
         }
         self.state.mark_session_dirty();
         let pane = self.pane_info(ws_idx, pane_id).unwrap();
+        self.refresh_collection_documents();
 
         encode_success(id, ResponseResult::PaneInfo { pane })
     }
@@ -1951,6 +1957,7 @@ impl App {
                 self.emit_layout_updated_event(ws_idx, tab_idx);
             }
         }
+        self.refresh_collection_documents();
 
         Ok(())
     }
@@ -2241,6 +2248,7 @@ fn invalid_agent(id: String) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::super::test_support::{exiting_test_command, shutdown_test_runtimes};
     use super::*;
     use crate::{
         api::schema::{ErrorResponse, SplitDirection, SuccessResponse},
@@ -2263,6 +2271,31 @@ mod tests {
         let pane_id = app.state.workspaces[0].tabs[0].root_pane;
         let public_pane_id = app.public_pane_id(0, pane_id).unwrap();
         (app, public_pane_id)
+    }
+
+    #[tokio::test]
+    async fn pane_split_refreshes_host_document_projection() {
+        let (mut app, public_pane_id) = app_with_test_workspace();
+        app.state.default_shell = exiting_test_command().into();
+        let response = app.handle_pane_split(
+            "req".into(),
+            PaneSplitParams {
+                workspace_id: None,
+                target_pane_id: Some(public_pane_id),
+                direction: SplitDirection::Right,
+                ratio: None,
+                cwd: None,
+                focus: false,
+                right_click: Default::default(),
+                env: Default::default(),
+            },
+        );
+        let response: SuccessResponse = serde_json::from_str(&response).unwrap();
+        assert!(matches!(response.result, ResponseResult::PaneInfo { .. }));
+        let documents = app.host_documents();
+        assert_eq!(documents.len(), 1);
+        assert_eq!(documents[0].document.items.len(), 2);
+        shutdown_test_runtimes(&mut app);
     }
 
     #[test]
@@ -2941,6 +2974,8 @@ mod tests {
         let mut app = app_with_linked_worktree();
         let pane_id = app.state.workspaces[0].tabs[0].root_pane;
         let public_pane_id = app.public_pane_id(0, pane_id).unwrap();
+        app.refresh_collection_documents();
+        assert!(!app.host_documents().is_empty());
 
         let response = app.handle_pane_close(
             "req".into(),
@@ -2952,6 +2987,8 @@ mod tests {
         let success: SuccessResponse = serde_json::from_str(&response).unwrap();
         assert_eq!(success.id, "req");
         assert!(app.state.workspaces.is_empty());
+        assert!(app.collections_shadow_documents.is_empty());
+        assert!(app.host_documents().is_empty());
     }
 
     #[test]
@@ -3220,6 +3257,7 @@ mod tests {
         let source_tab_public = app.public_tab_id(0, 0).unwrap();
         let target_public = app.public_pane_id(0, target).unwrap();
         let target_tab_public = app.public_tab_id(0, target_tab).unwrap();
+        let revision_before_move = app.next_host_document_revision;
 
         let response = app.handle_pane_move(
             "req".into(),
@@ -3255,6 +3293,8 @@ mod tests {
             app.state.workspaces[0].tabs[0].terminal_id(source),
             Some(&source_terminal)
         );
+        assert!(app.next_host_document_revision > revision_before_move);
+        assert_eq!(app.host_documents().len(), 1);
     }
     #[test]
     fn api_pane_move_to_existing_tab_across_workspace_reassigns_public_pane_id() {

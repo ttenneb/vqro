@@ -18,6 +18,8 @@ pub(crate) struct ClientShellEndpoint {
     pub(crate) snapshot_generation: Option<u64>,
     pub(crate) structure: Option<Box<crate::protocol::endpoint::ClientShellStructureProjection>>,
     pub(crate) structure_generation: Option<u64>,
+    pub(crate) host_documents: Option<Box<crate::protocol::endpoint::HostDocumentsProjectionV1>>,
+    pub(crate) host_documents_generation: Option<u64>,
     pub(crate) agent_recency: HashMap<String, u64>,
     pub(super) agent_presentation: super::endpoint_agent_state::EndpointAgentPresentation,
     pub(crate) agent_view_projection: Option<ClientEndpointAgentViewProjection>,
@@ -28,6 +30,17 @@ pub(crate) struct ClientShellEndpoint {
 }
 
 impl ClientShellEndpoint {
+    pub(super) fn current_host_documents(
+        &self,
+    ) -> Option<&crate::protocol::endpoint::HostDocumentsProjectionV1> {
+        let snapshot = self.snapshot.as_ref()?;
+        (self.host_documents_generation == self.snapshot_generation)
+            .then_some(self.host_documents.as_deref()?)
+            .filter(|documents| {
+                documents.boot_id == snapshot.boot_id && documents.revision == snapshot.revision
+            })
+    }
+
     pub(super) fn current_structure(
         &self,
     ) -> Option<&crate::protocol::endpoint::ClientShellStructureProjection> {
@@ -87,6 +100,9 @@ impl ClientShellState {
                 snapshot_generation: previous.and_then(|endpoint| endpoint.snapshot_generation),
                 structure: previous.and_then(|endpoint| endpoint.structure.clone()),
                 structure_generation: previous.and_then(|endpoint| endpoint.structure_generation),
+                host_documents: previous.and_then(|endpoint| endpoint.host_documents.clone()),
+                host_documents_generation: previous
+                    .and_then(|endpoint| endpoint.host_documents_generation),
                 agent_recency: previous
                     .map(|endpoint| endpoint.agent_recency.clone())
                     .unwrap_or_default(),
@@ -801,6 +817,150 @@ impl ClientShellState {
         true
     }
 
+    pub(super) fn host_document_action_for_pane(
+        &self,
+        pane_id: &str,
+    ) -> Option<crate::api::schema::HostDocumentActionParams> {
+        let projection = self
+            .endpoints
+            .iter()
+            .find(|endpoint| endpoint.endpoint_id == self.active_endpoint_id)?
+            .current_host_documents()?;
+        let entry = projection
+            .documents
+            .iter()
+            .filter(|entry| {
+                entry.document.items.iter().any(|item| {
+                    item.terminal
+                        .as_ref()
+                        .and_then(|terminal| terminal.placement.as_ref())
+                        .is_some_and(|placement| placement.pane_id == pane_id)
+                })
+            })
+            .max_by(|left, right| {
+                left.provider_priority
+                    .cmp(&right.provider_priority)
+                    .then_with(|| right.document.namespace.cmp(&left.document.namespace))
+            })?;
+        let document = &entry.document;
+        let item = document.items.iter().find(|item| {
+            !item.flags.disabled
+                && item
+                    .terminal
+                    .as_ref()
+                    .and_then(|terminal| terminal.placement.as_ref())
+                    .is_some_and(|placement| placement.pane_id == pane_id)
+        })?;
+        let action_id = item.action_ids.iter().find(|action_id| {
+            document.actions.iter().any(|action| {
+                action.id == action_id.as_str()
+                    && action
+                        .subject_id
+                        .as_deref()
+                        .is_none_or(|subject_id| subject_id == item.id)
+            })
+        })?;
+        Some(crate::api::schema::HostDocumentActionParams {
+            namespace: document.namespace.clone(),
+            scope_id: match &document.target {
+                crate::extension_contract::HostTarget::Tab { tab_id } => tab_id.clone(),
+                _ => return None,
+            },
+            generation: document.generation,
+            revision: document.revision,
+            action_id: action_id.to_string(),
+            confirmed: false,
+            confirmation_token: entry.confirmation_tokens.get(action_id.as_str()).cloned(),
+        })
+    }
+
+    pub(super) fn route_host_document_action(
+        &mut self,
+        mut params: crate::api::schema::HostDocumentActionParams,
+        fallback: crate::api::schema::Method,
+        outcome: &mut ClientShellInput,
+    ) {
+        let method = crate::api::schema::Method::HostDocumentAction(params.clone());
+        if !self.supports_endpoint_method(&method) {
+            self.push_endpoint_method(fallback, outcome);
+            return;
+        }
+        if self.host_document_action_requires_confirmation(&params) {
+            params.confirmed = true;
+            self.overlay = Some(ClientShellOverlay::ConfirmClose(
+                ClientConfirmCloseOverlay {
+                    target: ClientConfirmCloseTarget::HostDocumentAction(params),
+                    title: "Confirm extension action?".into(),
+                    detail: "This action can interrupt a terminal process and cannot be undone."
+                        .into(),
+                },
+            ));
+            outcome.repaint = true;
+        } else {
+            self.push_endpoint_method(
+                crate::api::schema::Method::HostDocumentAction(params),
+                outcome,
+            );
+        }
+    }
+
+    pub(super) fn host_document_action_requires_confirmation(
+        &self,
+        params: &crate::api::schema::HostDocumentActionParams,
+    ) -> bool {
+        self.endpoints
+            .iter()
+            .find(|endpoint| endpoint.endpoint_id == self.active_endpoint_id)
+            .and_then(ClientShellEndpoint::current_host_documents)
+            .and_then(|projection| {
+                projection.documents.iter().find_map(|entry| {
+                    let document = &entry.document;
+                    (document.namespace == params.namespace
+                        && document.generation == params.generation
+                        && document.revision == params.revision)
+                        .then(|| {
+                            document
+                                .actions
+                                .iter()
+                                .find(|action| action.id == params.action_id)
+                        })
+                        .flatten()
+                })
+            })
+            .is_some_and(|action| {
+                action.confirmation == crate::extension_contract::HostConfirmation::Required
+            })
+    }
+
+    pub(crate) fn set_endpoint_host_documents_for_generation(
+        &mut self,
+        endpoint_id: &ClientEndpointId,
+        generation: u64,
+        projection: Box<crate::protocol::endpoint::HostDocumentsProjectionV1>,
+    ) {
+        let Some(endpoint) = self
+            .endpoints
+            .iter_mut()
+            .find(|endpoint| &endpoint.endpoint_id == endpoint_id)
+        else {
+            return;
+        };
+        if endpoint
+            .host_documents_generation
+            .is_some_and(|current| generation < current)
+        {
+            return;
+        }
+        let stale = endpoint.host_documents_generation == Some(generation)
+            && endpoint.host_documents.as_ref().is_some_and(|current| {
+                current.boot_id == projection.boot_id && current.revision > projection.revision
+            });
+        if !stale {
+            endpoint.host_documents = Some(projection);
+            endpoint.host_documents_generation = Some(generation);
+        }
+    }
+
     pub(crate) fn set_endpoint_structure_for_generation(
         &mut self,
         endpoint_id: &ClientEndpointId,
@@ -935,6 +1095,8 @@ pub(super) fn local_endpoint() -> ClientShellEndpoint {
         snapshot_generation: None,
         structure: None,
         structure_generation: None,
+        host_documents: None,
+        host_documents_generation: None,
         agent_recency: HashMap::new(),
         agent_presentation: Default::default(),
         agent_view_projection: None,

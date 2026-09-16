@@ -77,6 +77,7 @@ impl App {
                     }
                 }
                 self.emit_workspace_open_events(index);
+                self.refresh_collection_documents();
                 encode_success(
                     id,
                     self.workspace_created_result(index)
@@ -351,6 +352,7 @@ impl App {
                 },
             });
         }
+        self.refresh_collection_documents();
 
         encode_success(id, ResponseResult::Ok {})
     }
@@ -452,6 +454,14 @@ mod tests {
             success.result,
             ResponseResult::WorkspaceCreated { .. }
         ));
+        assert_eq!(
+            app.host_documents().len(),
+            app.state
+                .workspaces
+                .iter()
+                .map(|workspace| workspace.tabs.len())
+                .sum::<usize>()
+        );
         let created_cwd = &app.state.workspaces[1].identity_cwd;
         assert_eq!(
             crate::worktree::canonical_or_original(created_cwd),

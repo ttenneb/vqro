@@ -190,6 +190,7 @@ pub(crate) struct ClientConnection {
     pub(crate) shell_mouse_capture: bool,
     /// Whether the client negotiated the optional typed structure control.
     pub(crate) shell_structure_enabled: bool,
+    pub(crate) shell_host_documents_enabled: bool,
     /// Whether this client may reserve terminal geometry for pane contributions.
     pub(crate) shell_pane_viewport_enabled: bool,
     pub(crate) shell_pane_view_enabled: bool,
@@ -221,6 +222,7 @@ pub(crate) struct ClientConnection {
     pub(crate) shell_agent_view: Option<crate::api::schema::AgentViewSetParams>,
     /// Optional structure control paired to the same boot and revision as the snapshot.
     pub(crate) shell_structure: Option<crate::protocol::endpoint::ClientShellStructureProjection>,
+    pub(crate) shell_host_documents: Vec<crate::protocol::endpoint::HostDocumentProjectionEntryV1>,
     /// Monotonic shell replacement revision for this connection.
     pub(crate) shell_projection_revision: u64,
     /// Whether this shell is waiting for one ordered endpoint command response.
@@ -282,6 +284,7 @@ impl ClientConnection {
             shell_surface_active: true,
             shell_mouse_capture: false,
             shell_structure_enabled: false,
+            shell_host_documents_enabled: false,
             shell_pane_viewport_enabled: false,
             shell_pane_view_enabled: false,
             shell_terminal_views_enabled: false,
@@ -300,6 +303,7 @@ impl ClientConnection {
             shell_snapshot: None,
             shell_agent_view: None,
             shell_structure: None,
+            shell_host_documents: Vec::new(),
             shell_projection_revision: 0,
             shell_endpoint_command_in_flight: false,
             shell_endpoint_command_surface_revision: None,

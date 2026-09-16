@@ -2653,6 +2653,47 @@
           ],
           "type": "object"
         },
+        "HostDocumentActionParams": {
+          "properties": {
+            "action_id": {
+              "type": "string"
+            },
+            "confirmation_token": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "confirmed": {
+              "default": false,
+              "type": "boolean"
+            },
+            "generation": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "namespace": {
+              "type": "string"
+            },
+            "revision": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "scope_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "namespace",
+            "scope_id",
+            "generation",
+            "revision",
+            "action_id"
+          ],
+          "type": "object"
+        },
         "IntegrationInstallParams": {
           "properties": {
             "target": {
@@ -6085,6 +6126,22 @@
         {
           "properties": {
             "method": {
+              "const": "host.document.action",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/HostDocumentActionParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
               "const": "collection.select",
               "type": "string"
             },
@@ -8591,7 +8648,10 @@
         "ExtensionServiceCapability": {
           "enum": [
             "view_contribution",
-            "terminal_interrupt"
+            "host_document",
+            "focus_terminal",
+            "terminal_interrupt",
+            "unknown"
           ],
           "type": "string"
         },
@@ -10412,7 +10472,9 @@
         },
         "PluginServiceCapability": {
           "enum": [
-            "pane_inspector"
+            "pane_inspector",
+            "host_document",
+            "unknown"
           ],
           "type": "string"
         },

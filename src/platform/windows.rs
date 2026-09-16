@@ -158,7 +158,10 @@ use windows_sys::{
             MAX_PATH, NTSTATUS, STATUS_SUCCESS, UNICODE_STRING,
         },
         Globalization::{CompareStringOrdinal, CSTR_EQUAL, CSTR_GREATER_THAN, CSTR_LESS_THAN},
-        Security::SECURITY_ATTRIBUTES,
+        Security::{
+            Cryptography::{BCryptGenRandom, BCRYPT_USE_SYSTEM_PREFERRED_RNG},
+            SECURITY_ATTRIBUTES,
+        },
         Storage::FileSystem::CreateDirectoryW,
         System::{
             Console::GetConsoleWindow,
@@ -213,11 +216,22 @@ use windows_sys::{
     },
 };
 
-pub(crate) fn fill_secure_random(_bytes: &mut [u8]) -> std::io::Result<()> {
-    Err(std::io::Error::new(
-        std::io::ErrorKind::Unsupported,
-        "supervised extension effects are disabled on Windows",
-    ))
+pub(crate) fn fill_secure_random(bytes: &mut [u8]) -> std::io::Result<()> {
+    let len = u32::try_from(bytes.len())
+        .map_err(|_| std::io::Error::other("random request exceeds Windows API limit"))?;
+    let status = unsafe {
+        BCryptGenRandom(
+            std::ptr::null_mut(),
+            bytes.as_mut_ptr(),
+            len,
+            BCRYPT_USE_SYSTEM_PREFERRED_RNG,
+        )
+    };
+    if status == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::from_raw_os_error(status))
+    }
 }
 
 pub(crate) fn configure_extension_service_command(command: &mut std::process::Command) {

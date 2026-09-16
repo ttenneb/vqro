@@ -426,6 +426,7 @@ pub(crate) enum ServerEvent {
         mouse_capture: bool,
         surface_active: bool,
         structure_enabled: bool,
+        host_documents_enabled: bool,
         pane_viewport_enabled: bool,
         pane_view_enabled: bool,
         terminal_views_enabled: bool,
@@ -697,6 +698,51 @@ fn set_client_recv_timeout(
     stream.set_recv_timeout(timeout)
 }
 
+struct ClientShellHandshakeOptions {
+    pixel_mouse: bool,
+    direct_graphics: bool,
+    endpoint_keybindings: bool,
+    mouse_capture: bool,
+    surface_active: bool,
+    structure_enabled: bool,
+    host_documents_enabled: bool,
+    pane_viewport_enabled: bool,
+    pane_view_enabled: bool,
+    terminal_views_enabled: bool,
+}
+
+fn client_shell_handshake_options(
+    hello: &crate::protocol::endpoint::EndpointClientHello,
+) -> ClientShellHandshakeOptions {
+    let has = |required: &str| hello.control_kinds.iter().any(|kind| kind == required);
+    ClientShellHandshakeOptions {
+        pixel_mouse: hello.pixel_mouse,
+        direct_graphics: hello.direct_graphics,
+        endpoint_keybindings: hello.endpoint_keybindings,
+        mouse_capture: hello.mouse_capture,
+        surface_active: hello.surface_active,
+        structure_enabled: has(crate::protocol::endpoint::SESSION_STRUCTURE_KIND),
+        host_documents_enabled: has(crate::protocol::endpoint::HOST_DOCUMENTS_KIND),
+        pane_viewport_enabled: has(crate::protocol::endpoint::PANE_VIEWPORT_KIND),
+        pane_view_enabled: [
+            crate::protocol::endpoint::PANE_VIEW_REQUEST_KIND,
+            crate::protocol::endpoint::PANE_VIEW_CANCEL_KIND,
+            crate::protocol::endpoint::PANE_VIEW_RESULT_KIND,
+            crate::protocol::endpoint::PANE_VIEW_ACTION_KIND,
+            crate::protocol::endpoint::PANE_VIEW_ACTION_RESULT_KIND,
+            crate::protocol::endpoint::PANE_VIEW_CONFIRM_KIND,
+        ]
+        .iter()
+        .all(|required| has(required)),
+        terminal_views_enabled: [
+            crate::protocol::endpoint::TERMINAL_VIEWS_INTEREST_KIND,
+            crate::protocol::endpoint::TERMINAL_VIEWS_SURFACE_KIND,
+        ]
+        .iter()
+        .all(|required| has(required)),
+    }
+}
+
 /// Handles the client handshake on a blocking thread.
 ///
 /// Reads the `TerminalHello` or `ClientShellHello` message, validates the version,
@@ -812,34 +858,7 @@ pub(crate) fn handle_client_handshake(
                 hello.cell_width_px,
                 hello.cell_height_px,
                 false,
-                Some((
-                    hello.pixel_mouse,
-                    hello.direct_graphics,
-                    hello.endpoint_keybindings,
-                    hello.mouse_capture,
-                    hello.surface_active,
-                    hello
-                        .control_kinds
-                        .iter()
-                        .any(|kind| kind == crate::protocol::endpoint::SESSION_STRUCTURE_KIND),
-                    hello
-                        .control_kinds
-                        .iter()
-                        .any(|kind| kind == crate::protocol::endpoint::PANE_VIEWPORT_KIND),
-                    [
-                        crate::protocol::endpoint::PANE_VIEW_REQUEST_KIND,
-                        crate::protocol::endpoint::PANE_VIEW_RESULT_KIND,
-                        crate::protocol::endpoint::PANE_VIEW_ACTION_RESULT_KIND,
-                    ]
-                    .iter()
-                    .all(|required| hello.control_kinds.iter().any(|kind| kind == required)),
-                    [
-                        crate::protocol::endpoint::TERMINAL_VIEWS_INTEREST_KIND,
-                        crate::protocol::endpoint::TERMINAL_VIEWS_SURFACE_KIND,
-                    ]
-                    .iter()
-                    .all(|required| hello.control_kinds.iter().any(|kind| kind == required)),
-                )),
+                Some(client_shell_handshake_options(&hello)),
             )
         }
         ClientMessage::ClientShellHello { .. } => {
@@ -887,22 +906,34 @@ pub(crate) fn handle_client_handshake(
                 .map(|method| (*method).to_owned())
                 .collect(),
         );
-        if shell_options.as_ref().is_some_and(|options| options.5) {
+        if shell_options
+            .as_ref()
+            .is_some_and(|options| options.structure_enabled)
+        {
             welcome
                 .capabilities
                 .push(crate::protocol::endpoint::SESSION_STRUCTURE_CAPABILITY.into());
         }
-        if shell_options.as_ref().is_some_and(|options| options.6) {
+        if shell_options
+            .as_ref()
+            .is_some_and(|options| options.pane_viewport_enabled)
+        {
             welcome
                 .capabilities
                 .push(crate::protocol::endpoint::PANE_VIEWPORT_CAPABILITY.into());
         }
-        if shell_options.as_ref().is_some_and(|options| options.7) {
+        if shell_options
+            .as_ref()
+            .is_some_and(|options| options.pane_view_enabled)
+        {
             welcome
                 .capabilities
                 .push(crate::protocol::endpoint::PANE_VIEW_CAPABILITY.into());
         }
-        if shell_options.as_ref().is_some_and(|options| options.8) {
+        if shell_options
+            .as_ref()
+            .is_some_and(|options| options.terminal_views_enabled)
+        {
             welcome
                 .capabilities
                 .push(crate::protocol::endpoint::TERMINAL_VIEWS_CAPABILITY.into());
@@ -948,33 +979,23 @@ pub(crate) fn handle_client_handshake(
 
     // Notify the main loop about the new client.
     let endpoint_control_writer = shell_options.as_ref().map(|_| writer.control.clone());
-    let connected = if let Some((
-        pixel_mouse,
-        direct_graphics,
-        endpoint_keybindings,
-        mouse_capture,
-        surface_active,
-        structure_enabled,
-        pane_viewport_enabled,
-        pane_view_enabled,
-        terminal_views_enabled,
-    )) = shell_options
-    {
+    let connected = if let Some(options) = shell_options {
         ServerEvent::ClientShellConnected {
             client_id,
             surface_cols: client_cols,
             surface_rows: client_rows,
             cell_width_px,
             cell_height_px,
-            pixel_mouse,
-            direct_graphics,
-            endpoint_keybindings,
-            mouse_capture,
-            surface_active,
-            structure_enabled,
-            pane_viewport_enabled,
-            pane_view_enabled,
-            terminal_views_enabled,
+            pixel_mouse: options.pixel_mouse,
+            direct_graphics: options.direct_graphics,
+            endpoint_keybindings: options.endpoint_keybindings,
+            mouse_capture: options.mouse_capture,
+            surface_active: options.surface_active,
+            structure_enabled: options.structure_enabled,
+            host_documents_enabled: options.host_documents_enabled,
+            pane_viewport_enabled: options.pane_viewport_enabled,
+            pane_view_enabled: options.pane_view_enabled,
+            terminal_views_enabled: options.terminal_views_enabled,
             writer,
         }
     } else {
@@ -2124,6 +2145,32 @@ mod tests {
     }
 
     #[test]
+    fn pane_view_negotiation_requires_every_action_confirmation_and_cancel_control() {
+        let ClientMessage::EndpointControl { data, .. } = endpoint_hello(80, 29) else {
+            unreachable!()
+        };
+        let mut hello: EndpointClientHello = serde_json::from_str(&data).unwrap();
+        hello.control_kinds.extend(
+            [
+                crate::protocol::endpoint::PANE_VIEW_REQUEST_KIND,
+                crate::protocol::endpoint::PANE_VIEW_RESULT_KIND,
+                crate::protocol::endpoint::PANE_VIEW_ACTION_RESULT_KIND,
+            ]
+            .map(str::to_owned),
+        );
+        assert!(!client_shell_handshake_options(&hello).pane_view_enabled);
+        hello.control_kinds.extend(
+            [
+                crate::protocol::endpoint::PANE_VIEW_CANCEL_KIND,
+                crate::protocol::endpoint::PANE_VIEW_ACTION_KIND,
+                crate::protocol::endpoint::PANE_VIEW_CONFIRM_KIND,
+            ]
+            .map(str::to_owned),
+        );
+        assert!(client_shell_handshake_options(&hello).pane_view_enabled);
+    }
+
+    #[test]
     fn dedicated_client_shell_handshake_uses_surface_viewport() {
         let (mut client_stream, server_stream, _path) = local_stream_pair("client-shell-handshake");
         let (server_event_tx, mut server_event_rx) = mpsc::channel(4);
@@ -2133,8 +2180,16 @@ mod tests {
             handle_client_handshake(server_stream, 43, &server_event_tx, &handshake_quit)
         });
 
-        protocol::write_message(&mut client_stream, &endpoint_hello(80, 29))
-            .expect("write shell hello");
+        let mut hello = endpoint_hello(80, 29);
+        let ClientMessage::EndpointControl { data, .. } = &mut hello else {
+            unreachable!("endpoint hello helper always returns endpoint control");
+        };
+        let mut payload: EndpointClientHello = serde_json::from_str(data).unwrap();
+        payload
+            .control_kinds
+            .push(crate::protocol::endpoint::HOST_DOCUMENTS_KIND.into());
+        *data = serde_json::to_string(&payload).unwrap();
+        protocol::write_message(&mut client_stream, &hello).expect("write shell hello");
 
         let welcome: ServerMessage =
             protocol::read_message(&mut client_stream, MAX_FRAME_SIZE).expect("read welcome");
@@ -2157,6 +2212,7 @@ mod tests {
                 mouse_capture,
                 surface_active,
                 structure_enabled,
+                host_documents_enabled,
                 pane_viewport_enabled,
                 pane_view_enabled,
                 terminal_views_enabled,
@@ -2171,6 +2227,7 @@ mod tests {
                 assert!(mouse_capture);
                 assert!(surface_active);
                 assert!(!structure_enabled);
+                assert!(host_documents_enabled);
                 assert!(!terminal_views_enabled);
                 assert!(!pane_viewport_enabled);
                 assert!(!pane_view_enabled);

@@ -264,13 +264,20 @@ pub struct PluginManifestService {
 #[serde(rename_all = "snake_case")]
 pub enum PluginServiceCapability {
     PaneInspector,
+    HostDocument,
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ExtensionServiceCapability {
     ViewContribution,
+    HostDocument,
+    FocusTerminal,
     TerminalInterrupt,
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]

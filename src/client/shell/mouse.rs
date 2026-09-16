@@ -1829,6 +1829,9 @@ impl ClientShellState {
                                     },
                                 )
                             }
+                            ClientConfirmCloseTarget::HostDocumentAction(params) => {
+                                crate::api::schema::Method::HostDocumentAction(params)
+                            }
                         };
                         self.push_endpoint_method(method, outcome);
                         outcome.repaint = true;
@@ -1941,16 +1944,18 @@ impl ClientShellState {
                 if self.inspector.is_some() {
                     self.close_terminal_inspector(outcome);
                 }
-                self.push_endpoint_method(
-                    crate::api::schema::Method::CollectionSelect(
-                        crate::api::schema::CollectionSelectParams {
-                            collection_id: collection.collection_id,
-                            pane_id,
-                            focus: true,
-                        },
-                    ),
-                    outcome,
+                let fallback = crate::api::schema::Method::CollectionSelect(
+                    crate::api::schema::CollectionSelectParams {
+                        collection_id: collection.collection_id,
+                        pane_id: pane_id.clone(),
+                        focus: true,
+                    },
                 );
+                if let Some(action) = self.host_document_action_for_pane(&pane_id) {
+                    self.route_host_document_action(action, fallback, outcome);
+                } else {
+                    self.push_endpoint_method(fallback, outcome);
+                }
                 outcome.repaint = true;
             }
             return;
@@ -2029,16 +2034,18 @@ impl ClientShellState {
                     }
                 } else {
                     self.collection_entered_pane = None;
-                    self.push_endpoint_method(
-                        crate::api::schema::Method::CollectionSelect(
-                            crate::api::schema::CollectionSelectParams {
-                                collection_id: member.collection_id,
-                                pane_id: member.pane_id,
-                                focus: true,
-                            },
-                        ),
-                        outcome,
+                    let fallback = crate::api::schema::Method::CollectionSelect(
+                        crate::api::schema::CollectionSelectParams {
+                            collection_id: member.collection_id,
+                            pane_id: member.pane_id,
+                            focus: true,
+                        },
                     );
+                    if let Some(action) = member.host_document_action {
+                        self.route_host_document_action(action, fallback, outcome);
+                    } else {
+                        self.push_endpoint_method(fallback, outcome);
+                    }
                 }
                 outcome.repaint = true;
                 return;

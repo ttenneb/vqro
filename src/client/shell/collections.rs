@@ -300,10 +300,15 @@ pub(super) fn render_collection_chrome(
     hits
 }
 
+pub(super) struct CollectionProjection<'a> {
+    pub(super) structure: Option<&'a crate::protocol::endpoint::ClientShellStructureProjection>,
+    pub(super) host_documents: Option<&'a crate::protocol::endpoint::HostDocumentsProjectionV1>,
+}
+
 pub(super) fn render_collection_lists(
     buffer: &mut Buffer,
     snapshot: &crate::protocol::ClientShellSnapshot,
-    structure: Option<&crate::protocol::endpoint::ClientShellStructureProjection>,
+    projection: CollectionProjection<'_>,
     panes: &[PaneHit],
     list_views: &HashSet<String>,
     expanded_members: &HashMap<String, HashSet<String>>,
@@ -313,7 +318,7 @@ pub(super) fn render_collection_lists(
     terminal_surfaces: &HashMap<String, crate::protocol::endpoint::ServerTerminalViewSurface>,
     palette: &Palette,
 ) -> Vec<CollectionMemberHit> {
-    let Some(structure) = structure.filter(|structure| {
+    let Some(structure) = projection.structure.filter(|structure| {
         structure.boot_id == snapshot.boot_id && structure.revision == snapshot.revision
     }) else {
         return Vec::new();
@@ -431,12 +436,69 @@ pub(super) fn render_collection_lists(
                 scroll,
                 collection_id: collection.collection_id.clone(),
                 pane_id: pane_id.clone(),
+                host_document_action: None,
             });
             continue;
         }
 
+        let tab_id = projected_panes
+            .get(selected_pane_id)
+            .map(|pane| pane.tab_id.as_str());
+        let document_entry = projection
+            .host_documents
+            .filter(|projection| {
+                projection.boot_id == snapshot.boot_id && projection.revision == snapshot.revision
+            })
+            .and_then(|projection| {
+                projection
+                    .documents
+                    .iter()
+                    .filter(|entry| {
+                        let document = &entry.document;
+                        matches!(
+                            &document.target,
+                            crate::extension_contract::HostTarget::Tab { tab_id: target }
+                                if Some(target.as_str()) == tab_id
+                        ) && document.items.iter().any(|item| {
+                            item.terminal
+                                .as_ref()
+                                .and_then(|terminal| terminal.placement.as_ref())
+                                .is_some_and(|placement| {
+                                    collection
+                                        .members
+                                        .iter()
+                                        .any(|member| member.pane_id == placement.pane_id)
+                                })
+                        })
+                    })
+                    .max_by(|left, right| {
+                        left.provider_priority
+                            .cmp(&right.provider_priority)
+                            .then_with(|| right.document.namespace.cmp(&left.document.namespace))
+                    })
+            });
+        let document = document_entry.map(|entry| &entry.document);
+        let item_for_pane = |pane_id: &str| {
+            document.and_then(|document| {
+                document.items.iter().find(|item| {
+                    item.terminal
+                        .as_ref()
+                        .and_then(|terminal| terminal.placement.as_ref())
+                        .is_some_and(|placement| placement.pane_id == pane_id)
+                })
+            })
+        };
         let mut members = collection.members.iter().collect::<Vec<_>>();
-        members.sort_by_key(|member| member.index);
+        members.sort_by_key(|member| {
+            item_for_pane(&member.pane_id)
+                .and_then(|item| {
+                    document?
+                        .items
+                        .iter()
+                        .position(|candidate| candidate.id == item.id)
+                })
+                .unwrap_or(usize::MAX)
+        });
         let active_count = members.iter().filter(|member| !member.archived).count();
         let archived_count = members.len().saturating_sub(active_count);
         let archived_by_pane = members
@@ -503,11 +565,17 @@ pub(super) fn render_collection_lists(
                     crate::api::schema::AgentStatus::Idle => "○",
                     crate::api::schema::AgentStatus::Unknown => "·",
                 };
-                let name = member_name(
-                    &member.pane_id,
-                    delegation,
-                    agents.get(member.pane_id.as_str()).copied(),
-                    projected_panes.get(member.pane_id.as_str()).copied(),
+                let item = item_for_pane(&member.pane_id);
+                let name = item.map_or_else(
+                    || {
+                        member_name(
+                            &member.pane_id,
+                            delegation,
+                            agents.get(member.pane_id.as_str()).copied(),
+                            projected_panes.get(member.pane_id.as_str()).copied(),
+                        )
+                    },
+                    |item| item.label.clone(),
                 );
                 let expanded = expanded_members
                     .get(&collection.collection_id)
@@ -656,6 +724,38 @@ pub(super) fn render_collection_lists(
                     scroll,
                     collection_id: collection.collection_id.clone(),
                     pane_id: member.pane_id.clone(),
+                    host_document_action: document.and_then(|document| {
+                        let item = item.filter(|item| !item.flags.disabled)?;
+                        let action_id = item
+                            .action_ids
+                            .iter()
+                            .find(|action_id| {
+                                document.actions.iter().any(|action| {
+                                    action.id == action_id.as_str()
+                                        && action
+                                            .subject_id
+                                            .as_deref()
+                                            .is_none_or(|subject_id| subject_id == item.id)
+                                })
+                            })?
+                            .clone();
+                        Some(crate::api::schema::HostDocumentActionParams {
+                            namespace: document.namespace.clone(),
+                            scope_id: match &document.target {
+                                crate::extension_contract::HostTarget::Tab { tab_id } => {
+                                    tab_id.clone()
+                                }
+                                _ => return None,
+                            },
+                            generation: document.generation,
+                            revision: document.revision,
+                            confirmation_token: document_entry
+                                .and_then(|entry| entry.confirmation_tokens.get(&action_id))
+                                .cloned(),
+                            action_id,
+                            confirmed: false,
+                        })
+                    }),
                 });
             }
         }

@@ -621,6 +621,7 @@ async fn client_shell_attach_seeds_workspace() {
             mouse_capture: false,
             surface_active: true,
             structure_enabled: false,
+            host_documents_enabled: false,
             pane_viewport_enabled: false,
             pane_view_enabled: false,
             terminal_views_enabled: false,
@@ -655,6 +656,7 @@ async fn client_shell_endpoint_request_uses_the_selected_connection() {
             mouse_capture: false,
             surface_active: true,
             structure_enabled: false,
+            host_documents_enabled: false,
             pane_viewport_enabled: false,
             pane_view_enabled: false,
             terminal_views_enabled: false,
@@ -775,6 +777,7 @@ async fn client_shell_pairs_agent_view_set_replacement_and_clear_with_snapshots(
             mouse_capture: false,
             surface_active: false,
             structure_enabled: false,
+            host_documents_enabled: false,
             pane_viewport_enabled: false,
             pane_view_enabled: false,
             terminal_views_enabled: false,
@@ -847,6 +850,53 @@ async fn client_shell_pairs_agent_view_set_replacement_and_clear_with_snapshots(
 }
 
 #[tokio::test]
+async fn host_documents_control_is_sent_only_when_negotiated() {
+    for (client_id, negotiated) in [(70, false), (71, true)] {
+        let mut server = test_headless_server();
+        server.app.state.workspaces = vec![crate::workspace::Workspace::test_new("docs")];
+        server.app.state.active = Some(0);
+        server.app.state.selected = 0;
+        server.app.refresh_collection_documents();
+        let (writer, control_rx, _render_rx) = test_client_writer();
+        assert!(
+            server.handle_server_event(ServerEvent::ClientShellConnected {
+                client_id,
+                surface_cols: 80,
+                surface_rows: 23,
+                cell_width_px: 10,
+                cell_height_px: 20,
+                pixel_mouse: true,
+                direct_graphics: false,
+                endpoint_keybindings: false,
+                mouse_capture: false,
+                surface_active: true,
+                structure_enabled: false,
+                host_documents_enabled: negotiated,
+                pane_viewport_enabled: false,
+                pane_view_enabled: false,
+                terminal_views_enabled: false,
+                writer,
+            })
+        );
+        let _snapshot = client_shell_snapshot(read_server_message(
+            control_rx.recv().expect("shell snapshot"),
+        ));
+        server.render_and_stream();
+        let sent_host_documents = control_rx.try_iter().any(|message| {
+            matches!(
+                read_server_message(message),
+                ServerMessage::EndpointControl { kind, .. }
+                    if kind == crate::protocol::endpoint::HOST_DOCUMENTS_KIND
+            )
+        });
+        assert_eq!(sent_host_documents, negotiated);
+        if !negotiated {
+            assert!(server.clients[&client_id].shell_host_documents.is_empty());
+        }
+    }
+}
+
+#[tokio::test]
 async fn client_shell_receives_metadata_then_shell_free_pane_surface() {
     let mut server = test_headless_server();
     let mut workspace = crate::workspace::Workspace::test_new("shell-only-label");
@@ -887,6 +937,7 @@ async fn client_shell_receives_metadata_then_shell_free_pane_surface() {
             mouse_capture: false,
             surface_active: true,
             structure_enabled: true,
+            host_documents_enabled: false,
             pane_viewport_enabled: false,
             pane_view_enabled: false,
             terminal_views_enabled: false,
@@ -1068,6 +1119,7 @@ fn connect_test_shell(
             mouse_capture: false,
             surface_active: true,
             structure_enabled: false,
+            host_documents_enabled: false,
             pane_viewport_enabled: false,
             pane_view_enabled: false,
             terminal_views_enabled: false,
@@ -1533,6 +1585,7 @@ async fn client_shell_config_diagnostics_follow_keybinding_ownership() {
             mouse_capture: false,
             surface_active: true,
             structure_enabled: false,
+            host_documents_enabled: false,
             pane_viewport_enabled: false,
             pane_view_enabled: false,
             terminal_views_enabled: false,
@@ -1561,6 +1614,7 @@ async fn client_shell_config_diagnostics_follow_keybinding_ownership() {
             mouse_capture: false,
             surface_active: true,
             structure_enabled: false,
+            host_documents_enabled: false,
             pane_viewport_enabled: false,
             pane_view_enabled: false,
             terminal_views_enabled: false,
@@ -2473,6 +2527,42 @@ async fn valid_view_control_gets_explicit_error_when_provider_admission_fails() 
     assert!(server.clients[&171].pending_pane_view.is_none());
 }
 
+#[test]
+fn retired_service_generation_completion_releases_owning_manager_admission() {
+    let mut server = test_headless_server();
+    let identity = crate::extension_service::ExtensionRequestIdentity {
+        client_id: 912,
+        boot_id: "boot-retired".into(),
+        projection_revision: 4,
+        request_id: "retired-result".into(),
+        target_pane_id: "w1:p1".into(),
+        contribution_revision: 7,
+    };
+    server
+        .app
+        .extension_services
+        .admit_for_test(identity.clone());
+    assert!(server
+        .app
+        .extension_services
+        .is_admitted_for_test(&identity));
+    server.handle_extension_service_result(crate::extension_service::ExtensionAsyncResult {
+        manager_generation: server.app.extension_services.manager_generation(),
+        holds_work_slot: true,
+        service_id: "retired.service".into(),
+        service_generation: u64::MAX,
+        granted_capabilities: Vec::new(),
+        identity: identity.clone(),
+        kind: crate::extension_service::ExtensionAsyncResultKind::Render(Err(
+            "provider retired".into()
+        )),
+    });
+    assert!(!server
+        .app
+        .extension_services
+        .is_admitted_for_test(&identity));
+}
+
 #[tokio::test]
 async fn retiring_extension_failure_reaches_exact_request_and_clears_pending_state() {
     let mut server = test_headless_server();
@@ -2588,6 +2678,41 @@ exit 7
 }
 
 #[tokio::test]
+async fn catalog_retirement_sends_terminal_result_and_clears_pending_view() {
+    let mut server = test_headless_server();
+    let (control, _render) = connect_test_shell(&mut server, 913, 100, 30);
+    let _ = control.recv().expect("snapshot");
+    let boot_id = server.client_shell_boot_id.clone();
+    let revision = server.clients[&913].shell_projection_revision;
+    server.clients.get_mut(&913).unwrap().pending_pane_view =
+        Some(crate::server::clients::PendingPaneView {
+            request: crate::protocol::endpoint::ClientPaneViewRequest {
+                boot_id,
+                projection_revision: revision,
+                request_id: "catalog-retired".into(),
+                pane_id: "w1:p1".into(),
+                contribution_revision: 2,
+            },
+            service_id: "old.service".into(),
+            service_generation: 41,
+        });
+    server.retire_client_extension_requests("extension catalog was replaced");
+    let crate::protocol::ServerMessage::EndpointControl { kind, data } =
+        read_server_message(control.recv().expect("terminal result"))
+    else {
+        panic!("pane view result");
+    };
+    assert_eq!(kind, crate::protocol::endpoint::PANE_VIEW_RESULT_KIND);
+    let result: crate::protocol::endpoint::ServerPaneViewResult =
+        serde_json::from_str(&data).unwrap();
+    assert_eq!(
+        result.error.as_deref(),
+        Some("extension catalog was replaced")
+    );
+    assert!(server.clients[&913].pending_pane_view.is_none());
+}
+
+#[tokio::test]
 async fn accepted_stale_generation_completions_clear_exact_render_and_action_pending_state() {
     let mut server = test_headless_server();
     let (control, _render) = connect_test_shell(&mut server, 170, 100, 30);
@@ -2615,6 +2740,8 @@ async fn accepted_stale_generation_completions_clear_exact_render_and_action_pen
             service_generation: 41,
         });
     server.handle_extension_service_result(crate::extension_service::ExtensionAsyncResult {
+        manager_generation: server.app.extension_services.manager_generation(),
+        holds_work_slot: false,
         service_id: "old.service".into(),
         service_generation: 41,
         granted_capabilities: vec![
@@ -2678,6 +2805,8 @@ async fn accepted_stale_generation_completions_clear_exact_render_and_action_pen
             action_id: "terminal.interrupt".into(),
         });
     server.handle_extension_service_result(crate::extension_service::ExtensionAsyncResult {
+        manager_generation: server.app.extension_services.manager_generation(),
+        holds_work_slot: false,
         service_id: "old.service".into(),
         service_generation: 41,
         granted_capabilities: vec![
@@ -2713,6 +2842,11 @@ async fn stale_contribution_action_receives_terminal_error_response() {
     let (control, _render) = connect_test_shell(&mut server, 169, 100, 30);
     let _ = control.recv().expect("snapshot");
     let boot_id = server.client_shell_boot_id.clone();
+    server
+        .clients
+        .get_mut(&169)
+        .unwrap()
+        .shell_pane_view_enabled = true;
     let revision = server.clients[&169].shell_projection_revision;
     let current_generation = server
         .app
@@ -3449,6 +3583,7 @@ async fn public_api_focus_replaces_every_client_shell_projection() {
             mouse_capture: false,
             surface_active: true,
             structure_enabled: false,
+            host_documents_enabled: false,
             pane_viewport_enabled: false,
             pane_view_enabled: false,
             terminal_views_enabled: false,
@@ -3703,6 +3838,7 @@ async fn client_shell_streams_and_targets_popup_terminal_content() {
             mouse_capture: false,
             surface_active: true,
             structure_enabled: false,
+            host_documents_enabled: false,
             pane_viewport_enabled: false,
             pane_view_enabled: false,
             terminal_views_enabled: false,

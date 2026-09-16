@@ -3,6 +3,7 @@ use std::time::{Duration, Instant};
 mod agent_view;
 mod agents;
 mod collections;
+pub(crate) use collections::HostDocumentConfirmationGrant;
 mod delegations;
 mod env;
 mod integrations;
@@ -120,11 +121,70 @@ impl App {
             ev => ev,
         };
         let ev = match ev {
+            AppEvent::ExtensionCatalogCapacityAvailable => {
+                if self.extension_catalog_rebuild_pending {
+                    self.rebuild_extension_catalogs();
+                }
+                return Vec::new();
+            }
+            AppEvent::HostDocumentProviderActionFinished {
+                request_id,
+                namespace,
+                scope_id,
+                generation,
+                revision,
+                holds_action_slot,
+                result,
+                respond_to,
+            } => {
+                if holds_action_slot {
+                    crate::extension_service::complete_host_document_provider_action();
+                }
+                let still_current = self.host_document_services.generation(&namespace)
+                    == Some(generation)
+                    && self
+                        .host_document_request_watermarks
+                        .get(&(namespace, scope_id))
+                        .is_some_and(|watermark| *watermark == (generation, revision));
+                let result = if still_current {
+                    result
+                } else {
+                    Err("document provider action was retired".into())
+                };
+                if result.is_ok() {
+                    self.refresh_collection_documents();
+                }
+                let response = match result {
+                    Ok(()) => responses::encode_success(
+                        request_id,
+                        crate::api::schema::ResponseResult::Ok {},
+                    ),
+                    Err(error) => {
+                        responses::encode_error(request_id, "host_document_action_rejected", &error)
+                    }
+                };
+                let _ = respond_to.send(response);
+                return Vec::new();
+            }
             // HeadlessServer consumes service completions before entering App. The standalone
             // App loop has no client-shell request owner, so there is nothing to fold here.
-            AppEvent::ExtensionServiceFinished(_) => return Vec::new(),
+            AppEvent::ExtensionServiceFinished(_) | AppEvent::HostDocumentFinished(_) => {
+                return Vec::new()
+            }
             ev => ev,
         };
+
+        let refresh_host_documents = matches!(
+            &ev,
+            AppEvent::PaneDied { .. }
+                | AppEvent::StateChanged { .. }
+                | AppEvent::AgentProcessDetected { .. }
+                | AppEvent::AgentSessionReported { .. }
+                | AppEvent::HookMetadataReported { .. }
+                | AppEvent::HookAuthorityCleared { .. }
+                | AppEvent::HookAgentReleased { .. }
+                | AppEvent::TerminalCwdReported { .. }
+        );
 
         if matches!(
             &ev,
@@ -391,6 +451,9 @@ impl App {
 
         self.sync_toast_deadline(previous_toast);
         self.shutdown_detached_terminal_runtimes();
+        if refresh_host_documents {
+            self.refresh_collection_documents();
+        }
         pane_updates.extend(worktree_restore_updates);
         pane_updates
     }
@@ -1117,6 +1180,38 @@ impl App {
             Method::CollectionAdd(params) => return self.handle_collection_add(request.id, params),
             Method::CollectionPromote(params) => {
                 return self.handle_collection_promote(request.id, params)
+            }
+            Method::HostDocumentAction(params) => {
+                let action = match self.authorize_host_document_action(&params) {
+                    Ok(action) => action,
+                    Err(error) => {
+                        return responses::encode_error(
+                            request.id,
+                            "host_document_action_rejected",
+                            &error,
+                        )
+                    }
+                };
+                return match action {
+                    collections::AuthorizedHostDocumentAction::Focus(pane) => {
+                        self.handle_pane_focus(request.id, pane)
+                    }
+                    collections::AuthorizedHostDocumentAction::Interrupt(pane) => self
+                        .handle_pane_send_keys(
+                            request.id,
+                            crate::api::schema::PaneSendKeysParams {
+                                pane_id: pane.pane_id,
+                                keys: vec!["ctrl+c".into()],
+                            },
+                        ),
+                    collections::AuthorizedHostDocumentAction::Provider(_) => {
+                        responses::encode_error(
+                            request.id,
+                            "host_document_action_requires_async_dispatch",
+                            "provider-owned document actions require the server dispatcher",
+                        )
+                    }
+                };
             }
             Method::CollectionSelect(params) => {
                 return self.handle_collection_select(request.id, params)

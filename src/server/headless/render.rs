@@ -484,11 +484,21 @@ impl HeadlessServer {
         result: crate::extension_service::ExtensionAsyncResult,
     ) {
         let client_id = result.identity.client_id;
-        self.app.extension_services.complete(&result.identity);
-        let generation_is_current = self
+        if result.holds_work_slot {
+            crate::extension_service::ExtensionServiceManager::consume_completion_slot();
+        }
+        let manager_is_current = self
             .app
             .extension_services
-            .matches_generation(&result.service_id, result.service_generation);
+            .matches_manager_generation(result.manager_generation);
+        if manager_is_current {
+            self.app.extension_services.complete(&result.identity);
+        }
+        let generation_is_current = manager_is_current
+            && self
+                .app
+                .extension_services
+                .matches_generation(&result.service_id, result.service_generation);
         match result.kind {
             crate::extension_service::ExtensionAsyncResultKind::Render(rendered) => {
                 let pending = self
@@ -791,6 +801,11 @@ impl HeadlessServer {
                 let Some(client) = self.clients.get_mut(&client_id) else {
                     continue;
                 };
+                let host_documents = if client.shell_host_documents_enabled {
+                    self.app.host_documents()
+                } else {
+                    Vec::new()
+                };
                 let mut candidate = client_shell_snapshot(
                     &self.app,
                     &self.client_shell_boot_id,
@@ -822,9 +837,12 @@ impl HeadlessServer {
                 let structure_changed = client.shell_structure_enabled
                     && client.shell_structure.as_ref() != structure.as_ref();
                 let agent_view_changed = client.shell_agent_view != agent_view;
+                let host_documents_changed = client.shell_host_documents_enabled
+                    && client.shell_host_documents != host_documents;
                 if client.shell_snapshot.as_ref() != Some(&candidate)
                     || structure_changed
                     || agent_view_changed
+                    || host_documents_changed
                 {
                     client.shell_projection_revision =
                         client.shell_projection_revision.saturating_add(1);
@@ -871,6 +889,15 @@ impl HeadlessServer {
                         ));
                     }
                     controls.push(crate::protocol::endpoint::snapshot_message(&candidate));
+                    if client.shell_host_documents_enabled {
+                        controls.push(crate::protocol::endpoint::host_documents_message(
+                            &crate::protocol::endpoint::HostDocumentsProjectionV1 {
+                                boot_id: candidate.boot_id.clone(),
+                                revision: candidate.revision,
+                                documents: host_documents.clone(),
+                            },
+                        ));
+                    }
                     if let Some(structure) = structure.as_ref() {
                         controls.push(crate::protocol::endpoint::structure_message(structure));
                     }
@@ -910,6 +937,7 @@ impl HeadlessServer {
                     client.shell_snapshot = Some(candidate);
                     client.shell_agent_view = agent_view;
                     client.shell_structure = structure;
+                    client.shell_host_documents = host_documents;
                 }
                 shell_projection_revision = client.shell_projection_revision;
                 if !client.shell_surface_active {

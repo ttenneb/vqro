@@ -61,7 +61,10 @@ pub enum AppEvent {
         exit_reason: crate::platform::ChildExitReason,
     },
     /// A worktree-removal runtime could not be restored normally.
-    WorktreeRuntimeRestoreFailed { pane_id: PaneId, operation_id: u64 },
+    WorktreeRuntimeRestoreFailed {
+        pane_id: PaneId,
+        operation_id: u64,
+    },
     /// Process detection identified an agent before its screen state was confirmed.
     AgentProcessDetected {
         pane_id: PaneId,
@@ -139,10 +142,15 @@ pub enum AppEvent {
     },
     /// A pane child emitted one or more executable BEL characters.
     /// The host-facing process forwards them to its outer terminal.
-    TerminalBell { pane_id: PaneId, count: u16 },
+    TerminalBell {
+        pane_id: PaneId,
+        count: u16,
+    },
     /// A pane child emitted a valid OSC 52 clipboard write. The main loop
     /// re-emits it through herdr's own clipboard writer.
-    ClipboardWrite { content: Vec<u8> },
+    ClipboardWrite {
+        content: Vec<u8>,
+    },
     /// A pane child reported its shell current directory through terminal
     /// metadata such as OSC 7.
     TerminalCwdReported {
@@ -162,6 +170,20 @@ pub enum AppEvent {
     },
     /// A bounded extension service job completed on its worker thread.
     ExtensionServiceFinished(Box<crate::extension_service::ExtensionAsyncResult>),
+    // Unit-test executables cannot recursively host the bundled service binary.
+    #[cfg_attr(test, allow(dead_code))]
+    HostDocumentFinished(Box<crate::extension_service::HostDocumentAsyncResult>),
+    ExtensionCatalogCapacityAvailable,
+    HostDocumentProviderActionFinished {
+        request_id: String,
+        namespace: String,
+        scope_id: String,
+        generation: u64,
+        revision: u64,
+        holds_action_slot: bool,
+        result: Result<(), String>,
+        respond_to: std::sync::mpsc::Sender<String>,
+    },
     /// A plugin action or event command finished.
     PluginCommandFinished {
         log_id: String,

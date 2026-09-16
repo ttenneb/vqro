@@ -153,6 +153,8 @@ pub enum Method {
     CollectionAdd(CollectionAddParams),
     #[serde(rename = "collection.promote")]
     CollectionPromote(CollectionPromoteParams),
+    #[serde(rename = "host.document.action")]
+    HostDocumentAction(HostDocumentActionParams),
     #[serde(rename = "collection.select")]
     CollectionSelect(CollectionSelectParams),
     #[serde(rename = "collection.reorder")]

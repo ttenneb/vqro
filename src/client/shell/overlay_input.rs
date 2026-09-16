@@ -961,6 +961,9 @@ impl ClientShellState {
                             },
                         )
                     }
+                    ClientConfirmCloseTarget::HostDocumentAction(params) => {
+                        crate::api::schema::Method::HostDocumentAction(params)
+                    }
                 };
                 self.push_endpoint_method(method, outcome);
                 outcome.repaint = true;

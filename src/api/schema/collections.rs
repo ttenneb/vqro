@@ -2,6 +2,19 @@ use serde::{Deserialize, Serialize};
 
 use super::SplitDirection;
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct HostDocumentActionParams {
+    pub namespace: String,
+    pub scope_id: String,
+    pub generation: u64,
+    pub revision: u64,
+    pub action_id: String,
+    #[serde(default)]
+    pub confirmed: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confirmation_token: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema, Default)]
 pub struct CollectionListParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
