@@ -10,10 +10,12 @@ mod targets;
 mod types;
 mod version;
 
-// Retain the baked installers as the parity oracle while every public mutation
-// path is disabled until their files and environment use the vqro namespace.
-#[allow(unused_imports)]
-pub(crate) use actions::{install_target, uninstall_target};
+// Retain the baked installers as the parity oracle while direct public mutation
+// stays gated. Marketplace lifecycle uses only verified Vqro artifact paths.
+pub(crate) use actions::{
+    artifact_asset_path, install_target, install_target_from_artifact, install_target_from_asset,
+    uninstall_target, uninstall_target_artifact,
+};
 #[cfg(test)]
 pub(crate) use env::integration_env_lock;
 pub(crate) use env::{
@@ -31,6 +33,7 @@ pub(crate) use types::{IntegrationRecommendation, IntegrationStatus, Integration
 pub(crate) const EXPERIMENTAL_INTEGRATION_TARGET_LABELS: &[&str] = &["letta"];
 
 const PI_EXTENSION_INSTALL_NAME: &str = "vqro-agent-state.ts";
+const MARKETPLACE_PI_EXTENSION_INSTALL_NAME: &str = "vqro-extension-agent-state.ts";
 const LEGACY_PI_EXTENSION_INSTALL_NAME: &str = "herdr-agent-state.ts";
 const PI_EXTENSION_ASSET: &str = include_str!("assets/pi/vqro-agent-state.ts");
 const PI_INTEGRATION_VERSION: u32 = 9;
@@ -42,6 +45,11 @@ const CLAUDE_HOOK_INSTALL_NAME: &str = if cfg!(windows) {
 } else {
     "vqro-agent-state.sh"
 };
+const MARKETPLACE_CLAUDE_HOOK_INSTALL_NAME: &str = if cfg!(windows) {
+    "vqro-extension-agent-state.ps1"
+} else {
+    "vqro-extension-agent-state.sh"
+};
 const CLAUDE_HOOK_ASSET: &str = if cfg!(windows) {
     include_str!("assets/claude/vqro-agent-state.ps1")
 } else {
@@ -52,6 +60,11 @@ const CODEX_HOOK_INSTALL_NAME: &str = if cfg!(windows) {
     "vqro-agent-state.ps1"
 } else {
     "vqro-agent-state.sh"
+};
+const MARKETPLACE_CODEX_HOOK_INSTALL_NAME: &str = if cfg!(windows) {
+    "vqro-extension-agent-state.ps1"
+} else {
+    "vqro-extension-agent-state.sh"
 };
 const CODEX_HOOK_ASSET: &str = if cfg!(windows) {
     include_str!("assets/codex/vqro-agent-state.ps1")

@@ -1095,8 +1095,36 @@ fn load_cli_plugin_manifest(path: &Path, enabled: bool) -> std::io::Result<Insta
 fn persist_plugin_offline(plugin: &InstalledPluginInfo) -> std::io::Result<()> {
     crate::plugin_paths::ensure_plugin_user_dirs(&plugin.plugin_id)?;
     crate::persist::plugin_registry::update(|plugins| {
-        plugins.retain(|entry| entry.plugin_id != plugin.plugin_id);
-        plugins.push(plugin.clone());
+        let mut plugin = plugin.clone();
+        let repository_identity = plugin.source.repository_identity();
+        let replaced_order = plugins
+            .iter()
+            .find(|entry| {
+                repository_identity.is_some()
+                    && entry.source.repository_identity() == repository_identity
+            })
+            .map(|entry| entry.load_order)
+            .or_else(|| {
+                plugins
+                    .iter()
+                    .find(|entry| entry.plugin_id == plugin.plugin_id)
+                    .map(|entry| entry.load_order)
+            });
+        plugins.retain(|entry| {
+            entry.plugin_id != plugin.plugin_id
+                && repository_identity.as_deref().is_none_or(|identity| {
+                    entry.source.repository_identity().as_deref() != Some(identity)
+                })
+        });
+        plugin.load_order = replaced_order.unwrap_or_else(|| {
+            plugins
+                .iter()
+                .map(|entry| entry.load_order)
+                .max()
+                .unwrap_or(0)
+                .saturating_add(1)
+        });
+        plugins.push(plugin);
     })?;
     Ok(())
 }
@@ -1903,6 +1931,7 @@ mod tests {
             manifest_path: format!("/tmp/{id}/herdr-plugin.toml"),
             plugin_root: format!("/tmp/{id}"),
             enabled: true,
+            load_order: 0,
             platforms: None,
             build: vec![],
             startup: vec![],

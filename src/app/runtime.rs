@@ -160,6 +160,9 @@ impl App {
                 .then(|| self.git_refresh_deadline())
                 .flatten(),
             self.next_auto_update_check,
+            self.policy
+                .persist_plugin_registry
+                .then_some(self.next_extension_state_refresh),
             self.next_agent_manifest_update_check,
             self.agent_metadata_deadline,
             self.pending_agent_resume_deadline,

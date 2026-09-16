@@ -341,6 +341,7 @@ pub(crate) fn load_plugin_manifest(
         manifest_path: manifest_path.display().to_string(),
         plugin_root: plugin_root.display().to_string(),
         enabled,
+        load_order: 0,
         platforms,
         build,
         startup,

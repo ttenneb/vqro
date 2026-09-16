@@ -439,6 +439,9 @@ impl App {
             true,
             !created_workspace,
         );
+        if api.focus {
+            self.apply_bundled_extension_state();
+        }
         if let Some(label) = api.label {
             if let Some(ws) = self.state.workspaces.get_mut(ws_idx) {
                 ws.set_custom_name(label);

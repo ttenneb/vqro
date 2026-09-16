@@ -553,6 +553,8 @@ impl ClientShellState {
                 | PendingEndpointKind::ReloadConfig
                 | PendingEndpointKind::IntegrationList
                 | PendingEndpointKind::IntegrationInstall
+                | PendingEndpointKind::ExtensionList(_)
+                | PendingEndpointKind::ExtensionMutation(_)
                 | PendingEndpointKind::SelectionCopy
                 | PendingEndpointKind::TerminalInspector { .. }
                 | PendingEndpointKind::PaneScroll { .. }

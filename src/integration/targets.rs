@@ -1,6 +1,7 @@
 use std::fs;
-use std::io;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde_json::{json, Map, Value};
 
@@ -54,14 +55,50 @@ use super::{
     HERMES_PLUGIN_INIT_ASSET, HERMES_PLUGIN_INIT_INSTALL_NAME, HERMES_PLUGIN_MANIFEST_ASSET,
     HERMES_PLUGIN_MANIFEST_INSTALL_NAME, KILO_PLUGIN_ASSET, KILO_PLUGIN_INSTALL_NAME,
     KIMI_HOOK_ASSET, KIMI_HOOK_INSTALL_NAME, LEGACY_PI_EXTENSION_INSTALL_NAME, LETTA_HOOK_ASSET,
-    LETTA_HOOK_INSTALL_NAME, LETTA_HOOK_TIMEOUT_MS, MASTRACODE_HOOK_ASSET, MASTRACODE_HOOK_EVENTS,
-    MASTRACODE_HOOK_INSTALL_NAME, MASTRACODE_HOOK_TIMEOUT_MS, MASTRACODE_REMOVED_HOOK_EVENTS,
-    OMP_EXTENSION_ASSET, OMP_EXTENSION_INSTALL_NAME, OPENCODE_PLUGIN_ASSET,
-    OPENCODE_PLUGIN_INSTALL_NAME, OPENCODE_TUI_PLUGIN_ASSET, OPENCODE_TUI_PLUGIN_INSTALL_NAME,
-    OPENCODE_TUI_PLUGIN_SPEC, PI_EXTENSION_ASSET, PI_EXTENSION_INSTALL_NAME, QODERCLI_HOOK_ASSET,
-    QODERCLI_HOOK_EVENTS, QODERCLI_HOOK_INSTALL_NAME, QODERCLI_REMOVED_LIFECYCLE_HOOK_EVENTS,
-    QWEN_HOOK_ASSET, QWEN_HOOK_EVENTS, QWEN_HOOK_INSTALL_NAME,
+    LETTA_HOOK_INSTALL_NAME, LETTA_HOOK_TIMEOUT_MS, MARKETPLACE_CLAUDE_HOOK_INSTALL_NAME,
+    MARKETPLACE_CODEX_HOOK_INSTALL_NAME, MARKETPLACE_PI_EXTENSION_INSTALL_NAME,
+    MASTRACODE_HOOK_ASSET, MASTRACODE_HOOK_EVENTS, MASTRACODE_HOOK_INSTALL_NAME,
+    MASTRACODE_HOOK_TIMEOUT_MS, MASTRACODE_REMOVED_HOOK_EVENTS, OMP_EXTENSION_ASSET,
+    OMP_EXTENSION_INSTALL_NAME, OPENCODE_PLUGIN_ASSET, OPENCODE_PLUGIN_INSTALL_NAME,
+    OPENCODE_TUI_PLUGIN_ASSET, OPENCODE_TUI_PLUGIN_INSTALL_NAME, OPENCODE_TUI_PLUGIN_SPEC,
+    PI_EXTENSION_ASSET, PI_EXTENSION_INSTALL_NAME, QODERCLI_HOOK_ASSET, QODERCLI_HOOK_EVENTS,
+    QODERCLI_HOOK_INSTALL_NAME, QODERCLI_REMOVED_LIFECYCLE_HOOK_EVENTS, QWEN_HOOK_ASSET,
+    QWEN_HOOK_EVENTS, QWEN_HOOK_INSTALL_NAME,
 };
+
+static NEXT_DURABLE_WRITE_ID: AtomicU64 = AtomicU64::new(1);
+
+fn durable_write(path: &Path, contents: impl AsRef<[u8]>) -> io::Result<()> {
+    let path = crate::platform::resolve_write_target(path)?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| io::Error::other("integration file has no parent directory"))?;
+    fs::create_dir_all(parent)?;
+    let temporary = parent.join(format!(
+        ".vqro-integration.{}.{}.tmp",
+        std::process::id(),
+        NEXT_DURABLE_WRITE_ID.fetch_add(1, Ordering::Relaxed)
+    ));
+    let result = (|| {
+        let mut file = fs::File::create(&temporary)?;
+        file.write_all(contents.as_ref())?;
+        file.sync_all()?;
+        drop(file);
+        crate::platform::durable_replace_file(&temporary, &path)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result
+}
+
+fn durable_remove_file_if_exists(path: &Path) -> io::Result<bool> {
+    let removed = remove_file_if_exists(path)?;
+    if removed {
+        crate::platform::sync_containing_directory(path)?;
+    }
+    Ok(removed)
+}
 
 fn ensure_extension_dir(dir: &Path, agent: &str) -> io::Result<()> {
     if dir.is_dir() {
@@ -77,11 +114,19 @@ fn ensure_extension_dir(dir: &Path, agent: &str) -> io::Result<()> {
 }
 
 pub(crate) fn install_pi() -> io::Result<PathBuf> {
+    install_pi_asset_named(PI_EXTENSION_ASSET.as_bytes(), PI_EXTENSION_INSTALL_NAME)
+}
+
+pub(crate) fn install_pi_asset(asset: &[u8]) -> io::Result<PathBuf> {
+    install_pi_asset_named(asset, MARKETPLACE_PI_EXTENSION_INSTALL_NAME)
+}
+
+fn install_pi_asset_named(asset: &[u8], install_name: &str) -> io::Result<PathBuf> {
     let dir = pi_extension_dir()?;
     ensure_extension_dir(&dir, "pi")?;
 
-    let path = dir.join(PI_EXTENSION_INSTALL_NAME);
-    fs::write(&path, PI_EXTENSION_ASSET)?;
+    let path = dir.join(install_name);
+    durable_write(&path, asset)?;
     Ok(path)
 }
 
@@ -121,6 +166,14 @@ pub(crate) fn remove_legacy_pi_extension_from_omp_dir(dir: &Path) -> io::Result<
 }
 
 pub(crate) fn install_claude() -> io::Result<ClaudeInstallPaths> {
+    install_claude_asset_named(CLAUDE_HOOK_ASSET.as_bytes(), CLAUDE_HOOK_INSTALL_NAME)
+}
+
+pub(crate) fn install_claude_asset(asset: &[u8]) -> io::Result<ClaudeInstallPaths> {
+    install_claude_asset_named(asset, MARKETPLACE_CLAUDE_HOOK_INSTALL_NAME)
+}
+
+fn install_claude_asset_named(asset: &[u8], install_name: &str) -> io::Result<ClaudeInstallPaths> {
     let dir = claude_dir()?;
     if !dir.is_dir() {
         return Err(io::Error::other(format!(
@@ -132,9 +185,13 @@ pub(crate) fn install_claude() -> io::Result<ClaudeInstallPaths> {
     let hooks_dir = dir.join("hooks");
     fs::create_dir_all(&hooks_dir)?;
 
-    let hook_path = hooks_dir.join(CLAUDE_HOOK_INSTALL_NAME);
-    fs::write(&hook_path, CLAUDE_HOOK_ASSET)?;
+    let hook_path = hooks_dir.join(install_name);
+    durable_write(&hook_path, asset)?;
     make_executable(&hook_path)?;
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&hook_path)?
+        .sync_all()?;
 
     let settings_path = dir.join("settings.json");
     let existing_settings = if settings_path.is_file() {
@@ -145,7 +202,7 @@ pub(crate) fn install_claude() -> io::Result<ClaudeInstallPaths> {
     let updated_settings = install_claude_settings(&existing_settings, &settings_path, &hook_path)?;
 
     if updated_settings != existing_settings {
-        fs::write(&settings_path, updated_settings)?;
+        durable_write(&settings_path, updated_settings)?;
     }
 
     Ok(ClaudeInstallPaths {
@@ -155,6 +212,14 @@ pub(crate) fn install_claude() -> io::Result<ClaudeInstallPaths> {
 }
 
 pub(crate) fn install_codex() -> io::Result<CodexInstallPaths> {
+    install_codex_asset_named(CODEX_HOOK_ASSET.as_bytes(), CODEX_HOOK_INSTALL_NAME)
+}
+
+pub(crate) fn install_codex_asset(asset: &[u8]) -> io::Result<CodexInstallPaths> {
+    install_codex_asset_named(asset, MARKETPLACE_CODEX_HOOK_INSTALL_NAME)
+}
+
+fn install_codex_asset_named(asset: &[u8], install_name: &str) -> io::Result<CodexInstallPaths> {
     let dir = codex_dir()?;
     if !dir.is_dir() {
         return Err(io::Error::other(format!(
@@ -163,9 +228,13 @@ pub(crate) fn install_codex() -> io::Result<CodexInstallPaths> {
         )));
     }
 
-    let hook_path = dir.join(CODEX_HOOK_INSTALL_NAME);
-    fs::write(&hook_path, CODEX_HOOK_ASSET)?;
+    let hook_path = dir.join(install_name);
+    durable_write(&hook_path, asset)?;
     make_executable(&hook_path)?;
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&hook_path)?
+        .sync_all()?;
 
     let hooks_path = dir.join("hooks.json");
     let mut hooks_file = if hooks_path.is_file() {
@@ -196,7 +265,7 @@ pub(crate) fn install_codex() -> io::Result<CodexInstallPaths> {
         None,
     )?;
 
-    fs::write(&hooks_path, serde_json::to_string_pretty(&hooks_file)?)?;
+    durable_write(&hooks_path, serde_json::to_string_pretty(&hooks_file)?)?;
 
     let config_path = dir.join("config.toml");
     let existing_config = if config_path.is_file() {
@@ -206,7 +275,7 @@ pub(crate) fn install_codex() -> io::Result<CodexInstallPaths> {
     };
     let new_config = build_codex_config_with_hooks(&existing_config);
     if new_config != existing_config {
-        fs::write(&config_path, new_config)?;
+        durable_write(&config_path, new_config)?;
     }
 
     Ok(CodexInstallPaths {
@@ -541,8 +610,16 @@ pub(crate) fn install_hermes() -> io::Result<HermesInstallPaths> {
 }
 
 pub(crate) fn uninstall_pi() -> io::Result<PiUninstallResult> {
-    let extension_path = pi_extension_dir()?.join(PI_EXTENSION_INSTALL_NAME);
-    let removed_extension = remove_file_if_exists(&extension_path)?;
+    uninstall_pi_named(PI_EXTENSION_INSTALL_NAME)
+}
+
+pub(crate) fn uninstall_pi_asset() -> io::Result<PiUninstallResult> {
+    uninstall_pi_named(MARKETPLACE_PI_EXTENSION_INSTALL_NAME)
+}
+
+fn uninstall_pi_named(install_name: &str) -> io::Result<PiUninstallResult> {
+    let extension_path = pi_extension_dir()?.join(install_name);
+    let removed_extension = durable_remove_file_if_exists(&extension_path)?;
 
     Ok(PiUninstallResult {
         extension_path,
@@ -561,7 +638,15 @@ pub(crate) fn uninstall_omp() -> io::Result<OmpUninstallResult> {
 }
 
 pub(crate) fn uninstall_claude() -> io::Result<ClaudeUninstallResult> {
-    let hook_path = claude_dir()?.join("hooks").join(CLAUDE_HOOK_INSTALL_NAME);
+    uninstall_claude_named(CLAUDE_HOOK_INSTALL_NAME)
+}
+
+pub(crate) fn uninstall_claude_asset() -> io::Result<ClaudeUninstallResult> {
+    uninstall_claude_named(MARKETPLACE_CLAUDE_HOOK_INSTALL_NAME)
+}
+
+fn uninstall_claude_named(install_name: &str) -> io::Result<ClaudeUninstallResult> {
+    let hook_path = claude_dir()?.join("hooks").join(install_name);
     let settings_path = claude_dir()?.join("settings.json");
     let mut updated_settings = false;
 
@@ -571,11 +656,11 @@ pub(crate) fn uninstall_claude() -> io::Result<ClaudeUninstallResult> {
             uninstall_claude_settings(&existing_settings, &settings_path, &hook_path)?;
         updated_settings = new_settings != existing_settings;
         if updated_settings {
-            fs::write(&settings_path, new_settings)?;
+            durable_write(&settings_path, new_settings)?;
         }
     }
 
-    let removed_hook_file = remove_file_if_exists(&hook_path)?;
+    let removed_hook_file = durable_remove_file_if_exists(&hook_path)?;
 
     Ok(ClaudeUninstallResult {
         hook_path,
@@ -586,8 +671,16 @@ pub(crate) fn uninstall_claude() -> io::Result<ClaudeUninstallResult> {
 }
 
 pub(crate) fn uninstall_codex() -> io::Result<CodexUninstallResult> {
+    uninstall_codex_named(CODEX_HOOK_INSTALL_NAME)
+}
+
+pub(crate) fn uninstall_codex_asset() -> io::Result<CodexUninstallResult> {
+    uninstall_codex_named(MARKETPLACE_CODEX_HOOK_INSTALL_NAME)
+}
+
+fn uninstall_codex_named(install_name: &str) -> io::Result<CodexUninstallResult> {
     let codex_dir = codex_dir()?;
-    let hook_path = codex_dir.join(CODEX_HOOK_INSTALL_NAME);
+    let hook_path = codex_dir.join(install_name);
     let hooks_path = codex_dir.join("hooks.json");
     let config_path = codex_dir.join("config.toml");
     let mut updated_hooks = false;
@@ -617,11 +710,11 @@ pub(crate) fn uninstall_codex() -> io::Result<CodexUninstallResult> {
         }
 
         if updated_hooks {
-            fs::write(&hooks_path, serde_json::to_string_pretty(&hooks_file)?)?;
+            durable_write(&hooks_path, serde_json::to_string_pretty(&hooks_file)?)?;
         }
     }
 
-    let removed_hook_file = remove_file_if_exists(&hook_path)?;
+    let removed_hook_file = durable_remove_file_if_exists(&hook_path)?;
 
     Ok(CodexUninstallResult {
         hook_path,

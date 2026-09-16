@@ -147,6 +147,7 @@ impl App {
             };
             self.validate_client_shell_command_parent_ids(params, workspace_index, tab_index)?;
             self.state.focus_pane_in_workspace(workspace_index, pane);
+            self.apply_bundled_extension_state();
             return Ok(());
         }
 
@@ -156,6 +157,7 @@ impl App {
             };
             self.validate_client_shell_command_workspace_id(params, workspace_index)?;
             self.state.switch_workspace_tab(workspace_index, tab_index);
+            self.apply_bundled_extension_state();
             return Ok(());
         }
 
@@ -167,6 +169,7 @@ impl App {
                 ));
             };
             self.state.switch_workspace(workspace_index);
+            self.apply_bundled_extension_state();
         }
         Ok(())
     }
@@ -536,6 +539,7 @@ impl App {
             self.state.previous_pane_focus = previous_focus_target;
         }
         self.state.switch_workspace_tab(ws_idx, tab_idx);
+        self.apply_bundled_extension_state();
         self.state.mode = Mode::Terminal;
         Ok((ws_idx, new_pane))
     }

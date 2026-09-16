@@ -1064,6 +1064,10 @@ impl ClientShellState {
             | PendingEndpointKind::IntegrationInstall) => {
                 return self.handle_settings_endpoint_result(kind, result);
             }
+            kind @ (PendingEndpointKind::ExtensionList(_)
+            | PendingEndpointKind::ExtensionMutation(_)) => {
+                return self.handle_extensions_endpoint_result(kind, result);
+            }
             kind => {
                 let mut outcome = ClientShellInput::default();
                 let repaint = self.handle_worktree_endpoint_result(kind, result, &mut outcome);

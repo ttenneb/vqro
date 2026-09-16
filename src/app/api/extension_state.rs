@@ -11,7 +11,7 @@ pub(crate) struct ExtensionStatePersistResult {
 }
 
 impl App {
-    fn emit_extension_state_committed(
+    pub(super) fn emit_extension_state_committed(
         &self,
         commit: &crate::extension_state::ExtensionStateCommitV1,
     ) {

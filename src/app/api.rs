@@ -8,6 +8,7 @@ pub(crate) use collections::HostDocumentConfirmationGrant;
 mod delegations;
 mod env;
 pub(crate) mod extension_state;
+mod extensions;
 mod integrations;
 mod layouts;
 mod pane_graphics;
@@ -70,7 +71,10 @@ impl App {
                 crate::workspace::GitHeadIdentity::Detached { oid } => Some(oid.clone()),
                 crate::workspace::GitHeadIdentity::Branch { .. } => None,
             });
-            (upstream, detached)
+            let preferred_remote = fingerprint
+                .and_then(|fingerprint| fingerprint.preferred_repository_remote_url())
+                .map(str::to_owned);
+            (upstream, detached, preferred_remote)
         };
         let projected_identity_changed = cache_updates.iter().any(|(key, entry)| {
             self.git_status_cache
@@ -90,8 +94,11 @@ impl App {
             .state
             .apply_workspace_git_statuses(&self.terminal_runtimes, results)
             || projected_identity_changed;
+        // Git identity changes can make a previously unavailable durable
+        // repository scope usable by extension documents.
+        self.apply_bundled_extension_state();
         if changed {
-            self.refresh_spaces_document();
+            self.refresh_collection_documents();
             self.render_dirty.request_generic();
             self.render_notify.notify_one();
         }
@@ -124,6 +131,10 @@ impl App {
             ev => ev,
         };
         let ev = match ev {
+            AppEvent::ExtensionArtifactStaged(result) => {
+                self.handle_extension_artifact_staged(*result);
+                return Vec::new();
+            }
             AppEvent::ExtensionCatalogCapacityAvailable => {
                 if self.extension_catalog_rebuild_pending {
                     self.rebuild_extension_catalogs();
@@ -1051,6 +1062,29 @@ impl App {
             ErrorBody, ErrorResponse, Method, ResponseResult, SuccessResponse,
         };
 
+        let required_provider = match &request.method {
+            Method::DelegationCreate(_)
+            | Method::DelegationGet(_)
+            | Method::DelegationTree(_)
+            | Method::DelegationRoot(_)
+            | Method::DelegationDescendants(_)
+            | Method::DelegationReparent(_)
+            | Method::DelegationReorder(_) => Some("delegation"),
+            Method::AgentList(_)
+            | Method::AgentGet(_)
+            | Method::AgentViewSet(_)
+            | Method::AgentViewClear(_) => Some("agent-status"),
+            _ => None,
+        };
+        if required_provider.is_some_and(|provider| !self.bundled_extension_enabled(provider, None))
+        {
+            return responses::encode_error(
+                request.id,
+                "extension_disabled",
+                "the required built-in extension is disabled or removed",
+            );
+        }
+
         let response = match request.method {
             Method::ServerStop(_) => {
                 self.state.should_quit = true;
@@ -1482,6 +1516,33 @@ impl App {
             }
             Method::PluginPaneClose(params) => {
                 return self.handle_plugin_pane_close(request.id, params);
+            }
+            Method::ExtensionList(params) => {
+                return self.handle_extension_list(request.id, params);
+            }
+            Method::ExtensionInstall(params) => {
+                return self.handle_extension_install(request.id, params);
+            }
+            Method::ExtensionEnable(params) => {
+                return self.handle_extension_enable(request.id, params);
+            }
+            Method::ExtensionRemove(params) => {
+                return self.handle_extension_remove(request.id, params);
+            }
+            Method::ExtensionDataDelete(params) => {
+                return self.handle_extension_data_delete(request.id, params);
+            }
+            Method::ExtensionReorder(params) => {
+                return self.handle_extension_reorder(request.id, params);
+            }
+            Method::ExtensionRepositoryOverrideSet(params) => {
+                return self.handle_extension_repository_override_set(request.id, params);
+            }
+            Method::ExtensionUpdate(params) => {
+                return self.handle_extension_update(request.id, params);
+            }
+            Method::ExtensionRollback(params) => {
+                return self.handle_extension_rollback(request.id, params);
             }
             _ => {
                 return responses::encode_error(

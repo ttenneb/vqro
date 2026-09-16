@@ -48,8 +48,13 @@ impl App {
             &self.state.installed_plugins,
             self.event_tx.clone(),
         );
+        let bundled_provider_priorities = crate::extensions::bundled_provider_priorities(
+            &self.extension_index,
+            &self.marketplace_state,
+        );
         let host_document_services = crate::extension_service::HostDocumentServiceCatalog::bundled(
             &self.disabled_extensions,
+            &bundled_provider_priorities,
             &self.state.installed_plugins,
             self.event_tx.clone(),
         );
@@ -167,6 +172,45 @@ impl App {
             return encode_error(id, "plugin_user_dir_create_failed", err.to_string());
         }
         if let Err(err) = self.update_installed_plugins(|plugins| {
+            let repository_identity = plugin.source.repository_identity();
+            let replaced_order = plugins
+                .values()
+                .filter(|installed| {
+                    repository_identity.is_some()
+                        && installed.source.repository_identity() == repository_identity
+                })
+                .map(|installed| installed.load_order)
+                .max()
+                .or_else(|| {
+                    plugins
+                        .get(&plugin.plugin_id)
+                        .map(|installed| installed.load_order)
+                });
+            if let Some(repository_identity) = repository_identity.as_deref() {
+                plugins.retain(|_, installed| {
+                    installed.source.repository_identity().as_deref() != Some(repository_identity)
+                });
+            }
+            plugin.load_order = replaced_order.unwrap_or_else(|| {
+                let max_order = plugins
+                    .values()
+                    .map(|installed| installed.load_order)
+                    .max()
+                    .unwrap_or(0);
+                max_order.checked_add(1).unwrap_or_else(|| {
+                    let mut ordered = plugins
+                        .values()
+                        .map(|installed| (installed.load_order, installed.plugin_id.clone()))
+                        .collect::<Vec<_>>();
+                    ordered.sort();
+                    for (index, (_, plugin_id)) in ordered.iter().enumerate() {
+                        if let Some(installed) = plugins.get_mut(plugin_id) {
+                            installed.load_order = u64::try_from(index).unwrap_or(u64::MAX);
+                        }
+                    }
+                    u64::try_from(ordered.len()).unwrap_or(u64::MAX)
+                })
+            });
             plugins.insert(plugin.plugin_id.clone(), plugin.clone());
         }) {
             return encode_error(id, "plugin_registry_save_failed", err.to_string());
@@ -193,7 +237,11 @@ impl App {
             })
             .cloned()
             .collect::<Vec<_>>();
-        plugins.sort_by(|a, b| a.plugin_id.cmp(&b.plugin_id));
+        plugins.sort_by(|left, right| {
+            left.load_order
+                .cmp(&right.load_order)
+                .then_with(|| left.plugin_id.cmp(&right.plugin_id))
+        });
         encode_success(id, ResponseResult::PluginList { plugins })
     }
 
@@ -760,7 +808,12 @@ impl App {
             .filter(|plugin| plugin.enabled && plugin_manifest_available(plugin))
             .cloned()
             .collect::<Vec<_>>();
-        plugins.sort_by(|a, b| a.plugin_id.cmp(&b.plugin_id));
+        plugins.sort_by(|left, right| {
+            right
+                .load_order
+                .cmp(&left.load_order)
+                .then_with(|| left.plugin_id.cmp(&right.plugin_id))
+        });
         for plugin in plugins {
             for handler in &plugin.link_handlers {
                 if ensure_platform_supported(
@@ -3498,6 +3551,57 @@ action = "generic"
         assert_eq!(handler.action, "specific");
 
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn later_plugin_load_order_wins_overlapping_link_handlers() {
+        let mut app = test_app();
+        let early_root = unique_temp_path("plugin-link-handler-early");
+        let late_root = unique_temp_path("plugin-link-handler-late");
+        let manifest = |id: &str| {
+            format!(
+                r#"
+id = "{id}"
+name = "{id}"
+version = "0.1.0"
+min_herdr_version = "0.6.10"
+platforms = ["linux", "macos", "windows"]
+
+[[actions]]
+id = "open"
+title = "Open"
+command = ["true"]
+
+[[link_handlers]]
+id = "github"
+title = "GitHub"
+pattern = "^https://github\\.com/"
+action = "open"
+"#
+            )
+        };
+        write_manifest_content(&early_root, &manifest("example.early"));
+        write_manifest_content(&late_root, &manifest("example.late"));
+        link_manifest(&mut app, &early_root);
+        link_manifest(&mut app, &late_root);
+        app.state
+            .installed_plugins
+            .get_mut("example.early")
+            .unwrap()
+            .load_order = 1;
+        app.state
+            .installed_plugins
+            .get_mut("example.late")
+            .unwrap()
+            .load_order = 2;
+
+        let (plugin, _) = app
+            .find_plugin_link_handler("https://github.com/herdrdev/herdr")
+            .expect("handler should match");
+
+        assert_eq!(plugin.plugin_id, "example.late");
+        let _ = std::fs::remove_dir_all(early_root);
+        let _ = std::fs::remove_dir_all(late_root);
     }
 
     #[test]

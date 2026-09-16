@@ -1607,6 +1607,122 @@ impl ClientShellState {
             }
             return;
         }
+        if matches!(self.overlay, Some(ClientShellOverlay::Extensions(_))) {
+            let mutating = matches!(
+                self.overlay,
+                Some(ClientShellOverlay::Extensions(ClientExtensionsOverlay {
+                    mutating: true,
+                    ..
+                }))
+            );
+            if mutating {
+                return;
+            }
+            if super::contains(self.hits.extensions_popup, point) {
+                match mouse.kind {
+                    MouseEventKind::ScrollUp => {
+                        self.move_extension_selection(-1);
+                        outcome.repaint = true;
+                        return;
+                    }
+                    MouseEventKind::ScrollDown => {
+                        self.move_extension_selection(1);
+                        outcome.repaint = true;
+                        return;
+                    }
+                    _ => {}
+                }
+            }
+            if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
+                if let Some((_, tab)) = self
+                    .hits
+                    .extensions_tabs
+                    .iter()
+                    .find(|(rect, _)| super::contains(*rect, point))
+                    .copied()
+                {
+                    if let Some(ClientShellOverlay::Extensions(extensions)) = self.overlay.as_mut()
+                    {
+                        extensions.tab = tab;
+                        extensions.selected = 0;
+                        extensions.confirmation = None;
+                        extensions.search_focused = false;
+                    }
+                    outcome.repaint = true;
+                } else if let Some((_, category)) = self
+                    .hits
+                    .extensions_categories
+                    .iter()
+                    .find(|(rect, _)| super::contains(*rect, point))
+                    .cloned()
+                {
+                    if let Some(ClientShellOverlay::Extensions(extensions)) = self.overlay.as_mut()
+                    {
+                        extensions.category = category;
+                        extensions.selected = 0;
+                        extensions.confirmation = None;
+                        extensions.search_focused = false;
+                    }
+                    outcome.repaint = true;
+                } else if super::contains(self.hits.extensions_search, point) {
+                    if let Some(ClientShellOverlay::Extensions(extensions)) = self.overlay.as_mut()
+                    {
+                        extensions.search_focused = true;
+                        extensions.confirmation = None;
+                        extensions.confirmation_extension = None;
+                    }
+                    outcome.repaint = true;
+                } else if let Some((_, extension_index)) = self
+                    .hits
+                    .extensions_rows
+                    .iter()
+                    .find(|(rect, _)| super::contains(*rect, point))
+                    .copied()
+                {
+                    if let Some(ClientShellOverlay::Extensions(extensions)) = self.overlay.as_mut()
+                    {
+                        if let Some(filtered_position) = extensions
+                            .filtered_indices()
+                            .iter()
+                            .position(|index| *index == extension_index)
+                        {
+                            extensions.selected = filtered_position;
+                            extensions.confirmation = None;
+                            extensions.search_focused = false;
+                        }
+                    }
+                    outcome.repaint = true;
+                } else if super::contains(self.hits.overlay_primary, point) {
+                    let confirming = matches!(
+                        self.overlay,
+                        Some(ClientShellOverlay::Extensions(ClientExtensionsOverlay {
+                            confirmation: Some(_),
+                            ..
+                        }))
+                    );
+                    if confirming {
+                        self.confirm_extension_action(outcome);
+                    } else {
+                        self.activate_selected_extension(outcome);
+                    }
+                } else if super::contains(self.hits.overlay_cancel, point)
+                    || !super::contains(self.hits.extensions_popup, point)
+                {
+                    let mutating = matches!(
+                        self.overlay,
+                        Some(ClientShellOverlay::Extensions(ClientExtensionsOverlay {
+                            mutating: true,
+                            ..
+                        }))
+                    );
+                    if !mutating {
+                        self.overlay = None;
+                        outcome.repaint = true;
+                    }
+                }
+            }
+            return;
+        }
         if matches!(self.overlay, Some(ClientShellOverlay::Settings(_))) {
             if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
                 if let Some((_, section)) = self

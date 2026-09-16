@@ -18,6 +18,7 @@ include = [
     "docs/next/api/vqro-extension-service.schema.json",
     "docs/next/api/vqro-extension.schema.json",
     "extensions/first-party/*/vqro-extension.toml",
+    "extensions/index-v1.json",
     "extensions/reference-host-document/README.md",
     "extensions/reference-host-document/fixtures/*.json",
     "extensions/reference-host-document/service.py",
@@ -60,6 +61,7 @@ serde = { version = "1", features = ["derive"] }
 serde_ignored = "0.1.14"
 serde_json = "1"
 sha2 = "0.10"
+tar = "0.4"
 time = { version = "0.3.47", features = ["formatting"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "process", "io-util"] }
 toml = "0.8"

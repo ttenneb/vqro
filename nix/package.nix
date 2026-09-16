@@ -48,6 +48,7 @@ rustPlatform.buildRustPackage {
         ../docs/next/api/vqro-extension-service.schema.json
         ../docs/next/api/vqro-extension.schema.json
         ../extensions/first-party
+        ../extensions/index-v1.json
         ../extensions/reference-host-document
         ../extensions/terminal-inspector
         ../src

@@ -45,6 +45,10 @@ pub struct InstalledPluginInfo {
     pub manifest_path: String,
     pub plugin_root: String,
     pub enabled: bool,
+    /// Stable global load position. Lower values load first; later values win
+    /// deterministic contribution conflicts.
+    #[serde(default)]
+    pub load_order: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub platforms: Option<Vec<PluginPlatform>>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -87,6 +91,27 @@ pub struct PluginSourceInfo {
     pub managed_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub installed_unix_ms: Option<u64>,
+}
+
+impl PluginSourceInfo {
+    /// Stable identity for replacement and update decisions. GitHub owner/repo
+    /// are case-insensitive; a manifest subdirectory identifies a distinct
+    /// package within the same repository.
+    pub fn repository_identity(&self) -> Option<String> {
+        if self.kind != PluginSourceKind::Github {
+            return None;
+        }
+        Some(format!(
+            "github:{}/{}#{}",
+            self.owner.as_deref()?.to_ascii_lowercase(),
+            self.repo.as_deref()?.to_ascii_lowercase(),
+            self.subdir
+                .as_deref()
+                .unwrap_or_default()
+                .trim_matches('/')
+                .to_ascii_lowercase()
+        ))
+    }
 }
 
 impl Default for PluginSourceInfo {
@@ -224,6 +249,27 @@ mod tests {
         assert_ne!(
             plugin_managed_path_component("example:a"),
             plugin_managed_path_component("example/a")
+        );
+    }
+
+    #[test]
+    fn github_repository_identity_is_case_insensitive_and_subdir_stable() {
+        let source = PluginSourceInfo {
+            kind: PluginSourceKind::Github,
+            owner: Some("Ttenneb".into()),
+            repo: Some("Vqro-Extension".into()),
+            subdir: Some("Agents/Pi/".into()),
+            ..PluginSourceInfo::default()
+        };
+        assert_eq!(
+            source.repository_identity().as_deref(),
+            Some("github:ttenneb/vqro-extension#agents/pi")
+        );
+        let mut root = source;
+        root.subdir = None;
+        assert_ne!(
+            root.repository_identity(),
+            Some("github:ttenneb/vqro-extension#agents/pi".into())
         );
     }
 }

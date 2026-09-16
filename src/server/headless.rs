@@ -3677,6 +3677,14 @@ impl HeadlessServer {
             let _ = msg.respond_to.send(response);
             return changed;
         }
+        if self
+            .app
+            .extension_artifact_request_requires_staging(&msg.request)
+        {
+            self.app
+                .start_deferred_extension_artifact_request(msg.request, msg.respond_to);
+            return changed;
+        }
         let alt_screen_read_spec = self.alt_screen_read_spec(&msg.request);
         if matches!(&msg.request.method, api::schema::Method::AgentPrompt(_)) {
             let deferred_changed = self
@@ -3991,6 +3999,8 @@ impl HeadlessServer {
         if self.has_app_client() {
             self.app.start_git_status_refresh_if_due(now);
         }
+
+        changed |= self.app.refresh_external_extension_state_if_due(now);
 
         if self
             .app

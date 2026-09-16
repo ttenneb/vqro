@@ -159,7 +159,9 @@ mod tests {
 
     #[test]
     fn delegation_projection_matches_fixture() {
-        let actual = serde_json::to_value(project(&snapshot()).unwrap()).unwrap();
+        let document = project(&snapshot()).unwrap();
+        assert!(!document.items.is_empty());
+        let actual = serde_json::to_value(document).unwrap();
         let expected: serde_json::Value = serde_json::from_str(include_str!(
             "../../tests/fixtures/delegation-document-v1.json"
         ))

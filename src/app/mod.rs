@@ -139,6 +139,7 @@ pub struct App {
     pub(crate) pending_worktree_remove_runtime_restores: HashMap<crate::layout::PaneId, u64>,
     pub(crate) next_api_worktree_operation_id: u64,
     pub(crate) next_auto_update_check: Option<Instant>,
+    pub(crate) next_extension_state_refresh: Instant,
     pub(crate) next_agent_manifest_update_check: Option<Instant>,
     pub(crate) update_version_check_enabled: bool,
     pub(crate) update_manifest_check_enabled: bool,
@@ -181,6 +182,9 @@ pub struct App {
         HashMap<crate::terminal::TerminalId, terminal_inspector::CachedTerminalTelemetry>,
     pub(crate) extension_services: crate::extension_service::ExtensionServiceManager,
     pub(crate) host_document_services: crate::extension_service::HostDocumentServiceCatalog,
+    pub(crate) extension_index: crate::extensions::CuratedIndex,
+    pub(crate) marketplace_state: crate::extensions::MarketplaceStateFile,
+    pub(crate) configured_disabled_extensions: std::collections::BTreeSet<String>,
     pub(crate) disabled_extensions: std::collections::BTreeSet<String>,
     pub(crate) collections_shadow_documents:
         HashMap<(String, String), crate::first_party::collections::ShadowDocumentCache>,
@@ -590,10 +594,25 @@ impl App {
         let theme_runtime = theme_runtime_config(config, true);
         let (theme_palette, theme_name) = resolve_effective_theme(&theme_runtime, None);
         let installed_plugins = load_plugin_registry(policy.persist_plugin_registry);
+        let extension_index = crate::extensions::CuratedIndex::bundled()
+            .expect("bundled extension index is validated by tests");
+        let marketplace_state = if policy.persist_plugin_registry {
+            crate::extensions::load_state(&extension_index)
+        } else {
+            crate::extensions::MarketplaceStateFile::defaults(&extension_index)
+        };
+        let mut disabled_extensions =
+            crate::extensions::unavailable_bundled_providers(&extension_index, &marketplace_state);
+        // Preserve the legacy config as an additive kill switch while clients migrate
+        // to the global extension registry.
+        disabled_extensions.extend(config.extensions.disabled.iter().cloned());
         let extension_services =
             crate::extension_service::manager_for_plugins(&installed_plugins, event_tx.clone());
+        let bundled_provider_priorities =
+            crate::extensions::bundled_provider_priorities(&extension_index, &marketplace_state);
         let host_document_services = crate::extension_service::HostDocumentServiceCatalog::bundled(
-            &config.extensions.disabled,
+            &disabled_extensions,
+            &bundled_provider_priorities,
             &installed_plugins,
             event_tx.clone(),
         );
@@ -789,6 +808,7 @@ impl App {
             next_api_worktree_operation_id: 1,
             next_auto_update_check: version_check_enabled
                 .then_some(Instant::now() + AUTO_UPDATE_CHECK_INTERVAL),
+            next_extension_state_refresh: Instant::now() + Duration::from_secs(1),
             next_agent_manifest_update_check: manifest_check_enabled
                 .then_some(Instant::now() + AUTO_UPDATE_CHECK_INTERVAL),
             update_version_check_enabled: config.update.version_check,
@@ -829,7 +849,10 @@ impl App {
             terminal_telemetry_cache: HashMap::new(),
             extension_services,
             host_document_services,
-            disabled_extensions: config.extensions.disabled.clone(),
+            extension_index,
+            marketplace_state,
+            configured_disabled_extensions: config.extensions.disabled.clone(),
+            disabled_extensions,
             collections_shadow_documents: HashMap::new(),
             next_host_document_revision: 1,
             next_host_spaces_document_revision: 1,
@@ -853,6 +876,7 @@ impl App {
         };
         app.configure_tab_bar_status(&config.ui.tab_bar_right, &config.ui.tab_bar_right_separator);
         app.configure_window_title(&config.ui.window_title);
+        app.recover_extension_data_deletion_on_startup();
         app.refresh_collection_documents();
         app
     }
@@ -1184,8 +1208,8 @@ impl App {
         }
 
         if !invalid_section("extensions") {
-            self.disabled_extensions = config.extensions.disabled.clone();
-            self.rebuild_extension_catalogs();
+            self.configured_disabled_extensions = config.extensions.disabled.clone();
+            self.apply_bundled_extension_state();
         }
 
         let status = if diagnostics.is_empty() {

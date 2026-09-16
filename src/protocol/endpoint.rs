@@ -171,6 +171,9 @@ pub struct ClientShellRepository {
     pub repository_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub web_url: Option<String>,
+    /// Durable extension-scope repository identity shared by linked worktrees.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub durable_identity: Option<String>,
     pub checkouts: Vec<ClientShellRepositoryCheckout>,
     pub last_focused_workspace_id: Option<String>,
 }
@@ -644,6 +647,7 @@ mod tests {
                 label: "vqro".into(),
                 repository_path: Some("/repo".into()),
                 web_url: Some("https://github.com/example/vqro".into()),
+                durable_identity: Some("https://github.com/example/vqro".into()),
                 checkouts: vec![ClientShellRepositoryCheckout {
                     workspace_id: "w1".into(),
                     checkout_path: Some("/repo".into()),

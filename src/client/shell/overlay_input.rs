@@ -468,6 +468,17 @@ impl ClientShellState {
                 navigator.selected = None;
                 true
             }
+            Some(ClientShellOverlay::Extensions(extensions))
+                if extensions.search_focused
+                    && !extensions.mutating
+                    && extensions.confirmation.is_none() =>
+            {
+                extensions
+                    .query
+                    .extend(text.chars().filter(|character| !character.is_control()));
+                extensions.selected = 0;
+                true
+            }
             _ => false,
         }
     }
@@ -594,6 +605,10 @@ impl ClientShellState {
                 }
                 _ => {}
             }
+            return;
+        }
+
+        if self.route_extensions_key(key, outcome) {
             return;
         }
 

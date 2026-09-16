@@ -655,6 +655,7 @@ impl HostDocumentServiceCatalog {
     #[cfg(test)]
     pub fn bundled(
         disabled: &std::collections::BTreeSet<String>,
+        _bundled_priorities: &std::collections::BTreeMap<String, i32>,
         plugins: &crate::app::state::InstalledPluginRegistry,
         _event_tx: tokio::sync::mpsc::Sender<crate::events::AppEvent>,
     ) -> Self {
@@ -665,6 +666,8 @@ impl HostDocumentServiceCatalog {
         for namespace in [
             crate::first_party::collections::NAMESPACE,
             crate::first_party::spaces::NAMESPACE,
+            crate::first_party::delegation::NAMESPACE,
+            crate::first_party::agent_status::NAMESPACE,
         ] {
             if !disabled.contains(namespace) {
                 generations.insert(namespace.into(), next_service_generation());
@@ -890,6 +893,7 @@ impl HostDocumentServiceCatalog {
     #[cfg(not(test))]
     pub fn bundled(
         disabled: &std::collections::BTreeSet<String>,
+        bundled_priorities: &std::collections::BTreeMap<String, i32>,
         plugins: &crate::app::state::InstalledPluginRegistry,
         event_tx: tokio::sync::mpsc::Sender<crate::events::AppEvent>,
     ) -> Self {
@@ -925,6 +929,10 @@ impl HostDocumentServiceCatalog {
                         continue;
                     }
                     let service = declaration.service;
+                    let priority = bundled_priorities
+                        .get(&declaration.namespace)
+                        .copied()
+                        .unwrap_or(service.priority);
                     let mut command = service.command;
                     if command.first().is_none_or(|program| program != "vqro") {
                         tracing::error!(namespace = %declaration.namespace, "bundled extension command does not target the host binary");
@@ -940,7 +948,7 @@ impl HostDocumentServiceCatalog {
                         id: declaration.namespace.clone(),
                         command,
                         cwd: std::env::current_dir().unwrap_or_default(),
-                        priority: service.priority,
+                        priority,
                         granted_capabilities: service.granted_capabilities,
                     };
                     let Ok(supervisor) = ExtensionServiceSupervisor::new(spec) else {
@@ -951,7 +959,7 @@ impl HostDocumentServiceCatalog {
                         declaration.namespace,
                         HostDocumentProvider {
                             source: service.document_source,
-                            priority: service.priority,
+                            priority,
                             generation: next_service_generation(),
                             supervisor,
                             grants,
@@ -1748,11 +1756,25 @@ fn host_document_specs(
         }
     }
     specs.sort_by(|left, right| {
-        left.0
-            .cmp(&right.0)
+        let left_order = plugins
+            .get(&left.0)
+            .map(|plugin| plugin.load_order)
+            .unwrap_or(0);
+        let right_order = plugins
+            .get(&right.0)
+            .map(|plugin| plugin.load_order)
+            .unwrap_or(0);
+        right_order
+            .cmp(&left_order)
             .then_with(|| right.1.priority.cmp(&left.1.priority))
+            .then_with(|| left.0.cmp(&right.0))
             .then_with(|| left.1.id.cmp(&right.1.id))
     });
+    // Runtime arbitration compares one scalar priority. Preserve the ordered
+    // later-wins contract in that scalar after sorting by load order.
+    for (rank, (_, spec, _, _)) in specs.iter_mut().enumerate() {
+        spec.priority = i32::MAX.saturating_sub(i32::try_from(rank).unwrap_or(i32::MAX));
+    }
     specs
 }
 
@@ -1778,6 +1800,7 @@ pub fn manager_for_plugins(
     event_tx: tokio::sync::mpsc::Sender<crate::events::AppEvent>,
 ) -> ExtensionServiceManager {
     let mut specs = Vec::new();
+    let mut load_order = std::collections::HashMap::new();
     for plugin in plugins.values().filter(|plugin| {
         plugin.enabled && crate::persist::plugin_registry::manifest_available(plugin)
     }) {
@@ -1795,8 +1818,10 @@ pub fn manager_for_plugins(
             {
                 continue;
             }
+            let service_id = format!("{}.{}", plugin.plugin_id, service.id);
+            load_order.insert(service_id.clone(), plugin.load_order);
             specs.push(ExtensionServiceSpec {
-                id: format!("{}.{}", plugin.plugin_id, service.id),
+                id: service_id,
                 command: service.command.clone(),
                 cwd: std::path::PathBuf::from(&plugin.plugin_root),
                 priority: service.priority,
@@ -1804,17 +1829,28 @@ pub fn manager_for_plugins(
             });
         }
     }
-    manager_for_specs(specs, event_tx)
+    manager_for_specs_with_order(specs, &load_order, event_tx)
 }
 
+#[cfg(test)]
 fn manager_for_specs(
+    specs: Vec<ExtensionServiceSpec>,
+    event_tx: tokio::sync::mpsc::Sender<crate::events::AppEvent>,
+) -> ExtensionServiceManager {
+    manager_for_specs_with_order(specs, &std::collections::HashMap::new(), event_tx)
+}
+
+fn manager_for_specs_with_order(
     mut specs: Vec<ExtensionServiceSpec>,
+    load_order: &std::collections::HashMap<String, u64>,
     event_tx: tokio::sync::mpsc::Sender<crate::events::AppEvent>,
 ) -> ExtensionServiceManager {
     specs.sort_by(|left, right| {
-        right
-            .priority
-            .cmp(&left.priority)
+        load_order
+            .get(&right.id)
+            .unwrap_or(&0)
+            .cmp(load_order.get(&left.id).unwrap_or(&0))
+            .then_with(|| right.priority.cmp(&left.priority))
             .then_with(|| left.id.cmp(&right.id))
     });
     specs.truncate(MAX_PANE_EXTENSION_PROVIDERS);
@@ -4337,6 +4373,41 @@ sleep 2
         assert!(manager_for_plugins(&unavailable, event_tx)
             .workers
             .is_empty());
+    }
+
+    #[test]
+    fn later_plugin_load_order_wins_before_service_priority() {
+        let plugin = |id: &str, load_order: u64, priority: i32| {
+            serde_json::from_value::<crate::api::schema::InstalledPluginInfo>(serde_json::json!({
+                "plugin_id": id,
+                "name": id,
+                "version": "1.0.0",
+                "manifest_path": format!("/tmp/{id}/herdr-plugin.toml"),
+                "plugin_root": format!("/tmp/{id}"),
+                "enabled": true,
+                "load_order": load_order,
+                "services": [{
+                    "id": "documents",
+                    "command": ["documents"],
+                    "priority": priority,
+                    "provides": ["host_document"],
+                    "granted_capabilities": ["host_document"]
+                }]
+            }))
+            .unwrap()
+        };
+        let early = plugin("example.early", 1, 100);
+        let late = plugin("example.late", 2, -100);
+        let plugins = crate::app::state::InstalledPluginRegistry::from([
+            (early.plugin_id.clone(), early),
+            (late.plugin_id.clone(), late),
+        ]);
+
+        let specs = host_document_specs(&plugins);
+
+        assert_eq!(specs[0].0, "example.late");
+        assert_eq!(specs[1].0, "example.early");
+        assert!(specs[0].1.priority > specs[1].1.priority);
     }
 
     #[test]

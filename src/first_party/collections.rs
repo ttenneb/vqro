@@ -355,6 +355,7 @@ mod tests {
     #[test]
     fn collections_projection_matches_normalized_parity_fixture() {
         let document = project(&snapshot(11)).unwrap();
+        assert!(!document.items.is_empty());
         let actual = serde_json::to_value(document).unwrap();
         let expected: serde_json::Value = serde_json::from_str(include_str!(
             "../../tests/fixtures/collections-document-v1.json"

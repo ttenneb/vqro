@@ -131,13 +131,105 @@ pub(crate) fn repository_branch_web_url(repository_url: &str, branch: &str) -> O
     (!encoded.is_empty()).then(|| format!("{repository_url}{separator}{encoded}"))
 }
 
+fn persist_extension_repository_identity(common_dir: &Path, local_id: &str) {
+    let path = common_dir.join("vqro-extension-repository-identity");
+    let existing_identities = std::fs::read_to_string(&path)
+        .ok()
+        .map(|value| {
+            value
+                .lines()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let existing_identity = existing_identities.first().map(String::as_str);
+    let remote = std::process::Command::new("git")
+        .arg(format!("--git-dir={}", common_dir.display()))
+        .args(["config", "--get", "remote.origin.url"])
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .and_then(|remote| canonical_repository_web_url(remote.trim()));
+    let identity = remote.as_deref().unwrap_or(local_id);
+    if existing_identity == Some(identity) || (remote.is_none() && existing_identity.is_some()) {
+        return;
+    }
+    let temporary = path.with_extension(format!("{}.tmp", std::process::id()));
+    let committed = std::fs::File::create(&temporary)
+        .and_then(|mut file| {
+            use std::io::Write;
+            writeln!(file, "{identity}")?;
+            for previous in existing_identities
+                .iter()
+                .filter(|previous| previous.as_str() != identity)
+            {
+                writeln!(file, "{previous}")?;
+            }
+            file.sync_all()
+        })
+        .and_then(|()| crate::platform::replace_file(&temporary, &path))
+        .and_then(|()| crate::platform::sync_containing_directory(&path));
+    if committed.is_err() {
+        let _ = std::fs::remove_file(temporary);
+    }
+}
+
+pub(crate) fn extension_repository_identities(common_dir: &Path) -> Vec<String> {
+    std::fs::read_to_string(common_dir.join("vqro-extension-repository-identity"))
+        .ok()
+        .map(|value| {
+            value
+                .lines()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 pub(crate) fn stable_repository_id(common_dir: &Path) -> RepositoryId {
+    let identity_path = common_dir.join("vqro-repository-id");
+    if let Ok(identity) = std::fs::read_to_string(&identity_path) {
+        let identity = identity.trim();
+        if identity.len() == 17
+            && identity.starts_with('r')
+            && identity[1..].bytes().all(|byte| byte.is_ascii_hexdigit())
+        {
+            let identity = identity.to_ascii_lowercase();
+            persist_extension_repository_identity(common_dir, &identity);
+            return identity;
+        }
+    }
+
     let mut hash = 0xcbf29ce484222325u64;
     for byte in common_dir.to_string_lossy().as_bytes() {
         hash ^= u64::from(*byte);
         hash = hash.wrapping_mul(0x100000001b3);
     }
-    format!("r{hash:016x}")
+    let identity = format!("r{hash:016x}");
+    // The marker lives in the shared Git directory, so linked worktrees and a
+    // moved local repository retain one identity. Repositories with a remote
+    // use their canonical remote URL for extension overrides instead.
+    if common_dir.is_dir() {
+        let temporary = identity_path.with_extension(format!("{}.tmp", std::process::id()));
+        let committed = std::fs::File::create(&temporary)
+            .and_then(|mut file| {
+                use std::io::Write;
+                writeln!(file, "{identity}")?;
+                file.sync_all()
+            })
+            .and_then(|()| crate::platform::replace_file(&temporary, &identity_path))
+            .and_then(|()| crate::platform::sync_containing_directory(&identity_path));
+        if committed.is_err() {
+            let _ = std::fs::remove_file(temporary);
+        }
+    }
+    persist_extension_repository_identity(common_dir, &identity);
+    identity
 }
 
 /// Rebuild membership from checkout identity while retaining repository metadata,

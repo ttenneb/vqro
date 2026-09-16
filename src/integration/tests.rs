@@ -4586,6 +4586,46 @@ fn uninstall_antigravity_cli_removes_hooks_json_entries_and_hook_file() {
 }
 
 #[test]
+fn marketplace_adapter_assets_are_vqro_only() {
+    assert!(super::actions::validate_vqro_adapter_asset(b"VQRO_ENV VQRO_SOCKET_PATH vqro").is_ok());
+    assert!(
+        super::actions::validate_vqro_adapter_asset(b"VQRO_ENV HERDR_SOCKET_PATH vqro").is_err()
+    );
+    assert!(super::actions::validate_vqro_adapter_asset(b"herdr").is_err());
+}
+
+#[test]
+fn marketplace_pi_adapter_uses_vqro_path_and_preserves_herdr_file() {
+    let _lock = integration_env_lock();
+    let base = unique_base();
+    let extension_dir = base.join("extensions");
+    fs::create_dir_all(&extension_dir).unwrap();
+    let legacy = extension_dir.join(LEGACY_PI_EXTENSION_INSTALL_NAME);
+    let native = extension_dir.join(PI_EXTENSION_INSTALL_NAME);
+    fs::write(&legacy, "legacy-herdr-adapter").unwrap();
+    fs::write(&native, "native-vqro-adapter").unwrap();
+    std::env::set_var(PI_CODING_AGENT_DIR_ENV_VAR, &base);
+
+    install_target_from_asset(
+        crate::api::schema::IntegrationTarget::Pi,
+        b"// VQRO_ENV VQRO_SOCKET_PATH vqro",
+    )
+    .unwrap();
+    assert!(extension_dir
+        .join(MARKETPLACE_PI_EXTENSION_INSTALL_NAME)
+        .is_file());
+    uninstall_target_artifact(crate::api::schema::IntegrationTarget::Pi).unwrap();
+
+    assert!(!extension_dir
+        .join(MARKETPLACE_PI_EXTENSION_INSTALL_NAME)
+        .exists());
+    assert_eq!(fs::read_to_string(&legacy).unwrap(), "legacy-herdr-adapter");
+    assert_eq!(fs::read_to_string(&native).unwrap(), "native-vqro-adapter");
+    std::env::remove_var(PI_CODING_AGENT_DIR_ENV_VAR);
+    let _ = fs::remove_dir_all(base);
+}
+
+#[test]
 fn grok_dir_honors_grok_home_after_config_dir_seam() {
     let _lock = integration_env_lock();
     let base = unique_base();

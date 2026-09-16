@@ -1070,6 +1070,7 @@ fn plugin_link_list_unlink_round_trip() {
         manifest_path: "/plugins/worktree-bootstrap/herdr-plugin.toml".into(),
         plugin_root: "/plugins/worktree-bootstrap".into(),
         enabled: true,
+        load_order: 0,
         platforms: None,
         build: vec![PluginManifestBuild {
             platforms: None,

@@ -91,6 +91,7 @@ fn remote_repository_rows_expose_web_links_but_not_local_directory_links() {
                 label: "repo".into(),
                 repository_path: Some(path.into()),
                 web_url: Some(url.into()),
+                durable_identity: Some(url.into()),
                 checkouts: vec![crate::protocol::endpoint::ClientShellRepositoryCheckout {
                     workspace_id: "ws_1".into(),
                     checkout_path: Some(path.into()),
@@ -206,6 +207,35 @@ fn endpoint_switch_and_rollback_restore_matching_cached_structure() {
             .map(|value| value.session_id.as_str()),
         Some("local")
     );
+}
+
+#[test]
+fn switching_endpoints_closes_endpoint_local_extensions_overlay() {
+    let (mut state, remote) = state_with_remote();
+    let mut outcome = ClientShellInput::default();
+    state.open_extensions_overlay(&mut outcome);
+    assert!(matches!(
+        state.overlay,
+        Some(ClientShellOverlay::Extensions(_))
+    ));
+    let generation = match state.overlay.as_ref().unwrap() {
+        ClientShellOverlay::Extensions(extensions) => extensions.generation,
+        _ => unreachable!(),
+    };
+    state.pending_requests.insert(
+        "old-extension-list".into(),
+        PendingEndpointRequest {
+            boot_id: "boot-1".into(),
+            method_name: "extension.list".into(),
+            confirmation_workspace_id: None,
+            kind: PendingEndpointKind::ExtensionList(generation),
+        },
+    );
+
+    assert!(state.activate_endpoint_projection(&remote));
+
+    assert!(state.overlay.is_none());
+    assert!(!state.pending_requests.contains_key("old-extension-list"));
 }
 
 #[test]
