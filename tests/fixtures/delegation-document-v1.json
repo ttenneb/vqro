@@ -1,0 +1,35 @@
+{
+  "contract": "host.document.v1",
+  "namespace": "vqro.delegation",
+  "generation": 6,
+  "revision": 13,
+  "surface": "navigation",
+  "target": { "kind": "session" },
+  "items": [
+    {
+      "id": "relationship:root",
+      "role": "terminal",
+      "label": "Coordinate release",
+      "terminal": {
+        "terminal_id": "term_root",
+        "placement": { "pane_id": "w1:p_root", "workspace_id": "w1", "tab_id": "w1:t1" }
+      },
+      "action_ids": [],
+      "flags": { "selected": false, "expanded": true, "disabled": false, "attention": false }
+    },
+    {
+      "id": "relationship:child",
+      "parent_id": "relationship:root",
+      "role": "terminal",
+      "label": "child",
+      "terminal": {
+        "terminal_id": "term_child",
+        "placement": { "pane_id": "w1:p_child", "workspace_id": "w1", "tab_id": "w1:t1" }
+      },
+      "action_ids": [],
+      "flags": { "selected": false, "expanded": false, "disabled": true, "attention": false }
+    }
+  ],
+  "actions": [],
+  "required_capabilities": []
+}

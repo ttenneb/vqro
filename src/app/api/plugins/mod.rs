@@ -68,10 +68,26 @@ impl App {
         self.host_document_retry_snapshots.clear();
         self.host_document_retry_order.clear();
         self.host_spaces_last_desired = None;
+        self.host_relationships_last_desired = None;
+        self.host_agent_activity_last_desired = None;
         self.host_spaces_retry_epoch = self.host_spaces_retry_epoch.saturating_add(1).max(1);
         self.host_spaces_retry_attempt = 0;
         self.host_spaces_retry_scheduled = false;
+        for namespace in [
+            crate::first_party::delegation::NAMESPACE,
+            crate::first_party::agent_status::NAMESPACE,
+        ] {
+            let epoch = self
+                .host_semantic_retry_epochs
+                .entry(namespace.into())
+                .or_default();
+            *epoch = epoch.saturating_add(1).max(1);
+        }
+        self.host_semantic_retry_attempts.clear();
+        self.host_semantic_retry_scheduled.clear();
         self.refresh_collection_documents();
+        self.refresh_relationships_document();
+        self.refresh_agent_activity_document();
     }
 
     fn refresh_installed_plugins(&mut self) -> std::io::Result<()> {
@@ -1605,7 +1621,13 @@ capabilities = ["view_contribution", "terminal_interrupt"]
 
     #[test]
     fn reserved_host_document_namespaces_are_rejected() {
-        for namespace in ["vqro.collections", "vqro.spaces", "host.fallback"] {
+        for namespace in [
+            "vqro.collections",
+            "vqro.spaces",
+            "vqro.delegation",
+            "vqro.agent-status",
+            "host.fallback",
+        ] {
             let root = unique_temp_path("reserved-host-document-namespace");
             write_manifest_content(
                 &root,

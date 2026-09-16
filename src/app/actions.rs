@@ -788,6 +788,10 @@ impl AppState {
             .active
             .and_then(|idx| self.workspaces.get(idx))
             .map(|ws| ws.id.clone());
+        for pane_id in &pane_ids {
+            self.delegations.tombstone_pane(*pane_id);
+        }
+        self.delegations.gc_tombstones();
         self.remove_plugin_pane_records(pane_ids);
         for idx in close_indices.iter().rev() {
             self.workspaces.remove(*idx);
@@ -1722,7 +1726,10 @@ impl AppState {
             | AppEvent::ExtensionServiceFinished(_)
             | AppEvent::HostDocumentFinished(_)
             | AppEvent::HostSpacesDocumentFinished(_)
+            | AppEvent::HostRelationshipsDocumentFinished(_)
+            | AppEvent::HostAgentActivityDocumentFinished(_)
             | AppEvent::HostSpacesRetryDue { .. }
+            | AppEvent::HostSemanticDocumentRetryDue { .. }
             | AppEvent::HostDocumentProviderActionFinished { .. } => Vec::new(),
         }
     }
@@ -2103,6 +2110,10 @@ impl AppState {
 
         let pane_terminal_id = self.terminal_id_for_pane(ws_idx, pane_id);
         let workspace_terminal_ids = self.terminal_ids_for_workspace(ws_idx);
+        // Relationships retain pane-less ancestry so descendant completion can still escalate
+        // through a closed intermediate node without making the dead PTY actionable.
+        self.delegations.tombstone_pane(pane_id);
+        self.delegations.gc_tombstones();
         self.pane_id_aliases.retain(|_, alias| *alias != pane_id);
         self.public_pane_id_aliases
             .retain(|_, alias| *alias != pane_id);
@@ -3422,6 +3433,40 @@ mod tests {
         assert!(state.pending_agent_notifications.is_empty());
         assert!(state.drain_due_agent_notifications(deadline).is_empty());
         assert!(state.toast.is_none());
+    }
+
+    #[test]
+    fn pane_death_collects_leaf_delegation() {
+        let mut state = app_with_workspaces(&["active"]);
+        let pane_id = *state.workspaces[0].panes.keys().next().unwrap();
+        let leaf = state.delegations.create(Some(pane_id), None, None).unwrap();
+        state.handle_app_event(AppEvent::PaneDied {
+            pane_id,
+            exit_reason: crate::platform::ChildExitReason::Exited,
+        });
+        assert!(state.delegations.get(leaf).is_none());
+    }
+
+    #[test]
+    fn pane_death_retains_tombstoned_delegation_ancestry() {
+        let mut state = app_with_workspaces(&["active"]);
+        let pane_id = *state.workspaces[0].panes.keys().next().unwrap();
+        let root = state
+            .delegations
+            .create(Some(pane_id), None, Some("root".into()))
+            .unwrap();
+        let child = state
+            .delegations
+            .create(None, Some(root), Some("child".into()))
+            .unwrap();
+        state.handle_app_event(AppEvent::PaneDied {
+            pane_id,
+            exit_reason: crate::platform::ChildExitReason::Exited,
+        });
+        let root_record = state.delegations.get(root).unwrap();
+        assert!(root_record.tombstone);
+        assert!(root_record.pane_id.is_none());
+        assert_eq!(state.delegations.get(child).unwrap().parent_id, Some(root));
     }
 
     #[test]

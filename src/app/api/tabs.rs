@@ -277,6 +277,10 @@ impl App {
                 format!("tab {} could not be closed", target.tab_id),
             );
         }
+        for pane_id in &pane_ids {
+            self.state.delegations.tombstone_pane(*pane_id);
+        }
+        self.state.delegations.gc_tombstones();
         self.state.remove_plugin_pane_records(pane_ids);
         self.state.remove_unattached_terminal_ids(terminal_ids);
         self.shutdown_detached_terminal_runtimes();
@@ -379,6 +383,49 @@ mod tests {
             } if closed_workspace_id == &workspace_id
                 && workspace.workspace_id == workspace_id
         ));
+    }
+
+    #[test]
+    fn api_tab_close_retains_delegation_ancestry_for_another_tab() {
+        let event_hub = crate::api::EventHub::default();
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &Config::default(),
+            crate::app::AppPolicy::TEST,
+            None,
+            api_rx,
+            event_hub,
+        );
+        let mut workspace = Workspace::test_new("tabs");
+        workspace.test_add_tab(Some("child"));
+        let parent_pane = workspace.tabs[0].root_pane;
+        let child_pane = workspace.tabs[1].root_pane;
+        app.state.workspaces = vec![workspace];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        let parent = app
+            .state
+            .delegations
+            .create(Some(parent_pane), None, Some("parent".into()))
+            .unwrap();
+        let child = app
+            .state
+            .delegations
+            .create(Some(child_pane), Some(parent), Some("child".into()))
+            .unwrap();
+        let tab_id = app.public_tab_id(0, 0).unwrap();
+
+        let response = app.handle_tab_close("req".into(), TabTarget { tab_id });
+
+        let _: SuccessResponse = serde_json::from_str(&response).unwrap();
+        let retained = app.state.delegations.get(parent).unwrap();
+        assert!(retained.tombstone);
+        assert_eq!(retained.pane_id, None);
+        assert_eq!(
+            app.state.delegations.get(child).unwrap().parent_id,
+            Some(parent)
+        );
     }
 
     #[test]

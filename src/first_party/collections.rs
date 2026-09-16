@@ -182,6 +182,7 @@ pub(crate) struct ShadowDocumentCache {
     document: Option<HostDocumentV1>,
     provider_priority: i32,
     grants: HashSet<HostCapability>,
+    encoded_bytes: usize,
 }
 
 impl ShadowDocumentCache {
@@ -231,6 +232,9 @@ impl ShadowDocumentCache {
         }) {
             return Err(HostDocumentError("stale document revision".into()));
         }
+        self.encoded_bytes = serde_json::to_vec(&document)
+            .map_err(|_| HostDocumentError("document is not serializable".into()))?
+            .len();
         self.document = Some(document);
         self.provider_priority = provider_priority;
         self.grants = granted_capabilities.clone();
@@ -239,13 +243,18 @@ impl ShadowDocumentCache {
 
     pub(crate) fn disable(&mut self) {
         self.document = None;
+        self.encoded_bytes = 0;
     }
 
     pub(crate) fn install_fallback(
         &mut self,
         snapshot: &HostTerminalGroupsV1,
     ) -> Result<(), HostDocumentError> {
-        self.document = Some(fallback(snapshot)?);
+        let document = fallback(snapshot)?;
+        self.encoded_bytes = serde_json::to_vec(&document)
+            .map_err(|_| HostDocumentError("fallback document is not serializable".into()))?
+            .len();
+        self.document = Some(document);
         self.provider_priority = i32::MIN;
         self.grants = HashSet::from([HostCapability::FocusTerminal]);
         Ok(())
@@ -257,6 +266,16 @@ impl ShadowDocumentCache {
 
     pub(crate) fn provider_priority(&self) -> i32 {
         self.provider_priority
+    }
+
+    pub(crate) fn projected_encoded_bytes(&self) -> usize {
+        let action_reserve = self
+            .document
+            .as_ref()
+            .map_or(0, |document| document.actions.len().saturating_mul(256));
+        self.encoded_bytes
+            .saturating_add(action_reserve)
+            .saturating_add(256)
     }
 
     pub(crate) fn grants(&self) -> &HashSet<HostCapability> {

@@ -1,5 +1,7 @@
 //! Endpoint-qualified rows shared by aggregate navigation surfaces.
 
+use std::collections::HashMap;
+
 use super::*;
 use crate::protocol::ClientShellAgent;
 
@@ -57,10 +59,39 @@ pub(super) struct AggregateAgentTarget {
     pub(super) pane_id: String,
 }
 
+pub(super) type AgentNavigationCache =
+    HashMap<ClientEndpointId, Option<Vec<super::document_navigation::DocumentedAgent>>>;
+
+pub(super) fn agent_navigation_cache(endpoints: &[ClientShellEndpoint]) -> AgentNavigationCache {
+    endpoints
+        .iter()
+        .filter_map(|endpoint| {
+            let snapshot = endpoint.snapshot.as_deref()?;
+            Some((
+                endpoint.endpoint_id.clone(),
+                super::document_navigation::agent_navigation(
+                    snapshot,
+                    endpoint.current_host_documents(),
+                ),
+            ))
+        })
+        .collect()
+}
+
 pub(super) fn aggregate_agent_rows<'a>(
     endpoints: &'a [ClientShellEndpoint],
     active_endpoint_id: &ClientEndpointId,
     sort: crate::config::AgentPanelSortConfig,
+) -> Vec<AggregateAgentRow<'a>> {
+    let navigation = agent_navigation_cache(endpoints);
+    aggregate_agent_rows_cached(endpoints, active_endpoint_id, sort, &navigation)
+}
+
+pub(super) fn aggregate_agent_rows_cached<'a>(
+    endpoints: &'a [ClientShellEndpoint],
+    active_endpoint_id: &ClientEndpointId,
+    sort: crate::config::AgentPanelSortConfig,
+    navigation: &AgentNavigationCache,
 ) -> Vec<AggregateAgentRow<'a>> {
     let active_index = endpoints
         .iter()
@@ -84,7 +115,7 @@ pub(super) fn aggregate_agent_rows<'a>(
         }
     });
 
-    if let Some(Ok(view)) = active_view {
+    if let Some(Ok(Some(view))) = active_view {
         let mut rows = cached_endpoint_snapshots(endpoints)
             .flat_map(|endpoint| {
                 endpoint
@@ -102,60 +133,86 @@ pub(super) fn aggregate_agent_rows<'a>(
                     })
             })
             .collect::<Vec<_>>();
-        if let Some(view) = view {
-            let context = active_index
-                .and_then(|index| endpoints[index].snapshot.as_deref())
-                .map(|snapshot| crate::agent_view_eval::AgentViewContext {
-                    scope: active_index.unwrap_or_default(),
-                    workspace_id: snapshot.focused_workspace_id.clone(),
-                    tab_id: snapshot.focused_tab_id.clone(),
-                });
-            if let (Some(context), Some(filter)) = (context.as_ref(), view.filter.as_ref()) {
-                rows.retain(|row| {
-                    crate::agent_view_eval::matches_filter(
-                        context,
-                        &ClientAgentViewEntry::new(row),
-                        filter,
-                    )
-                });
-            }
-            if !view.sort.is_empty() {
-                rows.sort_by(|left, right| {
-                    crate::agent_view_eval::compare_entries(
-                        &ClientAgentViewEntry::new(left),
-                        &ClientAgentViewEntry::new(right),
-                        &view.sort,
-                    )
-                });
-                return rows;
-            }
+        let context = active_index
+            .and_then(|index| endpoints[index].snapshot.as_deref())
+            .map(|snapshot| crate::agent_view_eval::AgentViewContext {
+                scope: active_index.unwrap_or_default(),
+                workspace_id: snapshot.focused_workspace_id.clone(),
+                tab_id: snapshot.focused_tab_id.clone(),
+            });
+        if let (Some(context), Some(filter)) = (context.as_ref(), view.filter.as_ref()) {
+            rows.retain(|row| {
+                crate::agent_view_eval::matches_filter(
+                    context,
+                    &ClientAgentViewEntry::new(row),
+                    filter,
+                )
+            });
+        }
+        if !view.sort.is_empty() {
+            rows.sort_by(|left, right| {
+                crate::agent_view_eval::compare_entries(
+                    &ClientAgentViewEntry::new(left),
+                    &ClientAgentViewEntry::new(right),
+                    &view.sort,
+                )
+            });
+            return rows;
         }
         sort_aggregate_rows(&mut rows, sort);
         return rows;
     }
 
+    let active_default_view = matches!(active_view, Some(Ok(None)));
     let mut rows = cached_endpoint_snapshots(endpoints)
         .flat_map(|endpoint| {
-            super::agent_sidebar::ordered_agent_pane_ids(endpoint.snapshot, sort)
-                .into_iter()
-                .filter_map(move |pane_id| {
-                    let agent = endpoint
-                        .snapshot
-                        .agents
-                        .iter()
-                        .find(|agent| agent.pane_id == pane_id)?;
-                    Some(AggregateAgentRow {
-                        recency: endpoint
-                            .agent_recency
-                            .get(&pane_id)
-                            .copied()
-                            .unwrap_or_default(),
-                        endpoint,
-                        agent,
+            let documented = navigation
+                .get(endpoint.endpoint_id)
+                .and_then(Option::as_ref);
+            let pane_ids = if !active_default_view && endpoint.snapshot.agent_view_label.is_some() {
+                endpoint
+                    .snapshot
+                    .agent_order
+                    .iter()
+                    .filter(|pane_id| {
+                        endpoint
+                            .snapshot
+                            .agents
+                            .iter()
+                            .any(|agent| agent.pane_id == pane_id.as_str())
                     })
+                    .cloned()
+                    .collect()
+            } else if let Some(documented) = documented {
+                documented.iter().map(|row| row.pane_id.clone()).collect()
+            } else {
+                super::agent_sidebar::ordered_agent_pane_ids_without_view(
+                    endpoint.snapshot,
+                    sort,
+                    None,
+                )
+            };
+            pane_ids.into_iter().filter_map(move |pane_id| {
+                let agent = endpoint
+                    .snapshot
+                    .agents
+                    .iter()
+                    .find(|agent| agent.pane_id == pane_id)?;
+                Some(AggregateAgentRow {
+                    recency: endpoint
+                        .agent_recency
+                        .get(&pane_id)
+                        .copied()
+                        .unwrap_or_default(),
+                    endpoint,
+                    agent,
                 })
+            })
         })
         .collect::<Vec<_>>();
+    // Stable aggregate sorting preserves each endpoint's provider-owned order among equal
+    // priorities while preventing one documented endpoint from suppressing fallback ordering for
+    // every other endpoint.
     sort_aggregate_rows(&mut rows, sort);
     rows
 }

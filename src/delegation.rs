@@ -668,7 +668,6 @@ impl Delegations {
     }
 
     /// Detach a closed pane but retain its provenance while descendants exist.
-    #[cfg(test)]
     pub fn tombstone_pane(&mut self, pane_id: PaneId) -> Option<DelegationId> {
         let id = self.delegation_for_pane(pane_id)?.id;
         if let Some(record) = self.records.get_mut(&id) {
@@ -679,7 +678,6 @@ impl Delegations {
     }
 
     /// Remove tombstoned leaves, then repeat for newly exposed tombstoned leaves.
-    #[cfg(test)]
     pub fn gc_tombstones(&mut self) -> Vec<DelegationId> {
         let mut removed = Vec::new();
         loop {
@@ -1217,6 +1215,18 @@ mod tests {
         d.tombstone_pane(pane(2));
         assert_eq!(d.gc_tombstones(), vec![child, root]);
         assert!(d.records().is_empty());
+    }
+
+    #[test]
+    fn reparenting_exposes_a_retained_parent_for_collection() {
+        let mut d = Delegations::new();
+        let parent = create(&mut d, 1, None);
+        let child = create(&mut d, 2, Some(parent));
+        d.tombstone_pane(pane(1));
+        d.reparent(child, None).unwrap();
+        assert_eq!(d.gc_tombstones(), vec![parent]);
+        assert!(d.get(parent).is_none());
+        assert_eq!(d.get(child).and_then(|record| record.parent_id), None);
     }
 
     #[test]

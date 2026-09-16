@@ -11,6 +11,7 @@ mod config;
 mod context_menu;
 mod contributions;
 mod copy_mode;
+mod document_navigation;
 mod endpoint_agent_state;
 mod endpoint_agents;
 mod endpoint_navigation;

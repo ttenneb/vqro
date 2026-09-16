@@ -610,7 +610,13 @@ fn collection_chrome_renders_members_delegation_and_routes_selection() {
     state.set_snapshot(Box::new(projected));
     state.structure = Some(Box::new(structure));
     state.set_pane_surface(pane_surface);
+    super::super::document_navigation::reset_delegation_navigation_call_count();
     let frame = state.compose(106, 24).expect("collection frame");
+    assert_eq!(
+        super::super::document_navigation::delegation_navigation_call_count(),
+        1,
+        "delegation documents must be joined once per frame"
+    );
     let text = frame
         .cells
         .chunks(frame.width as usize)

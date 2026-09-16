@@ -415,26 +415,31 @@ impl ClientShellState {
         restore_mode_bar(&mut frame, mode_bar, mode_bar_cells.as_deref());
         let mut occlusion = crate::kitty_graphics::surface::Occlusion::default();
         let mut composed = frame.to_ratatui_buffer()?;
-        self.hits.collections = collections::render_collection_chrome(
-            &mut composed,
-            snapshot,
-            self.structure.as_deref(),
-            &self.hits.panes,
-            &self.collection_list_views,
-            self.collection_maximized_pane.as_ref(),
-            &self.config.palette,
-        );
         let host_documents = self
             .endpoints
             .iter()
             .find(|endpoint| endpoint.endpoint_id == self.active_endpoint_id)
             .and_then(ClientShellEndpoint::current_host_documents);
+        let documented_delegations = self.structure.as_deref().and_then(|structure| {
+            super::document_navigation::delegation_navigation(snapshot, structure, host_documents)
+        });
+        self.hits.collections = collections::render_collection_chrome(
+            &mut composed,
+            snapshot,
+            self.structure.as_deref(),
+            documented_delegations.as_ref(),
+            &self.hits.panes,
+            &self.collection_list_views,
+            self.collection_maximized_pane.as_ref(),
+            &self.config.palette,
+        );
         self.hits.collection_members = collections::render_collection_lists(
             &mut composed,
             snapshot,
             collections::CollectionProjection {
                 structure: self.structure.as_deref(),
                 host_documents,
+                documented_delegations: documented_delegations.as_ref(),
             },
             &self.hits.panes,
             &self.collection_list_views,

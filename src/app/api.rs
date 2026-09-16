@@ -172,10 +172,29 @@ impl App {
                 self.handle_host_spaces_document_result(*result);
                 return Vec::new();
             }
+            AppEvent::HostRelationshipsDocumentFinished(result) => {
+                self.handle_host_relationships_document_result(*result);
+                return Vec::new();
+            }
+            AppEvent::HostAgentActivityDocumentFinished(result) => {
+                self.handle_host_agent_activity_document_result(*result);
+                return Vec::new();
+            }
             AppEvent::HostSpacesRetryDue { epoch } => {
                 if epoch == self.host_spaces_retry_epoch {
                     self.host_spaces_retry_scheduled = false;
                     self.refresh_spaces_document();
+                }
+                return Vec::new();
+            }
+            AppEvent::HostSemanticDocumentRetryDue { namespace, epoch } => {
+                if self.host_semantic_retry_epochs.get(&namespace) == Some(&epoch) {
+                    self.host_semantic_retry_scheduled.remove(&namespace);
+                    if namespace == crate::first_party::delegation::NAMESPACE {
+                        self.refresh_relationships_document();
+                    } else if namespace == crate::first_party::agent_status::NAMESPACE {
+                        self.refresh_agent_activity_document();
+                    }
                 }
                 return Vec::new();
             }
@@ -194,6 +213,7 @@ impl App {
                 | AppEvent::AgentProcessDetected { .. }
                 | AppEvent::AgentSessionReported { .. }
                 | AppEvent::HookMetadataReported { .. }
+                | AppEvent::HookStateReported { .. }
                 | AppEvent::HookAuthorityCleared { .. }
                 | AppEvent::HookAgentReleased { .. }
                 | AppEvent::TerminalCwdReported { .. }
@@ -303,6 +323,7 @@ impl App {
                         false
                     };
                     if !restore_failed {
+                        self.refresh_agent_activity_document();
                         return worktree_restore_updates;
                     }
                 }
@@ -321,6 +342,7 @@ impl App {
                     self.overlay_panes.remove(pane_id);
                     self.render_dirty.request_generic();
                     self.render_notify.notify_one();
+                    self.refresh_agent_activity_document();
                     return worktree_restore_updates;
                 }
             }
@@ -2481,6 +2503,7 @@ mod tests {
             .get_mut(&terminal_id)
             .expect("test terminal should exist");
         terminal.respawn_shell_on_exit = true;
+        terminal.set_detected_state(Some(crate::detect::Agent::Codex), AgentState::Working);
         terminal.set_agent_name("codex".into());
         terminal.set_persisted_agent_session(crate::agent_resume::PersistedAgentSession {
             source: "herdr:codex".into(),
@@ -2488,6 +2511,18 @@ mod tests {
             session_ref: crate::agent_resume::AgentSessionRef::id("codex-session")
                 .expect("test session id should be valid"),
         });
+        app.host_document_services =
+            crate::extension_service::HostDocumentServiceCatalog::with_test_document_source_provider(
+                crate::first_party::agent_status::NAMESPACE,
+                1,
+                crate::api::schema::HostDocumentSourceKind::AgentActivity,
+            );
+        app.refresh_agent_activity_document();
+        let previous_revision = app
+            .host_agent_activity_last_desired
+            .as_ref()
+            .expect("initial activity snapshot")
+            .revision;
 
         app.handle_internal_event(AppEvent::PaneDied {
             pane_id,
@@ -2506,6 +2541,14 @@ mod tests {
         assert!(!terminal.respawn_shell_on_exit);
         assert!(terminal.persisted_agent_session.is_none());
         assert!(terminal.agent_name.is_none());
+        let activity = app
+            .host_agent_activity_last_desired
+            .as_ref()
+            .expect("respawn activity snapshot");
+        assert!(activity.revision > previous_revision);
+        assert!(activity.activities.iter().all(|record| {
+            record.activity != crate::extension_contract::HostAgentActivityState::Working
+        }));
 
         for (_, runtime) in app.terminal_runtimes.drain() {
             runtime.shutdown();

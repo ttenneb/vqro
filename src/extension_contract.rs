@@ -5,15 +5,30 @@
 //! effect execution.
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 pub const HOST_DOCUMENT_CONTRACT_V1: &str = "host.document.v1";
 pub const MAX_DOCUMENT_PROVIDERS: usize = 16;
 pub const MAX_DOCUMENT_ITEMS: usize = 512;
+const MAX_SPACES_ITEMS: usize = MAX_DOCUMENT_ITEMS;
+pub const MAX_EXTENSION_FRAME_BYTES: usize = 256 * 1024;
+pub const MAX_RELATIONSHIP_SNAPSHOT_BYTES: usize = MAX_EXTENSION_FRAME_BYTES / 2;
+pub const MAX_AGENT_ACTIVITY_SNAPSHOT_BYTES: usize = MAX_EXTENSION_FRAME_BYTES / 2;
 pub const MAX_DOCUMENT_ACTIONS: usize = 256;
 pub const MAX_DOCUMENT_TEXT_CHARS: usize = 4096;
 pub const MAX_SPACES_REPOSITORIES: usize = 256;
 pub const MAX_SPACES_WORKSPACES: usize = 512;
+pub const MAX_RELATIONSHIPS: usize = 4096;
+pub const MAX_RELATIONSHIP_DEPTH: usize = 32;
+pub const MAX_RELATIONSHIP_FAN_OUT: usize = 128;
+pub const MAX_RELATIONSHIP_METADATA_ENTRIES: usize = 32;
+pub const MAX_RELATIONSHIP_METADATA_BYTES: usize = 16 * 1024;
+pub const MAX_RELATIONSHIP_METADATA_DEPTH: usize = 8;
+pub const MAX_AGENT_ACTIVITIES: usize = 256;
+pub const MAX_AGENT_ACTIVITY_LABELS: usize = 16;
+
+pub const HOST_RELATIONSHIPS_CONTRACT_V1: &str = "host.relationships.v1";
+pub const HOST_AGENT_ACTIVITY_CONTRACT_V1: &str = "host.agent-activity.v1";
 
 /// A host-owned session projection supplied to Spaces document providers.
 /// Repository membership and labels are semantic state; paths and Git internals
@@ -51,6 +66,74 @@ pub struct HostSpaceWorkspaceRef {
 pub enum HostSpaceOrderRef {
     Repository { repository_id: String },
     StandaloneWorkspace { workspace_id: String },
+}
+
+/// A session-scoped, host-owned relationship forest. Relationship kinds and
+/// metadata keys are namespaces so consumers can safely ignore semantics they
+/// do not understand while retaining the records unchanged.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostRelationshipsV1 {
+    pub contract: String,
+    pub generation: u64,
+    pub revision: u64,
+    pub scope_id: String,
+    #[serde(default)]
+    pub relationships: Vec<HostRelationship>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostRelationship {
+    pub relationship_id: String,
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal: Option<HostTerminalRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<String>,
+    pub sibling_rank: u64,
+    pub lifecycle: HostRelationshipLifecycle,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub metadata: BTreeMap<String, serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HostRelationshipLifecycle {
+    Active,
+    Retained,
+}
+
+/// Session-scoped, attributed agent activity after host arbitration. This is
+/// intentionally smaller than any agent-specific state model.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostAgentActivityV1 {
+    pub contract: String,
+    pub generation: u64,
+    pub revision: u64,
+    pub scope_id: String,
+    #[serde(default)]
+    pub activities: Vec<HostAgentActivityRecord>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostAgentActivityRecord {
+    pub terminal: HostTerminalRef,
+    pub activity: HostAgentActivityState,
+    /// Stable identity of the evidence publisher.
+    pub source: String,
+    /// Evidence kind. Unknown kinds remain round-trippable strings.
+    pub evidence_kind: String,
+    pub state_change_seq: u64,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub labels: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HostAgentActivityState {
+    Idle,
+    Working,
+    Blocked,
+    Unknown,
 }
 
 /// A host-owned terminal-group projection supplied to document providers.
@@ -303,7 +386,7 @@ impl HostSpacesV1 {
             validate_space_workspace(workspace, &mut workspace_ids)?;
         }
         if workspace_count > MAX_SPACES_WORKSPACES
-            || workspace_count + self.repositories.len() > MAX_DOCUMENT_ITEMS
+            || workspace_count + self.repositories.len() > MAX_SPACES_ITEMS
         {
             return invalid("spaces snapshot has too many workspaces");
         }
@@ -338,6 +421,109 @@ impl HostSpacesV1 {
                     return invalid("spaces order contains duplicate entries");
                 }
             }
+        }
+        Ok(())
+    }
+}
+
+impl HostRelationshipsV1 {
+    pub fn validate(&self) -> Result<(), HostDocumentError> {
+        if self.contract != HOST_RELATIONSHIPS_CONTRACT_V1 {
+            return invalid("unsupported relationships contract");
+        }
+        validate_snapshot_header(self.generation, self.revision, &self.scope_id)?;
+        if self.relationships.len() > MAX_RELATIONSHIPS {
+            return invalid("relationship snapshot has too many records");
+        }
+
+        let mut ids = HashSet::with_capacity(self.relationships.len());
+        for relationship in &self.relationships {
+            validate_stable_ref(&relationship.relationship_id)?;
+            validate_namespace(&relationship.kind)?;
+            if !ids.insert(relationship.relationship_id.as_str()) {
+                return invalid("relationship ids must be unique");
+            }
+            if let Some(terminal) = &relationship.terminal {
+                validate_terminal_ref(terminal)?;
+            }
+            if relationship.metadata.len() > MAX_RELATIONSHIP_METADATA_ENTRIES {
+                return invalid("relationship metadata has too many entries");
+            }
+            for (key, value) in &relationship.metadata {
+                validate_namespace(key)?;
+                validate_metadata_value(value, 0)?;
+            }
+            let encoded_size = serde_json::to_vec(&relationship.metadata)
+                .map_err(|_| HostDocumentError("relationship metadata is invalid".into()))?
+                .len();
+            if encoded_size > MAX_RELATIONSHIP_METADATA_BYTES {
+                return invalid("relationship metadata is too large");
+            }
+        }
+
+        let mut sibling_ranks = HashSet::new();
+        let mut child_counts: HashMap<Option<&str>, usize> = HashMap::new();
+        for relationship in &self.relationships {
+            let parent = relationship.parent_id.as_deref();
+            if let Some(parent_id) = parent {
+                validate_stable_ref(parent_id)?;
+                if parent_id == relationship.relationship_id || !ids.contains(parent_id) {
+                    return invalid("relationship parent is invalid");
+                }
+            }
+            if !sibling_ranks.insert((parent, relationship.sibling_rank)) {
+                return invalid("relationship sibling ranks must be unique");
+            }
+            let count = child_counts.entry(parent).or_default();
+            *count += 1;
+            if parent.is_some() && *count > MAX_RELATIONSHIP_FAN_OUT {
+                return invalid("relationship parent has too many children");
+            }
+        }
+        validate_relationship_tree(&self.relationships)?;
+        if serde_json::to_vec(self)
+            .map_err(|_| HostDocumentError("relationship snapshot is not serializable".into()))?
+            .len()
+            > MAX_RELATIONSHIP_SNAPSHOT_BYTES
+        {
+            return invalid("relationship snapshot exceeds extension transport capacity");
+        }
+        Ok(())
+    }
+}
+
+impl HostAgentActivityV1 {
+    pub fn validate(&self) -> Result<(), HostDocumentError> {
+        if self.contract != HOST_AGENT_ACTIVITY_CONTRACT_V1 {
+            return invalid("unsupported agent activity contract");
+        }
+        validate_snapshot_header(self.generation, self.revision, &self.scope_id)?;
+        if self.activities.len() > MAX_AGENT_ACTIVITIES {
+            return invalid("agent activity snapshot has too many records");
+        }
+
+        let mut terminal_ids = HashSet::with_capacity(self.activities.len());
+        for activity in &self.activities {
+            validate_terminal_ref(&activity.terminal)?;
+            if !terminal_ids.insert(activity.terminal.terminal_id.as_str()) {
+                return invalid("agent activity terminal identities must be unique");
+            }
+            validate_text(&activity.source)?;
+            validate_local_id(&activity.evidence_kind)?;
+            if activity.labels.len() > MAX_AGENT_ACTIVITY_LABELS {
+                return invalid("agent activity has too many labels");
+            }
+            for (key, value) in &activity.labels {
+                validate_local_id(key)?;
+                validate_text(value)?;
+            }
+        }
+        if serde_json::to_vec(self)
+            .map_err(|_| HostDocumentError("agent activity snapshot is not serializable".into()))?
+            .len()
+            > MAX_AGENT_ACTIVITY_SNAPSHOT_BYTES
+        {
+            return invalid("agent activity snapshot exceeds extension transport capacity");
         }
         Ok(())
     }
@@ -589,6 +775,73 @@ impl HostDocumentV1 {
     }
 }
 
+fn validate_snapshot_header(
+    generation: u64,
+    revision: u64,
+    scope_id: &str,
+) -> Result<(), HostDocumentError> {
+    if generation == 0 || revision == 0 {
+        return invalid("snapshot generation and revision must be non-zero");
+    }
+    validate_stable_ref(scope_id)
+}
+
+fn validate_relationship_tree(relationships: &[HostRelationship]) -> Result<(), HostDocumentError> {
+    let parents = relationships
+        .iter()
+        .map(|relationship| {
+            (
+                relationship.relationship_id.as_str(),
+                relationship.parent_id.as_deref(),
+            )
+        })
+        .collect::<HashMap<_, _>>();
+    for relationship in relationships {
+        let mut current = Some(relationship.relationship_id.as_str());
+        let mut visited = HashSet::new();
+        let mut depth = 0;
+        while let Some(id) = current {
+            if !visited.insert(id) {
+                return invalid("relationship hierarchy contains a cycle");
+            }
+            depth += 1;
+            if depth > MAX_RELATIONSHIP_DEPTH {
+                return invalid("relationship hierarchy is too deep");
+            }
+            current = parents.get(id).copied().flatten();
+        }
+    }
+    Ok(())
+}
+
+fn validate_metadata_value(
+    value: &serde_json::Value,
+    depth: usize,
+) -> Result<(), HostDocumentError> {
+    if depth > MAX_RELATIONSHIP_METADATA_DEPTH {
+        return invalid("relationship metadata is too deep");
+    }
+    match value {
+        serde_json::Value::String(value) => validate_text(value),
+        serde_json::Value::Array(values) => {
+            for value in values {
+                validate_metadata_value(value, depth + 1)?;
+            }
+            Ok(())
+        }
+        serde_json::Value::Object(values) => {
+            for (key, value) in values {
+                validate_text(key)?;
+                validate_metadata_value(value, depth + 1)?;
+            }
+            Ok(())
+        }
+        serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {
+            Ok(())
+        }
+    }
+}
+
 fn validate_space_workspace<'a>(
     workspace: &'a HostSpaceWorkspaceRef,
     workspace_ids: &mut HashSet<&'a str>,
@@ -667,18 +920,24 @@ fn validate_terminal_ref(terminal: &HostTerminalRef) -> Result<(), HostDocumentE
 }
 
 fn validate_item_cycles(items: &[HostDocumentItem]) -> Result<(), HostDocumentError> {
+    let parents = items
+        .iter()
+        .map(|item| (item.id.as_str(), item.parent_id.as_deref()))
+        .collect::<HashMap<_, _>>();
+    let mut complete = HashSet::new();
     for item in items {
-        let mut current = item.parent_id.as_deref();
-        let mut visited = HashSet::new();
+        let mut current = Some(item.id.as_str());
+        let mut path = HashSet::new();
         while let Some(id) = current {
-            if !visited.insert(id) {
+            if complete.contains(id) {
+                break;
+            }
+            if !path.insert(id) {
                 return invalid("document item hierarchy contains a cycle");
             }
-            current = items
-                .iter()
-                .find(|candidate| candidate.id == id)
-                .and_then(|candidate| candidate.parent_id.as_deref());
+            current = parents.get(id).copied().flatten();
         }
+        complete.extend(path);
     }
     Ok(())
 }
@@ -690,6 +949,148 @@ fn invalid<T>(message: &str) -> Result<T, HostDocumentError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn relationships_snapshot() -> HostRelationshipsV1 {
+        HostRelationshipsV1 {
+            contract: HOST_RELATIONSHIPS_CONTRACT_V1.into(),
+            generation: 2,
+            revision: 3,
+            scope_id: "session_alpha".into(),
+            relationships: vec![
+                HostRelationship {
+                    relationship_id: "root".into(),
+                    kind: "example.delegation".into(),
+                    terminal: None,
+                    parent_id: None,
+                    sibling_rank: 0,
+                    lifecycle: HostRelationshipLifecycle::Active,
+                    metadata: BTreeMap::from([(
+                        "example.delegation.purpose".into(),
+                        serde_json::json!("coordinate"),
+                    )]),
+                },
+                HostRelationship {
+                    relationship_id: "child".into(),
+                    kind: "example.delegation".into(),
+                    terminal: Some(HostTerminalRef {
+                        terminal_id: "term_child".into(),
+                        placement: None,
+                    }),
+                    parent_id: Some("root".into()),
+                    sibling_rank: 0,
+                    lifecycle: HostRelationshipLifecycle::Retained,
+                    metadata: BTreeMap::new(),
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn relationships_require_namespaced_bounded_acyclic_trees() {
+        relationships_snapshot().validate().unwrap();
+
+        let mut cyclic = relationships_snapshot();
+        cyclic.relationships[0].parent_id = Some("child".into());
+        assert!(cyclic.validate().unwrap_err().to_string().contains("cycle"));
+
+        let mut duplicate_rank = relationships_snapshot();
+        duplicate_rank.relationships[1].parent_id = None;
+        assert!(duplicate_rank
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("sibling ranks"));
+
+        let mut unnamespaced = relationships_snapshot();
+        unnamespaced.relationships[0].kind = "delegation".into();
+        assert!(unnamespaced.validate().is_err());
+    }
+
+    #[test]
+    fn relationships_are_bounded_by_extension_transport_capacity() {
+        let mut snapshot = relationships_snapshot();
+        snapshot.relationships = (0..64)
+            .map(|index| HostRelationship {
+                relationship_id: format!("r{index}"),
+                kind: "vqro.delegation".into(),
+                terminal: None,
+                parent_id: None,
+                sibling_rank: index,
+                lifecycle: HostRelationshipLifecycle::Active,
+                metadata: BTreeMap::from([(
+                    "vqro.delegation.payload".into(),
+                    serde_json::Value::String("x".repeat(MAX_DOCUMENT_TEXT_CHARS)),
+                )]),
+            })
+            .collect();
+        assert!(snapshot
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("transport capacity"));
+    }
+
+    #[test]
+    fn agent_activity_is_bounded_by_extension_transport_capacity() {
+        let snapshot = HostAgentActivityV1 {
+            contract: HOST_AGENT_ACTIVITY_CONTRACT_V1.into(),
+            generation: 1,
+            revision: 1,
+            scope_id: "session".into(),
+            activities: (0..MAX_AGENT_ACTIVITIES)
+                .map(|index| HostAgentActivityRecord {
+                    terminal: HostTerminalRef {
+                        terminal_id: format!("term_{index}"),
+                        placement: None,
+                    },
+                    activity: HostAgentActivityState::Working,
+                    source: "x".repeat(MAX_DOCUMENT_TEXT_CHARS),
+                    evidence_kind: "hook_state".into(),
+                    state_change_seq: index as u64,
+                    labels: BTreeMap::new(),
+                })
+                .collect(),
+        };
+        assert!(snapshot
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("transport capacity"));
+    }
+
+    #[test]
+    fn agent_activity_has_unique_terminals_and_round_trippable_attribution() {
+        let record = HostAgentActivityRecord {
+            terminal: HostTerminalRef {
+                terminal_id: "term_1".into(),
+                placement: None,
+            },
+            activity: HostAgentActivityState::Working,
+            source: "custom hook".into(),
+            evidence_kind: "future/evidence".into(),
+            state_change_seq: 17,
+            labels: BTreeMap::from([("name".into(), "Builder".into())]),
+        };
+        let mut snapshot = HostAgentActivityV1 {
+            contract: HOST_AGENT_ACTIVITY_CONTRACT_V1.into(),
+            generation: 4,
+            revision: 5,
+            scope_id: "session_alpha".into(),
+            activities: vec![record.clone()],
+        };
+        snapshot.validate().unwrap();
+        let decoded: HostAgentActivityV1 =
+            serde_json::from_value(serde_json::to_value(&snapshot).unwrap()).unwrap();
+        assert_eq!(decoded.activities[0].source, "custom hook");
+        assert_eq!(decoded.activities[0].evidence_kind, "future/evidence");
+
+        snapshot.activities.push(record);
+        assert!(snapshot
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("unique"));
+    }
 
     fn spaces_snapshot() -> HostSpacesV1 {
         HostSpacesV1 {

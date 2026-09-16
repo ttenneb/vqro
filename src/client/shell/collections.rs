@@ -39,12 +39,11 @@ fn render_preview_scrollbar(
 
 fn member_name(
     pane_id: &str,
-    delegation: Option<&crate::protocol::endpoint::ClientShellDelegation>,
+    purpose: Option<&str>,
     agent: Option<&crate::protocol::ClientShellAgent>,
     pane: Option<&crate::protocol::ClientShellPane>,
 ) -> String {
-    delegation
-        .and_then(|entry| entry.purpose.as_deref())
+    purpose
         .or_else(|| agent.and_then(|agent| agent.name.as_deref()))
         .or_else(|| agent.and_then(|agent| agent.title.as_deref()))
         .or_else(|| agent.and_then(|agent| agent.terminal_title_stripped.as_deref()))
@@ -88,6 +87,7 @@ pub(super) fn render_collection_chrome(
     buffer: &mut Buffer,
     snapshot: &crate::protocol::ClientShellSnapshot,
     structure: Option<&crate::protocol::endpoint::ClientShellStructureProjection>,
+    documented_delegations: Option<&super::document_navigation::DelegationNavigation>,
     panes: &[PaneHit],
     list_views: &HashSet<String>,
     maximized_pane: Option<&(String, String)>,
@@ -143,7 +143,13 @@ pub(super) fn render_collection_chrome(
             continue;
         };
         let selected = members[selected_index];
-        let delegation = delegations.get(selected.pane_id.as_str()).copied();
+        let documented_delegation = documented_delegations
+            .as_ref()
+            .and_then(|delegations| delegations.for_pane(&selected.pane_id));
+        let delegation = documented_delegations
+            .is_none()
+            .then(|| delegations.get(selected.pane_id.as_str()).copied())
+            .flatten();
         let header_y = pane.inner_rect.y.saturating_sub(1);
         if header_y < pane.rect.y || pane.inner_rect.width < 12 {
             continue;
@@ -233,20 +239,36 @@ pub(super) fn render_collection_chrome(
             .x
             .saturating_sub(content_x)
             .saturating_sub(1);
-        let parent_outside_collection = delegation
-            .and_then(|entry| entry.parent_id.as_deref())
-            .and_then(|parent_id| delegations_by_id.get(parent_id))
-            .and_then(|parent| parent.pane_id.as_deref())
+        let parent_outside_collection = documented_delegation
+            .and_then(|entry| entry.parent_pane_id.as_deref())
+            .or_else(|| {
+                delegation
+                    .and_then(|entry| entry.parent_id.as_deref())
+                    .and_then(|parent_id| delegations_by_id.get(parent_id))
+                    .and_then(|parent| parent.pane_id.as_deref())
+            })
             .is_some_and(|parent_pane_id| {
                 !members
                     .iter()
                     .any(|member| member.pane_id == parent_pane_id)
             });
-        let structure_icon = match delegation {
-            Some(entry) if entry.external_parent_id.is_some() || parent_outside_collection => "↗",
-            Some(entry) if entry.depth > 0 => "↳",
-            Some(_) => "◆",
-            None => "·",
+        let structure_icon = if let Some(entry) = documented_delegation {
+            if parent_outside_collection {
+                "↗"
+            } else if entry.depth > 0 {
+                "↳"
+            } else {
+                "◆"
+            }
+        } else {
+            match delegation {
+                Some(entry) if entry.external_parent_id.is_some() || parent_outside_collection => {
+                    "↗"
+                }
+                Some(entry) if entry.depth > 0 => "↳",
+                Some(_) => "◆",
+                None => "·",
+            }
         };
         let archive = if selected.archived { "◇ " } else { "" };
         let status = agents
@@ -263,7 +285,9 @@ pub(super) fn render_collection_chrome(
             archive,
             member_name(
                 &selected.pane_id,
-                delegation,
+                documented_delegation
+                    .map(|entry| entry.label.as_str())
+                    .or_else(|| delegation.and_then(|entry| entry.purpose.as_deref())),
                 agents.get(selected.pane_id.as_str()).copied(),
                 projected_panes.get(selected.pane_id.as_str()).copied(),
             ),
@@ -303,6 +327,7 @@ pub(super) fn render_collection_chrome(
 pub(super) struct CollectionProjection<'a> {
     pub(super) structure: Option<&'a crate::protocol::endpoint::ClientShellStructureProjection>,
     pub(super) host_documents: Option<&'a crate::protocol::endpoint::HostDocumentsProjectionV1>,
+    pub(super) documented_delegations: Option<&'a super::document_navigation::DelegationNavigation>,
 }
 
 pub(super) fn render_collection_lists(
@@ -323,6 +348,7 @@ pub(super) fn render_collection_lists(
     }) else {
         return Vec::new();
     };
+    let documented_delegations = projection.documented_delegations;
     let projected_panes = snapshot
         .panes
         .iter()
@@ -533,20 +559,37 @@ pub(super) fn render_collection_lists(
                 if y >= area.bottom().saturating_sub(1) {
                     break;
                 }
-                let delegation = delegations.get(member.pane_id.as_str()).copied();
-                let local_parent = delegation
-                    .and_then(|delegation| delegation.parent_id.as_deref())
-                    .and_then(|parent_id| delegations_by_id.get(parent_id).copied())
-                    .and_then(|parent| parent.pane_id.as_deref())
-                    .is_some_and(|parent_pane_id| {
-                        archived_by_pane.get(parent_pane_id) == Some(&member.archived)
+                let documented_delegation = documented_delegations
+                    .as_ref()
+                    .and_then(|delegations| delegations.for_pane(&member.pane_id));
+                let delegation = documented_delegations
+                    .is_none()
+                    .then(|| delegations.get(member.pane_id.as_str()).copied())
+                    .flatten();
+                let parent_pane_id = documented_delegation
+                    .and_then(|entry| entry.parent_pane_id.as_deref())
+                    .or_else(|| {
+                        delegation
+                            .and_then(|entry| entry.parent_id.as_deref())
+                            .and_then(|parent_id| delegations_by_id.get(parent_id).copied())
+                            .and_then(|parent| parent.pane_id.as_deref())
                     });
-                let external_parent = delegation.is_some_and(|delegation| {
-                    delegation.external_parent_id.is_some()
-                        || (delegation.parent_id.is_some() && !local_parent)
+                let local_parent = parent_pane_id.is_some_and(|parent_pane_id| {
+                    archived_by_pane.get(parent_pane_id) == Some(&member.archived)
                 });
+                let has_parent = documented_delegation
+                    .is_some_and(|entry| entry.parent_id.is_some())
+                    || delegation.is_some_and(|entry| entry.parent_id.is_some());
+                let external_parent = documented_delegation
+                    .is_some_and(|_| has_parent && !local_parent)
+                    || delegation.is_some_and(|entry| {
+                        entry.external_parent_id.is_some() || (has_parent && !local_parent)
+                    });
                 let depth = if local_parent {
-                    delegation.map_or(0, |delegation| delegation.depth.min(8))
+                    documented_delegation.map_or_else(
+                        || delegation.map_or(0, |entry| entry.depth.min(8)),
+                        |entry| entry.depth.min(8),
+                    )
                 } else {
                     0
                 };
@@ -570,7 +613,9 @@ pub(super) fn render_collection_lists(
                     || {
                         member_name(
                             &member.pane_id,
-                            delegation,
+                            documented_delegation
+                                .map(|entry| entry.label.as_str())
+                                .or_else(|| delegation.and_then(|entry| entry.purpose.as_deref())),
                             agents.get(member.pane_id.as_str()).copied(),
                             projected_panes.get(member.pane_id.as_str()).copied(),
                         )

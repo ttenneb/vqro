@@ -1923,6 +1923,8 @@ impl App {
             };
             ws.close_pane(pane_id)
         };
+        self.state.delegations.tombstone_pane(pane_id);
+        self.state.delegations.gc_tombstones();
         self.state.remove_plugin_pane_records([pane_id]);
         if should_close_workspace {
             self.state.selected = ws_idx;
@@ -2989,6 +2991,65 @@ mod tests {
         assert!(app.state.workspaces.is_empty());
         assert!(app.collections_shadow_documents.is_empty());
         assert!(app.host_documents().is_empty());
+    }
+
+    #[test]
+    fn api_pane_close_retains_delegation_ancestry_for_live_descendant() {
+        let mut app = app_with_linked_worktree();
+        let root_pane = app.state.workspaces[0].tabs[0].root_pane;
+        let child_pane = app.state.workspaces[0].test_split(ratatui::layout::Direction::Horizontal);
+        app.state.ensure_test_terminals();
+        let parent = app
+            .state
+            .delegations
+            .create(Some(root_pane), None, Some("parent".into()))
+            .unwrap();
+        let child = app
+            .state
+            .delegations
+            .create(Some(child_pane), Some(parent), Some("child".into()))
+            .unwrap();
+        let public_pane_id = app.public_pane_id(0, root_pane).unwrap();
+
+        let response = app.handle_pane_close(
+            "req".into(),
+            PaneTarget {
+                pane_id: public_pane_id,
+            },
+        );
+
+        let _: SuccessResponse = serde_json::from_str(&response).unwrap();
+        let retained = app.state.delegations.get(parent).unwrap();
+        assert!(retained.tombstone);
+        assert_eq!(retained.pane_id, None);
+        assert_eq!(
+            app.state.delegations.get(child).unwrap().parent_id,
+            Some(parent)
+        );
+    }
+
+    #[test]
+    fn reparenting_a_restored_leaf_tombstone_is_rejected_without_gc_panic() {
+        let mut app = app_with_linked_worktree();
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let retained = app
+            .state
+            .delegations
+            .create(Some(pane_id), None, Some("retained".into()))
+            .unwrap();
+        app.state.delegations.tombstone_pane(pane_id);
+
+        let response = app.handle_delegation_reparent(
+            "req".into(),
+            crate::api::schema::DelegationReparentParams {
+                delegation_id: retained.to_string(),
+                parent_id: None,
+            },
+        );
+
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(value["error"]["code"], "invalid_delegation");
+        assert!(app.state.delegations.get(retained).is_some());
     }
 
     #[test]

@@ -610,11 +610,26 @@ fn mobile_items(
             });
         }
     }
-    let agents = super::aggregate_navigation::aggregate_agent_rows(
+    let navigation = super::aggregate_navigation::agent_navigation_cache(endpoints);
+    let agents = super::aggregate_navigation::aggregate_agent_rows_cached(
         endpoints,
         active_endpoint_id,
         config.agent_panel_sort,
+        &navigation,
     );
+    let documented_agent_labels = endpoints
+        .iter()
+        .filter_map(|endpoint| {
+            let rows = navigation.get(&endpoint.endpoint_id)?.as_ref()?;
+            Some(rows.iter().map(move |row| {
+                (
+                    (endpoint.endpoint_id.clone(), row.pane_id.clone()),
+                    row.label.clone(),
+                )
+            }))
+        })
+        .flatten()
+        .collect::<std::collections::HashMap<_, _>>();
     let agent_view_label = snapshot.agent_view_label.as_deref();
     if !agents.is_empty() || agent_view_label.is_some() {
         let title = agent_view_label
@@ -647,9 +662,11 @@ fn mobile_items(
                 .tabs
                 .iter()
                 .find(|tab| tab.tab_id == agent.tab_id);
-            let agent_label = agent
-                .display_agent
-                .as_deref()
+            let documented_label =
+                documented_agent_labels.get(&(endpoint.endpoint_id.clone(), agent.pane_id.clone()));
+            let agent_label = documented_label
+                .map(String::as_str)
+                .or(agent.display_agent.as_deref())
                 .or(agent.name.as_deref())
                 .or(agent.agent.as_deref())
                 .unwrap_or("agent");

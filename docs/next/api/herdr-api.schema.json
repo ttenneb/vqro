@@ -8659,6 +8659,8 @@
           "enum": [
             "terminal_groups",
             "spaces",
+            "relationships",
+            "agent_activity",
             "unknown"
           ],
           "type": "string"

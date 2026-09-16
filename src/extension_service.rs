@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 
 pub const EXTENSION_SERVICE_PROTOCOL: u16 = 2;
-const MAX_FRAME_BYTES: usize = 256 * 1024;
+const MAX_FRAME_BYTES: usize = crate::extension_contract::MAX_EXTENSION_FRAME_BYTES;
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(3);
 const REQUEST_TIMEOUT: Duration = Duration::from_millis(750);
 const MAX_RESTARTS: u32 = 3;
@@ -207,6 +207,8 @@ fn limit_host_document_specs(
     specs.retain(|(namespace, _, _, _)| {
         namespace != crate::first_party::collections::NAMESPACE
             && namespace != crate::first_party::spaces::NAMESPACE
+            && namespace != crate::first_party::delegation::NAMESPACE
+            && namespace != crate::first_party::agent_status::NAMESPACE
             && namespace != "host.fallback"
     });
     let mut namespaces = std::collections::HashSet::new();
@@ -351,6 +353,8 @@ struct HostDocumentProvider {
 enum HostDocumentSnapshotV1 {
     TerminalGroups(crate::extension_contract::HostTerminalGroupsV1),
     Spaces(crate::extension_contract::HostSpacesV1),
+    Relationships(crate::extension_contract::HostRelationshipsV1),
+    AgentActivity(crate::extension_contract::HostAgentActivityV1),
 }
 
 impl HostDocumentSnapshotV1 {
@@ -358,6 +362,8 @@ impl HostDocumentSnapshotV1 {
         match self {
             Self::TerminalGroups(snapshot) => &snapshot.scope_id,
             Self::Spaces(snapshot) => &snapshot.scope_id,
+            Self::Relationships(snapshot) => &snapshot.scope_id,
+            Self::AgentActivity(snapshot) => &snapshot.scope_id,
         }
     }
 
@@ -365,6 +371,8 @@ impl HostDocumentSnapshotV1 {
         match self {
             Self::TerminalGroups(snapshot) => snapshot.generation,
             Self::Spaces(snapshot) => snapshot.generation,
+            Self::Relationships(snapshot) => snapshot.generation,
+            Self::AgentActivity(snapshot) => snapshot.generation,
         }
     }
 
@@ -372,6 +380,8 @@ impl HostDocumentSnapshotV1 {
         match self {
             Self::TerminalGroups(snapshot) => snapshot.revision,
             Self::Spaces(snapshot) => snapshot.revision,
+            Self::Relationships(snapshot) => snapshot.revision,
+            Self::AgentActivity(snapshot) => snapshot.revision,
         }
     }
 
@@ -379,6 +389,8 @@ impl HostDocumentSnapshotV1 {
         match self {
             Self::TerminalGroups(_) => crate::api::schema::HostDocumentSourceKind::TerminalGroups,
             Self::Spaces(_) => crate::api::schema::HostDocumentSourceKind::Spaces,
+            Self::Relationships(_) => crate::api::schema::HostDocumentSourceKind::Relationships,
+            Self::AgentActivity(_) => crate::api::schema::HostDocumentSourceKind::AgentActivity,
         }
     }
 }
@@ -472,6 +484,25 @@ fn reject_queued_host_document_action(
     }
 }
 
+fn host_document_target_matches(
+    snapshot: &HostDocumentSnapshotV1,
+    target: &crate::extension_contract::HostTarget,
+) -> bool {
+    match (snapshot, target) {
+        (
+            HostDocumentSnapshotV1::TerminalGroups(snapshot),
+            crate::extension_contract::HostTarget::Tab { tab_id },
+        ) => tab_id == &snapshot.scope_id,
+        (
+            HostDocumentSnapshotV1::Spaces(_)
+            | HostDocumentSnapshotV1::Relationships(_)
+            | HostDocumentSnapshotV1::AgentActivity(_),
+            crate::extension_contract::HostTarget::Session,
+        ) => true,
+        _ => false,
+    }
+}
+
 fn host_document_action_is_current(
     desired_revisions: &Mutex<std::collections::HashMap<String, (u64, u64)>>,
     snapshot: &HostDocumentSnapshotV1,
@@ -545,6 +576,26 @@ pub struct HostSpacesDocumentAsyncResult {
     pub namespace: String,
     pub provider_priority: i32,
     pub snapshot: crate::extension_contract::HostSpacesV1,
+    pub result: Result<crate::extension_contract::HostDocumentV1, String>,
+    pub grants: std::collections::HashSet<crate::extension_contract::HostCapability>,
+}
+
+#[derive(Debug)]
+pub struct HostRelationshipsDocumentAsyncResult {
+    pub(crate) _render_slot: Option<Arc<HostDocumentRenderSlotGuard>>,
+    pub namespace: String,
+    pub provider_priority: i32,
+    pub snapshot: crate::extension_contract::HostRelationshipsV1,
+    pub result: Result<crate::extension_contract::HostDocumentV1, String>,
+    pub grants: std::collections::HashSet<crate::extension_contract::HostCapability>,
+}
+
+#[derive(Debug)]
+pub struct HostAgentActivityDocumentAsyncResult {
+    pub(crate) _render_slot: Option<Arc<HostDocumentRenderSlotGuard>>,
+    pub namespace: String,
+    pub provider_priority: i32,
+    pub snapshot: crate::extension_contract::HostAgentActivityV1,
     pub result: Result<crate::extension_contract::HostDocumentV1, String>,
     pub grants: std::collections::HashSet<crate::extension_contract::HostCapability>,
 }
@@ -814,9 +865,9 @@ impl HostDocumentServiceCatalog {
         event_tx: tokio::sync::mpsc::Sender<crate::events::AppEvent>,
     ) -> Self {
         let mut providers = std::collections::BTreeMap::new();
-        // Reserve capacity for both bundled providers. Collections' generic fallback
-        // occupies its reserved public projection identity when that provider is disabled.
-        let reserved_bundled = 2;
+        // Reserve capacity for all default-enabled bundled document providers. Collections'
+        // generic fallback occupies its reserved identity when that provider is disabled.
+        let reserved_bundled = 4;
         for (namespace, candidate, grants, source) in
             limit_host_document_specs(host_document_specs(plugins), reserved_bundled)
         {
@@ -905,6 +956,51 @@ impl HostDocumentServiceCatalog {
                         },
                     );
                 }
+            }
+        }
+        for (namespace, command, source) in [
+            (
+                crate::first_party::delegation::NAMESPACE,
+                "delegation",
+                crate::api::schema::HostDocumentSourceKind::Relationships,
+            ),
+            (
+                crate::first_party::agent_status::NAMESPACE,
+                "agent-status",
+                crate::api::schema::HostDocumentSourceKind::AgentActivity,
+            ),
+        ] {
+            if disabled.contains(namespace) {
+                continue;
+            }
+            let Ok(exe) = std::env::current_exe() else {
+                continue;
+            };
+            let spec = ExtensionServiceSpec {
+                id: namespace.into(),
+                command: vec![
+                    exe.display().to_string(),
+                    "_extension-service".into(),
+                    command.into(),
+                ],
+                cwd: std::env::current_dir().unwrap_or_default(),
+                priority: 100,
+                granted_capabilities: vec![
+                    crate::api::schema::ExtensionServiceCapability::HostDocument,
+                ],
+            };
+            if let Ok(supervisor) = ExtensionServiceSupervisor::new(spec) {
+                providers.insert(
+                    namespace.into(),
+                    HostDocumentProvider {
+                        source,
+                        priority: 100,
+                        generation: NEXT_SERVICE_GENERATION
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+                        supervisor,
+                        grants: std::collections::HashSet::new(),
+                    },
+                );
             }
         }
         let mut generations: std::collections::BTreeMap<String, u64> = providers
@@ -1130,19 +1226,10 @@ impl HostDocumentServiceCatalog {
                                     if document.namespace == request.namespace
                                         && document.generation == provider.generation
                                         && document.revision == request.snapshot.revision()
-                                        && match (&request.snapshot, &document.target) {
-                                            (
-                                                HostDocumentSnapshotV1::TerminalGroups(snapshot),
-                                                crate::extension_contract::HostTarget::Tab {
-                                                    tab_id,
-                                                },
-                                            ) => tab_id == &snapshot.scope_id,
-                                            (
-                                                HostDocumentSnapshotV1::Spaces(_),
-                                                crate::extension_contract::HostTarget::Session,
-                                            ) => true,
-                                            _ => false,
-                                        }
+                                        && host_document_target_matches(
+                                            &request.snapshot,
+                                            &document.target,
+                                        )
                                     {
                                         Ok(document)
                                     } else {
@@ -1181,6 +1268,30 @@ impl HostDocumentServiceCatalog {
                         HostDocumentSnapshotV1::Spaces(snapshot) => {
                             crate::events::AppEvent::HostSpacesDocumentFinished(Box::new(
                                 HostSpacesDocumentAsyncResult {
+                                    _render_slot: request.render_slot,
+                                    namespace: request.namespace,
+                                    provider_priority: provider.priority,
+                                    snapshot,
+                                    result,
+                                    grants: provider.grants.clone(),
+                                },
+                            ))
+                        }
+                        HostDocumentSnapshotV1::Relationships(snapshot) => {
+                            crate::events::AppEvent::HostRelationshipsDocumentFinished(Box::new(
+                                HostRelationshipsDocumentAsyncResult {
+                                    _render_slot: request.render_slot,
+                                    namespace: request.namespace,
+                                    provider_priority: provider.priority,
+                                    snapshot,
+                                    result,
+                                    grants: provider.grants.clone(),
+                                },
+                            ))
+                        }
+                        HostDocumentSnapshotV1::AgentActivity(snapshot) => {
+                            crate::events::AppEvent::HostAgentActivityDocumentFinished(Box::new(
+                                HostAgentActivityDocumentAsyncResult {
                                     _render_slot: request.render_slot,
                                     namespace: request.namespace,
                                     provider_priority: provider.priority,
@@ -1229,6 +1340,19 @@ impl HostDocumentServiceCatalog {
 
     pub fn namespaces(&self) -> impl Iterator<Item = &str> {
         self.generations.keys().map(String::as_str)
+    }
+
+    pub fn source(&self, namespace: &str) -> Option<crate::api::schema::HostDocumentSourceKind> {
+        self.requests
+            .get(namespace)
+            .map(|handle| handle.source)
+            // Test-only in-process providers predate source-aware request handles and model the
+            // original terminal-groups provider.
+            .or_else(|| {
+                self.generations
+                    .contains_key(namespace)
+                    .then_some(crate::api::schema::HostDocumentSourceKind::TerminalGroups)
+            })
     }
 
     pub fn generation(&self, namespace: &str) -> Option<u64> {
@@ -1419,6 +1543,22 @@ impl HostDocumentServiceCatalog {
         snapshot: crate::extension_contract::HostSpacesV1,
     ) -> Result<(), String> {
         self.request_snapshot(namespace, HostDocumentSnapshotV1::Spaces(snapshot))
+    }
+
+    pub fn request_relationships(
+        &self,
+        namespace: &str,
+        snapshot: crate::extension_contract::HostRelationshipsV1,
+    ) -> Result<(), String> {
+        self.request_snapshot(namespace, HostDocumentSnapshotV1::Relationships(snapshot))
+    }
+
+    pub fn request_agent_activity(
+        &self,
+        namespace: &str,
+        snapshot: crate::extension_contract::HostAgentActivityV1,
+    ) -> Result<(), String> {
+        self.request_snapshot(namespace, HostDocumentSnapshotV1::AgentActivity(snapshot))
     }
 
     fn request_snapshot(
@@ -4153,6 +4293,41 @@ printf '{"type":"response","id":%s,"result":{"accepted":true}}\n' "$id"
             )
             .unwrap();
         assert_eq!(supervisor.status, ExtensionServiceStatus::Running);
+    }
+
+    #[test]
+    fn every_host_snapshot_source_accepts_only_its_expected_target() {
+        let session = crate::extension_contract::HostTarget::Session;
+        let relationships =
+            HostDocumentSnapshotV1::Relationships(crate::extension_contract::HostRelationshipsV1 {
+                contract: crate::extension_contract::HOST_RELATIONSHIPS_CONTRACT_V1.into(),
+                generation: 1,
+                revision: 1,
+                scope_id: "session".into(),
+                relationships: Vec::new(),
+            });
+        let activity =
+            HostDocumentSnapshotV1::AgentActivity(crate::extension_contract::HostAgentActivityV1 {
+                contract: crate::extension_contract::HOST_AGENT_ACTIVITY_CONTRACT_V1.into(),
+                generation: 1,
+                revision: 1,
+                scope_id: "session".into(),
+                activities: Vec::new(),
+            });
+        assert!(host_document_target_matches(&relationships, &session));
+        assert!(host_document_target_matches(&activity, &session));
+        assert!(!host_document_target_matches(
+            &relationships,
+            &crate::extension_contract::HostTarget::Tab {
+                tab_id: "t1".into()
+            },
+        ));
+        assert!(!host_document_target_matches(
+            &activity,
+            &crate::extension_contract::HostTarget::Tab {
+                tab_id: "t1".into()
+            },
+        ));
     }
 
     #[cfg(unix)]

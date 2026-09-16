@@ -262,22 +262,26 @@ actions; Herdr continues to own terminal processes, geometry, focus, input,
 colors, accessibility, admission, and rendering. Rendering uses the last
 validated cached document rather than making per-frame service calls.
 
-The bundled `vqro.collections` and `vqro.spaces` providers use this same public
-service and document protocol. They are enabled by default and can be disabled
-independently:
+The bundled `vqro.collections`, `vqro.spaces`, `vqro.delegation`, and
+`vqro.agent-status` providers use this same public service and document protocol.
+They are enabled by default and can be disabled independently:
 
 ```toml
 [extensions]
-disabled = ["vqro.collections", "vqro.spaces"]
+disabled = ["vqro.collections", "vqro.spaces", "vqro.delegation", "vqro.agent-status"]
 ```
 
-Disabling or losing either provider removes its product-specific document, but
+Disabling or losing any provider removes its product-specific document, but
 all workspaces, tabs, panes, and live terminals remain reachable through the
-native generic projection. The `spaces` document source carries host-derived
-repository identity and is currently reserved for the bundled `vqro.spaces`
-provider; user services cannot request it. User document providers use the
-public terminal-group source. The namespaces `vqro.collections`, `vqro.spaces`,
-and `host.fallback` are reserved.
+native generic projection. The `spaces`, `relationships`, and `agent_activity` document sources carry
+host-derived repository, relationship, or attributed activity facts and are
+currently restricted to their matching bundled providers. Their bounded
+`host.spaces.v1`, `host.relationships.v1`, and `host.agent-activity.v1` JSON
+contracts remain the versioned service boundary. Agent activity is neutral
+(`idle`, `working`, `blocked`, or `unknown`); each client still derives `done`
+from its own acknowledgement cursor. User document providers use the public
+terminal-group source. The namespaces `vqro.collections`, `vqro.spaces`,
+`vqro.delegation`, `vqro.agent-status`, and `host.fallback` are reserved.
 
 ## Commands and environment
 

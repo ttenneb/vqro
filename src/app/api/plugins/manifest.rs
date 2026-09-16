@@ -195,7 +195,11 @@ pub(crate) fn load_plugin_manifest(
     reject_duplicate_service_ids(&services)?;
     let reserved_document_namespace = matches!(
         plugin_id.as_str(),
-        "vqro.collections" | "vqro.spaces" | "host.fallback"
+        "vqro.collections"
+            | "vqro.spaces"
+            | "vqro.delegation"
+            | "vqro.agent-status"
+            | "host.fallback"
     );
     let publishes_host_documents = services.iter().any(|service| {
         service
@@ -210,11 +214,11 @@ pub(crate) fn load_plugin_manifest(
     }
     if services
         .iter()
-        .any(|service| service.document_source == HostDocumentSourceKind::Spaces)
+        .any(|service| service.document_source != HostDocumentSourceKind::TerminalGroups)
     {
         return Err((
             "restricted_host_document_source",
-            "the host-derived spaces source is restricted to the bundled vqro.spaces provider"
+            "host-derived document sources are restricted to their bundled first-party providers"
                 .to_string(),
         ));
     }

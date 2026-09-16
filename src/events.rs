@@ -176,7 +176,20 @@ pub enum AppEvent {
     // Constructed by production provider workers; test catalogs use injected terminal-group sources.
     #[cfg_attr(test, allow(dead_code))]
     HostSpacesDocumentFinished(Box<crate::extension_service::HostSpacesDocumentAsyncResult>),
+    // Production bundled providers construct these; unit tests install explicit sources.
+    #[cfg_attr(test, allow(dead_code))]
+    HostRelationshipsDocumentFinished(
+        Box<crate::extension_service::HostRelationshipsDocumentAsyncResult>,
+    ),
+    #[cfg_attr(test, allow(dead_code))]
+    HostAgentActivityDocumentFinished(
+        Box<crate::extension_service::HostAgentActivityDocumentAsyncResult>,
+    ),
     HostSpacesRetryDue {
+        epoch: u64,
+    },
+    HostSemanticDocumentRetryDue {
+        namespace: String,
         epoch: u64,
     },
     ExtensionCatalogCapacityAvailable,

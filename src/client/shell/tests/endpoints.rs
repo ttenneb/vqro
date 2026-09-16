@@ -916,6 +916,63 @@ fn current_workspace_or_blocked_keeps_foreign_attention_only() {
         ..remote.panes[0].clone()
     });
     state.set_endpoint_snapshot(&endpoint_id, Box::new(remote));
+    let terminal_item =
+        |id: &str, pane_id: &str, label: &str| crate::extension_contract::HostDocumentItem {
+            id: format!("terminal:{id}"),
+            parent_id: Some("activity:blocked".into()),
+            role: crate::extension_contract::HostItemRole::Terminal,
+            label: label.into(),
+            detail: None,
+            terminal: Some(crate::extension_contract::HostTerminalRef {
+                terminal_id: id.into(),
+                placement: Some(crate::extension_contract::HostTerminalPlacement {
+                    pane_id: pane_id.into(),
+                    workspace_id: "ws_1".into(),
+                    tab_id: "tab_1".into(),
+                }),
+            }),
+            action_ids: Vec::new(),
+            flags: Default::default(),
+        };
+    state.set_endpoint_host_documents_for_generation(
+        &endpoint_id,
+        1,
+        Box::new(crate::protocol::endpoint::HostDocumentsProjectionV1 {
+            boot_id: "remote-boot".into(),
+            revision: 1,
+            documents: vec![crate::protocol::endpoint::HostDocumentProjectionEntryV1 {
+                provider_priority: 100,
+                document: crate::extension_contract::HostDocumentV1 {
+                    contract: crate::extension_contract::HOST_DOCUMENT_CONTRACT_V1.into(),
+                    namespace: crate::first_party::agent_status::NAMESPACE.into(),
+                    generation: 1,
+                    revision: 1,
+                    surface: crate::extension_contract::HostSurface::Navigation,
+                    target: crate::extension_contract::HostTarget::Session,
+                    items: vec![
+                        crate::extension_contract::HostDocumentItem {
+                            id: "activity:blocked".into(),
+                            parent_id: None,
+                            role: crate::extension_contract::HostItemRole::Group,
+                            label: "Provider blocked".into(),
+                            detail: None,
+                            terminal: None,
+                            action_ids: Vec::new(),
+                            flags: crate::extension_contract::HostDocumentItemFlags {
+                                expanded: true,
+                                ..Default::default()
+                            },
+                        },
+                        terminal_item("remote-1", "pane_1", "remote idle"),
+                        terminal_item("remote-2", "pane_2", "remote blocked"),
+                    ],
+                    actions: Vec::new(),
+                    required_capabilities: Vec::new(),
+                },
+                confirmation_tokens: Default::default(),
+            }],
+        }),
+    );
 
     let mut view = current_workspace_view();
     view.label = Some("focus".into());
@@ -944,6 +1001,7 @@ fn current_workspace_or_blocked_keeps_foreign_attention_only() {
     assert!(text.contains("Local · local agent"), "frame: {text}");
     assert!(!text.contains("Build · remote idle"), "frame: {text}");
     assert!(text.contains("Build · remote blocked"), "frame: {text}");
+    assert!(!text.contains("Provider blocked"), "frame: {text}");
 }
 
 #[test]
@@ -986,7 +1044,13 @@ fn selected_default_view_ignores_inactive_endpoint_projection() {
         }),
     );
 
+    super::super::document_navigation::reset_agent_navigation_call_count();
     let frame = state.compose(100, 28).expect("combined endpoint frame");
+    assert_eq!(
+        super::super::document_navigation::agent_navigation_call_count(),
+        2,
+        "each endpoint document must be joined exactly once per frame"
+    );
     let text = frame
         .cells
         .chunks(frame.width as usize)

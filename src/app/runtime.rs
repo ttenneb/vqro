@@ -57,9 +57,14 @@ impl App {
 
     pub(crate) fn expire_metadata_at(&mut self, deadline: Instant, now: Instant) {
         let previous_toast = self.state.toast.clone();
-        for update in self.state.expire_agent_metadata_at(deadline, now) {
+        let agent_updates = self.state.expire_agent_metadata_at(deadline, now);
+        let refresh_agent_activity = !agent_updates.is_empty();
+        for update in agent_updates {
             self.refresh_new_herdr_toast_context_for_update(&update, &previous_toast);
             self.emit_pane_state_update(&update);
+        }
+        if refresh_agent_activity {
+            self.refresh_agent_activity_document();
         }
         let (panes, workspaces) = self.state.expire_metadata_tokens(now);
         for (ws_idx, pane_id) in panes {

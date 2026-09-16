@@ -188,10 +188,14 @@ pub(crate) fn render_collapsed_sidebar(
         detail_area.width,
         detail_area.height.saturating_sub(1),
     );
-    for (index, pane_id) in super::ordered_agent_pane_ids(snapshot, config.agent_panel_sort)
-        .into_iter()
-        .take(detail_content.height as usize)
-        .enumerate()
+    for (index, pane_id) in super::ordered_agent_pane_ids_with_documents(
+        snapshot,
+        config.agent_panel_sort,
+        host_documents,
+    )
+    .into_iter()
+    .take(detail_content.height as usize)
+    .enumerate()
     {
         let Some(agent) = snapshot
             .agents
@@ -611,6 +615,7 @@ pub(crate) fn render_sidebar(
         detail_area,
         snapshot,
         config,
+        host_documents,
         state.agent_scroll,
         hits,
     );

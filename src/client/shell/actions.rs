@@ -1102,6 +1102,11 @@ impl ClientShellState {
         let focused_workspace = snapshot.focused_workspace_id.clone()?;
         let focused_tab = snapshot.focused_tab_id.clone();
         let focused_pane = snapshot.focused_pane_id.clone();
+        let host_documents = self
+            .endpoints
+            .iter()
+            .find(|endpoint| endpoint.endpoint_id == self.active_endpoint_id)
+            .and_then(ClientShellEndpoint::current_host_documents);
         let direction = |action| match action {
             KeybindAction::FocusPaneLeft
             | KeybindAction::SwapPaneLeft
@@ -1120,18 +1125,20 @@ impl ClientShellState {
 
         match action {
             KeybindAction::FocusAgent(index) => {
-                let agents = super::agent_sidebar::ordered_agent_pane_ids(
+                let agents = super::agent_sidebar::ordered_agent_pane_ids_with_documents(
                     snapshot,
                     self.config.agent_panel_sort,
+                    host_documents,
                 );
                 Some(Method::PaneFocus(PaneTarget {
                     pane_id: agents.get(index)?.clone(),
                 }))
             }
             KeybindAction::PreviousAgent | KeybindAction::NextAgent => {
-                let agents = super::agent_sidebar::ordered_agent_pane_ids(
+                let agents = super::agent_sidebar::ordered_agent_pane_ids_with_documents(
                     snapshot,
                     self.config.agent_panel_sort,
+                    host_documents,
                 );
                 if agents.is_empty() {
                     return None;

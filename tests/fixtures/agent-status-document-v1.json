@@ -1,0 +1,75 @@
+{
+  "contract": "host.document.v1",
+  "namespace": "vqro.agent-status",
+  "generation": 8,
+  "revision": 21,
+  "surface": "navigation",
+  "target": { "kind": "session" },
+  "items": [
+    {
+      "id": "activity:blocked",
+      "role": "group",
+      "label": "Blocked",
+      "detail": "1 agent",
+      "action_ids": [],
+      "flags": { "selected": false, "expanded": true, "disabled": false, "attention": true }
+    },
+    {
+      "id": "terminal:term_blocked",
+      "parent_id": "activity:blocked",
+      "role": "terminal",
+      "label": "Review",
+      "detail": "Blocked",
+      "terminal": {
+        "terminal_id": "term_blocked",
+        "placement": { "pane_id": "w1:p_term_blocked", "workspace_id": "w1", "tab_id": "w1:t1" }
+      },
+      "action_ids": [],
+      "flags": { "selected": false, "expanded": false, "disabled": false, "attention": true }
+    },
+    {
+      "id": "activity:working",
+      "role": "group",
+      "label": "Working",
+      "detail": "1 agent",
+      "action_ids": [],
+      "flags": { "selected": false, "expanded": true, "disabled": false, "attention": false }
+    },
+    {
+      "id": "terminal:term_working",
+      "parent_id": "activity:working",
+      "role": "terminal",
+      "label": "Build",
+      "detail": "Working",
+      "terminal": {
+        "terminal_id": "term_working",
+        "placement": { "pane_id": "w1:p_term_working", "workspace_id": "w1", "tab_id": "w1:t1" }
+      },
+      "action_ids": [],
+      "flags": { "selected": false, "expanded": false, "disabled": false, "attention": false }
+    },
+    {
+      "id": "activity:idle",
+      "role": "group",
+      "label": "Idle",
+      "detail": "1 agent",
+      "action_ids": [],
+      "flags": { "selected": false, "expanded": true, "disabled": false, "attention": false }
+    },
+    {
+      "id": "terminal:term_idle",
+      "parent_id": "activity:idle",
+      "role": "terminal",
+      "label": "Research",
+      "detail": "Idle",
+      "terminal": {
+        "terminal_id": "term_idle",
+        "placement": { "pane_id": "w1:p_term_idle", "workspace_id": "w1", "tab_id": "w1:t1" }
+      },
+      "action_ids": [],
+      "flags": { "selected": false, "expanded": false, "disabled": false, "attention": false }
+    }
+  ],
+  "actions": [],
+  "required_capabilities": []
+}

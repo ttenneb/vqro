@@ -773,6 +773,17 @@ impl HeadlessServer {
             }
         }
 
+        let shared_host_documents = render_targets
+            .iter()
+            .any(|(client_id, _, _, _, mode)| {
+                matches!(mode, ClientConnectionMode::ClientShell)
+                    && self
+                        .clients
+                        .get(client_id)
+                        .is_some_and(|client| client.shell_host_documents_enabled)
+            })
+            .then(|| self.app.host_documents());
+
         let mut broken_clients: Vec<u64> = Vec::new();
         for (client_id, (cols, rows), cell_size, _is_foreground, mode) in render_targets {
             #[cfg(unix)]
@@ -802,7 +813,7 @@ impl HeadlessServer {
                     continue;
                 };
                 let host_documents = if client.shell_host_documents_enabled {
-                    self.app.host_documents()
+                    shared_host_documents.clone().unwrap_or_default()
                 } else {
                     Vec::new()
                 };

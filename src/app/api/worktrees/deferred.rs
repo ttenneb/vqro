@@ -587,7 +587,7 @@ impl App {
             worktree,
             result.forced,
         );
-        self.refresh_spaces_document();
+        self.refresh_collection_documents();
         let response = encode_success(
             api.id,
             ResponseResult::WorktreeRemoved {

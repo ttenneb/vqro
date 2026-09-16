@@ -270,6 +270,8 @@ pub enum HostDocumentSourceKind {
     #[default]
     TerminalGroups,
     Spaces,
+    Relationships,
+    AgentActivity,
     #[serde(other)]
     Unknown,
 }

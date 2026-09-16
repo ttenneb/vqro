@@ -182,6 +182,10 @@ impl App {
                 return encode_error(id, "tab_not_found", "tab not found");
             };
             if ws.close_tab(target_tab_idx) {
+                for pane_id in &plugin_pane_ids {
+                    self.state.delegations.tombstone_pane(*pane_id);
+                }
+                self.state.delegations.gc_tombstones();
                 self.state.remove_plugin_pane_records(plugin_pane_ids);
                 self.state.remove_unattached_terminal_ids(terminal_ids);
                 self.shutdown_detached_terminal_runtimes();
@@ -230,6 +234,7 @@ impl App {
         let Some(layout) = self.layout_description(ws_idx, new_tab_idx) else {
             return encode_error(id, "layout_apply_failed", "new layout unavailable");
         };
+        self.refresh_collection_documents();
         encode_success(id, ResponseResult::LayoutApply { layout })
     }
 
@@ -1052,6 +1057,16 @@ mod tests {
                 entrypoint: "board".into(),
             },
         );
+        let parent = app
+            .state
+            .delegations
+            .create(Some(replaced_pane), None, Some("parent".into()))
+            .unwrap();
+        let child = app
+            .state
+            .delegations
+            .create(None, Some(parent), Some("child".into()))
+            .unwrap();
 
         let response = app.handle_layout_apply(
             "req".into(),
@@ -1072,6 +1087,13 @@ mod tests {
         let success: SuccessResponse = serde_json::from_str(&response).unwrap();
         assert!(matches!(success.result, ResponseResult::LayoutApply { .. }));
         assert!(!app.state.plugin_panes.contains_key(&replaced_pane));
+        let retained = app.state.delegations.get(parent).unwrap();
+        assert!(retained.tombstone);
+        assert_eq!(retained.pane_id, None);
+        assert_eq!(
+            app.state.delegations.get(child).unwrap().parent_id,
+            Some(parent)
+        );
         app.state.assert_invariants_for_test();
     }
 

@@ -34,6 +34,14 @@ pub(crate) fn run(provider: &str) -> std::io::Result<i32> {
             crate::first_party::spaces::NAMESPACE,
             serde_json::json!(["host_document"]),
         ),
+        "delegation" => (
+            crate::first_party::delegation::NAMESPACE,
+            serde_json::json!(["host_document"]),
+        ),
+        "agent-status" => (
+            crate::first_party::agent_status::NAMESPACE,
+            serde_json::json!(["host_document"]),
+        ),
         _ => return Ok(2),
     };
     let service_id =
@@ -80,6 +88,22 @@ pub(crate) fn run(provider: &str) -> std::io::Result<i32> {
                     .map_err(|error| error.to_string())
                     .and_then(|snapshot| {
                         crate::first_party::spaces::project(&snapshot)
+                            .map_err(|error| error.to_string())
+                    }),
+                    "delegation" => serde_json::from_value::<
+                        crate::extension_contract::HostRelationshipsV1,
+                    >(request.params)
+                    .map_err(|error| error.to_string())
+                    .and_then(|snapshot| {
+                        crate::first_party::delegation::project(&snapshot)
+                            .map_err(|error| error.to_string())
+                    }),
+                    "agent-status" => serde_json::from_value::<
+                        crate::extension_contract::HostAgentActivityV1,
+                    >(request.params)
+                    .map_err(|error| error.to_string())
+                    .and_then(|snapshot| {
+                        crate::first_party::agent_status::project(&snapshot)
                             .map_err(|error| error.to_string())
                     }),
                     _ => unreachable!("provider was validated before the service loop"),

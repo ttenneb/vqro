@@ -11,11 +11,23 @@ use crate::layout::{CollectionId, LayoutLeaf};
 
 const MAX_HOST_DOCUMENT_CONFIRMATION_GRANTS: usize = 8_192;
 const MAX_HOST_SPACES_RETRY_ATTEMPTS: u32 = 6;
+const MAX_HOST_SEMANTIC_RETRY_ATTEMPTS: u32 = 6;
+const MAX_HOST_DOCUMENTS_PROJECTION_BYTES: usize = crate::protocol::MAX_FRAME_SIZE / 2;
+
+fn bounded_document_text(value: &str) -> String {
+    value
+        .chars()
+        .filter(|character| !character.is_control())
+        .take(crate::extension_contract::MAX_DOCUMENT_TEXT_CHARS)
+        .collect()
+}
 
 #[derive(Debug, Clone)]
 pub(crate) enum DeferredHostDocumentSnapshot {
     TerminalGroups(crate::extension_contract::HostTerminalGroupsV1),
     Spaces(crate::extension_contract::HostSpacesV1),
+    Relationships(crate::extension_contract::HostRelationshipsV1),
+    AgentActivity(crate::extension_contract::HostAgentActivityV1),
 }
 
 #[derive(Debug)]
@@ -99,6 +111,8 @@ impl App {
             self.refresh_collection_document(ws_idx, tab_idx);
         }
         self.refresh_spaces_document();
+        self.refresh_relationships_document();
+        self.refresh_agent_activity_document();
     }
 
     fn next_host_document_revision(&mut self) -> u64 {
@@ -113,11 +127,27 @@ impl App {
         revision
     }
 
+    fn next_host_relationships_document_revision(&mut self) -> u64 {
+        let revision = self.next_host_relationships_document_revision.max(1);
+        self.next_host_relationships_document_revision = revision.saturating_add(1).max(1);
+        revision
+    }
+
+    fn next_host_agent_activity_document_revision(&mut self) -> u64 {
+        let revision = self.next_host_agent_activity_document_revision.max(1);
+        self.next_host_agent_activity_document_revision = revision.saturating_add(1).max(1);
+        revision
+    }
+
     fn refresh_collection_document(&mut self, ws_idx: usize, tab_idx: usize) {
         let revision = self.next_host_document_revision();
         let mut namespaces = self
             .host_document_services
             .namespaces()
+            .filter(|namespace| {
+                self.host_document_services.source(namespace)
+                    == Some(crate::api::schema::HostDocumentSourceKind::TerminalGroups)
+            })
             .map(str::to_owned)
             .collect::<Vec<_>>();
         if !namespaces
@@ -203,6 +233,12 @@ impl App {
                 DeferredHostDocumentSnapshot::Spaces(snapshot) => self
                     .host_document_services
                     .request_spaces(&key.0, snapshot.clone()),
+                DeferredHostDocumentSnapshot::Relationships(snapshot) => self
+                    .host_document_services
+                    .request_relationships(&key.0, snapshot.clone()),
+                DeferredHostDocumentSnapshot::AgentActivity(snapshot) => self
+                    .host_document_services
+                    .request_agent_activity(&key.0, snapshot.clone()),
             };
             match result {
                 Ok(()) => return,
@@ -436,6 +472,334 @@ impl App {
         }
     }
 
+    fn host_terminal_ref_for_pane(
+        &self,
+        pane_id: crate::layout::PaneId,
+    ) -> Option<crate::extension_contract::HostTerminalRef> {
+        let (ws_idx, pane) = self.find_pane(pane_id)?;
+        let tab_idx = self.state.workspaces[ws_idx].find_tab_index_for_pane(pane_id)?;
+        let terminal = self.state.terminals.get(&pane.attached_terminal_id)?;
+        Some(crate::extension_contract::HostTerminalRef {
+            terminal_id: terminal.id.to_string(),
+            placement: Some(crate::extension_contract::HostTerminalPlacement {
+                pane_id: self.public_pane_id(ws_idx, pane_id)?,
+                workspace_id: self.public_workspace_id(ws_idx),
+                tab_id: self.public_tab_id(ws_idx, tab_idx)?,
+            }),
+        })
+    }
+
+    pub(crate) fn refresh_relationships_document(&mut self) {
+        let namespace = crate::first_party::delegation::NAMESPACE;
+        let scope_id = crate::first_party::spaces::SESSION_SCOPE_ID.to_string();
+        let Some(generation) = self.host_document_services.generation(namespace) else {
+            self.collections_shadow_documents
+                .remove(&(namespace.into(), scope_id.clone()));
+            self.host_document_request_watermarks
+                .remove(&(namespace.into(), scope_id));
+            self.host_relationships_last_desired = None;
+            return;
+        };
+        let relationships = self
+            .state
+            .delegations
+            .records()
+            .values()
+            .map(|record| {
+                let mut metadata = std::collections::BTreeMap::new();
+                if let Some(purpose) = record.purpose.as_ref() {
+                    metadata.insert(
+                        "vqro.delegation.purpose".into(),
+                        serde_json::json!(bounded_document_text(purpose)),
+                    );
+                }
+                crate::extension_contract::HostRelationship {
+                    relationship_id: record.id.to_string(),
+                    kind: namespace.into(),
+                    terminal: record
+                        .pane_id
+                        .and_then(|pane_id| self.host_terminal_ref_for_pane(pane_id)),
+                    parent_id: record.parent_id.map(|id| id.to_string()),
+                    sibling_rank: record.sibling_rank,
+                    lifecycle: if record.tombstone {
+                        crate::extension_contract::HostRelationshipLifecycle::Retained
+                    } else {
+                        crate::extension_contract::HostRelationshipLifecycle::Active
+                    },
+                    metadata,
+                }
+            })
+            .collect::<Vec<_>>();
+        let mut snapshot = crate::extension_contract::HostRelationshipsV1 {
+            contract: crate::extension_contract::HOST_RELATIONSHIPS_CONTRACT_V1.into(),
+            generation,
+            revision: 1,
+            scope_id: scope_id.clone(),
+            relationships,
+        };
+        let key = (namespace.to_string(), scope_id.clone());
+        if snapshot.relationships.len() > crate::extension_contract::MAX_DOCUMENT_ITEMS
+            || snapshot.validate().is_err()
+        {
+            self.collections_shadow_documents.remove(&key);
+            self.host_document_request_watermarks.remove(&key);
+            self.host_document_retry_snapshots.remove(&key);
+            self.host_relationships_last_desired = None;
+            return;
+        }
+        if self
+            .host_relationships_last_desired
+            .as_ref()
+            .is_some_and(|previous| {
+                let mut normalized = previous.clone();
+                normalized.revision = 1;
+                normalized == snapshot
+            })
+        {
+            return;
+        }
+        snapshot.revision = self.next_host_relationships_document_revision();
+        self.host_relationships_last_desired = Some(snapshot.clone());
+        self.host_document_request_watermarks
+            .insert(key.clone(), (generation, snapshot.revision));
+        if let Some(cache) = self.collections_shadow_documents.get_mut(&key) {
+            cache.disable();
+        }
+        match self
+            .host_document_services
+            .request_relationships(namespace, snapshot.clone())
+        {
+            Ok(()) => {
+                self.host_document_retry_snapshots.remove(&key);
+            }
+            Err(error) if error.contains("global document render queue is full") => {
+                if !self.host_document_retry_snapshots.contains_key(&key) {
+                    self.host_document_retry_order.push_back(key.clone());
+                }
+                self.host_document_retry_snapshots
+                    .insert(key, DeferredHostDocumentSnapshot::Relationships(snapshot));
+            }
+            Err(error) => {
+                self.host_relationships_last_desired = None;
+                self.schedule_host_semantic_retry(namespace);
+                tracing::warn!(%error, "Delegation provider unavailable; using relationship fallback");
+            }
+        }
+    }
+
+    pub(crate) fn refresh_agent_activity_document(&mut self) {
+        let namespace = crate::first_party::agent_status::NAMESPACE;
+        let scope_id = crate::first_party::spaces::SESSION_SCOPE_ID.to_string();
+        let Some(generation) = self.host_document_services.generation(namespace) else {
+            self.collections_shadow_documents
+                .remove(&(namespace.into(), scope_id.clone()));
+            self.host_document_request_watermarks
+                .remove(&(namespace.into(), scope_id));
+            self.host_agent_activity_last_desired = None;
+            return;
+        };
+        let mut seen = std::collections::HashSet::new();
+        let mut activities = Vec::new();
+        for workspace in &self.state.workspaces {
+            for tab in &workspace.tabs {
+                for (pane_id, pane) in &tab.panes {
+                    let Some(terminal) = self.state.terminals.get(&pane.attached_terminal_id)
+                    else {
+                        continue;
+                    };
+                    if !seen.insert(terminal.id.clone()) {
+                        continue;
+                    }
+                    let Some(agent_label) = terminal.effective_agent_label() else {
+                        continue;
+                    };
+                    let Some(terminal_ref) = self.host_terminal_ref_for_pane(*pane_id) else {
+                        continue;
+                    };
+                    let (source, evidence_kind) = terminal.effective_evidence_attribution();
+                    let effective_display_agent = terminal.effective_presentation().display_agent;
+                    let activity = match terminal.state {
+                        crate::detect::AgentState::Idle => {
+                            crate::extension_contract::HostAgentActivityState::Idle
+                        }
+                        crate::detect::AgentState::Working => {
+                            crate::extension_contract::HostAgentActivityState::Working
+                        }
+                        crate::detect::AgentState::Blocked => {
+                            crate::extension_contract::HostAgentActivityState::Blocked
+                        }
+                        crate::detect::AgentState::Unknown => {
+                            crate::extension_contract::HostAgentActivityState::Unknown
+                        }
+                    };
+                    activities.push(crate::extension_contract::HostAgentActivityRecord {
+                        terminal: terminal_ref,
+                        activity,
+                        source: bounded_document_text(source),
+                        evidence_kind: evidence_kind.into(),
+                        state_change_seq: terminal.last_agent_state_change_seq.unwrap_or(0),
+                        labels: std::collections::BTreeMap::from([
+                            ("agent".into(), bounded_document_text(agent_label)),
+                            (
+                                "display".into(),
+                                bounded_document_text(
+                                    effective_display_agent.as_deref().unwrap_or(agent_label),
+                                ),
+                            ),
+                        ]),
+                    });
+                }
+            }
+        }
+        let mut snapshot = crate::extension_contract::HostAgentActivityV1 {
+            contract: crate::extension_contract::HOST_AGENT_ACTIVITY_CONTRACT_V1.into(),
+            generation,
+            revision: 1,
+            scope_id: scope_id.clone(),
+            activities,
+        };
+        let key = (namespace.to_string(), scope_id.clone());
+        if snapshot.validate().is_err() {
+            self.collections_shadow_documents.remove(&key);
+            self.host_document_request_watermarks.remove(&key);
+            self.host_document_retry_snapshots.remove(&key);
+            self.host_agent_activity_last_desired = None;
+            return;
+        }
+        if self
+            .host_agent_activity_last_desired
+            .as_ref()
+            .is_some_and(|previous| {
+                let mut normalized = previous.clone();
+                normalized.revision = 1;
+                normalized == snapshot
+            })
+        {
+            return;
+        }
+        snapshot.revision = self.next_host_agent_activity_document_revision();
+        self.host_agent_activity_last_desired = Some(snapshot.clone());
+        self.host_document_request_watermarks
+            .insert(key.clone(), (generation, snapshot.revision));
+        if let Some(cache) = self.collections_shadow_documents.get_mut(&key) {
+            cache.disable();
+        }
+        match self
+            .host_document_services
+            .request_agent_activity(namespace, snapshot.clone())
+        {
+            Ok(()) => {
+                self.host_document_retry_snapshots.remove(&key);
+            }
+            Err(error) if error.contains("global document render queue is full") => {
+                if !self.host_document_retry_snapshots.contains_key(&key) {
+                    self.host_document_retry_order.push_back(key.clone());
+                }
+                self.host_document_retry_snapshots
+                    .insert(key, DeferredHostDocumentSnapshot::AgentActivity(snapshot));
+            }
+            Err(error) => {
+                self.host_agent_activity_last_desired = None;
+                self.schedule_host_semantic_retry(namespace);
+                tracing::warn!(%error, "Agent Status provider unavailable; using native fallback");
+            }
+        }
+    }
+
+    pub(crate) fn handle_host_relationships_document_result(
+        &mut self,
+        mut result: crate::extension_service::HostRelationshipsDocumentAsyncResult,
+    ) {
+        let render_slot = result._render_slot.take();
+        self.host_document_services.complete_render(
+            &result.namespace,
+            &result.snapshot.scope_id,
+            result.snapshot.generation,
+            result.snapshot.revision,
+        );
+        let key = (result.namespace.clone(), result.snapshot.scope_id.clone());
+        let current = self.host_document_services.generation(&result.namespace)
+            == Some(result.snapshot.generation)
+            && self
+                .host_document_request_watermarks
+                .get(&key)
+                .is_some_and(|watermark| {
+                    *watermark == (result.snapshot.generation, result.snapshot.revision)
+                });
+        if current {
+            match result.result {
+                Ok(document) => {
+                    self.complete_host_semantic_retry(&result.namespace);
+                    let _ = self
+                        .collections_shadow_documents
+                        .entry(key)
+                        .or_default()
+                        .publish_for_namespace(
+                            &result.namespace,
+                            result.snapshot.generation,
+                            result.provider_priority,
+                            &result.grants,
+                            document,
+                        );
+                }
+                Err(error) => {
+                    self.host_relationships_last_desired = None;
+                    self.schedule_host_semantic_retry(&result.namespace);
+                    tracing::warn!(%error, "Delegation document render failed; using relationship fallback");
+                }
+            }
+        }
+        drop(render_slot);
+        self.retry_one_host_document_render();
+    }
+
+    pub(crate) fn handle_host_agent_activity_document_result(
+        &mut self,
+        mut result: crate::extension_service::HostAgentActivityDocumentAsyncResult,
+    ) {
+        let render_slot = result._render_slot.take();
+        self.host_document_services.complete_render(
+            &result.namespace,
+            &result.snapshot.scope_id,
+            result.snapshot.generation,
+            result.snapshot.revision,
+        );
+        let key = (result.namespace.clone(), result.snapshot.scope_id.clone());
+        let current = self.host_document_services.generation(&result.namespace)
+            == Some(result.snapshot.generation)
+            && self
+                .host_document_request_watermarks
+                .get(&key)
+                .is_some_and(|watermark| {
+                    *watermark == (result.snapshot.generation, result.snapshot.revision)
+                });
+        if current {
+            match result.result {
+                Ok(document) => {
+                    self.complete_host_semantic_retry(&result.namespace);
+                    let _ = self
+                        .collections_shadow_documents
+                        .entry(key)
+                        .or_default()
+                        .publish_for_namespace(
+                            &result.namespace,
+                            result.snapshot.generation,
+                            result.provider_priority,
+                            &result.grants,
+                            document,
+                        );
+                }
+                Err(error) => {
+                    self.host_agent_activity_last_desired = None;
+                    self.schedule_host_semantic_retry(&result.namespace);
+                    tracing::warn!(%error, "Agent Status document render failed; using native fallback");
+                }
+            }
+        }
+        drop(render_slot);
+        self.retry_one_host_document_render();
+    }
+
     pub(crate) fn handle_host_spaces_document_result(
         &mut self,
         mut result: crate::extension_service::HostSpacesDocumentAsyncResult,
@@ -481,6 +845,66 @@ impl App {
         }
         drop(render_slot);
         self.retry_one_host_document_render();
+    }
+
+    fn schedule_host_semantic_retry(&mut self, namespace: &str) {
+        let attempts = self
+            .host_semantic_retry_attempts
+            .get(namespace)
+            .copied()
+            .unwrap_or(0);
+        if self.host_semantic_retry_scheduled.contains(namespace)
+            || attempts >= MAX_HOST_SEMANTIC_RETRY_ATTEMPTS
+            || self.host_document_services.generation(namespace).is_none()
+        {
+            return;
+        }
+        let delay_ms = 100_u64.saturating_mul(1_u64 << attempts.min(6)).min(5_000);
+        self.host_semantic_retry_attempts
+            .insert(namespace.to_string(), attempts.saturating_add(1));
+        self.host_semantic_retry_scheduled
+            .insert(namespace.to_string());
+        let epoch = self
+            .host_semantic_retry_epochs
+            .entry(namespace.to_string())
+            .or_insert(1)
+            .to_owned();
+        let namespace = namespace.to_string();
+        let thread_namespace = namespace.clone();
+        let event_tx = self.event_tx.clone();
+        if let Err(error) = std::thread::Builder::new()
+            .name("vqro-semantic-document-retry".into())
+            .spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+                let mut event = crate::events::AppEvent::HostSemanticDocumentRetryDue {
+                    namespace: thread_namespace,
+                    epoch,
+                };
+                loop {
+                    match event_tx.try_send(event) {
+                        Ok(()) | Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => return,
+                        Err(tokio::sync::mpsc::error::TrySendError::Full(returned)) => {
+                            event = returned;
+                            std::thread::sleep(std::time::Duration::from_millis(10));
+                        }
+                    }
+                }
+            })
+        {
+            self.host_semantic_retry_scheduled
+                .remove(namespace.as_str());
+            tracing::warn!(%error, %namespace, "failed to schedule semantic document retry");
+        }
+    }
+
+    fn complete_host_semantic_retry(&mut self, namespace: &str) {
+        let epoch = self
+            .host_semantic_retry_epochs
+            .entry(namespace.to_string())
+            .or_insert(1);
+        *epoch = epoch.saturating_add(1).max(1);
+        self.host_semantic_retry_attempts.remove(namespace);
+        self.host_semantic_retry_scheduled.remove(namespace);
     }
 
     fn schedule_host_spaces_retry(&mut self) {
@@ -822,11 +1246,39 @@ impl App {
             .retain(|(_, scope_id, _, _, _), grant| {
                 live_tab_ids.contains(scope_id) && grant.expires_at > now
             });
-        let mut documents = Vec::new();
-        for ((_, scope_id), cache) in &self.collections_shadow_documents {
-            if !live_tab_ids.contains(scope_id) {
-                continue;
+        let mut candidates = self
+            .collections_shadow_documents
+            .iter()
+            .filter(|((_, scope_id), cache)| {
+                live_tab_ids.contains(scope_id) && cache.current().is_some()
+            })
+            .collect::<Vec<_>>();
+        candidates.sort_by(|left, right| {
+            let (Some(left_document), Some(right_document)) = (left.1.current(), right.1.current())
+            else {
+                return std::cmp::Ordering::Equal;
+            };
+            right
+                .1
+                .provider_priority()
+                .cmp(&left.1.provider_priority())
+                .then_with(|| left_document.namespace.cmp(&right_document.namespace))
+                .then_with(|| left_document.target.cmp(&right_document.target))
+        });
+        let mut encoded_bytes = 256usize;
+        candidates.retain(|(_, cache)| {
+            let Some(next) = encoded_bytes.checked_add(cache.projected_encoded_bytes()) else {
+                return false;
+            };
+            if next > MAX_HOST_DOCUMENTS_PROJECTION_BYTES {
+                return false;
             }
+            encoded_bytes = next;
+            true
+        });
+
+        let mut documents = Vec::with_capacity(candidates.len());
+        for ((_, scope_id), cache) in candidates {
             let Some(document) = cache.current().cloned() else {
                 continue;
             };
@@ -888,13 +1340,6 @@ impl App {
                 confirmation_tokens,
             });
         }
-        documents.sort_by(|left, right| {
-            right
-                .provider_priority
-                .cmp(&left.provider_priority)
-                .then_with(|| left.document.namespace.cmp(&right.document.namespace))
-                .then_with(|| left.document.target.cmp(&right.document.target))
-        });
         documents
     }
 
@@ -2321,6 +2766,241 @@ mod tests {
         );
         assert!(render_changed);
         assert!(app.host_spaces_last_desired.is_none());
+    }
+
+    #[test]
+    fn relationship_snapshot_retains_tombstoned_ancestry() {
+        let mut app = app_with_workspace();
+        let pane = app.state.workspaces[0].focused_pane_id().unwrap();
+        let root = app
+            .state
+            .delegations
+            .create(Some(pane), None, Some("root".into()))
+            .unwrap();
+        let child = app
+            .state
+            .delegations
+            .create(None, Some(root), Some("child".into()))
+            .unwrap();
+        app.state.delegations.tombstone_pane(pane);
+        let namespace = crate::first_party::delegation::NAMESPACE;
+        app.host_document_services =
+            crate::extension_service::HostDocumentServiceCatalog::with_test_document_source_provider(
+                namespace,
+                12,
+                crate::api::schema::HostDocumentSourceKind::Relationships,
+            );
+        app.refresh_relationships_document();
+        let snapshot = app.host_relationships_last_desired.as_ref().unwrap();
+        let root_record = snapshot
+            .relationships
+            .iter()
+            .find(|record| record.relationship_id == root.to_string())
+            .unwrap();
+        let child_record = snapshot
+            .relationships
+            .iter()
+            .find(|record| record.relationship_id == child.to_string())
+            .unwrap();
+        assert_eq!(
+            root_record.lifecycle,
+            crate::extension_contract::HostRelationshipLifecycle::Retained
+        );
+        assert!(root_record.terminal.is_none());
+        let root_id = root.to_string();
+        assert_eq!(child_record.parent_id.as_deref(), Some(root_id.as_str()));
+    }
+
+    #[test]
+    fn agent_activity_snapshot_is_attributed_and_never_projects_shared_done() {
+        let mut app = app_with_workspace();
+        let pane = app.state.workspaces[0].focused_pane_id().unwrap();
+        let terminal_id = app.state.workspaces[0]
+            .pane_state(pane)
+            .unwrap()
+            .attached_terminal_id
+            .clone();
+        let terminal = app.state.terminals.get_mut(&terminal_id).unwrap();
+        terminal.set_detected_state(
+            Some(crate::detect::Agent::Claude),
+            crate::detect::AgentState::Idle,
+        );
+        terminal.last_agent_state_change_seq = Some(17);
+        terminal.set_agent_metadata(crate::terminal::AgentMetadataReport {
+            source: "user:presentation".into(),
+            agent_label: Some("claude".into()),
+            applies_to_source: None,
+            title: None,
+            display_agent: Some("Friendly Claude".into()),
+            state_labels: std::collections::HashMap::new(),
+            clear_title: false,
+            clear_display_agent: false,
+            clear_state_labels: false,
+            ttl: Some(std::time::Duration::from_secs(1)),
+            seq: None,
+        });
+        let namespace = crate::first_party::agent_status::NAMESPACE;
+        app.host_document_services =
+            crate::extension_service::HostDocumentServiceCatalog::with_test_document_source_provider(
+                namespace,
+                13,
+                crate::api::schema::HostDocumentSourceKind::AgentActivity,
+            );
+        app.refresh_agent_activity_document();
+        let snapshot = app.host_agent_activity_last_desired.as_ref().unwrap();
+        assert_eq!(snapshot.activities.len(), 1);
+        assert_eq!(
+            snapshot.activities[0].activity,
+            crate::extension_contract::HostAgentActivityState::Idle
+        );
+        assert_eq!(snapshot.activities[0].source, "host_detection");
+        assert_eq!(
+            snapshot.activities[0]
+                .labels
+                .get("display")
+                .map(String::as_str),
+            Some("Friendly Claude")
+        );
+        assert_eq!(snapshot.activities[0].state_change_seq, 17);
+        assert!(!serde_json::to_string(snapshot).unwrap().contains("done"));
+        let previous_revision = snapshot.revision;
+
+        app.sync_agent_metadata_deadline();
+        let deadline = app.agent_metadata_deadline.unwrap();
+        app.expire_metadata_at(deadline, deadline + std::time::Duration::from_millis(1));
+        let refreshed = app.host_agent_activity_last_desired.as_ref().unwrap();
+        assert!(refreshed.revision > previous_revision);
+        assert_ne!(
+            refreshed.activities[0]
+                .labels
+                .get("display")
+                .map(String::as_str),
+            Some("Friendly Claude")
+        );
+    }
+
+    #[test]
+    fn hook_state_reports_refresh_agent_activity_documents() {
+        let mut app = app_with_workspace();
+        let pane_id = app.state.workspaces[0].focused_pane_id().unwrap();
+        app.host_document_services =
+            crate::extension_service::HostDocumentServiceCatalog::with_test_document_source_provider(
+                crate::first_party::agent_status::NAMESPACE,
+                13,
+                crate::api::schema::HostDocumentSourceKind::AgentActivity,
+            );
+        app.refresh_agent_activity_document();
+        let previous_revision = app
+            .host_agent_activity_last_desired
+            .as_ref()
+            .unwrap()
+            .revision;
+
+        app.handle_internal_event(crate::events::AppEvent::HookStateReported {
+            pane_id,
+            session_ref: None,
+            source: "smoke".into(),
+            agent_label: "codex".into(),
+            state: crate::detect::AgentState::Working,
+            message: None,
+            seq: Some(1),
+        });
+
+        let snapshot = app.host_agent_activity_last_desired.as_ref().unwrap();
+        assert!(snapshot.revision > previous_revision);
+        assert_eq!(snapshot.activities.len(), 1);
+        assert_eq!(
+            snapshot.activities[0].activity,
+            crate::extension_contract::HostAgentActivityState::Working
+        );
+    }
+
+    #[test]
+    fn oversized_relationship_projection_retires_to_native_fallback() {
+        let mut app = app_with_workspace();
+        let namespace = crate::first_party::delegation::NAMESPACE;
+        app.host_document_services =
+            crate::extension_service::HostDocumentServiceCatalog::with_test_document_source_provider(
+                namespace,
+                13,
+                crate::api::schema::HostDocumentSourceKind::Relationships,
+            );
+        for _ in 0..=crate::extension_contract::MAX_DOCUMENT_ITEMS {
+            app.state.delegations.create(None, None, None).unwrap();
+        }
+        app.refresh_relationships_document();
+        assert!(app.host_relationships_last_desired.is_none());
+        assert!(!app.collections_shadow_documents.contains_key(&(
+            namespace.into(),
+            crate::first_party::spaces::SESSION_SCOPE_ID.into()
+        )));
+    }
+
+    #[test]
+    fn endpoint_document_projection_drops_over_budget_entries_selectively() {
+        let mut app = app_with_workspace();
+        for provider in 0..6 {
+            let namespace = format!("example.large-{provider}");
+            let document = crate::extension_contract::HostDocumentV1 {
+                contract: crate::extension_contract::HOST_DOCUMENT_CONTRACT_V1.into(),
+                namespace: namespace.clone(),
+                generation: 1,
+                revision: 1,
+                surface: crate::extension_contract::HostSurface::Navigation,
+                target: crate::extension_contract::HostTarget::Session,
+                items: (0..48)
+                    .map(|index| crate::extension_contract::HostDocumentItem {
+                        id: format!("item-{index}"),
+                        parent_id: None,
+                        role: crate::extension_contract::HostItemRole::Section,
+                        label: "x".repeat(crate::extension_contract::MAX_DOCUMENT_TEXT_CHARS),
+                        detail: None,
+                        terminal: None,
+                        action_ids: Vec::new(),
+                        flags: Default::default(),
+                    })
+                    .collect(),
+                actions: Vec::new(),
+                required_capabilities: Vec::new(),
+            };
+            let mut cache = crate::first_party::collections::ShadowDocumentCache::default();
+            cache
+                .publish_for_namespace(
+                    &namespace,
+                    1,
+                    100,
+                    &std::collections::HashSet::new(),
+                    document,
+                )
+                .unwrap();
+            app.collections_shadow_documents.insert(
+                (
+                    namespace,
+                    crate::first_party::spaces::SESSION_SCOPE_ID.into(),
+                ),
+                cache,
+            );
+        }
+
+        let entries = app.host_documents();
+        assert!(!entries.is_empty());
+        assert!(entries.len() < 6);
+        let encoded = serde_json::to_vec(&entries).unwrap();
+        assert!(encoded.len() < MAX_HOST_DOCUMENTS_PROJECTION_BYTES);
+    }
+
+    #[test]
+    fn semantic_metadata_is_bounded_before_provider_validation() {
+        let oversized = format!(
+            "{}\u{0000}",
+            "x".repeat(crate::extension_contract::MAX_DOCUMENT_TEXT_CHARS + 10)
+        );
+        let bounded = bounded_document_text(&oversized);
+        assert_eq!(
+            bounded.chars().count(),
+            crate::extension_contract::MAX_DOCUMENT_TEXT_CHARS
+        );
+        assert!(!bounded.chars().any(char::is_control));
     }
 
     #[test]

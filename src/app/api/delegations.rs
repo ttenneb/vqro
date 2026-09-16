@@ -83,6 +83,7 @@ impl App {
         self.state.mark_session_dirty();
         let delegation = self.delegation_info(id).expect("created delegation");
         self.emit_delegation_event("created", delegation.clone());
+        self.refresh_relationships_document();
         responses::encode_success(request_id, ResponseResult::DelegationInfo { delegation })
     }
 
@@ -179,6 +180,18 @@ impl App {
         let Ok(id) = self.parse_delegation_target(&params.delegation_id) else {
             return responses::encode_error(request_id, "not_found", "delegation was not found");
         };
+        if self
+            .state
+            .delegations
+            .get(id)
+            .is_some_and(|record| record.tombstone)
+        {
+            return responses::encode_error(
+                request_id,
+                "invalid_delegation",
+                "retained delegation ancestry cannot be reparented",
+            );
+        }
         let parent = match params.parent_id.as_deref() {
             Some(raw) => match self.parse_delegation_target(raw) {
                 Ok(parent_id) => Some(parent_id),
@@ -204,9 +217,11 @@ impl App {
                 "reparenting would create an invalid tree",
             );
         }
+        self.state.delegations.gc_tombstones();
         self.state.mark_session_dirty();
         let delegation = self.delegation_info(id).expect("delegation exists");
         self.emit_delegation_event("reparented", delegation.clone());
+        self.refresh_relationships_document();
         responses::encode_success(request_id, ResponseResult::DelegationInfo { delegation })
     }
 
@@ -256,6 +271,7 @@ impl App {
         self.state.mark_session_dirty();
         let delegation = self.delegation_info(id).expect("delegation exists");
         self.emit_delegation_event("reordered", delegation.clone());
+        self.refresh_relationships_document();
         responses::encode_success(request_id, ResponseResult::DelegationInfo { delegation })
     }
 }

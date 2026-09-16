@@ -1855,6 +1855,20 @@ impl TerminalState {
         self.live_full_lifecycle_hook_authority()
     }
 
+    /// Attribution for the evidence that won effective-state arbitration.
+    pub fn effective_evidence_attribution(&self) -> (&str, &str) {
+        if !self.visible_blocker_overrides_hook() {
+            if let Some(authority) = self
+                .hook_authority
+                .as_ref()
+                .filter(|authority| self.hook_authority_is_effective(authority))
+            {
+                return (&authority.source, "hook_state");
+            }
+        }
+        ("host_detection", "screen_state")
+    }
+
     fn visible_blocker_overrides_hook(&self) -> bool {
         if self.live_full_lifecycle_hook_authority() {
             return false;
@@ -3528,6 +3542,10 @@ mod tests {
 
         assert_eq!(terminal.fallback_state, AgentState::Blocked);
         assert_eq!(terminal.state, AgentState::Blocked);
+        assert_eq!(
+            terminal.effective_evidence_attribution(),
+            ("host_detection", "screen_state")
+        );
         assert_eq!(change.unwrap().previous_state, AgentState::Working);
     }
 
