@@ -55,13 +55,15 @@ use super::{
     HERMES_PLUGIN_INIT_ASSET, HERMES_PLUGIN_INIT_INSTALL_NAME, HERMES_PLUGIN_MANIFEST_ASSET,
     HERMES_PLUGIN_MANIFEST_INSTALL_NAME, KILO_PLUGIN_ASSET, KILO_PLUGIN_INSTALL_NAME,
     KIMI_HOOK_ASSET, KIMI_HOOK_INSTALL_NAME, LEGACY_PI_EXTENSION_INSTALL_NAME, LETTA_HOOK_ASSET,
-    LETTA_HOOK_INSTALL_NAME, LETTA_HOOK_TIMEOUT_MS, MASTRACODE_HOOK_ASSET, MASTRACODE_HOOK_EVENTS,
-    MASTRACODE_HOOK_INSTALL_NAME, MASTRACODE_HOOK_TIMEOUT_MS, MASTRACODE_REMOVED_HOOK_EVENTS,
-    OMP_EXTENSION_ASSET, OMP_EXTENSION_INSTALL_NAME, OPENCODE_PLUGIN_ASSET,
-    OPENCODE_PLUGIN_INSTALL_NAME, OPENCODE_TUI_PLUGIN_ASSET, OPENCODE_TUI_PLUGIN_INSTALL_NAME,
-    OPENCODE_TUI_PLUGIN_SPEC, PI_EXTENSION_ASSET, PI_EXTENSION_INSTALL_NAME, QODERCLI_HOOK_ASSET,
-    QODERCLI_HOOK_EVENTS, QODERCLI_HOOK_INSTALL_NAME, QODERCLI_REMOVED_LIFECYCLE_HOOK_EVENTS,
-    QWEN_HOOK_ASSET, QWEN_HOOK_EVENTS, QWEN_HOOK_INSTALL_NAME,
+    LETTA_HOOK_INSTALL_NAME, LETTA_HOOK_TIMEOUT_MS, MARKETPLACE_CLAUDE_HOOK_INSTALL_NAME,
+    MARKETPLACE_CODEX_HOOK_INSTALL_NAME, MARKETPLACE_PI_EXTENSION_INSTALL_NAME,
+    MASTRACODE_HOOK_ASSET, MASTRACODE_HOOK_EVENTS, MASTRACODE_HOOK_INSTALL_NAME,
+    MASTRACODE_HOOK_TIMEOUT_MS, MASTRACODE_REMOVED_HOOK_EVENTS, OMP_EXTENSION_ASSET,
+    OMP_EXTENSION_INSTALL_NAME, OPENCODE_PLUGIN_ASSET, OPENCODE_PLUGIN_INSTALL_NAME,
+    OPENCODE_TUI_PLUGIN_ASSET, OPENCODE_TUI_PLUGIN_INSTALL_NAME, OPENCODE_TUI_PLUGIN_SPEC,
+    PI_EXTENSION_ASSET, PI_EXTENSION_INSTALL_NAME, QODERCLI_HOOK_ASSET, QODERCLI_HOOK_EVENTS,
+    QODERCLI_HOOK_INSTALL_NAME, QODERCLI_REMOVED_LIFECYCLE_HOOK_EVENTS, QWEN_HOOK_ASSET,
+    QWEN_HOOK_EVENTS, QWEN_HOOK_INSTALL_NAME,
 };
 
 static NEXT_DURABLE_WRITE_ID: AtomicU64 = AtomicU64::new(1);
@@ -116,7 +118,7 @@ pub(crate) fn install_pi() -> io::Result<PathBuf> {
 }
 
 pub(crate) fn install_pi_asset(asset: &[u8]) -> io::Result<PathBuf> {
-    install_pi_asset_named(asset, PI_EXTENSION_INSTALL_NAME)
+    install_pi_asset_named(asset, MARKETPLACE_PI_EXTENSION_INSTALL_NAME)
 }
 
 fn install_pi_asset_named(asset: &[u8], install_name: &str) -> io::Result<PathBuf> {
@@ -168,7 +170,7 @@ pub(crate) fn install_claude() -> io::Result<ClaudeInstallPaths> {
 }
 
 pub(crate) fn install_claude_asset(asset: &[u8]) -> io::Result<ClaudeInstallPaths> {
-    install_claude_asset_named(asset, CLAUDE_HOOK_INSTALL_NAME)
+    install_claude_asset_named(asset, MARKETPLACE_CLAUDE_HOOK_INSTALL_NAME)
 }
 
 fn install_claude_asset_named(asset: &[u8], install_name: &str) -> io::Result<ClaudeInstallPaths> {
@@ -214,7 +216,7 @@ pub(crate) fn install_codex() -> io::Result<CodexInstallPaths> {
 }
 
 pub(crate) fn install_codex_asset(asset: &[u8]) -> io::Result<CodexInstallPaths> {
-    install_codex_asset_named(asset, CODEX_HOOK_INSTALL_NAME)
+    install_codex_asset_named(asset, MARKETPLACE_CODEX_HOOK_INSTALL_NAME)
 }
 
 fn install_codex_asset_named(asset: &[u8], install_name: &str) -> io::Result<CodexInstallPaths> {
@@ -612,7 +614,7 @@ pub(crate) fn uninstall_pi() -> io::Result<PiUninstallResult> {
 }
 
 pub(crate) fn uninstall_pi_asset() -> io::Result<PiUninstallResult> {
-    uninstall_pi_named(PI_EXTENSION_INSTALL_NAME)
+    uninstall_pi_named(MARKETPLACE_PI_EXTENSION_INSTALL_NAME)
 }
 
 fn uninstall_pi_named(install_name: &str) -> io::Result<PiUninstallResult> {
@@ -640,7 +642,7 @@ pub(crate) fn uninstall_claude() -> io::Result<ClaudeUninstallResult> {
 }
 
 pub(crate) fn uninstall_claude_asset() -> io::Result<ClaudeUninstallResult> {
-    uninstall_claude_named(CLAUDE_HOOK_INSTALL_NAME)
+    uninstall_claude_named(MARKETPLACE_CLAUDE_HOOK_INSTALL_NAME)
 }
 
 fn uninstall_claude_named(install_name: &str) -> io::Result<ClaudeUninstallResult> {
@@ -673,7 +675,7 @@ pub(crate) fn uninstall_codex() -> io::Result<CodexUninstallResult> {
 }
 
 pub(crate) fn uninstall_codex_asset() -> io::Result<CodexUninstallResult> {
-    uninstall_codex_named(CODEX_HOOK_INSTALL_NAME)
+    uninstall_codex_named(MARKETPLACE_CODEX_HOOK_INSTALL_NAME)
 }
 
 fn uninstall_codex_named(install_name: &str) -> io::Result<CodexUninstallResult> {

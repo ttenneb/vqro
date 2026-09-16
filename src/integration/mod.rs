@@ -33,6 +33,7 @@ pub(crate) use types::{IntegrationRecommendation, IntegrationStatus, Integration
 pub(crate) const EXPERIMENTAL_INTEGRATION_TARGET_LABELS: &[&str] = &["letta"];
 
 const PI_EXTENSION_INSTALL_NAME: &str = "vqro-agent-state.ts";
+const MARKETPLACE_PI_EXTENSION_INSTALL_NAME: &str = "vqro-extension-agent-state.ts";
 const LEGACY_PI_EXTENSION_INSTALL_NAME: &str = "herdr-agent-state.ts";
 const PI_EXTENSION_ASSET: &str = include_str!("assets/pi/vqro-agent-state.ts");
 const PI_INTEGRATION_VERSION: u32 = 9;
@@ -44,6 +45,11 @@ const CLAUDE_HOOK_INSTALL_NAME: &str = if cfg!(windows) {
 } else {
     "vqro-agent-state.sh"
 };
+const MARKETPLACE_CLAUDE_HOOK_INSTALL_NAME: &str = if cfg!(windows) {
+    "vqro-extension-agent-state.ps1"
+} else {
+    "vqro-extension-agent-state.sh"
+};
 const CLAUDE_HOOK_ASSET: &str = if cfg!(windows) {
     include_str!("assets/claude/vqro-agent-state.ps1")
 } else {
@@ -54,6 +60,11 @@ const CODEX_HOOK_INSTALL_NAME: &str = if cfg!(windows) {
     "vqro-agent-state.ps1"
 } else {
     "vqro-agent-state.sh"
+};
+const MARKETPLACE_CODEX_HOOK_INSTALL_NAME: &str = if cfg!(windows) {
+    "vqro-extension-agent-state.ps1"
+} else {
+    "vqro-extension-agent-state.sh"
 };
 const CODEX_HOOK_ASSET: &str = if cfg!(windows) {
     include_str!("assets/codex/vqro-agent-state.ps1")

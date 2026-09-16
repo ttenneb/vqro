@@ -3119,14 +3119,16 @@ mod tests {
         );
         assert!(app.host_spaces_retry_scheduled);
         assert_eq!(app.host_spaces_retry_attempt, 1);
-        let event = app
-            .event_rx
-            .blocking_recv()
-            .expect("retry timer should wake an idle app");
-        assert!(matches!(
-            &event,
-            crate::events::AppEvent::HostSpacesRetryDue { .. }
-        ));
+        let event = loop {
+            let event = app
+                .event_rx
+                .blocking_recv()
+                .expect("retry timer should wake an idle app");
+            if matches!(&event, crate::events::AppEvent::HostSpacesRetryDue { .. }) {
+                break event;
+            }
+            app.handle_internal_event(event);
+        };
         app.handle_internal_event(event);
         assert!(!app.host_spaces_retry_scheduled);
         assert!(app.host_spaces_last_desired.is_some());

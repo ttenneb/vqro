@@ -22,11 +22,14 @@ fn registry_path() -> PathBuf {
     crate::config::config_dir().join("plugins.json")
 }
 
+fn registry_lock_path() -> PathBuf {
+    crate::config::config_dir().join(REGISTRY_LOCK_FILE)
+}
+
 fn with_registry_lock<T>(
     operation: impl FnOnce(&Path) -> std::io::Result<T>,
 ) -> std::io::Result<T> {
-    let target = crate::platform::resolve_write_target(&registry_path())?;
-    let lock_path = target.with_extension("json.lock");
+    let lock_path = registry_lock_path();
     if let Some(parent) = lock_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -37,6 +40,7 @@ fn with_registry_lock<T>(
         .write(true)
         .open(lock_path)?;
     lock.lock()?;
+    let target = crate::platform::resolve_write_target(&registry_path())?;
     operation(&target)
 }
 

@@ -4600,8 +4600,10 @@ fn marketplace_pi_adapter_uses_vqro_path_and_preserves_herdr_file() {
     let base = unique_base();
     let extension_dir = base.join("extensions");
     fs::create_dir_all(&extension_dir).unwrap();
-    let legacy = extension_dir.join(PI_EXTENSION_INSTALL_NAME);
+    let legacy = extension_dir.join(LEGACY_PI_EXTENSION_INSTALL_NAME);
+    let native = extension_dir.join(PI_EXTENSION_INSTALL_NAME);
     fs::write(&legacy, "legacy-herdr-adapter").unwrap();
+    fs::write(&native, "native-vqro-adapter").unwrap();
     std::env::set_var(PI_CODING_AGENT_DIR_ENV_VAR, &base);
 
     install_target_from_asset(
@@ -4609,11 +4611,16 @@ fn marketplace_pi_adapter_uses_vqro_path_and_preserves_herdr_file() {
         b"// VQRO_ENV VQRO_SOCKET_PATH vqro",
     )
     .unwrap();
-    assert!(extension_dir.join(VQRO_PI_EXTENSION_INSTALL_NAME).is_file());
+    assert!(extension_dir
+        .join(MARKETPLACE_PI_EXTENSION_INSTALL_NAME)
+        .is_file());
     uninstall_target_artifact(crate::api::schema::IntegrationTarget::Pi).unwrap();
 
-    assert!(!extension_dir.join(VQRO_PI_EXTENSION_INSTALL_NAME).exists());
+    assert!(!extension_dir
+        .join(MARKETPLACE_PI_EXTENSION_INSTALL_NAME)
+        .exists());
     assert_eq!(fs::read_to_string(&legacy).unwrap(), "legacy-herdr-adapter");
+    assert_eq!(fs::read_to_string(&native).unwrap(), "native-vqro-adapter");
     std::env::remove_var(PI_CODING_AGENT_DIR_ENV_VAR);
     let _ = fs::remove_dir_all(base);
 }

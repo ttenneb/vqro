@@ -71,7 +71,10 @@ impl App {
                 crate::workspace::GitHeadIdentity::Detached { oid } => Some(oid.clone()),
                 crate::workspace::GitHeadIdentity::Branch { .. } => None,
             });
-            (upstream, detached)
+            let preferred_remote = fingerprint
+                .and_then(|fingerprint| fingerprint.preferred_repository_remote_url())
+                .map(str::to_owned);
+            (upstream, detached, preferred_remote)
         };
         let projected_identity_changed = cache_updates.iter().any(|(key, entry)| {
             self.git_status_cache
