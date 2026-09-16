@@ -1,0 +1,15 @@
+manifest_version = 1
+id = "vqro.spaces"
+name = "vqro Spaces"
+version = "1.0.0"
+min_vqro_version = "0.9.0"
+description = "Bundled repository and checkout navigation provider."
+platforms = ["linux", "macos", "windows"]
+
+[[services]]
+id = "document"
+command = ["vqro", "_extension-service", "spaces"]
+priority = 100
+document_source = "spaces"
+provides = ["host_document"]
+capabilities = ["host_document"]

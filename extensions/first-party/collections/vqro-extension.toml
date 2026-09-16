@@ -1,0 +1,15 @@
+manifest_version = 1
+id = "vqro.collections"
+name = "vqro Collections"
+version = "1.0.0"
+min_vqro_version = "0.9.0"
+description = "Bundled terminal-group navigation provider."
+platforms = ["linux", "macos", "windows"]
+
+[[services]]
+id = "document"
+command = ["vqro", "_extension-service", "collections"]
+priority = 100
+document_source = "terminal_groups"
+provides = ["host_document"]
+capabilities = ["host_document", "focus_terminal"]

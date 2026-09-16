@@ -10,7 +10,8 @@ mod agents;
 pub(crate) use agents::{AGENT_START_SETTLE_DELAY, MAX_AGENT_START_TIMEOUT};
 mod api;
 pub(crate) use api::extension_state::ExtensionStatePersistResult;
-pub(crate) use api::plugins::manifest_json_schema;
+#[cfg_attr(test, allow(unused_imports))]
+pub(crate) use api::plugins::{bundled_document_service_declarations, manifest_json_schema};
 pub(crate) fn api_load_plugin_manifest_for_cli(
     path: &str,
 ) -> Result<crate::api::schema::InstalledPluginInfo, (&'static str, String)> {

@@ -13,6 +13,7 @@ use crate::api::schema::{
     PluginUnlinkParams, ResponseResult,
 };
 use crate::app::App;
+pub(crate) use manifest::bundled_document_service_declarations;
 pub(super) use manifest::normalize_plugin_id;
 use manifest::{
     effective_platforms, ensure_platform_supported, normalize_action_id, normalize_plugin_source,

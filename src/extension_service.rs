@@ -181,7 +181,8 @@ pub struct ExtensionServiceManager {
     complete_catalog: bool,
     generation: u64,
     workers: std::collections::BTreeMap<String, ExtensionWorker>,
-    provider: Option<String>,
+    provider: Mutex<Option<String>>,
+    provider_order: Vec<String>,
     admissions: Arc<Mutex<std::collections::HashMap<ExtensionRequestIdentity, Arc<AtomicBool>>>>,
     cancellation_tombstones: Arc<Mutex<std::collections::VecDeque<ExtensionRequestIdentity>>>,
 }
@@ -916,115 +917,51 @@ impl HostDocumentServiceCatalog {
                 );
             }
         }
-        let namespace = crate::first_party::collections::NAMESPACE;
-        if !disabled.contains(namespace) {
-            if let Ok(exe) = std::env::current_exe() {
-                let spec = ExtensionServiceSpec {
-                    id: namespace.into(),
-                    command: vec![
-                        exe.display().to_string(),
-                        "_extension-service".into(),
-                        "collections".into(),
-                    ],
-                    cwd: std::env::current_dir().unwrap_or_default(),
-                    priority: 100,
-                    granted_capabilities: vec![
-                        crate::api::schema::ExtensionServiceCapability::HostDocument,
-                        crate::api::schema::ExtensionServiceCapability::FocusTerminal,
-                    ],
-                };
-                if let Ok(supervisor) = ExtensionServiceSupervisor::new(spec) {
+        let bundled = crate::app::bundled_document_service_declarations();
+        match (bundled, std::env::current_exe()) {
+            (Ok(declarations), Ok(exe)) => {
+                for declaration in declarations {
+                    if disabled.contains(&declaration.namespace) {
+                        continue;
+                    }
+                    let service = declaration.service;
+                    let mut command = service.command;
+                    if command.first().is_none_or(|program| program != "vqro") {
+                        tracing::error!(namespace = %declaration.namespace, "bundled extension command does not target the host binary");
+                        continue;
+                    }
+                    command[0] = exe.display().to_string();
+                    let grants = service
+                        .granted_capabilities
+                        .iter()
+                        .filter_map(protocol_grant_to_host_capability)
+                        .collect();
+                    let spec = ExtensionServiceSpec {
+                        id: declaration.namespace.clone(),
+                        command,
+                        cwd: std::env::current_dir().unwrap_or_default(),
+                        priority: service.priority,
+                        granted_capabilities: service.granted_capabilities,
+                    };
+                    let Ok(supervisor) = ExtensionServiceSupervisor::new(spec) else {
+                        tracing::error!(namespace = %declaration.namespace, "bundled extension service declaration is invalid");
+                        continue;
+                    };
                     providers.insert(
-                        namespace.into(),
+                        declaration.namespace,
                         HostDocumentProvider {
-                            source: crate::api::schema::HostDocumentSourceKind::TerminalGroups,
-                            priority: 100,
+                            source: service.document_source,
+                            priority: service.priority,
                             generation: next_service_generation(),
                             supervisor,
-                            grants: std::collections::HashSet::from([
-                                crate::extension_contract::HostCapability::FocusTerminal,
-                            ]),
+                            grants,
                         },
                     );
                 }
             }
-        }
-        // Unit-test executables are libtest harnesses and cannot recursively host the bundled
-        // service entrypoint. Focused tests install an explicit Spaces source provider instead.
-        #[cfg(not(test))]
-        let namespace = crate::first_party::spaces::NAMESPACE;
-        #[cfg(not(test))]
-        if !disabled.contains(namespace) {
-            if let Ok(exe) = std::env::current_exe() {
-                let spec = ExtensionServiceSpec {
-                    id: namespace.into(),
-                    command: vec![
-                        exe.display().to_string(),
-                        "_extension-service".into(),
-                        "spaces".into(),
-                    ],
-                    cwd: std::env::current_dir().unwrap_or_default(),
-                    priority: 100,
-                    granted_capabilities: vec![
-                        crate::api::schema::ExtensionServiceCapability::HostDocument,
-                    ],
-                };
-                if let Ok(supervisor) = ExtensionServiceSupervisor::new(spec) {
-                    providers.insert(
-                        namespace.into(),
-                        HostDocumentProvider {
-                            source: crate::api::schema::HostDocumentSourceKind::Spaces,
-                            priority: 100,
-                            generation: next_service_generation(),
-                            supervisor,
-                            grants: std::collections::HashSet::new(),
-                        },
-                    );
-                }
-            }
-        }
-        for (namespace, command, source) in [
-            (
-                crate::first_party::delegation::NAMESPACE,
-                "delegation",
-                crate::api::schema::HostDocumentSourceKind::Relationships,
-            ),
-            (
-                crate::first_party::agent_status::NAMESPACE,
-                "agent-status",
-                crate::api::schema::HostDocumentSourceKind::AgentActivity,
-            ),
-        ] {
-            if disabled.contains(namespace) {
-                continue;
-            }
-            let Ok(exe) = std::env::current_exe() else {
-                continue;
-            };
-            let spec = ExtensionServiceSpec {
-                id: namespace.into(),
-                command: vec![
-                    exe.display().to_string(),
-                    "_extension-service".into(),
-                    command.into(),
-                ],
-                cwd: std::env::current_dir().unwrap_or_default(),
-                priority: 100,
-                granted_capabilities: vec![
-                    crate::api::schema::ExtensionServiceCapability::HostDocument,
-                ],
-            };
-            if let Ok(supervisor) = ExtensionServiceSupervisor::new(spec) {
-                providers.insert(
-                    namespace.into(),
-                    HostDocumentProvider {
-                        source,
-                        priority: 100,
-                        generation: next_service_generation(),
-                        supervisor,
-                        grants: std::collections::HashSet::new(),
-                    },
-                );
+            (Err(error), _) => tracing::error!(%error, "bundled extension manifests are invalid"),
+            (_, Err(error)) => {
+                tracing::error!(%error, "cannot resolve host binary for bundled extensions")
             }
         }
         let mut generations: std::collections::BTreeMap<String, u64> = providers
@@ -1881,6 +1818,7 @@ fn manager_for_specs(
     let manager_generation =
         NEXT_MANAGER_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let mut provider = None;
+    let mut provider_order = Vec::new();
     let mut workers = std::collections::BTreeMap::new();
     let admissions = Arc::new(Mutex::new(std::collections::HashMap::new()));
     let cancellation_tombstones = Arc::new(Mutex::new(std::collections::VecDeque::new()));
@@ -2001,11 +1939,13 @@ fn manager_for_specs(
                 continue;
             }
         };
-        if provider.is_none()
-            && granted_capabilities
-                .contains(&crate::api::schema::ExtensionServiceCapability::ViewContribution)
+        if granted_capabilities
+            .contains(&crate::api::schema::ExtensionServiceCapability::ViewContribution)
         {
-            provider = Some(service_id.clone());
+            if provider.is_none() {
+                provider = Some(service_id.clone());
+            }
+            provider_order.push(service_id.clone());
         }
         workers.insert(
             service_id,
@@ -2024,7 +1964,8 @@ fn manager_for_specs(
         complete_catalog: workers.len() == expected_provider_count,
         generation: manager_generation,
         workers,
-        provider,
+        provider: Mutex::new(provider),
+        provider_order,
         admissions,
         cancellation_tombstones,
     }
@@ -2054,6 +1995,14 @@ pub(crate) fn manager_for_test_spec(
     event_tx: tokio::sync::mpsc::Sender<crate::events::AppEvent>,
 ) -> ExtensionServiceManager {
     manager_for_specs(vec![spec], event_tx)
+}
+
+#[cfg(test)]
+pub(crate) fn manager_for_test_specs(
+    specs: Vec<ExtensionServiceSpec>,
+    event_tx: tokio::sync::mpsc::Sender<crate::events::AppEvent>,
+) -> ExtensionServiceManager {
+    manager_for_specs(specs, event_tx)
 }
 
 impl ExtensionServiceManager {
@@ -2093,12 +2042,30 @@ impl ExtensionServiceManager {
     }
 
     pub fn provider_identity(&self) -> Option<(String, u64)> {
-        let service_id = self.provider.as_ref()?;
+        let provider = self.provider.lock().ok()?;
+        let service_id = provider.as_ref()?;
         let worker = self.workers.get(service_id)?;
         Some((
             service_id.clone(),
             worker.generation.load(Ordering::Acquire),
         ))
+    }
+
+    pub fn fail_over_view_provider(&self, failed_service_id: &str) -> bool {
+        let Ok(mut provider) = self.provider.lock() else {
+            return false;
+        };
+        if provider.as_deref() != Some(failed_service_id) {
+            return false;
+        }
+        *provider = self
+            .provider_order
+            .iter()
+            .skip_while(|service_id| service_id.as_str() != failed_service_id)
+            .skip(1)
+            .find(|service_id| self.workers.contains_key(service_id.as_str()))
+            .cloned();
+        provider.is_some()
     }
 
     pub fn request_view(
@@ -2108,11 +2075,13 @@ impl ExtensionServiceManager {
     ) -> Result<(String, u64), String> {
         let service_id = self
             .provider
-            .as_ref()
+            .lock()
+            .map_err(|_| "pane contribution provider registry is unavailable".to_owned())?
+            .clone()
             .ok_or_else(|| "no pane contribution provider is enabled".to_owned())?;
         let worker = self
             .workers
-            .get(service_id)
+            .get(&service_id)
             .ok_or_else(|| "pane contribution provider is unavailable".to_owned())?;
         if !worker
             .granted_capabilities
@@ -2163,7 +2132,7 @@ impl ExtensionServiceManager {
             return Err(format!("extension service queue unavailable: {error}"));
         }
         work_slot.disarm();
-        Ok((service_id.clone(), service_generation))
+        Ok((service_id, service_generation))
     }
 
     pub fn request_action(
@@ -4562,6 +4531,28 @@ printf '%s\n' '{"type":"response","id":2,"result":{"accepted":true}}'
             Err(ExtensionServiceError::Protocol(message))
                 if message.contains("generation is stale")
         ));
+    }
+
+    #[test]
+    fn failed_primary_view_provider_promotes_next_priority() {
+        let (event_tx, _event_rx) = tokio::sync::mpsc::channel(4);
+        let spec = |id: &str, priority| ExtensionServiceSpec {
+            id: id.into(),
+            command: vec!["unused".into()],
+            cwd: PathBuf::from("."),
+            priority,
+            granted_capabilities: vec![
+                crate::api::schema::ExtensionServiceCapability::ViewContribution,
+            ],
+        };
+        let manager = manager_for_test_specs(
+            vec![spec("provider.low", 10), spec("provider.high", 20)],
+            event_tx,
+        );
+        assert_eq!(manager.provider_identity().unwrap().0, "provider.high");
+        assert!(manager.fail_over_view_provider("provider.high"));
+        assert_eq!(manager.provider_identity().unwrap().0, "provider.low");
+        assert!(!manager.fail_over_view_provider("provider.high"));
     }
 
     #[test]

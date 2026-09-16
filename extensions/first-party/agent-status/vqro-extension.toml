@@ -1,0 +1,15 @@
+manifest_version = 1
+id = "vqro.agent-status"
+name = "vqro Agent Status"
+version = "1.0.0"
+min_vqro_version = "0.9.0"
+description = "Bundled attributed activity projection provider."
+platforms = ["linux", "macos", "windows"]
+
+[[services]]
+id = "document"
+command = ["vqro", "_extension-service", "agent-status"]
+priority = 100
+document_source = "agent_activity"
+provides = ["host_document"]
+capabilities = ["host_document"]

@@ -847,6 +847,57 @@ fn normalize_local_identifier(value: &str, max_chars: usize) -> Option<String> {
     .then(|| value.to_string())
 }
 
+pub(crate) struct BundledDocumentServiceDeclaration {
+    pub(crate) namespace: String,
+    pub(crate) service: PluginManifestService,
+}
+
+pub(crate) fn bundled_document_service_declarations(
+) -> Result<Vec<BundledDocumentServiceDeclaration>, String> {
+    let manifests = [
+        include_str!("../../../../extensions/first-party/collections/vqro-extension.toml"),
+        include_str!("../../../../extensions/first-party/spaces/vqro-extension.toml"),
+        include_str!("../../../../extensions/first-party/delegation/vqro-extension.toml"),
+        include_str!("../../../../extensions/first-party/agent-status/vqro-extension.toml"),
+    ];
+    manifests
+        .into_iter()
+        .map(|content| {
+            let manifest: RawPluginManifest = toml::from_str(content)
+                .map_err(|error| format!("bundled manifest parse failed: {error}"))?;
+            if manifest.manifest_version != Some(1)
+                || manifest.min_vqro_version.as_deref() != Some("0.9.0")
+                || manifest.services.len() != 1
+            {
+                return Err(format!(
+                    "bundled manifest {} has an invalid contract declaration",
+                    manifest.id
+                ));
+            }
+            let namespace = normalize_plugin_id(&manifest.id).ok_or_else(|| {
+                format!("bundled manifest {} has an invalid namespace", manifest.id)
+            })?;
+            let service = normalize_manifest_service(
+                manifest
+                    .services
+                    .into_iter()
+                    .next()
+                    .ok_or_else(|| "bundled manifest has no document service".to_string())?,
+            )
+            .map_err(|(_, message)| message)?;
+            if !service
+                .provides
+                .contains(&PluginServiceCapability::HostDocument)
+            {
+                return Err(format!(
+                    "bundled manifest {namespace} is not a document provider"
+                ));
+            }
+            Ok(BundledDocumentServiceDeclaration { namespace, service })
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod contract_tests {
     use super::*;
@@ -874,6 +925,68 @@ mod contract_tests {
             let error =
                 load_plugin_manifest(root.join(fixture).to_str().unwrap(), false).unwrap_err();
             assert_eq!(error.0, code, "fixture {fixture}");
+        }
+    }
+
+    #[test]
+    fn bundled_first_party_packages_match_the_runtime_service_contract() {
+        let declarations = bundled_document_service_declarations().unwrap();
+        assert_eq!(declarations.len(), 4);
+        assert!(declarations.iter().all(|declaration| {
+            declaration.namespace.starts_with("vqro.") && declaration.service.priority == 100
+        }));
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("extensions/first-party");
+        for (directory, namespace, source, entrypoint, capabilities) in [
+            (
+                "collections",
+                "vqro.collections",
+                HostDocumentSourceKind::TerminalGroups,
+                "collections",
+                vec![
+                    ExtensionServiceCapability::HostDocument,
+                    ExtensionServiceCapability::FocusTerminal,
+                ],
+            ),
+            (
+                "spaces",
+                "vqro.spaces",
+                HostDocumentSourceKind::Spaces,
+                "spaces",
+                vec![ExtensionServiceCapability::HostDocument],
+            ),
+            (
+                "delegation",
+                "vqro.delegation",
+                HostDocumentSourceKind::Relationships,
+                "delegation",
+                vec![ExtensionServiceCapability::HostDocument],
+            ),
+            (
+                "agent-status",
+                "vqro.agent-status",
+                HostDocumentSourceKind::AgentActivity,
+                "agent-status",
+                vec![ExtensionServiceCapability::HostDocument],
+            ),
+        ] {
+            let text =
+                std::fs::read_to_string(root.join(directory).join("vqro-extension.toml")).unwrap();
+            let manifest: RawPluginManifest = toml::from_str(&text).unwrap();
+            assert_eq!(manifest.manifest_version, Some(1));
+            assert_eq!(manifest.id, namespace);
+            assert_eq!(manifest.services.len(), 1);
+            let service =
+                normalize_manifest_service(manifest.services.into_iter().next().unwrap()).unwrap();
+            assert_eq!(service.document_source, source);
+            assert_eq!(service.priority, 100);
+            assert_eq!(service.granted_capabilities, capabilities);
+            assert_eq!(
+                service.command,
+                ["vqro", "_extension-service", entrypoint]
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect::<Vec<_>>()
+            );
         }
     }
 

@@ -541,6 +541,11 @@ impl HeadlessServer {
                 if let Some(client) = self.clients.get_mut(&client_id) {
                     client.pending_pane_view = None;
                 }
+                if rendered.is_err() {
+                    self.app
+                        .extension_services
+                        .fail_over_view_provider(&result.service_id);
+                }
                 if !generation_is_current {
                     response.error = Some(
                         "extension service generation retired or replaced; retry request".into(),

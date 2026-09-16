@@ -1,0 +1,15 @@
+manifest_version = 1
+id = "vqro.delegation"
+name = "vqro Delegation"
+version = "1.0.0"
+min_vqro_version = "0.9.0"
+description = "Bundled relationship navigation provider."
+platforms = ["linux", "macos", "windows"]
+
+[[services]]
+id = "document"
+command = ["vqro", "_extension-service", "delegation"]
+priority = 100
+document_source = "relationships"
+provides = ["host_document"]
+capabilities = ["host_document"]
