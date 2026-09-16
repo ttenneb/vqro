@@ -757,6 +757,7 @@ fn mobile_items(
         for entry in super::render::workspace_entries_with_structure(
             endpoint.snapshot,
             endpoint.structure,
+            endpoint.host_documents,
             &HashSet::new(),
         ) {
             let Some(workspace) = endpoint.snapshot.workspaces.get(entry.index) else {
@@ -793,7 +794,9 @@ fn mobile_items(
             let checkout = entry
                 .checkout_index
                 .and_then(|index| repository?.checkouts.get(index));
-            let name = if entry.indented && !workspace.custom_label {
+            let name = if let Some(label) = entry.label.as_deref() {
+                label
+            } else if entry.indented && !workspace.custom_label {
                 workspace
                     .branch
                     .as_deref()

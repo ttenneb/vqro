@@ -23,9 +23,15 @@ impl ClientShellState {
                 && structure.revision == snapshot.revision
                 && (!structure.repositories.is_empty() || !structure.space_order.is_empty())
         }) {
+            let host_documents = self
+                .endpoints
+                .iter()
+                .find(|endpoint| endpoint.endpoint_id == self.active_endpoint_id)
+                .and_then(ClientShellEndpoint::current_host_documents);
             return super::sidebar::workspace_entries_with_structure(
                 snapshot,
                 Some(structure),
+                host_documents,
                 &HashSet::new(),
             )
             .into_iter()
@@ -171,6 +177,7 @@ impl ClientShellState {
                             render::workspace_entries_with_structure(
                                 snapshot,
                                 endpoint.current_structure(),
+                                endpoint.current_host_documents(),
                                 if structured {
                                     &collapsed_repositories
                                 } else {

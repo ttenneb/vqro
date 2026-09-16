@@ -126,6 +126,7 @@ impl App {
                 label: params.label,
             },
         });
+        self.refresh_spaces_document();
 
         encode_success(
             id,
@@ -167,6 +168,7 @@ impl App {
                     workspaces: workspaces.clone(),
                 },
             });
+            self.refresh_spaces_document();
         }
 
         encode_success(id, ResponseResult::WorkspaceList { workspaces })
@@ -237,6 +239,7 @@ impl App {
                     workspaces: workspaces.clone(),
                 },
             });
+            self.refresh_spaces_document();
         }
 
         encode_success(id, ResponseResult::WorkspaceList { workspaces })
@@ -383,6 +386,57 @@ mod tests {
         config::Config,
         workspace::Workspace,
     };
+
+    fn empty_spaces_snapshot() -> crate::extension_contract::HostSpacesV1 {
+        crate::extension_contract::HostSpacesV1 {
+            contract: "host.spaces.v1".into(),
+            generation: 1,
+            revision: 1,
+            scope_id: crate::first_party::spaces::SESSION_SCOPE_ID.into(),
+            repositories: Vec::new(),
+            standalone: Vec::new(),
+            order: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn workspace_rename_and_reorder_invalidate_spaces_projection() {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &Config::default(),
+            crate::app::AppPolicy::TEST,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        app.state.workspaces = vec![Workspace::test_new("one"), Workspace::test_new("two")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.ensure_test_terminals();
+
+        let first_id = app.public_workspace_id(0);
+        app.host_spaces_last_desired = Some(empty_spaces_snapshot());
+        let response = app.handle_workspace_rename(
+            "rename".into(),
+            WorkspaceRenameParams {
+                workspace_id: first_id.clone(),
+                label: "renamed".into(),
+            },
+        );
+        let _: SuccessResponse = serde_json::from_str(&response).unwrap();
+        assert!(app.host_spaces_last_desired.is_none());
+
+        app.host_spaces_last_desired = Some(empty_spaces_snapshot());
+        let response = app.handle_workspace_move(
+            "move".into(),
+            WorkspaceMoveParams {
+                workspace_id: first_id,
+                insert_index: 2,
+            },
+        );
+        let _: SuccessResponse = serde_json::from_str(&response).unwrap();
+        assert!(app.host_spaces_last_desired.is_none());
+    }
 
     // `new_cwd = follow` must anchor on the focused pane for every creation
     // surface. Splits and tabs already do; a new workspace must follow the

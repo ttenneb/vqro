@@ -172,10 +172,15 @@ pub struct App {
     pub(crate) collections_shadow_documents:
         HashMap<(String, String), crate::first_party::collections::ShadowDocumentCache>,
     pub(crate) next_host_document_revision: u64,
+    pub(crate) next_host_spaces_document_revision: u64,
     pub(crate) host_document_request_watermarks: HashMap<(String, String), (u64, u64)>,
     pub(crate) host_document_retry_snapshots:
-        HashMap<(String, String), crate::extension_contract::HostTerminalGroupsV1>,
+        HashMap<(String, String), api::DeferredHostDocumentSnapshot>,
     pub(crate) host_document_retry_order: std::collections::VecDeque<(String, String)>,
+    pub(crate) host_spaces_last_desired: Option<crate::extension_contract::HostSpacesV1>,
+    pub(crate) host_spaces_retry_epoch: u64,
+    pub(crate) host_spaces_retry_attempt: u32,
+    pub(crate) host_spaces_retry_scheduled: bool,
     pub(crate) host_document_confirmation_grants:
         HashMap<(String, String, u64, u64, String), api::HostDocumentConfirmationGrant>,
 }
@@ -762,9 +767,14 @@ impl App {
             disabled_extensions: config.extensions.disabled.clone(),
             collections_shadow_documents: HashMap::new(),
             next_host_document_revision: 1,
+            next_host_spaces_document_revision: 1,
             host_document_request_watermarks: HashMap::new(),
             host_document_retry_snapshots: HashMap::new(),
             host_document_retry_order: std::collections::VecDeque::new(),
+            host_spaces_last_desired: None,
+            host_spaces_retry_epoch: 1,
+            host_spaces_retry_attempt: 0,
+            host_spaces_retry_scheduled: false,
             host_document_confirmation_grants: HashMap::new(),
         };
         app.configure_tab_bar_status(&config.ui.tab_bar_right, &config.ui.tab_bar_right_separator);

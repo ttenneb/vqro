@@ -1,0 +1,43 @@
+{
+  "contract": "host.document.v1",
+  "namespace": "vqro.spaces",
+  "generation": 5,
+  "revision": 12,
+  "surface": "navigation",
+  "target": { "kind": "session" },
+  "items": [
+    {
+      "id": "repository:repo_vqro",
+      "role": "group",
+      "label": "vqro",
+      "detail": "2 workspaces",
+      "action_ids": [],
+      "flags": { "selected": false, "expanded": true, "disabled": false, "attention": false }
+    },
+    {
+      "id": "workspace:workspace_main",
+      "parent_id": "repository:repo_vqro",
+      "role": "section",
+      "label": "main",
+      "action_ids": [],
+      "flags": { "selected": false, "expanded": false, "disabled": false, "attention": false }
+    },
+    {
+      "id": "workspace:workspace_feature",
+      "parent_id": "repository:repo_vqro",
+      "role": "section",
+      "label": "feature/spaces",
+      "action_ids": [],
+      "flags": { "selected": false, "expanded": false, "disabled": false, "attention": false }
+    },
+    {
+      "id": "workspace:workspace_scratch",
+      "role": "section",
+      "label": "Scratch",
+      "action_ids": [],
+      "flags": { "selected": false, "expanded": false, "disabled": false, "attention": false }
+    }
+  ],
+  "actions": [],
+  "required_capabilities": []
+}

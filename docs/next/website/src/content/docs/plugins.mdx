@@ -248,6 +248,37 @@ Startup hooks receive the normal runtime plugin environment and
 `HERDR_PLUGIN_EVENT=startup`. The install preview lists every startup command so
 users can review code that will run automatically.
 
+## Supervised document services
+
+A plugin can declare a long-running `[[services]]` entry with
+`provides = ["host_document"]`, `capabilities = ["host_document"]`, and
+`document_source = "terminal_groups"` (the default). The command speaks the
+versioned extension-service JSON-lines protocol over stdin/stdout. After its
+protocol-2 `hello`/`welcome` handshake, Herdr sends correlated
+`host.document.render` requests containing a bounded `host.terminal-groups.v1`
+snapshot. The service returns a validated `host.document.v1` semantic document.
+Documents describe roles, labels, hierarchy, stable terminal references, and
+actions; Herdr continues to own terminal processes, geometry, focus, input,
+colors, accessibility, admission, and rendering. Rendering uses the last
+validated cached document rather than making per-frame service calls.
+
+The bundled `vqro.collections` and `vqro.spaces` providers use this same public
+service and document protocol. They are enabled by default and can be disabled
+independently:
+
+```toml
+[extensions]
+disabled = ["vqro.collections", "vqro.spaces"]
+```
+
+Disabling or losing either provider removes its product-specific document, but
+all workspaces, tabs, panes, and live terminals remain reachable through the
+native generic projection. The `spaces` document source carries host-derived
+repository identity and is currently reserved for the bundled `vqro.spaces`
+provider; user services cannot request it. User document providers use the
+public terminal-group source. The namespaces `vqro.collections`, `vqro.spaces`,
+and `host.fallback` are reserved.
+
 ## Commands and environment
 
 Runtime commands run with the plugin directory as their working directory. Herdr

@@ -84,6 +84,7 @@ fn compact_workspace_entries(endpoint: &ClientShellEndpoint) -> Vec<WorkspaceEnt
             super::sidebar::workspace_entries_with_structure(
                 snapshot,
                 endpoint.current_structure(),
+                endpoint.current_host_documents(),
                 &compact_collapsed_groups(endpoint),
             )
             .into_iter()
@@ -395,6 +396,7 @@ pub(super) fn render_expanded(
                 super::sidebar::workspace_entries_with_structure(
                     snapshot,
                     endpoint.current_structure(),
+                    endpoint.current_host_documents(),
                     if endpoint.current_structure().is_some_and(|structure| {
                         !structure.repositories.is_empty() || !structure.space_order.is_empty()
                     }) {
@@ -674,8 +676,15 @@ pub(super) fn render_expanded(
                     false,
                     palette,
                     super::sidebar::WorkspaceLinkLabels {
-                        repository: repository.map(|repository| repository.label.as_str()),
-                        branch: workspace.branch.as_deref(),
+                        repository: (!entry.indented)
+                            .then_some(entry.label.as_deref())
+                            .flatten()
+                            .or_else(|| repository.map(|repository| repository.label.as_str())),
+                        branch: entry
+                            .indented
+                            .then_some(entry.label.as_deref())
+                            .flatten()
+                            .or(workspace.branch.as_deref()),
                         upstream: checkout.and_then(|checkout| checkout.upstream.as_deref()),
                     },
                 );

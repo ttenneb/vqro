@@ -93,6 +93,7 @@ impl ClientShellState {
             let entries = render::workspace_entries_with_structure(
                 snapshot,
                 endpoint.current_structure(),
+                endpoint.current_host_documents(),
                 if compact {
                     &compact_repositories
                 } else if structured {

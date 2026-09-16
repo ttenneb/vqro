@@ -12,6 +12,46 @@ pub const MAX_DOCUMENT_PROVIDERS: usize = 16;
 pub const MAX_DOCUMENT_ITEMS: usize = 512;
 pub const MAX_DOCUMENT_ACTIONS: usize = 256;
 pub const MAX_DOCUMENT_TEXT_CHARS: usize = 4096;
+pub const MAX_SPACES_REPOSITORIES: usize = 256;
+pub const MAX_SPACES_WORKSPACES: usize = 512;
+
+/// A host-owned session projection supplied to Spaces document providers.
+/// Repository membership and labels are semantic state; paths and Git internals
+/// are intentionally excluded.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostSpacesV1 {
+    pub contract: String,
+    pub generation: u64,
+    pub revision: u64,
+    pub scope_id: String,
+    #[serde(default)]
+    pub repositories: Vec<HostSpaceRepository>,
+    #[serde(default)]
+    pub standalone: Vec<HostSpaceWorkspaceRef>,
+    #[serde(default)]
+    pub order: Vec<HostSpaceOrderRef>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostSpaceRepository {
+    pub repository_id: String,
+    pub label: String,
+    #[serde(default)]
+    pub workspaces: Vec<HostSpaceWorkspaceRef>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostSpaceWorkspaceRef {
+    pub workspace_id: String,
+    pub label: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum HostSpaceOrderRef {
+    Repository { repository_id: String },
+    StandaloneWorkspace { workspace_id: String },
+}
 
 /// A host-owned terminal-group projection supplied to document providers.
 /// It contains stable identities and semantic state, never PTYs or geometry.
@@ -225,6 +265,81 @@ pub struct HostDocumentError(pub String);
 impl std::fmt::Display for HostDocumentError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(&self.0)
+    }
+}
+
+impl HostSpacesV1 {
+    pub fn validate(&self) -> Result<(), HostDocumentError> {
+        if self.contract != "host.spaces.v1" {
+            return invalid("unsupported spaces contract");
+        }
+        if self.generation == 0 || self.revision == 0 {
+            return invalid("spaces generation and revision must be non-zero");
+        }
+        validate_stable_ref(&self.scope_id)?;
+        if self.repositories.len() > MAX_SPACES_REPOSITORIES {
+            return invalid("spaces snapshot has too many repositories");
+        }
+
+        let mut repository_ids = HashSet::with_capacity(self.repositories.len());
+        let mut workspace_ids = HashSet::new();
+        let mut workspace_count = self.standalone.len();
+        for repository in &self.repositories {
+            validate_stable_ref(&repository.repository_id)?;
+            validate_text(&repository.label)?;
+            if !repository_ids.insert(repository.repository_id.as_str()) {
+                return invalid("spaces repository ids must be unique");
+            }
+            workspace_count = workspace_count
+                .checked_add(repository.workspaces.len())
+                .ok_or_else(|| {
+                    HostDocumentError("spaces snapshot has too many workspaces".into())
+                })?;
+            for workspace in &repository.workspaces {
+                validate_space_workspace(workspace, &mut workspace_ids)?;
+            }
+        }
+        for workspace in &self.standalone {
+            validate_space_workspace(workspace, &mut workspace_ids)?;
+        }
+        if workspace_count > MAX_SPACES_WORKSPACES
+            || workspace_count + self.repositories.len() > MAX_DOCUMENT_ITEMS
+        {
+            return invalid("spaces snapshot has too many workspaces");
+        }
+        if !self.order.is_empty() {
+            if self.order.len() != self.repositories.len() + self.standalone.len() {
+                return invalid("spaces order must contain every top-level space exactly once");
+            }
+            let standalone_ids = self
+                .standalone
+                .iter()
+                .map(|workspace| workspace.workspace_id.as_str())
+                .collect::<HashSet<_>>();
+            let mut ordered = HashSet::new();
+            for entry in &self.order {
+                let key = match entry {
+                    HostSpaceOrderRef::Repository { repository_id } => {
+                        if !repository_ids.contains(repository_id.as_str()) {
+                            return invalid("spaces order references an unknown repository");
+                        }
+                        format!("repository:{repository_id}")
+                    }
+                    HostSpaceOrderRef::StandaloneWorkspace { workspace_id } => {
+                        if !standalone_ids.contains(workspace_id.as_str()) {
+                            return invalid(
+                                "spaces order references an unknown standalone workspace",
+                            );
+                        }
+                        format!("workspace:{workspace_id}")
+                    }
+                };
+                if !ordered.insert(key) {
+                    return invalid("spaces order contains duplicate entries");
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -474,6 +589,18 @@ impl HostDocumentV1 {
     }
 }
 
+fn validate_space_workspace<'a>(
+    workspace: &'a HostSpaceWorkspaceRef,
+    workspace_ids: &mut HashSet<&'a str>,
+) -> Result<(), HostDocumentError> {
+    validate_stable_ref(&workspace.workspace_id)?;
+    validate_text(&workspace.label)?;
+    if !workspace_ids.insert(workspace.workspace_id.as_str()) {
+        return invalid("a workspace may appear only once in a spaces snapshot");
+    }
+    Ok(())
+}
+
 fn validate_namespace(value: &str) -> Result<(), HostDocumentError> {
     if value.len() > 128
         || !value.contains('.')
@@ -563,6 +690,65 @@ fn invalid<T>(message: &str) -> Result<T, HostDocumentError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn spaces_snapshot() -> HostSpacesV1 {
+        HostSpacesV1 {
+            contract: "host.spaces.v1".into(),
+            generation: 4,
+            revision: 9,
+            scope_id: "session_alpha".into(),
+            repositories: vec![HostSpaceRepository {
+                repository_id: "repo_1".into(),
+                label: "vqro".into(),
+                workspaces: vec![HostSpaceWorkspaceRef {
+                    workspace_id: "workspace_main".into(),
+                    label: "main".into(),
+                }],
+            }],
+            standalone: vec![HostSpaceWorkspaceRef {
+                workspace_id: "workspace_notes".into(),
+                label: "Notes".into(),
+            }],
+            order: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn spaces_snapshot_validates_session_scope_and_unique_workspace_refs() {
+        spaces_snapshot().validate().unwrap();
+
+        let mut duplicate = spaces_snapshot();
+        duplicate.standalone[0].workspace_id = "workspace_main".into();
+        assert!(duplicate
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("only once"));
+
+        let mut unfenced = spaces_snapshot();
+        unfenced.revision = 0;
+        assert_eq!(
+            unfenced.validate().unwrap_err().to_string(),
+            "spaces generation and revision must be non-zero"
+        );
+    }
+
+    #[test]
+    fn spaces_snapshot_is_bounded_by_document_capacity() {
+        let mut oversized = spaces_snapshot();
+        oversized.repositories[0].workspaces = (0..MAX_SPACES_WORKSPACES)
+            .map(|index| HostSpaceWorkspaceRef {
+                workspace_id: format!("workspace_{index}"),
+                label: format!("Workspace {index}"),
+            })
+            .collect();
+        oversized.standalone.clear();
+        assert!(oversized
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("too many workspaces"));
+    }
 
     fn document() -> HostDocumentV1 {
         HostDocumentV1 {

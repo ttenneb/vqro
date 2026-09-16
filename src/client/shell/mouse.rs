@@ -536,9 +536,15 @@ impl ClientShellState {
             .collapsed_groups_for_endpoint(&self.active_endpoint_id)
             .unwrap_or(&empty_collapsed_groups);
         let collapsed_repositories = self.navigation_collapsed_repository_ids();
+        let host_documents = self
+            .endpoints
+            .iter()
+            .find(|endpoint| endpoint.endpoint_id == self.active_endpoint_id)
+            .and_then(ClientShellEndpoint::current_host_documents);
         let entries = render::workspace_entries_with_structure(
             snapshot,
             self.structure.as_deref(),
+            host_documents,
             if self.structure.as_ref().is_some_and(|structure| {
                 !structure.repositories.is_empty() || !structure.space_order.is_empty()
             }) {
@@ -590,9 +596,15 @@ impl ClientShellState {
                 && structure.revision == snapshot.revision
                 && (!structure.repositories.is_empty() || !structure.space_order.is_empty())
         })?;
+        let host_documents = self
+            .endpoints
+            .iter()
+            .find(|endpoint| endpoint.endpoint_id == self.active_endpoint_id)
+            .and_then(ClientShellEndpoint::current_host_documents);
         let entries = super::sidebar::workspace_entries_with_structure(
             snapshot,
             Some(structure),
+            host_documents,
             &HashSet::new(),
         );
         let roots = entries

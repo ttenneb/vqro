@@ -460,6 +460,7 @@ impl App {
             return;
         };
         self.emit_worktree_created_event(ws_idx, worktree.clone());
+        self.refresh_spaces_document();
         let tab_idx = self.state.workspaces[ws_idx].active_tab;
         let response = encode_success(
             api.id,
@@ -586,6 +587,7 @@ impl App {
             worktree,
             result.forced,
         );
+        self.refresh_spaces_document();
         let response = encode_success(
             api.id,
             ResponseResult::WorktreeRemoved {

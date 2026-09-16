@@ -1,8 +1,8 @@
 use crate::api::schema::{
-    ExtensionServiceCapability, InstalledPluginInfo, PluginManifestAction, PluginManifestBuild,
-    PluginManifestEventHook, PluginManifestLinkHandler, PluginManifestPane, PluginManifestService,
-    PluginManifestStartup, PluginPanePlacement, PluginPlatform, PluginServiceCapability,
-    PluginSourceInfo, PluginSourceKind,
+    ExtensionServiceCapability, HostDocumentSourceKind, InstalledPluginInfo, PluginManifestAction,
+    PluginManifestBuild, PluginManifestEventHook, PluginManifestLinkHandler, PluginManifestPane,
+    PluginManifestService, PluginManifestStartup, PluginPanePlacement, PluginPlatform,
+    PluginServiceCapability, PluginSourceInfo, PluginSourceKind,
 };
 use crate::popup_size::PopupSize;
 
@@ -58,6 +58,8 @@ struct RawPluginManifestService {
     command: Vec<String>,
     #[serde(default)]
     priority: i32,
+    #[serde(default)]
+    document_source: HostDocumentSourceKind,
     #[serde(default)]
     provides: Vec<PluginServiceCapability>,
     #[serde(default)]
@@ -191,8 +193,10 @@ pub(crate) fn load_plugin_manifest(
         .map(normalize_manifest_service)
         .collect::<Result<Vec<_>, _>>()?;
     reject_duplicate_service_ids(&services)?;
-    let reserved_document_namespace =
-        plugin_id == "vqro.collections" || plugin_id == "host.fallback";
+    let reserved_document_namespace = matches!(
+        plugin_id.as_str(),
+        "vqro.collections" | "vqro.spaces" | "host.fallback"
+    );
     let publishes_host_documents = services.iter().any(|service| {
         service
             .provides
@@ -202,6 +206,16 @@ pub(crate) fn load_plugin_manifest(
         return Err((
             "reserved_host_document_namespace",
             format!("plugin namespace {plugin_id} is reserved by the host"),
+        ));
+    }
+    if services
+        .iter()
+        .any(|service| service.document_source == HostDocumentSourceKind::Spaces)
+    {
+        return Err((
+            "restricted_host_document_source",
+            "the host-derived spaces source is restricted to the bundled vqro.spaces provider"
+                .to_string(),
         ));
     }
     let mut actions = manifest_source
@@ -342,6 +356,22 @@ fn normalize_manifest_service(
             "pane inspector services must request view_contribution".to_string(),
         ));
     }
+    if service.document_source == HostDocumentSourceKind::Unknown {
+        return Err((
+            "invalid_host_document_source",
+            "unknown host document source".to_string(),
+        ));
+    }
+    if service.document_source != HostDocumentSourceKind::TerminalGroups
+        && !service
+            .provides
+            .contains(&PluginServiceCapability::HostDocument)
+    {
+        return Err((
+            "invalid_host_document_source",
+            "document_source requires a host_document service".to_string(),
+        ));
+    }
     if service
         .provides
         .contains(&PluginServiceCapability::HostDocument)
@@ -360,6 +390,7 @@ fn normalize_manifest_service(
     let granted_capabilities = requested_capabilities.clone();
     Ok(PluginManifestService {
         id,
+        document_source: service.document_source,
         platforms,
         command,
         priority: service.priority,

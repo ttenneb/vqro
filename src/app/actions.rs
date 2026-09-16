@@ -1721,6 +1721,8 @@ impl AppState {
             | AppEvent::ExtensionCatalogCapacityAvailable
             | AppEvent::ExtensionServiceFinished(_)
             | AppEvent::HostDocumentFinished(_)
+            | AppEvent::HostSpacesDocumentFinished(_)
+            | AppEvent::HostSpacesRetryDue { .. }
             | AppEvent::HostDocumentProviderActionFinished { .. } => Vec::new(),
         }
     }

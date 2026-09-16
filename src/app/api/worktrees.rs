@@ -167,6 +167,7 @@ impl App {
         let tab_idx = self.state.workspaces[ws_idx].active_tab;
         let worktree = self.worktree_info_for_entry(&source, entry);
         self.emit_worktree_opened_event(ws_idx, worktree.clone(), already_open.is_some());
+        self.refresh_spaces_document();
         encode_success(
             id,
             ResponseResult::WorktreeOpened {
@@ -753,6 +754,18 @@ mod tests {
     };
     use crate::{config::Config, workspace::Workspace};
 
+    fn stale_spaces_snapshot() -> crate::extension_contract::HostSpacesV1 {
+        crate::extension_contract::HostSpacesV1 {
+            contract: "host.spaces.v1".into(),
+            generation: 1,
+            revision: 1,
+            scope_id: crate::first_party::spaces::SESSION_SCOPE_ID.into(),
+            repositories: Vec::new(),
+            standalone: Vec::new(),
+            order: Vec::new(),
+        }
+    }
+
     fn unique_temp_path(name: &str) -> PathBuf {
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -1214,6 +1227,7 @@ mod tests {
             is_linked_worktree: false,
         });
         let (respond_to, response_rx) = response_channel();
+        app.host_spaces_last_desired = Some(stale_spaces_snapshot());
 
         app.handle_api_worktree_add_finished(WorktreeAddResult {
             path: checkout.clone(),
@@ -1247,6 +1261,7 @@ mod tests {
             .into_iter()
             .any(|(_, event)| event.event == EventKind::WorktreeCreated));
         assert_eq!(app.state.workspaces.len(), 3);
+        assert!(app.host_spaces_last_desired.is_none());
         assert_eq!(
             app.state.workspaces[0]
                 .worktree_space()

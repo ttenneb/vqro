@@ -381,6 +381,7 @@ fn typed_repository_projection_drives_space_identity_git_context_and_compact_cou
         super::super::sidebar::workspace_entries_with_structure(
             compact_snapshot,
             Some(compact_structure),
+            None,
             &HashSet::from(["repo_1".to_owned()]),
         )
         .into_iter()
@@ -472,6 +473,7 @@ fn typed_single_checkout_repository_is_still_a_repository_space() {
     let entries = super::super::sidebar::workspace_entries_with_structure(
         &projected,
         Some(&structure),
+        None,
         &HashSet::new(),
     );
     assert_eq!(entries.len(), 1);
@@ -531,6 +533,7 @@ fn typed_standalone_space_order_is_authoritative_without_repositories() {
     let entries = super::super::sidebar::workspace_entries_with_structure(
         &projected,
         Some(&structure),
+        None,
         &HashSet::new(),
     );
 
@@ -541,6 +544,239 @@ fn typed_standalone_space_order_is_authoritative_without_repositories() {
             .collect::<Vec<_>>(),
         vec!["ws_2", "ws_1"]
     );
+}
+
+#[test]
+fn spaces_document_controls_workspace_order_labels_and_hierarchy() {
+    use crate::extension_contract::{
+        HostDocumentItem, HostDocumentItemFlags, HostDocumentV1, HostItemRole, HostSurface,
+        HostTarget, HOST_DOCUMENT_CONTRACT_V1,
+    };
+
+    let mut projected = snapshot();
+    let mut child = projected.workspaces[0].clone();
+    child.workspace_id = "ws_2".into();
+    child.focused = false;
+    let mut standalone = projected.workspaces[0].clone();
+    standalone.workspace_id = "ws_3".into();
+    standalone.focused = false;
+    projected.workspaces.extend([child, standalone]);
+    let structure = crate::protocol::endpoint::ClientShellStructureProjection {
+        session_id: "alpha".into(),
+        boot_id: projected.boot_id.clone(),
+        revision: projected.revision,
+        collections: Vec::new(),
+        delegations: Vec::new(),
+        repositories: vec![crate::protocol::endpoint::ClientShellRepository {
+            repository_id: "repo_1".into(),
+            label: "native repository".into(),
+            repository_path: None,
+            web_url: None,
+            checkouts: vec![
+                crate::protocol::endpoint::ClientShellRepositoryCheckout {
+                    workspace_id: "ws_1".into(),
+                    checkout_path: None,
+                    kind: crate::protocol::endpoint::ClientShellCheckoutKind::Primary,
+                    upstream: None,
+                    upstream_web_url: None,
+                    detached_head: None,
+                },
+                crate::protocol::endpoint::ClientShellRepositoryCheckout {
+                    workspace_id: "ws_2".into(),
+                    checkout_path: None,
+                    kind: crate::protocol::endpoint::ClientShellCheckoutKind::Linked,
+                    upstream: None,
+                    upstream_web_url: None,
+                    detached_head: None,
+                },
+            ],
+            last_focused_workspace_id: Some("ws_1".into()),
+        }],
+        space_order: vec![
+            crate::protocol::endpoint::ClientShellSpaceRef {
+                kind: crate::protocol::endpoint::ClientShellSpaceKind::Repository,
+                id: "repo_1".into(),
+            },
+            crate::protocol::endpoint::ClientShellSpaceRef {
+                kind: crate::protocol::endpoint::ClientShellSpaceKind::StandaloneWorkspace,
+                id: "ws_3".into(),
+            },
+        ],
+    };
+    let item = |id: &str, parent_id: Option<&str>, role, label: &str| HostDocumentItem {
+        id: id.into(),
+        parent_id: parent_id.map(str::to_owned),
+        role,
+        label: label.into(),
+        detail: None,
+        terminal: None,
+        action_ids: Vec::new(),
+        flags: HostDocumentItemFlags::default(),
+    };
+    let document = HostDocumentV1 {
+        contract: HOST_DOCUMENT_CONTRACT_V1.into(),
+        namespace: "vqro.spaces".into(),
+        generation: 1,
+        revision: projected.revision,
+        surface: HostSurface::Navigation,
+        target: HostTarget::Session,
+        items: vec![
+            item("workspace:ws_3", None, HostItemRole::Section, "Scratch doc"),
+            item(
+                "repository:repo_1",
+                None,
+                HostItemRole::Group,
+                "Repository doc",
+            ),
+            item(
+                "workspace:ws_2",
+                Some("repository:repo_1"),
+                HostItemRole::Section,
+                "Feature doc",
+            ),
+            item(
+                "workspace:ws_1",
+                Some("repository:repo_1"),
+                HostItemRole::Section,
+                "Main doc",
+            ),
+        ],
+        actions: Vec::new(),
+        required_capabilities: Vec::new(),
+    };
+    let documents = crate::protocol::endpoint::HostDocumentsProjectionV1 {
+        boot_id: projected.boot_id.clone(),
+        revision: projected.revision,
+        documents: vec![crate::protocol::endpoint::HostDocumentProjectionEntryV1 {
+            provider_priority: 100,
+            document,
+            confirmation_tokens: Default::default(),
+        }],
+    };
+
+    let entries = super::super::sidebar::workspace_entries_with_structure(
+        &projected,
+        Some(&structure),
+        Some(&documents),
+        &HashSet::new(),
+    );
+    assert_eq!(
+        entries
+            .iter()
+            .map(|entry| (
+                projected.workspaces[entry.index].workspace_id.as_str(),
+                entry.indented,
+                entry.label.as_deref(),
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            ("ws_3", false, Some("Scratch doc")),
+            ("ws_1", false, Some("Repository doc")),
+            ("ws_2", true, Some("Feature doc")),
+        ]
+    );
+
+    let mut incomplete = documents.clone();
+    incomplete.documents[0]
+        .document
+        .items
+        .retain(|item| item.id != "workspace:ws_3");
+    let fallback = super::super::sidebar::workspace_entries_with_structure(
+        &projected,
+        Some(&structure),
+        Some(&incomplete),
+        &HashSet::new(),
+    );
+    assert_eq!(
+        fallback
+            .iter()
+            .map(|entry| projected.workspaces[entry.index].workspace_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["ws_1", "ws_2", "ws_3"]
+    );
+    assert!(fallback.iter().all(|entry| entry.label.is_none()));
+}
+
+#[test]
+fn highest_priority_spaces_document_wins_deterministically() {
+    use crate::extension_contract::{
+        HostDocumentItem, HostDocumentItemFlags, HostDocumentV1, HostItemRole, HostSurface,
+        HostTarget, HOST_DOCUMENT_CONTRACT_V1,
+    };
+
+    let projected = snapshot();
+    let structure = crate::protocol::endpoint::ClientShellStructureProjection {
+        session_id: "alpha".into(),
+        boot_id: projected.boot_id.clone(),
+        revision: projected.revision,
+        collections: Vec::new(),
+        delegations: Vec::new(),
+        repositories: Vec::new(),
+        space_order: vec![crate::protocol::endpoint::ClientShellSpaceRef {
+            kind: crate::protocol::endpoint::ClientShellSpaceKind::StandaloneWorkspace,
+            id: "ws_1".into(),
+        }],
+    };
+    let document = |label: &str| HostDocumentV1 {
+        contract: HOST_DOCUMENT_CONTRACT_V1.into(),
+        namespace: "vqro.spaces".into(),
+        generation: 1,
+        revision: projected.revision,
+        surface: HostSurface::Navigation,
+        target: HostTarget::Session,
+        items: vec![HostDocumentItem {
+            id: "workspace:ws_1".into(),
+            parent_id: None,
+            role: HostItemRole::Section,
+            label: label.into(),
+            detail: None,
+            terminal: None,
+            action_ids: Vec::new(),
+            flags: HostDocumentItemFlags::default(),
+        }],
+        actions: Vec::new(),
+        required_capabilities: Vec::new(),
+    };
+    let documents = crate::protocol::endpoint::HostDocumentsProjectionV1 {
+        boot_id: projected.boot_id.clone(),
+        revision: projected.revision,
+        documents: vec![
+            crate::protocol::endpoint::HostDocumentProjectionEntryV1 {
+                provider_priority: 20,
+                document: document("high first"),
+                confirmation_tokens: Default::default(),
+            },
+            crate::protocol::endpoint::HostDocumentProjectionEntryV1 {
+                provider_priority: 10,
+                document: document("low"),
+                confirmation_tokens: Default::default(),
+            },
+            crate::protocol::endpoint::HostDocumentProjectionEntryV1 {
+                provider_priority: 20,
+                document: document("high second"),
+                confirmation_tokens: Default::default(),
+            },
+        ],
+    };
+
+    let entries = super::super::sidebar::workspace_entries_with_structure(
+        &projected,
+        Some(&structure),
+        Some(&documents),
+        &HashSet::new(),
+    );
+    assert_eq!(entries[0].label.as_deref(), Some("high first"));
+
+    let mut malformed_winner = documents;
+    malformed_winner.documents[0].document.items.clear();
+    let fallback = super::super::sidebar::workspace_entries_with_structure(
+        &projected,
+        Some(&structure),
+        Some(&malformed_winner),
+        &HashSet::new(),
+    );
+    assert_eq!(fallback.len(), 1);
+    assert_eq!(fallback[0].label, None);
 }
 
 #[test]

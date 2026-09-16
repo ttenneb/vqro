@@ -273,16 +273,18 @@ pub(super) fn render_shell(
                 );
             }
         } else if state.sidebar_collapsed {
-            let structure = state
+            let endpoint = state
                 .endpoints
                 .iter()
-                .find(|endpoint| &endpoint.endpoint_id == state.active_endpoint_id)
-                .and_then(|endpoint| endpoint.current_structure());
+                .find(|endpoint| &endpoint.endpoint_id == state.active_endpoint_id);
+            let structure = endpoint.and_then(|endpoint| endpoint.current_structure());
+            let host_documents = endpoint.and_then(|endpoint| endpoint.current_host_documents());
             render_collapsed_sidebar(
                 buffer,
                 layout.sidebar,
                 snapshot,
                 structure,
+                host_documents,
                 config,
                 state
                     .selected_workspace_id

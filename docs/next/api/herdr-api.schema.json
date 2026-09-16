@@ -8655,6 +8655,14 @@
           ],
           "type": "string"
         },
+        "HostDocumentSourceKind": {
+          "enum": [
+            "terminal_groups",
+            "spaces",
+            "unknown"
+          ],
+          "type": "string"
+        },
         "InstalledPluginInfo": {
           "properties": {
             "actions": {
@@ -10365,6 +10373,10 @@
                 "type": "string"
               },
               "type": "array"
+            },
+            "document_source": {
+              "$ref": "#/schemas/success_response/$defs/HostDocumentSourceKind",
+              "default": "terminal_groups"
             },
             "granted_capabilities": {
               "description": "Host-allowlisted protocol grants. These are not an OS sandbox.",

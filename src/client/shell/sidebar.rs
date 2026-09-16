@@ -39,6 +39,7 @@ pub(crate) fn render_collapsed_sidebar(
     area: Rect,
     snapshot: &ClientShellSnapshot,
     structure: Option<&crate::protocol::endpoint::ClientShellStructureProjection>,
+    host_documents: Option<&crate::protocol::endpoint::HostDocumentsProjectionV1>,
     config: &ClientShellConfig,
     selected_workspace_id: Option<&str>,
     hits: &mut ShellHitMap,
@@ -63,7 +64,12 @@ pub(crate) fn render_collapsed_sidebar(
                 .filter_map(|(index, _)| parent_group_key(snapshot, index))
                 .collect()
         });
-    let spaces = workspace_entries_with_structure(snapshot, structure, &collapsed_repositories);
+    let spaces = workspace_entries_with_structure(
+        snapshot,
+        structure,
+        host_documents,
+        &collapsed_repositories,
+    );
     let workspace_index = workspace_projection_index(snapshot);
     for (index, entry) in spaces
         .iter()
@@ -281,12 +287,18 @@ pub(crate) fn render_sidebar(
             .add_modifier(Modifier::BOLD),
     );
 
-    let structure = state
+    let endpoint = state
         .endpoints
         .iter()
-        .find(|endpoint| &endpoint.endpoint_id == state.active_endpoint_id)
-        .and_then(|endpoint| endpoint.current_structure());
-    let entries = workspace_entries_with_structure(snapshot, structure, state.collapsed_groups);
+        .find(|endpoint| &endpoint.endpoint_id == state.active_endpoint_id);
+    let structure = endpoint.and_then(|endpoint| endpoint.current_structure());
+    let host_documents = endpoint.and_then(|endpoint| endpoint.current_host_documents());
+    let entries = workspace_entries_with_structure(
+        snapshot,
+        structure,
+        host_documents,
+        state.collapsed_groups,
+    );
     let workspace_index = workspace_projection_index(snapshot);
     let body = Rect::new(
         workspace_area.x,
@@ -442,8 +454,15 @@ pub(crate) fn render_sidebar(
             dragged,
             palette,
             WorkspaceLinkLabels {
-                repository: repository.map(|repository| repository.label.as_str()),
-                branch: workspace.branch.as_deref(),
+                repository: (!entry.indented)
+                    .then_some(entry.label.as_deref())
+                    .flatten()
+                    .or_else(|| repository.map(|repository| repository.label.as_str())),
+                branch: entry
+                    .indented
+                    .then_some(entry.label.as_deref())
+                    .flatten()
+                    .or(workspace.branch.as_deref()),
                 upstream: checkout.and_then(|checkout| checkout.upstream.as_deref()),
             },
         );
@@ -617,12 +636,13 @@ pub(crate) fn workspace_entries(
     snapshot: &ClientShellSnapshot,
     collapsed_groups: &HashSet<String>,
 ) -> Vec<WorkspaceEntry> {
-    workspace_entries_with_structure(snapshot, None, collapsed_groups)
+    workspace_entries_with_structure(snapshot, None, None, collapsed_groups)
 }
 
 pub(crate) fn workspace_entries_with_structure(
     snapshot: &ClientShellSnapshot,
     structure: Option<&crate::protocol::endpoint::ClientShellStructureProjection>,
+    host_documents: Option<&crate::protocol::endpoint::HostDocumentsProjectionV1>,
     collapsed_groups: &HashSet<String>,
 ) -> Vec<WorkspaceEntry> {
     let Some(structure) = structure.filter(|structure| {
@@ -632,6 +652,11 @@ pub(crate) fn workspace_entries_with_structure(
     }) else {
         return compatibility_workspace_entries(snapshot, collapsed_groups);
     };
+    if let Some(entries) =
+        documented_workspace_entries(snapshot, structure, host_documents, collapsed_groups)
+    {
+        return entries;
+    }
     let workspace_indexes = snapshot
         .workspaces
         .iter()
@@ -694,6 +719,208 @@ pub(crate) fn workspace_entries_with_structure(
     entries
 }
 
+fn documented_workspace_entries(
+    snapshot: &ClientShellSnapshot,
+    structure: &crate::protocol::endpoint::ClientShellStructureProjection,
+    host_documents: Option<&crate::protocol::endpoint::HostDocumentsProjectionV1>,
+    collapsed_groups: &HashSet<String>,
+) -> Option<Vec<WorkspaceEntry>> {
+    use crate::extension_contract::{HostItemRole, HostSurface, HostTarget};
+
+    let projection = host_documents.filter(|projection| {
+        projection.boot_id == snapshot.boot_id && projection.revision == snapshot.revision
+    })?;
+    let (_, document_entry) = projection
+        .documents
+        .iter()
+        .enumerate()
+        .filter(|(_, entry)| {
+            let document = &entry.document;
+            document.namespace == "vqro.spaces"
+                && document.surface == HostSurface::Navigation
+                && document.target == HostTarget::Session
+        })
+        .max_by(|(left_index, left), (right_index, right)| {
+            left.provider_priority
+                .cmp(&right.provider_priority)
+                // On equal priority, the earlier projection entry wins.
+                .then_with(|| right_index.cmp(left_index))
+        })?;
+    let document = &document_entry.document;
+    if document.validate().is_err() {
+        return None;
+    }
+
+    let workspace_indexes = snapshot
+        .workspaces
+        .iter()
+        .enumerate()
+        .map(|(index, workspace)| (workspace.workspace_id.as_str(), index))
+        .collect::<HashMap<_, _>>();
+    if workspace_indexes.len() != snapshot.workspaces.len() {
+        return None;
+    }
+    let repository_indexes = structure
+        .repositories
+        .iter()
+        .enumerate()
+        .map(|(index, repository)| (repository.repository_id.as_str(), index))
+        .collect::<HashMap<_, _>>();
+    if repository_indexes.len() != structure.repositories.len() {
+        return None;
+    }
+
+    let mut workspace_membership = HashMap::new();
+    for (repository_index, repository) in structure.repositories.iter().enumerate() {
+        if repository.checkouts.is_empty() {
+            return None;
+        }
+        for (checkout_index, checkout) in repository.checkouts.iter().enumerate() {
+            if !workspace_indexes.contains_key(checkout.workspace_id.as_str())
+                || workspace_membership
+                    .insert(
+                        checkout.workspace_id.as_str(),
+                        (repository_index, checkout_index),
+                    )
+                    .is_some()
+            {
+                return None;
+            }
+        }
+    }
+
+    let mut repository_items = HashMap::new();
+    let mut workspace_items = HashMap::new();
+    for (item_index, item) in document.items.iter().enumerate() {
+        if let Some(repository_id) = item.id.strip_prefix("repository:") {
+            if repository_id.is_empty()
+                || item.role != HostItemRole::Group
+                || item.parent_id.is_some()
+                || !repository_indexes.contains_key(repository_id)
+                || repository_items.insert(repository_id, item_index).is_some()
+            {
+                return None;
+            }
+        } else if let Some(workspace_id) = item.id.strip_prefix("workspace:") {
+            let &workspace_index = workspace_indexes.get(workspace_id)?;
+            if workspace_id.is_empty()
+                || item.role != HostItemRole::Section
+                || workspace_items
+                    .insert(workspace_id, (item_index, workspace_index))
+                    .is_some()
+            {
+                return None;
+            }
+            match (
+                workspace_membership.get(workspace_id),
+                item.parent_id.as_deref(),
+            ) {
+                (Some((repository_index, _)), Some(parent))
+                    if parent.strip_prefix("repository:")
+                        == Some(
+                            structure.repositories[*repository_index]
+                                .repository_id
+                                .as_str(),
+                        ) => {}
+                (None, None) => {}
+                _ => return None,
+            }
+        } else {
+            return None;
+        }
+    }
+    if repository_items.len() != structure.repositories.len()
+        || workspace_items.len() != snapshot.workspaces.len()
+    {
+        return None;
+    }
+
+    let mut entries = Vec::with_capacity(snapshot.workspaces.len());
+    for item in document
+        .items
+        .iter()
+        .filter(|item| item.parent_id.is_none())
+    {
+        if let Some(repository_id) = item.id.strip_prefix("repository:") {
+            let repository_index = *repository_indexes.get(repository_id)?;
+            let repository = structure.repositories.get(repository_index)?;
+            let ordered_checkouts = document
+                .items
+                .iter()
+                .filter(|candidate| candidate.parent_id.as_deref() == Some(item.id.as_str()))
+                .map(|candidate| {
+                    let workspace_id = candidate.id.strip_prefix("workspace:")?;
+                    let (_, workspace_index) = *workspace_items.get(workspace_id)?;
+                    let (_, checkout_index) = *workspace_membership.get(workspace_id)?;
+                    Some((checkout_index, workspace_index, candidate.label.clone()))
+                })
+                .collect::<Option<Vec<_>>>()?;
+            if ordered_checkouts.len() != repository.checkouts.len() {
+                return None;
+            }
+            let (root_checkout_index, root_workspace_index) = ordered_checkouts
+                .iter()
+                .map(|(checkout, workspace, _)| (*checkout, *workspace))
+                .find(|(checkout, _)| {
+                    repository.checkouts[*checkout].kind
+                        == crate::protocol::endpoint::ClientShellCheckoutKind::Primary
+                })
+                .or_else(|| {
+                    ordered_checkouts
+                        .first()
+                        .map(|(checkout, workspace, _)| (*checkout, *workspace))
+                })?;
+            let has_children = ordered_checkouts.len() > 1;
+            entries.push(WorkspaceEntry {
+                index: root_workspace_index,
+                indented: false,
+                last_child: false,
+                repository_index: Some(repository_index),
+                checkout_index: Some(root_checkout_index),
+                repository_has_children: has_children,
+                label: Some(item.label.clone()),
+            });
+            let mut children = ordered_checkouts
+                .into_iter()
+                .filter(|(_, workspace_index, _)| *workspace_index != root_workspace_index)
+                .collect::<Vec<_>>();
+            if collapsed_groups.contains(&repository.repository_id) {
+                children.retain(|(_, workspace_index, _)| {
+                    snapshot.workspaces[*workspace_index].focused
+                });
+                children.truncate(1);
+            }
+            let child_count = children.len();
+            for (position, (checkout_index, workspace_index, label)) in
+                children.into_iter().enumerate()
+            {
+                entries.push(WorkspaceEntry {
+                    index: workspace_index,
+                    indented: true,
+                    last_child: position + 1 == child_count,
+                    repository_index: Some(repository_index),
+                    checkout_index: Some(checkout_index),
+                    repository_has_children: has_children,
+                    label: Some(label),
+                });
+            }
+        } else {
+            let workspace_id = item.id.strip_prefix("workspace:")?;
+            let (_, workspace_index) = *workspace_items.get(workspace_id)?;
+            entries.push(WorkspaceEntry {
+                index: workspace_index,
+                indented: false,
+                last_child: false,
+                repository_index: None,
+                checkout_index: None,
+                repository_has_children: false,
+                label: Some(item.label.clone()),
+            });
+        }
+    }
+    Some(entries)
+}
+
 fn append_repository_entries(
     snapshot: &ClientShellSnapshot,
     structure: &crate::protocol::endpoint::ClientShellStructureProjection,
@@ -744,6 +971,7 @@ fn append_repository_entries(
         repository_index: Some(repository_index),
         checkout_index: Some(root_checkout_index),
         repository_has_children: has_children,
+        label: None,
     });
     if collapsed_groups.contains(&repository.repository_id) {
         if let Some((checkout_index, workspace_index)) =
@@ -760,6 +988,7 @@ fn append_repository_entries(
                 repository_index: Some(repository_index),
                 checkout_index: Some(checkout_index),
                 repository_has_children: has_children,
+                label: None,
             });
         }
         return;
@@ -777,6 +1006,7 @@ fn append_repository_entries(
             repository_index: Some(repository_index),
             checkout_index: Some(checkout_index),
             repository_has_children: has_children,
+            label: None,
         });
     }
 }
@@ -789,6 +1019,7 @@ fn plain_workspace_entry(index: usize) -> WorkspaceEntry {
         repository_index: None,
         checkout_index: None,
         repository_has_children: false,
+        label: None,
     }
 }
 
@@ -841,6 +1072,7 @@ fn compatibility_workspace_entries(
             repository_index: None,
             checkout_index: None,
             repository_has_children: true,
+            label: None,
         });
         if collapsed_groups.contains(&worktree.key) {
             if let Some(active) = group_members
@@ -855,6 +1087,7 @@ fn compatibility_workspace_entries(
                     repository_index: None,
                     checkout_index: None,
                     repository_has_children: true,
+                    label: None,
                 });
             }
             continue;
@@ -872,6 +1105,7 @@ fn compatibility_workspace_entries(
                 repository_index: None,
                 checkout_index: None,
                 repository_has_children: true,
+                label: None,
             });
         }
     }
@@ -1042,7 +1276,9 @@ pub(in crate::client::shell) fn projected_workspace_rows(
     let checkout = entry
         .checkout_index
         .and_then(|index| repository?.checkouts.get(index));
-    let label = if entry.indented && !workspace.custom_label {
+    let label = if let Some(label) = entry.label.as_ref() {
+        label.clone()
+    } else if entry.indented && !workspace.custom_label {
         workspace.branch.as_deref().map_or_else(
             || {
                 checkout

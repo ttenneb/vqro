@@ -67,6 +67,10 @@ impl App {
         self.host_document_confirmation_grants.clear();
         self.host_document_retry_snapshots.clear();
         self.host_document_retry_order.clear();
+        self.host_spaces_last_desired = None;
+        self.host_spaces_retry_epoch = self.host_spaces_retry_epoch.saturating_add(1).max(1);
+        self.host_spaces_retry_attempt = 0;
+        self.host_spaces_retry_scheduled = false;
         self.refresh_collection_documents();
     }
 
@@ -1601,7 +1605,7 @@ capabilities = ["view_contribution", "terminal_interrupt"]
 
     #[test]
     fn reserved_host_document_namespaces_are_rejected() {
-        for namespace in ["vqro.collections", "host.fallback"] {
+        for namespace in ["vqro.collections", "vqro.spaces", "host.fallback"] {
             let root = unique_temp_path("reserved-host-document-namespace");
             write_manifest_content(
                 &root,
@@ -1624,6 +1628,30 @@ capabilities = ["host_document"]
             assert_eq!(error.0, "reserved_host_document_namespace");
             let _ = std::fs::remove_dir_all(root);
         }
+    }
+
+    #[test]
+    fn user_plugins_cannot_request_the_host_derived_spaces_source() {
+        let root = unique_temp_path("restricted-spaces-document-source");
+        write_manifest_content(
+            &root,
+            r#"
+id = "example.spaces"
+name = "Spaces"
+version = "0.1.0"
+min_herdr_version = "0.9.0"
+
+[[services]]
+id = "documents"
+command = ["document-service"]
+document_source = "spaces"
+provides = ["host_document"]
+capabilities = ["host_document"]
+"#,
+        );
+        let error = load_plugin_manifest(root.to_str().unwrap(), true).unwrap_err();
+        assert_eq!(error.0, "restricted_host_document_source");
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

@@ -3,6 +3,7 @@ use std::time::{Duration, Instant};
 mod agent_view;
 mod agents;
 mod collections;
+pub(crate) use collections::DeferredHostDocumentSnapshot;
 pub(crate) use collections::HostDocumentConfirmationGrant;
 mod delegations;
 mod env;
@@ -89,6 +90,7 @@ impl App {
             .apply_workspace_git_statuses(&self.terminal_runtimes, results)
             || projected_identity_changed;
         if changed {
+            self.refresh_spaces_document();
             self.render_dirty.request_generic();
             self.render_notify.notify_one();
         }
@@ -164,6 +166,17 @@ impl App {
                     }
                 };
                 let _ = respond_to.send(response);
+                return Vec::new();
+            }
+            AppEvent::HostSpacesDocumentFinished(result) => {
+                self.handle_host_spaces_document_result(*result);
+                return Vec::new();
+            }
+            AppEvent::HostSpacesRetryDue { epoch } => {
+                if epoch == self.host_spaces_retry_epoch {
+                    self.host_spaces_retry_scheduled = false;
+                    self.refresh_spaces_document();
+                }
                 return Vec::new();
             }
             // HeadlessServer consumes service completions before entering App. The standalone

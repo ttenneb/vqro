@@ -1135,7 +1135,7 @@ pub(super) fn release_notes_state(
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub(super) struct WorkspaceEntry {
     pub(super) index: usize,
     pub(super) indented: bool,
@@ -1144,6 +1144,8 @@ pub(super) struct WorkspaceEntry {
     pub(super) repository_index: Option<usize>,
     pub(super) checkout_index: Option<usize>,
     pub(super) repository_has_children: bool,
+    /// Presentation supplied by a validated Spaces document. Runtime identity remains projected.
+    pub(super) label: Option<String>,
 }
 
 impl ClientShellState {
@@ -1363,10 +1365,16 @@ impl ClientShellState {
         snapshot: &ClientShellSnapshot,
     ) -> Vec<WorkspaceEntry> {
         let empty_collapsed_groups = HashSet::new();
+        let host_documents = self
+            .endpoints
+            .iter()
+            .find(|endpoint| endpoint.endpoint_id == self.active_endpoint_id)
+            .and_then(ClientShellEndpoint::current_host_documents);
         if self.mobile_layout_active() {
             render::workspace_entries_with_structure(
                 snapshot,
                 self.structure.as_deref(),
+                host_documents,
                 &empty_collapsed_groups,
             )
         } else if self.structure.as_ref().is_some_and(|structure| {
@@ -1375,12 +1383,14 @@ impl ClientShellState {
             render::workspace_entries_with_structure(
                 snapshot,
                 self.structure.as_deref(),
+                host_documents,
                 &self.navigation_collapsed_repository_ids(),
             )
         } else {
             render::workspace_entries_with_structure(
                 snapshot,
                 self.structure.as_deref(),
+                host_documents,
                 self.collapsed_groups_for_endpoint(&self.active_endpoint_id)
                     .unwrap_or(&empty_collapsed_groups),
             )

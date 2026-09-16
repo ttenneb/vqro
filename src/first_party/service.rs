@@ -30,6 +30,10 @@ pub(crate) fn run(provider: &str) -> std::io::Result<i32> {
             crate::first_party::collections::NAMESPACE,
             serde_json::json!(["host_document", "focus_terminal"]),
         ),
+        "spaces" => (
+            crate::first_party::spaces::NAMESPACE,
+            serde_json::json!(["host_document"]),
+        ),
         _ => return Ok(2),
     };
     let service_id =
@@ -61,14 +65,26 @@ pub(crate) fn run(provider: &str) -> std::io::Result<i32> {
             Ok(request)
                 if request.kind == "request" && request.method == "host.document.render" =>
             {
-                match serde_json::from_value::<crate::extension_contract::HostTerminalGroupsV1>(
-                    request.params,
-                )
-                .map_err(|error| error.to_string())
-                .and_then(|snapshot| {
-                    crate::first_party::collections::project(&snapshot)
-                        .map_err(|error| error.to_string())
-                }) {
+                let projection = match provider {
+                    "collections" => serde_json::from_value::<
+                        crate::extension_contract::HostTerminalGroupsV1,
+                    >(request.params)
+                    .map_err(|error| error.to_string())
+                    .and_then(|snapshot| {
+                        crate::first_party::collections::project(&snapshot)
+                            .map_err(|error| error.to_string())
+                    }),
+                    "spaces" => serde_json::from_value::<crate::extension_contract::HostSpacesV1>(
+                        request.params,
+                    )
+                    .map_err(|error| error.to_string())
+                    .and_then(|snapshot| {
+                        crate::first_party::spaces::project(&snapshot)
+                            .map_err(|error| error.to_string())
+                    }),
+                    _ => unreachable!("provider was validated before the service loop"),
+                };
+                match projection {
                     Ok(document) => Response {
                         kind: "response",
                         id: request.id,

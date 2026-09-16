@@ -195,21 +195,24 @@ fn limit_host_document_specs(
         String,
         ExtensionServiceSpec,
         std::collections::HashSet<crate::extension_contract::HostCapability>,
+        crate::api::schema::HostDocumentSourceKind,
     )>,
-    reserve_bundled: bool,
+    reserved_bundled: usize,
 ) -> Vec<(
     String,
     ExtensionServiceSpec,
     std::collections::HashSet<crate::extension_contract::HostCapability>,
+    crate::api::schema::HostDocumentSourceKind,
 )> {
-    specs.retain(|(namespace, _, _)| {
-        namespace != crate::first_party::collections::NAMESPACE && namespace != "host.fallback"
+    specs.retain(|(namespace, _, _, _)| {
+        namespace != crate::first_party::collections::NAMESPACE
+            && namespace != crate::first_party::spaces::NAMESPACE
+            && namespace != "host.fallback"
     });
     let mut namespaces = std::collections::HashSet::new();
-    specs.retain(|(namespace, _, _)| namespaces.insert(namespace.clone()));
+    specs.retain(|(namespace, _, _, _)| namespaces.insert(namespace.clone()));
     specs.truncate(
-        crate::extension_contract::MAX_DOCUMENT_PROVIDERS
-            .saturating_sub(usize::from(reserve_bundled)),
+        crate::extension_contract::MAX_DOCUMENT_PROVIDERS.saturating_sub(reserved_bundled),
     );
     specs
 }
@@ -240,6 +243,7 @@ type ActiveRenderSlots =
     Arc<Mutex<std::collections::HashMap<String, (u64, u64, Arc<HostDocumentRenderSlotGuard>)>>>;
 
 struct HostDocumentWorkerHandle {
+    source: crate::api::schema::HostDocumentSourceKind,
     _provider_slot: Option<HostDocumentProviderSlotGuard>,
     pending: Arc<(Mutex<HostDocumentPending>, std::sync::Condvar)>,
     desired_revisions: Arc<Mutex<std::collections::HashMap<String, (u64, u64)>>>,
@@ -300,7 +304,7 @@ impl HostDocumentPending {
             self.actions.push_back(request);
             return Ok(());
         }
-        let scope_id = request.snapshot.scope_id.clone();
+        let scope_id = request.snapshot.scope_id().to_string();
         if !self.render_by_scope.contains_key(&scope_id) {
             if self.render_by_scope.len() >= crate::extension_contract::MAX_DOCUMENT_ITEMS {
                 return Err("document provider scope queue is full".into());
@@ -333,6 +337,7 @@ impl HostDocumentPending {
 // Unit-test executables cannot recursively host the bundled service binary.
 #[cfg_attr(test, allow(dead_code))]
 struct HostDocumentProvider {
+    source: crate::api::schema::HostDocumentSourceKind,
     priority: i32,
     generation: u64,
     supervisor: ExtensionServiceSupervisor,
@@ -341,10 +346,49 @@ struct HostDocumentProvider {
 
 // Fields are consumed by the production worker, omitted from unit-test catalogs.
 #[cfg_attr(test, allow(dead_code))]
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(untagged)]
+enum HostDocumentSnapshotV1 {
+    TerminalGroups(crate::extension_contract::HostTerminalGroupsV1),
+    Spaces(crate::extension_contract::HostSpacesV1),
+}
+
+impl HostDocumentSnapshotV1 {
+    fn scope_id(&self) -> &str {
+        match self {
+            Self::TerminalGroups(snapshot) => &snapshot.scope_id,
+            Self::Spaces(snapshot) => &snapshot.scope_id,
+        }
+    }
+
+    fn generation(&self) -> u64 {
+        match self {
+            Self::TerminalGroups(snapshot) => snapshot.generation,
+            Self::Spaces(snapshot) => snapshot.generation,
+        }
+    }
+
+    fn revision(&self) -> u64 {
+        match self {
+            Self::TerminalGroups(snapshot) => snapshot.revision,
+            Self::Spaces(snapshot) => snapshot.revision,
+        }
+    }
+
+    fn source(&self) -> crate::api::schema::HostDocumentSourceKind {
+        match self {
+            Self::TerminalGroups(_) => crate::api::schema::HostDocumentSourceKind::TerminalGroups,
+            Self::Spaces(_) => crate::api::schema::HostDocumentSourceKind::Spaces,
+        }
+    }
+}
+
+// Fields are consumed by the production worker, omitted from unit-test catalogs.
+#[cfg_attr(test, allow(dead_code))]
 struct HostDocumentRequest {
     namespace: String,
     render_slot: Option<Arc<HostDocumentRenderSlotGuard>>,
-    snapshot: crate::extension_contract::HostTerminalGroupsV1,
+    snapshot: HostDocumentSnapshotV1,
     action: Option<crate::extension_contract::HostDocumentExtensionActionV1>,
     action_response: Option<mpsc::SyncSender<Result<(), String>>>,
     action_completion: Option<HostDocumentActionCompletion>,
@@ -430,13 +474,13 @@ fn reject_queued_host_document_action(
 
 fn host_document_action_is_current(
     desired_revisions: &Mutex<std::collections::HashMap<String, (u64, u64)>>,
-    snapshot: &crate::extension_contract::HostTerminalGroupsV1,
+    snapshot: &HostDocumentSnapshotV1,
 ) -> bool {
     desired_revisions
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .get(&snapshot.scope_id)
-        .is_some_and(|desired| *desired == (snapshot.generation, snapshot.revision))
+        .get(snapshot.scope_id())
+        .is_some_and(|desired| *desired == (snapshot.generation(), snapshot.revision()))
 }
 
 fn try_acquire_host_document_action_slot() -> Result<(), String> {
@@ -496,6 +540,16 @@ pub(crate) fn complete_host_document_provider_action() {
 }
 
 #[derive(Debug)]
+pub struct HostSpacesDocumentAsyncResult {
+    pub(crate) _render_slot: Option<Arc<HostDocumentRenderSlotGuard>>,
+    pub namespace: String,
+    pub provider_priority: i32,
+    pub snapshot: crate::extension_contract::HostSpacesV1,
+    pub result: Result<crate::extension_contract::HostDocumentV1, String>,
+    pub grants: std::collections::HashSet<crate::extension_contract::HostCapability>,
+}
+
+#[derive(Debug)]
 pub struct HostDocumentAsyncResult {
     pub(crate) _render_slot: Option<Arc<HostDocumentRenderSlotGuard>>,
     pub namespace: String,
@@ -518,18 +572,23 @@ impl HostDocumentServiceCatalog {
     ) -> Self {
         let mut generations = host_document_specs(plugins)
             .into_iter()
-            .map(|(namespace, _, _)| {
+            .map(|(namespace, _, _, _)| {
                 (
                     namespace,
                     NEXT_SERVICE_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
                 )
             })
             .collect::<std::collections::BTreeMap<_, _>>();
-        if !disabled.contains(crate::first_party::collections::NAMESPACE) {
-            generations.insert(
-                crate::first_party::collections::NAMESPACE.into(),
-                NEXT_SERVICE_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
-            );
+        for namespace in [
+            crate::first_party::collections::NAMESPACE,
+            crate::first_party::spaces::NAMESPACE,
+        ] {
+            if !disabled.contains(namespace) {
+                generations.insert(
+                    namespace.into(),
+                    NEXT_SERVICE_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+                );
+            }
         }
         Self {
             test_render_slots: Vec::new(),
@@ -561,31 +620,63 @@ impl HostDocumentServiceCatalog {
 
     #[cfg(test)]
     pub(crate) fn with_test_saturated_render_provider(namespace: &str, generation: u64) -> Self {
-        let active_render_slots = Arc::new(Mutex::new(std::collections::HashMap::new()));
+        Self::with_test_saturated_render_providers(&[(
+            namespace,
+            generation,
+            crate::api::schema::HostDocumentSourceKind::TerminalGroups,
+        )])
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_test_document_source_provider(
+        namespace: &str,
+        generation: u64,
+        source: crate::api::schema::HostDocumentSourceKind,
+    ) -> Self {
+        let mut catalog =
+            Self::with_test_saturated_render_providers(&[(namespace, generation, source)]);
+        catalog.test_render_slots.clear();
+        catalog
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_test_saturated_render_providers(
+        providers: &[(&str, u64, crate::api::schema::HostDocumentSourceKind)],
+    ) -> Self {
+        let requests = providers
+            .iter()
+            .map(|(namespace, _, source)| {
+                (
+                    (*namespace).into(),
+                    HostDocumentWorkerHandle {
+                        source: *source,
+                        _provider_slot: None,
+                        pending: Arc::new((
+                            Mutex::new(HostDocumentPending::default()),
+                            std::sync::Condvar::new(),
+                        )),
+                        desired_revisions: Arc::new(Mutex::new(std::collections::HashMap::new())),
+                        active_actions: Arc::new(Mutex::new(std::collections::HashMap::new())),
+                        active_renders: Arc::new(Mutex::new(std::collections::HashMap::new())),
+                        active_render_slots: Arc::new(Mutex::new(std::collections::HashMap::new())),
+                        event_pending: None,
+                        revoked: Arc::new(AtomicBool::new(false)),
+                        join: None,
+                        event_join: None,
+                    },
+                )
+            })
+            .collect();
         Self {
             test_render_slots: (0..32)
                 .map(|_| Arc::new(HostDocumentRenderSlotGuard::acquire().unwrap()))
                 .collect(),
             complete_catalog: true,
-            generations: std::collections::BTreeMap::from([(namespace.into(), generation)]),
-            requests: std::collections::BTreeMap::from([(
-                namespace.into(),
-                HostDocumentWorkerHandle {
-                    _provider_slot: None,
-                    pending: Arc::new((
-                        Mutex::new(HostDocumentPending::default()),
-                        std::sync::Condvar::new(),
-                    )),
-                    desired_revisions: Arc::new(Mutex::new(std::collections::HashMap::new())),
-                    active_actions: Arc::new(Mutex::new(std::collections::HashMap::new())),
-                    active_renders: Arc::new(Mutex::new(std::collections::HashMap::new())),
-                    active_render_slots,
-                    event_pending: None,
-                    revoked: Arc::new(AtomicBool::new(false)),
-                    join: None,
-                    event_join: None,
-                },
-            )]),
+            generations: providers
+                .iter()
+                .map(|(namespace, generation, _)| ((*namespace).into(), *generation))
+                .collect(),
+            requests,
             event_tx: None,
         }
     }
@@ -642,6 +733,7 @@ impl HostDocumentServiceCatalog {
             requests: std::collections::BTreeMap::from([(
                 namespace.into(),
                 HostDocumentWorkerHandle {
+                    source: crate::api::schema::HostDocumentSourceKind::TerminalGroups,
                     _provider_slot: None,
                     pending,
                     desired_revisions: Arc::new(Mutex::new(std::collections::HashMap::new())),
@@ -698,6 +790,7 @@ impl HostDocumentServiceCatalog {
             requests: std::collections::BTreeMap::from([(
                 namespace.into(),
                 HostDocumentWorkerHandle {
+                    source: crate::api::schema::HostDocumentSourceKind::TerminalGroups,
                     _provider_slot: None,
                     pending,
                     desired_revisions: Arc::new(Mutex::new(std::collections::HashMap::new())),
@@ -721,11 +814,11 @@ impl HostDocumentServiceCatalog {
         event_tx: tokio::sync::mpsc::Sender<crate::events::AppEvent>,
     ) -> Self {
         let mut providers = std::collections::BTreeMap::new();
-        // Reserve one public namespace for the host's generic fallback even when the
-        // product-specific Collections provider is disabled.
-        let reserve_host_fallback = true;
-        for (namespace, candidate, grants) in
-            limit_host_document_specs(host_document_specs(plugins), reserve_host_fallback)
+        // Reserve capacity for both bundled providers. Collections' generic fallback
+        // occupies its reserved public projection identity when that provider is disabled.
+        let reserved_bundled = 2;
+        for (namespace, candidate, grants, source) in
+            limit_host_document_specs(host_document_specs(plugins), reserved_bundled)
         {
             if providers.contains_key(&namespace) {
                 continue;
@@ -735,6 +828,7 @@ impl HostDocumentServiceCatalog {
                 providers.insert(
                     namespace,
                     HostDocumentProvider {
+                        source,
                         priority,
                         generation: NEXT_SERVICE_GENERATION
                             .fetch_add(1, std::sync::atomic::Ordering::Relaxed),
@@ -765,6 +859,7 @@ impl HostDocumentServiceCatalog {
                     providers.insert(
                         namespace.into(),
                         HostDocumentProvider {
+                            source: crate::api::schema::HostDocumentSourceKind::TerminalGroups,
                             priority: 100,
                             generation: NEXT_SERVICE_GENERATION
                                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed),
@@ -772,6 +867,41 @@ impl HostDocumentServiceCatalog {
                             grants: std::collections::HashSet::from([
                                 crate::extension_contract::HostCapability::FocusTerminal,
                             ]),
+                        },
+                    );
+                }
+            }
+        }
+        // Unit-test executables are libtest harnesses and cannot recursively host the bundled
+        // service entrypoint. Focused tests install an explicit Spaces source provider instead.
+        #[cfg(not(test))]
+        let namespace = crate::first_party::spaces::NAMESPACE;
+        #[cfg(not(test))]
+        if !disabled.contains(namespace) {
+            if let Ok(exe) = std::env::current_exe() {
+                let spec = ExtensionServiceSpec {
+                    id: namespace.into(),
+                    command: vec![
+                        exe.display().to_string(),
+                        "_extension-service".into(),
+                        "spaces".into(),
+                    ],
+                    cwd: std::env::current_dir().unwrap_or_default(),
+                    priority: 100,
+                    granted_capabilities: vec![
+                        crate::api::schema::ExtensionServiceCapability::HostDocument,
+                    ],
+                };
+                if let Ok(supervisor) = ExtensionServiceSupervisor::new(spec) {
+                    providers.insert(
+                        namespace.into(),
+                        HostDocumentProvider {
+                            source: crate::api::schema::HostDocumentSourceKind::Spaces,
+                            priority: 100,
+                            generation: NEXT_SERVICE_GENERATION
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+                            supervisor,
+                            grants: std::collections::HashSet::new(),
                         },
                     );
                 }
@@ -844,6 +974,7 @@ impl HostDocumentServiceCatalog {
             let Some(event_join) = event_join else {
                 continue;
             };
+            let provider_source = provider.source;
             let worker_pending = pending.clone();
             let worker_desired_revisions = desired_revisions.clone();
             let worker_active_actions = active_actions.clone();
@@ -906,14 +1037,17 @@ impl HostDocumentServiceCatalog {
                             &worker_desired_revisions,
                             &request.snapshot,
                         );
-                        let result = if request.snapshot.generation == provider.generation
+                        let result = if request.snapshot.generation() == provider.generation
                             && desired_is_current
                         {
                             let action_canceled = Arc::new(AtomicBool::new(false));
                             worker_active_actions
                                 .lock()
                                 .unwrap_or_else(|poisoned| poisoned.into_inner())
-                                .insert(request.snapshot.scope_id.clone(), action_canceled.clone());
+                                .insert(
+                                    request.snapshot.scope_id().to_string(),
+                                    action_canceled.clone(),
+                                );
                             let result = if !worker_revoked.load(Ordering::Acquire)
                                 && host_document_action_is_current(
                                     &worker_desired_revisions,
@@ -942,7 +1076,7 @@ impl HostDocumentServiceCatalog {
                         } else {
                             Err("document action generation or revision is stale".into())
                         };
-                        let action_scope_id = request.snapshot.scope_id.clone();
+                        let action_scope_id = request.snapshot.scope_id().to_string();
                         complete_host_document_action(result, action_response, action_completion);
                         worker_active_actions
                             .lock()
@@ -950,7 +1084,7 @@ impl HostDocumentServiceCatalog {
                             .remove(&action_scope_id);
                         continue;
                     }
-                    let result = if request.snapshot.generation != provider.generation
+                    let result = if request.snapshot.generation() != provider.generation
                         || !host_document_action_is_current(
                             &worker_desired_revisions,
                             &request.snapshot,
@@ -961,53 +1095,66 @@ impl HostDocumentServiceCatalog {
                         worker_active_renders
                             .lock()
                             .unwrap_or_else(|poisoned| poisoned.into_inner())
-                            .insert(request.snapshot.scope_id.clone(), render_canceled.clone());
+                            .insert(
+                                request.snapshot.scope_id().to_string(),
+                                render_canceled.clone(),
+                            );
                         if let Some(slot) = request.render_slot.as_ref() {
                             worker_active_render_slots
                                 .lock()
                                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                                 .insert(
-                                    request.snapshot.scope_id.clone(),
+                                    request.snapshot.scope_id().to_string(),
                                     (
-                                        request.snapshot.generation,
-                                        request.snapshot.revision,
+                                        request.snapshot.generation(),
+                                        request.snapshot.revision(),
                                         slot.clone(),
                                     ),
                                 );
                         }
-                        let result =
-                            if worker_revoked.load(Ordering::Acquire)
-                                || !host_document_action_is_current(
-                                    &worker_desired_revisions,
+                        let result = if worker_revoked.load(Ordering::Acquire)
+                            || !host_document_action_is_current(
+                                &worker_desired_revisions,
+                                &request.snapshot,
+                            ) {
+                            Err("document snapshot revision was superseded".into())
+                        } else {
+                            provider
+                                .supervisor
+                                .render_host_document_cancellable(
                                     &request.snapshot,
+                                    &render_canceled,
                                 )
-                            {
-                                Err("document snapshot revision was superseded".into())
-                            } else {
-                                provider
-                            .supervisor
-                            .render_host_document_cancellable(&request.snapshot, &render_canceled)
-                            .map_err(|error| error.to_string())
-                            .and_then(|document| {
-                                if document.namespace == request.namespace
-                                    && document.generation == provider.generation
-                                    && document.revision == request.snapshot.revision
-                                    && matches!(
-                                        &document.target,
-                                        crate::extension_contract::HostTarget::Tab { tab_id }
-                                            if tab_id == &request.snapshot.scope_id
-                                    )
-                                {
-                                    Ok(document)
-                                } else {
-                                    Err("document provider identity or generation mismatch".into())
-                                }
-                            })
-                            };
+                                .map_err(|error| error.to_string())
+                                .and_then(|document| {
+                                    if document.namespace == request.namespace
+                                        && document.generation == provider.generation
+                                        && document.revision == request.snapshot.revision()
+                                        && match (&request.snapshot, &document.target) {
+                                            (
+                                                HostDocumentSnapshotV1::TerminalGroups(snapshot),
+                                                crate::extension_contract::HostTarget::Tab {
+                                                    tab_id,
+                                                },
+                                            ) => tab_id == &snapshot.scope_id,
+                                            (
+                                                HostDocumentSnapshotV1::Spaces(_),
+                                                crate::extension_contract::HostTarget::Session,
+                                            ) => true,
+                                            _ => false,
+                                        }
+                                    {
+                                        Ok(document)
+                                    } else {
+                                        Err("document provider identity or generation mismatch"
+                                            .into())
+                                    }
+                                })
+                        };
                         worker_active_renders
                             .lock()
                             .unwrap_or_else(|poisoned| poisoned.into_inner())
-                            .remove(&request.snapshot.scope_id);
+                            .remove(request.snapshot.scope_id());
                         if host_document_action_is_current(
                             &worker_desired_revisions,
                             &request.snapshot,
@@ -1017,26 +1164,40 @@ impl HostDocumentServiceCatalog {
                             Err("document snapshot revision was superseded".into())
                         }
                     };
-                    let scope_id = request.snapshot.scope_id.clone();
-                    send_host_document_event(
-                        &worker_events,
-                        scope_id.clone(),
-                        crate::events::AppEvent::HostDocumentFinished(Box::new(
-                            HostDocumentAsyncResult {
-                                _render_slot: request.render_slot,
-                                namespace: request.namespace,
-                                provider_priority: provider.priority,
-                                snapshot: request.snapshot,
-                                result,
-                                grants: provider.grants.clone(),
-                            },
-                        )),
-                    );
+                    let scope_id = request.snapshot.scope_id().to_string();
+                    let event = match request.snapshot {
+                        HostDocumentSnapshotV1::TerminalGroups(snapshot) => {
+                            crate::events::AppEvent::HostDocumentFinished(Box::new(
+                                HostDocumentAsyncResult {
+                                    _render_slot: request.render_slot,
+                                    namespace: request.namespace,
+                                    provider_priority: provider.priority,
+                                    snapshot,
+                                    result,
+                                    grants: provider.grants.clone(),
+                                },
+                            ))
+                        }
+                        HostDocumentSnapshotV1::Spaces(snapshot) => {
+                            crate::events::AppEvent::HostSpacesDocumentFinished(Box::new(
+                                HostSpacesDocumentAsyncResult {
+                                    _render_slot: request.render_slot,
+                                    namespace: request.namespace,
+                                    provider_priority: provider.priority,
+                                    snapshot,
+                                    result,
+                                    grants: provider.grants.clone(),
+                                },
+                            ))
+                        }
+                    };
+                    send_host_document_event(&worker_events, scope_id.clone(), event);
                 })
             {
                 requests.insert(
                     namespace,
                     HostDocumentWorkerHandle {
+                        source: provider_source,
                         _provider_slot: Some(provider_slot),
                         pending,
                         desired_revisions,
@@ -1104,6 +1265,7 @@ impl HostDocumentServiceCatalog {
         if snapshot.generation != generation || action.generation != generation {
             return Err("document action generation is stale".into());
         }
+        let snapshot = HostDocumentSnapshotV1::TerminalGroups(snapshot);
         let (response_tx, response_rx) = mpsc::sync_channel(1);
         self.enqueue(
             &namespace,
@@ -1134,6 +1296,7 @@ impl HostDocumentServiceCatalog {
         if snapshot.generation != generation || action.generation != generation {
             return Err("document action generation is stale".into());
         }
+        let snapshot = HostDocumentSnapshotV1::TerminalGroups(snapshot);
         let event_tx = self
             .event_tx
             .as_ref()
@@ -1146,8 +1309,8 @@ impl HostDocumentServiceCatalog {
             return Err("document action revision is stale".into());
         }
         try_acquire_host_document_action_slot()?;
-        let scope_id = snapshot.scope_id.clone();
-        let revision = snapshot.revision;
+        let scope_id = snapshot.scope_id().to_string();
+        let revision = snapshot.revision();
         let enqueue = self.enqueue(
             &namespace,
             HostDocumentRequest {
@@ -1204,7 +1367,7 @@ impl HostDocumentServiceCatalog {
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             let mut retained = std::collections::VecDeque::new();
             while let Some(request) = pending.actions.pop_front() {
-                if live_scope_ids.contains(&request.snapshot.scope_id) {
+                if live_scope_ids.contains(request.snapshot.scope_id()) {
                     retained.push_back(request);
                 } else {
                     reject_queued_host_document_action(
@@ -1247,16 +1410,35 @@ impl HostDocumentServiceCatalog {
         namespace: &str,
         snapshot: crate::extension_contract::HostTerminalGroupsV1,
     ) -> Result<(), String> {
+        self.request_snapshot(namespace, HostDocumentSnapshotV1::TerminalGroups(snapshot))
+    }
+
+    pub fn request_spaces(
+        &self,
+        namespace: &str,
+        snapshot: crate::extension_contract::HostSpacesV1,
+    ) -> Result<(), String> {
+        self.request_snapshot(namespace, HostDocumentSnapshotV1::Spaces(snapshot))
+    }
+
+    fn request_snapshot(
+        &self,
+        namespace: &str,
+        snapshot: HostDocumentSnapshotV1,
+    ) -> Result<(), String> {
         let generation = self
             .generation(namespace)
             .ok_or_else(|| format!("document provider {namespace} is disabled or unavailable"))?;
-        if snapshot.generation != generation {
+        if snapshot.generation() != generation {
             return Err("document snapshot generation is stale".into());
         }
         let handle = self
             .requests
             .get(namespace)
             .ok_or_else(|| "document provider worker is unavailable".to_string())?;
+        if handle.source != snapshot.source() {
+            return Err("document provider does not consume this host snapshot contract".into());
+        }
         let render_slot = match HostDocumentRenderSlotGuard::acquire() {
             Ok(slot) => Arc::new(slot),
             Err(error) => handle
@@ -1265,29 +1447,29 @@ impl HostDocumentServiceCatalog {
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .render_by_scope
-                .get(&snapshot.scope_id)
+                .get(snapshot.scope_id())
                 .and_then(|request| request.render_slot.clone())
                 .or_else(|| {
                     handle
                         .active_render_slots
                         .lock()
                         .unwrap_or_else(|poisoned| poisoned.into_inner())
-                        .get(&snapshot.scope_id)
+                        .get(snapshot.scope_id())
                         .map(|(_, _, slot)| slot.clone())
                 })
                 .ok_or(error)?,
         };
-        let desired = (snapshot.generation, snapshot.revision);
+        let desired = (snapshot.generation(), snapshot.revision());
         handle
             .desired_revisions
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .insert(snapshot.scope_id.clone(), desired);
+            .insert(snapshot.scope_id().to_string(), desired);
         for active in [&handle.active_actions, &handle.active_renders] {
             if let Some(canceled) = active
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .get(&snapshot.scope_id)
+                .get(snapshot.scope_id())
             {
                 canceled.store(true, Ordering::Release);
             }
@@ -1300,8 +1482,8 @@ impl HostDocumentServiceCatalog {
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             let mut retained = std::collections::VecDeque::new();
             while let Some(request) = pending.actions.pop_front() {
-                if request.snapshot.scope_id != snapshot.scope_id
-                    || (request.snapshot.generation, request.snapshot.revision) == desired
+                if request.snapshot.scope_id() != snapshot.scope_id()
+                    || (request.snapshot.generation(), request.snapshot.revision()) == desired
                 {
                     retained.push_back(request);
                 } else {
@@ -1430,6 +1612,7 @@ fn host_document_specs(
     String,
     ExtensionServiceSpec,
     std::collections::HashSet<crate::extension_contract::HostCapability>,
+    crate::api::schema::HostDocumentSourceKind,
 )> {
     let mut specs = Vec::new();
     for plugin in plugins.values().filter(|plugin| plugin.enabled) {
@@ -1456,6 +1639,7 @@ fn host_document_specs(
                         .iter()
                         .filter_map(protocol_grant_to_host_capability)
                         .collect(),
+                    service.document_source,
                 ));
             }
         }
@@ -2102,7 +2286,7 @@ impl ExtensionServiceSupervisor {
 
     fn render_host_document_cancellable(
         &mut self,
-        snapshot: &crate::extension_contract::HostTerminalGroupsV1,
+        snapshot: &HostDocumentSnapshotV1,
         canceled: &AtomicBool,
     ) -> Result<crate::extension_contract::HostDocumentV1, ExtensionServiceError> {
         self.ensure_running_cancellable(Instant::now(), canceled)?;
@@ -3211,6 +3395,7 @@ sleep 2
             requests: std::collections::BTreeMap::from([(
                 "example.docs".into(),
                 HostDocumentWorkerHandle {
+                    source: crate::api::schema::HostDocumentSourceKind::TerminalGroups,
                     _provider_slot: None,
                     pending: pending.clone(),
                     desired_revisions: Arc::new(Mutex::new(std::collections::HashMap::new())),
@@ -3243,7 +3428,7 @@ sleep 2
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .render_by_scope
             .get("tab-1")
-            .map(|request| request.snapshot.revision);
+            .map(|request| request.snapshot.revision());
         assert_eq!(queued_revision, Some(2));
     }
 
@@ -3260,6 +3445,7 @@ sleep 2
             requests: std::collections::BTreeMap::from([(
                 "example.docs".into(),
                 HostDocumentWorkerHandle {
+                    source: crate::api::schema::HostDocumentSourceKind::TerminalGroups,
                     _provider_slot: None,
                     pending,
                     desired_revisions: Arc::new(Mutex::new(std::collections::HashMap::new())),
@@ -3351,6 +3537,7 @@ sleep 2
             requests: std::collections::BTreeMap::from([(
                 "example.docs".into(),
                 HostDocumentWorkerHandle {
+                    source: crate::api::schema::HostDocumentSourceKind::TerminalGroups,
                     _provider_slot: None,
                     pending,
                     desired_revisions: Arc::new(Mutex::new(std::collections::HashMap::new())),
@@ -3389,14 +3576,16 @@ sleep 2
             .push(HostDocumentRequest {
                 namespace: "example.docs".into(),
                 render_slot: None,
-                snapshot: crate::extension_contract::HostTerminalGroupsV1 {
-                    contract: "host.terminal-groups.v1".into(),
-                    generation: 1,
-                    revision: 1,
-                    scope_id: "tab-1".into(),
-                    groups: Vec::new(),
-                    ungrouped: Vec::new(),
-                },
+                snapshot: HostDocumentSnapshotV1::TerminalGroups(
+                    crate::extension_contract::HostTerminalGroupsV1 {
+                        contract: "host.terminal-groups.v1".into(),
+                        generation: 1,
+                        revision: 1,
+                        scope_id: "tab-1".into(),
+                        groups: Vec::new(),
+                        ungrouped: Vec::new(),
+                    },
+                ),
                 action: Some(crate::extension_contract::HostDocumentExtensionActionV1 {
                     contract: crate::extension_contract::HOST_DOCUMENT_CONTRACT_V1.into(),
                     namespace: "example.docs".into(),
@@ -3430,6 +3619,7 @@ sleep 2
             requests: std::collections::BTreeMap::from([(
                 "example.docs".into(),
                 HostDocumentWorkerHandle {
+                    source: crate::api::schema::HostDocumentSourceKind::TerminalGroups,
                     _provider_slot: None,
                     pending,
                     desired_revisions: Arc::new(Mutex::new(std::collections::HashMap::new())),
@@ -3499,14 +3689,16 @@ sleep 2
                     .push(HostDocumentRequest {
                         namespace: "example.docs".into(),
                         render_slot: None,
-                        snapshot: crate::extension_contract::HostTerminalGroupsV1 {
-                            contract: "host.terminal-groups.v1".into(),
-                            generation: 7,
-                            revision,
-                            scope_id: format!("tab-{index:02}"),
-                            groups: Vec::new(),
-                            ungrouped: Vec::new(),
-                        },
+                        snapshot: HostDocumentSnapshotV1::TerminalGroups(
+                            crate::extension_contract::HostTerminalGroupsV1 {
+                                contract: "host.terminal-groups.v1".into(),
+                                generation: 7,
+                                revision,
+                                scope_id: format!("tab-{index:02}"),
+                                groups: Vec::new(),
+                                ungrouped: Vec::new(),
+                            },
+                        ),
                         action: None,
                         action_response: None,
                         action_completion: None,
@@ -3517,8 +3709,8 @@ sleep 2
         }
         let mut scopes = Vec::new();
         while let Some(request) = pending.pop() {
-            assert_eq!(request.snapshot.revision, 2);
-            scopes.push(request.snapshot.scope_id);
+            assert_eq!(request.snapshot.revision(), 2);
+            scopes.push(request.snapshot.scope_id().to_string());
         }
         assert_eq!(scopes.len(), 16);
         assert_eq!(scopes[0], "tab-00");
@@ -3536,9 +3728,11 @@ sleep 2
             groups: Vec::new(),
             ungrouped: Vec::new(),
         };
-        assert!(!host_document_action_is_current(&desired, &snapshot));
+        let stale = HostDocumentSnapshotV1::TerminalGroups(snapshot.clone());
+        assert!(!host_document_action_is_current(&desired, &stale));
         snapshot.revision = 2;
-        assert!(host_document_action_is_current(&desired, &snapshot));
+        let current = HostDocumentSnapshotV1::TerminalGroups(snapshot);
+        assert!(host_document_action_is_current(&desired, &current));
     }
 
     #[test]
@@ -3561,6 +3755,7 @@ sleep 2
             requests: std::collections::BTreeMap::from([(
                 "example.docs".into(),
                 HostDocumentWorkerHandle {
+                    source: crate::api::schema::HostDocumentSourceKind::TerminalGroups,
                     _provider_slot: None,
                     pending: pending.clone(),
                     desired_revisions: Arc::new(Mutex::new(std::collections::HashMap::new())),
@@ -3620,6 +3815,7 @@ sleep 2
                     granted_capabilities: Vec::new(),
                 },
                 std::collections::HashSet::new(),
+                crate::api::schema::HostDocumentSourceKind::TerminalGroups,
             )
         };
         let mut specs = vec![
@@ -3628,19 +3824,19 @@ sleep 2
         ];
         specs.extend((0..20).map(|index| make(index, "duplicate.namespace")));
         specs.extend((0..20).map(|index| make(index + 20, &format!("unique.{index}"))));
-        let limited = limit_host_document_specs(specs, true);
+        let limited = limit_host_document_specs(specs, 2);
         assert_eq!(
             limited.len(),
-            crate::extension_contract::MAX_DOCUMENT_PROVIDERS - 1
+            crate::extension_contract::MAX_DOCUMENT_PROVIDERS - 2
         );
         assert_eq!(limited[0].0, "duplicate.namespace");
-        assert!(limited.iter().all(|(namespace, _, _)| {
+        assert!(limited.iter().all(|(namespace, _, _, _)| {
             namespace != crate::first_party::collections::NAMESPACE && namespace != "host.fallback"
         }));
         assert_eq!(
             limited
                 .iter()
-                .map(|(namespace, _, _)| namespace)
+                .map(|(namespace, _, _, _)| namespace)
                 .collect::<std::collections::HashSet<_>>()
                 .len(),
             limited.len()
@@ -3678,14 +3874,16 @@ sleep 2
         let request = HostDocumentRequest {
             namespace: "example.docs".into(),
             render_slot: None,
-            snapshot: crate::extension_contract::HostTerminalGroupsV1 {
-                contract: "host.terminal-groups.v1".into(),
-                generation: 7,
-                revision: 9,
-                scope_id: "tab-1".into(),
-                groups: Vec::new(),
-                ungrouped: Vec::new(),
-            },
+            snapshot: HostDocumentSnapshotV1::TerminalGroups(
+                crate::extension_contract::HostTerminalGroupsV1 {
+                    contract: "host.terminal-groups.v1".into(),
+                    generation: 7,
+                    revision: 9,
+                    scope_id: "tab-1".into(),
+                    groups: Vec::new(),
+                    ungrouped: Vec::new(),
+                },
+            ),
             action: Some(crate::extension_contract::HostDocumentExtensionActionV1 {
                 contract: crate::extension_contract::HOST_DOCUMENT_CONTRACT_V1.into(),
                 namespace: "example.docs".into(),
@@ -3784,14 +3982,16 @@ sleep 2
         let worker_canceled = canceled.clone();
         let worker = std::thread::spawn(move || {
             let result = supervisor.render_host_document_cancellable(
-                &crate::extension_contract::HostTerminalGroupsV1 {
-                    contract: "host.terminal-groups.v1".into(),
-                    generation: 1,
-                    revision: 1,
-                    scope_id: "tab-1".into(),
-                    groups: Vec::new(),
-                    ungrouped: Vec::new(),
-                },
+                &HostDocumentSnapshotV1::TerminalGroups(
+                    crate::extension_contract::HostTerminalGroupsV1 {
+                        contract: "host.terminal-groups.v1".into(),
+                        generation: 1,
+                        revision: 1,
+                        scope_id: "tab-1".into(),
+                        groups: Vec::new(),
+                        ungrouped: Vec::new(),
+                    },
+                ),
                 &worker_canceled,
             );
             (result, supervisor.failures, supervisor.status)
@@ -3829,14 +4029,16 @@ sleep 5
         let worker = std::thread::spawn(move || {
             let mut supervisor = supervisor;
             supervisor.render_host_document_cancellable(
-                &crate::extension_contract::HostTerminalGroupsV1 {
-                    contract: "host.terminal-groups.v1".into(),
-                    generation: 1,
-                    revision: 1,
-                    scope_id: "tab-1".into(),
-                    groups: Vec::new(),
-                    ungrouped: Vec::new(),
-                },
+                &HostDocumentSnapshotV1::TerminalGroups(
+                    crate::extension_contract::HostTerminalGroupsV1 {
+                        contract: "host.terminal-groups.v1".into(),
+                        generation: 1,
+                        revision: 1,
+                        scope_id: "tab-1".into(),
+                        groups: Vec::new(),
+                        ungrouped: Vec::new(),
+                    },
+                ),
                 &worker_canceled,
             )
         });

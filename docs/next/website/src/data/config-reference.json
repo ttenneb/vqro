@@ -1458,7 +1458,7 @@
           "key": "extensions.disabled",
           "type": "list of strings",
           "default": "[]",
-          "description": "Disable default-enabled bundled extension providers by namespace, for example vqro.collections."
+          "description": "Disable default-enabled bundled extension providers by namespace, for example vqro.collections or vqro.spaces."
         }
       ]
     },
