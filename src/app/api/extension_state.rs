@@ -333,6 +333,77 @@ mod tests {
     }
 
     #[test]
+    fn restart_preserves_store_identity_events_and_idempotency_receipts() {
+        let _guard = crate::config::test_config_env_lock().lock().unwrap();
+        let directory = std::env::temp_dir().join(format!(
+            "vqro-extension-state-restart-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::env::set_var("XDG_CONFIG_HOME", &directory);
+        std::env::remove_var(crate::session::SESSION_ENV_VAR);
+        let policy = crate::app::AppPolicy {
+            restore_session: false,
+            persist_session: true,
+            persist_plugin_registry: false,
+            background_updates: false,
+        };
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut first = crate::app::App::new(
+            &Config::default(),
+            policy,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        let generation = first.extension_state.store_generation;
+        let transaction = transaction(generation);
+        let response = first.handle_extension_state_transact("first".into(), transaction.clone());
+        let first_response: SuccessResponse = serde_json::from_str(&response).unwrap();
+        let ResponseResult::ExtensionStateCommitted {
+            commit: first_commit,
+        } = first_response.result
+        else {
+            panic!("expected first commit");
+        };
+        let store_id = first.extension_state.store_id.clone();
+        drop(first);
+
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut restored = crate::app::App::new(
+            &Config::default(),
+            policy,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        assert_eq!(restored.extension_state.store_id, store_id);
+        assert_eq!(restored.extension_state.store_generation, generation);
+        assert_eq!(restored.extension_state.events_after(0, 10).events.len(), 1);
+        assert_eq!(
+            restored
+                .extension_state
+                .snapshot("example.extension")
+                .unwrap()
+                .values["mode"],
+            serde_json::json!("fast")
+        );
+        let replay = restored.handle_extension_state_transact("replay".into(), transaction);
+        let replay: SuccessResponse = serde_json::from_str(&replay).unwrap();
+        let ResponseResult::ExtensionStateCommitted { commit } = replay.result else {
+            panic!("expected replayed commit");
+        };
+        assert!(commit.replayed);
+        assert_eq!(commit.sequence, first_commit.sequence);
+
+        std::env::remove_var("XDG_CONFIG_HOME");
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
     fn deferred_transaction_persists_off_actor_before_publication() {
         let mut app = app();
         let directory = std::env::temp_dir().join(format!(
