@@ -193,6 +193,7 @@ pub enum AppEvent {
         epoch: u64,
     },
     ExtensionCatalogCapacityAvailable,
+    ExtensionStatePersisted(Box<crate::app::ExtensionStatePersistResult>),
     HostDocumentProviderActionFinished {
         request_id: String,
         namespace: String,

@@ -1,27 +1,22 @@
-use std::collections::HashMap;
-
+use crate::acknowledgement::{AcknowledgementCursor, SequenceObservation};
 use crate::api::schema::AgentStatus;
 use crate::protocol::{ClientShellAgent, ClientShellSnapshot, PaneSurfaceFrame};
 
 #[derive(Clone, Debug, Default)]
 pub(super) struct EndpointAgentPresentation {
-    boot_id: Option<String>,
-    acknowledged: HashMap<String, u64>,
+    cursor: AcknowledgementCursor<String>,
 }
 
 impl EndpointAgentPresentation {
     pub(super) fn project_snapshot(&mut self, snapshot: &mut ClientShellSnapshot) {
-        if self.boot_id.as_deref() != Some(snapshot.boot_id.as_str()) {
-            self.boot_id = Some(snapshot.boot_id.clone());
-            self.acknowledged.clear();
-            self.acknowledged.extend(
-                snapshot
-                    .agents
-                    .iter()
-                    .map(|agent| (agent.pane_id.clone(), agent.state_change_seq)),
-            );
-        }
-        self.acknowledged.retain(|pane_id, _| {
+        self.cursor.establish_baseline(
+            &snapshot.boot_id,
+            snapshot.agents.iter().map(|agent| SequenceObservation {
+                subject: agent.pane_id.clone(),
+                sequence: agent.state_change_seq,
+            }),
+        );
+        self.cursor.retain_subjects(|pane_id| {
             snapshot
                 .agents
                 .iter()
@@ -39,29 +34,22 @@ impl EndpointAgentPresentation {
         surface: &PaneSurfaceFrame,
         outer_focused: Option<bool>,
     ) -> bool {
-        if outer_focused == Some(false)
-            || self.boot_id.as_deref() != Some(surface.boot_id.as_str())
-            || snapshot.boot_id != surface.boot_id
-            || snapshot.revision != surface.projection_revision
-        {
+        if snapshot.boot_id != surface.boot_id {
             return false;
         }
-
-        let mut changed = false;
-        for pane in &surface.panes {
-            let Some(agent) = snapshot
-                .agents
-                .iter()
-                .find(|agent| agent.pane_id == pane.pane_id)
-            else {
-                continue;
-            };
-            let acknowledged = self.acknowledged.entry(agent.pane_id.clone()).or_default();
-            if *acknowledged < agent.state_change_seq {
-                *acknowledged = agent.state_change_seq;
-                changed = true;
-            }
-        }
+        let changed = self.cursor.acknowledge_observations(
+            &surface.boot_id,
+            surface.projection_revision,
+            snapshot.revision,
+            outer_focused != Some(false),
+            surface.panes.iter().filter_map(|pane| {
+                snapshot
+                    .agents
+                    .iter()
+                    .find(|agent| agent.pane_id == pane.pane_id)
+                    .map(|agent| (&agent.pane_id, agent.state_change_seq))
+            }),
+        );
         if changed {
             for agent in &mut snapshot.agents {
                 agent.agent_status = self.projected_status(agent);
@@ -72,9 +60,8 @@ impl EndpointAgentPresentation {
     }
 
     pub(super) fn seen(&self, agent: &ClientShellAgent) -> bool {
-        self.acknowledged
-            .get(&agent.pane_id)
-            .is_some_and(|sequence| *sequence >= agent.state_change_seq)
+        self.cursor
+            .is_acknowledged(&agent.pane_id, agent.state_change_seq)
     }
 
     fn projected_status(&self, agent: &ClientShellAgent) -> AgentStatus {

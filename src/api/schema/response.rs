@@ -53,6 +53,15 @@ pub enum ResponseResult {
     SessionSnapshot {
         snapshot: Box<SessionSnapshot>,
     },
+    ExtensionStateSnapshot {
+        snapshot: crate::extension_state::ExtensionStateSnapshotV1,
+    },
+    ExtensionStateCommitted {
+        commit: crate::extension_state::ExtensionStateCommitV1,
+    },
+    ExtensionStateEvents {
+        page: crate::extension_state::ExtensionStateEventPageV1,
+    },
     WorkspaceInfo {
         workspace: WorkspaceInfo,
     },

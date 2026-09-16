@@ -7,6 +7,7 @@ pub(crate) use collections::DeferredHostDocumentSnapshot;
 pub(crate) use collections::HostDocumentConfirmationGrant;
 mod delegations;
 mod env;
+pub(crate) mod extension_state;
 mod integrations;
 mod layouts;
 mod pane_graphics;
@@ -127,6 +128,10 @@ impl App {
                 if self.extension_catalog_rebuild_pending {
                     self.rebuild_extension_catalogs();
                 }
+                return Vec::new();
+            }
+            AppEvent::ExtensionStatePersisted(result) => {
+                self.handle_extension_state_persisted(*result);
                 return Vec::new();
             }
             AppEvent::HostDocumentProviderActionFinished {
@@ -1129,6 +1134,15 @@ impl App {
                 );
             }
             Method::SessionSnapshot(_) => return self.handle_session_snapshot(request.id),
+            Method::ExtensionStateSnapshotV1(params) => {
+                return self.handle_extension_state_snapshot(request.id, params.namespace);
+            }
+            Method::ExtensionStateTransactV1(transaction) => {
+                return self.handle_extension_state_transact(request.id, transaction);
+            }
+            Method::ExtensionStateEventsV1(params) => {
+                return self.handle_extension_state_events(request.id, params);
+            }
             Method::WorkspaceList(_) => return self.handle_workspace_list(request.id),
             Method::WorkspaceGet(target) => return self.handle_workspace_get(request.id, target),
             Method::WorkspaceCreate(params) => {

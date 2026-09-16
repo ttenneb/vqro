@@ -3702,6 +3702,16 @@ impl HeadlessServer {
                     msg.respond_to,
                 );
         }
+        if let api::schema::Method::ExtensionStateTransactV1(transaction) =
+            msg.request.method.clone()
+        {
+            return changed
+                | self.app.handle_deferred_extension_state_transact(
+                    msg.request.id,
+                    transaction,
+                    msg.respond_to,
+                );
+        }
         if matches!(
             &msg.request.method,
             api::schema::Method::WorktreeCreate(_) | api::schema::Method::WorktreeRemove(_)

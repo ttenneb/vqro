@@ -26,6 +26,12 @@ impl HeadlessServer {
         &mut self,
         params: crate::api::schema::ServerLiveHandoffParams,
     ) -> io::Result<()> {
+        if self.app.extension_state_transaction_pending {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "extension state transaction is still being durably committed",
+            ));
+        }
         info!("starting live handoff");
         let import_exe = params.import_exe.as_deref().map(std::path::PathBuf::from);
         let socket_path = crate::server::handoff::handoff_socket_path();

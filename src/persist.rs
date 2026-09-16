@@ -4,6 +4,8 @@
 //! Optional pane screen history is stored separately at `session-history.json`.
 //! Installed plugins are persisted separately at `plugins.json`.
 
+// Kept separate from ordinary session saves so rejected bytes remain authoritative.
+pub(crate) mod extension_state;
 mod io;
 pub mod plugin_registry;
 mod restore;

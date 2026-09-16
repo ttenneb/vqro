@@ -283,6 +283,27 @@ from its own acknowledgement cursor. User document providers use the public
 terminal-group source. The namespaces `vqro.collections`, `vqro.spaces`,
 `vqro.delegation`, `vqro.agent-status`, and `host.fallback` are reserved.
 
+Supervised services can also request the additive `action_choices` capability.
+Dynamic choices use only the fixed `host.action.choices.v1` and
+`host.action.choice.invoke.v1` service methods. Choice sets are bounded and
+fenced by provider generation, context revision, set identity, and set revision;
+invocation sends only a validated choice ID. A provider cannot declare an
+arbitrary choices subprocess, and choice discovery never runs from rendering.
+Confirmation remains host-owned.
+
+The client-neutral `host.terminal-resource.v1` contract defines transient,
+terminal-owned provider resources. Publications are complete atomic
+replacements fenced by active provider generation, aggregate client-interest
+revision, and publication revision. TTLs use host monotonic time. Client
+connection generations prevent delayed disconnects from clearing a replacement
+connection's interest. Resources are cached data only: providers never own the
+PTY, terminal lifetime, coordinates, focus, input, or per-frame rendering.
+
+`host.acknowledgement.v1` defines a client-local epoch/sequence cursor for
+presentation acknowledgement. It advances only from coherent focused
+presentation evidence. Shared provider documents continue to publish neutral
+activity; each client independently derives Done.
+
 ## Commands and environment
 
 Runtime commands run with the plugin directory as their working directory. Herdr
@@ -389,10 +410,24 @@ name an action declared by the same plugin. Link handler actions receive
 `HERDR_PLUGIN_CLICKED_URL` and `HERDR_PLUGIN_LINK_HANDLER_ID`. Handlers are
 checked in manifest order inside each plugin.
 
-## Storage
+## Durable extension state
 
-There is no Herdr-managed plugin storage API in v1. Plugins that need durable
-state should own their files or database.
+Herdr exposes the additive `host.extension-state.v1` contract through
+`extension.state.snapshot.v1`, `extension.state.transact.v1`, and
+`extension.state.events.v1`. State is partitioned by a namespaced owner ID and
+stores bounded opaque JSON values. Transactions require the current store
+generation and namespace revision, include an idempotency key, and commit all
+key updates atomically. A successful response is returned only after the
+candidate store has been atomically persisted. Failed validation or persistence
+leaves the previous store unchanged.
+
+Events have a bounded replay tail and an explicit `gap` result. Consumers must
+request a new snapshot after a gap or store-identity change rather than assuming
+missing events. Rejected persisted bytes remain authoritative and block writes
+until repaired or removed. Namespacing prevents accidental collisions; it is
+not a security boundary between plugins, which already execute as the same OS
+user. Plugin-owned files under `HERDR_PLUGIN_STATE_DIR` remain available for
+formats that do not need shared host transactions.
 
 ## Marketplace
 

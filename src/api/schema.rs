@@ -6,6 +6,7 @@ pub mod commands;
 pub mod common;
 pub mod delegations;
 pub mod events;
+pub mod extension_state;
 pub mod integrations;
 pub mod panes;
 pub mod plugins;
@@ -23,6 +24,7 @@ pub use commands::*;
 pub use common::*;
 pub use delegations::*;
 pub use events::*;
+pub use extension_state::*;
 pub use integrations::*;
 pub use panes::*;
 pub use plugins::*;
@@ -79,6 +81,12 @@ pub enum Method {
     ClientShellSurfaceSet(ClientShellSurfaceSetParams),
     #[serde(rename = "session.snapshot")]
     SessionSnapshot(EmptyParams),
+    #[serde(rename = "extension.state.snapshot.v1")]
+    ExtensionStateSnapshotV1(ExtensionStateSnapshotParams),
+    #[serde(rename = "extension.state.transact.v1")]
+    ExtensionStateTransactV1(crate::extension_state::ExtensionStateTransactionV1),
+    #[serde(rename = "extension.state.events.v1")]
+    ExtensionStateEventsV1(ExtensionStateEventsParams),
     #[serde(rename = "workspace.create")]
     WorkspaceCreate(WorkspaceCreateParams),
     #[serde(rename = "workspace.list")]

@@ -2653,6 +2653,98 @@
           ],
           "type": "object"
         },
+        "ExtensionStateEventsParams": {
+          "properties": {
+            "after_sequence": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "limit": {
+              "format": "uint",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "store_generation": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "store_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "store_id",
+            "store_generation",
+            "after_sequence"
+          ],
+          "type": "object"
+        },
+        "ExtensionStateOperationV1": {
+          "properties": {
+            "key": {
+              "type": "string"
+            },
+            "value": true
+          },
+          "required": [
+            "key"
+          ],
+          "type": "object"
+        },
+        "ExtensionStateSnapshotParams": {
+          "properties": {
+            "namespace": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "namespace"
+          ],
+          "type": "object"
+        },
+        "ExtensionStateTransactionV1": {
+          "properties": {
+            "contract": {
+              "type": "string"
+            },
+            "expected_revision": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "expected_store_generation": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "idempotency_key": {
+              "type": "string"
+            },
+            "namespace": {
+              "type": "string"
+            },
+            "operations": {
+              "items": {
+                "$ref": "#/schemas/request/$defs/ExtensionStateOperationV1"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "contract",
+            "namespace",
+            "expected_store_generation",
+            "expected_revision",
+            "idempotency_key",
+            "operations"
+          ],
+          "type": "object"
+        },
         "HostDocumentActionParams": {
           "properties": {
             "action_id": {
@@ -5523,6 +5615,54 @@
             },
             "params": {
               "$ref": "#/schemas/request/$defs/EmptyParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "extension.state.snapshot.v1",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/ExtensionStateSnapshotParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "extension.state.transact.v1",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/ExtensionStateTransactionV1"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "extension.state.events.v1",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/ExtensionStateEventsParams"
             }
           },
           "required": [
@@ -8649,11 +8789,169 @@
           "enum": [
             "view_contribution",
             "host_document",
+            "action_choices",
             "focus_terminal",
             "terminal_interrupt",
             "unknown"
           ],
           "type": "string"
+        },
+        "ExtensionStateCommitV1": {
+          "properties": {
+            "contract": {
+              "type": "string"
+            },
+            "namespace": {
+              "type": "string"
+            },
+            "replayed": {
+              "type": "boolean"
+            },
+            "revision": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "sequence": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "store_generation": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "store_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "contract",
+            "store_id",
+            "store_generation",
+            "namespace",
+            "revision",
+            "sequence",
+            "replayed"
+          ],
+          "type": "object"
+        },
+        "ExtensionStateEventPageV1": {
+          "properties": {
+            "contract": {
+              "type": "string"
+            },
+            "earliest_sequence": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "events": {
+              "items": {
+                "$ref": "#/schemas/success_response/$defs/ExtensionStateEventV1"
+              },
+              "type": "array"
+            },
+            "gap": {
+              "type": "boolean"
+            },
+            "latest_sequence": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "store_generation": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "store_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "contract",
+            "store_id",
+            "store_generation",
+            "earliest_sequence",
+            "latest_sequence",
+            "gap",
+            "events"
+          ],
+          "type": "object"
+        },
+        "ExtensionStateEventV1": {
+          "properties": {
+            "changed_keys": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "namespace": {
+              "type": "string"
+            },
+            "revision": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "sequence": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "sequence",
+            "namespace",
+            "revision",
+            "changed_keys"
+          ],
+          "type": "object"
+        },
+        "ExtensionStateSnapshotV1": {
+          "properties": {
+            "contract": {
+              "type": "string"
+            },
+            "namespace": {
+              "type": "string"
+            },
+            "revision": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "sequence": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "store_generation": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "store_id": {
+              "type": "string"
+            },
+            "values": {
+              "additionalProperties": true,
+              "type": "object"
+            }
+          },
+          "required": [
+            "contract",
+            "store_id",
+            "store_generation",
+            "namespace",
+            "revision",
+            "sequence",
+            "values"
+          ],
+          "type": "object"
         },
         "HostDocumentSourceKind": {
           "enum": [
@@ -10488,6 +10786,7 @@
           "enum": [
             "pane_inspector",
             "host_document",
+            "action_choices",
             "unknown"
           ],
           "type": "string"
@@ -10668,6 +10967,54 @@
               "required": [
                 "type",
                 "snapshot"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "snapshot": {
+                  "$ref": "#/schemas/success_response/$defs/ExtensionStateSnapshotV1"
+                },
+                "type": {
+                  "const": "extension_state_snapshot",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "snapshot"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "commit": {
+                  "$ref": "#/schemas/success_response/$defs/ExtensionStateCommitV1"
+                },
+                "type": {
+                  "const": "extension_state_committed",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "commit"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "page": {
+                  "$ref": "#/schemas/success_response/$defs/ExtensionStateEventPageV1"
+                },
+                "type": {
+                  "const": "extension_state_events",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "page"
               ],
               "type": "object"
             },

@@ -48,6 +48,21 @@ pub struct ExtensionServiceSupervisor {
     runtime: Option<ExtensionServiceRuntime>,
     status: ExtensionServiceStatus,
     failures: u32,
+    runtime_generation: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct ValidatedActionChoiceSet {
+    runtime_generation: u64,
+    set: crate::action_choices::ActionChoiceSetV1,
+}
+
+impl ValidatedActionChoiceSet {
+    // Staged accessor for the marketplace UI integration.
+    #[allow(dead_code)]
+    pub fn choices(&self) -> &crate::action_choices::ActionChoiceSetV1 {
+        &self.set
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -1805,6 +1820,7 @@ fn protocol_grant_to_host_capability(
         }
         crate::api::schema::ExtensionServiceCapability::ViewContribution
         | crate::api::schema::ExtensionServiceCapability::HostDocument
+        | crate::api::schema::ExtensionServiceCapability::ActionChoices
         | crate::api::schema::ExtensionServiceCapability::Unknown => None,
     }
 }
@@ -1819,9 +1835,12 @@ pub fn manager_for_plugins(
             continue;
         }
         for service in &plugin.services {
-            if !service
+            if (!service
                 .provides
                 .contains(&crate::api::schema::PluginServiceCapability::PaneInspector)
+                && !service
+                    .provides
+                    .contains(&crate::api::schema::PluginServiceCapability::ActionChoices))
                 || !supports_current_platform(service.platforms.as_deref())
             {
                 continue;
@@ -1975,7 +1994,10 @@ fn manager_for_specs(
                 continue;
             }
         };
-        if provider.is_none() {
+        if provider.is_none()
+            && granted_capabilities
+                .contains(&crate::api::schema::ExtensionServiceCapability::ViewContribution)
+        {
             provider = Some(service_id.clone());
         }
         workers.insert(
@@ -2331,6 +2353,7 @@ impl ExtensionServiceSupervisor {
             runtime: None,
             status: ExtensionServiceStatus::Stopped,
             failures: 0,
+            runtime_generation: 0,
         })
     }
 
@@ -2344,6 +2367,12 @@ impl ExtensionServiceSupervisor {
         self.status = ExtensionServiceStatus::Starting;
         match ExtensionServiceRuntime::spawn(&self.spec, canceled) {
             Ok(runtime) => {
+                self.runtime_generation =
+                    self.runtime_generation.checked_add(1).ok_or_else(|| {
+                        ExtensionServiceError::RestartBudget(
+                            "extension service generation exhausted".into(),
+                        )
+                    })?;
                 self.runtime = Some(runtime);
                 self.failures = 0;
                 self.status = ExtensionServiceStatus::Running;
@@ -2492,6 +2521,147 @@ impl ExtensionServiceSupervisor {
         }
         let result = runtime
             .request_cancellable("host.document.action", params, canceled)
+            .map(|_| ());
+        if let Err(error) = &result {
+            if error.requires_restart() {
+                self.runtime = None;
+                if error.counts_as_failure() {
+                    self.record_failure(error);
+                }
+            }
+        }
+        result
+    }
+
+    /// Blocking provider I/O. Call only from a bounded extension worker, never the App actor or
+    /// render path.
+    // Staged public service method; the marketplace integration will wire its bounded scheduler.
+    #[allow(dead_code)]
+    pub fn list_action_choices_cancellable(
+        &mut self,
+        request: &crate::action_choices::ActionChoicesRequestV1,
+        canceled: &AtomicBool,
+    ) -> Result<ValidatedActionChoiceSet, ExtensionServiceError> {
+        request.validate().map_err(|error| {
+            ExtensionServiceError::Protocol(format!("invalid action choices request: {error:?}"))
+        })?;
+        if !self
+            .spec
+            .granted_capabilities
+            .contains(&crate::api::schema::ExtensionServiceCapability::ActionChoices)
+        {
+            return Err(ExtensionServiceError::Protocol(
+                "action_choices was not granted".into(),
+            ));
+        }
+        self.ensure_running_cancellable(Instant::now(), canceled)?;
+        let params = serde_json::to_value(request).map_err(|error| {
+            ExtensionServiceError::Protocol(format!(
+                "cannot encode action choices request: {error}"
+            ))
+        })?;
+        let runtime = self
+            .runtime
+            .as_mut()
+            .ok_or_else(|| ExtensionServiceError::Protocol("service is not running".into()))?;
+        if !runtime
+            .methods
+            .contains(crate::action_choices::ACTION_CHOICES_LIST_METHOD_V1)
+        {
+            return Err(ExtensionServiceError::Protocol(
+                "service did not advertise host.action.choices.v1".into(),
+            ));
+        }
+        let result = runtime
+            .request_cancellable(
+                crate::action_choices::ACTION_CHOICES_LIST_METHOD_V1,
+                params,
+                canceled,
+            )
+            .and_then(|value| {
+                let choices =
+                    serde_json::from_value::<crate::action_choices::ActionChoiceSetV1>(value)
+                        .map_err(|error| {
+                            ExtensionServiceError::Protocol(format!(
+                                "invalid action choices response: {error}"
+                            ))
+                        })?;
+                choices.validate_for(request).map_err(|error| {
+                    ExtensionServiceError::Protocol(format!(
+                        "invalid action choices response: {error:?}"
+                    ))
+                })?;
+                Ok(ValidatedActionChoiceSet {
+                    runtime_generation: self.runtime_generation,
+                    set: choices,
+                })
+            });
+        if let Err(error) = &result {
+            if error.requires_restart() {
+                self.runtime = None;
+                if error.counts_as_failure() {
+                    self.record_failure(error);
+                }
+            }
+        }
+        result
+    }
+
+    /// Blocking provider I/O. Invocation carries only the validated choice identity.
+    // Staged public service method; the marketplace integration will wire its bounded scheduler.
+    #[allow(dead_code)]
+    pub fn invoke_action_choice_cancellable(
+        &mut self,
+        choice_set: &ValidatedActionChoiceSet,
+        invocation: &crate::action_choices::ActionChoiceInvocationV1,
+        confirmed_by_host: bool,
+        canceled: &AtomicBool,
+    ) -> Result<(), ExtensionServiceError> {
+        choice_set
+            .set
+            .validate_invocation(invocation, confirmed_by_host)
+            .map_err(|error| {
+                ExtensionServiceError::Protocol(format!("invalid action choice: {error:?}"))
+            })?;
+        if !self
+            .spec
+            .granted_capabilities
+            .contains(&crate::api::schema::ExtensionServiceCapability::ActionChoices)
+        {
+            return Err(ExtensionServiceError::Protocol(
+                "action_choices was not granted".into(),
+            ));
+        }
+        self.ensure_running_cancellable(Instant::now(), canceled)?;
+        if choice_set.runtime_generation != self.runtime_generation {
+            return Err(ExtensionServiceError::Protocol(
+                "action choice service generation is stale".into(),
+            ));
+        }
+        let mut params = serde_json::to_value(invocation).map_err(|error| {
+            ExtensionServiceError::Protocol(format!("cannot encode action choice: {error}"))
+        })?;
+        if let Some(params) = params.as_object_mut() {
+            params.insert("confirmed".into(), confirmed_by_host.into());
+        }
+        let runtime = self
+            .runtime
+            .as_mut()
+            .ok_or_else(|| ExtensionServiceError::Protocol("service is not running".into()))?;
+        if !runtime
+            .methods
+            .contains(crate::action_choices::ACTION_CHOICE_INVOKE_METHOD_V1)
+        {
+            return Err(ExtensionServiceError::Protocol(
+                "service did not advertise host.action.choice.invoke.v1".into(),
+            ));
+        }
+        let result = runtime
+            .request_cancellable(
+                crate::action_choices::ACTION_CHOICE_INVOKE_METHOD_V1,
+                params,
+                canceled,
+            )
             .map(|_| ());
         if let Err(error) = &result {
             if error.requires_restart() {
@@ -2693,6 +2863,8 @@ impl ExtensionServiceRuntime {
         let requires_action = requires_view
             && granted_capabilities
                 .contains(&crate::api::schema::ExtensionServiceCapability::TerminalInterrupt);
+        let requires_choices = granted_capabilities
+            .contains(&crate::api::schema::ExtensionServiceCapability::ActionChoices);
         if (requires_view && !hello.methods.iter().any(|method| method == "view.render"))
             || (requires_document
                 && !hello
@@ -2700,6 +2872,14 @@ impl ExtensionServiceRuntime {
                     .iter()
                     .any(|method| method == "host.document.render"))
             || (requires_action && !hello.methods.iter().any(|method| method == "view.action"))
+            || (requires_choices
+                && (!hello
+                    .methods
+                    .iter()
+                    .any(|method| method == crate::action_choices::ACTION_CHOICES_LIST_METHOD_V1)
+                    || !hello.methods.iter().any(|method| {
+                        method == crate::action_choices::ACTION_CHOICE_INVOKE_METHOD_V1
+                    })))
         {
             return Err(ExtensionServiceError::Protocol(
                 "service does not support the granted methods".into(),
@@ -2718,16 +2898,21 @@ impl ExtensionServiceRuntime {
             ));
         }
         self.methods = hello.methods.iter().cloned().collect();
+        let mut host_methods = vec![
+            "view.render",
+            "view.action",
+            "host.document.render",
+            "host.document.action",
+        ];
+        if requires_choices {
+            host_methods.push(crate::action_choices::ACTION_CHOICES_LIST_METHOD_V1);
+            host_methods.push(crate::action_choices::ACTION_CHOICE_INVOKE_METHOD_V1);
+        }
         let welcome = ServiceWelcome {
             kind: "welcome",
             protocol: EXTENSION_SERVICE_PROTOCOL,
             granted_capabilities,
-            methods: &[
-                "view.render",
-                "view.action",
-                "host.document.render",
-                "host.document.action",
-            ],
+            methods: &host_methods,
             trust: "trusted_same_user_not_sandboxed",
         };
         let mut bytes = serde_json::to_vec(&welcome).map_err(|error| {
@@ -4293,6 +4478,64 @@ printf '{"type":"response","id":%s,"result":{"accepted":true}}\n' "$id"
             )
             .unwrap();
         assert_eq!(supervisor.status, ExtensionServiceStatus::Running);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn action_choices_use_fixed_supervised_service_methods_and_validated_identity() {
+        let script = r#"
+printf '%s\n' '{"type":"hello","protocol":2,"service_id":"test.choices","requested_capabilities":["action_choices"],"methods":["host.action.choices.v1","host.action.choice.invoke.v1"]}'
+IFS= read -r welcome
+IFS= read -r request
+printf '%s\n' '{"type":"response","id":1,"result":{"contract":"host.action-choices.v1","request_id":"request-1","action_id":"set-mode","choice_set_id":"set-1","revision":1,"provider_generation":7,"context_revision":3,"choices":[{"choice_id":"fast","label":"Fast","kind":"enum_value"}]}}'
+IFS= read -r request
+printf '%s\n' '{"type":"response","id":2,"result":{"accepted":true}}'
+"#;
+        let mut supervisor = ExtensionServiceSupervisor::new(ExtensionServiceSpec {
+            id: "test.choices".into(),
+            command: vec!["sh".into(), "-c".into(), script.into()],
+            cwd: PathBuf::from("."),
+            priority: 0,
+            granted_capabilities: vec![
+                crate::api::schema::ExtensionServiceCapability::ActionChoices,
+            ],
+        })
+        .unwrap();
+        let request = crate::action_choices::ActionChoicesRequestV1 {
+            contract: crate::action_choices::ACTION_CHOICES_CONTRACT_V1.into(),
+            request_id: "request-1".into(),
+            action_id: "set-mode".into(),
+            provider_generation: 7,
+            context_revision: 3,
+            context: serde_json::json!({"terminal_id": "term_1"}),
+        };
+        let choices = supervisor
+            .list_action_choices_cancellable(&request, &AtomicBool::new(false))
+            .unwrap();
+        let invocation = crate::action_choices::ActionChoiceInvocationV1 {
+            contract: crate::action_choices::ACTION_CHOICES_CONTRACT_V1.into(),
+            request_id: "invoke-1".into(),
+            action_id: "set-mode".into(),
+            choice_set_id: "set-1".into(),
+            choice_revision: 1,
+            choice_id: "fast".into(),
+            provider_generation: 7,
+            context_revision: 3,
+        };
+        supervisor
+            .invoke_action_choice_cancellable(&choices, &invocation, false, &AtomicBool::new(false))
+            .unwrap();
+        supervisor.stop();
+        assert!(matches!(
+            supervisor.invoke_action_choice_cancellable(
+                &choices,
+                &invocation,
+                false,
+                &AtomicBool::new(false),
+            ),
+            Err(ExtensionServiceError::Protocol(message))
+                if message.contains("generation is stale")
+        ));
     }
 
     #[test]

@@ -9,6 +9,7 @@ pub(crate) mod agent_view;
 mod agents;
 pub(crate) use agents::{AGENT_START_SETTLE_DELAY, MAX_AGENT_START_TIMEOUT};
 mod api;
+pub(crate) use api::extension_state::ExtensionStatePersistResult;
 #[cfg(test)]
 pub(crate) use api::test_support::exiting_test_command;
 mod api_helpers;
@@ -142,6 +143,11 @@ pub struct App {
     /// Set when startup rejects the durable snapshot. The original bytes stay
     /// authoritative until an operator repairs or removes them.
     session_persistence_blocked: bool,
+    pub(crate) extension_state: crate::extension_state::DurableExtensionStateV1,
+    pub(crate) extension_state_path: Option<std::path::PathBuf>,
+    /// Rejected extension-state bytes remain authoritative and block automatic writes.
+    pub(crate) extension_state_persistence_blocked: bool,
+    pub(crate) extension_state_transaction_pending: bool,
     pane_exit_checkpoint_pending: bool,
     pub(crate) detached_process_children: Vec<std::process::Child>,
     tab_bar_status_generation: u64,
@@ -710,6 +716,43 @@ impl App {
         let client_shell_keybindings_profile = config.local_keybindings_profile_toml().ok();
         let endpoint_commands =
             custom_commands::EndpointCommandRegistry::new(&state.keybinds.custom_commands);
+        let extension_state_path = policy
+            .persist_session
+            .then(|| crate::session::data_dir().join("extension-state-v1.json"));
+        let mut extension_state_persistence_blocked = false;
+        let extension_state = extension_state_path
+            .as_deref()
+            .and_then(|path| match crate::persist::extension_state::load(path) {
+                crate::persist::extension_state::ExtensionStateLoad::Loaded(store) => Some(store),
+                crate::persist::extension_state::ExtensionStateLoad::Missing => None,
+                crate::persist::extension_state::ExtensionStateLoad::Rejected { bytes, error } => {
+                    extension_state_persistence_blocked = true;
+                    tracing::error!(path = %path.display(), byte_count = bytes.len(), %error, "extension state rejected; preserving original bytes and blocking writes");
+                    None
+                }
+            })
+            .unwrap_or_else(|| {
+                let mut random = [0_u8; 16];
+                if crate::platform::fill_secure_random(&mut random).is_err() {
+                    random[..8].copy_from_slice(&
+                        std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_nanos()
+                            .to_le_bytes()[..8]);
+                }
+                crate::extension_state::DurableExtensionStateV1::new(
+                    format!(
+                        "session:{}",
+                        random
+                            .iter()
+                            .map(|byte| format!("{byte:02x}"))
+                            .collect::<String>()
+                    ),
+                    1,
+                )
+                .expect("host-generated extension state identity is valid")
+            });
 
         let mut app = Self {
             config_diagnostic_deadline: None,
@@ -747,6 +790,10 @@ impl App {
             session_save_deadline: None,
             session_save_thread: None,
             session_persistence_blocked,
+            extension_state,
+            extension_state_path,
+            extension_state_persistence_blocked,
+            extension_state_transaction_pending: false,
             pane_exit_checkpoint_pending: false,
             detached_process_children: Vec::new(),
             tab_bar_status_generation: 0,

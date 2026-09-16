@@ -281,6 +281,7 @@ pub enum HostDocumentSourceKind {
 pub enum PluginServiceCapability {
     PaneInspector,
     HostDocument,
+    ActionChoices,
     #[serde(other)]
     Unknown,
 }
@@ -290,6 +291,7 @@ pub enum PluginServiceCapability {
 pub enum ExtensionServiceCapability {
     ViewContribution,
     HostDocument,
+    ActionChoices,
     FocusTerminal,
     TerminalInterrupt,
     #[serde(other)]
