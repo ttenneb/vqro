@@ -229,6 +229,27 @@ pub(super) fn render_extensions_overlay(
             muted,
         );
         y += 1;
+        if extension.source_commit.is_some() {
+            put_text(
+                buffer,
+                details.x + 1,
+                y,
+                details.width.saturating_sub(2),
+                if extension.package_kind == "bundled" {
+                    "source pin: catalog attestation · runtime: native host provider"
+                } else if extension.artifact_verified {
+                    "source artifact: retained (press u to reverify)"
+                } else {
+                    "source artifact: not retained (press u to verify)"
+                },
+                if extension.package_kind == "bundled" || extension.artifact_verified {
+                    base.fg(palette.green)
+                } else {
+                    base.fg(palette.yellow)
+                },
+            );
+            y += 1;
+        }
         if let Some(status) = extension.integration_status.as_deref() {
             put_text(
                 buffer,

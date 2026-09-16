@@ -2,10 +2,11 @@ use std::io;
 
 use super::registry::{integration_target_label, integration_target_supported};
 use super::targets::{
-    install_antigravity_cli, install_claude, install_codex, install_copilot, install_cursor,
-    install_devin, install_droid, install_grok, install_hermes, install_kilo, install_kimi,
-    install_letta, install_mastracode, install_omp, install_opencode, install_pi, install_qodercli,
-    install_qwen, uninstall_antigravity_cli, uninstall_claude, uninstall_codex, uninstall_copilot,
+    install_antigravity_cli, install_claude, install_claude_asset, install_codex,
+    install_codex_asset, install_copilot, install_cursor, install_devin, install_droid,
+    install_grok, install_hermes, install_kilo, install_kimi, install_letta, install_mastracode,
+    install_omp, install_opencode, install_pi, install_pi_asset, install_qodercli, install_qwen,
+    uninstall_antigravity_cli, uninstall_claude, uninstall_codex, uninstall_copilot,
     uninstall_cursor, uninstall_devin, uninstall_droid, uninstall_grok, uninstall_hermes,
     uninstall_kilo, uninstall_kimi, uninstall_letta, uninstall_mastracode, uninstall_omp,
     uninstall_opencode, uninstall_pi, uninstall_qodercli, uninstall_qwen,
@@ -26,6 +27,81 @@ pub(crate) fn install_target(
     let outcome = if result.is_ok() { "ok" } else { "error" };
     crate::logging::integration_action("install", integration_target_label(target), outcome);
     result
+}
+
+pub(crate) fn artifact_asset_path(
+    target: crate::api::schema::IntegrationTarget,
+) -> io::Result<&'static str> {
+    Ok(match target {
+        crate::api::schema::IntegrationTarget::Pi => "assets/herdr-agent-state.ts",
+        crate::api::schema::IntegrationTarget::Claude
+        | crate::api::schema::IntegrationTarget::Codex => {
+            if cfg!(windows) {
+                "assets/herdr-agent-state.ps1"
+            } else {
+                "assets/herdr-agent-state.sh"
+            }
+        }
+        _ => {
+            return Err(io::Error::other(format!(
+                "{} does not support pinned artifact deployment",
+                integration_target_label(target)
+            )));
+        }
+    })
+}
+
+pub(crate) fn install_target_from_artifact(
+    target: crate::api::schema::IntegrationTarget,
+    artifact: &crate::extensions::VerifiedExtensionArtifact,
+) -> io::Result<Vec<String>> {
+    let asset =
+        crate::extension_artifact::read_verified_file(artifact, artifact_asset_path(target)?)
+            .map_err(io::Error::other)?;
+    install_target_from_asset(target, &asset)
+}
+
+pub(crate) fn install_target_from_asset(
+    target: crate::api::schema::IntegrationTarget,
+    asset: &[u8],
+) -> io::Result<Vec<String>> {
+    match target {
+        crate::api::schema::IntegrationTarget::Pi => {
+            let path = install_pi_asset(asset)?;
+            Ok(vec![format!(
+                "installed pi integration to {}",
+                path.display()
+            )])
+        }
+        crate::api::schema::IntegrationTarget::Claude => {
+            let installed = install_claude_asset(asset)?;
+            Ok(vec![
+                format!(
+                    "installed claude integration hook to {}",
+                    installed.hook_path.display()
+                ),
+                format!(
+                    "ensured claude settings at {}",
+                    installed.settings_path.display()
+                ),
+            ])
+        }
+        crate::api::schema::IntegrationTarget::Codex => {
+            let installed = install_codex_asset(asset)?;
+            Ok(vec![
+                format!(
+                    "installed codex integration hook to {}",
+                    installed.hook_path.display()
+                ),
+                format!("ensured codex hooks at {}", installed.hooks_path.display()),
+                format!(
+                    "ensured codex config at {}",
+                    installed.config_path.display()
+                ),
+            ])
+        }
+        _ => unreachable!("target was restricted above"),
+    }
 }
 
 /// Experimental Letta install that bypasses the frozen client endpoint

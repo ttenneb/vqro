@@ -409,16 +409,17 @@ impl ClientShellState {
             }
             KeyCode::Char('u') if modifiers.is_empty() => {
                 if self.selected_extension().is_some_and(|extension| {
-                    extension.installed && extension.available_version != extension.active_version
+                    extension.installed && extension.package_kind == "agent_integration"
                 }) {
                     self.set_extension_confirmation(ClientExtensionConfirmation::Update);
                 }
             }
             KeyCode::Char('b')
                 if modifiers.is_empty()
-                    && self
-                        .selected_extension()
-                        .is_some_and(|extension| extension.rollback_version.is_some()) =>
+                    && self.selected_extension().is_some_and(|extension| {
+                        extension.package_kind == "agent_integration"
+                            && extension.rollback_version.is_some()
+                    }) =>
             {
                 self.set_extension_confirmation(ClientExtensionConfirmation::Rollback);
             }

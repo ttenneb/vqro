@@ -28,6 +28,9 @@ impl App {
             source_commit: extension.source_commit.clone(),
             source_sha256: extension.source_sha256.clone(),
             manifest_sha256: extension.manifest_sha256.clone(),
+            manifest_path: extension
+                .has_pinned_source()
+                .then(|| extension.manifest_path.clone()),
             name: extension.name.clone(),
             summary: extension.summary.clone(),
             details: extension.details.clone(),
@@ -49,17 +52,26 @@ impl App {
             // v1 exposes lifecycle methods for forward compatibility, but the
             // host does not advertise update controls without a locally
             // retained, digest-verified artifact.
-            available_version: state.active_version.clone(),
+            available_version: if extension.has_pinned_source() {
+                extension.version.clone()
+            } else {
+                state.active_version.clone()
+            },
             active_version: state.active_version.clone(),
             installed: state.installed,
             enabled: state.enabled,
-            install_supported: match &extension.package {
-                ExtensionPackage::Bundled { .. } => true,
-                ExtensionPackage::AgentIntegration { target } => {
-                    self.integration_target(target).is_some()
-                }
-                ExtensionPackage::GithubPlugin { .. } => false,
-            },
+            install_supported: extension.has_pinned_source()
+                && match &extension.package {
+                    ExtensionPackage::Bundled { .. } => true,
+                    ExtensionPackage::AgentIntegration { target } => {
+                        self.integration_target(target).is_some()
+                    }
+                    ExtensionPackage::GithubPlugin { .. } => false,
+                },
+            artifact_verified: state
+                .active_artifact
+                .as_ref()
+                .is_some_and(crate::extension_artifact::retained),
             repository_override_supported: matches!(
                 &extension.package,
                 ExtensionPackage::Bundled { provider } if provider == "collections"
@@ -70,8 +82,12 @@ impl App {
                 .iter()
                 .position(|repository| repository == &extension.repository)
                 .unwrap_or(usize::MAX),
-            pending_version: None,
-            rollback_version: None,
+            pending_version: state.pending_version.clone(),
+            rollback_version: state
+                .rollback_artifact
+                .as_ref()
+                .filter(|artifact| crate::extension_artifact::retained(artifact))
+                .map(|artifact| artifact.version.clone()),
             activation_error: state.activation_error.clone(),
             repository_overrides: state
                 .repository_overrides
@@ -100,7 +116,8 @@ impl App {
             return Ok(None);
         }
         let path = crate::extensions::state_storage_path()?;
-        let guard = crate::extensions::lock_state_file(&path)?;
+        let guard = crate::extensions::try_lock_state_file(&path)?
+            .ok_or_else(|| "extension state is busy; retry shortly".to_string())?;
         self.extension_state =
             crate::extensions::load_state_from_path(&path, &self.extension_index)?;
         crate::extensions::finish_extension_data_deletion(&path, &mut self.extension_state)?;
@@ -165,10 +182,34 @@ impl App {
                 let _ = crate::extensions::finish_extension_lifecycle(&path);
                 return false;
             };
+            let active_artifact = pending.active_artifact.clone().or_else(|| {
+                loaded
+                    .entries
+                    .get(&pending.repository)
+                    .and_then(|state| state.active_artifact.clone())
+            });
+            let requires_artifact = self
+                .extension_index
+                .extensions
+                .iter()
+                .find(|extension| extension.repository == pending.repository)
+                .is_some_and(CuratedExtension::has_pinned_source);
             let result = if pending.enabled {
-                crate::integration::install_target(target).map(|_| ())
+                if let Some(artifact) = active_artifact {
+                    crate::integration::install_target_from_artifact(target, &artifact)
+                        .map(|_| ())
+                        .map_err(|error| error.to_string())
+                } else if requires_artifact {
+                    Err("verified source artifact is missing during lifecycle recovery".into())
+                } else {
+                    crate::integration::install_target(target)
+                        .map(|_| ())
+                        .map_err(|error| error.to_string())
+                }
             } else {
-                crate::integration::uninstall_target(target).map(|_| ())
+                crate::integration::uninstall_target(target)
+                    .map(|_| ())
+                    .map_err(|error| error.to_string())
             };
             let Some(state) = loaded.entries.get_mut(&pending.repository) else {
                 tracing::warn!(repository = %pending.repository, "discarding unrecoverable extension lifecycle journal for missing state");
@@ -178,6 +219,15 @@ impl App {
             state.installed = pending.installed;
             state.enabled = pending.enabled && result.is_ok();
             state.activation_error = result.as_ref().err().map(ToString::to_string);
+            state.active_artifact = pending.active_artifact;
+            state.rollback_artifact = pending.rollback_artifact;
+            if let Some(version) = pending.active_version {
+                state.active_version = version;
+            }
+            state.rollback_version = state
+                .rollback_artifact
+                .as_ref()
+                .map(|artifact| artifact.version.clone());
             if let Err(error) = crate::extensions::save_state_to_path(&path, &loaded) {
                 tracing::warn!(%error, "failed to persist recovered extension lifecycle");
                 return false;
@@ -217,8 +267,7 @@ impl App {
         &self,
         extension: &CuratedExtension,
         lock: Option<&crate::extensions::ExtensionStateLock>,
-        installed: bool,
-        enabled: bool,
+        recovery_state: &crate::extensions::ExtensionStateFile,
     ) -> Result<bool, String> {
         let (ExtensionPackage::AgentIntegration { target }, Some(lock)) =
             (&extension.package, lock)
@@ -228,30 +277,43 @@ impl App {
         if self.integration_target(target).is_none() {
             return Ok(false);
         }
+        let state = recovery_state
+            .entries
+            .get(&extension.repository)
+            .ok_or_else(|| "extension recovery state is missing".to_string())?;
+        // This is a rollback journal. Until the new state is durably saved and
+        // the journal is removed, recovery restores the pre-mutation state.
         crate::extensions::begin_extension_lifecycle(
             lock.path(),
             &crate::extensions::PendingExtensionLifecycle {
                 repository: extension.repository.clone(),
                 target: target.clone(),
-                installed,
-                enabled,
+                installed: state.installed,
+                enabled: state.enabled,
+                active_artifact: state.active_artifact.clone(),
+                rollback_artifact: state.rollback_artifact.clone(),
+                active_version: Some(state.active_version.clone()),
             },
         )?;
         Ok(true)
     }
 
-    fn restore_agent_lifecycle_journal(
-        &self,
+    fn compensate_failed_state_save(
+        &mut self,
         extension: &CuratedExtension,
         lock: Option<&crate::extensions::ExtensionStateLock>,
-        previous: &crate::extensions::ExtensionStateFile,
+        previous: crate::extensions::ExtensionStateFile,
         journaled: bool,
-    ) {
-        if !journaled {
-            return;
-        }
-        if let Some(state) = previous.entries.get(&extension.repository) {
-            let _ = self.begin_agent_lifecycle(extension, lock, state.installed, state.enabled);
+        save_error: String,
+    ) -> String {
+        match self.try_restore_extension_state(previous, extension) {
+            Ok(()) => match self.finish_agent_lifecycle(lock, journaled) {
+                Ok(()) => save_error,
+                Err(error) => format!("{save_error}; failed to clear rollback journal: {error}"),
+            },
+            Err(error) => format!(
+                "{save_error}; runtime compensation failed and rollback remains pending: {error}"
+            ),
         }
     }
 
@@ -282,24 +344,22 @@ impl App {
         Ok(())
     }
 
-    fn restore_extension_state(
+    fn try_restore_extension_state(
         &mut self,
         previous: crate::extensions::ExtensionStateFile,
         extension: &CuratedExtension,
-    ) {
+    ) -> Result<(), String> {
         let should_be_active = previous
             .entries
             .get(&extension.repository)
             .is_some_and(|state| state.installed && state.enabled);
         self.extension_state = previous;
-        let result = if should_be_active {
+        if should_be_active {
             self.activate_curated_extension(extension)
         } else {
             self.deactivate_curated_extension(extension)
-        };
-        if let Err(error) = result {
-            tracing::warn!(extension = %extension.id, %error, "failed to compensate extension lifecycle mutation");
         }
+        .map_err(|error| error.to_string())
     }
 
     fn repository_identity_for_workspace(&self, ws_idx: usize) -> Option<String> {
@@ -360,6 +420,14 @@ impl App {
     }
 
     fn activate_curated_extension(&mut self, extension: &CuratedExtension) -> Result<(), String> {
+        self.activate_curated_extension_with_asset(extension, None)
+    }
+
+    fn activate_curated_extension_with_asset(
+        &mut self,
+        extension: &CuratedExtension,
+        staged_asset: Option<&[u8]>,
+    ) -> Result<(), String> {
         match &extension.package {
             ExtensionPackage::Bundled { .. } => {
                 self.apply_bundled_extension_state();
@@ -369,9 +437,29 @@ impl App {
                 let target = self.integration_target(target).ok_or_else(|| {
                     format!("agent integration '{target}' is not available through this endpoint")
                 })?;
-                crate::integration::install_target(target)
-                    .map(|_| ())
-                    .map_err(|error| error.to_string())
+                if let Some(asset) = staged_asset {
+                    crate::integration::install_target_from_asset(target, asset)
+                        .map(|_| ())
+                        .map_err(|error| error.to_string())
+                } else if let Some(artifact) = self
+                    .extension_state
+                    .entries
+                    .get(&extension.repository)
+                    .and_then(|state| state.active_artifact.as_ref())
+                {
+                    crate::integration::install_target_from_artifact(target, artifact)
+                        .map(|_| ())
+                        .map_err(|error| error.to_string())
+                } else if extension.has_pinned_source() && self.policy.persist_plugin_registry {
+                    Err(
+                        "verified source artifact is not retained; verify the pinned package before enabling it"
+                            .into(),
+                    )
+                } else {
+                    crate::integration::install_target(target)
+                        .map(|_| ())
+                        .map_err(|error| error.to_string())
+                }
             }
             ExtensionPackage::GithubPlugin { .. } => {
                 Err("GitHub package installation is not available through extension v1".into())
@@ -395,6 +483,353 @@ impl App {
             }
             ExtensionPackage::GithubPlugin { .. } => Ok(()),
         }
+    }
+
+    pub(crate) fn extension_artifact_request_requires_staging(
+        &self,
+        request: &crate::api::schema::Request,
+    ) -> bool {
+        let repository = match &request.method {
+            crate::api::schema::Method::ExtensionInstall(params) => &params.repository,
+            crate::api::schema::Method::ExtensionUpdate(params) => &params.repository,
+            _ => return false,
+        };
+        self.extension_index
+            .extensions
+            .iter()
+            .find(|extension| &extension.repository == repository)
+            .is_some_and(CuratedExtension::has_pinned_source)
+    }
+
+    pub(crate) fn start_deferred_extension_artifact_request(
+        &self,
+        request: crate::api::schema::Request,
+        respond_to: std::sync::mpsc::Sender<String>,
+    ) {
+        let id = request.id;
+        let (repository, action) = match request.method {
+            crate::api::schema::Method::ExtensionInstall(params) if params.confirmed => (
+                params.repository,
+                crate::extension_artifact::ExtensionArtifactAction::Install,
+            ),
+            crate::api::schema::Method::ExtensionUpdate(params) if params.approved => (
+                params.repository,
+                crate::extension_artifact::ExtensionArtifactAction::Update {
+                    version: params.version,
+                },
+            ),
+            crate::api::schema::Method::ExtensionInstall(_) => {
+                let _ = respond_to.send(encode_error(
+                    id,
+                    "confirmation_required",
+                    "extension installation requires explicit confirmation",
+                ));
+                return;
+            }
+            crate::api::schema::Method::ExtensionUpdate(_) => {
+                let _ = respond_to.send(encode_error(
+                    id,
+                    "confirmation_required",
+                    "extension update requires explicit approval",
+                ));
+                return;
+            }
+            _ => {
+                let _ = respond_to.send(encode_error(
+                    id,
+                    "extension_artifact_invalid",
+                    "request does not stage an extension artifact",
+                ));
+                return;
+            }
+        };
+        let Some(extension) = self
+            .extension_index
+            .extensions
+            .iter()
+            .find(|extension| extension.repository == repository)
+            .cloned()
+        else {
+            let _ = respond_to.send(encode_error(
+                id,
+                "extension_not_found",
+                "extension is not in the curated index",
+            ));
+            return;
+        };
+        if let crate::extension_artifact::ExtensionArtifactAction::Update { version } = &action {
+            if !matches!(
+                &extension.package,
+                ExtensionPackage::AgentIntegration { .. }
+            ) {
+                let _ = respond_to.send(encode_error(
+                    id,
+                    "extension_update_unavailable",
+                    "native bundled providers are updated with the host binary",
+                ));
+                return;
+            }
+            if version != &extension.version {
+                let _ = respond_to.send(encode_error(
+                    id,
+                    "extension_version_mismatch",
+                    "requested update does not match the pinned catalog version",
+                ));
+                return;
+            }
+        }
+        let Some(expected_state) = self.extension_state.entries.get(&repository).cloned() else {
+            let _ = respond_to.send(encode_error(
+                id,
+                "extension_state_invalid",
+                "extension state is missing",
+            ));
+            return;
+        };
+        if matches!(
+            action,
+            crate::extension_artifact::ExtensionArtifactAction::Update { .. }
+        ) && !expected_state.installed
+        {
+            let _ = respond_to.send(encode_error(
+                id,
+                "extension_not_installed",
+                "install the extension before updating it",
+            ));
+            return;
+        }
+        let Some(stage_slot) = crate::extension_artifact::ExtensionArtifactStageSlot::acquire()
+        else {
+            let _ = respond_to.send(encode_error(
+                id,
+                "extension_artifact_busy",
+                "too many extension artifacts are already being staged",
+            ));
+            return;
+        };
+        let event_tx = self.event_tx.clone();
+        std::thread::spawn(move || {
+            let _stage_slot = stage_slot;
+            let staged = crate::extension_artifact::stage(&extension);
+            let activation_asset = match (&staged, &extension.package) {
+                (Ok(staged), ExtensionPackage::AgentIntegration { target }) => {
+                    serde_json::from_value::<crate::api::schema::IntegrationTarget>(
+                        serde_json::Value::String(target.clone()),
+                    )
+                    .map_err(|error| format!("resolve integration target: {error}"))
+                    .and_then(|target| {
+                        crate::integration::artifact_asset_path(target)
+                            .map_err(|error| error.to_string())
+                    })
+                    .and_then(|path| staged.read_file(path))
+                    .map(Some)
+                }
+                _ => Ok(None),
+            };
+            let _ = event_tx.blocking_send(crate::events::AppEvent::ExtensionArtifactStaged(
+                Box::new(crate::extension_artifact::ExtensionArtifactStageResult {
+                    id,
+                    repository,
+                    action,
+                    expected_state,
+                    staged,
+                    activation_asset,
+                    respond_to,
+                }),
+            ));
+        });
+    }
+
+    pub(crate) fn handle_extension_artifact_staged(
+        &mut self,
+        result: crate::extension_artifact::ExtensionArtifactStageResult,
+    ) {
+        let respond_to = result.respond_to.clone();
+        let response = self.finish_extension_artifact_staged(result);
+        let _ = respond_to.send(response);
+    }
+
+    fn finish_extension_artifact_staged(
+        &mut self,
+        result: crate::extension_artifact::ExtensionArtifactStageResult,
+    ) -> String {
+        let activation_asset = match result.activation_asset.clone() {
+            Ok(asset) => asset,
+            Err(error) => {
+                return encode_error(result.id.clone(), "extension_artifact_asset_invalid", error);
+            }
+        };
+        let staged = match result.staged {
+            Ok(staged) => staged,
+            Err(error) => {
+                return encode_error(result.id.clone(), "extension_artifact_stage_failed", error);
+            }
+        };
+        let extension = match self.curated_extension(&result.repository) {
+            Ok(extension) => extension,
+            Err(code) => {
+                return encode_error(
+                    result.id.clone(),
+                    code,
+                    "extension is not in the curated index",
+                );
+            }
+        };
+        if staged.descriptor().version != extension.version
+            || staged.descriptor().commit != extension.source_commit.clone().unwrap_or_default()
+        {
+            return encode_error(
+                result.id.clone(),
+                "extension_artifact_stale",
+                "staged artifact no longer matches the curated index",
+            );
+        }
+        let state_lock = match self.lock_extension_state_for_mutation() {
+            Ok(lock) => lock,
+            Err(error) => {
+                return encode_error(result.id.clone(), "extension_state_lock_failed", error);
+            }
+        };
+        if self.extension_state.entries.get(&result.repository) != Some(&result.expected_state) {
+            return encode_error(
+                result.id.clone(),
+                "extension_state_conflict",
+                "extension changed while its pinned source was being staged; retry",
+            );
+        }
+        // Moving a verified directory is intentionally the first operation under
+        // the state lock. An unreferenced retained artifact is safe after a crash.
+        let artifact =
+            match crate::extension_artifact::commit(staged, &result.expected_state.data_id) {
+                Ok(artifact) => artifact,
+                Err(error) => {
+                    return encode_error(
+                        result.id.clone(),
+                        "extension_artifact_commit_failed",
+                        error,
+                    );
+                }
+            };
+        let previous = self.extension_state.clone();
+        let same_active_artifact =
+            result
+                .expected_state
+                .active_artifact
+                .as_ref()
+                .is_some_and(|active| {
+                    active.commit == artifact.commit
+                        && active.source_sha256 == artifact.source_sha256
+                        && active.manifest_sha256 == artifact.manifest_sha256
+                });
+        let should_enable = matches!(
+            result.action,
+            crate::extension_artifact::ExtensionArtifactAction::Install
+        ) || result.expected_state.enabled;
+        let obsolete_rollback = previous
+            .entries
+            .get(&result.repository)
+            .and_then(|state| state.rollback_artifact.clone());
+        match &result.action {
+            crate::extension_artifact::ExtensionArtifactAction::Install => {
+                self.extension_state.install(&extension);
+            }
+            crate::extension_artifact::ExtensionArtifactAction::Update { .. } => {}
+        }
+        if let Some(state) = self.extension_state.entries.get_mut(&result.repository) {
+            if matches!(
+                result.action,
+                crate::extension_artifact::ExtensionArtifactAction::Update { .. }
+            ) && !same_active_artifact
+            {
+                state.rollback_artifact = state
+                    .active_artifact
+                    .take()
+                    .filter(|artifact| crate::extension_artifact::verify(artifact).is_ok());
+                state.rollback_version = state
+                    .rollback_artifact
+                    .as_ref()
+                    .map(|artifact| artifact.version.clone());
+            }
+            state.active_artifact = Some(artifact);
+            state.active_version = extension.version.clone();
+            state.pending_version = None;
+            state.activation_error = None;
+        }
+        let journaled = match self.begin_agent_lifecycle(&extension, state_lock.as_ref(), &previous)
+        {
+            Ok(journaled) => journaled,
+            Err(error) => {
+                self.extension_state = previous;
+                return encode_error(
+                    result.id.clone(),
+                    "extension_lifecycle_journal_failed",
+                    error,
+                );
+            }
+        };
+        if should_enable {
+            let activation =
+                self.activate_curated_extension_with_asset(&extension, activation_asset.as_deref());
+            let activation = match activation {
+                Ok(()) => Ok(()),
+                Err(error) => match self.deactivate_curated_extension(&extension) {
+                    Ok(()) => Err(error.to_string()),
+                    Err(compensation) => Err(format!(
+                        "{error}; cleaning up the partial integration also failed: {compensation}"
+                    )),
+                },
+            };
+            let _ = self
+                .extension_state
+                .finish_activation(&extension.repository, activation);
+        }
+        if let Err(error) = self.save_extension_state(state_lock.as_ref()) {
+            let error = self.compensate_failed_state_save(
+                &extension,
+                state_lock.as_ref(),
+                previous,
+                journaled,
+                error,
+            );
+            return encode_error(result.id.clone(), "extension_state_save_failed", error);
+        }
+        if let Err(error) = self.finish_agent_lifecycle(state_lock.as_ref(), journaled) {
+            return encode_error(
+                result.id.clone(),
+                "extension_lifecycle_journal_failed",
+                error,
+            );
+        }
+        if let Some(obsolete) = obsolete_rollback {
+            let still_referenced = self
+                .extension_state
+                .entries
+                .get(&result.repository)
+                .is_some_and(|state| {
+                    state
+                        .active_artifact
+                        .as_ref()
+                        .map(|artifact| &artifact.path)
+                        == Some(&obsolete.path)
+                        || state
+                            .rollback_artifact
+                            .as_ref()
+                            .map(|artifact| &artifact.path)
+                            == Some(&obsolete.path)
+                });
+            if !still_referenced {
+                if let Err(error) = crate::extension_artifact::purge_artifact(&obsolete) {
+                    tracing::warn!(%error, "failed to purge obsolete extension rollback artifact");
+                }
+            }
+        }
+        self.refresh_collection_documents();
+        encode_success(
+            result.id.clone(),
+            ResponseResult::ExtensionChanged {
+                extension: self.extension_info(&extension),
+            },
+        )
     }
 
     pub(super) fn handle_extension_list(&self, id: String, params: ExtensionListParams) -> String {
@@ -440,13 +875,14 @@ impl App {
             Ok(extension) => extension,
             Err(code) => return encode_error(id, code, "extension is not in the curated index"),
         };
-        let install_supported = match &extension.package {
-            ExtensionPackage::Bundled { .. } => true,
-            ExtensionPackage::AgentIntegration { target } => {
-                self.integration_target(target).is_some()
-            }
-            ExtensionPackage::GithubPlugin { .. } => false,
-        };
+        let install_supported = extension.has_pinned_source()
+            && match &extension.package {
+                ExtensionPackage::Bundled { .. } => true,
+                ExtensionPackage::AgentIntegration { target } => {
+                    self.integration_target(target).is_some()
+                }
+                ExtensionPackage::GithubPlugin { .. } => false,
+            };
         if !install_supported {
             return encode_error(
                 id,
@@ -454,10 +890,17 @@ impl App {
                 "installation is not supported for this curated entry",
             );
         }
+        if self.policy.persist_plugin_registry && extension.has_pinned_source() {
+            return encode_error(
+                id,
+                "extension_artifact_staging_required",
+                "pinned extension installation must be staged off the server event loop",
+            );
+        }
         let previous = self.extension_state.clone();
         self.extension_state.install(&extension);
         let journaled =
-            match self.begin_agent_lifecycle(&extension, _state_lock.as_ref(), true, true) {
+            match self.begin_agent_lifecycle(&extension, _state_lock.as_ref(), &previous) {
                 Ok(journaled) => journaled,
                 Err(error) => return encode_error(id, "extension_lifecycle_journal_failed", error),
             };
@@ -472,13 +915,13 @@ impl App {
                 .finish_activation(&extension.repository, Ok(()));
         }
         if let Err(error) = self.save_extension_state(_state_lock.as_ref()) {
-            self.restore_agent_lifecycle_journal(
+            let error = self.compensate_failed_state_save(
                 &extension,
                 _state_lock.as_ref(),
-                &previous,
+                previous,
                 journaled,
+                error,
             );
-            self.restore_extension_state(previous, &extension);
             return encode_error(id, "extension_state_save_failed", error);
         }
         if let Err(error) = self.finish_agent_lifecycle(_state_lock.as_ref(), journaled) {
@@ -513,15 +956,11 @@ impl App {
         {
             return encode_error(id, "extension_state_invalid", error);
         }
-        let journaled = match self.begin_agent_lifecycle(
-            &extension,
-            _state_lock.as_ref(),
-            true,
-            params.enabled,
-        ) {
-            Ok(journaled) => journaled,
-            Err(error) => return encode_error(id, "extension_lifecycle_journal_failed", error),
-        };
+        let journaled =
+            match self.begin_agent_lifecycle(&extension, _state_lock.as_ref(), &previous) {
+                Ok(journaled) => journaled,
+                Err(error) => return encode_error(id, "extension_lifecycle_journal_failed", error),
+            };
         let activation = if params.enabled {
             self.activate_curated_extension(&extension)
         } else {
@@ -533,19 +972,27 @@ impl App {
                     .extension_state
                     .finish_activation(&extension.repository, Err(error));
             } else {
-                self.restore_extension_state(previous, &extension);
-                let _ = self.finish_agent_lifecycle(_state_lock.as_ref(), journaled);
+                let compensation = self.try_restore_extension_state(previous, &extension);
+                if compensation.is_ok() {
+                    let _ = self.finish_agent_lifecycle(_state_lock.as_ref(), journaled);
+                }
+                let error = match compensation {
+                    Ok(()) => error,
+                    Err(compensation) => format!(
+                        "{error}; restoring the integration also failed and rollback remains pending: {compensation}"
+                    ),
+                };
                 return encode_error(id, "extension_deactivation_failed", error);
             }
         }
         if let Err(error) = self.save_extension_state(_state_lock.as_ref()) {
-            self.restore_agent_lifecycle_journal(
+            let error = self.compensate_failed_state_save(
                 &extension,
                 _state_lock.as_ref(),
-                &previous,
+                previous,
                 journaled,
+                error,
             );
-            self.restore_extension_state(previous, &extension);
             return encode_error(id, "extension_state_save_failed", error);
         }
         if let Err(error) = self.finish_agent_lifecycle(_state_lock.as_ref(), journaled) {
@@ -585,23 +1032,31 @@ impl App {
             return encode_error(id, "extension_state_invalid", error);
         }
         let journaled =
-            match self.begin_agent_lifecycle(&extension, _state_lock.as_ref(), false, false) {
+            match self.begin_agent_lifecycle(&extension, _state_lock.as_ref(), &previous) {
                 Ok(journaled) => journaled,
                 Err(error) => return encode_error(id, "extension_lifecycle_journal_failed", error),
             };
         if let Err(error) = self.deactivate_curated_extension(&extension) {
-            self.restore_extension_state(previous, &extension);
-            let _ = self.finish_agent_lifecycle(_state_lock.as_ref(), journaled);
+            let compensation = self.try_restore_extension_state(previous, &extension);
+            if compensation.is_ok() {
+                let _ = self.finish_agent_lifecycle(_state_lock.as_ref(), journaled);
+            }
+            let error = match compensation {
+                Ok(()) => error,
+                Err(compensation) => format!(
+                    "{error}; restoring the integration also failed and rollback remains pending: {compensation}"
+                ),
+            };
             return encode_error(id, "extension_deactivation_failed", error);
         }
         if let Err(error) = self.save_extension_state(_state_lock.as_ref()) {
-            self.restore_agent_lifecycle_journal(
+            let error = self.compensate_failed_state_save(
                 &extension,
                 _state_lock.as_ref(),
-                &previous,
+                previous,
                 journaled,
+                error,
             );
-            self.restore_extension_state(previous, &extension);
             return encode_error(id, "extension_state_save_failed", error);
         }
         if let Err(error) = self.finish_agent_lifecycle(_state_lock.as_ref(), journaled) {
@@ -786,13 +1241,28 @@ impl App {
         id: String,
         params: ExtensionUpdateParams,
     ) -> String {
-        if let Err(code) = self.curated_extension(&params.repository) {
-            return encode_error(id, code, "extension is not in the curated index");
+        let extension = match self.curated_extension(&params.repository) {
+            Ok(extension) => extension,
+            Err(code) => return encode_error(id, code, "extension is not in the curated index"),
+        };
+        if !params.approved {
+            return encode_error(
+                id,
+                "confirmation_required",
+                "extension update requires explicit approval",
+            );
+        }
+        if params.version != extension.version {
+            return encode_error(
+                id,
+                "extension_version_mismatch",
+                "requested update does not match the pinned catalog version",
+            );
         }
         encode_error(
             id,
-            "extension_update_unavailable",
-            "no digest-verified update artifact is staged",
+            "extension_artifact_staging_required",
+            "pinned extension updates must be staged off the server event loop",
         )
     }
 
@@ -801,13 +1271,102 @@ impl App {
         id: String,
         params: ExtensionConfirmedParams,
     ) -> String {
-        if let Err(code) = self.curated_extension(&params.repository) {
-            return encode_error(id, code, "extension is not in the curated index");
+        if !params.confirmed {
+            return encode_error(
+                id,
+                "confirmation_required",
+                "extension rollback requires explicit confirmation",
+            );
         }
-        encode_error(
+        let state_lock = match self.lock_extension_state_for_mutation() {
+            Ok(lock) => lock,
+            Err(error) => return encode_error(id, "extension_state_lock_failed", error),
+        };
+        let extension = match self.curated_extension(&params.repository) {
+            Ok(extension) => extension,
+            Err(code) => return encode_error(id, code, "extension is not in the curated index"),
+        };
+        if !matches!(
+            &extension.package,
+            ExtensionPackage::AgentIntegration { .. }
+        ) {
+            return encode_error(
+                id,
+                "extension_rollback_unavailable",
+                "native bundled providers are rolled back with the host binary",
+            );
+        }
+        let Some(rollback) = self.extension_state.entries[&extension.repository]
+            .rollback_artifact
+            .clone()
+        else {
+            return encode_error(
+                id,
+                "extension_rollback_unavailable",
+                "no verified previous artifact is retained",
+            );
+        };
+        if let Err(error) = crate::extension_artifact::verify(&rollback) {
+            return encode_error(id, "extension_rollback_unavailable", error);
+        }
+        let previous = self.extension_state.clone();
+        let enabled = self.extension_state.entries[&extension.repository].enabled;
+        let state = self
+            .extension_state
+            .entries
+            .get_mut(&extension.repository)
+            .expect("curated state is normalized");
+        let active = state.active_artifact.replace(rollback.clone());
+        state.rollback_artifact = active;
+        state.active_version = rollback.version.clone();
+        state.rollback_version = state
+            .rollback_artifact
+            .as_ref()
+            .map(|artifact| artifact.version.clone());
+        state.activation_error = None;
+
+        let journaled = match self.begin_agent_lifecycle(&extension, state_lock.as_ref(), &previous)
+        {
+            Ok(journaled) => journaled,
+            Err(error) => {
+                self.extension_state = previous;
+                return encode_error(id, "extension_lifecycle_journal_failed", error);
+            }
+        };
+        if enabled {
+            if let Err(error) = self.activate_curated_extension(&extension) {
+                let compensation = self.try_restore_extension_state(previous.clone(), &extension);
+                if compensation.is_ok() {
+                    let _ = self.finish_agent_lifecycle(state_lock.as_ref(), journaled);
+                }
+                let message = match compensation {
+                    Ok(()) => error,
+                    Err(compensation) => format!(
+                        "{error}; restoring the active integration also failed: {compensation}"
+                    ),
+                };
+                return encode_error(id, "extension_activation_failed", message);
+            }
+        }
+        if let Err(error) = self.save_extension_state(state_lock.as_ref()) {
+            let error = self.compensate_failed_state_save(
+                &extension,
+                state_lock.as_ref(),
+                previous,
+                journaled,
+                error,
+            );
+            return encode_error(id, "extension_state_save_failed", error);
+        }
+        if let Err(error) = self.finish_agent_lifecycle(state_lock.as_ref(), journaled) {
+            return encode_error(id, "extension_lifecycle_journal_failed", error);
+        }
+        self.refresh_collection_documents();
+        encode_success(
             id,
-            "extension_rollback_unavailable",
-            "no verified previous artifact is retained",
+            ResponseResult::ExtensionChanged {
+                extension: self.extension_info(&extension),
+            },
         )
     }
 }
@@ -865,6 +1424,30 @@ mod tests {
             .iter()
             .find(|extension| extension.name == "OMP")
             .is_some_and(|extension| !extension.installed));
+        let pinned_defaults = extensions
+            .iter()
+            .filter(|extension| {
+                matches!(
+                    extension.name.as_str(),
+                    "Collections"
+                        | "Spaces"
+                        | "Delegation"
+                        | "Agent Status"
+                        | "Pi"
+                        | "Claude Code"
+                        | "Codex"
+                )
+            })
+            .collect::<Vec<_>>();
+        assert!(pinned_defaults.iter().all(|extension| {
+            extension.source_commit.is_some()
+                && extension.manifest_path.is_some()
+                && !extension.artifact_verified
+        }));
+        assert!(pinned_defaults
+            .iter()
+            .filter(|extension| extension.package_kind == "bundled")
+            .all(|extension| extension.install_supported));
     }
 
     #[test]
@@ -922,6 +1505,37 @@ mod tests {
         }))
         .unwrap();
         assert_ne!(response["error"]["code"], "extension_disabled");
+    }
+
+    #[test]
+    fn pinned_updates_require_approval_and_deferred_staging() {
+        let mut app = test_app();
+        let repository = "ttenneb/vqro-extension-pi";
+        let unapproved: serde_json::Value =
+            serde_json::from_str(&app.handle_api_request(Request {
+                id: "update".into(),
+                method: Method::ExtensionUpdate(ExtensionUpdateParams {
+                    repository: repository.into(),
+                    version: "9.0.0".into(),
+                    approved: false,
+                }),
+            }))
+            .unwrap();
+        assert_eq!(unapproved["error"]["code"], "confirmation_required");
+
+        let approved: serde_json::Value = serde_json::from_str(&app.handle_api_request(Request {
+            id: "update".into(),
+            method: Method::ExtensionUpdate(ExtensionUpdateParams {
+                repository: repository.into(),
+                version: "9.0.0".into(),
+                approved: true,
+            }),
+        }))
+        .unwrap();
+        assert_eq!(
+            approved["error"]["code"],
+            "extension_artifact_staging_required"
+        );
     }
 
     #[test]

@@ -14,6 +14,28 @@ fn integration_mutation_disabled(id: String) -> String {
 }
 
 impl App {
+    fn integration_is_marketplace_managed(
+        &self,
+        path: &std::path::Path,
+        target: crate::api::schema::IntegrationTarget,
+    ) -> Result<bool, String> {
+        let state = crate::extensions::load_state_from_path(path, &self.extension_index)?;
+        let target = serde_json::to_value(target)
+            .ok()
+            .and_then(|value| value.as_str().map(str::to_owned))
+            .unwrap_or_default();
+        Ok(self.extension_index.extensions.iter().any(|extension| {
+            matches!(
+                &extension.package,
+                crate::extensions::ExtensionPackage::AgentIntegration { target: extension_target }
+                    if extension_target.eq_ignore_ascii_case(&target)
+            ) && state
+                .entries
+                .get(&extension.repository)
+                .is_some_and(|entry| entry.installed)
+        }))
+    }
+
     pub(super) fn handle_integration_list(&self, id: String) -> String {
         let integrations = crate::integration::integration_recommendations()
             .into_iter()
@@ -45,6 +67,32 @@ impl App {
         if !crate::integration::integration_mutation_enabled(target) {
             return integration_mutation_disabled(id);
         }
+        let state_path = match crate::extensions::state_storage_path() {
+            Ok(path) => path,
+            Err(error) => return encode_error(id, "extension_state_lock_failed", error),
+        };
+        let _extension_lock = match crate::extensions::try_lock_state_file(&state_path) {
+            Ok(Some(lock)) => lock,
+            Ok(None) => {
+                return encode_error(
+                    id,
+                    "extension_state_lock_failed",
+                    "extension state is busy; retry shortly",
+                );
+            }
+            Err(error) => return encode_error(id, "extension_state_lock_failed", error),
+        };
+        match self.integration_is_marketplace_managed(&state_path, target) {
+            Ok(true) => {
+                return encode_error(
+                    id,
+                    "integration_managed_by_extension",
+                    "use the Extensions marketplace to change this managed integration",
+                );
+            }
+            Ok(false) => {}
+            Err(error) => return encode_error(id, "extension_state_unreadable", error),
+        }
         let messages = match crate::integration::install_target(target) {
             Ok(messages) => messages,
             Err(err) => return encode_error(id, "integration_install_failed", err.to_string()),
@@ -68,6 +116,32 @@ impl App {
         let target = params.target;
         if !crate::integration::integration_mutation_enabled(target) {
             return integration_mutation_disabled(id);
+        }
+        let state_path = match crate::extensions::state_storage_path() {
+            Ok(path) => path,
+            Err(error) => return encode_error(id, "extension_state_lock_failed", error),
+        };
+        let _extension_lock = match crate::extensions::try_lock_state_file(&state_path) {
+            Ok(Some(lock)) => lock,
+            Ok(None) => {
+                return encode_error(
+                    id,
+                    "extension_state_lock_failed",
+                    "extension state is busy; retry shortly",
+                );
+            }
+            Err(error) => return encode_error(id, "extension_state_lock_failed", error),
+        };
+        match self.integration_is_marketplace_managed(&state_path, target) {
+            Ok(true) => {
+                return encode_error(
+                    id,
+                    "integration_managed_by_extension",
+                    "use the Extensions marketplace to change this managed integration",
+                );
+            }
+            Ok(false) => {}
+            Err(error) => return encode_error(id, "extension_state_unreadable", error),
         }
         let messages = match crate::integration::uninstall_target(target) {
             Ok(messages) => messages,

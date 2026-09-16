@@ -27,6 +27,7 @@ mod copy_mode;
 mod delegation;
 mod detect;
 mod events;
+mod extension_artifact;
 pub mod extension_contract;
 pub mod extension_resource;
 mod extension_service;

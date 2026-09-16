@@ -10,10 +10,12 @@ mod targets;
 mod types;
 mod version;
 
-// Retain the baked installers as the parity oracle while every public mutation
-// path is disabled until their files and environment use the vqro namespace.
-#[allow(unused_imports)]
-pub(crate) use actions::{install_target, uninstall_target};
+// Retain the baked installers as the parity oracle while direct public mutation
+// stays gated. Marketplace lifecycle uses only verified Vqro artifact paths.
+pub(crate) use actions::{
+    artifact_asset_path, install_target, install_target_from_artifact, install_target_from_asset,
+    uninstall_target,
+};
 #[cfg(test)]
 pub(crate) use env::integration_env_lock;
 pub(crate) use env::{

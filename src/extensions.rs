@@ -31,6 +31,8 @@ pub(crate) struct CuratedExtension {
     pub source_commit: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_sha256: Option<String>,
+    #[serde(default = "default_manifest_path")]
+    pub manifest_path: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub manifest_sha256: Option<String>,
     pub name: String,
@@ -62,6 +64,17 @@ pub(crate) struct ExtensionStateFile {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct VerifiedExtensionArtifact {
+    pub extension_id: String,
+    pub version: String,
+    pub commit: String,
+    pub source_sha256: String,
+    pub manifest_sha256: String,
+    pub manifest_path: String,
+    pub path: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct ExtensionInstallState {
     /// Persistent namespace for config/state deletion. It does not change when
     /// display or manifest ids are renamed under the same repository identity.
@@ -76,9 +89,26 @@ pub(crate) struct ExtensionInstallState {
     pub pending_version: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub activation_error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_artifact: Option<VerifiedExtensionArtifact>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rollback_artifact: Option<VerifiedExtensionArtifact>,
     /// Overrides are keyed by stable repository ids from the session snapshot.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub repository_overrides: BTreeMap<String, bool>,
+}
+
+fn default_manifest_path() -> String {
+    "herdr-plugin.toml".into()
+}
+
+impl CuratedExtension {
+    pub(crate) fn has_pinned_source(&self) -> bool {
+        self.source_commit.is_some()
+            && self.source_sha256.is_some()
+            && self.manifest_sha256.is_some()
+            && !self.manifest_path.is_empty()
+    }
 }
 
 impl CuratedIndex {
@@ -136,11 +166,42 @@ impl CuratedIndex {
                     ));
                 }
             }
-            if extension.source_commit.is_some()
-                && (extension.source_sha256.is_none() || extension.manifest_sha256.is_none())
+            let pin_count = [
+                extension.source_commit.is_some(),
+                extension.source_sha256.is_some(),
+                extension.manifest_sha256.is_some(),
+            ]
+            .into_iter()
+            .filter(|present| *present)
+            .count();
+            if pin_count != 0 && pin_count != 3 {
+                return Err(format!(
+                    "extension '{}' has incomplete pinned source metadata",
+                    extension.id
+                ));
+            }
+            let remotely_installable =
+                !extension.repository.contains('#') && extension.repository.split('/').count() == 2;
+            if remotely_installable && !extension.has_pinned_source() {
+                return Err(format!(
+                    "extension '{}' is remotely installable without exact pins",
+                    extension.id
+                ));
+            }
+            let manifest_path = Path::new(&extension.manifest_path);
+            if manifest_path.is_absolute()
+                || extension.manifest_path.is_empty()
+                || manifest_path.components().any(|component| {
+                    matches!(
+                        component,
+                        std::path::Component::ParentDir
+                            | std::path::Component::RootDir
+                            | std::path::Component::Prefix(_)
+                    )
+                })
             {
                 return Err(format!(
-                    "extension '{}' pins a commit without source and manifest digests",
+                    "extension '{}' has an unsafe manifest path",
                     extension.id
                 ));
             }
@@ -208,6 +269,8 @@ impl ExtensionStateFile {
                         rollback_version: None,
                         pending_version: None,
                         activation_error: None,
+                        active_artifact: None,
+                        rollback_artifact: None,
                         repository_overrides: BTreeMap::new(),
                     },
                 )
@@ -253,6 +316,8 @@ impl ExtensionStateFile {
                     rollback_version: None,
                     pending_version: None,
                     activation_error: None,
+                    active_artifact: None,
+                    rollback_artifact: None,
                     repository_overrides: BTreeMap::new(),
                 });
             if state.data_id.is_empty() {
@@ -276,6 +341,8 @@ impl ExtensionStateFile {
                 rollback_version: None,
                 pending_version: None,
                 activation_error: None,
+                active_artifact: None,
+                rollback_artifact: None,
                 repository_overrides: BTreeMap::new(),
             });
         state.installed = true;
@@ -413,6 +480,8 @@ impl ExtensionStateFile {
         state.activation_error = None;
         state.pending_version = None;
         state.rollback_version = None;
+        state.active_artifact = None;
+        state.rollback_artifact = None;
         Ok(())
     }
 
@@ -620,6 +689,12 @@ pub(crate) struct PendingExtensionLifecycle {
     pub(crate) target: String,
     pub(crate) installed: bool,
     pub(crate) enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) active_artifact: Option<VerifiedExtensionArtifact>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) rollback_artifact: Option<VerifiedExtensionArtifact>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) active_version: Option<String>,
 }
 
 fn lifecycle_journal_path(state_path: &Path) -> PathBuf {
@@ -717,6 +792,7 @@ pub(crate) fn begin_extension_data_deletion(
 }
 
 pub(crate) fn purge_extension_data(extension_id: &str) -> Result<(), String> {
+    crate::extension_artifact::purge(extension_id)?;
     for path in [
         crate::plugin_paths::plugin_config_dir(extension_id),
         crate::plugin_paths::plugin_state_dir(extension_id),
@@ -890,6 +966,9 @@ mod tests {
             target: "pi".into(),
             installed: true,
             enabled: true,
+            active_artifact: None,
+            rollback_artifact: None,
+            active_version: Some("1.0.0".into()),
         };
 
         begin_extension_lifecycle(&state_path, &pending).unwrap();

@@ -58,6 +58,8 @@ pub struct ExtensionInfo {
     pub source_sha256: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub manifest_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manifest_path: Option<String>,
     pub name: String,
     pub summary: String,
     pub details: String,
@@ -75,6 +77,9 @@ pub struct ExtensionInfo {
     /// Whether this host can perform a fresh installation of the package.
     #[serde(default)]
     pub install_supported: bool,
+    /// True only when the active retained source artifact re-verifies locally.
+    #[serde(default)]
+    pub artifact_verified: bool,
     #[serde(default)]
     pub repository_override_supported: bool,
     pub load_order: usize,

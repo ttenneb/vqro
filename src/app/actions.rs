@@ -1722,6 +1722,7 @@ impl AppState {
             AppEvent::WorktreeRemoveFinished(_) => Vec::new(),
             AppEvent::TabBarCommandFinished { .. } => Vec::new(),
             AppEvent::PluginCommandFinished { .. }
+            | AppEvent::ExtensionArtifactStaged(_)
             | AppEvent::ExtensionCatalogCapacityAvailable
             | AppEvent::ExtensionStatePersisted(_)
             | AppEvent::ExtensionServiceFinished(_)

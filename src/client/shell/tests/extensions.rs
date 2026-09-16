@@ -11,6 +11,7 @@ fn extension_info(installed: bool) -> crate::api::schema::ExtensionInfo {
         manifest_sha256: Some(
             "6b796bf133eae9496695616e299fd614e34ed619d73bdf99cd656902bc48e69d".into(),
         ),
+        manifest_path: Some("herdr-plugin.toml".into()),
         name: "Collections".into(),
         summary: "Group related terminal panes.".into(),
         details: "First-party collection workflows through a public contract.".into(),
@@ -23,6 +24,7 @@ fn extension_info(installed: bool) -> crate::api::schema::ExtensionInfo {
         installed,
         enabled: installed,
         install_supported: true,
+        artifact_verified: true,
         repository_override_supported: true,
         load_order: 0,
         pending_version: None,

@@ -20,7 +20,8 @@
         "provider": "collections"
       },
       "default_installed": true,
-      "default_enabled": true
+      "default_enabled": true,
+      "manifest_path": "herdr-plugin.toml"
     },
     {
       "id": "vqro.spaces",
@@ -41,7 +42,8 @@
         "provider": "spaces"
       },
       "default_installed": true,
-      "default_enabled": true
+      "default_enabled": true,
+      "manifest_path": "herdr-plugin.toml"
     },
     {
       "id": "vqro.delegation",
@@ -62,7 +64,8 @@
         "provider": "delegation"
       },
       "default_installed": true,
-      "default_enabled": true
+      "default_enabled": true,
+      "manifest_path": "herdr-plugin.toml"
     },
     {
       "id": "vqro.agent-status",
@@ -83,7 +86,8 @@
         "provider": "agent-status"
       },
       "default_installed": true,
-      "default_enabled": true
+      "default_enabled": true,
+      "manifest_path": "herdr-plugin.toml"
     },
     {
       "id": "vqro.pi",
@@ -103,7 +107,8 @@
         "target": "pi"
       },
       "default_installed": true,
-      "default_enabled": true
+      "default_enabled": true,
+      "manifest_path": "herdr-plugin.toml"
     },
     {
       "id": "vqro.claude",
@@ -123,7 +128,8 @@
         "target": "claude"
       },
       "default_installed": true,
-      "default_enabled": true
+      "default_enabled": true,
+      "manifest_path": "herdr-plugin.toml"
     },
     {
       "id": "vqro.codex",
@@ -143,7 +149,8 @@
         "target": "codex"
       },
       "default_installed": true,
-      "default_enabled": true
+      "default_enabled": true,
+      "manifest_path": "herdr-plugin.toml"
     },
     {
       "id": "vqro.omp",

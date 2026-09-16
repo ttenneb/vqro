@@ -168,6 +168,8 @@ pub enum AppEvent {
         segment_index: usize,
         result: Result<Option<String>, String>,
     },
+    /// Pinned extension source staging completed off the server event loop.
+    ExtensionArtifactStaged(Box<crate::extension_artifact::ExtensionArtifactStageResult>),
     /// A bounded extension service job completed on its worker thread.
     ExtensionServiceFinished(Box<crate::extension_service::ExtensionAsyncResult>),
     // Unit-test executables cannot recursively host the bundled service binary.

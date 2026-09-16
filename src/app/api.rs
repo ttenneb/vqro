@@ -128,6 +128,10 @@ impl App {
             ev => ev,
         };
         let ev = match ev {
+            AppEvent::ExtensionArtifactStaged(result) => {
+                self.handle_extension_artifact_staged(*result);
+                return Vec::new();
+            }
             AppEvent::ExtensionCatalogCapacityAvailable => {
                 if self.extension_catalog_rebuild_pending {
                     self.rebuild_extension_catalogs();
