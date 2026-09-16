@@ -1178,3 +1178,97 @@ command = ["sh", "-c", "echo install"]
 
     cleanup_test_base(&base);
 }
+
+#[test]
+fn plugin_schema_prints_the_publishable_bundle() {
+    let output = Command::new(env!("CARGO_BIN_EXE_vqro"))
+        .args(["plugin", "schema", "bundle"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["$id"], "https://vqro.dev/schema/extensions/v1");
+    assert!(value["schemas"]["host_document"].is_object());
+}
+
+#[test]
+fn plugin_validate_is_offline_and_uses_native_manifest() {
+    let root =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/extensions/valid");
+    let output = Command::new(env!("CARGO_BIN_EXE_vqro"))
+        .args(["plugin", "validate"])
+        .arg(root)
+        .arg("--json")
+        .env("VQRO_SOCKET_PATH", "/definitely/not/a/socket")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["valid"], true);
+    assert_eq!(value["contract"], "vqro.extension-manifest.v1");
+    assert_eq!(value["checked_services"], serde_json::json!([]));
+}
+
+#[test]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn plugin_conformance_runs_reference_handshake_and_render() {
+    if Command::new("python3").arg("--version").output().is_err() {
+        return;
+    }
+    let root =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("extensions/reference-host-document");
+    let output = Command::new(env!("CARGO_BIN_EXE_vqro"))
+        .args(["plugin", "conformance"])
+        .arg(root)
+        .arg("--json")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["valid"], true);
+    assert_eq!(
+        value["checked_services"][0],
+        "example.reference-document.document"
+    );
+}
+
+#[test]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn plugin_conformance_json_reports_fixture_failures_as_json() {
+    if Command::new("python3").arg("--version").output().is_err() {
+        return;
+    }
+    let base = unique_test_dir();
+    let source =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("extensions/reference-host-document");
+    fs::create_dir_all(base.join("fixtures")).unwrap();
+    for file in ["vqro-extension.toml", "service.py"] {
+        fs::copy(source.join(file), base.join(file)).unwrap();
+    }
+    fs::copy(
+        source.join("fixtures/terminal-groups.json"),
+        base.join("fixtures/terminal-groups.json"),
+    )
+    .unwrap();
+    fs::write(base.join("fixtures/document.json"), "{}\n").unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_vqro"))
+        .args(["plugin", "conformance"])
+        .arg(&base)
+        .arg("--json")
+        .output()
+        .unwrap();
+    cleanup_test_base(&base);
+    assert_eq!(output.status.code(), Some(1));
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["valid"], false);
+    assert_eq!(value["code"], "extension_conformance_failed");
+}

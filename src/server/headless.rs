@@ -3190,74 +3190,39 @@ impl HeadlessServer {
                 boot_id,
                 request,
             } => self.handle_client_shell_endpoint_request(client_id, boot_id, request),
+            ServerEvent::NativeEndpointRequest {
+                client_id,
+                boot_id,
+                request,
+            } => self.handle_native_endpoint_request(client_id, boot_id, request),
             ServerEvent::ClientShellEndpointResponseChunkReady {
                 client_id,
                 boot_id,
                 request_id,
                 final_chunk,
                 data,
-            } => {
-                let command_surface_revision = self.clients.get(&client_id).and_then(|client| {
-                    (matches!(client.mode, ClientConnectionMode::ClientShell)
-                        && client.shell_endpoint_command_in_flight
-                        && boot_id == self.client_shell_boot_id)
-                        .then_some(client.shell_endpoint_command_surface_revision)
-                        .flatten()
-                });
-                let Some(command_surface_revision) = command_surface_revision else {
-                    return false;
-                };
-                let completed_deferred_response =
-                    self.clients.get_mut(&client_id).and_then(|client| {
-                        let response = client.shell_deferred_navigation_response.as_mut()?;
-                        response.extend_from_slice(&data);
-                        final_chunk
-                            .then(|| client.shell_deferred_navigation_response.take())
-                            .flatten()
-                    });
-                if final_chunk {
-                    if let Some(client) = self.clients.get_mut(&client_id) {
-                        client.shell_endpoint_command_in_flight = false;
-                        client.shell_endpoint_command_surface_revision = None;
-                        client.shell_deferred_navigation_request_id = None;
-                    }
-                }
-                let deferred_tab_id = completed_deferred_response
-                    .as_deref()
-                    .and_then(Self::deferred_endpoint_navigation_tab_id);
-                let focus_before = self.shell_focus_target(client_id);
-                let focused_tabs_before = self.focused_shell_tabs();
-                let navigation_changed = self.clients.get(&client_id).is_some_and(|client| {
-                    client.is_active_shell_client()
-                        && client.shell_projection_revision == command_surface_revision
-                }) && deferred_tab_id
-                    .as_deref()
-                    .is_some_and(|tab_id| self.focus_shell_client_on_tab(client_id, tab_id));
-                let geometry_changed =
-                    navigation_changed && self.claim_shell_tab_geometry(client_id, false);
-                if navigation_changed {
-                    self.reconcile_client_shell_locations();
-                    let focus_after = self.shell_focus_target(client_id);
-                    let focused_tabs_after = self.focused_shell_tabs();
-                    self.app.accept_current_focus_without_events();
-                    self.send_shell_navigation_focus_events(
-                        focus_before.as_ref(),
-                        focus_after.as_ref(),
-                        &focused_tabs_before,
-                        &focused_tabs_after,
-                    );
-                }
-                self.send_to_client(
-                    client_id,
-                    ServerMessage::ClientShellEndpointResponseChunk {
-                        boot_id,
-                        request_id,
-                        final_chunk,
-                        data,
-                    },
-                );
-                navigation_changed | geometry_changed
-            }
+            } => self.handle_endpoint_api_response_chunk(
+                client_id,
+                boot_id,
+                request_id,
+                final_chunk,
+                data,
+                false,
+            ),
+            ServerEvent::NativeEndpointResponseChunkReady {
+                client_id,
+                boot_id,
+                request_id,
+                final_chunk,
+                data,
+            } => self.handle_endpoint_api_response_chunk(
+                client_id,
+                boot_id,
+                request_id,
+                final_chunk,
+                data,
+                true,
+            ),
             ServerEvent::ClientDetach { client_id } => {
                 info!(client_id, "client detached");
                 self.send_terminal_stream_detach_shutdown(client_id);
@@ -3297,6 +3262,7 @@ impl HeadlessServer {
             ServerEvent::ClientConnected { .. }
                 | ServerEvent::ClientShellConnected { .. }
                 | ServerEvent::ClientShellEndpointResponseChunkReady { .. }
+                | ServerEvent::NativeEndpointResponseChunkReady { .. }
                 | ServerEvent::ClientDisconnected { .. }
                 | ServerEvent::ClientWriterDrained { .. }
                 | ServerEvent::QuitSignal
@@ -3543,6 +3509,30 @@ impl HeadlessServer {
         msg: api::ApiRequestMessage,
         skip_default_workspace_for_request: bool,
     ) -> bool {
+        let origin = match &msg.origin {
+            api::ApiOrigin::LocalSocket => "local_socket",
+            api::ApiOrigin::NativeEndpoint { client_id, boot_id } => {
+                tracing::trace!(
+                    client_id,
+                    boot_id,
+                    "dispatching native endpoint API request"
+                );
+                "native_endpoint"
+            }
+            api::ApiOrigin::LegacyEndpointV1 { client_id, boot_id } => {
+                tracing::trace!(
+                    client_id,
+                    boot_id,
+                    "dispatching legacy endpoint bridge request"
+                );
+                "legacy_endpoint_v1"
+            }
+        };
+        tracing::trace!(
+            origin,
+            method = crate::api::api_method_name(&msg.request.method),
+            "dispatching API request"
+        );
         if self.shutting_down {
             // During shutdown, respond with server_unavailable.
             let response = serde_json::to_string(&api::schema::ErrorResponse {

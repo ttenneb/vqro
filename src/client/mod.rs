@@ -1989,6 +1989,110 @@ async fn run_client_loop(
                                 }
                                 continue;
                             }
+                            Ok(endpoint::EndpointControlMessage::NativeApiResponse(response)) => {
+                                let chunk = response.decode_data().map_err(|message| {
+                                    ClientError::Protocol(protocol::FramingError::Io(
+                                        io::Error::new(io::ErrorKind::InvalidData, message),
+                                    ))
+                                })?;
+                                let completed = endpoint_commands
+                                    .receive_chunk(
+                                        &endpoint_id,
+                                        generation,
+                                        &response.boot_id,
+                                        &response.request_id,
+                                        response.final_chunk,
+                                        chunk,
+                                    )
+                                    .map_err(ClientError::ConnectionLost)?;
+                                let Some(completed) = completed else {
+                                    continue;
+                                };
+                                let (repaint, actions) = state.shell.as_mut().map_or_else(
+                                    || (false, Vec::new()),
+                                    |shell| {
+                                        if completed.generation == generation
+                                            && shell.endpoint_is_active(&completed.endpoint_id)
+                                        {
+                                            shell.handle_endpoint_result(
+                                                &completed.boot_id,
+                                                &completed.request_id,
+                                                completed.result,
+                                            )
+                                        } else {
+                                            (
+                                                shell
+                                                    .cancel_endpoint_request(&completed.request_id),
+                                                Vec::new(),
+                                            )
+                                        }
+                                    },
+                                );
+                                if let Some(shell) = state.shell.as_mut() {
+                                    shell.reconcile_input_source();
+                                }
+                                apply_client_shell_input_source_changes(
+                                    &mut state,
+                                    &mut write_stream,
+                                    &mut prefix_input_source,
+                                );
+                                let (replay_mouse, dispatch_repaint) =
+                                    dispatch_client_shell_actions(
+                                        actions,
+                                        &mut endpoint_commands,
+                                        &mut write_stream,
+                                        state.shell.as_mut(),
+                                        &mut state.detached_process_children,
+                                        &event_tx,
+                                    )?;
+                                let repaint = repaint || dispatch_repaint;
+                                if replay_mouse.is_empty() {
+                                    if repaint {
+                                        if let Some(frame) =
+                                            state.shell.as_mut().and_then(|shell| {
+                                                shell.compose(
+                                                    state.reported_size.0,
+                                                    state.reported_size.1,
+                                                )
+                                            })
+                                        {
+                                            state.present_frame(frame);
+                                        }
+                                    }
+                                } else {
+                                    let (outcome, frame) = {
+                                        let shell = state
+                                            .shell
+                                            .as_mut()
+                                            .expect("shell native endpoint response");
+                                        let mut outcome = shell.replay_mouse_events(replay_mouse);
+                                        outcome.repaint |= repaint;
+                                        let frame = outcome
+                                            .repaint
+                                            .then(|| {
+                                                shell.compose(
+                                                    state.reported_size.0,
+                                                    state.reported_size.1,
+                                                )
+                                            })
+                                            .flatten();
+                                        (outcome, frame)
+                                    };
+                                    if finish_client_shell_input(
+                                        &mut state,
+                                        outcome,
+                                        frame,
+                                        &mut write_stream,
+                                        &mut pending_activation,
+                                        &mut endpoint_commands,
+                                        &mut prefix_input_source,
+                                        &event_tx,
+                                    )? {
+                                        return Ok(());
+                                    }
+                                }
+                                continue;
+                            }
                             Ok(endpoint::EndpointControlMessage::Snapshot(snapshot)) => snapshot,
                             Err(message)
                                 if federated

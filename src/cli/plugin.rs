@@ -9,8 +9,8 @@ use crate::api::schema::{
     InstalledPluginInfo, Method, PluginActionInvokeParams, PluginActionListParams,
     PluginInvocationContext, PluginLinkParams, PluginListParams, PluginLogListParams,
     PluginPaneCloseParams, PluginPaneFocusParams, PluginPaneOpenParams, PluginPanePlacement,
-    PluginPlatform, PluginSetEnabledParams, PluginSourceInfo, PluginSourceKind, PluginUnlinkParams,
-    Request, ResponseResult, SplitDirection, SuccessResponse,
+    PluginPlatform, PluginServiceCapability, PluginSetEnabledParams, PluginSourceInfo,
+    PluginSourceKind, PluginUnlinkParams, Request, ResponseResult, SplitDirection, SuccessResponse,
 };
 use crate::popup_size::PopupSize;
 
@@ -24,6 +24,9 @@ pub(super) fn run_plugin_command(args: &[String]) -> std::io::Result<i32> {
 
     match subcommand {
         "install" => plugin_install(&args[1..]),
+        "schema" => plugin_schema(&args[1..]),
+        "validate" => plugin_validate(&args[1..], false),
+        "conformance" => plugin_validate(&args[1..], true),
         "uninstall" => plugin_uninstall(&args[1..]),
         "link" => plugin_link(&args[1..]),
         "list" => plugin_list(&args[1..]),
@@ -43,6 +46,176 @@ pub(super) fn run_plugin_command(args: &[String]) -> std::io::Result<i32> {
             Ok(2)
         }
     }
+}
+
+fn plugin_schema(args: &[String]) -> std::io::Result<i32> {
+    let usage = "usage: vqro plugin schema <bundle|manifest|service> [--output PATH]";
+    let Some(kind) = args.first().map(String::as_str) else {
+        eprintln!("{usage}");
+        return Ok(2);
+    };
+    let schema = match kind {
+        "bundle" => crate::extension_spec::extension_schema_json(),
+        "manifest" => crate::extension_spec::manifest_schema_json(),
+        "service" => crate::extension_spec::service_schema_json(),
+        _ => {
+            eprintln!("{usage}");
+            return Ok(2);
+        }
+    };
+    match &args[1..] {
+        [] => print!("{schema}"),
+        [flag, path] if flag == "--output" => {
+            std::fs::write(path, schema)?;
+            println!("wrote {kind} extension schema to {path}");
+        }
+        _ => {
+            eprintln!("{usage}");
+            return Ok(2);
+        }
+    }
+    Ok(0)
+}
+
+fn plugin_validation_failure(
+    json: bool,
+    code: &str,
+    service: Option<&str>,
+    message: impl std::fmt::Display,
+) -> std::io::Result<i32> {
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "valid": false,
+                "code": code,
+                "service": service,
+                "message": message.to_string(),
+            })
+        );
+    } else if let Some(service) = service {
+        eprintln!("{code}: service {service}: {message}");
+    } else {
+        eprintln!("{code}: {message}");
+    }
+    Ok(1)
+}
+
+fn plugin_validate(args: &[String], run_services: bool) -> std::io::Result<i32> {
+    let command = if run_services {
+        "conformance"
+    } else {
+        "validate"
+    };
+    let Some(path) = args.first() else {
+        eprintln!("usage: vqro plugin {command} <path> [--json]");
+        return Ok(2);
+    };
+    let json = args.iter().skip(1).any(|arg| arg == "--json");
+    if args.iter().skip(1).any(|arg| arg != "--json") {
+        eprintln!("usage: vqro plugin {command} <path> [--json]");
+        return Ok(2);
+    }
+    let manifest = match crate::app::api_load_plugin_manifest_for_cli(path) {
+        Ok(manifest) => manifest,
+        Err((code, message)) => return plugin_validation_failure(json, code, None, message),
+    };
+
+    let mut checked_services = Vec::new();
+    let mut skipped_services = Vec::new();
+    if run_services {
+        let package_supported =
+            crate::extension_service::supports_current_platform(manifest.platforms.as_deref());
+        for service in &manifest.services {
+            let id = format!("{}.{}", manifest.plugin_id, service.id);
+            if !package_supported
+                || !crate::extension_service::supports_current_platform(
+                    service.platforms.as_deref(),
+                )
+            {
+                skipped_services.push(id);
+                continue;
+            }
+            let check = (|| -> Result<(), String> {
+                let mut supervisor = crate::extension_service::ExtensionServiceSupervisor::new(
+                    crate::extension_service::ExtensionServiceSpec {
+                        id: id.clone(),
+                        command: service.command.clone(),
+                        cwd: PathBuf::from(&manifest.plugin_root),
+                        priority: service.priority,
+                        granted_capabilities: service.granted_capabilities.clone(),
+                    },
+                )
+                .map_err(|error| error.to_string())?;
+                supervisor.start().map_err(|error| error.to_string())?;
+                if service
+                    .provides
+                    .contains(&PluginServiceCapability::HostDocument)
+                {
+                    let fixture =
+                        PathBuf::from(&manifest.plugin_root).join("fixtures/terminal-groups.json");
+                    if fixture.is_file() {
+                        let bytes = std::fs::read(&fixture).map_err(|error| error.to_string())?;
+                        let params =
+                            serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
+                        let value = supervisor
+                            .conformance_request("host.document.render", params)
+                            .map_err(|error| error.to_string())?;
+                        let document: crate::extension_contract::HostDocumentV1 =
+                            serde_json::from_value(value).map_err(|error| error.to_string())?;
+                        document.validate().map_err(|error| error.to_string())?;
+                        let expected =
+                            PathBuf::from(&manifest.plugin_root).join("fixtures/document.json");
+                        if expected.is_file() {
+                            let bytes =
+                                std::fs::read(expected).map_err(|error| error.to_string())?;
+                            let expected: crate::extension_contract::HostDocumentV1 =
+                                serde_json::from_slice(&bytes)
+                                    .map_err(|error| error.to_string())?;
+                            if document != expected {
+                                return Err(
+                                    "host document does not match fixtures/document.json".into()
+                                );
+                            }
+                        }
+                    }
+                }
+                supervisor.stop();
+                Ok(())
+            })();
+            if let Err(message) = check {
+                return plugin_validation_failure(
+                    json,
+                    "extension_conformance_failed",
+                    Some(&id),
+                    message,
+                );
+            }
+            checked_services.push(id);
+        }
+    }
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "valid": true,
+                "contract": crate::extension_spec::EXTENSION_MANIFEST_CONTRACT_V1,
+                "plugin": manifest,
+                "checked_services": checked_services,
+                "skipped_services": skipped_services,
+            }))
+            .map_err(io::Error::other)?
+        );
+    } else {
+        println!("valid {} {}", manifest.plugin_id, manifest.version);
+        for service in checked_services {
+            println!("conformant service {service}");
+        }
+        for service in skipped_services {
+            println!("skipped unsupported-platform service {service}");
+        }
+    }
+    Ok(0)
 }
 
 fn plugin_link(args: &[String]) -> std::io::Result<i32> {
@@ -1661,6 +1834,9 @@ fn print_plugin_help() {
     eprintln!("  vqro plugin uninstall <plugin_id|owner/repo[/subdir...]>");
     eprintln!("  vqro plugin link <path> [--disabled]");
     eprintln!("  vqro plugin list [--plugin ID] [--json]");
+    eprintln!("  vqro plugin schema <bundle|manifest|service> [--output PATH]");
+    eprintln!("  vqro plugin validate <path> [--json]");
+    eprintln!("  vqro plugin conformance <path> [--json]");
     eprintln!("  vqro plugin config-dir <plugin_id>");
     eprintln!("  vqro plugin unlink <plugin_id>");
     eprintln!("  vqro plugin enable <plugin_id>");

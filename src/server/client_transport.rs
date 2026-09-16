@@ -563,6 +563,12 @@ pub(crate) enum ServerEvent {
         boot_id: String,
         request: Box<crate::api::schema::Request>,
     },
+    /// A negotiated vqro-native API request, separate from the frozen bridge.
+    NativeEndpointRequest {
+        client_id: u64,
+        boot_id: String,
+        request: Box<crate::api::schema::Request>,
+    },
     /// A well-framed endpoint request could not be dispatched by this server.
     ClientShellEndpointRequestError {
         client_id: u64,
@@ -573,6 +579,13 @@ pub(crate) enum ServerEvent {
     },
     /// One chunk of a deferred endpoint operation's final response is ready.
     ClientShellEndpointResponseChunkReady {
+        client_id: u64,
+        boot_id: String,
+        request_id: String,
+        final_chunk: bool,
+        data: Vec<u8>,
+    },
+    NativeEndpointResponseChunkReady {
         client_id: u64,
         boot_id: String,
         request_id: String,
@@ -709,6 +722,7 @@ struct ClientShellHandshakeOptions {
     pane_viewport_enabled: bool,
     pane_view_enabled: bool,
     terminal_views_enabled: bool,
+    native_api_enabled: bool,
 }
 
 fn client_shell_handshake_options(
@@ -737,6 +751,12 @@ fn client_shell_handshake_options(
         terminal_views_enabled: [
             crate::protocol::endpoint::TERMINAL_VIEWS_INTEREST_KIND,
             crate::protocol::endpoint::TERMINAL_VIEWS_SURFACE_KIND,
+        ]
+        .iter()
+        .all(|required| has(required)),
+        native_api_enabled: [
+            crate::native_api::NATIVE_API_REQUEST_KIND_V1,
+            crate::native_api::NATIVE_API_RESPONSE_KIND_V1,
         ]
         .iter()
         .all(|required| has(required)),
@@ -899,13 +919,20 @@ pub(crate) fn handle_client_handshake(
         RenderEncoding::TerminalAnsi
     };
     let welcome = if shell_options.is_some() {
-        let mut welcome = EndpointServerWelcome::compatible(
+        let native_api_enabled = shell_options
+            .as_ref()
+            .is_some_and(|options| options.native_api_enabled);
+        let methods = if native_api_enabled {
             crate::server::client_commands::supported_client_shell_method_names()
                 .iter()
                 .chain(crate::server::client_commands::optional_client_shell_method_names())
-                .map(|method| (*method).to_owned())
-                .collect(),
-        );
+                .copied()
+                .collect::<Vec<_>>()
+        } else {
+            crate::protocol::endpoint_bridge_v1::METHODS.to_vec()
+        };
+        let mut welcome =
+            EndpointServerWelcome::compatible(methods.into_iter().map(str::to_owned).collect());
         if shell_options
             .as_ref()
             .is_some_and(|options| options.structure_enabled)
@@ -937,6 +964,14 @@ pub(crate) fn handle_client_handshake(
             welcome
                 .capabilities
                 .push(crate::protocol::endpoint::TERMINAL_VIEWS_CAPABILITY.into());
+        }
+        if shell_options
+            .as_ref()
+            .is_some_and(|options| options.native_api_enabled)
+        {
+            welcome
+                .capabilities
+                .push(crate::native_api::NATIVE_API_CAPABILITY_V1.into());
         }
         ServerMessage::EndpointControl {
             kind: ENDPOINT_WELCOME_KIND.into(),
@@ -979,6 +1014,9 @@ pub(crate) fn handle_client_handshake(
 
     // Notify the main loop about the new client.
     let endpoint_control_writer = shell_options.as_ref().map(|_| writer.control.clone());
+    let native_api_enabled = shell_options
+        .as_ref()
+        .is_some_and(|options| options.native_api_enabled);
     let connected = if let Some(options) = shell_options {
         ServerEvent::ClientShellConnected {
             client_id,
@@ -1026,6 +1064,7 @@ pub(crate) fn handle_client_handshake(
         server_event_tx,
         should_quit,
         endpoint_control_writer.as_ref(),
+        native_api_enabled,
     )
 }
 
@@ -1092,7 +1131,14 @@ fn client_read_loop(
     server_event_tx: &mpsc::Sender<ServerEvent>,
     should_quit: &Arc<AtomicBool>,
 ) -> io::Result<()> {
-    client_read_loop_with_endpoint_controls(stream, client_id, server_event_tx, should_quit, None)
+    client_read_loop_with_endpoint_controls(
+        stream,
+        client_id,
+        server_event_tx,
+        should_quit,
+        None,
+        false,
+    )
 }
 
 fn client_read_loop_with_endpoint_controls(
@@ -1101,6 +1147,7 @@ fn client_read_loop_with_endpoint_controls(
     server_event_tx: &mpsc::Sender<ServerEvent>,
     should_quit: &Arc<AtomicBool>,
     endpoint_control_writer: Option<&ClientControlWriter>,
+    native_api_enabled: bool,
 ) -> io::Result<()> {
     while !should_quit.load(Ordering::Acquire) {
         #[cfg(unix)]
@@ -1432,6 +1479,106 @@ fn client_read_loop_with_endpoint_controls(
                         code,
                         message,
                     },
+                }
+            }
+            ClientMessage::EndpointControl { kind, data }
+                if kind == crate::native_api::NATIVE_API_REQUEST_KIND_V1 && native_api_enabled =>
+            {
+                if data.len() > crate::server::client_commands::MAX_ENDPOINT_COMMAND_BYTES {
+                    warn!(client_id, "oversized native API endpoint request");
+                    let head = serde_json::from_str::<serde_json::Value>(&data).ok();
+                    let boot_id = head
+                        .as_ref()
+                        .and_then(|value| value.get("boot_id"))
+                        .and_then(serde_json::Value::as_str);
+                    let request_id = head
+                        .as_ref()
+                        .and_then(|value| value.pointer("/request/id"))
+                        .and_then(serde_json::Value::as_str);
+                    if let (Some(boot_id), Some(request_id), Some(writer)) =
+                        (boot_id, request_id, endpoint_control_writer)
+                    {
+                        if boot_id.len()
+                            > crate::server::client_commands::MAX_ENDPOINT_BOOT_ID_BYTES
+                            || request_id.len()
+                                > crate::server::client_commands::MAX_ENDPOINT_REQUEST_ID_BYTES
+                        {
+                            continue;
+                        }
+                        let response = crate::server::client_commands::error_response(
+                            request_id.to_owned(),
+                            "request_too_large",
+                            "native API endpoint request exceeds the byte limit",
+                        );
+                        if let Ok(message) = crate::native_api::response_chunk_message(
+                            boot_id.to_owned(),
+                            request_id.to_owned(),
+                            true,
+                            response.as_bytes(),
+                        ) {
+                            let mut framed = Vec::new();
+                            if protocol::write_message(&mut framed, &message).is_ok() {
+                                let _ = writer.send(framed);
+                            }
+                        }
+                    }
+                    continue;
+                }
+                let envelope: crate::native_api::NativeEndpointRequestV1 =
+                    match serde_json::from_str(&data) {
+                        Ok(envelope) => envelope,
+                        Err(error) => {
+                            warn!(client_id, %error, "invalid native API endpoint request");
+                            let head = serde_json::from_str::<serde_json::Value>(&data).ok();
+                            let boot_id = head
+                                .as_ref()
+                                .and_then(|value| value.get("boot_id"))
+                                .and_then(serde_json::Value::as_str);
+                            let request_id = head
+                                .as_ref()
+                                .and_then(|value| value.pointer("/request/id"))
+                                .and_then(serde_json::Value::as_str);
+                            if let (Some(boot_id), Some(request_id), Some(writer)) =
+                                (boot_id, request_id, endpoint_control_writer)
+                            {
+                                if boot_id.len()
+                                    <= crate::server::client_commands::MAX_ENDPOINT_BOOT_ID_BYTES
+                                    && request_id.len()
+                                        <= crate::server::client_commands::MAX_ENDPOINT_REQUEST_ID_BYTES
+                                {
+                                    let response = crate::server::client_commands::error_response(
+                                        request_id.to_owned(),
+                                        "invalid_request",
+                                        error.to_string(),
+                                    );
+                                    if let Ok(message) = crate::native_api::response_chunk_message(
+                                        boot_id.to_owned(),
+                                        request_id.to_owned(),
+                                        true,
+                                        response.as_bytes(),
+                                    ) {
+                                        let mut framed = Vec::new();
+                                        if protocol::write_message(&mut framed, &message).is_ok() {
+                                            let _ = writer.send(framed);
+                                        }
+                                    }
+                                }
+                            }
+                            continue;
+                        }
+                    };
+                if envelope.boot_id.len()
+                    > crate::server::client_commands::MAX_ENDPOINT_BOOT_ID_BYTES
+                    || envelope.request.id.len()
+                        > crate::server::client_commands::MAX_ENDPOINT_REQUEST_ID_BYTES
+                {
+                    warn!(client_id, "oversized native API endpoint identity");
+                    continue;
+                }
+                ServerEvent::NativeEndpointRequest {
+                    client_id,
+                    boot_id: envelope.boot_id,
+                    request: Box::new(envelope.request),
                 }
             }
             ClientMessage::EndpointControl { kind, data }
@@ -2185,9 +2332,11 @@ mod tests {
             unreachable!("endpoint hello helper always returns endpoint control");
         };
         let mut payload: EndpointClientHello = serde_json::from_str(data).unwrap();
-        payload
-            .control_kinds
-            .push(crate::protocol::endpoint::HOST_DOCUMENTS_KIND.into());
+        payload.control_kinds.extend([
+            crate::protocol::endpoint::HOST_DOCUMENTS_KIND.into(),
+            crate::native_api::NATIVE_API_REQUEST_KIND_V1.into(),
+            crate::native_api::NATIVE_API_RESPONSE_KIND_V1.into(),
+        ]);
         *data = serde_json::to_string(&payload).unwrap();
         protocol::write_message(&mut client_stream, &hello).expect("write shell hello");
 
@@ -2196,6 +2345,10 @@ mod tests {
         let welcome = endpoint_welcome(welcome);
         assert_eq!(welcome.generation, ENDPOINT_PROTOCOL_GENERATION);
         assert!(welcome.error.is_none());
+        assert!(welcome
+            .capabilities
+            .iter()
+            .any(|capability| capability == crate::native_api::NATIVE_API_CAPABILITY_V1));
         match server_event_rx
             .blocking_recv()
             .expect("client shell connected event")

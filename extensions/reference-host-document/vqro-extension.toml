@@ -1,0 +1,14 @@
+manifest_version = 1
+id = "example.reference-document"
+name = "Reference host document"
+version = "1.0.0"
+min_vqro_version = "0.9.0"
+description = "Minimal terminal-group host document provider."
+platforms = ["linux", "macos"]
+
+[[services]]
+id = "document"
+command = ["python3", "service.py"]
+document_source = "terminal_groups"
+provides = ["host_document"]
+capabilities = ["host_document", "focus_terminal"]

@@ -45,6 +45,45 @@ fn protocol_schema_document() -> serde_json::Value {
     })
 }
 
+fn native_api_schema_document() -> serde_json::Value {
+    let mut request = protocol_schema_entry::<Request>("request");
+    if let Some(branches) = request
+        .get_mut("oneOf")
+        .and_then(serde_json::Value::as_array_mut)
+    {
+        branches.retain(|branch| {
+            branch
+                .pointer("/properties/method/const")
+                .and_then(serde_json::Value::as_str)
+                != Some("client_shell.surface.set")
+        });
+    }
+    serde_json::json!({
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$id": crate::native_api::NATIVE_API_SCHEMA_ID,
+        "title": "vqro JSON API",
+        "contract": crate::native_api::NATIVE_API_CONTRACT_V1,
+        "major_version": crate::native_api::NATIVE_API_MAJOR_VERSION,
+        "schemas": {
+            "request": request,
+            "success_response": protocol_schema_entry::<SuccessResponse>("success_response"),
+            "error_response": protocol_schema_entry::<ErrorResponse>("error_response"),
+            "event": protocol_schema_entry::<EventEnvelope>("event"),
+            "subscription_event": protocol_schema_entry::<SubscriptionEventEnvelope>("subscription_event"),
+        },
+    })
+}
+
+#[test]
+fn native_schema_excludes_bridge_only_surface_method() {
+    let native = native_api_schema_document();
+    let native_json = serde_json::to_string(&native["schemas"]["request"]).unwrap();
+    assert!(!native_json.contains("client_shell.surface.set"));
+    let bridge_source =
+        serde_json::to_string(&protocol_schema_document()["schemas"]["request"]).unwrap();
+    assert!(bridge_source.contains("client_shell.surface.set"));
+}
+
 #[test]
 fn request_uses_dot_method_names() {
     let request = Request {
@@ -177,6 +216,7 @@ fn bundled_protocol_schema_refs_resolve_inside_bundle() {
     }
 
     assert_no_standalone_refs(&protocol_schema_document());
+    assert_no_standalone_refs(&native_api_schema_document());
 }
 
 #[test]
@@ -203,6 +243,29 @@ fn generated_protocol_schema_artifact_is_current() {
     assert_eq!(
         expected, actual,
         "generated API schema artifact is stale; run `HERDR_UPDATE_API_SCHEMA=1 just test-one generated_protocol_schema_artifact_is_current`"
+    );
+}
+
+#[test]
+fn generated_native_api_schema_artifact_is_current() {
+    let actual = format!(
+        "{}\n",
+        serde_json::to_string_pretty(&native_api_schema_document()).unwrap()
+    );
+    let path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/next/api/vqro-api.schema.json");
+
+    if std::env::var_os("HERDR_UPDATE_API_SCHEMA").is_some() {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, &actual).unwrap();
+        return;
+    }
+
+    let expected = std::fs::read_to_string(&path)
+        .unwrap_or_else(|err| panic!("failed to read {}: {err}", path.display()));
+    assert_eq!(
+        expected, actual,
+        "generated vqro API schema artifact is stale"
     );
 }
 

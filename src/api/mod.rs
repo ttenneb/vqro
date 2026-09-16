@@ -97,7 +97,15 @@ pub(crate) fn request_changes_ui(request: &Request) -> bool {
     )
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ApiOrigin {
+    LocalSocket,
+    NativeEndpoint { client_id: u64, boot_id: String },
+    LegacyEndpointV1 { client_id: u64, boot_id: String },
+}
+
 pub struct ApiRequestMessage {
+    pub origin: ApiOrigin,
     pub request: Request,
     pub respond_to: std::sync::mpsc::Sender<String>,
     pub response_write_complete: Option<std::sync::mpsc::Receiver<()>>,

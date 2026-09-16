@@ -2325,7 +2325,9 @@ pub(crate) fn declared_actions_allowed(
     })
 }
 
-fn supports_current_platform(platforms: Option<&[crate::api::schema::PluginPlatform]>) -> bool {
+pub(crate) fn supports_current_platform(
+    platforms: Option<&[crate::api::schema::PluginPlatform]>,
+) -> bool {
     let Some(platforms) = platforms else {
         return true;
     };
@@ -2357,7 +2359,6 @@ impl ExtensionServiceSupervisor {
         })
     }
 
-    #[cfg(test)]
     pub fn start(&mut self) -> Result<(), ExtensionServiceError> {
         self.start_cancellable(&AtomicBool::new(false))
     }
@@ -2712,6 +2713,18 @@ impl ExtensionServiceSupervisor {
         }
     }
 
+    pub(crate) fn conformance_request(
+        &mut self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, ExtensionServiceError> {
+        self.ensure_running_cancellable(Instant::now(), &AtomicBool::new(false))?;
+        self.runtime
+            .as_mut()
+            .ok_or_else(|| ExtensionServiceError::Protocol("service is not running".into()))?
+            .request_cancellable(method, params, &AtomicBool::new(false))
+    }
+
     pub fn stop(&mut self) {
         self.runtime = None;
         self.status = ExtensionServiceStatus::Stopped;
@@ -2908,12 +2921,12 @@ impl ExtensionServiceRuntime {
             host_methods.push(crate::action_choices::ACTION_CHOICES_LIST_METHOD_V1);
             host_methods.push(crate::action_choices::ACTION_CHOICE_INVOKE_METHOD_V1);
         }
-        let welcome = ServiceWelcome {
-            kind: "welcome",
+        let welcome = ExtensionServiceWelcomeV1 {
+            kind: "welcome".into(),
             protocol: EXTENSION_SERVICE_PROTOCOL,
-            granted_capabilities,
-            methods: &host_methods,
-            trust: "trusted_same_user_not_sandboxed",
+            granted_capabilities: granted_capabilities.to_vec(),
+            methods: host_methods.into_iter().map(str::to_owned).collect(),
+            trust: "trusted_same_user_not_sandboxed".into(),
         };
         let mut bytes = serde_json::to_vec(&welcome).map_err(|error| {
             ExtensionServiceError::Protocol(format!("cannot encode service welcome: {error}"))
@@ -2932,10 +2945,10 @@ impl ExtensionServiceRuntime {
     ) -> Result<serde_json::Value, ExtensionServiceError> {
         let request_id = self.next_request_id;
         self.next_request_id = self.next_request_id.saturating_add(1);
-        let request = ServiceRequest {
-            kind: "request",
+        let request = ExtensionServiceRequestV1 {
+            kind: "request".into(),
             id: request_id,
-            method,
+            method: method.into(),
             params,
         };
         let mut bytes = serde_json::to_vec(&request).map_err(|error| {
@@ -2954,20 +2967,25 @@ impl ExtensionServiceRuntime {
             ExtensionServiceError::Protocol(format!("service input queue unavailable: {error}"))
         })?;
         let frame = self.recv_frame_cancellable(REQUEST_TIMEOUT, canceled)?;
-        let response: ServiceResponse = serde_json::from_slice(&frame).map_err(|error| {
-            ExtensionServiceError::Protocol(format!("invalid service response: {error}"))
-        })?;
+        let response: ExtensionServiceResponseV1 =
+            serde_json::from_slice(&frame).map_err(|error| {
+                ExtensionServiceError::Protocol(format!("invalid service response: {error}"))
+            })?;
         if response.kind != "response" || response.id != request_id {
             return Err(ExtensionServiceError::Protocol(
                 "service response request id mismatch".into(),
             ));
         }
-        if let Some(error) = response.error {
-            return Err(ExtensionServiceError::Remote(error));
+        match (response.result, response.error) {
+            (Some(result), None) => Ok(result),
+            (None, Some(error)) => Err(ExtensionServiceError::Remote(error)),
+            (None, None) => Err(ExtensionServiceError::Protocol(
+                "service response omitted result and error".into(),
+            )),
+            (Some(_), Some(_)) => Err(ExtensionServiceError::Protocol(
+                "service response cannot contain both result and error".into(),
+            )),
         }
-        response.result.ok_or_else(|| {
-            ExtensionServiceError::Protocol("service response omitted result".into())
-        })
     }
 
     fn recv_frame_cancellable(
@@ -3009,35 +3027,35 @@ impl Drop for ExtensionServiceRuntime {
     }
 }
 
-#[derive(Serialize)]
-struct ServiceRequest<'a> {
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct ServiceHello {
     #[serde(rename = "type")]
-    kind: &'a str,
-    id: u64,
-    method: &'a str,
-    params: serde_json::Value,
+    pub kind: String,
+    pub protocol: u16,
+    pub service_id: String,
+    #[serde(default)]
+    pub requested_capabilities: Vec<crate::api::schema::ExtensionServiceCapability>,
+    #[serde(default)]
+    pub methods: Vec<String>,
 }
 
-#[derive(Deserialize)]
-struct ServiceHello {
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct ExtensionServiceWelcomeV1 {
     #[serde(rename = "type")]
-    kind: String,
-    protocol: u16,
-    service_id: String,
-    #[serde(default)]
-    requested_capabilities: Vec<crate::api::schema::ExtensionServiceCapability>,
-    #[serde(default)]
-    methods: Vec<String>,
+    pub kind: String,
+    pub protocol: u16,
+    pub granted_capabilities: Vec<crate::api::schema::ExtensionServiceCapability>,
+    pub methods: Vec<String>,
+    pub trust: String,
 }
 
-#[derive(Serialize)]
-struct ServiceWelcome<'a> {
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct ExtensionServiceRequestV1 {
     #[serde(rename = "type")]
-    kind: &'a str,
-    protocol: u16,
-    granted_capabilities: &'a [crate::api::schema::ExtensionServiceCapability],
-    methods: &'a [&'a str],
-    trust: &'a str,
+    pub kind: String,
+    pub id: u64,
+    pub method: String,
+    pub params: serde_json::Value,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -3058,15 +3076,15 @@ struct ExtensionActionResponse {
     effect: ExtensionHostEffect,
 }
 
-#[derive(Deserialize)]
-struct ServiceResponse {
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct ExtensionServiceResponseV1 {
     #[serde(rename = "type")]
-    kind: String,
-    id: u64,
-    #[serde(default)]
-    result: Option<serde_json::Value>,
-    #[serde(default)]
-    error: Option<String>,
+    pub kind: String,
+    pub id: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 #[derive(Debug)]

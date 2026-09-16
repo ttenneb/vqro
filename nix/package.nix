@@ -42,7 +42,14 @@ rustPlatform.buildRustPackage {
         ../assets
         ../distribution/install.ps1
         ../docs/next/api/herdr-api.schema.json
+        ../docs/next/api/vqro-api.schema.json
+        ../docs/next/api/vqro-extension-manifest.schema.json
+        ../docs/next/api/vqro-extension-service.schema.json
+        ../docs/next/api/vqro-extension.schema.json
+        ../extensions/reference-host-document
+        ../extensions/terminal-inspector
         ../src
+        ../tests/fixtures/extensions
         ../vendor/libghostty-vt
         ../vendor/libghostty-vt.vendor.json
         ../vendor/portable-pty

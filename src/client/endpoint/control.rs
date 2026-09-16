@@ -15,6 +15,7 @@ pub(crate) enum EndpointControlMessage {
     TerminalViewsSurface(Box<crate::protocol::endpoint::ServerTerminalViewsSurface>),
     PaneViewResult(Box<crate::protocol::endpoint::ServerPaneViewResult>),
     PaneViewActionResult(Box<crate::protocol::endpoint::ServerPaneViewActionResult>),
+    NativeApiResponse(crate::native_api::NativeEndpointResponseChunkV1),
     Ignored,
 }
 
@@ -51,6 +52,11 @@ pub(crate) fn decode_endpoint_control(
                 view,
             },
         ));
+    }
+    if kind == crate::native_api::NATIVE_API_RESPONSE_KIND_V1 {
+        let response = serde_json::from_str(data)
+            .map_err(|error| format!("invalid native API response: {error}"))?;
+        return Ok(EndpointControlMessage::NativeApiResponse(response));
     }
     if kind == crate::protocol::endpoint::PANE_VIEW_RESULT_KIND {
         let result = serde_json::from_str(data)

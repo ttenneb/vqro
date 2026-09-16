@@ -1,0 +1,50 @@
+---
+title: Extension service protocol
+description: Versioned stdio framing and conformance rules for vqro extensions.
+---
+
+The supported service contract is `vqro.extension-service.v1`, implemented by
+host protocol `2`. Its generated schema is
+`docs/next/api/vqro-extension-service.schema.json`.
+
+## Transport and lifecycle
+
+Services are trusted same-user processes, not an OS security sandbox. vqro
+starts them under supervised process containment, sends and receives bounded
+newline-delimited JSON frames, drains stderr, enforces handshake and request
+timeouts, and terminates the process tree on disable, replacement, or shutdown.
+A frame may not exceed the host's published extension frame limit.
+
+The service first writes a `hello` frame containing protocol `2`, its exact
+runtime service ID, requested capabilities, and supported fixed methods. The
+host rejects identity, protocol, capability, or required-method mismatches. It
+then writes `welcome` with the exact granted capabilities and supported methods.
+Manifest capability declarations constrain protocol effects but do not sandbox
+the process.
+
+Requests have `type: "request"`, a host-issued numeric `id`, a fixed `method`,
+and `params`. Responses must echo the ID and contain exactly one of `result` or
+`error`. Unknown IDs, malformed or oversized frames, and result/error ambiguity
+are protocol failures.
+
+## Supported methods
+
+The stable authoring surface includes `view.render`, `view.action`,
+`host.document.render`, and `host.document.action`. Third-party host documents
+may currently consume only `terminal_groups`; repository Spaces, relationships,
+and attributed agent activity are restricted first-party sources.
+
+Dynamic action choices, terminal resources, and acknowledgement contracts are
+foundation or experimental surfaces until a later specification marks them
+stable. Their presence in host capability enums is not a publication promise.
+
+## Validation
+
+`vqro plugin validate PATH` parses and semantically validates a package without
+running code or requiring a server. `vqro plugin conformance PATH` explicitly
+runs declared services through the production supervisor and handshake. Both
+return 0 on success, 1 on validation failure, and 2 for invalid usage; `--json`
+produces machine-readable output.
+
+Incompatible changes require a new named contract or protocol number. Existing
+protocol-2 frame meanings are not reinterpreted.

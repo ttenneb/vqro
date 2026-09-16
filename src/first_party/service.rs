@@ -2,28 +2,6 @@
 
 use std::io::{BufRead, Write};
 
-use serde::{Deserialize, Serialize};
-
-#[derive(Deserialize)]
-struct Request {
-    #[serde(rename = "type")]
-    kind: String,
-    id: u64,
-    method: String,
-    params: serde_json::Value,
-}
-
-#[derive(Serialize)]
-struct Response<T: Serialize> {
-    #[serde(rename = "type")]
-    kind: &'static str,
-    id: u64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    result: Option<T>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    error: Option<String>,
-}
-
 pub(crate) fn run(provider: &str) -> std::io::Result<i32> {
     let (namespace, capabilities) = match provider {
         "collections" => (
@@ -46,13 +24,13 @@ pub(crate) fn run(provider: &str) -> std::io::Result<i32> {
     };
     let service_id =
         std::env::var("VQRO_EXTENSION_SERVICE_ID").unwrap_or_else(|_| namespace.to_string());
-    let hello = serde_json::json!({
-        "type": "hello",
-        "protocol": crate::extension_service::EXTENSION_SERVICE_PROTOCOL,
-        "service_id": service_id,
-        "requested_capabilities": capabilities,
-        "methods": ["host.document.render"],
-    });
+    let hello = crate::extension_service::ServiceHello {
+        kind: "hello".into(),
+        protocol: crate::extension_service::EXTENSION_SERVICE_PROTOCOL,
+        service_id,
+        requested_capabilities: serde_json::from_value(capabilities)?,
+        methods: vec!["host.document.render".into()],
+    };
     let mut stdout = std::io::stdout().lock();
     serde_json::to_writer(&mut stdout, &hello)?;
     stdout.write_all(b"\n")?;
@@ -69,7 +47,10 @@ pub(crate) fn run(provider: &str) -> std::io::Result<i32> {
     }
 
     for line in lines {
-        let response = match serde_json::from_str::<Request>(&line?) {
+        let response = match serde_json::from_str::<
+            crate::extension_service::ExtensionServiceRequestV1,
+        >(&line?)
+        {
             Ok(request)
                 if request.kind == "request" && request.method == "host.document.render" =>
             {
@@ -109,28 +90,28 @@ pub(crate) fn run(provider: &str) -> std::io::Result<i32> {
                     _ => unreachable!("provider was validated before the service loop"),
                 };
                 match projection {
-                    Ok(document) => Response {
-                        kind: "response",
+                    Ok(document) => crate::extension_service::ExtensionServiceResponseV1 {
+                        kind: "response".into(),
                         id: request.id,
-                        result: Some(document),
+                        result: Some(serde_json::to_value(document)?),
                         error: None,
                     },
-                    Err(error) => Response {
-                        kind: "response",
+                    Err(error) => crate::extension_service::ExtensionServiceResponseV1 {
+                        kind: "response".into(),
                         id: request.id,
                         result: None,
                         error: Some(error),
                     },
                 }
             }
-            Ok(request) => Response {
-                kind: "response",
+            Ok(request) => crate::extension_service::ExtensionServiceResponseV1 {
+                kind: "response".into(),
                 id: request.id,
                 result: None,
                 error: Some("unsupported method".into()),
             },
-            Err(error) => Response::<crate::extension_contract::HostDocumentV1> {
-                kind: "response",
+            Err(error) => crate::extension_service::ExtensionServiceResponseV1 {
+                kind: "response".into(),
                 id: 0,
                 result: None,
                 error: Some(error.to_string()),

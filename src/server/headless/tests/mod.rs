@@ -210,6 +210,7 @@ async fn headless_api_reads_latest_title_without_spinner_event_flooding() {
 fn headless_pane_list(server: &mut HeadlessServer) -> Vec<api::schema::PaneInfo> {
     let (respond_to, response_rx) = std::sync::mpsc::channel();
     server.handle_api_request_with_shutdown_check(api::ApiRequestMessage {
+        origin: crate::api::ApiOrigin::LocalSocket,
         request: api::schema::Request {
             id: "list-titles".into(),
             method: api::schema::Method::PaneList(api::schema::PaneListParams::default()),
@@ -268,6 +269,7 @@ fn headless_api_request_drains_all_pending_internal_events_before_reading_state(
     let (respond_to, response_rx) = std::sync::mpsc::channel();
     assert!(
         server.handle_api_request_with_shutdown_check(api::ApiRequestMessage {
+            origin: crate::api::ApiOrigin::LocalSocket,
             request: api::schema::Request {
                 id: "headless_stop_after_events".into(),
                 method: api::schema::Method::ServerStop(api::schema::EmptyParams::default()),
@@ -726,6 +728,77 @@ async fn client_shell_endpoint_request_uses_the_selected_connection() {
         }
         other => panic!("expected client shell endpoint response, got {other:?}"),
     }
+    shutdown_test_runtimes(&mut server);
+}
+
+#[tokio::test]
+async fn native_endpoint_lane_dispatches_methods_outside_the_frozen_bridge() {
+    let mut server = test_headless_server();
+    server.app.state.workspaces = vec![crate::workspace::Workspace::test_new("endpoint")];
+    server.app.state.ensure_test_terminals();
+    server.app.state.active = Some(0);
+    let (writer, control_rx, _render_rx) = test_client_writer();
+    let client_id = 142;
+    assert!(
+        server.handle_server_event(ServerEvent::ClientShellConnected {
+            client_id,
+            surface_cols: 80,
+            surface_rows: 23,
+            cell_width_px: 0,
+            cell_height_px: 0,
+            pixel_mouse: false,
+            direct_graphics: false,
+            endpoint_keybindings: false,
+            mouse_capture: false,
+            surface_active: true,
+            structure_enabled: false,
+            host_documents_enabled: false,
+            pane_viewport_enabled: false,
+            pane_view_enabled: false,
+            terminal_views_enabled: false,
+            writer,
+        })
+    );
+    let _initial_snapshot = control_rx.recv().expect("initial shell snapshot");
+    let boot_id = server.client_shell_boot_id.clone();
+    let method = api::schema::Method::CollectionList(Default::default());
+    assert!(!crate::protocol::endpoint_bridge_v1::supports(&method));
+
+    assert!(
+        !server.handle_server_event(ServerEvent::NativeEndpointRequest {
+            client_id,
+            boot_id: boot_id.clone(),
+            request: Box::new(api::schema::Request {
+                id: "native:1".into(),
+                method,
+            }),
+        })
+    );
+    let response_ready = server
+        .server_event_rx
+        .recv()
+        .await
+        .expect("native response ready");
+    assert!(!server.handle_server_event(response_ready));
+
+    let ServerMessage::EndpointControl { kind, data } =
+        read_server_message(control_rx.recv().expect("native endpoint response"))
+    else {
+        panic!("expected native endpoint response");
+    };
+    assert_eq!(kind, crate::native_api::NATIVE_API_RESPONSE_KIND_V1);
+    let chunk: crate::native_api::NativeEndpointResponseChunkV1 =
+        serde_json::from_str(&data).unwrap();
+    assert_eq!(chunk.boot_id, boot_id);
+    assert_eq!(chunk.request_id, "native:1");
+    assert!(chunk.final_chunk);
+    let response: api::schema::SuccessResponse =
+        serde_json::from_slice(&chunk.decode_data().unwrap()).unwrap();
+    assert_eq!(response.id, "native:1");
+    assert!(matches!(
+        response.result,
+        api::schema::ResponseResult::CollectionList { .. }
+    ));
     shutdown_test_runtimes(&mut server);
 }
 
@@ -1851,6 +1924,7 @@ async fn client_local_navigation_does_not_emit_global_focus_transitions() {
     server.handle_client_shell_api_request(
         62,
         crate::api::ApiRequestMessage {
+            origin: crate::api::ApiOrigin::LocalSocket,
             request: crate::api::schema::Request {
                 id: "focus-own-tab".into(),
                 method: crate::api::schema::Method::TabFocus(crate::api::schema::TabTarget {
@@ -1944,6 +2018,7 @@ async fn client_local_navigation_emits_pane_focused_only_when_that_client_moves(
         server.handle_client_shell_api_request(
             client_id,
             api::ApiRequestMessage {
+                origin: crate::api::ApiOrigin::LocalSocket,
                 request: api::schema::Request {
                     id: "navigate".into(),
                     method,
@@ -2069,6 +2144,7 @@ async fn repeated_layout_action_reapplies_controller_geometry() {
     assert!(server.handle_client_shell_api_request(
         65,
         crate::api::ApiRequestMessage {
+            origin: crate::api::ApiOrigin::LocalSocket,
             request: crate::api::schema::Request {
                 id: "resize-layout".into(),
                 method: crate::api::schema::Method::LayoutSetSplitRatio(
@@ -3181,6 +3257,7 @@ async fn public_close_reapplies_controller_geometry() {
     let (respond_to, _response_rx) = std::sync::mpsc::channel();
     assert!(
         server.handle_api_request_with_shutdown_check(crate::api::ApiRequestMessage {
+            origin: crate::api::ApiOrigin::LocalSocket,
             request: crate::api::schema::Request {
                 id: "public-close-geometry".into(),
                 method: crate::api::schema::Method::PaneClose(crate::api::schema::PaneTarget {
@@ -3381,6 +3458,7 @@ async fn public_background_tab_create_preserves_client_locations() {
 
     let (respond_to, _response_rx) = std::sync::mpsc::channel();
     server.handle_api_request_with_shutdown_check(crate::api::ApiRequestMessage {
+        origin: crate::api::ApiOrigin::LocalSocket,
         request: crate::api::schema::Request {
             id: "create-background-tab".into(),
             method: crate::api::schema::Method::TabCreate(crate::api::schema::TabCreateParams {
@@ -3431,6 +3509,7 @@ async fn public_workspace_focus_preserves_each_clients_remembered_tabs() {
 
     let (respond_to, _response_rx) = std::sync::mpsc::channel();
     server.handle_api_request_with_shutdown_check(crate::api::ApiRequestMessage {
+        origin: crate::api::ApiOrigin::LocalSocket,
         request: crate::api::schema::Request {
             id: "focus-second-workspace".into(),
             method: crate::api::schema::Method::WorkspaceFocus(
@@ -3516,6 +3595,7 @@ async fn public_agent_focus_replaces_a_diverged_client_shell_projection() {
         .unwrap();
     let (respond_to, response_rx) = std::sync::mpsc::channel();
     server.handle_api_request_with_shutdown_check(crate::api::ApiRequestMessage {
+        origin: crate::api::ApiOrigin::LocalSocket,
         request: crate::api::schema::Request {
             id: "focus-first-agent".into(),
             method: crate::api::schema::Method::AgentFocus(crate::api::schema::AgentTarget {
@@ -3597,6 +3677,7 @@ async fn public_api_focus_replaces_every_client_shell_projection() {
 
     let (respond_to, _response_rx) = std::sync::mpsc::channel();
     server.handle_api_request_with_shutdown_check(crate::api::ApiRequestMessage {
+        origin: crate::api::ApiOrigin::LocalSocket,
         request: crate::api::schema::Request {
             id: "test.client.shell.workspace.focus".into(),
             method: crate::api::schema::Method::WorkspaceFocus(
@@ -7583,6 +7664,7 @@ fn notification_show_api_forwards_one_semantic_client_notification() {
 
     let (respond_to, response_rx) = std::sync::mpsc::channel();
     let changed = server.handle_api_request_with_shutdown_check(api::ApiRequestMessage {
+        origin: crate::api::ApiOrigin::LocalSocket,
         request: api::schema::Request {
             id: "notify".into(),
             method: api::schema::Method::NotificationShow(api::schema::NotificationShowParams {
@@ -7646,6 +7728,7 @@ fn notification_show_api_preserves_colon_in_forwarded_title() {
 
     let (respond_to, response_rx) = std::sync::mpsc::channel();
     let changed = server.handle_api_request_with_shutdown_check(api::ApiRequestMessage {
+        origin: crate::api::ApiOrigin::LocalSocket,
         request: api::schema::Request {
             id: "notify".into(),
             method: api::schema::Method::NotificationShow(api::schema::NotificationShowParams {
@@ -7692,6 +7775,7 @@ fn notification_show_api_validates_empty_title_before_disabled_delivery() {
 
     let (respond_to, response_rx) = std::sync::mpsc::channel();
     let changed = server.handle_api_request_with_shutdown_check(api::ApiRequestMessage {
+        origin: crate::api::ApiOrigin::LocalSocket,
         request: api::schema::Request {
             id: "notify".into(),
             method: api::schema::Method::NotificationShow(api::schema::NotificationShowParams {
@@ -7723,6 +7807,7 @@ fn notification_show_api_reports_no_foreground_client() {
 
     let (respond_to, response_rx) = std::sync::mpsc::channel();
     let changed = server.handle_api_request_with_shutdown_check(api::ApiRequestMessage {
+        origin: crate::api::ApiOrigin::LocalSocket,
         request: api::schema::Request {
             id: "notify".into(),
             method: api::schema::Method::NotificationShow(api::schema::NotificationShowParams {
@@ -7772,6 +7857,7 @@ fn notification_show_api_includes_sound_in_semantic_event() {
     let (respond_to, response_rx) = std::sync::mpsc::channel();
     assert!(
         server.handle_api_request_with_shutdown_check(api::ApiRequestMessage {
+            origin: crate::api::ApiOrigin::LocalSocket,
             request: api::schema::Request {
                 id: "notify".into(),
                 method: api::schema::Method::NotificationShow(
@@ -7948,6 +8034,7 @@ fn stale_api_agent_report_does_not_forward_done_sound() {
 
     let (respond_to, response_rx) = std::sync::mpsc::channel();
     let changed = server.handle_api_request_with_shutdown_check(api::ApiRequestMessage {
+        origin: crate::api::ApiOrigin::LocalSocket,
         request: api::schema::Request {
             id: "stale".into(),
             method: api::schema::Method::PaneReportAgent(api::schema::PaneReportAgentParams {

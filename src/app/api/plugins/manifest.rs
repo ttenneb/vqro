@@ -9,13 +9,15 @@ use crate::popup_size::PopupSize;
 const PLUGIN_ID_MAX_CHARS: usize = 120;
 const PLUGIN_ACTION_ID_MAX_CHARS: usize = 120;
 
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, schemars::JsonSchema)]
 struct RawPluginManifest {
+    #[serde(default)]
+    manifest_version: Option<u32>,
     id: String,
     name: String,
     version: String,
-    #[serde(default)]
-    min_herdr_version: Option<String>,
+    #[serde(default, alias = "min_herdr_version")]
+    min_vqro_version: Option<String>,
     #[serde(default)]
     description: Option<String>,
     #[serde(default)]
@@ -36,21 +38,21 @@ struct RawPluginManifest {
     link_handlers: Vec<RawPluginManifestLinkHandler>,
 }
 
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, schemars::JsonSchema)]
 struct RawPluginManifestBuild {
     #[serde(default)]
     platforms: Option<Vec<RawPlatform>>,
     command: Vec<String>,
 }
 
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, schemars::JsonSchema)]
 struct RawPluginManifestStartup {
     #[serde(default)]
     platforms: Option<Vec<RawPlatform>>,
     command: Vec<String>,
 }
 
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, schemars::JsonSchema)]
 struct RawPluginManifestService {
     id: String,
     #[serde(default)]
@@ -66,7 +68,7 @@ struct RawPluginManifestService {
     capabilities: Vec<ExtensionServiceCapability>,
 }
 
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, schemars::JsonSchema)]
 struct RawPluginManifestAction {
     id: String,
     title: String,
@@ -79,7 +81,7 @@ struct RawPluginManifestAction {
     command: Vec<String>,
 }
 
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, schemars::JsonSchema)]
 struct RawPluginManifestEventHook {
     on: String,
     #[serde(default)]
@@ -87,7 +89,7 @@ struct RawPluginManifestEventHook {
     command: Vec<String>,
 }
 
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, schemars::JsonSchema)]
 struct RawPluginManifestPane {
     id: String,
     title: String,
@@ -104,7 +106,7 @@ struct RawPluginManifestPane {
     command: Vec<String>,
 }
 
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, schemars::JsonSchema)]
 struct RawPluginManifestLinkHandler {
     id: String,
     title: String,
@@ -115,8 +117,9 @@ struct RawPluginManifestLinkHandler {
 }
 
 /// Raw string platform value from the manifest, validated before conversion.
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, schemars::JsonSchema)]
 #[serde(try_from = "String")]
+#[schemars(with = "PluginPlatform")]
 struct RawPlatform(PluginPlatform);
 
 impl TryFrom<String> for RawPlatform {
@@ -134,13 +137,65 @@ impl TryFrom<String> for RawPlatform {
     }
 }
 
+pub(crate) fn manifest_json_schema() -> serde_json::Value {
+    fn remove_unknown_enum_values(value: &mut serde_json::Value) {
+        match value {
+            serde_json::Value::Object(object) => {
+                if let Some(serde_json::Value::Array(values)) = object.get_mut("enum") {
+                    values.retain(|value| value.as_str() != Some("unknown"));
+                }
+                for child in object.values_mut() {
+                    remove_unknown_enum_values(child);
+                }
+            }
+            serde_json::Value::Array(items) => {
+                for item in items {
+                    remove_unknown_enum_values(item);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut schema = serde_json::to_value(schemars::schema_for!(RawPluginManifest))
+        .expect("plugin manifest schema serializes");
+    let object = schema.as_object_mut().expect("manifest schema object");
+    if let Some(properties) = object
+        .get_mut("properties")
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        properties.insert(
+            "manifest_version".into(),
+            serde_json::json!({"const": 1, "type": "integer"}),
+        );
+    }
+    let required = object
+        .entry("required")
+        .or_insert_with(|| serde_json::Value::Array(Vec::new()))
+        .as_array_mut()
+        .expect("manifest required fields");
+    for field in ["manifest_version", "min_vqro_version"] {
+        if !required.iter().any(|value| value.as_str() == Some(field)) {
+            required.push(serde_json::Value::String(field.into()));
+        }
+    }
+    remove_unknown_enum_values(&mut schema);
+    schema
+}
+
 pub(crate) fn load_plugin_manifest(
     path: &str,
     enabled: bool,
 ) -> Result<InstalledPluginInfo, (&'static str, String)> {
     let path = std::path::PathBuf::from(path);
     let manifest_path = if path.is_dir() {
-        path.join("herdr-plugin.toml")
+        let native = path.join(crate::extension_spec::EXTENSION_MANIFEST_FILE_V1);
+        if native.is_file() {
+            native
+        } else {
+            // Compatibility for extensions authored before the vqro contract was published.
+            path.join("herdr-plugin.toml")
+        }
     } else {
         path
     };
@@ -158,6 +213,15 @@ pub(crate) fn load_plugin_manifest(
         .map_err(|err| ("plugin_manifest_read_failed", err.to_string()))?;
     let manifest_source: RawPluginManifest = toml::from_str(&content)
         .map_err(|err| ("plugin_manifest_parse_failed", err.to_string()))?;
+    if manifest_source
+        .manifest_version
+        .is_some_and(|version| version != 1)
+    {
+        return Err((
+            "unsupported_extension_manifest_version",
+            "only extension manifest version 1 is supported".into(),
+        ));
+    }
     let plugin_id = normalize_plugin_id(&manifest_source.id)
         .ok_or_else(|| ("invalid_plugin_id", "invalid plugin id".to_string()))?;
     let name = non_empty_trimmed(
@@ -171,7 +235,7 @@ pub(crate) fn load_plugin_manifest(
         "plugin version is required",
     )?;
     let min_herdr_version =
-        validate_min_herdr_version(manifest_source.min_herdr_version.as_deref())?;
+        validate_min_herdr_version(manifest_source.min_vqro_version.as_deref())?;
     let description = manifest_source
         .description
         .map(|description| description.trim().to_string())
@@ -206,6 +270,12 @@ pub(crate) fn load_plugin_manifest(
             .provides
             .contains(&PluginServiceCapability::HostDocument)
     });
+    if publishes_host_documents && !plugin_id.contains('.') {
+        return Err((
+            "invalid_host_document_namespace",
+            "host document plugin IDs must be dotted namespaces".to_string(),
+        ));
+    }
     if reserved_document_namespace && publishes_host_documents {
         return Err((
             "reserved_host_document_namespace",
@@ -346,6 +416,16 @@ fn normalize_manifest_service(
         return Err((
             "invalid_plugin_service_capability",
             "plugin service must declare at least one capability".to_string(),
+        ));
+    }
+    if service.provides.contains(&PluginServiceCapability::Unknown)
+        || service
+            .capabilities
+            .contains(&ExtensionServiceCapability::Unknown)
+    {
+        return Err((
+            "invalid_plugin_service_capability",
+            "plugin services cannot request unknown capabilities".to_string(),
         ));
     }
     if service
@@ -765,4 +845,44 @@ fn normalize_local_identifier(value: &str, max_chars: usize) -> Option<String> {
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b':' | b'_' | b'-')))
     .then(|| value.to_string())
+}
+
+#[cfg(test)]
+mod contract_tests {
+    use super::*;
+
+    #[test]
+    fn public_manifest_conformance_fixtures_use_the_production_parser() {
+        let root =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/extensions");
+        let valid = load_plugin_manifest(root.join("valid").to_str().unwrap(), false).unwrap();
+        assert_eq!(valid.plugin_id, "example.conformant");
+        assert_eq!(valid.min_herdr_version, "0.9.0");
+
+        let error = load_plugin_manifest(root.join("invalid-platform").to_str().unwrap(), false)
+            .unwrap_err();
+        assert_eq!(error.0, "plugin_manifest_parse_failed");
+
+        for (fixture, code) in [
+            (
+                "invalid-unknown-capability",
+                "invalid_plugin_service_capability",
+            ),
+            ("invalid-namespace", "invalid_host_document_namespace"),
+            ("missing-version", "invalid_plugin_min_herdr_version"),
+        ] {
+            let error =
+                load_plugin_manifest(root.join(fixture).to_str().unwrap(), false).unwrap_err();
+            assert_eq!(error.0, code, "fixture {fixture}");
+        }
+    }
+
+    #[test]
+    fn native_manifest_name_wins_over_legacy_compatibility_file() {
+        let root =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("extensions/terminal-inspector");
+        let manifest = load_plugin_manifest(root.to_str().unwrap(), false).unwrap();
+        assert_eq!(manifest.plugin_id, "vqro.terminal-inspector");
+        assert_eq!(manifest.min_herdr_version, "0.8.2");
+    }
 }

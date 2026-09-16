@@ -926,6 +926,7 @@ fn dispatch_to_app(
     let request_active = stream_active.clone();
     let (respond_to, response_rx) = std::sync::mpsc::channel();
     if let Err(err) = api_tx.send(ApiRequestMessage {
+        origin: crate::api::ApiOrigin::LocalSocket,
         request,
         respond_to,
         response_write_complete,

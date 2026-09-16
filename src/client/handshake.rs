@@ -200,6 +200,8 @@ pub(super) fn do_handshake(
                 PANE_VIEW_CONFIRM_KIND.into(),
                 TERMINAL_VIEWS_INTEREST_KIND.into(),
                 TERMINAL_VIEWS_SURFACE_KIND.into(),
+                crate::native_api::NATIVE_API_REQUEST_KIND_V1.into(),
+                crate::native_api::NATIVE_API_RESPONSE_KIND_V1.into(),
             ],
         };
         ClientMessage::EndpointControl {

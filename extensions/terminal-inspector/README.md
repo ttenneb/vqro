@@ -1,6 +1,6 @@
 # Terminal inspector extension
 
-Reference Linux alpha extension for vqro's supervised service and declarative inspector protocol. vqro intentionally does not start supervised extension services on Windows until Job Object process-tree containment is implemented.
+Linux reference for vqro's supervised pane-inspector protocol. Supervised services use process-group containment on Unix and kill-on-close Job Objects on Windows; this Python example remains Linux-only as declared by its manifest.
 
 ```bash
 vqro plugin link ./extensions/terminal-inspector

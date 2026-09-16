@@ -1,0 +1,1199 @@
+{
+  "$id": "https://vqro.dev/schema/extensions/v1",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "manifest_contract": "vqro.extension-manifest.v1",
+  "schemas": {
+    "host_document": {
+      "$defs": {
+        "HostCapability": {
+          "enum": [
+            "focus_terminal",
+            "terminal_interrupt"
+          ],
+          "type": "string"
+        },
+        "HostConfirmation": {
+          "enum": [
+            "none",
+            "required"
+          ],
+          "type": "string"
+        },
+        "HostDocumentAction": {
+          "properties": {
+            "confirmation": {
+              "$ref": "#/schemas/host_document/$defs/HostConfirmation",
+              "default": "none"
+            },
+            "id": {
+              "type": "string"
+            },
+            "label": {
+              "type": "string"
+            },
+            "operation": {
+              "$ref": "#/schemas/host_document/$defs/HostDocumentOperation"
+            },
+            "subject_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "id",
+            "label",
+            "operation"
+          ],
+          "type": "object"
+        },
+        "HostDocumentItem": {
+          "properties": {
+            "action_ids": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "detail": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "flags": {
+              "$ref": "#/schemas/host_document/$defs/HostDocumentItemFlags",
+              "default": {
+                "attention": false,
+                "disabled": false,
+                "expanded": false,
+                "selected": false
+              }
+            },
+            "id": {
+              "type": "string"
+            },
+            "label": {
+              "type": "string"
+            },
+            "parent_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "role": {
+              "$ref": "#/schemas/host_document/$defs/HostItemRole"
+            },
+            "terminal": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/host_document/$defs/HostTerminalRef"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "id",
+            "role",
+            "label"
+          ],
+          "type": "object"
+        },
+        "HostDocumentItemFlags": {
+          "properties": {
+            "attention": {
+              "default": false,
+              "type": "boolean"
+            },
+            "disabled": {
+              "default": false,
+              "type": "boolean"
+            },
+            "expanded": {
+              "default": false,
+              "type": "boolean"
+            },
+            "selected": {
+              "default": false,
+              "type": "boolean"
+            }
+          },
+          "type": "object"
+        },
+        "HostDocumentOperation": {
+          "oneOf": [
+            {
+              "description": "Routed only to the provider identified by the enclosing document's\nnamespace and generation. `name` is never resolved globally.",
+              "properties": {
+                "kind": {
+                  "const": "extension",
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind",
+                "name"
+              ],
+              "type": "object"
+            },
+            {
+              "description": "A fixed host-owned effect. The provider must hold the corresponding\ncapability and the host still validates the referenced identity.",
+              "properties": {
+                "effect": {
+                  "$ref": "#/schemas/host_document/$defs/HostEffect"
+                },
+                "kind": {
+                  "const": "host",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind",
+                "effect"
+              ],
+              "type": "object"
+            }
+          ]
+        },
+        "HostEffect": {
+          "oneOf": [
+            {
+              "properties": {
+                "kind": {
+                  "const": "focus_terminal",
+                  "type": "string"
+                },
+                "terminal_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind",
+                "terminal_id"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "kind": {
+                  "const": "terminal_interrupt",
+                  "type": "string"
+                },
+                "terminal_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind",
+                "terminal_id"
+              ],
+              "type": "object"
+            }
+          ]
+        },
+        "HostItemRole": {
+          "enum": [
+            "group",
+            "terminal",
+            "section",
+            "command",
+            "status"
+          ],
+          "type": "string"
+        },
+        "HostSurface": {
+          "enum": [
+            "navigation",
+            "pane"
+          ],
+          "type": "string"
+        },
+        "HostTarget": {
+          "oneOf": [
+            {
+              "properties": {
+                "kind": {
+                  "const": "session",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "kind": {
+                  "const": "workspace",
+                  "type": "string"
+                },
+                "workspace_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind",
+                "workspace_id"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "kind": {
+                  "const": "tab",
+                  "type": "string"
+                },
+                "tab_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind",
+                "tab_id"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "kind": {
+                  "const": "pane",
+                  "type": "string"
+                },
+                "pane_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind",
+                "pane_id"
+              ],
+              "type": "object"
+            }
+          ]
+        },
+        "HostTerminalPlacement": {
+          "properties": {
+            "pane_id": {
+              "type": "string"
+            },
+            "tab_id": {
+              "type": "string"
+            },
+            "workspace_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "pane_id",
+            "workspace_id",
+            "tab_id"
+          ],
+          "type": "object"
+        },
+        "HostTerminalRef": {
+          "properties": {
+            "placement": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/host_document/$defs/HostTerminalPlacement"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Optional, ephemeral placement context for resolving host interactions."
+            },
+            "terminal_id": {
+              "description": "Stable runtime identity. It does not change when a pane moves, is\npromoted from a group, or is shown by another client.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "terminal_id"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "actions": {
+          "default": [],
+          "items": {
+            "$ref": "#/schemas/host_document/$defs/HostDocumentAction"
+          },
+          "type": "array"
+        },
+        "contract": {
+          "type": "string"
+        },
+        "generation": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "items": {
+          "default": [],
+          "items": {
+            "$ref": "#/schemas/host_document/$defs/HostDocumentItem"
+          },
+          "type": "array"
+        },
+        "namespace": {
+          "type": "string"
+        },
+        "required_capabilities": {
+          "default": [],
+          "items": {
+            "$ref": "#/schemas/host_document/$defs/HostCapability"
+          },
+          "type": "array"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "surface": {
+          "$ref": "#/schemas/host_document/$defs/HostSurface"
+        },
+        "target": {
+          "$ref": "#/schemas/host_document/$defs/HostTarget"
+        }
+      },
+      "required": [
+        "contract",
+        "namespace",
+        "generation",
+        "revision",
+        "surface",
+        "target"
+      ],
+      "title": "HostDocumentV1",
+      "type": "object"
+    },
+    "host_document_action": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "action_id": {
+          "type": "string"
+        },
+        "contract": {
+          "type": "string"
+        },
+        "generation": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "name": {
+          "type": "string"
+        },
+        "namespace": {
+          "type": "string"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "scope_id": {
+          "type": "string"
+        },
+        "subject_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "contract",
+        "namespace",
+        "generation",
+        "revision",
+        "scope_id",
+        "action_id",
+        "name"
+      ],
+      "title": "HostDocumentExtensionActionV1",
+      "type": "object"
+    },
+    "manifest": {
+      "$defs": {
+        "ExtensionServiceCapability": {
+          "enum": [
+            "view_contribution",
+            "host_document",
+            "action_choices",
+            "focus_terminal",
+            "terminal_interrupt"
+          ],
+          "type": "string"
+        },
+        "HostDocumentSourceKind": {
+          "enum": [
+            "terminal_groups",
+            "spaces",
+            "relationships",
+            "agent_activity"
+          ],
+          "type": "string"
+        },
+        "PluginActionContext": {
+          "enum": [
+            "global",
+            "workspace",
+            "tab",
+            "pane",
+            "selection"
+          ],
+          "type": "string"
+        },
+        "PluginPanePlacement": {
+          "enum": [
+            "overlay",
+            "popup",
+            "split",
+            "tab",
+            "zoomed"
+          ],
+          "type": "string"
+        },
+        "PluginServiceCapability": {
+          "enum": [
+            "pane_inspector",
+            "host_document",
+            "action_choices"
+          ],
+          "type": "string"
+        },
+        "PopupSize": {
+          "oneOf": [
+            {
+              "description": "Outer popup size in terminal cells, including the border.",
+              "maximum": 65535,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "description": "Outer popup size as a percentage of the terminal area, for example 80%.",
+              "pattern": "^(100|[1-9][0-9]?)%$",
+              "type": "string"
+            }
+          ]
+        },
+        "RawPlatform": {
+          "description": "Raw string platform value from the manifest, validated before conversion.",
+          "enum": [
+            "linux",
+            "macos",
+            "windows"
+          ],
+          "type": "string"
+        },
+        "RawPluginManifestAction": {
+          "properties": {
+            "command": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "contexts": {
+              "default": [],
+              "items": {
+                "$ref": "#/$defs/PluginActionContext"
+              },
+              "type": "array"
+            },
+            "description": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "id": {
+              "type": "string"
+            },
+            "platforms": {
+              "items": {
+                "$ref": "#/$defs/RawPlatform"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
+            },
+            "title": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "title",
+            "command"
+          ],
+          "type": "object"
+        },
+        "RawPluginManifestBuild": {
+          "properties": {
+            "command": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "platforms": {
+              "items": {
+                "$ref": "#/$defs/RawPlatform"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "command"
+          ],
+          "type": "object"
+        },
+        "RawPluginManifestEventHook": {
+          "properties": {
+            "command": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "on": {
+              "type": "string"
+            },
+            "platforms": {
+              "items": {
+                "$ref": "#/$defs/RawPlatform"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "on",
+            "command"
+          ],
+          "type": "object"
+        },
+        "RawPluginManifestLinkHandler": {
+          "properties": {
+            "action": {
+              "type": "string"
+            },
+            "id": {
+              "type": "string"
+            },
+            "pattern": {
+              "type": "string"
+            },
+            "platforms": {
+              "items": {
+                "$ref": "#/$defs/RawPlatform"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
+            },
+            "title": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "title",
+            "pattern",
+            "action"
+          ],
+          "type": "object"
+        },
+        "RawPluginManifestPane": {
+          "properties": {
+            "command": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "description": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "height": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/PopupSize"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "id": {
+              "type": "string"
+            },
+            "placement": {
+              "$ref": "#/$defs/PluginPanePlacement",
+              "default": "overlay"
+            },
+            "platforms": {
+              "items": {
+                "$ref": "#/$defs/RawPlatform"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
+            },
+            "title": {
+              "type": "string"
+            },
+            "width": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/PopupSize"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            }
+          },
+          "required": [
+            "id",
+            "title",
+            "command"
+          ],
+          "type": "object"
+        },
+        "RawPluginManifestService": {
+          "properties": {
+            "capabilities": {
+              "default": [],
+              "items": {
+                "$ref": "#/$defs/ExtensionServiceCapability"
+              },
+              "type": "array"
+            },
+            "command": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "document_source": {
+              "$ref": "#/$defs/HostDocumentSourceKind",
+              "default": "terminal_groups"
+            },
+            "id": {
+              "type": "string"
+            },
+            "platforms": {
+              "items": {
+                "$ref": "#/$defs/RawPlatform"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
+            },
+            "priority": {
+              "default": 0,
+              "format": "int32",
+              "type": "integer"
+            },
+            "provides": {
+              "default": [],
+              "items": {
+                "$ref": "#/$defs/PluginServiceCapability"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "id",
+            "command"
+          ],
+          "type": "object"
+        },
+        "RawPluginManifestStartup": {
+          "properties": {
+            "command": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "platforms": {
+              "items": {
+                "$ref": "#/$defs/RawPlatform"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "command"
+          ],
+          "type": "object"
+        }
+      },
+      "$id": "https://vqro.dev/schema/extension-manifest/v1",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "contract": "vqro.extension-manifest.v1",
+      "properties": {
+        "actions": {
+          "items": {
+            "$ref": "#/$defs/RawPluginManifestAction"
+          },
+          "type": "array"
+        },
+        "build": {
+          "items": {
+            "$ref": "#/$defs/RawPluginManifestBuild"
+          },
+          "type": "array"
+        },
+        "description": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "events": {
+          "items": {
+            "$ref": "#/$defs/RawPluginManifestEventHook"
+          },
+          "type": "array"
+        },
+        "id": {
+          "type": "string"
+        },
+        "link_handlers": {
+          "items": {
+            "$ref": "#/$defs/RawPluginManifestLinkHandler"
+          },
+          "type": "array"
+        },
+        "manifest_version": {
+          "const": 1,
+          "type": "integer"
+        },
+        "min_vqro_version": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "type": "string"
+        },
+        "panes": {
+          "items": {
+            "$ref": "#/$defs/RawPluginManifestPane"
+          },
+          "type": "array"
+        },
+        "platforms": {
+          "items": {
+            "$ref": "#/$defs/RawPlatform"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "services": {
+          "items": {
+            "$ref": "#/$defs/RawPluginManifestService"
+          },
+          "type": "array"
+        },
+        "startup": {
+          "items": {
+            "$ref": "#/$defs/RawPluginManifestStartup"
+          },
+          "type": "array"
+        },
+        "version": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "version",
+        "manifest_version",
+        "min_vqro_version"
+      ],
+      "title": "vqro extension manifest v1",
+      "type": "object"
+    },
+    "service": {
+      "$id": "https://vqro.dev/schema/extension-service/v1",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "contract": "vqro.extension-service.v1",
+      "host_protocol": 2,
+      "limits": {
+        "handshake_timeout_ms": 3000,
+        "max_frame_bytes": 262144,
+        "request_timeout_ms": 750
+      },
+      "schemas": {
+        "hello": {
+          "$defs": {
+            "ExtensionServiceCapability": {
+              "enum": [
+                "view_contribution",
+                "host_document",
+                "action_choices",
+                "focus_terminal",
+                "terminal_interrupt",
+                "unknown"
+              ],
+              "type": "string"
+            }
+          },
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "properties": {
+            "methods": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "protocol": {
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "requested_capabilities": {
+              "default": [],
+              "items": {
+                "$ref": "#/schemas/hello/$defs/ExtensionServiceCapability"
+              },
+              "type": "array"
+            },
+            "service_id": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "protocol",
+            "service_id"
+          ],
+          "title": "ServiceHello",
+          "type": "object"
+        },
+        "request": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "properties": {
+            "id": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "method": {
+              "type": "string"
+            },
+            "params": true,
+            "type": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "id",
+            "method",
+            "params"
+          ],
+          "title": "ExtensionServiceRequestV1",
+          "type": "object"
+        },
+        "response": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "properties": {
+            "error": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "id": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "result": true,
+            "type": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "id"
+          ],
+          "title": "ExtensionServiceResponseV1",
+          "type": "object"
+        },
+        "welcome": {
+          "$defs": {
+            "ExtensionServiceCapability": {
+              "enum": [
+                "view_contribution",
+                "host_document",
+                "action_choices",
+                "focus_terminal",
+                "terminal_interrupt",
+                "unknown"
+              ],
+              "type": "string"
+            }
+          },
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "properties": {
+            "granted_capabilities": {
+              "items": {
+                "$ref": "#/schemas/welcome/$defs/ExtensionServiceCapability"
+              },
+              "type": "array"
+            },
+            "methods": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "protocol": {
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "trust": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "protocol",
+            "granted_capabilities",
+            "methods",
+            "trust"
+          ],
+          "title": "ExtensionServiceWelcomeV1",
+          "type": "object"
+        }
+      },
+      "stability": {
+        "experimental_methods": [
+          "host.action.choices.v1",
+          "host.action.choice.invoke.v1"
+        ],
+        "foundation_contracts": [
+          "host.terminal-resource.v1",
+          "host.acknowledgement.v1"
+        ],
+        "restricted_sources": [
+          "spaces",
+          "relationships",
+          "agent_activity"
+        ],
+        "stable_methods": [
+          "view.render",
+          "view.action",
+          "host.document.render",
+          "host.document.action"
+        ]
+      },
+      "title": "vqro extension service protocol v1",
+      "transport": "bounded newline-delimited JSON over stdio"
+    },
+    "terminal_groups": {
+      "$defs": {
+        "HostTerminalGroup": {
+          "properties": {
+            "group_id": {
+              "type": "string"
+            },
+            "label": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "members": {
+              "items": {
+                "$ref": "#/schemas/terminal_groups/$defs/HostTerminalGroupMember"
+              },
+              "type": "array"
+            },
+            "selected_terminal_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "group_id",
+            "members"
+          ],
+          "type": "object"
+        },
+        "HostTerminalGroupMember": {
+          "properties": {
+            "label": {
+              "type": "string"
+            },
+            "lifecycle": {
+              "$ref": "#/schemas/terminal_groups/$defs/HostTerminalLifecycle"
+            },
+            "terminal": {
+              "$ref": "#/schemas/terminal_groups/$defs/HostTerminalRef"
+            }
+          },
+          "required": [
+            "terminal",
+            "label",
+            "lifecycle"
+          ],
+          "type": "object"
+        },
+        "HostTerminalLifecycle": {
+          "enum": [
+            "live",
+            "exited",
+            "archived"
+          ],
+          "type": "string"
+        },
+        "HostTerminalPlacement": {
+          "properties": {
+            "pane_id": {
+              "type": "string"
+            },
+            "tab_id": {
+              "type": "string"
+            },
+            "workspace_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "pane_id",
+            "workspace_id",
+            "tab_id"
+          ],
+          "type": "object"
+        },
+        "HostTerminalRef": {
+          "properties": {
+            "placement": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/terminal_groups/$defs/HostTerminalPlacement"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Optional, ephemeral placement context for resolving host interactions."
+            },
+            "terminal_id": {
+              "description": "Stable runtime identity. It does not change when a pane moves, is\npromoted from a group, or is shown by another client.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "terminal_id"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "A host-owned terminal-group projection supplied to document providers.\nIt contains stable identities and semantic state, never PTYs or geometry.",
+      "properties": {
+        "contract": {
+          "type": "string"
+        },
+        "generation": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "groups": {
+          "items": {
+            "$ref": "#/schemas/terminal_groups/$defs/HostTerminalGroup"
+          },
+          "type": "array"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "scope_id": {
+          "type": "string"
+        },
+        "ungrouped": {
+          "default": [],
+          "items": {
+            "$ref": "#/schemas/terminal_groups/$defs/HostTerminalGroupMember"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "contract",
+        "generation",
+        "revision",
+        "scope_id",
+        "groups"
+      ],
+      "title": "HostTerminalGroupsV1",
+      "type": "object"
+    }
+  },
+  "service_contract": "vqro.extension-service.v1",
+  "title": "vqro extension contracts v1"
+}

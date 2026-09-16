@@ -33,7 +33,7 @@ pub const HOST_AGENT_ACTIVITY_CONTRACT_V1: &str = "host.agent-activity.v1";
 /// A host-owned session projection supplied to Spaces document providers.
 /// Repository membership and labels are semantic state; paths and Git internals
 /// are intentionally excluded.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct HostSpacesV1 {
     pub contract: String,
     pub generation: u64,
@@ -47,7 +47,7 @@ pub struct HostSpacesV1 {
     pub order: Vec<HostSpaceOrderRef>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct HostSpaceRepository {
     pub repository_id: String,
     pub label: String,
@@ -55,13 +55,13 @@ pub struct HostSpaceRepository {
     pub workspaces: Vec<HostSpaceWorkspaceRef>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct HostSpaceWorkspaceRef {
     pub workspace_id: String,
     pub label: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum HostSpaceOrderRef {
     Repository { repository_id: String },
@@ -71,7 +71,7 @@ pub enum HostSpaceOrderRef {
 /// A session-scoped, host-owned relationship forest. Relationship kinds and
 /// metadata keys are namespaces so consumers can safely ignore semantics they
 /// do not understand while retaining the records unchanged.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct HostRelationshipsV1 {
     pub contract: String,
     pub generation: u64,
@@ -81,7 +81,7 @@ pub struct HostRelationshipsV1 {
     pub relationships: Vec<HostRelationship>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct HostRelationship {
     pub relationship_id: String,
     pub kind: String,
@@ -95,7 +95,7 @@ pub struct HostRelationship {
     pub metadata: BTreeMap<String, serde_json::Value>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum HostRelationshipLifecycle {
     Active,
@@ -104,7 +104,7 @@ pub enum HostRelationshipLifecycle {
 
 /// Session-scoped, attributed agent activity after host arbitration. This is
 /// intentionally smaller than any agent-specific state model.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct HostAgentActivityV1 {
     pub contract: String,
     pub generation: u64,
@@ -114,7 +114,7 @@ pub struct HostAgentActivityV1 {
     pub activities: Vec<HostAgentActivityRecord>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct HostAgentActivityRecord {
     pub terminal: HostTerminalRef,
     pub activity: HostAgentActivityState,
@@ -127,7 +127,19 @@ pub struct HostAgentActivityRecord {
     pub labels: BTreeMap<String, String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    PartialOrd,
+    Ord,
+    Serialize,
+    Deserialize,
+    schemars::JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum HostAgentActivityState {
     Idle,
@@ -138,7 +150,7 @@ pub enum HostAgentActivityState {
 
 /// A host-owned terminal-group projection supplied to document providers.
 /// It contains stable identities and semantic state, never PTYs or geometry.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct HostTerminalGroupsV1 {
     pub contract: String,
     pub generation: u64,
@@ -149,7 +161,7 @@ pub struct HostTerminalGroupsV1 {
     pub ungrouped: Vec<HostTerminalGroupMember>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct HostTerminalGroup {
     pub group_id: String,
     pub label: Option<String>,
@@ -157,14 +169,14 @@ pub struct HostTerminalGroup {
     pub selected_terminal_id: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct HostTerminalGroupMember {
     pub terminal: HostTerminalRef,
     pub label: String,
     pub lifecycle: HostTerminalLifecycle,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum HostTerminalLifecycle {
     Live,
@@ -172,7 +184,7 @@ pub enum HostTerminalLifecycle {
     Archived,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct HostDocumentV1 {
     pub contract: String,
     pub namespace: String,
@@ -188,14 +200,16 @@ pub struct HostDocumentV1 {
     pub required_capabilities: Vec<HostCapability>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum HostSurface {
     Navigation,
     Pane,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, schemars::JsonSchema,
+)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum HostTarget {
     Session,
@@ -204,7 +218,7 @@ pub enum HostTarget {
     Pane { pane_id: String },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct HostDocumentItem {
     pub id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -221,7 +235,7 @@ pub struct HostDocumentItem {
     pub flags: HostDocumentItemFlags,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum HostItemRole {
     Group,
@@ -231,7 +245,7 @@ pub enum HostItemRole {
     Status,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct HostTerminalRef {
     /// Stable runtime identity. It does not change when a pane moves, is
     /// promoted from a group, or is shown by another client.
@@ -241,14 +255,14 @@ pub struct HostTerminalRef {
     pub placement: Option<HostTerminalPlacement>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct HostTerminalPlacement {
     pub pane_id: String,
     pub workspace_id: String,
     pub tab_id: String,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct HostDocumentItemFlags {
     #[serde(default)]
     pub selected: bool,
@@ -260,7 +274,7 @@ pub struct HostDocumentItemFlags {
     pub attention: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct HostDocumentExtensionActionV1 {
     pub contract: String,
     pub namespace: String,
@@ -273,7 +287,7 @@ pub struct HostDocumentExtensionActionV1 {
     pub subject_id: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct HostDocumentAction {
     pub id: String,
     pub label: String,
@@ -284,7 +298,7 @@ pub struct HostDocumentAction {
     pub confirmation: HostConfirmation,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum HostDocumentOperation {
     /// Routed only to the provider identified by the enclosing document's
@@ -295,14 +309,14 @@ pub enum HostDocumentOperation {
     Host { effect: HostEffect },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum HostCapability {
     FocusTerminal,
     TerminalInterrupt,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum HostEffect {
     FocusTerminal { terminal_id: String },
@@ -334,7 +348,9 @@ impl HostEffect {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum HostConfirmation {
     #[default]

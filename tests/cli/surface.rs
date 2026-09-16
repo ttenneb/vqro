@@ -594,6 +594,20 @@ fn api_schema_default_output_is_a_short_summary() {
 }
 
 #[test]
+fn api_describe_json_reports_native_identity_and_schema_digest() {
+    let output = Command::new(env!("CARGO_BIN_EXE_vqro"))
+        .args(["api", "describe", "--json"])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let descriptor: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(descriptor["contract"], "vqro.api.v1");
+    assert_eq!(descriptor["major_version"], 1);
+    assert_eq!(descriptor["schema_sha256"].as_str().unwrap().len(), 64);
+}
+
+#[test]
 fn api_schema_json_prints_bundled_schema() {
     let output = Command::new(env!("CARGO_BIN_EXE_vqro"))
         .args(["api", "schema", "--json"])
@@ -602,10 +616,8 @@ fn api_schema_json_prints_bundled_schema() {
 
     assert!(output.status.success());
     let schema: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert!(schema
-        .get("protocol")
-        .and_then(serde_json::Value::as_u64)
-        .is_some_and(|protocol| protocol > 0));
+    assert_eq!(schema["contract"], "vqro.api.v1");
+    assert_eq!(schema["major_version"], 1);
     assert_eq!(
         schema
             .get("schemas")
@@ -670,10 +682,8 @@ fn api_schema_output_writes_bundled_schema_to_file() {
     );
     let schema: serde_json::Value =
         serde_json::from_slice(&fs::read(&schema_path).unwrap()).unwrap();
-    assert!(schema
-        .get("protocol")
-        .and_then(serde_json::Value::as_u64)
-        .is_some_and(|protocol| protocol > 0));
+    assert_eq!(schema["contract"], "vqro.api.v1");
+    assert_eq!(schema["major_version"], 1);
 
     cleanup_test_base(&base);
 }

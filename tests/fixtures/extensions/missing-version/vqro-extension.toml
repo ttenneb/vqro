@@ -1,0 +1,4 @@
+manifest_version = 1
+id = "example.missing"
+name = "Missing"
+version = "1.0.0"

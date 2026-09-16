@@ -87,11 +87,11 @@ pub(crate) fn optional_client_shell_method_names() -> &'static [&'static str] {
 }
 
 pub(crate) fn supports_client_shell_method_name(method: &str) -> bool {
-    CLIENT_SHELL_METHODS.contains(&method) || CLIENT_SHELL_OPTIONAL_METHODS.contains(&method)
+    crate::protocol::endpoint_bridge_v1::supports_name(method)
 }
 
 pub(crate) fn supports_client_shell_method(method: &Method) -> bool {
-    supports_client_shell_method_name(crate::api::api_method_name(method))
+    crate::protocol::endpoint_bridge_v1::supports(method)
 }
 
 pub(crate) fn error_response(id: String, code: &str, message: impl Into<String>) -> String {
@@ -160,12 +160,31 @@ fn correlate_response_id(response: String, request_id: &str) -> String {
     serde_json::to_string(&value).unwrap_or(response)
 }
 
+#[cfg(test)]
 pub(crate) fn spawn_response_waiter(
     client_id: u64,
     boot_id: String,
     request_id: String,
     response_rx: mpsc::Receiver<String>,
     server_event_tx: tokio_mpsc::Sender<ServerEvent>,
+) -> io::Result<()> {
+    spawn_response_waiter_for_lane(
+        client_id,
+        boot_id,
+        request_id,
+        response_rx,
+        server_event_tx,
+        false,
+    )
+}
+
+pub(crate) fn spawn_response_waiter_for_lane(
+    client_id: u64,
+    boot_id: String,
+    request_id: String,
+    response_rx: mpsc::Receiver<String>,
+    server_event_tx: tokio_mpsc::Sender<ServerEvent>,
+    native: bool,
 ) -> io::Result<()> {
     std::thread::Builder::new()
         .name("herdr-client-endpoint-response".into())
@@ -179,29 +198,46 @@ pub(crate) fn spawn_response_waiter(
             });
             let response = correlate_response_id(response, &request_id).into_bytes();
             if response.is_empty() {
-                let _ = server_event_tx.blocking_send(
+                let event = if native {
+                    ServerEvent::NativeEndpointResponseChunkReady {
+                        client_id,
+                        boot_id,
+                        request_id,
+                        final_chunk: true,
+                        data: Vec::new(),
+                    }
+                } else {
                     ServerEvent::ClientShellEndpointResponseChunkReady {
                         client_id,
                         boot_id,
                         request_id,
                         final_chunk: true,
                         data: Vec::new(),
-                    },
-                );
+                    }
+                };
+                let _ = server_event_tx.blocking_send(event);
                 return;
             }
             let chunk_count = response.len().div_ceil(ENDPOINT_RESPONSE_CHUNK_BYTES);
             for (index, chunk) in response.chunks(ENDPOINT_RESPONSE_CHUNK_BYTES).enumerate() {
-                if server_event_tx
-                    .blocking_send(ServerEvent::ClientShellEndpointResponseChunkReady {
+                let event = if native {
+                    ServerEvent::NativeEndpointResponseChunkReady {
                         client_id,
                         boot_id: boot_id.clone(),
                         request_id: request_id.clone(),
                         final_chunk: index + 1 == chunk_count,
                         data: chunk.to_vec(),
-                    })
-                    .is_err()
-                {
+                    }
+                } else {
+                    ServerEvent::ClientShellEndpointResponseChunkReady {
+                        client_id,
+                        boot_id: boot_id.clone(),
+                        request_id: request_id.clone(),
+                        final_chunk: index + 1 == chunk_count,
+                        data: chunk.to_vec(),
+                    }
+                };
+                if server_event_tx.blocking_send(event).is_err() {
                     break;
                 }
             }
@@ -376,11 +412,20 @@ mod tests {
         assert!(CLIENT_SHELL_OPTIONAL_METHODS
             .iter()
             .all(|method| !CLIENT_SHELL_METHODS.contains(method)));
-        assert!(supports_client_shell_method(&Method::CollectionList(
+        assert!(!supports_client_shell_method(&Method::CollectionList(
             crate::api::schema::CollectionListParams::default()
         )));
-        assert!(supports_client_shell_method(&Method::PaneTelemetry(
+        assert!(!supports_client_shell_method(&Method::PaneTelemetry(
             crate::api::schema::PaneTelemetryParams::default()
+        )));
+        assert!(!supports_client_shell_method(&Method::PaneLinkResolve(
+            crate::api::schema::PaneLinkActivateParams {
+                pane_id: "p1".into(),
+                viewport_row: 1,
+                col: 1,
+                content_revision: None,
+                offset_from_bottom: None,
+            }
         )));
     }
 
@@ -403,7 +448,7 @@ mod tests {
                 offset_from_bottom: None,
             },
         )));
-        assert!(supports_client_shell_method(&Method::PaneLinkResolve(
+        assert!(!supports_client_shell_method(&Method::PaneLinkResolve(
             crate::api::schema::PaneLinkActivateParams {
                 pane_id: "w1:p1".into(),
                 viewport_row: 0,
