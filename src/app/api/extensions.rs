@@ -899,6 +899,32 @@ mod tests {
     }
 
     #[test]
+    fn disabling_agent_status_does_not_disable_agent_control_apis() {
+        let mut app = test_app();
+        let disabled = app.handle_api_request(Request {
+            id: "disable".into(),
+            method: Method::ExtensionEnable(ExtensionSetEnabledParams {
+                repository: "ttenneb/vqro-extension-agent-status".into(),
+                enabled: false,
+            }),
+        });
+        let _ = result(&disabled);
+        assert!(app
+            .host_document_services
+            .generation("vqro.agent-status")
+            .is_none());
+
+        let response: serde_json::Value = serde_json::from_str(&app.handle_api_request(Request {
+            id: "focus".into(),
+            method: Method::AgentFocus(crate::api::schema::AgentTarget {
+                target: "missing".into(),
+            }),
+        }))
+        .unwrap();
+        assert_ne!(response["error"]["code"], "extension_disabled");
+    }
+
+    #[test]
     fn unsupported_curated_agent_install_is_rejected_without_state_change() {
         let mut app = test_app();
         let repository = "vqro/bundled-integrations#letta";

@@ -552,7 +552,7 @@ pub(crate) fn unavailable_bundled_providers(
                 if !state
                     .entries
                     .get(&extension.repository)
-                    .is_some_and(|entry| entry.installed) =>
+                    .is_some_and(|entry| entry.installed && entry.enabled) =>
             {
                 Some(format!("vqro.{provider}"))
             }
@@ -819,6 +819,16 @@ mod tests {
         assert!(state.entries[&extension.repository]
             .repository_overrides
             .is_empty());
+    }
+
+    #[test]
+    fn globally_disabled_bundled_provider_is_unavailable_to_runtime_catalogs() {
+        let index = CuratedIndex::bundled().unwrap();
+        let extension = index.extension("vqro.delegation").unwrap();
+        let mut state = ExtensionStateFile::defaults(&index);
+        state.set_enabled(&extension.repository, false).unwrap();
+
+        assert!(unavailable_bundled_providers(&index, &state).contains("vqro.delegation"));
     }
 
     #[test]

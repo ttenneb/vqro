@@ -80,7 +80,7 @@ impl ClientShellState {
         }
     }
 
-    fn focused_repository_id(&self) -> Option<String> {
+    pub(super) fn focused_repository_id(&self) -> Option<String> {
         let workspace_id = self.snapshot.as_deref()?.focused_workspace_id.as_deref()?;
         self.structure
             .as_deref()?

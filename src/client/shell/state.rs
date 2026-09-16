@@ -1914,6 +1914,10 @@ impl ClientShellState {
             }
         }
         self.snapshot = Some(snapshot);
+        let focused_repository = self.focused_repository_id();
+        if let Some(ClientShellOverlay::Extensions(extensions)) = self.overlay.as_mut() {
+            extensions.repository_context = focused_repository;
+        }
         let pending_surface = self.pending_pane_surface.take();
         if let Some(surface) = pending_surface {
             let matching = self.snapshot.as_ref().is_some_and(|snapshot| {

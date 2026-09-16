@@ -1065,16 +1065,8 @@ impl App {
             | Method::DelegationReorder(_) => Some("delegation"),
             Method::AgentList(_)
             | Method::AgentGet(_)
-            | Method::AgentFocus(_)
-            | Method::AgentRename(_)
             | Method::AgentViewSet(_)
-            | Method::AgentViewClear(_)
-            | Method::AgentStart(_)
-            | Method::AgentPrompt(_)
-            | Method::AgentWait(_)
-            | Method::AgentRead(_)
-            | Method::AgentExplain(_)
-            | Method::AgentSendKeys(_) => Some("agent-status"),
+            | Method::AgentViewClear(_) => Some("agent-status"),
             _ => None,
         };
         if required_provider.is_some_and(|provider| !self.bundled_extension_enabled(provider, None))

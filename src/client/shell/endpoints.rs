@@ -1055,6 +1055,10 @@ impl ClientShellState {
             }
         }
         self.structure = matching;
+        let focused_repository = self.focused_repository_id();
+        if let Some(ClientShellOverlay::Extensions(extensions)) = self.overlay.as_mut() {
+            extensions.repository_context = focused_repository;
+        }
     }
 
     fn apply_cached_endpoint_snapshot(&mut self, endpoint_id: &ClientEndpointId) {
