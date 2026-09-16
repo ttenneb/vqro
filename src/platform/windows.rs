@@ -2783,6 +2783,82 @@ impl Drop for InputSourceRestore {
     }
 }
 
+pub(crate) struct PackageStagingBackend {
+    root: PathBuf,
+    canonical_root: PathBuf,
+}
+
+pub(crate) fn configure_package_nofollow(options: &mut std::fs::OpenOptions) {
+    use std::os::windows::fs::OpenOptionsExt;
+    options.custom_flags(windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT);
+}
+
+pub(crate) fn create_private_package_directory(path: &std::path::Path) -> std::io::Result<()> {
+    std::fs::create_dir(path)
+}
+
+pub(crate) fn open_package_staging(
+    path: &std::path::Path,
+) -> std::io::Result<PackageStagingBackend> {
+    let metadata = std::fs::symlink_metadata(path)?;
+    if !metadata.file_type().is_dir() || metadata.file_type().is_symlink() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "package staging root is not a real directory",
+        ));
+    }
+    Ok(PackageStagingBackend {
+        root: path.to_path_buf(),
+        canonical_root: std::fs::canonicalize(path)?,
+    })
+}
+
+pub(crate) fn write_package_staging_file(
+    staging: &PackageStagingBackend,
+    components: &[std::ffi::OsString],
+    bytes: &[u8],
+    _mode: u32,
+) -> std::io::Result<()> {
+    use std::io::Write;
+
+    let mut parent = staging.root.clone();
+    for component in &components[..components.len() - 1] {
+        parent.push(component);
+        match std::fs::create_dir(&parent) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error),
+        }
+        let metadata = std::fs::symlink_metadata(&parent)?;
+        if !metadata.file_type().is_dir() || metadata.file_type().is_symlink() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "package staging path contains a link",
+            ));
+        }
+        if !std::fs::canonicalize(&parent)?.starts_with(&staging.canonical_root) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "package staging path escaped its root",
+            ));
+        }
+    }
+    let output = parent.join(&components[components.len() - 1]);
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    configure_package_nofollow(&mut options);
+    let mut file = options.open(output)?;
+    let metadata = file.metadata()?;
+    if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "package output is not a regular file",
+        ));
+    }
+    file.write_all(bytes)?;
+    file.sync_all()
+}
+
 #[cfg(test)]
 mod tests {
     use std::{

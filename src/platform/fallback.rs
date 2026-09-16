@@ -5,6 +5,54 @@ pub(crate) fn local_listener_accept_error_is_resource_exhaustion(_error: &std::i
     false
 }
 
+pub(crate) struct PackageStagingBackend {
+    root: PathBuf,
+    canonical_root: PathBuf,
+}
+
+pub(crate) fn configure_package_nofollow(_options: &mut std::fs::OpenOptions) {}
+
+pub(crate) fn create_private_package_directory(path: &std::path::Path) -> std::io::Result<()> {
+    std::fs::create_dir(path)
+}
+
+pub(crate) fn open_package_staging(
+    path: &std::path::Path,
+) -> std::io::Result<PackageStagingBackend> {
+    Ok(PackageStagingBackend {
+        root: path.to_path_buf(),
+        canonical_root: std::fs::canonicalize(path)?,
+    })
+}
+
+pub(crate) fn write_package_staging_file(
+    staging: &PackageStagingBackend,
+    components: &[std::ffi::OsString],
+    bytes: &[u8],
+    _mode: u32,
+) -> std::io::Result<()> {
+    use std::io::Write;
+
+    let mut parent = staging.root.clone();
+    for component in &components[..components.len() - 1] {
+        parent.push(component);
+        std::fs::create_dir_all(&parent)?;
+        if !std::fs::canonicalize(&parent)?.starts_with(&staging.canonical_root) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "package staging path escaped its root",
+            ));
+        }
+    }
+    let output = parent.join(&components[components.len() - 1]);
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(output)?;
+    file.write_all(bytes)?;
+    file.sync_all()
+}
+
 pub(crate) fn fill_secure_random(_bytes: &mut [u8]) -> std::io::Result<()> {
     Err(std::io::Error::new(
         std::io::ErrorKind::Unsupported,

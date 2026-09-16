@@ -128,6 +128,10 @@ pub enum PackageProvenanceV1 {
         canonical_path: String,
         trust_id: String,
         trusted: bool,
+        package_id: String,
+        version: String,
+        package_sha256: String,
+        manifest_sha256: String,
     },
 }
 
@@ -202,16 +206,9 @@ pub fn validate_package_file(
     path: &Path,
     expected_package_sha256: Option<&str>,
 ) -> Result<ValidatedPackageContents, String> {
-    let metadata =
-        fs::symlink_metadata(path).map_err(|error| format!("inspect package file: {error}"))?;
-    if !metadata.file_type().is_file() {
-        return Err("package source is not a regular file".into());
-    }
-    if metadata.len() > MAX_PACKAGE_BYTES {
-        return Err("package archive exceeds 8 MiB".into());
-    }
-    let bytes = fs::read(path).map_err(|error| format!("read package file: {error}"))?;
-    validate_package_bytes(&bytes, expected_package_sha256)
+    let file = crate::platform::read_bounded_regular_nofollow(path, MAX_PACKAGE_BYTES)
+        .map_err(|error| format!("read bounded package file: {error}"))?;
+    validate_package_bytes(&file.bytes, expected_package_sha256)
 }
 
 pub fn validate_package_bytes(
@@ -432,6 +429,9 @@ fn parse_checksums(bytes: &[u8]) -> Result<BTreeMap<String, String>, String> {
             .split_once("  ")
             .ok_or_else(|| "checksum line must use two spaces".to_string())?;
         validate_digest(digest, "file")?;
+        if path.contains('\\') {
+            return Err("checksum path must use canonical forward slashes".into());
+        }
         let portable = portable_package_path(Path::new(path))?;
         if portable == PACKAGE_CHECKSUM_FILE {
             return Err("checksum manifest cannot checksum itself".into());
@@ -620,6 +620,7 @@ pub fn validate_namespace_claims(
     manifest: &PackageManifestV2,
     provenance: &PackageProvenanceV1,
     occupied: &BTreeMap<String, String>,
+    trusted_curated: Option<&PackageProvenanceV1>,
 ) -> Result<(), String> {
     match provenance {
         PackageProvenanceV1::Curated {
@@ -633,6 +634,11 @@ pub fn validate_namespace_claims(
             manifest_sha256,
             ..
         } => {
+            if trusted_curated != Some(provenance) {
+                return Err(
+                    "curated provenance is not exactly authorized by the trusted catalog".into(),
+                );
+            }
             validate_identifier(catalog, 128, "curated catalog")?;
             validate_identifier(publisher, 128, "curated publisher")?;
             validate_package_id(package_id)?;
@@ -658,6 +664,7 @@ pub fn validate_namespace_claims(
             canonical_path,
             trust_id,
             trusted,
+            ..
         } => {
             if !trusted || canonical_path.is_empty() || trust_id.is_empty() || trust_id.len() > 256
             {
@@ -706,19 +713,22 @@ pub fn install_local_file(
     expected_package_sha256: Option<&str>,
     provenance: PackageProvenanceV1,
     occupied: &BTreeMap<String, String>,
+    trusted_curated: Option<&PackageProvenanceV1>,
 ) -> Result<InstalledPackageV1, String> {
-    let metadata =
-        fs::symlink_metadata(source).map_err(|error| format!("inspect package file: {error}"))?;
-    if !metadata.file_type().is_file() || metadata.len() > MAX_PACKAGE_BYTES {
-        return Err("package source is not a bounded regular file".into());
-    }
-    let archive_bytes = fs::read(source).map_err(|error| format!("read package file: {error}"))?;
+    let archive_file = crate::platform::read_bounded_regular_nofollow(source, MAX_PACKAGE_BYTES)
+        .map_err(|error| format!("read bounded package source: {error}"))?;
+    let archive_bytes = archive_file.bytes;
     let validated = validate_package_bytes(&archive_bytes, expected_package_sha256)?;
     if matches!(provenance, PackageProvenanceV1::Link { .. }) {
         return Err("immutable package installs cannot use developer-link provenance".into());
     }
     validate_provenance_digest(&validated.descriptor, &provenance)?;
-    validate_namespace_claims(&validated.descriptor.manifest, &provenance, occupied)?;
+    validate_namespace_claims(
+        &validated.descriptor.manifest,
+        &provenance,
+        occupied,
+        trusted_curated,
+    )?;
     let digest = validated.descriptor.package_sha256.clone();
     let content_root = store_root.join("sha256");
     let staging_root = store_root.join(".staging");
@@ -736,56 +746,29 @@ pub fn install_local_file(
         verify_installed_package(&destination, &digest)?;
         return installed_descriptor(&validated.descriptor, &destination, provenance);
     }
-    let staging = staging_root.join(format!(
-        "{}-{}",
-        std::process::id(),
-        NEXT_PACKAGE_TEMP.fetch_add(1, Ordering::Relaxed)
-    ));
-    fs::create_dir(&staging)
-        .map_err(|error| format!("create package staging directory: {error}"))?;
-    let result = (|| {
-        for (path, (bytes, mode)) in &validated.files {
-            let output = staging.join(path);
-            if let Some(parent) = output.parent() {
-                fs::create_dir_all(parent)
-                    .map_err(|error| format!("create package output directory: {error}"))?;
-            }
-            let mut file =
-                File::create(&output).map_err(|error| format!("create package output: {error}"))?;
-            file.write_all(bytes)
-                .and_then(|()| file.sync_all())
-                .map_err(|error| format!("write package output: {error}"))?;
-            set_mode(&output, *mode)?;
-        }
-        let mut archive = File::create(staging.join("package.vqrox"))
-            .map_err(|error| format!("create retained package archive: {error}"))?;
-        archive
-            .write_all(&archive_bytes)
-            .and_then(|()| archive.sync_all())
-            .map_err(|error| format!("retain package archive: {error}"))?;
-        let parent = destination
-            .parent()
-            .ok_or_else(|| "package destination has no parent".to_string())?;
-        fs::create_dir_all(parent)
-            .map_err(|error| format!("create package digest directory: {error}"))?;
-        match fs::rename(&staging, &destination) {
-            Ok(()) => {}
-            Err(error) if destination.exists() => {
-                verify_installed_package(&destination, &digest)?;
-                fs::remove_dir_all(&staging).map_err(|remove| {
-                    format!("remove duplicate package stage after {error}: {remove}")
-                })?;
-            }
-            Err(error) => return Err(format!("commit immutable package: {error}")),
-        }
-        set_tree_readonly(&destination)?;
-        crate::platform::sync_containing_directory(&destination)
-            .map_err(|error| format!("sync immutable package: {error}"))
-    })();
-    if result.is_err() {
-        let _ = fs::remove_dir_all(&staging);
+    let staging = crate::platform::SecurePackageStaging::create(&staging_root)
+        .map_err(|error| format!("create private package staging directory: {error}"))?;
+    for (path, (bytes, mode)) in &validated.files {
+        staging
+            .write_file(Path::new(path), bytes, *mode)
+            .map_err(|error| format!("write package output safely: {error}"))?;
     }
-    result?;
+    staging
+        .write_file(Path::new("package.vqrox"), &archive_bytes, 0o600)
+        .map_err(|error| format!("retain package archive safely: {error}"))?;
+    match fs::rename(staging.path(), &destination) {
+        Ok(()) => {}
+        Err(error) if destination.exists() => {
+            verify_installed_package(&destination, &digest)?;
+            fs::remove_dir_all(staging.path()).map_err(|remove| {
+                format!("remove duplicate package stage after {error}: {remove}")
+            })?;
+        }
+        Err(error) => return Err(format!("commit immutable package: {error}")),
+    }
+    set_tree_readonly(&destination)?;
+    crate::platform::sync_containing_directory(&destination)
+        .map_err(|error| format!("sync immutable package: {error}"))?;
     installed_descriptor(&validated.descriptor, &destination, provenance)
 }
 
@@ -814,8 +797,12 @@ pub fn register_developer_link(
         canonical_path: canonical_text.clone(),
         trust_id,
         trusted: true,
+        package_id: validated.manifest.id.clone(),
+        version: validated.manifest.version.clone(),
+        package_sha256: validated.package_sha256.clone(),
+        manifest_sha256: validated.manifest_sha256.clone(),
     };
-    validate_namespace_claims(&validated.manifest, &provenance, occupied)?;
+    validate_namespace_claims(&validated.manifest, &provenance, occupied, None)?;
     Ok(LinkedPackageV1 {
         package_id: validated.manifest.id,
         version: validated.manifest.version,
@@ -835,6 +822,7 @@ pub fn revalidate_developer_link(
         canonical_path,
         trust_id,
         trusted,
+        ..
     } = &record.source
     else {
         return Err("package is not a developer link".into());
@@ -845,22 +833,48 @@ pub fn revalidate_developer_link(
         *trusted,
         occupied,
     )?;
-    if linked.package_id != record.package_id || linked.namespaces != record.namespaces {
-        return Err("developer link package identity or namespace claims changed".into());
+    if linked.package_id != record.package_id
+        || linked.namespaces != record.namespaces
+        || linked.provenance != record.source
+    {
+        return Err("developer link package identity, content, or namespace claims changed".into());
     }
     Ok(linked)
 }
 
 pub fn validate_directory_package(root: &Path) -> Result<ValidatedPackageV1, String> {
-    let mut pending = vec![root.to_path_buf()];
+    let canonical_root = fs::canonicalize(root)
+        .map_err(|error| format!("canonicalize developer link root: {error}"))?;
+    let mut pending = vec![canonical_root.clone()];
     let mut entries = BTreeMap::new();
     let mut expanded = 0_u64;
+    let mut visited_entries = 0_usize;
     while let Some(directory) = pending.pop() {
+        let directory_metadata = fs::symlink_metadata(&directory)
+            .map_err(|error| format!("inspect developer link directory: {error}"))?;
+        if !directory_metadata.file_type().is_dir()
+            || directory_metadata.file_type().is_symlink()
+            || !fs::canonicalize(&directory)
+                .map_err(|error| format!("canonicalize developer link directory: {error}"))?
+                .starts_with(&canonical_root)
+        {
+            return Err("developer link directory traversal escaped through a link".into());
+        }
         for entry in fs::read_dir(&directory)
             .map_err(|error| format!("read developer link directory: {error}"))?
         {
+            visited_entries = visited_entries
+                .checked_add(1)
+                .ok_or_else(|| "developer link entry count overflow".to_string())?;
+            if visited_entries > MAX_PACKAGE_ENTRIES {
+                return Err("developer link contains too many files or directories".into());
+            }
             let entry = entry.map_err(|error| format!("read developer link entry: {error}"))?;
             let path = entry.path();
+            let relative_path = path
+                .strip_prefix(&canonical_root)
+                .map_err(|_| "developer link escaped its root".to_string())?;
+            let relative = portable_package_path(relative_path)?;
             let metadata = fs::symlink_metadata(&path)
                 .map_err(|error| format!("inspect developer link entry: {error}"))?;
             if metadata.file_type().is_symlink() {
@@ -873,33 +887,23 @@ pub fn validate_directory_package(root: &Path) -> Result<ValidatedPackageV1, Str
             if !metadata.file_type().is_file() {
                 return Err("developer link contains a special file".into());
             }
-            reject_hard_link(&metadata)?;
-            let relative = path
-                .strip_prefix(root)
-                .map_err(|_| "developer link escaped its root".to_string())?;
-            let relative = portable_package_path(relative)?;
             if entries
                 .keys()
                 .any(|existing: &String| existing.eq_ignore_ascii_case(&relative))
             {
                 return Err("developer link contains a duplicate or case-colliding path".into());
             }
-            if metadata.len() > MAX_PACKAGE_FILE_BYTES {
-                return Err("developer link file exceeds 8 MiB".into());
-            }
+            let file =
+                crate::platform::read_bounded_regular_nofollow(&path, MAX_PACKAGE_FILE_BYTES)
+                    .map_err(|error| format!("read bounded developer link file: {error}"))?;
+            reject_hard_link(&file.metadata)?;
             expanded = expanded
-                .checked_add(metadata.len())
+                .checked_add(file.bytes.len() as u64)
                 .ok_or_else(|| "developer link expanded size overflow".to_string())?;
-            if expanded > MAX_EXPANDED_BYTES || entries.len() >= MAX_PACKAGE_ENTRIES {
-                return Err("developer link exceeds expanded size or entry limits".into());
+            if expanded > MAX_EXPANDED_BYTES {
+                return Err("developer link exceeds expanded size limits".into());
             }
-            entries.insert(
-                relative,
-                (
-                    fs::read(path).map_err(|error| format!("read developer link file: {error}"))?,
-                    metadata_mode(&metadata),
-                ),
-            );
+            entries.insert(relative, (file.bytes, metadata_mode(&file.metadata)));
         }
     }
     let checksum_bytes = &entries
@@ -999,9 +1003,10 @@ pub fn verify_installed_package(root: &Path, expected_digest: &str) -> Result<()
     }
     for file in &validated.descriptor.files {
         let path = root.join(&file.path);
-        let metadata = fs::symlink_metadata(&path)
-            .map_err(|error| format!("inspect installed package file: {error}"))?;
-        if !metadata.file_type().is_file() || sha256_file(&path)? != file.sha256 {
+        let installed =
+            crate::platform::read_bounded_regular_nofollow(&path, MAX_PACKAGE_FILE_BYTES)
+                .map_err(|error| format!("read installed package file safely: {error}"))?;
+        if installed.bytes.len() as u64 != file.size || sha256(&installed.bytes) != file.sha256 {
             return Err(format!("installed package file changed: {}", file.path));
         }
     }
@@ -1089,7 +1094,7 @@ fn validate_provenance_digest(
     if expected != &package.package_sha256 {
         return Err("provenance package digest mismatch".into());
     }
-    validate_namespace_claims(&package.manifest, provenance, &BTreeMap::new())
+    Ok(())
 }
 
 fn portable_package_path(path: &Path) -> Result<String, String> {
@@ -1230,34 +1235,6 @@ fn sha256(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 
-fn sha256_file(path: &Path) -> Result<String, String> {
-    let mut file = File::open(path).map_err(|error| format!("open package file: {error}"))?;
-    let mut digest = Sha256::new();
-    let mut buffer = [0_u8; 64 * 1024];
-    loop {
-        let read = file
-            .read(&mut buffer)
-            .map_err(|error| format!("read package file: {error}"))?;
-        if read == 0 {
-            break;
-        }
-        digest.update(&buffer[..read]);
-    }
-    Ok(format!("{:x}", digest.finalize()))
-}
-
-#[cfg(unix)]
-fn set_mode(path: &Path, mode: u32) -> Result<(), String> {
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(path, fs::Permissions::from_mode(mode))
-        .map_err(|error| format!("set package file mode: {error}"))
-}
-
-#[cfg(not(unix))]
-fn set_mode(_path: &Path, _mode: u32) -> Result<(), String> {
-    Ok(())
-}
-
 fn set_tree_readonly(root: &Path) -> Result<(), String> {
     let mut pending = vec![root.to_path_buf()];
     let mut paths = Vec::new();
@@ -1347,8 +1324,16 @@ pub struct PackageLifecycleRecordV1 {
     pub previous: Option<PackageArtifactPointerV1>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub activation_error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_activation: Option<PendingActivationV1>,
     #[serde(default)]
     pub retained_data: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct PendingActivationV1 {
+    pub operation_id: String,
+    pub candidate: PackageArtifactPointerV1,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -1380,6 +1365,26 @@ fn validate_lifecycle_record(record: &PackageLifecycleRecordV1) -> Result<(), St
     if record.revision == 0 {
         return Err("package lifecycle revision must be nonzero".into());
     }
+    if (record.status == PackageLifecycleStatusV1::Activating)
+        != record.pending_activation.is_some()
+    {
+        return Err("package pending activation does not match lifecycle status".into());
+    }
+    if let Some(pending) = &record.pending_activation {
+        validate_identifier(
+            &pending.operation_id,
+            128,
+            "pending activation operation id",
+        )?;
+        validate_digest(
+            &pending.candidate.package_sha256,
+            "pending activation package",
+        )?;
+        validate_version(&pending.candidate.version, "pending activation version")?;
+        if pending.candidate.runtime_generation == 0 {
+            return Err("pending activation generation must be nonzero".into());
+        }
+    }
     let expected_digest = match &record.source {
         PackageProvenanceV1::Curated {
             package_id,
@@ -1410,9 +1415,20 @@ fn validate_lifecycle_record(record: &PackageLifecycleRecordV1) -> Result<(), St
             canonical_path,
             trust_id,
             trusted,
+            package_id,
+            version,
+            package_sha256,
+            manifest_sha256,
         } => {
             validate_identifier(trust_id, 128, "developer-link trust id")?;
-            if !trusted || !Path::new(canonical_path).is_absolute() {
+            validate_package_id(package_id)?;
+            validate_version(version, "developer-link version")?;
+            validate_digest(package_sha256, "developer-link inventory")?;
+            validate_digest(manifest_sha256, "developer-link manifest")?;
+            if !trusted
+                || !Path::new(canonical_path).is_absolute()
+                || package_id != &record.package_id
+            {
                 return Err("developer link is not explicitly trusted and canonical".into());
             }
             None
@@ -1447,10 +1463,14 @@ fn lifecycle_manifest(record: &PackageLifecycleRecordV1) -> PackageManifestV2 {
         manifest_version: MANIFEST_VERSION_V2,
         package_contract: PACKAGE_CONTRACT_V1.into(),
         id: record.package_id.clone(),
-        version: record
-            .active
-            .as_ref()
-            .map_or_else(|| "0.0.0".into(), |active| active.version.clone()),
+        version: match &record.source {
+            PackageProvenanceV1::Curated { version, .. }
+            | PackageProvenanceV1::Link { version, .. } => version.clone(),
+            PackageProvenanceV1::File { .. } => record
+                .active
+                .as_ref()
+                .map_or_else(|| "0.0.0".into(), |active| active.version.clone()),
+        },
         min_vqro_version: "0.0.0".into(),
         namespaces: record.namespaces.clone(),
         services: Vec::new(),
@@ -1458,7 +1478,10 @@ fn lifecycle_manifest(record: &PackageLifecycleRecordV1) -> PackageManifestV2 {
 }
 
 impl PackageRegistryV1 {
-    pub fn validate(&self) -> Result<(), String> {
+    pub fn validate(
+        &self,
+        trusted_curated: &BTreeMap<String, PackageProvenanceV1>,
+    ) -> Result<(), String> {
         if self.contract != PACKAGE_REGISTRY_CONTRACT_V1 {
             return Err("unsupported package registry contract".into());
         }
@@ -1486,7 +1509,12 @@ impl PackageRegistryV1 {
             }
             validate_lifecycle_record(record)?;
             let manifest = lifecycle_manifest(record);
-            validate_namespace_claims(&manifest, &record.source, &BTreeMap::new())?;
+            validate_namespace_claims(
+                &manifest,
+                &record.source,
+                &BTreeMap::new(),
+                trusted_curated.get(package_id),
+            )?;
             if record.status != PackageLifecycleStatusV1::RemovedRetainingData
                 && !ordered.contains(package_id.as_str())
             {
@@ -1513,8 +1541,9 @@ impl PackageRegistryV1 {
         &mut self,
         record: PackageLifecycleRecordV1,
         expected_revision: u64,
+        trusted_curated: &BTreeMap<String, PackageProvenanceV1>,
     ) -> Result<u64, String> {
-        self.validate()?;
+        self.validate(trusted_curated)?;
         if self.packages.len() >= MAX_INSTALLED_PACKAGES {
             return Err("package registry is full".into());
         }
@@ -1531,7 +1560,12 @@ impl PackageRegistryV1 {
         }
         let occupied = self.namespace_owners();
         let manifest = lifecycle_manifest(&record);
-        validate_namespace_claims(&manifest, &record.source, &occupied)?;
+        validate_namespace_claims(
+            &manifest,
+            &record.source,
+            &occupied,
+            trusted_curated.get(&record.package_id),
+        )?;
         self.revision = self
             .revision
             .checked_add(1)
@@ -1551,14 +1585,16 @@ impl PackageRegistryV1 {
         operation_id: String,
         candidate: PackageArtifactPointerV1,
         candidate_source: PackageProvenanceV1,
+        trusted_curated: &BTreeMap<String, PackageProvenanceV1>,
     ) -> Result<PackageActivationJournalV1, String> {
-        self.validate()?;
+        self.validate(trusted_curated)?;
         if self.revision != expected_registry_revision {
             return Err(format!(
                 "package registry revision conflict: {}",
                 self.revision
             ));
         }
+        let occupied = self.namespace_owners();
         let record = self
             .packages
             .get_mut(package_id)
@@ -1574,6 +1610,37 @@ impl PackageRegistryV1 {
         {
             return Err("candidate source does not match its artifact pointer".into());
         }
+        let candidate_manifest = PackageManifestV2 {
+            manifest_version: MANIFEST_VERSION_V2,
+            package_contract: PACKAGE_CONTRACT_V1.into(),
+            id: package_id.into(),
+            version: candidate.version.clone(),
+            min_vqro_version: "0.0.0".into(),
+            namespaces: record.namespaces.clone(),
+            services: Vec::new(),
+        };
+        validate_namespace_claims(
+            &candidate_manifest,
+            &candidate_source,
+            &occupied,
+            trusted_curated.get(package_id),
+        )?;
+        if matches!(candidate_source, PackageProvenanceV1::Link { .. }) {
+            let candidate_record = PackageLifecycleRecordV1 {
+                package_id: package_id.into(),
+                source: candidate_source.clone(),
+                previous_source: None,
+                namespaces: record.namespaces.clone(),
+                revision: 1,
+                status: PackageLifecycleStatusV1::Disabled,
+                active: None,
+                previous: None,
+                activation_error: None,
+                pending_activation: None,
+                retained_data: true,
+            };
+            revalidate_developer_link(&candidate_record, &occupied)?;
+        }
         let previous = record.active.clone();
         if previous
             .as_ref()
@@ -1581,30 +1648,39 @@ impl PackageRegistryV1 {
         {
             return Err("candidate runtime generation must advance".into());
         }
-        let previous_source = record.source.clone();
-        record.previous = previous.clone();
-        record.previous_source = Some(previous_source.clone());
-        record.status = PackageLifecycleStatusV1::Activating;
-        record.activation_error = None;
-        record.revision = record
+        let previous_source = previous.as_ref().map(|_| record.source.clone());
+        let next_package_revision = record
             .revision
             .checked_add(1)
             .ok_or("package revision exhausted")?;
-        self.revision = self
+        let next_registry_revision = self
             .revision
             .checked_add(1)
             .ok_or("registry revision exhausted")?;
-        Ok(PackageActivationJournalV1 {
+        let journal = PackageActivationJournalV1 {
             contract: ACTIVATION_JOURNAL_CONTRACT_V1.into(),
             operation_id,
             package_id: package_id.into(),
-            expected_registry_revision: self.revision,
+            expected_registry_revision: next_registry_revision,
+            expected_package_revision: next_package_revision,
             phase: ActivationPhaseV1::Prepared,
-            previous,
-            previous_source: Some(previous_source),
+            previous: previous.clone(),
+            previous_source: previous_source.clone(),
             candidate,
             candidate_source,
-        })
+        };
+        journal.validate()?;
+        record.previous = previous;
+        record.previous_source = previous_source;
+        record.status = PackageLifecycleStatusV1::Activating;
+        record.activation_error = None;
+        record.pending_activation = Some(PendingActivationV1 {
+            operation_id: journal.operation_id.clone(),
+            candidate: journal.candidate.clone(),
+        });
+        record.revision = next_package_revision;
+        self.revision = next_registry_revision;
+        Ok(journal)
     }
 
     pub fn commit_activation(
@@ -1622,7 +1698,16 @@ impl PackageRegistryV1 {
         if record.active.as_ref() == Some(&journal.candidate) {
             return Ok(());
         }
-        if self.revision != journal.expected_registry_revision || record.active != journal.previous
+        if self.revision != journal.expected_registry_revision
+            || record.revision != journal.expected_package_revision
+            || record.active != journal.previous
+            || record.previous != journal.previous
+            || record.previous_source != journal.previous_source
+            || record.status != PackageLifecycleStatusV1::Activating
+            || !record.pending_activation.as_ref().is_some_and(|pending| {
+                pending.operation_id == journal.operation_id
+                    && pending.candidate == journal.candidate
+            })
         {
             return Err("package activation state changed after journal preparation".into());
         }
@@ -1632,6 +1717,7 @@ impl PackageRegistryV1 {
         record.previous_source = journal.previous_source.clone();
         record.status = PackageLifecycleStatusV1::Enabled;
         record.activation_error = None;
+        record.pending_activation = None;
         record.revision = record
             .revision
             .checked_add(1)
@@ -1643,21 +1729,45 @@ impl PackageRegistryV1 {
         Ok(())
     }
 
-    pub fn fail_activation(&mut self, package_id: &str, error: String) -> Result<(), String> {
+    pub fn fail_activation(
+        &mut self,
+        journal: &PackageActivationJournalV1,
+        error: String,
+    ) -> Result<(), String> {
+        journal.validate()?;
+        if journal.phase == ActivationPhaseV1::RegistryCommitted {
+            return Err("committed activation cannot be failed".into());
+        }
         let record = self
             .packages
-            .get_mut(package_id)
+            .get_mut(&journal.package_id)
             .ok_or_else(|| "package is not registered".to_string())?;
-        record.status = PackageLifecycleStatusV1::Failed;
-        record.activation_error = Some(error);
-        record.revision = record
+        if self.revision != journal.expected_registry_revision
+            || record.revision != journal.expected_package_revision
+            || record.status != PackageLifecycleStatusV1::Activating
+            || record.active != journal.previous
+            || record.previous != journal.previous
+            || record.previous_source != journal.previous_source
+            || !record.pending_activation.as_ref().is_some_and(|pending| {
+                pending.operation_id == journal.operation_id
+                    && pending.candidate == journal.candidate
+            })
+        {
+            return Err("stale or unrelated activation failure".into());
+        }
+        let next_package_revision = record
             .revision
             .checked_add(1)
             .ok_or("package revision exhausted")?;
-        self.revision = self
+        let next_registry_revision = self
             .revision
             .checked_add(1)
             .ok_or("registry revision exhausted")?;
+        record.status = PackageLifecycleStatusV1::Failed;
+        record.activation_error = Some(error);
+        record.pending_activation = None;
+        record.revision = next_package_revision;
+        self.revision = next_registry_revision;
         Ok(())
     }
 
@@ -1748,6 +1858,7 @@ pub struct PackageActivationJournalV1 {
     pub operation_id: String,
     pub package_id: String,
     pub expected_registry_revision: u64,
+    pub expected_package_revision: u64,
     pub phase: ActivationPhaseV1,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub previous: Option<PackageArtifactPointerV1>,
@@ -1782,7 +1893,16 @@ fn source_matches_pointer(
                 && package_sha256 == &pointer.package_sha256
         }
         PackageProvenanceV1::File { package_sha256 } => package_sha256 == &pointer.package_sha256,
-        PackageProvenanceV1::Link { .. } => false,
+        PackageProvenanceV1::Link {
+            package_id: source_id,
+            version,
+            package_sha256,
+            ..
+        } => {
+            source_id == package_id
+                && version == &pointer.version
+                && package_sha256 == &pointer.package_sha256
+        }
     }
 }
 
@@ -1790,6 +1910,9 @@ impl PackageActivationJournalV1 {
     pub fn validate(&self) -> Result<(), String> {
         if self.contract != ACTIVATION_JOURNAL_CONTRACT_V1 {
             return Err("unsupported package activation journal contract".into());
+        }
+        if self.expected_registry_revision == 0 || self.expected_package_revision == 0 {
+            return Err("activation journal revisions must be nonzero".into());
         }
         validate_identifier(&self.operation_id, 128, "activation operation id")?;
         validate_package_id(&self.package_id)?;
@@ -1811,6 +1934,9 @@ impl PackageActivationJournalV1 {
             };
             if !source_matches_pointer(previous_source, &self.package_id, previous) {
                 return Err("previous source does not match its artifact pointer".into());
+            }
+            if self.candidate.runtime_generation <= previous.runtime_generation {
+                return Err("candidate runtime generation does not advance".into());
             }
         }
         Ok(())
@@ -1993,6 +2119,17 @@ mod tests {
         )])
     }
 
+    fn write_directory_package(root: &Path, package: &[u8]) {
+        let validated = validate_package_bytes(package, None).unwrap();
+        for (path, (bytes, _)) in &validated.files {
+            let output = root.join(path);
+            if let Some(parent) = output.parent() {
+                fs::create_dir_all(parent).unwrap();
+            }
+            fs::write(output, bytes).unwrap();
+        }
+    }
+
     #[cfg(unix)]
     fn make_writable(path: &Path) {
         use std::os::unix::fs::PermissionsExt;
@@ -2129,6 +2266,10 @@ mod tests {
     fn checksum_manifest_rejects_missing_extra_malformed_unsorted_and_mismatch() {
         let manifest = asset_manifest("example.checksum", &[]).into_bytes();
         let valid_digest = sha256(&manifest);
+        assert_eq!(
+            parse_checksums(format!("{}  nested\\file\n", "0".repeat(64)).as_bytes()).unwrap_err(),
+            "checksum path must use canonical forward slashes"
+        );
         for checksum in [
             String::new(),
             format!("{}  missing.txt\n", "0".repeat(64)),
@@ -2160,6 +2301,23 @@ mod tests {
         assert!(validate_package_bytes(b"not a tar", Some("short"))
             .unwrap_err()
             .contains("not SHA-256"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn package_file_reads_are_no_follow_and_stream_bounded() {
+        use std::os::unix::fs::symlink;
+
+        let root = temp_dir("bounded-read");
+        let package = root.join("package.vqrox");
+        fs::write(&package, asset_package("example.read", &[])).unwrap();
+        symlink(&package, root.join("linked.vqrox")).unwrap();
+        assert!(validate_package_file(&root.join("linked.vqrox"), None).is_err());
+        let oversized = root.join("oversized.vqrox");
+        let file = File::create(&oversized).unwrap();
+        file.set_len(MAX_PACKAGE_BYTES + 1).unwrap();
+        assert!(validate_package_file(&oversized, None).is_err());
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -2240,6 +2398,29 @@ mod tests {
     }
 
     #[test]
+    fn developer_link_counts_directories_and_enforces_directory_depth() {
+        let root = temp_dir("link-directory-limits");
+        for index in 0..=MAX_PACKAGE_ENTRIES {
+            fs::create_dir(root.join(format!("d{index:05}"))).unwrap();
+        }
+        assert!(validate_directory_package(&root)
+            .unwrap_err()
+            .contains("too many files or directories"));
+        fs::remove_dir_all(&root).unwrap();
+
+        let root = temp_dir("link-directory-depth");
+        let mut deep = root.clone();
+        for index in 0..=MAX_PATH_DEPTH {
+            deep.push(format!("d{index}"));
+        }
+        fs::create_dir_all(&deep).unwrap();
+        assert!(validate_directory_package(&root)
+            .unwrap_err()
+            .contains("depth or length"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn process_runtime_resolves_exact_payload_for_all_targets() {
         let files = all_target_names()
             .into_iter()
@@ -2310,7 +2491,7 @@ mod tests {
         let file = PackageProvenanceV1::File {
             package_sha256: "0".repeat(64),
         };
-        assert!(validate_namespace_claims(&manifest, &file, &BTreeMap::new()).is_err());
+        assert!(validate_namespace_claims(&manifest, &file, &BTreeMap::new(), None).is_err());
         let curated = PackageProvenanceV1::Curated {
             catalog: "builtin-v1".into(),
             publisher: "vqro".into(),
@@ -2322,12 +2503,18 @@ mod tests {
             manifest_sha256: "2".repeat(64),
             authorized_namespaces: vec!["vqro.collections".into()],
         };
-        assert!(validate_namespace_claims(&manifest, &curated, &BTreeMap::new()).is_ok());
+        assert!(validate_namespace_claims(&manifest, &curated, &BTreeMap::new(), None).is_err());
+        assert!(
+            validate_namespace_claims(&manifest, &curated, &BTreeMap::new(), Some(&curated))
+                .is_ok()
+        );
         let occupied = BTreeMap::from([("vqro.collections".into(), "other.package".into())]);
-        assert!(validate_namespace_claims(&manifest, &curated, &occupied).is_err());
+        assert!(validate_namespace_claims(&manifest, &curated, &occupied, Some(&curated)).is_err());
         let host: PackageManifestV2 =
             toml::from_str(&asset_manifest("example.package", &["host.terminals"])).unwrap();
-        assert!(validate_namespace_claims(&host, &curated, &BTreeMap::new()).is_err());
+        assert!(
+            validate_namespace_claims(&host, &curated, &BTreeMap::new(), Some(&curated)).is_err()
+        );
     }
 
     #[test]
@@ -2347,11 +2534,18 @@ mod tests {
             Some(&digest),
             provenance.clone(),
             &BTreeMap::new(),
+            None,
         )
         .unwrap();
-        let second =
-            install_local_file(&source, &store, Some(&digest), provenance, &BTreeMap::new())
-                .unwrap();
+        let second = install_local_file(
+            &source,
+            &store,
+            Some(&digest),
+            provenance,
+            &BTreeMap::new(),
+            None,
+        )
+        .unwrap();
         assert_eq!(first, second);
         assert!(first.immutable_root.ends_with(&digest));
         let installed_root = Path::new(&first.immutable_root);
@@ -2386,6 +2580,7 @@ mod tests {
                 package_sha256: digest.clone(),
             },
             &BTreeMap::new(),
+            None,
         )
         .unwrap_err()
         .contains("not a real directory"));
@@ -2396,14 +2591,7 @@ mod tests {
     fn developer_link_requires_explicit_trust_and_rejects_symlinks() {
         let root = temp_dir("link");
         let package = asset_package("example.link", &["example.link"]);
-        let validated = validate_package_bytes(&package, None).unwrap();
-        for (path, (bytes, _)) in &validated.files {
-            let output = root.join(path);
-            if let Some(parent) = output.parent() {
-                fs::create_dir_all(parent).unwrap();
-            }
-            fs::write(output, bytes).unwrap();
-        }
+        write_directory_package(&root, &package);
         assert!(
             register_developer_link(&root, "approval".into(), false, &BTreeMap::new()).is_err()
         );
@@ -2420,6 +2608,7 @@ mod tests {
             active: None,
             previous: None,
             activation_error: None,
+            pending_activation: None,
             retained_data: true,
         };
         assert_eq!(
@@ -2430,11 +2619,71 @@ mod tests {
         );
         #[cfg(unix)]
         {
+            let mut registry = PackageRegistryV1::default();
+            registry.register(record, 0, &BTreeMap::new()).unwrap();
             std::os::unix::fs::symlink(PACKAGE_MANIFEST_FILE, root.join("linked-file")).unwrap();
             assert!(
                 register_developer_link(&root, "approval".into(), true, &BTreeMap::new()).is_err()
             );
+            let before = registry.clone();
+            assert!(registry
+                .prepare_activation(
+                    "example.link",
+                    1,
+                    1,
+                    "linked-activation".into(),
+                    PackageArtifactPointerV1 {
+                        package_sha256: linked.inventory_sha256,
+                        version: linked.version,
+                        runtime_generation: 1,
+                    },
+                    linked.provenance,
+                    &BTreeMap::new(),
+                )
+                .is_err());
+            assert_eq!(registry, before);
         }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn production_state_reload_revalidates_trusted_developer_links() {
+        let root = temp_dir("link-reload");
+        let link_root = root.join("link");
+        fs::create_dir(&link_root).unwrap();
+        write_directory_package(
+            &link_root,
+            &asset_package("example.reload", &["example.reload"]),
+        );
+        let linked =
+            register_developer_link(&link_root, "reload-approval".into(), true, &BTreeMap::new())
+                .unwrap();
+        let index = crate::extensions::CuratedIndex::bundled().unwrap();
+        let mut state = crate::extensions::MarketplaceStateFile::defaults(&index);
+        state
+            .register_package_v1(
+                &index,
+                PackageLifecycleRecordV1 {
+                    package_id: linked.package_id.clone(),
+                    source: linked.provenance,
+                    previous_source: None,
+                    namespaces: linked.namespaces,
+                    revision: 1,
+                    status: PackageLifecycleStatusV1::Disabled,
+                    active: None,
+                    previous: None,
+                    activation_error: None,
+                    pending_activation: None,
+                    retained_data: true,
+                },
+                0,
+            )
+            .unwrap();
+        let state_path = root.join("extensions.json");
+        crate::extensions::save_state_to_path(&state_path, &state).unwrap();
+        crate::extensions::load_state_from_path(&state_path, &index).unwrap();
+        fs::write(link_root.join(PACKAGE_MANIFEST_FILE), b"mutated").unwrap();
+        assert!(crate::extensions::load_state_from_path(&state_path, &index).is_err());
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -2461,9 +2710,10 @@ mod tests {
             active: Some(pointer('a', 1)),
             previous: None,
             activation_error: None,
+            pending_activation: None,
             retained_data: true,
         };
-        assert_eq!(registry.register(record, 0).unwrap(), 1);
+        assert_eq!(registry.register(record, 0, &BTreeMap::new()).unwrap(), 1);
         let mut collision = PackageLifecycleRecordV1 {
             package_id: "example.two".into(),
             source: PackageProvenanceV1::File {
@@ -2476,12 +2726,86 @@ mod tests {
             active: None,
             previous: None,
             activation_error: None,
+            pending_activation: None,
             retained_data: true,
         };
-        assert!(registry.register(collision.clone(), 0).is_err());
-        assert!(registry.register(collision.clone(), 1).is_err());
+        assert!(registry
+            .register(collision.clone(), 0, &BTreeMap::new())
+            .is_err());
+        assert!(registry
+            .register(collision.clone(), 1, &BTreeMap::new())
+            .is_err());
         collision.namespaces = vec!["example.two".into()];
-        assert_eq!(registry.register(collision, 1).unwrap(), 2);
+        assert_eq!(
+            registry.register(collision, 1, &BTreeMap::new()).unwrap(),
+            2
+        );
+    }
+
+    #[test]
+    fn first_activation_is_validated_before_atomic_mutation() {
+        let mut registry = PackageRegistryV1::default();
+        registry
+            .register(
+                PackageLifecycleRecordV1 {
+                    package_id: "example.first".into(),
+                    source: PackageProvenanceV1::File {
+                        package_sha256: "a".repeat(64),
+                    },
+                    previous_source: None,
+                    namespaces: vec!["example.first".into()],
+                    revision: 1,
+                    status: PackageLifecycleStatusV1::Disabled,
+                    active: None,
+                    previous: None,
+                    activation_error: None,
+                    pending_activation: None,
+                    retained_data: true,
+                },
+                0,
+                &BTreeMap::new(),
+            )
+            .unwrap();
+        let before = registry.clone();
+        assert!(registry
+            .prepare_activation(
+                "example.first",
+                1,
+                1,
+                "invalid-first".into(),
+                PackageArtifactPointerV1 {
+                    package_sha256: "a".repeat(64),
+                    version: "1.0.0".into(),
+                    runtime_generation: 0,
+                },
+                PackageProvenanceV1::File {
+                    package_sha256: "a".repeat(64),
+                },
+                &BTreeMap::new(),
+            )
+            .is_err());
+        assert_eq!(registry, before);
+
+        let journal = registry
+            .prepare_activation(
+                "example.first",
+                1,
+                1,
+                "valid-first".into(),
+                PackageArtifactPointerV1 {
+                    package_sha256: "a".repeat(64),
+                    version: "1.0.0".into(),
+                    runtime_generation: 1,
+                },
+                PackageProvenanceV1::File {
+                    package_sha256: "a".repeat(64),
+                },
+                &BTreeMap::new(),
+            )
+            .unwrap();
+        assert!(journal.previous.is_none());
+        assert!(journal.previous_source.is_none());
+        registry.validate(&BTreeMap::new()).unwrap();
     }
 
     #[test]
@@ -2503,9 +2827,11 @@ mod tests {
                     active: Some(active.clone()),
                     previous: None,
                     activation_error: None,
+                    pending_activation: None,
                     retained_data: true,
                 },
                 0,
+                &BTreeMap::new(),
             )
             .unwrap();
         assert!(registry
@@ -2518,6 +2844,7 @@ mod tests {
                 PackageProvenanceV1::File {
                     package_sha256: "b".repeat(64),
                 },
+                &BTreeMap::new(),
             )
             .is_err());
         let mut journal = registry
@@ -2530,6 +2857,7 @@ mod tests {
                 PackageProvenanceV1::File {
                     package_sha256: "b".repeat(64),
                 },
+                &BTreeMap::new(),
             )
             .unwrap();
         assert!(registry.commit_activation(&journal).is_err());
@@ -2550,8 +2878,38 @@ mod tests {
             registry.packages["example.lifecycle"].active.as_ref(),
             Some(&active)
         );
+        let failure = registry
+            .prepare_activation(
+                "example.lifecycle",
+                registry.revision,
+                registry.packages["example.lifecycle"].revision,
+                "update-3".into(),
+                pointer('c', 3),
+                PackageProvenanceV1::File {
+                    package_sha256: "c".repeat(64),
+                },
+                &BTreeMap::new(),
+            )
+            .unwrap();
+        let before_failure = registry.clone();
+        let mut wrong_operation = failure.clone();
+        wrong_operation.operation_id = "other-operation".into();
+        assert!(registry
+            .fail_activation(&wrong_operation, "wrong operation".into())
+            .is_err());
+        let mut wrong_revision = failure.clone();
+        wrong_revision.expected_package_revision += 1;
+        assert!(registry
+            .fail_activation(&wrong_revision, "wrong revision".into())
+            .is_err());
+        let mut wrong_generation = failure.clone();
+        wrong_generation.candidate.runtime_generation = 1;
+        assert!(registry
+            .fail_activation(&wrong_generation, "wrong generation".into())
+            .is_err());
+        assert_eq!(registry, before_failure);
         registry
-            .fail_activation("example.lifecycle", "preflight failed".into())
+            .fail_activation(&failure, "preflight failed".into())
             .unwrap();
         assert_eq!(
             registry.packages["example.lifecycle"].status,
@@ -2572,6 +2930,7 @@ mod tests {
             operation_id: "update-1".into(),
             package_id: "example.package".into(),
             expected_registry_revision: 4,
+            expected_package_revision: 3,
             phase: ActivationPhaseV1::Prepared,
             previous: Some(previous.clone()),
             previous_source: Some(PackageProvenanceV1::File {

@@ -52,12 +52,12 @@ Package lifecycle state uses one model for:
 
 `host.*` is never package-owned. Curated `vqro.*` claims require publisher `vqro` and an exact catalog authorization. Immutable local files cannot claim `vqro.*`. Trusted developer links may claim non-`host.*` namespaces. Namespace collisions include disabled or removed packages while retained data still owns the claim.
 
-Installed file artifacts live under a SHA-256-derived immutable directory and retain the original `.vqrox`. Activation must reverify both archive and extracted inventory; mutation or an added file fails closed. Developer links remain visibly mutable and are never treated as curated artifacts.
+Installed file artifacts live under a SHA-256-derived immutable directory and retain the original `.vqrox`. Extraction uses an unpredictable private staging directory and no-follow, root-relative file creation. Activation must reverify both archive and extracted inventory; mutation or an added file fails closed. Developer links remain visibly mutable, are revalidated on state reload and activation, and are never treated as curated artifacts.
 
 ## Lifecycle and recovery
 
 The package registry records source, claims, revision, status, active and previous artifact pointers, runtime generation, retained-data state, and deterministic load order. Existing marketplace entries are exposed only through a named legacy compatibility projection; their `Bundled` and `AgentIntegration` tags are not package-v1 runtime selectors.
 
-The activation journal has `prepared`, `artifact_committed`, and `registry_committed` phases plus an idempotent operation ID, expected registry revision, previous pointer, and candidate pointer. Journal writes are bounded, atomic, and durable. Recovery can commit an already-retained candidate, keep an already-committed candidate, roll back an uncommitted candidate, or stop on conflicting state. M1a does not spawn or preflight a runtime; process supervision and component execution are M1b/M1c work.
+The activation journal has `prepared`, `artifact_committed`, and `registry_committed` phases plus an idempotent operation ID, expected registry and package revisions, previous pointer, and candidate pointer. Journal writes are bounded, atomic, and durable. Recovery can commit an already-retained candidate, keep an already-committed candidate, roll back an uncommitted candidate, or stop on conflicting state. M1a does not spawn or preflight a runtime; process supervision and component execution are M1b/M1c work.
 
 Disabling or removing a package retains namespaced data. Explicit data deletion remains separately confirmed and journaled. Native process packages will remain trusted same-user code, not sandboxes.

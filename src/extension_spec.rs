@@ -12,7 +12,10 @@ pub const PACKAGE_SCHEMA_ID_V1: &str = crate::extension_package::PACKAGE_SCHEMA_
 pub const EXTENSION_MANIFEST_SCHEMA_ID_V2: &str = crate::extension_package::MANIFEST_SCHEMA_ID_V2;
 
 pub fn manifest_v2_schema_document() -> serde_json::Value {
-    let mut schema = scoped_schema::<crate::extension_package::PackageManifestV2>("manifest_v2");
+    let mut schema = serde_json::to_value(schemars::schema_for!(
+        crate::extension_package::PackageManifestV2
+    ))
+    .expect("generated manifest-v2 schema serializes");
     let object = schema
         .as_object_mut()
         .expect("generated manifest-v2 schema is an object");
@@ -193,6 +196,43 @@ pub fn manifest_schema_sha256() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn standalone_manifest_v2_schema_has_no_dangling_local_references() {
+        fn collect_references<'a>(value: &'a serde_json::Value, references: &mut Vec<&'a str>) {
+            match value {
+                serde_json::Value::Object(object) => {
+                    if let Some(reference) = object.get("$ref").and_then(serde_json::Value::as_str)
+                    {
+                        references.push(reference);
+                    }
+                    for child in object.values() {
+                        collect_references(child, references);
+                    }
+                }
+                serde_json::Value::Array(items) => {
+                    for item in items {
+                        collect_references(item, references);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let schema = manifest_v2_schema_document();
+        let mut references = Vec::new();
+        collect_references(&schema, &mut references);
+        assert!(!references.is_empty());
+        for reference in references {
+            let pointer = reference
+                .strip_prefix('#')
+                .expect("manifest-v2 schema uses only local references");
+            assert!(
+                schema.pointer(pointer).is_some(),
+                "dangling schema reference: {reference}"
+            );
+        }
+    }
 
     #[test]
     fn generated_package_and_manifest_v2_schema_artifacts_are_current() {

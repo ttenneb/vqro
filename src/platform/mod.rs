@@ -312,14 +312,18 @@ mod remote_bridge_tests;
 mod unix_common;
 #[cfg(unix)]
 pub(crate) use unix_common::{
-    begin_cli_output, end_cli_output, forward_remote_bridge_stdio, RemoteBridgeWake,
+    begin_cli_output, configure_package_nofollow, create_private_package_directory, end_cli_output,
+    forward_remote_bridge_stdio, open_package_staging, write_package_staging_file,
+    PackageStagingBackend, RemoteBridgeWake,
 };
 
 mod client_state;
+mod package_fs;
 pub(crate) use client_state::{
     create_private_state_file, durable_replace_file, replace_file, resolve_write_target,
     sync_containing_directory, sync_parent_directory,
 };
+pub(crate) use package_fs::{read_bounded_regular_nofollow, SecurePackageStaging};
 
 #[cfg(not(unix))]
 pub(crate) fn begin_cli_output() {}

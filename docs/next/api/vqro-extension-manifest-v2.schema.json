@@ -73,7 +73,7 @@
           "type": "array"
         },
         "runtime": {
-          "$ref": "#/schemas/manifest_v2/$defs/PackageRuntimeV1"
+          "$ref": "#/$defs/PackageRuntimeV1"
         }
       },
       "required": [
@@ -112,7 +112,7 @@
     "services": {
       "default": [],
       "items": {
-        "$ref": "#/schemas/manifest_v2/$defs/PackageServiceV1"
+        "$ref": "#/$defs/PackageServiceV1"
       },
       "type": "array"
     },

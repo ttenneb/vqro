@@ -284,6 +284,28 @@ impl CuratedIndex {
         self.extensions.iter().find(|extension| extension.id == id)
     }
 
+    fn package_v1_trust(&self) -> BTreeMap<String, crate::extension_package::PackageProvenanceV1> {
+        self.extensions
+            .iter()
+            .filter_map(|extension| {
+                Some((
+                    extension.id.clone(),
+                    crate::extension_package::PackageProvenanceV1::Curated {
+                        catalog: "bundled-v1".into(),
+                        publisher: "vqro".into(),
+                        repository: extension.repository.clone(),
+                        package_id: extension.id.clone(),
+                        version: extension.version.clone(),
+                        source_commit: extension.source_commit.clone()?,
+                        package_sha256: extension.source_sha256.clone()?,
+                        manifest_sha256: extension.manifest_sha256.clone()?,
+                        authorized_namespaces: vec![extension.id.clone()],
+                    },
+                ))
+            })
+            .collect()
+    }
+
     pub(crate) fn search<'a>(
         &'a self,
         query: &str,
@@ -401,7 +423,7 @@ impl MarketplaceStateFile {
         }
     }
 
-    fn validate_data_ids(&self) -> Result<(), String> {
+    fn validate_data_ids(&self, index: &CuratedIndex) -> Result<(), String> {
         let mut data_ids = BTreeSet::new();
         for (repository, state) in &self.entries {
             if !crate::extension_state::valid_namespace(&state.data_id) {
@@ -416,8 +438,16 @@ impl MarketplaceStateFile {
                 ));
             }
         }
-        self.packages.validate()?;
+        self.packages.validate(&index.package_v1_trust())?;
         let package_namespaces = self.packages.namespace_owners();
+        for record in self.packages.packages.values() {
+            if matches!(
+                record.source,
+                crate::extension_package::PackageProvenanceV1::Link { .. }
+            ) {
+                crate::extension_package::revalidate_developer_link(record, &package_namespaces)?;
+            }
+        }
         if let Some(namespace) = self.entries.values().find_map(|state| {
             package_namespaces
                 .contains_key(&state.data_id)
@@ -459,10 +489,15 @@ impl MarketplaceStateFile {
     #[allow(dead_code)]
     pub(crate) fn register_package_v1(
         &mut self,
+        index: &CuratedIndex,
         record: crate::extension_package::PackageLifecycleRecordV1,
         expected_registry_revision: u64,
     ) -> Result<u64, String> {
-        self.packages.register(record, expected_registry_revision)
+        self.packages.register(
+            record,
+            expected_registry_revision,
+            &index.package_v1_trust(),
+        )
     }
 
     pub(crate) fn install(&mut self, extension: &CuratedExtension) {
@@ -803,7 +838,7 @@ pub(crate) fn load_state_from_path(
         ));
     }
     state.normalize(index);
-    state.validate_data_ids()?;
+    state.validate_data_ids(index)?;
     Ok(state)
 }
 
@@ -1153,6 +1188,39 @@ mod tests {
     }
 
     #[test]
+    fn curated_package_provenance_must_exactly_match_the_bundled_index() {
+        let index = CuratedIndex::bundled().unwrap();
+        let trusted = index.package_v1_trust()["vqro.collections"].clone();
+        let record = crate::extension_package::PackageLifecycleRecordV1 {
+            package_id: "vqro.collections".into(),
+            source: trusted.clone(),
+            previous_source: None,
+            namespaces: vec!["vqro.collections".into()],
+            revision: 1,
+            status: crate::extension_package::PackageLifecycleStatusV1::Disabled,
+            active: None,
+            previous: None,
+            activation_error: None,
+            pending_activation: None,
+            retained_data: true,
+        };
+        let mut state = MarketplaceStateFile::defaults(&index);
+        state
+            .register_package_v1(&index, record.clone(), 0)
+            .unwrap();
+
+        let mut forged = record;
+        let crate::extension_package::PackageProvenanceV1::Curated { repository, .. } =
+            &mut forged.source
+        else {
+            panic!("test provenance is curated");
+        };
+        *repository = "attacker/forged".into();
+        let mut rejected = MarketplaceStateFile::defaults(&index);
+        assert!(rejected.register_package_v1(&index, forged, 0).is_err());
+    }
+
+    #[test]
     fn package_v1_registry_and_legacy_marketplace_use_explicit_compatibility_views() {
         let index = CuratedIndex::bundled().unwrap();
         let mut state = MarketplaceStateFile::defaults(&index);
@@ -1168,9 +1236,10 @@ mod tests {
             active: None,
             previous: None,
             activation_error: None,
+            pending_activation: None,
             retained_data: true,
         };
-        state.register_package_v1(record, 0).unwrap();
+        state.register_package_v1(&index, record, 0).unwrap();
 
         let views = state.package_lifecycle_views(&index);
         assert!(matches!(
@@ -1197,12 +1266,11 @@ mod tests {
         let mut state = MarketplaceStateFile::defaults(&index);
         state
             .register_package_v1(
+                &index,
                 crate::extension_package::PackageLifecycleRecordV1 {
                     package_id: "example.link".into(),
-                    source: crate::extension_package::PackageProvenanceV1::Link {
-                        canonical_path: "/tmp/example-link".into(),
-                        trust_id: "approved-once".into(),
-                        trusted: true,
+                    source: crate::extension_package::PackageProvenanceV1::File {
+                        package_sha256: "b".repeat(64),
                     },
                     previous_source: None,
                     namespaces: vec!["example.link".into()],
@@ -1211,6 +1279,7 @@ mod tests {
                     active: None,
                     previous: None,
                     activation_error: None,
+                    pending_activation: None,
                     retained_data: true,
                 },
                 0,
@@ -1251,6 +1320,7 @@ mod tests {
         let mut invalid = state;
         invalid
             .register_package_v1(
+                &index,
                 crate::extension_package::PackageLifecycleRecordV1 {
                     package_id: "example.invalid".into(),
                     source: crate::extension_package::PackageProvenanceV1::File {
@@ -1263,6 +1333,7 @@ mod tests {
                     active: None,
                     previous: None,
                     activation_error: None,
+                    pending_activation: None,
                     retained_data: true,
                 },
                 0,

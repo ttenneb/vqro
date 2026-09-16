@@ -124,18 +124,34 @@
                   "const": "link",
                   "type": "string"
                 },
+                "manifest_sha256": {
+                  "type": "string"
+                },
+                "package_id": {
+                  "type": "string"
+                },
+                "package_sha256": {
+                  "type": "string"
+                },
                 "trust_id": {
                   "type": "string"
                 },
                 "trusted": {
                   "type": "boolean"
+                },
+                "version": {
+                  "type": "string"
                 }
               },
               "required": [
                 "kind",
                 "canonical_path",
                 "trust_id",
-                "trusted"
+                "trusted",
+                "package_id",
+                "version",
+                "package_sha256",
+                "manifest_sha256"
               ],
               "type": "object"
             }
@@ -152,6 +168,11 @@
         },
         "contract": {
           "type": "string"
+        },
+        "expected_package_revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
         },
         "expected_registry_revision": {
           "format": "uint64",
@@ -193,6 +214,7 @@
         "operation_id",
         "package_id",
         "expected_registry_revision",
+        "expected_package_revision",
         "phase",
         "candidate",
         "candidate_source"
@@ -283,18 +305,34 @@
                   "const": "link",
                   "type": "string"
                 },
+                "manifest_sha256": {
+                  "type": "string"
+                },
+                "package_id": {
+                  "type": "string"
+                },
+                "package_sha256": {
+                  "type": "string"
+                },
                 "trust_id": {
                   "type": "string"
                 },
                 "trusted": {
                   "type": "boolean"
+                },
+                "version": {
+                  "type": "string"
                 }
               },
               "required": [
                 "kind",
                 "canonical_path",
                 "trust_id",
-                "trusted"
+                "trusted",
+                "package_id",
+                "version",
+                "package_sha256",
+                "manifest_sha256"
               ],
               "type": "object"
             }
@@ -416,18 +454,34 @@
                   "const": "link",
                   "type": "string"
                 },
+                "manifest_sha256": {
+                  "type": "string"
+                },
+                "package_id": {
+                  "type": "string"
+                },
+                "package_sha256": {
+                  "type": "string"
+                },
                 "trust_id": {
                   "type": "string"
                 },
                 "trusted": {
                   "type": "boolean"
+                },
+                "version": {
+                  "type": "string"
                 }
               },
               "required": [
                 "kind",
                 "canonical_path",
                 "trust_id",
-                "trusted"
+                "trusted",
+                "package_id",
+                "version",
+                "package_sha256",
+                "manifest_sha256"
               ],
               "type": "object"
             }
@@ -685,18 +739,34 @@
               "const": "link",
               "type": "string"
             },
+            "manifest_sha256": {
+              "type": "string"
+            },
+            "package_id": {
+              "type": "string"
+            },
+            "package_sha256": {
+              "type": "string"
+            },
             "trust_id": {
               "type": "string"
             },
             "trusted": {
               "type": "boolean"
+            },
+            "version": {
+              "type": "string"
             }
           },
           "required": [
             "kind",
             "canonical_path",
             "trust_id",
-            "trusted"
+            "trusted",
+            "package_id",
+            "version",
+            "package_sha256",
+            "manifest_sha256"
           ],
           "type": "object"
         }
@@ -753,6 +823,16 @@
             },
             "package_id": {
               "type": "string"
+            },
+            "pending_activation": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/registry/$defs/PendingActivationV1"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "previous": {
               "anyOf": [
@@ -889,22 +969,53 @@
                   "const": "link",
                   "type": "string"
                 },
+                "manifest_sha256": {
+                  "type": "string"
+                },
+                "package_id": {
+                  "type": "string"
+                },
+                "package_sha256": {
+                  "type": "string"
+                },
                 "trust_id": {
                   "type": "string"
                 },
                 "trusted": {
                   "type": "boolean"
+                },
+                "version": {
+                  "type": "string"
                 }
               },
               "required": [
                 "kind",
                 "canonical_path",
                 "trust_id",
-                "trusted"
+                "trusted",
+                "package_id",
+                "version",
+                "package_sha256",
+                "manifest_sha256"
               ],
               "type": "object"
             }
           ]
+        },
+        "PendingActivationV1": {
+          "properties": {
+            "candidate": {
+              "$ref": "#/schemas/registry/$defs/PackageArtifactPointerV1"
+            },
+            "operation_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "operation_id",
+            "candidate"
+          ],
+          "type": "object"
         }
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",

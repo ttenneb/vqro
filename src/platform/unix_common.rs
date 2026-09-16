@@ -489,6 +489,112 @@ pub(crate) fn set_default_plugin_pane_pwd(env: &mut Vec<(String, String)>, cwd: 
     }
 }
 
+pub(crate) struct PackageStagingBackend(std::os::fd::OwnedFd);
+
+pub(crate) fn configure_package_nofollow(options: &mut std::fs::OpenOptions) {
+    use std::os::unix::fs::OpenOptionsExt;
+    options.custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW);
+}
+
+pub(crate) fn create_private_package_directory(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::DirBuilderExt;
+    let mut builder = std::fs::DirBuilder::new();
+    builder.mode(0o700).create(path)
+}
+
+pub(crate) fn open_package_staging(path: &Path) -> std::io::Result<PackageStagingBackend> {
+    use std::ffi::CString;
+    use std::os::fd::{FromRawFd, OwnedFd};
+    use std::os::unix::ffi::OsStrExt;
+    let path = CString::new(path.as_os_str().as_bytes()).map_err(|_| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "NUL in staging path")
+    })?;
+    // SAFETY: path is NUL-terminated and the returned descriptor is owned below.
+    let descriptor = unsafe {
+        libc::open(
+            path.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if descriptor < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: open returned a fresh owned descriptor.
+    Ok(PackageStagingBackend(unsafe {
+        OwnedFd::from_raw_fd(descriptor)
+    }))
+}
+
+pub(crate) fn write_package_staging_file(
+    staging: &PackageStagingBackend,
+    components: &[std::ffi::OsString],
+    bytes: &[u8],
+    mode: u32,
+) -> std::io::Result<()> {
+    use std::ffi::CString;
+    use std::io::Write;
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    use std::os::unix::ffi::OsStrExt;
+
+    // SAFETY: fcntl duplicates a valid descriptor and returns a new owned descriptor.
+    let duplicate = unsafe { libc::fcntl(staging.0.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 0) };
+    if duplicate < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: fcntl returned a fresh descriptor.
+    let mut directory = unsafe { OwnedFd::from_raw_fd(duplicate) };
+    for component in &components[..components.len() - 1] {
+        let component = CString::new(component.as_bytes()).map_err(|_| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "NUL in package path")
+        })?;
+        // SAFETY: directory and component are valid; EEXIST is handled below.
+        let created = unsafe { libc::mkdirat(directory.as_raw_fd(), component.as_ptr(), 0o700) };
+        if created < 0 {
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() != Some(libc::EEXIST) {
+                return Err(error);
+            }
+        }
+        // SAFETY: arguments are valid and the returned descriptor is owned below.
+        let next = unsafe {
+            libc::openat(
+                directory.as_raw_fd(),
+                component.as_ptr(),
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            )
+        };
+        if next < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        // SAFETY: openat returned a fresh descriptor.
+        directory = unsafe { OwnedFd::from_raw_fd(next) };
+    }
+    let name = CString::new(components[components.len() - 1].as_bytes()).map_err(|_| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "NUL in package path")
+    })?;
+    // SAFETY: arguments are valid and the returned descriptor is owned by File.
+    let descriptor = unsafe {
+        libc::openat(
+            directory.as_raw_fd(),
+            name.as_ptr(),
+            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            0o600,
+        )
+    };
+    if descriptor < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: openat returned a fresh descriptor.
+    let mut file = unsafe { std::fs::File::from_raw_fd(descriptor) };
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    // SAFETY: file owns a valid descriptor; mode is limited by package validation.
+    if unsafe { libc::fchmod(file.as_raw_fd(), mode as libc::mode_t) } < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
