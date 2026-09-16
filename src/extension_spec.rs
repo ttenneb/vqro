@@ -7,6 +7,7 @@ pub const EXTENSION_MANIFEST_FILE_V1: &str = "vqro-extension.toml";
 pub const EXTENSION_MANIFEST_SCHEMA_ID_V1: &str = "https://vqro.dev/schema/extension-manifest/v1";
 pub const EXTENSION_SERVICE_CONTRACT_V1: &str = "vqro.extension-service.v1";
 pub const EXTENSION_SERVICE_SCHEMA_ID_V1: &str = "https://vqro.dev/schema/extension-service/v1";
+pub const RUNTIME_SERVICE_SCHEMA_ID_V1: &str = "https://vqro.dev/schema/service/v1";
 pub const EXTENSION_BUNDLE_SCHEMA_ID_V1: &str = "https://vqro.dev/schema/extensions/v1";
 pub const PACKAGE_SCHEMA_ID_V1: &str = crate::extension_package::PACKAGE_SCHEMA_ID_V1;
 pub const EXTENSION_MANIFEST_SCHEMA_ID_V2: &str = crate::extension_package::MANIFEST_SCHEMA_ID_V2;
@@ -32,6 +33,29 @@ pub fn manifest_v2_schema_document() -> serde_json::Value {
         serde_json::Value::String(crate::extension_package::PACKAGE_CONTRACT_V1.into()),
     );
     schema
+}
+
+pub fn runtime_service_schema_document() -> serde_json::Value {
+    serde_json::json!({
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$id": RUNTIME_SERVICE_SCHEMA_ID_V1,
+        "title": "vqro runtime-neutral service contract v1",
+        "contract": crate::extension_runtime::EXTENSION_SERVICE_CONTRACT_V1,
+        "limits": {
+            "max_frame_bytes": crate::extension_runtime::MAX_RUNTIME_FRAME_BYTES,
+            "max_queue_depth": crate::extension_runtime::MAX_RUNTIME_QUEUE_DEPTH,
+            "max_host_call_depth": crate::extension_runtime::MAX_HOST_CALL_DEPTH,
+            "max_outstanding_host_calls": crate::extension_runtime::MAX_OUTSTANDING_HOST_CALLS,
+            "max_host_calls_per_invocation": crate::extension_runtime::MAX_HOST_CALLS_PER_INVOCATION,
+        },
+        "schemas": {
+            "request": scoped_schema::<crate::extension_runtime::RuntimeRequestV1>("request"),
+            "event": scoped_schema::<crate::extension_runtime::RuntimeEventV1>("event"),
+            "host_call": scoped_schema::<crate::extension_runtime::RuntimeHostCallV1>("host_call"),
+            "host_call_response": scoped_schema::<crate::extension_runtime::RuntimeHostCallResponseV1>("host_call_response"),
+            "error": scoped_schema::<crate::extension_runtime::RuntimeErrorBodyV1>("error"),
+        }
+    })
 }
 
 pub fn package_schema_document() -> serde_json::Value {
@@ -185,6 +209,10 @@ pub fn service_schema_json() -> &'static str {
     include_str!("../docs/next/api/vqro-extension-service.schema.json")
 }
 
+pub fn runtime_service_schema_json() -> &'static str {
+    include_str!("../docs/next/api/vqro-service-v1.schema.json")
+}
+
 pub fn extension_schema_json() -> &'static str {
     include_str!("../docs/next/api/vqro-extension.schema.json")
 }
@@ -235,8 +263,44 @@ mod tests {
     }
 
     #[test]
+    fn runtime_service_schema_has_no_dangling_local_references() {
+        fn visit(root: &serde_json::Value, value: &serde_json::Value) {
+            match value {
+                serde_json::Value::Object(object) => {
+                    if let Some(reference) = object.get("$ref").and_then(serde_json::Value::as_str)
+                    {
+                        let pointer = reference
+                            .strip_prefix('#')
+                            .expect("runtime schema uses only local references");
+                        assert!(
+                            root.pointer(pointer).is_some(),
+                            "dangling reference: {reference}"
+                        );
+                    }
+                    for child in object.values() {
+                        visit(root, child);
+                    }
+                }
+                serde_json::Value::Array(items) => {
+                    for child in items {
+                        visit(root, child);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let schema = runtime_service_schema_document();
+        visit(&schema, &schema);
+    }
+
+    #[test]
     fn generated_package_and_manifest_v2_schema_artifacts_are_current() {
         for (relative, document) in [
+            (
+                "docs/next/api/vqro-service-v1.schema.json",
+                runtime_service_schema_document(),
+            ),
             (
                 "docs/next/api/vqro-extension-manifest-v2.schema.json",
                 manifest_v2_schema_document(),

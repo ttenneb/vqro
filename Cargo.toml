@@ -19,6 +19,8 @@ include = [
     "docs/next/api/vqro-extension-service.schema.json",
     "docs/next/api/vqro-package-v1.schema.json",
     "docs/next/api/vqro-package-v1.md",
+    "docs/next/api/vqro-service-v1.schema.json",
+    "docs/next/api/vqro-service-v1.md",
     "docs/next/api/vqro-extension.schema.json",
     "extensions/first-party/*/vqro-extension.toml",
     "extensions/index-v1.json",

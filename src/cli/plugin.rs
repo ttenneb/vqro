@@ -50,7 +50,7 @@ pub(super) fn run_plugin_command(args: &[String]) -> std::io::Result<i32> {
 
 fn plugin_schema(args: &[String]) -> std::io::Result<i32> {
     let usage =
-        "usage: vqro plugin schema <bundle|manifest|manifest-v2|package|service> [--output PATH]";
+        "usage: vqro plugin schema <bundle|manifest|manifest-v2|package|runtime|service> [--output PATH]";
     let Some(kind) = args.first().map(String::as_str) else {
         eprintln!("{usage}");
         return Ok(2);
@@ -60,6 +60,7 @@ fn plugin_schema(args: &[String]) -> std::io::Result<i32> {
         "manifest" => crate::extension_spec::manifest_schema_json(),
         "manifest-v2" => crate::extension_spec::manifest_v2_schema_json(),
         "package" => crate::extension_spec::package_schema_json(),
+        "runtime" => crate::extension_spec::runtime_service_schema_json(),
         "service" => crate::extension_spec::service_schema_json(),
         _ => {
             eprintln!("{usage}");
