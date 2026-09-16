@@ -101,15 +101,57 @@ pub fn restore_delegations(
             }
         }
     }
-    crate::delegation::Delegations::repair_records(snapshot.delegations.iter().cloned().map(
-        |mut record| {
+    let mut records = snapshot
+        .delegations
+        .iter()
+        .cloned()
+        .map(|mut record| {
             if let Some(old) = record.pane_id {
                 record.pane_id = pane_map.get(&old.raw()).copied();
                 record.tombstone |= record.pane_id.is_none();
             }
             record
-        },
-    ))
+        })
+        .collect::<Vec<_>>();
+    records.sort_by_key(|record| (record.id, record.sibling_rank));
+    records.truncate(crate::admission::MAX_RELATIONSHIPS);
+
+    // Semantic relationship corruption must not prevent PTY restoration. Keep
+    // a deterministic bounded prefix and root links that exceed current
+    // fan-out/depth limits; repair_records handles duplicates and cycles.
+    let repaired = crate::delegation::Delegations::repair_records(records);
+    let mut records = repaired.records().values().cloned().collect::<Vec<_>>();
+    records.sort_by_key(|record| record.id);
+    let mut accepted_parents = HashMap::new();
+    let mut child_counts = HashMap::new();
+    for record in &mut records {
+        let valid_parent = record.parent_id.filter(|parent| {
+            if !accepted_parents.contains_key(parent)
+                || child_counts.get(parent).copied().unwrap_or(0)
+                    >= crate::admission::MAX_RELATIONSHIP_FAN_OUT
+            {
+                return false;
+            }
+            let mut depth = 1usize;
+            let mut current = Some(*parent);
+            while let Some(id) = current {
+                if depth > crate::admission::MAX_RELATIONSHIP_DEPTH {
+                    return false;
+                }
+                current = accepted_parents.get(&id).copied().flatten();
+                depth += 1;
+            }
+            true
+        });
+        record.parent_id = valid_parent;
+        if let Some(parent) = valid_parent {
+            *child_counts.entry(parent).or_insert(0usize) += 1;
+        }
+        accepted_parents.insert(record.id, valid_parent);
+    }
+    let repaired = crate::delegation::Delegations::repair_records(records);
+    debug_assert!(crate::admission::relationships(&repaired).is_ok());
+    repaired
 }
 
 pub(crate) fn validate_snapshot_admission(snapshot: &SessionSnapshot) -> Result<(), String> {
@@ -126,27 +168,12 @@ pub(crate) fn validate_snapshot_admission(snapshot: &SessionSnapshot) -> Result<
             workspace_panes = workspace_panes
                 .checked_add(tab_panes)
                 .ok_or_else(|| "workspace pane count overflow".to_string())?;
-            if tab.collections.len() > crate::admission::MAX_GROUPS_PER_TAB {
-                return Err("terminal group limit reached during restore".into());
-            }
-            if tab
-                .collections
-                .iter()
-                .any(|collection| collection.members.len() > crate::admission::MAX_GROUP_MEMBERS)
-            {
-                return Err("terminal group member limit reached during restore".into());
-            }
         }
     }
-    let relationships = crate::delegation::Delegations::from_keyed_records(
-        snapshot
-            .delegations
-            .iter()
-            .cloned()
-            .map(|record| (record.id, record)),
-    )
-    .map_err(|error| error.to_string())?;
-    crate::admission::relationships(&relationships).map_err(|error| error.to_string())
+    // Collection and relationship records are semantic projections. They are
+    // repaired after pane identities/runtimes have been admitted so corrupt or
+    // over-limit feature state cannot make otherwise valid terminals vanish.
+    Ok(())
 }
 
 fn restored_tab_identity_count(tab: &super::snapshot::TabSnapshot) -> usize {
@@ -1031,9 +1058,12 @@ fn recover_typed_layout(
     id_map: &HashMap<u32, PaneId>,
     surviving: &HashSet<PaneId>,
 ) -> Option<TileLayout> {
-    let records: HashMap<CollectionId, &CollectionSnapshot> = snap
-        .collections
-        .iter()
+    let mut saved_records = snap.collections.iter().collect::<Vec<_>>();
+    saved_records.sort_by_key(|record| record.id.raw());
+    saved_records.dedup_by_key(|record| record.id);
+    saved_records.truncate(crate::admission::MAX_GROUPS_PER_TAB);
+    let records: HashMap<CollectionId, &CollectionSnapshot> = saved_records
+        .into_iter()
         .map(|record| (record.id, record))
         .collect();
     fn prune(
@@ -1092,12 +1122,17 @@ fn recover_typed_layout(
     ids.sort_by_key(|id| id.raw());
     for id in ids {
         let saved = records[&id];
+        let mut members_seen = HashSet::new();
         let members: Vec<_> = saved
             .members
             .iter()
             .filter_map(|old| id_map.get(old).copied())
-            .filter(|pane| surviving.contains(pane) && placed.insert(*pane))
+            .filter(|pane| {
+                surviving.contains(pane) && !placed.contains(pane) && members_seen.insert(*pane)
+            })
+            .take(crate::admission::MAX_GROUP_MEMBERS)
             .collect();
+        placed.extend(members.iter().copied());
         let selected = saved
             .selected
             .and_then(|old| id_map.get(&old).copied())
@@ -1426,6 +1461,140 @@ mod tests {
         assert!(duplicate.restore_plan.is_none());
         assert!(duplicate.initial_history_ansi.is_none());
         assert!(duplicate.duplicate_agent_session);
+    }
+
+    #[test]
+    fn restore_admission_is_pty_first_and_defers_semantic_overflow_for_repair() {
+        use super::super::snapshot::{
+            CollectionSnapshot, LayoutSnapshot, PaneSnapshot, TabSnapshot, WorkspaceSnapshot,
+        };
+
+        let collection = CollectionId::from_raw(6_000_001).unwrap();
+        let collections = (0..=crate::admission::MAX_GROUPS_PER_TAB)
+            .map(|offset| CollectionSnapshot {
+                id: CollectionId::from_raw(collection.raw() + offset as u64).unwrap(),
+                label: None,
+                members: vec![1; crate::admission::MAX_GROUP_MEMBERS + 1],
+                selected: Some(1),
+                archived: Vec::new(),
+            })
+            .collect();
+        let snapshot = SessionSnapshot {
+            version: super::super::snapshot::SNAPSHOT_VERSION,
+            workspaces: vec![WorkspaceSnapshot {
+                id: Some("pty-first".into()),
+                custom_name: None,
+                identity_cwd: std::path::PathBuf::from("/tmp"),
+                checkout: None,
+                worktree_space: None,
+                public_pane_numbers: HashMap::new(),
+                next_public_pane_number: 2,
+                public_tab_numbers: vec![1],
+                next_public_tab_number: 2,
+                tabs: vec![TabSnapshot {
+                    custom_name: None,
+                    layout: LayoutSnapshot::Collection(collection),
+                    collections,
+                    panes: HashMap::from([(
+                        1,
+                        PaneSnapshot {
+                            cwd: std::path::PathBuf::from("/tmp"),
+                            label: None,
+                            agent_name: None,
+                            managed_agent_kind: None,
+                            agent_session: None,
+                            launch_argv: None,
+                        },
+                    )]),
+                    zoomed: false,
+                    focused: Some(1),
+                    focused_leaf: Some(LayoutLeafSnapshot::Collection(collection)),
+                    root_pane: Some(1),
+                }],
+                active_tab: 0,
+            }],
+            repositories: Vec::new(),
+            space_order: Vec::new(),
+            active: Some(0),
+            selected: 0,
+            sidebar_width: None,
+            sidebar_section_split: None,
+            collapsed_space_keys: HashSet::new(),
+            delegations: Vec::new(),
+        };
+
+        validate_snapshot_admission(&snapshot).expect("semantic overflow is repaired after PTYs");
+    }
+
+    #[test]
+    fn legacy_collection_restore_repairs_duplicate_missing_and_over_limit_members_without_losing_panes(
+    ) {
+        use super::super::snapshot::{CollectionSnapshot, LayoutSnapshot, TabSnapshot};
+
+        let collection = CollectionId::from_raw(7_000_001).unwrap();
+        let first = PaneId::from_raw(101);
+        let second = PaneId::from_raw(102);
+        let unplaced = PaneId::from_raw(103);
+        let id_map = HashMap::from([(1, first), (2, second), (3, unplaced)]);
+        let surviving = HashSet::from([first, second, unplaced]);
+        let mut members = Vec::new();
+        for _ in 0..=crate::admission::MAX_GROUP_MEMBERS {
+            members.extend([1, 2, 999]);
+        }
+        let mut collections = vec![CollectionSnapshot {
+            id: collection,
+            label: Some("legacy".into()),
+            members,
+            selected: Some(999),
+            archived: vec![2, 999],
+        }];
+        for offset in 1..=crate::admission::MAX_GROUPS_PER_TAB {
+            collections.push(CollectionSnapshot {
+                id: CollectionId::from_raw(collection.raw() + offset as u64).unwrap(),
+                label: None,
+                members: vec![3],
+                selected: Some(3),
+                archived: Vec::new(),
+            });
+        }
+        let snap = TabSnapshot {
+            custom_name: None,
+            layout: LayoutSnapshot::Collection(collection),
+            collections,
+            panes: HashMap::new(),
+            zoomed: false,
+            focused: None,
+            focused_leaf: Some(LayoutLeafSnapshot::Collection(collection)),
+            root_pane: Some(1),
+        };
+        let typed = TypedNode::Split {
+            direction: Direction::Horizontal,
+            ratio: 0.5,
+            first: Box::new(TypedNode::Leaf(LayoutLeaf::Collection(collection))),
+            second: Box::new(TypedNode::Leaf(LayoutLeaf::Collection(collection))),
+        };
+
+        let layout = recover_typed_layout(&snap, typed, &id_map, &surviving).unwrap();
+        let restored = layout
+            .collection(collection)
+            .expect("bounded collection survives");
+        assert_eq!(restored.members(), &[first, second]);
+        assert_eq!(restored.selected(), Some(first));
+        assert!(restored.is_archived(second));
+        assert_eq!(
+            layout.placement(unplaced),
+            Some(crate::layout::PanePlacement::Tiled)
+        );
+        for pane in [first, second, unplaced] {
+            assert_eq!(
+                layout
+                    .pane_ids()
+                    .iter()
+                    .filter(|candidate| **candidate == pane)
+                    .count(),
+                1
+            );
+        }
     }
 
     #[test]

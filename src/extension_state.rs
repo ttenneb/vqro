@@ -328,7 +328,11 @@ impl DurableExtensionStateV1 {
         state.revision = revision;
         self.store_generation = store_generation;
         self.sequence = sequence;
-        self.events.retain(|event| event.namespace != namespace);
+        // Clearing package data advances the store generation, so every event
+        // cursor from the prior generation must resnapshot. Retaining events
+        // from other namespaces could leave an undetectable hole when their
+        // sequences were interleaved with the removed namespace.
+        self.events.clear();
         self.events.push_back(ExtensionStateEventV1 {
             sequence,
             namespace: namespace.into(),
@@ -622,6 +626,37 @@ mod tests {
         assert_eq!(events.len(), 2);
         assert_eq!(events[0].revision, 2);
         assert_eq!(events[1].revision, 3);
+    }
+
+    #[test]
+    fn namespace_clear_marks_gap_for_interleaved_removed_events() {
+        let mut store = DurableExtensionStateV1::new("session:one".into(), 1).unwrap();
+        for (namespace, key) in [
+            ("example.alpha", "alpha-1"),
+            ("example.beta", "beta-1"),
+            ("example.alpha", "alpha-2"),
+            ("example.beta", "beta-2"),
+        ] {
+            let revision = store.snapshot(namespace).unwrap().revision;
+            let mut mutation = transaction(revision, key);
+            mutation.namespace = namespace.into();
+            mutation.expected_store_generation = store.store_generation;
+            store.transact(&mutation).unwrap();
+        }
+
+        store
+            .clear_namespace("example.alpha", "clear-alpha".into())
+            .unwrap();
+
+        for cursor in [1, 2] {
+            let page = store.events_after(cursor, MAX_STATE_EVENTS);
+            assert!(page.gap, "cursor {cursor} must resnapshot across the clear");
+            assert!(page.events.is_empty());
+        }
+        let page = store.events_after(4, MAX_STATE_EVENTS);
+        assert!(!page.gap);
+        assert_eq!(page.events.len(), 1);
+        assert_eq!(page.events[0].sequence, 5);
     }
 
     #[test]

@@ -33,7 +33,7 @@ The bundled reference extension is under [`extensions/terminal-inspector`](exten
 
 Extension services are **trusted same-user subprocesses, not sandboxed plugins**. Requested/granted capabilities constrain what the vqro service protocol will perform, but cannot remove the subprocess's ordinary operating-system access. vqro does not inject its API socket by default. The reference extension receives explicit `view_contribution` and `terminal_interrupt` protocol grants; terminal interruption is a host-defined Ctrl-C effect bound to the contribution's exact pane and requires host-rendered user confirmation.
 
-Supervised extension services are Linux-only in this alpha. The Windows host fails closed and does not start them until process trees can be contained with a Job Object; this boundary does not disable the rest of vqro's Windows client/server functionality.
+Supervised extension services are supported on Linux, macOS, and Windows. On Windows, vqro creates the child suspended, assigns it to a kill-on-close Job Object, and resumes it only after containment succeeds; setup failures terminate the child and fail closed. These services remain trusted same-user subprocesses rather than sandboxes on every platform.
 
 This remains work-in-progress alpha software: contracts may evolve, final project gates are still pending, remote vqro deployment is not yet a supported release path, and inherited agent-integration install/remove commands are disabled until their assets have a fully isolated vqro namespace. Process-based agent detection remains available. The retained upstream documentation below still describes Herdr.
 

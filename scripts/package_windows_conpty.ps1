@@ -9,7 +9,9 @@ param(
     [string]$StageDir,
 
     [Parameter(Mandatory = $true)]
-    [string]$OutputPath
+    [string]$OutputPath,
+
+    [string]$ExecutableName = "herdr.exe"
 )
 
 Set-StrictMode -Version Latest
@@ -33,6 +35,7 @@ Invoke-NativeChecked python @(
     "stage",
     "--package", $PackagePath,
     "--herdr-exe", $HerdrExe,
+    "--executable-name", $ExecutableName,
     "--output-dir", $StageDir
 )
 Invoke-NativeChecked dotnet @("nuget", "verify", "--all", $PackagePath)
@@ -49,5 +52,6 @@ Invoke-NativeChecked python @(
     $packager,
     "archive",
     "--stage-dir", $StageDir,
+    "--executable-name", $ExecutableName,
     "--output", $OutputPath
 )
