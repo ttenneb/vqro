@@ -79,8 +79,16 @@ fn durable_write(path: &Path, contents: impl AsRef<[u8]>) -> io::Result<()> {
         std::process::id(),
         NEXT_DURABLE_WRITE_ID.fetch_add(1, Ordering::Relaxed)
     ));
+    let existing_permissions = match fs::metadata(&path) {
+        Ok(metadata) => Some(metadata.permissions()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error),
+    };
     let result = (|| {
         let mut file = fs::File::create(&temporary)?;
+        if let Some(permissions) = existing_permissions {
+            file.set_permissions(permissions)?;
+        }
         file.write_all(contents.as_ref())?;
         file.sync_all()?;
         drop(file);

@@ -1420,6 +1420,40 @@ fn install_codex_writes_hook_and_updates_hooks_and_config() {
     let _ = fs::remove_dir_all(base);
 }
 
+#[cfg(unix)]
+#[test]
+fn claude_and_codex_updates_preserve_private_config_permissions() {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    let _lock = integration_env_lock();
+    let base = unique_base();
+    let home = base.join("home");
+    let claude_dir = home.join(".claude");
+    let codex_dir = home.join(".codex");
+    fs::create_dir_all(&claude_dir).unwrap();
+    fs::create_dir_all(&codex_dir).unwrap();
+    let paths = [
+        (claude_dir.join("settings.json"), "{\"hooks\":{}}"),
+        (codex_dir.join("hooks.json"), "{\"hooks\":{}}"),
+        (codex_dir.join("config.toml"), "model = \"gpt-5.4\"\n"),
+    ];
+    for (path, contents) in &paths {
+        fs::write(path, contents).unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    std::env::set_var("HOME", &home);
+
+    install_claude().unwrap();
+    install_codex().unwrap();
+
+    for (path, _) in &paths {
+        assert_eq!(fs::metadata(path).unwrap().mode() & 0o777, 0o600);
+    }
+
+    std::env::remove_var("HOME");
+    let _ = fs::remove_dir_all(base);
+}
+
 #[test]
 fn install_codex_uses_codex_home_env() {
     let _lock = integration_env_lock();

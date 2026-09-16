@@ -876,7 +876,7 @@ impl App {
         };
         app.configure_tab_bar_status(&config.ui.tab_bar_right, &config.ui.tab_bar_right_separator);
         app.configure_window_title(&config.ui.window_title);
-        app.recover_extension_data_deletion_on_startup();
+        app.recover_extension_state_on_startup();
         app.refresh_collection_documents();
         app
     }

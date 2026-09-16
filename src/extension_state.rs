@@ -476,10 +476,14 @@ fn validate_transaction(
 }
 
 fn validate_namespace(namespace: &str) -> Result<(), ExtensionStateError> {
-    if !valid_identifier(namespace, 128) || !namespace.contains('.') {
+    if !valid_namespace(namespace) {
         return Err(ExtensionStateError::InvalidNamespace);
     }
     Ok(())
+}
+
+pub(crate) fn valid_namespace(namespace: &str) -> bool {
+    valid_identifier(namespace, 128) && namespace.contains('.')
 }
 
 fn validate_candidate(state: &NamespaceState) -> Result<(), ExtensionStateError> {

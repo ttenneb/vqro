@@ -374,6 +374,24 @@ impl MarketplaceStateFile {
         }
     }
 
+    fn validate_data_ids(&self) -> Result<(), String> {
+        let mut data_ids = BTreeSet::new();
+        for (repository, state) in &self.entries {
+            if !crate::extension_state::valid_namespace(&state.data_id) {
+                return Err(format!(
+                    "extension '{repository}' has an invalid data namespace"
+                ));
+            }
+            if !data_ids.insert(state.data_id.as_str()) {
+                return Err(format!(
+                    "extension state contains duplicate data namespace '{}'",
+                    state.data_id
+                ));
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn install(&mut self, extension: &CuratedExtension) {
         let state = self
             .entries
@@ -712,6 +730,7 @@ pub(crate) fn load_state_from_path(
         ));
     }
     state.normalize(index);
+    state.validate_data_ids()?;
     Ok(state)
 }
 
@@ -893,6 +912,18 @@ pub(crate) fn apply_extension_data_deletion(
     };
     let pending: PendingExtensionDataDeletion = serde_json::from_slice(&bytes)
         .map_err(|error| format!("decode data deletion journal: {error}"))?;
+    if !crate::extension_state::valid_namespace(&pending.data_id) {
+        return Err("data deletion journal contains an invalid data namespace".into());
+    }
+    let expected_data_id = state
+        .entries
+        .get(&pending.repository)
+        .ok_or_else(|| "data deletion journal references an unknown extension".to_string())?
+        .data_id
+        .as_str();
+    if expected_data_id != pending.data_id {
+        return Err("data deletion journal does not own the requested data namespace".into());
+    }
     purge_extension_data(&pending.data_id)?;
     state.clear_retained_data(&pending.repository)?;
     save_state_to_path(state_path, state)?;
@@ -1139,6 +1170,56 @@ mod tests {
         assert!(!state.entries[&extension.repository]
             .repository_overrides
             .contains_key("local-id"));
+    }
+
+    #[test]
+    fn persisted_data_namespaces_must_be_valid_and_unique() {
+        let index = CuratedIndex::bundled().unwrap();
+        let directory = std::env::temp_dir().join(format!(
+            "vqro-extension-data-id-test-{}-{}",
+            std::process::id(),
+            NEXT_STATE_TEMP_ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let state_path = directory.join("extensions.json");
+        let mut state = MarketplaceStateFile::defaults(&index);
+        let repositories = state.entries.keys().take(2).cloned().collect::<Vec<_>>();
+        state.entries.get_mut(&repositories[0]).unwrap().data_id = "../escape".into();
+        std::fs::write(&state_path, serde_json::to_vec(&state).unwrap()).unwrap();
+        assert!(load_state_from_path(&state_path, &index)
+            .unwrap_err()
+            .contains("invalid data namespace"));
+
+        let mut state = MarketplaceStateFile::defaults(&index);
+        let duplicate = state.entries[&repositories[0]].data_id.clone();
+        state.entries.get_mut(&repositories[1]).unwrap().data_id = duplicate;
+        std::fs::write(&state_path, serde_json::to_vec(&state).unwrap()).unwrap();
+        assert!(load_state_from_path(&state_path, &index)
+            .unwrap_err()
+            .contains("duplicate data namespace"));
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn data_deletion_journal_cannot_delete_another_extensions_namespace() {
+        let index = CuratedIndex::bundled().unwrap();
+        let mut state = MarketplaceStateFile::defaults(&index);
+        let repositories = state.entries.keys().take(2).cloned().collect::<Vec<_>>();
+        let foreign_data_id = state.entries[&repositories[1]].data_id.clone();
+        let directory = std::env::temp_dir().join(format!(
+            "vqro-extension-delete-owner-test-{}-{}",
+            std::process::id(),
+            NEXT_STATE_TEMP_ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let state_path = directory.join("extensions.json");
+        save_state_to_path(&state_path, &state).unwrap();
+        begin_extension_data_deletion(&state_path, &repositories[0], &foreign_data_id).unwrap();
+
+        let error = apply_extension_data_deletion(&state_path, &mut state).unwrap_err();
+        assert!(error.contains("does not own"));
+        assert!(data_deletion_journal_path(&state_path).exists());
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

@@ -160,7 +160,7 @@ impl App {
         Ok(true)
     }
 
-    pub(crate) fn recover_extension_data_deletion_on_startup(&mut self) {
+    pub(crate) fn recover_extension_state_on_startup(&mut self) {
         if !self.policy.persist_plugin_registry {
             return;
         }
@@ -170,13 +170,87 @@ impl App {
             let mut marketplace_state =
                 crate::extensions::load_state_from_path(&path, &self.extension_index)?;
             self.recover_extension_data_deletion(&path, &mut marketplace_state)?;
+            self.recover_extension_lifecycle(&path, &mut marketplace_state)?;
             self.marketplace_state = marketplace_state;
             self.apply_bundled_extension_state();
             Ok::<(), String>(())
         })();
         if let Err(error) = result {
-            tracing::warn!(%error, "failed to recover extension data deletion during startup");
+            tracing::warn!(%error, "failed to recover extension state during startup");
         }
+    }
+
+    fn recover_extension_lifecycle(
+        &mut self,
+        path: &std::path::Path,
+        marketplace_state: &mut crate::extensions::MarketplaceStateFile,
+    ) -> Result<bool, String> {
+        let Some(pending) = crate::extensions::pending_extension_lifecycle(path)? else {
+            return Ok(false);
+        };
+        let target = pending.target;
+        let requires_artifact = self
+            .extension_index
+            .extensions
+            .iter()
+            .find(|extension| extension.repository == pending.repository)
+            .is_some_and(CuratedExtension::has_pinned_source);
+        let runtime_result = if pending.enabled {
+            if let Some(artifact) = pending.active_artifact.as_ref() {
+                crate::integration::install_target_from_artifact(target, artifact)
+                    .map(|_| ())
+                    .map_err(|error| error.to_string())
+            } else if requires_artifact {
+                // The journal is the sole authority for pre-mutation ownership. A newly
+                // persisted artifact may describe the interrupted replacement and must
+                // never be installed while rolling back to an artifact-free state.
+                crate::integration::uninstall_target_artifact(target)
+                    .map(|_| ())
+                    .map_err(|error| error.to_string())
+            } else {
+                crate::integration::install_target(target)
+                    .map(|_| ())
+                    .map_err(|error| error.to_string())
+            }
+        } else {
+            crate::integration::uninstall_target_artifact(target)
+                .map(|_| ())
+                .map_err(|error| error.to_string())
+        };
+        let state = marketplace_state
+            .entries
+            .get_mut(&pending.repository)
+            .ok_or_else(|| {
+                format!(
+                    "extension lifecycle journal references missing state for '{}'",
+                    pending.repository
+                )
+            })?;
+        state.installed = pending.installed;
+        state.enabled = pending.enabled && runtime_result.is_ok();
+        state.activation_error = runtime_result.as_ref().err().map(ToString::to_string);
+        state.active_artifact = pending.active_artifact;
+        state.rollback_artifact = pending.rollback_artifact;
+        if let Some(version) = pending.active_version {
+            state.active_version = version;
+        }
+        state.rollback_version = state
+            .rollback_artifact
+            .as_ref()
+            .map(|artifact| artifact.version.clone());
+        if !pending.load_order.is_empty() {
+            marketplace_state.load_order = pending.load_order;
+        }
+        crate::extensions::save_state_to_path(path, marketplace_state)?;
+        if let Err(error) = runtime_result {
+            // Keep the journal so the next refresh retries the rollback. The persisted
+            // state remains disabled and records the failure instead of activating an
+            // artifact whose ownership differs from the journal.
+            tracing::warn!(%error, "extension lifecycle rollback remains pending");
+            return Ok(true);
+        }
+        crate::extensions::finish_extension_lifecycle(path)?;
+        Ok(true)
     }
 
     fn adopt_external_marketplace_state(
@@ -256,76 +330,9 @@ impl App {
             tracing::warn!(%error, "failed to recover extension data deletion during refresh");
             return false;
         }
-        if let Some(pending) = match crate::extensions::pending_extension_lifecycle(&path) {
-            Ok(pending) => pending,
-            Err(error) => {
-                tracing::warn!(%error, "failed to read extension lifecycle recovery journal");
-                return false;
-            }
-        } {
-            let target = pending.target;
-            let active_artifact = pending.active_artifact.clone().or_else(|| {
-                loaded
-                    .entries
-                    .get(&pending.repository)
-                    .and_then(|state| state.active_artifact.clone())
-            });
-            let requires_artifact = self
-                .extension_index
-                .extensions
-                .iter()
-                .find(|extension| extension.repository == pending.repository)
-                .is_some_and(CuratedExtension::has_pinned_source);
-            let result = if pending.enabled {
-                if let Some(artifact) = active_artifact {
-                    crate::integration::install_target_from_artifact(target, &artifact)
-                        .map(|_| ())
-                        .map_err(|error| error.to_string())
-                } else if requires_artifact {
-                    // A journal without a previous artifact represents package state that was
-                    // enabled before any adapter was deployed. Remove a possibly half-applied
-                    // new adapter and restore that artifact-free state.
-                    crate::integration::uninstall_target_artifact(target)
-                        .map(|_| ())
-                        .map_err(|error| error.to_string())
-                } else {
-                    crate::integration::install_target(target)
-                        .map(|_| ())
-                        .map_err(|error| error.to_string())
-                }
-            } else {
-                crate::integration::uninstall_target_artifact(target)
-                    .map(|_| ())
-                    .map_err(|error| error.to_string())
-            };
-            let Some(state) = loaded.entries.get_mut(&pending.repository) else {
-                tracing::warn!(repository = %pending.repository, "discarding unrecoverable extension lifecycle journal for missing state");
-                let _ = crate::extensions::finish_extension_lifecycle(&path);
-                return false;
-            };
-            state.installed = pending.installed;
-            state.enabled = pending.enabled && result.is_ok();
-            state.activation_error = result.as_ref().err().map(ToString::to_string);
-            state.active_artifact = pending.active_artifact;
-            state.rollback_artifact = pending.rollback_artifact;
-            if let Some(version) = pending.active_version {
-                state.active_version = version;
-            }
-            state.rollback_version = state
-                .rollback_artifact
-                .as_ref()
-                .map(|artifact| artifact.version.clone());
-            if !pending.load_order.is_empty() {
-                loaded.load_order = pending.load_order;
-            }
-            if let Err(error) = crate::extensions::save_state_to_path(&path, &loaded) {
-                tracing::warn!(%error, "failed to persist recovered extension lifecycle");
-                return false;
-            }
-            if let Err(error) = crate::extensions::finish_extension_lifecycle(&path) {
-                tracing::warn!(%error, "failed to finish extension lifecycle recovery");
-                return false;
-            }
+        if let Err(error) = self.recover_extension_lifecycle(&path, &mut loaded) {
+            tracing::warn!(%error, "failed to recover extension lifecycle during refresh");
+            return false;
         }
         let mut migrated = false;
         for repository in &self.state.repositories {
@@ -1825,6 +1832,94 @@ mod tests {
         }
 
         match previous {
+            Some(value) => unsafe { std::env::set_var("PI_CODING_AGENT_DIR", value) },
+            None => unsafe { std::env::remove_var("PI_CODING_AGENT_DIR") },
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn startup_lifecycle_recovery_uses_only_journaled_artifact_ownership() {
+        let _config_env = crate::config::test_config_env_lock().lock().unwrap();
+        let _integration_env = crate::integration::integration_env_lock();
+        let root = std::env::temp_dir().join(format!(
+            "vqro-marketplace-startup-recovery-{}",
+            std::process::id()
+        ));
+        let config_home = root.join("config");
+        let pi_root = root.join("pi");
+        let extensions_dir = pi_root.join("extensions");
+        std::fs::create_dir_all(&extensions_dir).unwrap();
+        let adapter = extensions_dir.join("vqro-extension-agent-state.ts");
+        std::fs::write(&adapter, "interrupted-new-adapter").unwrap();
+        let previous_xdg = std::env::var_os("XDG_CONFIG_HOME");
+        let previous_pi = std::env::var_os("PI_CODING_AGENT_DIR");
+        unsafe {
+            std::env::set_var("XDG_CONFIG_HOME", &config_home);
+            std::env::set_var("PI_CODING_AGENT_DIR", &pi_root);
+        }
+
+        let index = crate::extensions::CuratedIndex::bundled().unwrap();
+        let state_path = crate::extensions::state_storage_path().unwrap();
+        let repository = "ttenneb/vqro-extension-pi";
+        let mut persisted = crate::extensions::MarketplaceStateFile::defaults(&index);
+        persisted
+            .entries
+            .get_mut(repository)
+            .unwrap()
+            .active_artifact = Some(crate::extensions::VerifiedExtensionArtifact {
+            extension_id: "vqro.pi".into(),
+            version: "2.0.0".into(),
+            commit: "a".repeat(40),
+            source_sha256: "b".repeat(64),
+            manifest_sha256: "c".repeat(64),
+            manifest_path: "vqro-extension.toml".into(),
+            path: root.join("new-artifact").display().to_string(),
+        });
+        crate::extensions::save_state_to_path(&state_path, &persisted).unwrap();
+        crate::extensions::begin_extension_lifecycle(
+            &state_path,
+            &crate::extensions::PendingExtensionLifecycle {
+                repository: repository.into(),
+                target: crate::api::schema::IntegrationTarget::Pi,
+                installed: true,
+                enabled: true,
+                active_artifact: None,
+                rollback_artifact: None,
+                active_version: Some("1.0.0".into()),
+                load_order: persisted.load_order.clone(),
+            },
+        )
+        .unwrap();
+
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let app = App::new(
+            &crate::config::Config::default(),
+            crate::app::AppPolicy {
+                restore_session: false,
+                persist_session: false,
+                persist_plugin_registry: true,
+                background_updates: false,
+            },
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+
+        let recovered = &app.marketplace_state.entries[repository];
+        assert!(recovered.installed);
+        assert!(recovered.enabled);
+        assert!(recovered.active_artifact.is_none());
+        assert!(!adapter.exists());
+        assert!(crate::extensions::pending_extension_lifecycle(&state_path)
+            .unwrap()
+            .is_none());
+
+        match previous_xdg {
+            Some(value) => unsafe { std::env::set_var("XDG_CONFIG_HOME", value) },
+            None => unsafe { std::env::remove_var("XDG_CONFIG_HOME") },
+        }
+        match previous_pi {
             Some(value) => unsafe { std::env::set_var("PI_CODING_AGENT_DIR", value) },
             None => unsafe { std::env::remove_var("PI_CODING_AGENT_DIR") },
         }
