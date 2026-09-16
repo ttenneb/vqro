@@ -91,6 +91,7 @@ fn remote_repository_rows_expose_web_links_but_not_local_directory_links() {
                 label: "repo".into(),
                 repository_path: Some(path.into()),
                 web_url: Some(url.into()),
+                durable_identity: Some(url.into()),
                 checkouts: vec![crate::protocol::endpoint::ClientShellRepositoryCheckout {
                     workspace_id: "ws_1".into(),
                     checkout_path: Some(path.into()),

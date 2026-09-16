@@ -103,17 +103,22 @@ pub(super) fn structure_projection(
                         .find_map(|workspace| workspace.checkout.as_ref())
                 })
                 .map(|checkout| checkout.checkout_path.display().to_string());
+            let durable_identity =
+                crate::repository::extension_repository_identities(&repository.git_common_dir)
+                    .into_iter()
+                    .next();
             protocol::endpoint::ClientShellRepository {
                 repository_id: repository.id.clone(),
                 label: repository.display_label().to_owned(),
                 repository_path,
                 web_url,
+                durable_identity,
                 checkouts,
                 last_focused_workspace_id: repository.last_focused_workspace_id.clone(),
             }
         })
         .collect();
-    let space_order = app
+    let mut space_order = app
         .state
         .space_order
         .iter()
@@ -132,9 +137,24 @@ pub(super) fn structure_projection(
             }
         })
         .collect();
+    if !app.bundled_extension_enabled("spaces", None) {
+        space_order = app
+            .state
+            .workspaces
+            .iter()
+            .map(|workspace| protocol::endpoint::ClientShellSpaceRef {
+                kind: protocol::endpoint::ClientShellSpaceKind::StandaloneWorkspace,
+                id: workspace.id.clone(),
+            })
+            .collect();
+    }
     let collections = app
         .collection_infos(None, None)
         .into_iter()
+        .filter(|collection| {
+            app.parse_workspace_id(&collection.workspace_id)
+                .is_some_and(|ws_idx| app.bundled_extension_enabled("collections", Some(ws_idx)))
+        })
         .map(|collection| protocol::endpoint::ClientShellCollection {
             collection_id: collection.collection_id,
             workspace_id: collection.workspace_id,
@@ -155,6 +175,7 @@ pub(super) fn structure_projection(
     let delegations = app
         .delegation_tree()
         .into_iter()
+        .filter(|_| app.bundled_extension_enabled("delegation", None))
         .map(|entry| protocol::endpoint::ClientShellDelegation {
             delegation_id: entry.delegation.delegation_id,
             pane_id: entry.delegation.pane_id,
@@ -204,6 +225,7 @@ pub(super) fn snapshot(
             app.public_pane_id(workspace_index, pane_id)
         })
         .or_else(|| snapshot.focused_pane_id.clone());
+    let agent_status_enabled = app.bundled_extension_enabled("agent-status", None);
     let workspaces = snapshot
         .workspaces
         .into_iter()
@@ -243,7 +265,11 @@ pub(super) fn snapshot(
                         label: worktree.repo_name,
                         is_linked_worktree: worktree.is_linked_worktree,
                     }),
-                agent_status: workspace.agent_status,
+                agent_status: if agent_status_enabled {
+                    workspace.agent_status
+                } else {
+                    crate::api::schema::AgentStatus::Unknown
+                },
             }
         })
         .collect();
@@ -266,7 +292,11 @@ pub(super) fn snapshot(
                 label: tab.label,
                 custom_label: !state.is_auto_named(),
                 zoomed: state.zoomed,
-                agent_status: tab.agent_status,
+                agent_status: if agent_status_enabled {
+                    tab.agent_status
+                } else {
+                    crate::api::schema::AgentStatus::Unknown
+                },
             }
         })
         .collect();
@@ -300,6 +330,7 @@ pub(super) fn snapshot(
     let agents = snapshot
         .agents
         .into_iter()
+        .filter(|_| agent_status_enabled)
         .map(|agent| {
             let pane_id = agent.pane_id;
             let focused = focused_pane_id.as_deref() == Some(pane_id.as_str());

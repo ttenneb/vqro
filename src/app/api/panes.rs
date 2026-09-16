@@ -112,6 +112,7 @@ impl App {
         }
         if params.focus {
             self.state.switch_workspace_tab(ws_idx, target_tab_idx);
+            self.apply_bundled_extension_state();
             self.state
                 .record_pane_focus_change(previous_focus, ws_idx, new_pane.pane_id);
             self.state.mode = crate::app::Mode::Terminal;
@@ -474,7 +475,11 @@ impl App {
             return pane_not_found(id, &target.pane_id);
         };
 
+        let previous_workspace = self.state.active;
         let focus_changed = self.state.focus_pane_in_workspace(ws_idx, pane_id);
+        if self.state.active != previous_workspace {
+            self.apply_bundled_extension_state();
+        }
         self.state.mark_active_tab_seen();
         self.state.mode = crate::app::Mode::Terminal;
         if focus_changed {
@@ -712,6 +717,7 @@ impl App {
         if let Some(target_pane_id) = target {
             self.state.focus_pane_in_workspace(ws_idx, target_pane_id);
             self.state.switch_workspace_tab(ws_idx, tab_idx);
+            self.apply_bundled_extension_state();
             self.state.mode = crate::app::Mode::Terminal;
         }
         let focused_pane_id = self
@@ -906,6 +912,7 @@ impl App {
                     tab.layout.focus_pane(source_pane_id);
                     if changed {
                         self.state.switch_workspace_tab(ws_idx, tab_idx);
+                        self.apply_bundled_extension_state();
                         self.state
                             .record_pane_focus_change(previous_focus, ws_idx, source_pane_id);
                         self.state.mark_session_dirty();
@@ -1293,6 +1300,7 @@ impl App {
         if focus || self.state.active.is_none() {
             self.state
                 .switch_workspace_tab(target_ws_idx, target_tab_idx);
+            self.apply_bundled_extension_state();
             self.state
                 .record_pane_focus_change(previous_focus, target_ws_idx, moved_pane_id);
             self.state.mode = crate::app::Mode::Terminal;
@@ -1929,6 +1937,7 @@ impl App {
         if should_close_workspace {
             self.state.selected = ws_idx;
             self.state.close_selected_workspace();
+            self.apply_bundled_extension_state();
             self.shutdown_detached_terminal_runtimes();
             self.emit_event(EventEnvelope {
                 event: EventKind::PaneClosed,

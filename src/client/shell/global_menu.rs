@@ -24,7 +24,6 @@ pub(super) fn global_menu_items(
     snapshot: &ClientShellSnapshot,
 ) -> Vec<(&'static str, ClientGlobalMenuAction)> {
     let mut items = vec![
-        ("extensions", ClientGlobalMenuAction::Extensions),
         (
             "settings",
             ClientGlobalMenuAction::Binding(crate::input::KeybindAction::Settings),
@@ -48,6 +47,7 @@ pub(super) fn global_menu_items(
             ClientGlobalMenuAction::WhatsNew,
         ));
     }
+    items.push(("extensions", ClientGlobalMenuAction::Extensions));
     items.push((
         "detach",
         ClientGlobalMenuAction::Binding(crate::input::KeybindAction::Detach),

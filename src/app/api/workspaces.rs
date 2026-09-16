@@ -96,6 +96,7 @@ impl App {
             return workspace_not_found(id, &target.workspace_id);
         }
         self.state.switch_workspace(index);
+        self.apply_bundled_extension_state();
 
         encode_success(
             id,

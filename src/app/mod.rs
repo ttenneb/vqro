@@ -139,6 +139,7 @@ pub struct App {
     pub(crate) pending_worktree_remove_runtime_restores: HashMap<crate::layout::PaneId, u64>,
     pub(crate) next_api_worktree_operation_id: u64,
     pub(crate) next_auto_update_check: Option<Instant>,
+    pub(crate) next_extension_state_refresh: Instant,
     pub(crate) next_agent_manifest_update_check: Option<Instant>,
     pub(crate) update_version_check_enabled: bool,
     pub(crate) update_manifest_check_enabled: bool,
@@ -183,6 +184,7 @@ pub struct App {
     pub(crate) host_document_services: crate::extension_service::HostDocumentServiceCatalog,
     pub(crate) extension_index: crate::extensions::CuratedIndex,
     pub(crate) extension_state: crate::extensions::ExtensionStateFile,
+    pub(crate) configured_disabled_extensions: std::collections::BTreeSet<String>,
     pub(crate) disabled_extensions: std::collections::BTreeSet<String>,
     pub(crate) collections_shadow_documents:
         HashMap<(String, String), crate::first_party::collections::ShadowDocumentCache>,
@@ -600,14 +602,17 @@ impl App {
             crate::extensions::ExtensionStateFile::defaults(&extension_index)
         };
         let mut disabled_extensions =
-            crate::extensions::disabled_bundled_providers(&extension_index, &extension_state);
+            crate::extensions::unavailable_bundled_providers(&extension_index, &extension_state);
         // Preserve the legacy config as an additive kill switch while clients migrate
         // to the global extension registry.
         disabled_extensions.extend(config.extensions.disabled.iter().cloned());
         let extension_services =
             crate::extension_service::manager_for_plugins(&installed_plugins, event_tx.clone());
+        let bundled_provider_priorities =
+            crate::extensions::bundled_provider_priorities(&extension_index, &extension_state);
         let host_document_services = crate::extension_service::HostDocumentServiceCatalog::bundled(
             &disabled_extensions,
+            &bundled_provider_priorities,
             &installed_plugins,
             event_tx.clone(),
         );
@@ -803,6 +808,7 @@ impl App {
             next_api_worktree_operation_id: 1,
             next_auto_update_check: version_check_enabled
                 .then_some(Instant::now() + AUTO_UPDATE_CHECK_INTERVAL),
+            next_extension_state_refresh: Instant::now() + Duration::from_secs(1),
             next_agent_manifest_update_check: manifest_check_enabled
                 .then_some(Instant::now() + AUTO_UPDATE_CHECK_INTERVAL),
             update_version_check_enabled: config.update.version_check,
@@ -845,6 +851,7 @@ impl App {
             host_document_services,
             extension_index,
             extension_state,
+            configured_disabled_extensions: config.extensions.disabled.clone(),
             disabled_extensions,
             collections_shadow_documents: HashMap::new(),
             next_host_document_revision: 1,
@@ -1200,13 +1207,8 @@ impl App {
         }
 
         if !invalid_section("extensions") {
-            self.disabled_extensions = crate::extensions::disabled_bundled_providers(
-                &self.extension_index,
-                &self.extension_state,
-            );
-            self.disabled_extensions
-                .extend(config.extensions.disabled.iter().cloned());
-            self.rebuild_extension_catalogs();
+            self.configured_disabled_extensions = config.extensions.disabled.clone();
+            self.apply_bundled_extension_state();
         }
 
         let status = if diagnostics.is_empty() {

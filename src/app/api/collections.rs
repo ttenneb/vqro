@@ -199,6 +199,13 @@ impl App {
                 (generation, revision),
             );
             let request_key = (namespace.clone(), scope_id.clone());
+            if namespace == crate::first_party::collections::NAMESPACE
+                && !self.bundled_extension_enabled("collections", Some(ws_idx))
+            {
+                self.collections_shadow_documents.remove(&request_key);
+                self.host_document_request_watermarks.remove(&request_key);
+                continue;
+            }
             let cache = self
                 .collections_shadow_documents
                 .entry(request_key.clone())
@@ -400,6 +407,14 @@ impl App {
     pub(crate) fn refresh_spaces_document(&mut self) {
         let namespace = crate::first_party::spaces::NAMESPACE;
         let scope_id = crate::first_party::spaces::SESSION_SCOPE_ID.to_string();
+        if !self.bundled_extension_enabled("spaces", None) {
+            self.collections_shadow_documents
+                .remove(&(namespace.into(), scope_id.clone()));
+            self.host_document_request_watermarks
+                .remove(&(namespace.into(), scope_id));
+            self.host_spaces_last_desired = None;
+            return;
+        }
         let Some(generation) = self.host_document_services.generation(namespace) else {
             self.collections_shadow_documents
                 .remove(&(namespace.into(), scope_id.clone()));
@@ -1808,12 +1823,17 @@ impl App {
                 "workspace or tab was not found",
             );
         }
-        responses::encode_success(
-            request_id,
-            ResponseResult::CollectionList {
-                collections: self.collection_infos(workspace_filter, tab_filter),
-            },
-        )
+        let collections = self
+            .collection_infos(workspace_filter, tab_filter)
+            .into_iter()
+            .filter(|collection| {
+                self.parse_workspace_id(&collection.workspace_id)
+                    .is_some_and(|ws_idx| {
+                        self.bundled_extension_enabled("collections", Some(ws_idx))
+                    })
+            })
+            .collect();
+        responses::encode_success(request_id, ResponseResult::CollectionList { collections })
     }
 
     pub(crate) fn handle_collection_get(
@@ -1827,6 +1847,13 @@ impl App {
         let Some((ws_idx, tab_idx)) = self.find_collection(id) else {
             return responses::encode_error(request_id, "not_found", "collection was not found");
         };
+        if !self.bundled_extension_enabled("collections", Some(ws_idx)) {
+            return responses::encode_error(
+                request_id,
+                "extension_disabled",
+                "Collections is disabled for this repository",
+            );
+        }
         responses::encode_success(
             request_id,
             ResponseResult::CollectionInfo {
@@ -1846,6 +1873,13 @@ impl App {
         else {
             return responses::encode_error(request_id, "not_found", "target pane was not found");
         };
+        if !self.bundled_extension_enabled("collections", Some(ws_idx)) {
+            return responses::encode_error(
+                request_id,
+                "extension_disabled",
+                "Collections is disabled for this repository",
+            );
+        }
         let Some(tab_idx) = self.state.workspaces[ws_idx].find_tab_index_for_pane(pane_id) else {
             return responses::encode_error(request_id, "not_found", "target tab was not found");
         };
@@ -1893,6 +1927,13 @@ impl App {
         let Some((ws_idx, tab_idx)) = self.find_collection(collection_id) else {
             return responses::encode_error(request_id, "not_found", "collection was not found");
         };
+        if !self.bundled_extension_enabled("collections", Some(ws_idx)) {
+            return responses::encode_error(
+                request_id,
+                "extension_disabled",
+                "Collections is disabled for this repository",
+            );
+        }
         let Some((pane_ws_idx, pane_id)) = self.parse_current_public_pane_id(&params.pane_id)
         else {
             return responses::encode_error(request_id, "not_found", "pane was not found");
@@ -1997,6 +2038,13 @@ impl App {
         let Some((ws_idx, tab_idx)) = self.find_collection(collection_id) else {
             return responses::encode_error(request_id, "not_found", "collection was not found");
         };
+        if !self.bundled_extension_enabled("collections", Some(ws_idx)) {
+            return responses::encode_error(
+                request_id,
+                "extension_disabled",
+                "Collections is disabled for this repository",
+            );
+        }
         let Some((pane_ws_idx, pane_id)) = self.parse_current_public_pane_id(pane_raw) else {
             return responses::encode_error(request_id, "not_found", "pane was not found");
         };
@@ -2030,6 +2078,13 @@ impl App {
         let Some((ws_idx, pane_id)) = self.parse_current_public_pane_id(&params.pane_id) else {
             return responses::encode_error(request_id, "not_found", "pane was not found");
         };
+        if !self.bundled_extension_enabled("collections", Some(ws_idx)) {
+            return responses::encode_error(
+                request_id,
+                "extension_disabled",
+                "Collections is disabled for this repository",
+            );
+        }
         let Some((target_ws_idx, target)) =
             self.parse_current_public_pane_id(&params.target_pane_id)
         else {
@@ -2101,6 +2156,13 @@ impl App {
         let Some((ws_idx, tab_idx)) = self.find_collection(collection_id) else {
             return responses::encode_error(request_id, "not_found", "collection was not found");
         };
+        if !self.bundled_extension_enabled("collections", Some(ws_idx)) {
+            return responses::encode_error(
+                request_id,
+                "extension_disabled",
+                "Collections is disabled for this repository",
+            );
+        }
         let members = self.state.workspaces[ws_idx].tabs[tab_idx]
             .collection(collection_id)
             .expect("located collection")

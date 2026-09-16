@@ -91,8 +91,11 @@ impl App {
             .state
             .apply_workspace_git_statuses(&self.terminal_runtimes, results)
             || projected_identity_changed;
+        // Git identity changes can make a previously unavailable durable
+        // repository scope usable by extension documents.
+        self.apply_bundled_extension_state();
         if changed {
-            self.refresh_spaces_document();
+            self.refresh_collection_documents();
             self.render_dirty.request_generic();
             self.render_notify.notify_one();
         }
@@ -1051,6 +1054,37 @@ impl App {
         use crate::api::schema::{
             ErrorBody, ErrorResponse, Method, ResponseResult, SuccessResponse,
         };
+
+        let required_provider = match &request.method {
+            Method::DelegationCreate(_)
+            | Method::DelegationGet(_)
+            | Method::DelegationTree(_)
+            | Method::DelegationRoot(_)
+            | Method::DelegationDescendants(_)
+            | Method::DelegationReparent(_)
+            | Method::DelegationReorder(_) => Some("delegation"),
+            Method::AgentList(_)
+            | Method::AgentGet(_)
+            | Method::AgentFocus(_)
+            | Method::AgentRename(_)
+            | Method::AgentViewSet(_)
+            | Method::AgentViewClear(_)
+            | Method::AgentStart(_)
+            | Method::AgentPrompt(_)
+            | Method::AgentWait(_)
+            | Method::AgentRead(_)
+            | Method::AgentExplain(_)
+            | Method::AgentSendKeys(_) => Some("agent-status"),
+            _ => None,
+        };
+        if required_provider.is_some_and(|provider| !self.bundled_extension_enabled(provider, None))
+        {
+            return responses::encode_error(
+                request.id,
+                "extension_disabled",
+                "the required built-in extension is disabled or removed",
+            );
+        }
 
         let response = match request.method {
             Method::ServerStop(_) => {

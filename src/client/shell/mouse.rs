@@ -1608,6 +1608,16 @@ impl ClientShellState {
             return;
         }
         if matches!(self.overlay, Some(ClientShellOverlay::Extensions(_))) {
+            let mutating = matches!(
+                self.overlay,
+                Some(ClientShellOverlay::Extensions(ClientExtensionsOverlay {
+                    mutating: true,
+                    ..
+                }))
+            );
+            if mutating {
+                return;
+            }
             if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
                 if let Some((_, tab)) = self
                     .hits
@@ -1621,6 +1631,7 @@ impl ClientShellState {
                         extensions.tab = tab;
                         extensions.selected = 0;
                         extensions.confirmation = None;
+                        extensions.search_focused = false;
                     }
                     outcome.repaint = true;
                 } else if let Some((_, category)) = self
@@ -1635,12 +1646,15 @@ impl ClientShellState {
                         extensions.category = category;
                         extensions.selected = 0;
                         extensions.confirmation = None;
+                        extensions.search_focused = false;
                     }
                     outcome.repaint = true;
                 } else if super::contains(self.hits.extensions_search, point) {
                     if let Some(ClientShellOverlay::Extensions(extensions)) = self.overlay.as_mut()
                     {
                         extensions.search_focused = true;
+                        extensions.confirmation = None;
+                        extensions.confirmation_extension = None;
                     }
                     outcome.repaint = true;
                 } else if let Some((_, extension_index)) = self
@@ -1659,6 +1673,7 @@ impl ClientShellState {
                         {
                             extensions.selected = filtered_position;
                             extensions.confirmation = None;
+                            extensions.search_focused = false;
                         }
                     }
                     outcome.repaint = true;

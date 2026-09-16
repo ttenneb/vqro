@@ -1,5 +1,7 @@
 use std::fs::OpenOptions;
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use tracing::warn;
 
@@ -14,17 +16,17 @@ pub fn manifest_available(plugin: &InstalledPluginInfo) -> bool {
         .any(|warning| warning.starts_with(MANIFEST_UNAVAILABLE_WARNING_PREFIX))
 }
 const REGISTRY_LOCK_FILE: &str = ".plugins.lock";
+static NEXT_REGISTRY_TEMP_ID: AtomicU64 = AtomicU64::new(1);
 
 fn registry_path() -> PathBuf {
     crate::config::config_dir().join("plugins.json")
 }
 
-fn registry_lock_path() -> PathBuf {
-    crate::config::config_dir().join(REGISTRY_LOCK_FILE)
-}
-
-fn with_registry_lock<T>(operation: impl FnOnce() -> std::io::Result<T>) -> std::io::Result<T> {
-    let lock_path = registry_lock_path();
+fn with_registry_lock<T>(
+    operation: impl FnOnce(&Path) -> std::io::Result<T>,
+) -> std::io::Result<T> {
+    let target = crate::platform::resolve_write_target(&registry_path())?;
+    let lock_path = target.with_extension("json.lock");
     if let Some(parent) = lock_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -35,56 +37,46 @@ fn with_registry_lock<T>(operation: impl FnOnce() -> std::io::Result<T>) -> std:
         .write(true)
         .open(lock_path)?;
     lock.lock()?;
-    operation()
+    operation(&target)
 }
 
-// Resolve the file link before replacing it, including a missing target in a
-// stow-managed directory. Keep this separate from session persistence, which
-// has its own write/error behavior.
-fn resolve_write_target(path: &Path) -> std::io::Result<PathBuf> {
-    let mut target = path.to_path_buf();
-    for _ in 0..40 {
-        let metadata = match std::fs::symlink_metadata(&target) {
-            Ok(metadata) => metadata,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(target),
-            Err(err) => return Err(err),
-        };
-        if !metadata.file_type().is_symlink() {
-            return Ok(target);
-        }
-        let link = std::fs::read_link(&target)?;
-        target = if link.is_absolute() {
-            link
-        } else {
-            target.parent().unwrap_or_else(|| Path::new(".")).join(link)
-        };
-    }
-    Err(std::io::Error::other("too many plugin registry symlinks"))
-}
-
+#[cfg(test)]
 fn save_json_to_path<T: serde::Serialize + ?Sized>(path: &Path, value: &T) -> std::io::Result<()> {
-    let target = resolve_write_target(path)?;
-    let path = target.as_path();
+    let target = crate::platform::resolve_write_target(path)?;
+    save_json_to_resolved_path(&target, value)
+}
+
+fn save_json_to_resolved_path<T: serde::Serialize + ?Sized>(
+    path: &Path,
+    value: &T,
+) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
     let json = serde_json::to_string_pretty(value)?;
-    let tmp_path = path.with_extension("json.tmp");
-    std::fs::write(&tmp_path, json)?;
-    #[cfg(windows)]
-    if path.exists() {
-        if let Err(err) = std::fs::remove_file(path) {
-            let _ = std::fs::remove_file(&tmp_path);
-            return Err(err);
-        }
-    }
-    if let Err(err) = std::fs::rename(&tmp_path, path) {
+    let tmp_path = path.with_extension(format!(
+        "json.{}.{}.tmp",
+        std::process::id(),
+        NEXT_REGISTRY_TEMP_ID.fetch_add(1, Ordering::Relaxed)
+    ));
+    let mut file = std::fs::File::create(&tmp_path)?;
+    if let Err(error) = file
+        .write_all(json.as_bytes())
+        .and_then(|()| file.sync_all())
+    {
+        drop(file);
         let _ = std::fs::remove_file(&tmp_path);
-        return Err(err);
+        return Err(error);
+    }
+    drop(file);
+    if let Err(error) = crate::platform::durable_replace_file(&tmp_path, path) {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(error);
     }
     Ok(())
 }
 
+#[cfg(test)]
 pub fn save_to_path(path: &Path, plugins: &[InstalledPluginInfo]) -> std::io::Result<()> {
     save_json_to_path(path, plugins)
 }
@@ -92,17 +84,21 @@ pub fn save_to_path(path: &Path, plugins: &[InstalledPluginInfo]) -> std::io::Re
 pub fn update<T>(
     mutation: impl FnOnce(&mut Vec<InstalledPluginInfo>) -> T,
 ) -> std::io::Result<(T, Vec<InstalledPluginInfo>)> {
-    with_registry_lock(|| {
-        let mut plugins = load_from_path_strict(&registry_path())?;
+    with_registry_lock(|path| {
+        let mut plugins = load_from_path_strict(path)?;
         let result = mutation(&mut plugins);
-        plugins.sort_by(|left, right| left.plugin_id.cmp(&right.plugin_id));
-        save_to_path(&registry_path(), &plugins)?;
+        plugins.sort_by(|left, right| {
+            left.load_order
+                .cmp(&right.load_order)
+                .then_with(|| left.plugin_id.cmp(&right.plugin_id))
+        });
+        save_json_to_resolved_path(path, &plugins)?;
         Ok((result, plugins))
     })
 }
 
 pub fn try_load() -> std::io::Result<Vec<InstalledPluginInfo>> {
-    with_registry_lock(|| load_from_path_strict(&registry_path()))
+    with_registry_lock(load_from_path_strict)
 }
 
 /// Load the global registry. Returns an empty vec on failure so a corrupt or
@@ -133,8 +129,26 @@ fn load_from_path_strict(path: &Path) -> std::io::Result<Vec<InstalledPluginInfo
         return Ok(Vec::new());
     }
     let content = std::fs::read_to_string(path)?;
-    serde_json::from_str::<Vec<InstalledPluginInfo>>(&content)
-        .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))
+    let mut entries = serde_json::from_str::<Vec<InstalledPluginInfo>>(&content)
+        .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?;
+    normalize_load_order(&mut entries);
+    Ok(entries)
+}
+
+fn normalize_load_order(entries: &mut [InstalledPluginInfo]) {
+    let mut next = entries
+        .iter()
+        .map(|entry| entry.load_order)
+        .max()
+        .unwrap_or(0);
+    let mut seen = std::collections::BTreeSet::new();
+    for entry in entries {
+        if entry.load_order == 0 || !seen.insert(entry.load_order) {
+            next = next.saturating_add(1).max(1);
+            entry.load_order = next;
+            seen.insert(entry.load_order);
+        }
+    }
 }
 
 /// Re-read each entry's manifest from disk using the provided reload function.
@@ -151,6 +165,7 @@ pub fn reload_manifests(
         match reload_fn(&entry.manifest_path, entry.enabled) {
             Ok(mut fresh) => {
                 fresh.enabled = entry.enabled;
+                fresh.load_order = entry.load_order;
                 fresh.source = entry.source.clone();
                 *entry = fresh;
             }
@@ -191,6 +206,7 @@ mod tests {
             manifest_path: format!("/tmp/{id}/herdr-plugin.toml"),
             plugin_root: format!("/tmp/{id}"),
             enabled: true,
+            load_order: 0,
             platforms: None,
             build: vec![],
             startup: vec![],
@@ -216,6 +232,21 @@ mod tests {
         let ids: Vec<_> = loaded.iter().map(|p| p.plugin_id.as_str()).collect();
         assert!(ids.contains(&"example.a"));
         assert!(ids.contains(&"example.b"));
+    }
+
+    #[test]
+    fn legacy_registry_gets_deterministic_load_order() {
+        let path = temp_registry_path("legacy-load-order");
+        let mut first = sample_plugin("example.a");
+        let mut second = sample_plugin("example.b");
+        first.load_order = 0;
+        second.load_order = 0;
+        save_to_path(&path, &[first, second]).unwrap();
+
+        let loaded = load_from_path(&path);
+
+        assert_eq!(loaded[0].load_order, 1);
+        assert_eq!(loaded[1].load_order, 2);
     }
 
     #[test]
@@ -279,6 +310,7 @@ mod tests {
                 manifest_path: "/tmp/example.reload/herdr-plugin.toml".to_string(),
                 plugin_root: "/tmp/example.reload".to_string(),
                 enabled: true, // caller would pass stored enabled; fresh parse returns true
+                load_order: 0,
                 platforms: None,
                 build: vec![],
                 startup: vec![],
@@ -408,6 +440,7 @@ mod tests {
         let target = base.join("dotfiles/plugins.json");
         let mut existing = sample_plugin("example.existing");
         existing.enabled = false;
+        existing.load_order = 1;
         existing.source.kind = crate::api::schema::PluginSourceKind::Github;
         existing.source.owner = Some("example".into());
         save_to_path(&target, &[existing.clone()]).unwrap();

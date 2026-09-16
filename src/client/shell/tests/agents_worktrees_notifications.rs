@@ -196,6 +196,7 @@ fn typed_repository_projection_drives_space_identity_git_context_and_compact_cou
             label: "custom repository".into(),
             repository_path: Some("/repo/custom".into()),
             web_url: Some("https://github.com/example/custom".into()),
+            durable_identity: Some("https://github.com/example/custom".into()),
             checkouts: vec![
                 crate::protocol::endpoint::ClientShellRepositoryCheckout {
                     workspace_id: "ws_1".into(),
@@ -455,6 +456,7 @@ fn typed_single_checkout_repository_is_still_a_repository_space() {
             label: "stable repository label".into(),
             repository_path: None,
             web_url: None,
+            durable_identity: None,
             checkouts: vec![crate::protocol::endpoint::ClientShellRepositoryCheckout {
                 workspace_id: "ws_1".into(),
                 checkout_path: None,
@@ -572,6 +574,7 @@ fn spaces_document_controls_workspace_order_labels_and_hierarchy() {
             label: "native repository".into(),
             repository_path: None,
             web_url: None,
+            durable_identity: None,
             checkouts: vec![
                 crate::protocol::endpoint::ClientShellRepositoryCheckout {
                     workspace_id: "ws_1".into(),
@@ -800,6 +803,7 @@ fn typed_repository_drag_moves_all_checkouts_when_visual_root_is_linked() {
             label: "repo".into(),
             repository_path: None,
             web_url: None,
+            durable_identity: None,
             checkouts: vec![
                 crate::protocol::endpoint::ClientShellRepositoryCheckout {
                     workspace_id: "ws_1".into(),

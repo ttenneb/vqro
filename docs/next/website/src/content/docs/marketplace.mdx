@@ -7,6 +7,40 @@ The Herdr plugin marketplace indexes community plugins. Browse it at
 [herdr.dev/plugins](/plugins/). The index covers public GitHub repositories; it
 is not a reviewed catalog.
 
+## Vqro Extensions
+
+Vqro also ships a native, host-owned Extensions marketplace. Open the main menu
+and choose **Extensions**. **Browse** searches a checked-in curated index and
+filters it by category; **Agents** is one category rather than a separate
+settings surface. Select an entry to inspect its repository, package type,
+version, details, and pinned source revision when the curated entry supplies one.
+
+Installation, removal, and permanent data deletion require separate host
+confirmations. Update and rollback controls appear only when Vqro retains the
+corresponding digest-verified artifacts; unsupported actions stay hidden. A
+successful install enables the extension immediately. If activation fails, Vqro keeps the package installed but disabled
+and displays the activation error so it can be retried. Removing an extension
+retains its config and state; use the separate **delete data** action only after
+removal when those files should be destroyed.
+
+Enablement and load order are global to the server user. Extensions load in the
+shown order and later contributions win deterministic conflicts. Collections
+can override global enablement for an individual repository's tab documents by
+its durable repository identity, so linked worktrees share the same override;
+Vqro does not project that override onto other repositories or clients.
+Extensions without a repository-scoped contribution do not expose this action.
+Built-in extensions use the same lifecycle
+and are removable. Vqro initially marks the packages for Collections, Spaces,
+Delegation, Agent Status, Pi, Claude Code, and Codex installed and enabled; the other bundled agent
+integrations remain available in Browse. Agent cards report the separately
+reconciled adapter deployment state; an enabled marketplace package does not
+claim that an adapter managed outside Vqro's namespace was installed.
+
+Extensions execute as trusted same-user code. They are not sandboxed. New
+marketplace methods are optional endpoint capabilities, so an older compatible
+server disables only marketplace actions and does not affect attached PTYs or
+the generation-1 client bridge.
+
 ## Browse plugins
 
 The [marketplace](/plugins/) lists public repositories tagged with the GitHub

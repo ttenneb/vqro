@@ -128,6 +128,12 @@ impl ClientShellState {
     }
 
     fn prepare_committed_text(&mut self, text: &str, outcome: &mut ClientShellInput) -> bool {
+        if matches!(self.overlay, Some(ClientShellOverlay::Extensions(_))) {
+            if self.insert_overlay_text(text) {
+                outcome.repaint = true;
+            }
+            return true;
+        }
         if !(self.mode == ClientShellMode::Navigate && self.workspace_preview_action_blocked())
             && self.insert_copy_search_text(text)
         {

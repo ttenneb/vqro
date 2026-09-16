@@ -74,6 +74,15 @@ pub(crate) const CLIENT_SHELL_OPTIONAL_METHODS: &[&str] = &[
     "delegation.reparent",
     "delegation.root",
     "delegation.tree",
+    "extension.data.delete",
+    "extension.enable",
+    "extension.install",
+    "extension.list",
+    "extension.remove",
+    "extension.reorder",
+    "extension.repository_override.set",
+    "extension.rollback",
+    "extension.update",
     "host.document.action",
     "pane.telemetry",
 ];
@@ -295,7 +304,7 @@ mod tests {
         }
     }
 
-    fn endpoint_method_shape_digests() -> BTreeMap<String, String> {
+    fn endpoint_method_shape_digests(methods: &[&str]) -> BTreeMap<String, String> {
         let schema = serde_json::to_value(schemars::schema_for!(crate::api::schema::Request))
             .expect("request schema");
         let definitions = schema
@@ -308,7 +317,7 @@ mod tests {
             .expect("request method branches");
         let mut digests = BTreeMap::new();
 
-        for method in CLIENT_SHELL_METHODS {
+        for method in methods {
             let branch = branches
                 .iter()
                 .find(|branch| {
@@ -350,7 +359,7 @@ mod tests {
             "/tests/fixtures/endpoint-method-shapes-v1.json"
         )))
         .expect("endpoint method shape fixture");
-        let mut actual = endpoint_method_shape_digests();
+        let mut actual = endpoint_method_shape_digests(CLIENT_SHELL_METHODS);
         // Freeze the additive method separately without rewriting the published fixture.
         assert_eq!(
             actual.remove("pane.link.resolve").as_deref(),
@@ -361,6 +370,29 @@ mod tests {
             actual, expected,
             "an existing endpoint method changed shape; add load-bearing behavior as a new advertised method or explicitly gate new fields"
         );
+    }
+
+    #[test]
+    fn extension_optional_method_shapes_are_frozen() {
+        let methods = CLIENT_SHELL_OPTIONAL_METHODS
+            .iter()
+            .copied()
+            .filter(|method| method.starts_with("extension."))
+            .collect::<Vec<_>>();
+        let actual = endpoint_method_shape_digests(&methods);
+        let expected: BTreeMap<String, String> = serde_json::from_value(serde_json::json!({
+            "extension.data.delete": "d059ee1c7131f2009ef6fb90f4396f2584f1cfc29f06f01045c7913c0775cb0d",
+            "extension.enable": "84c5c02436e0b3495bbdb8c2cc7e169a5e1ae3fefc69b6d3944faa5c22042d6e",
+            "extension.install": "224b706f76947f2b332ff4c11194f0e85ba9e24ee50d23f9c5b7577519ca56b2",
+            "extension.list": "d1e09d69befbe1bfad6145471f0b38f8dd16507b37c3fac1fe7b916d674e1e1c",
+            "extension.remove": "0f39aa9b91aaf0fd942d34639a3dc7df1e76d0e1fe2c096f88111366c1378d52",
+            "extension.reorder": "c1f1a45766e14655fb746445ad81a0acce5c33259f3497799f329d2549698dda",
+            "extension.repository_override.set": "a1daa4a155454b4eece1e3f056c2b049075729218c40b4576e2a6fe883c65d62",
+            "extension.rollback": "5a04e0a01ad2874c134bb068574574cb13454907879752119935b10b9dff2572",
+            "extension.update": "a913b2751ae43da2613ee3a24b8d6aa20b40cec109b29ebf5969502216928682"
+        }))
+        .expect("extension method shape fixture");
+        assert_eq!(actual, expected);
     }
 
     #[test]
@@ -426,6 +458,9 @@ mod tests {
                 content_revision: None,
                 offset_from_bottom: None,
             }
+        )));
+        assert!(supports_client_shell_method(&Method::ExtensionList(
+            crate::api::schema::ExtensionListParams::default()
         )));
     }
 

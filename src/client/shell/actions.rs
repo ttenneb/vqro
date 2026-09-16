@@ -1064,8 +1064,8 @@ impl ClientShellState {
             | PendingEndpointKind::IntegrationInstall) => {
                 return self.handle_settings_endpoint_result(kind, result);
             }
-            kind
-            @ (PendingEndpointKind::ExtensionList | PendingEndpointKind::ExtensionMutation) => {
+            kind @ (PendingEndpointKind::ExtensionList(_)
+            | PendingEndpointKind::ExtensionMutation(_)) => {
                 return self.handle_extensions_endpoint_result(kind, result);
             }
             kind => {

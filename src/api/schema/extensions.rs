@@ -52,6 +52,12 @@ pub struct ExtensionUpdateParams {
 pub struct ExtensionInfo {
     pub id: String,
     pub repository: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_commit: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manifest_sha256: Option<String>,
     pub name: String,
     pub summary: String,
     pub details: String,
@@ -59,10 +65,18 @@ pub struct ExtensionInfo {
     pub package_kind: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub integration_target: Option<String>,
+    /// Deployment state of an agent adapter, distinct from package install state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub integration_status: Option<String>,
     pub available_version: String,
     pub active_version: String,
     pub installed: bool,
     pub enabled: bool,
+    /// Whether this host can perform a fresh installation of the package.
+    #[serde(default)]
+    pub install_supported: bool,
+    #[serde(default)]
+    pub repository_override_supported: bool,
     pub load_order: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_version: Option<String>,

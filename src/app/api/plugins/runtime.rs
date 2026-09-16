@@ -192,7 +192,11 @@ impl App {
             })
             .cloned()
             .collect::<Vec<_>>();
-        plugins.sort_by(|left, right| left.plugin_id.cmp(&right.plugin_id));
+        plugins.sort_by(|left, right| {
+            left.load_order
+                .cmp(&right.load_order)
+                .then_with(|| left.plugin_id.cmp(&right.plugin_id))
+        });
         for plugin in plugins {
             for startup in plugin.startup.clone() {
                 if ensure_platform_supported(

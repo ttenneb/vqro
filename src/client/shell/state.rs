@@ -517,6 +517,7 @@ pub(super) enum ClientExtensionConfirmation {
 
 #[derive(Debug)]
 pub(super) struct ClientExtensionsOverlay {
+    pub(super) generation: u64,
     pub(super) tab: ClientExtensionsTab,
     pub(super) query: String,
     pub(super) search_focused: bool,
@@ -526,6 +527,8 @@ pub(super) struct ClientExtensionsOverlay {
     pub(super) loading: bool,
     pub(super) mutating: bool,
     pub(super) confirmation: Option<ClientExtensionConfirmation>,
+    pub(super) confirmation_extension: Option<Box<crate::api::schema::ExtensionInfo>>,
+    pub(super) repository_context: Option<String>,
     pub(super) message: Option<String>,
 }
 
@@ -853,8 +856,8 @@ pub(super) enum PendingEndpointKind {
     ReloadConfig,
     IntegrationList,
     IntegrationInstall,
-    ExtensionList,
-    ExtensionMutation,
+    ExtensionList(u64),
+    ExtensionMutation(u64),
     PrepareWorktreeCreate {
         workspace_id: String,
     },

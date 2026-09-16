@@ -28,6 +28,23 @@ pub(super) fn render_extensions_overlay(
     let close = Rect::new(inner.right().saturating_sub(11), inner.y, 10, 1);
     button(buffer, close, " esc close ", muted.bg(palette.surface0));
 
+    if inner.width < 72 || inner.height < 14 {
+        put_text(
+            buffer,
+            inner.x + 1,
+            inner.y + 2,
+            inner.width.saturating_sub(2),
+            "Make the terminal larger to manage extensions.",
+            muted,
+        );
+        return Some(OverlayRender {
+            area: outer,
+            cancel: close,
+            extensions_popup: outer,
+            ..OverlayRender::default()
+        });
+    }
+
     let browse = Rect::new(inner.x + 1, inner.y + 2, 10, 1);
     let installed = Rect::new(inner.x + 12, inner.y + 2, 12, 1);
     for (rect, label, active) in [
@@ -196,10 +213,38 @@ pub(super) fn render_extensions_overlay(
             details.x + 1,
             y,
             details.width.saturating_sub(2),
-            &format!("{} · v{}", extension.package_kind, extension.active_version),
+            &if extension.installed {
+                format!(
+                    "{} · v{} · load {} (later wins)",
+                    extension.package_kind,
+                    extension.active_version,
+                    extension.load_order.saturating_add(1)
+                )
+            } else {
+                format!(
+                    "{} · v{} · not installed",
+                    extension.package_kind, extension.available_version
+                )
+            },
             muted,
         );
-        y += 2;
+        y += 1;
+        if let Some(status) = extension.integration_status.as_deref() {
+            put_text(
+                buffer,
+                details.x + 1,
+                y,
+                details.width.saturating_sub(2),
+                &format!("adapter: {}", status.replace('_', " ")),
+                if status == "current" {
+                    base.fg(palette.green)
+                } else {
+                    base.fg(palette.yellow)
+                },
+            );
+            y += 1;
+        }
+        y += 1;
         for line in wrap_text(&extension.summary, details.width.saturating_sub(2)) {
             if y >= details.bottom() {
                 break;
@@ -236,9 +281,39 @@ pub(super) fn render_extensions_overlay(
                 details.x + 1,
                 y,
                 details.width.saturating_sub(2),
-                &extension.repository,
+                &match extension.source_commit.as_deref() {
+                    Some(commit) => format!("{} @ {}", extension.repository, commit),
+                    None => extension.repository.clone(),
+                },
                 base.fg(palette.mauve),
             );
+        }
+        if extension.repository_override_supported {
+            if let Some(repository_id) = extensions.repository_context.as_deref() {
+                let override_enabled = extension
+                    .repository_overrides
+                    .iter()
+                    .find(|override_info| override_info.repository_id == repository_id)
+                    .map(|override_info| override_info.enabled);
+                let effective = override_enabled.unwrap_or(extension.enabled);
+                put_text(
+                    buffer,
+                    details.x + 1,
+                    details.bottom().saturating_sub(3),
+                    details.width.saturating_sub(2),
+                    &format!(
+                        "repository: {} · {} ({})",
+                        repository_id,
+                        if effective { "on" } else { "off" },
+                        if override_enabled.is_some() {
+                            "override"
+                        } else {
+                            "global"
+                        }
+                    ),
+                    base.fg(palette.teal),
+                );
+            }
         }
         if let Some(error) = extension.activation_error.as_deref() {
             put_text(
@@ -258,33 +333,53 @@ pub(super) fn render_extensions_overlay(
         " Working…"
     } else if let Some(confirmation) = extensions.confirmation {
         match confirmation {
-            ClientExtensionConfirmation::Install => {
-                " Install and enable this extension?  enter confirm · esc cancel"
-            }
+            ClientExtensionConfirmation::Install => " Install and enable this extension?",
             ClientExtensionConfirmation::Remove => {
-                " Remove this extension? Config and state are retained.  enter confirm · esc cancel"
+                " Remove this extension? Config and state are retained."
             }
             ClientExtensionConfirmation::DeleteData => {
-                " Permanently delete extension config and state?  enter confirm · esc cancel"
+                " Permanently delete extension config and state?"
             }
-            ClientExtensionConfirmation::Update => {
-                " Approve this extension update?  enter confirm · esc cancel"
-            }
-            ClientExtensionConfirmation::Rollback => {
-                " Roll back to the previous version?  enter confirm · esc cancel"
-            }
+            ClientExtensionConfirmation::Update => " Approve this extension update?",
+            ClientExtensionConfirmation::Rollback => " Roll back to the previous version?",
         }
+    } else if extensions
+        .selected_extension()
+        .is_some_and(|extension| !extension.installed && !extension.install_supported)
+    {
+        " Installation is unavailable for this curated entry."
     } else {
-        " enter install/toggle · r remove · x delete data · u update · b rollback · c category"
+        " [ ] order · o repository · r remove · x data · u update · b rollback · c category"
+    };
+    let unsupported_install = extensions
+        .selected_extension()
+        .is_some_and(|extension| !extension.installed && !extension.install_supported);
+    let action = if extensions.mutating || unsupported_install || footer.width < 18 {
+        Rect::default()
+    } else {
+        Rect::new(footer.right().saturating_sub(17), footer.y, 17, 1)
     };
     put_text(
         buffer,
         footer.x,
         footer.y,
-        footer.width,
+        action.x.saturating_sub(footer.x).min(footer.width),
         footer_text,
         muted.bg(palette.surface0),
     );
+    if !action.is_empty() {
+        let label = if extensions.confirmation.is_some() {
+            " enter confirm "
+        } else if extensions
+            .selected_extension()
+            .is_some_and(|extension| extension.installed)
+        {
+            " enter toggle "
+        } else {
+            " enter install "
+        };
+        button(buffer, action, label, selected_style);
+    }
     if let Some(message) = extensions.message.as_deref() {
         put_text(
             buffer,
@@ -307,7 +402,7 @@ pub(super) fn render_extensions_overlay(
 
     Some(OverlayRender {
         area: outer,
-        primary: footer,
+        primary: action,
         cancel: close,
         extensions_popup: outer,
         extensions_tabs: vec![

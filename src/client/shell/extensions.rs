@@ -5,7 +5,10 @@ const EXTENSION_CATEGORIES: [&str; 3] = ["Agents", "Workflow", "Interface"];
 
 impl ClientShellState {
     pub(super) fn open_extensions_overlay(&mut self, outcome: &mut ClientShellInput) {
+        let repository_context = self.focused_repository_id();
+        let generation = self.next_request_id;
         self.overlay = Some(ClientShellOverlay::Extensions(ClientExtensionsOverlay {
+            generation,
             tab: ClientExtensionsTab::Browse,
             query: String::new(),
             search_focused: false,
@@ -15,13 +18,15 @@ impl ClientShellState {
             loading: true,
             mutating: false,
             confirmation: None,
+            confirmation_extension: None,
+            repository_context,
             message: None,
         }));
         if !self.push_endpoint_method_with_kind(
             crate::api::schema::Method::ExtensionList(
                 crate::api::schema::ExtensionListParams::default(),
             ),
-            PendingEndpointKind::ExtensionList,
+            PendingEndpointKind::ExtensionList(generation),
             outcome,
         ) {
             if let Some(ClientShellOverlay::Extensions(extensions)) = self.overlay.as_mut() {
@@ -75,19 +80,52 @@ impl ClientShellState {
         }
     }
 
+    fn focused_repository_id(&self) -> Option<String> {
+        let workspace_id = self.snapshot.as_deref()?.focused_workspace_id.as_deref()?;
+        self.structure
+            .as_deref()?
+            .repositories
+            .iter()
+            .find(|repository| {
+                repository
+                    .checkouts
+                    .iter()
+                    .any(|checkout| checkout.workspace_id == workspace_id)
+            })
+            .and_then(|repository| repository.durable_identity.clone())
+    }
+
+    fn set_extension_confirmation(&mut self, confirmation: ClientExtensionConfirmation) {
+        let extension = self.selected_extension();
+        if let Some(ClientShellOverlay::Extensions(extensions)) = self.overlay.as_mut() {
+            extensions.confirmation = extension.as_ref().map(|_| confirmation);
+            extensions.confirmation_extension = extension.map(Box::new);
+            extensions.search_focused = false;
+        }
+    }
+
     fn queue_extension_mutation(
         &mut self,
         method: crate::api::schema::Method,
         outcome: &mut ClientShellInput,
     ) {
+        let generation = match self.overlay.as_ref() {
+            Some(ClientShellOverlay::Extensions(extensions)) if !extensions.loading => {
+                extensions.generation
+            }
+            Some(ClientShellOverlay::Extensions(_)) => return,
+            _ => return,
+        };
         if let Some(ClientShellOverlay::Extensions(extensions)) = self.overlay.as_mut() {
             extensions.mutating = true;
             extensions.confirmation = None;
+            extensions.confirmation_extension = None;
+            extensions.search_focused = false;
             extensions.message = None;
         }
         if !self.push_endpoint_method_with_kind(
             method,
-            PendingEndpointKind::ExtensionMutation,
+            PendingEndpointKind::ExtensionMutation(generation),
             outcome,
         ) {
             if let Some(ClientShellOverlay::Extensions(extensions)) = self.overlay.as_mut() {
@@ -99,13 +137,17 @@ impl ClientShellState {
     }
 
     pub(super) fn confirm_extension_action(&mut self, outcome: &mut ClientShellInput) {
-        let Some(extension) = self.selected_extension() else {
+        let (confirmation, confirmed_extension) = match self.overlay.as_ref() {
+            Some(ClientShellOverlay::Extensions(extensions)) => (
+                extensions.confirmation,
+                extensions.confirmation_extension.clone(),
+            ),
+            _ => (None, None),
+        };
+        let Some(extension) = confirmed_extension else {
             return;
         };
-        let confirmation = match self.overlay.as_ref() {
-            Some(ClientShellOverlay::Extensions(extensions)) => extensions.confirmation,
-            _ => None,
-        };
+        let extension = *extension;
         let method = match confirmation {
             Some(ClientExtensionConfirmation::Install) => {
                 crate::api::schema::Method::ExtensionInstall(
@@ -158,9 +200,15 @@ impl ClientShellState {
             return;
         };
         if !extension.installed {
-            if let Some(ClientShellOverlay::Extensions(extensions)) = self.overlay.as_mut() {
-                extensions.confirmation = Some(ClientExtensionConfirmation::Install);
+            if !extension.install_supported {
+                if let Some(ClientShellOverlay::Extensions(extensions)) = self.overlay.as_mut() {
+                    extensions.message =
+                        Some("Installation is not supported for this curated entry.".into());
+                }
+                outcome.repaint = true;
+                return;
             }
+            self.set_extension_confirmation(ClientExtensionConfirmation::Install);
             outcome.repaint = true;
             return;
         }
@@ -197,11 +245,15 @@ impl ClientShellState {
             } else if confirming {
                 if let Some(ClientShellOverlay::Extensions(extensions)) = self.overlay.as_mut() {
                     extensions.confirmation = None;
+                    extensions.confirmation_extension = None;
                 }
             } else {
                 self.overlay = None;
             }
             outcome.repaint = true;
+            return true;
+        }
+        if self.hits.extensions_popup.is_empty() || self.hits.extensions_tabs.is_empty() {
             return true;
         }
         if confirming {
@@ -230,7 +282,11 @@ impl ClientShellState {
                 {
                     if let Some(ClientShellOverlay::Extensions(extensions)) = self.overlay.as_mut()
                     {
-                        extensions.query.push(character);
+                        let text = key
+                            .generated_text
+                            .clone()
+                            .unwrap_or_else(|| character.to_string());
+                        extensions.query.push_str(&text);
                         extensions.selected = 0;
                     }
                 }
@@ -272,10 +328,7 @@ impl ClientShellState {
                     .selected_extension()
                     .is_some_and(|extension| extension.installed)
                 {
-                    if let Some(ClientShellOverlay::Extensions(extensions)) = self.overlay.as_mut()
-                    {
-                        extensions.confirmation = Some(ClientExtensionConfirmation::Remove);
-                    }
+                    self.set_extension_confirmation(ClientExtensionConfirmation::Remove);
                 }
             }
             KeyCode::Char('x') if modifiers.is_empty() => {
@@ -283,32 +336,91 @@ impl ClientShellState {
                     .selected_extension()
                     .is_some_and(|extension| !extension.installed)
                 {
-                    if let Some(ClientShellOverlay::Extensions(extensions)) = self.overlay.as_mut()
-                    {
-                        extensions.confirmation = Some(ClientExtensionConfirmation::DeleteData);
-                    }
+                    self.set_extension_confirmation(ClientExtensionConfirmation::DeleteData);
+                }
+            }
+            KeyCode::Char('[') if modifiers.is_empty() => {
+                if let Some(extension) = self
+                    .selected_extension()
+                    .filter(|extension| extension.installed && extension.load_order > 0)
+                {
+                    self.queue_extension_mutation(
+                        crate::api::schema::Method::ExtensionReorder(
+                            crate::api::schema::ExtensionReorderParams {
+                                repository: extension.repository,
+                                index: extension.load_order.saturating_sub(1),
+                            },
+                        ),
+                        outcome,
+                    );
+                }
+            }
+            KeyCode::Char(']') if modifiers.is_empty() => {
+                if let Some(extension) = self
+                    .selected_extension()
+                    .filter(|extension| extension.installed)
+                {
+                    self.queue_extension_mutation(
+                        crate::api::schema::Method::ExtensionReorder(
+                            crate::api::schema::ExtensionReorderParams {
+                                repository: extension.repository,
+                                index: extension.load_order.saturating_add(1),
+                            },
+                        ),
+                        outcome,
+                    );
+                }
+            }
+            KeyCode::Char('o') if modifiers.is_empty() => {
+                if let (Some(extension), Some(repository_id)) = (
+                    self.selected_extension().filter(|extension| {
+                        extension.installed && extension.repository_override_supported
+                    }),
+                    self.overlay.as_ref().and_then(|overlay| match overlay {
+                        ClientShellOverlay::Extensions(extensions) => {
+                            extensions.repository_context.clone()
+                        }
+                        _ => None,
+                    }),
+                ) {
+                    let enabled = extension
+                        .repository_overrides
+                        .iter()
+                        .find(|override_info| override_info.repository_id == repository_id)
+                        .map_or(Some(!extension.enabled), |_| None);
+                    self.queue_extension_mutation(
+                        crate::api::schema::Method::ExtensionRepositoryOverrideSet(
+                            crate::api::schema::ExtensionRepositoryOverrideParams {
+                                repository: extension.repository,
+                                repository_id,
+                                enabled,
+                            },
+                        ),
+                        outcome,
+                    );
+                } else if let Some(ClientShellOverlay::Extensions(extensions)) =
+                    self.overlay.as_mut()
+                {
+                    extensions.message = Some(
+                        "Repository overrides require an installed bundled extension and a focused repository."
+                            .into(),
+                    );
                 }
             }
             KeyCode::Char('u') if modifiers.is_empty() => {
                 if self.selected_extension().is_some_and(|extension| {
                     extension.installed && extension.available_version != extension.active_version
                 }) {
-                    if let Some(ClientShellOverlay::Extensions(extensions)) = self.overlay.as_mut()
-                    {
-                        extensions.confirmation = Some(ClientExtensionConfirmation::Update);
-                    }
+                    self.set_extension_confirmation(ClientExtensionConfirmation::Update);
                 }
             }
-            KeyCode::Char('b') if modifiers.is_empty() => {
-                if self
-                    .selected_extension()
-                    .is_some_and(|extension| extension.rollback_version.is_some())
-                {
-                    if let Some(ClientShellOverlay::Extensions(extensions)) = self.overlay.as_mut()
-                    {
-                        extensions.confirmation = Some(ClientExtensionConfirmation::Rollback);
-                    }
-                }
+            KeyCode::Char('b')
+                if modifiers.is_empty()
+                    && self
+                        .selected_extension()
+                        .is_some_and(|extension| extension.rollback_version.is_some()) =>
+            {
+                self.set_extension_confirmation(ClientExtensionConfirmation::Rollback);
             }
             _ => {}
         }
@@ -322,15 +434,35 @@ impl ClientShellState {
         result: Result<crate::api::schema::ResponseResult, ClientShellEndpointError>,
     ) -> (bool, Vec<ClientShellAction>) {
         match kind {
-            PendingEndpointKind::ExtensionList => {
+            PendingEndpointKind::ExtensionList(generation) => {
+                if !matches!(
+                    self.overlay,
+                    Some(ClientShellOverlay::Extensions(ClientExtensionsOverlay {
+                        generation: current,
+                        ..
+                    })) if current == generation
+                ) {
+                    return (true, Vec::new());
+                }
                 if let Some(ClientShellOverlay::Extensions(extensions)) = self.overlay.as_mut() {
                     extensions.loading = false;
+                    extensions.mutating = false;
                     match result {
                         Ok(crate::api::schema::ResponseResult::ExtensionList {
                             extensions: listed,
                         }) => {
+                            let selected_repository = extensions
+                                .selected_extension()
+                                .map(|extension| extension.repository.clone());
                             extensions.extensions = listed;
-                            extensions.selected = 0;
+                            extensions.selected = selected_repository
+                                .as_ref()
+                                .and_then(|repository| {
+                                    extensions.filtered_indices().iter().position(|index| {
+                                        extensions.extensions[*index].repository == *repository
+                                    })
+                                })
+                                .unwrap_or(0);
                             extensions.message = None;
                         }
                         Ok(_) => extensions.message = Some("Unexpected extension response.".into()),
@@ -339,9 +471,18 @@ impl ClientShellState {
                 }
                 (true, Vec::new())
             }
-            PendingEndpointKind::ExtensionMutation => {
+            PendingEndpointKind::ExtensionMutation(generation) => {
+                if !matches!(
+                    self.overlay,
+                    Some(ClientShellOverlay::Extensions(ClientExtensionsOverlay {
+                        generation: current,
+                        ..
+                    })) if current == generation
+                ) {
+                    return (true, Vec::new());
+                }
+                let mut refresh = false;
                 if let Some(ClientShellOverlay::Extensions(extensions)) = self.overlay.as_mut() {
-                    extensions.mutating = false;
                     match result {
                         Ok(crate::api::schema::ResponseResult::ExtensionChanged { extension }) => {
                             if let Some(existing) = extensions
@@ -352,9 +493,11 @@ impl ClientShellState {
                                 *existing = extension;
                             }
                             extensions.message = Some("Extension updated.".into());
+                            refresh = true;
                         }
                         Ok(crate::api::schema::ResponseResult::ExtensionDataDeleted { .. }) => {
                             extensions.message = Some("Extension data deleted.".into());
+                            refresh = true;
                         }
                         Ok(_) => extensions.message = Some("Unexpected extension response.".into()),
                         Err(error) => extensions.message = Some(error.message),
@@ -362,7 +505,40 @@ impl ClientShellState {
                     let count = extensions.filtered_indices().len();
                     extensions.selected = extensions.selected.min(count.saturating_sub(1));
                 }
-                (true, Vec::new())
+                let actions = if refresh {
+                    let mut deferred = ClientShellInput::default();
+                    if let Some(ClientShellOverlay::Extensions(extensions)) = self.overlay.as_mut()
+                    {
+                        extensions.loading = true;
+                    }
+                    let queued = self.push_endpoint_method_with_kind(
+                        crate::api::schema::Method::ExtensionList(
+                            crate::api::schema::ExtensionListParams::default(),
+                        ),
+                        PendingEndpointKind::ExtensionList(generation),
+                        &mut deferred,
+                    );
+                    if !queued {
+                        if let Some(ClientShellOverlay::Extensions(extensions)) =
+                            self.overlay.as_mut()
+                        {
+                            extensions.loading = false;
+                            extensions.mutating = false;
+                            extensions.message = Some(
+                                "Extension changed, but this server no longer supports refresh."
+                                    .into(),
+                            );
+                        }
+                    }
+                    deferred.actions
+                } else {
+                    if let Some(ClientShellOverlay::Extensions(extensions)) = self.overlay.as_mut()
+                    {
+                        extensions.mutating = false;
+                    }
+                    Vec::new()
+                };
+                (true, actions)
             }
             _ => (false, Vec::new()),
         }

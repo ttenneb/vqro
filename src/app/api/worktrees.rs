@@ -143,6 +143,9 @@ impl App {
             canonical_path != crate::worktree::canonical_or_original(&source.source_repo_root),
             !created_workspace,
         );
+        if params.focus {
+            self.apply_bundled_extension_state();
+        }
         if let Some(label) = params.label {
             let workspace_id = self.public_workspace_id(ws_idx);
             if let Some(ws) = self.state.workspaces.get_mut(ws_idx) {
@@ -869,6 +872,7 @@ mod tests {
                 manifest_path: manifest_path.display().to_string(),
                 plugin_root: plugin_root.display().to_string(),
                 enabled: true,
+                load_order: 0,
                 platforms: None,
                 build: Vec::new(),
                 startup: Vec::new(),

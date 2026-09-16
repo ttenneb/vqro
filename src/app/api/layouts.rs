@@ -209,6 +209,7 @@ impl App {
 
         if params.focus || replace_was_active {
             self.state.switch_workspace_tab(ws_idx, new_tab_idx);
+            self.apply_bundled_extension_state();
             self.state.mode = Mode::Terminal;
         }
         self.schedule_session_save();
@@ -284,6 +285,7 @@ impl App {
         }
         if params.focus {
             self.state.switch_workspace_tab(ws_idx, tab_idx);
+            self.apply_bundled_extension_state();
             self.state.mode = Mode::Terminal;
         }
         self.state.mark_session_dirty();

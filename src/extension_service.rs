@@ -925,6 +925,10 @@ impl HostDocumentServiceCatalog {
                         continue;
                     }
                     let service = declaration.service;
+                    let priority = bundled_priorities
+                        .get(&declaration.namespace)
+                        .copied()
+                        .unwrap_or(service.priority);
                     let mut command = service.command;
                     if command.first().is_none_or(|program| program != "vqro") {
                         tracing::error!(namespace = %declaration.namespace, "bundled extension command does not target the host binary");
@@ -940,7 +944,7 @@ impl HostDocumentServiceCatalog {
                         id: declaration.namespace.clone(),
                         command,
                         cwd: std::env::current_dir().unwrap_or_default(),
-                        priority: service.priority,
+                        priority,
                         granted_capabilities: service.granted_capabilities,
                     };
                     let Ok(supervisor) = ExtensionServiceSupervisor::new(spec) else {
@@ -951,7 +955,7 @@ impl HostDocumentServiceCatalog {
                         declaration.namespace,
                         HostDocumentProvider {
                             source: service.document_source,
-                            priority: service.priority,
+                            priority,
                             generation: next_service_generation(),
                             supervisor,
                             grants,

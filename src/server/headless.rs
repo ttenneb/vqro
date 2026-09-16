@@ -3679,6 +3679,18 @@ impl HeadlessServer {
         }
         let alt_screen_read_spec = self.alt_screen_read_spec(&msg.request);
         if matches!(&msg.request.method, api::schema::Method::AgentPrompt(_)) {
+            if !self.app.bundled_extension_enabled("agent-status", None) {
+                let response = serde_json::to_string(&api::schema::ErrorResponse {
+                    id: msg.request.id,
+                    error: api::schema::ErrorBody {
+                        code: "extension_disabled".into(),
+                        message: "the required built-in extension is disabled or removed".into(),
+                    },
+                })
+                .unwrap_or_else(|_| "{}".to_owned());
+                let _ = msg.respond_to.send(response);
+                return changed;
+            }
             let deferred_changed = self
                 .app
                 .handle_deferred_agent_api_request(msg.request, msg.respond_to);
@@ -3991,6 +4003,8 @@ impl HeadlessServer {
         if self.has_app_client() {
             self.app.start_git_status_refresh_if_due(now);
         }
+
+        changed |= self.app.refresh_external_extension_state_if_due(now);
 
         if self
             .app

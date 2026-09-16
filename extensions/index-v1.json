@@ -4,84 +4,144 @@
     {
       "id": "vqro.collections",
       "repository": "ttenneb/vqro-extension-collections",
+      "source_commit": "93624cc67dc47b380e7233b60223acc1da64c47f",
+      "source_sha256": "35b8a4fb8a6b434faf15625dc8d213e1953d939cef77f5affd5cef7be0062376",
+      "manifest_sha256": "6b796bf133eae9496695616e299fd614e34ed619d73bdf99cd656902bc48e69d",
       "name": "Collections",
       "summary": "Group related terminal panes into focused agent collections.",
       "details": "The first-party Collections provider renders and controls collection membership through the public host document contract.",
       "version": "1.0.0",
-      "categories": ["Workflow", "Interface"],
-      "package": { "kind": "bundled", "provider": "collections" },
+      "categories": [
+        "Workflow",
+        "Interface"
+      ],
+      "package": {
+        "kind": "bundled",
+        "provider": "collections"
+      },
       "default_installed": true,
       "default_enabled": true
     },
     {
       "id": "vqro.spaces",
       "repository": "ttenneb/vqro-extension-spaces",
+      "source_commit": "60175817b648eef831d52e8d7a91d0bbc2ecf68a",
+      "source_sha256": "8494c036b3291df9aa7d2c626d4e463da53128eae658104546525ac8f82da8c7",
+      "manifest_sha256": "9db594d10cfe55d6564e6979fcce02886fef861618ed1d7501beb2ecbd88fb97",
       "name": "Spaces",
       "summary": "Repository-aware workspace navigation and ordering.",
       "details": "The first-party Spaces provider projects stable repositories and workspaces through host.spaces.v1.",
       "version": "1.0.0",
-      "categories": ["Workflow", "Interface"],
-      "package": { "kind": "bundled", "provider": "spaces" },
+      "categories": [
+        "Workflow",
+        "Interface"
+      ],
+      "package": {
+        "kind": "bundled",
+        "provider": "spaces"
+      },
       "default_installed": true,
       "default_enabled": true
     },
     {
       "id": "vqro.delegation",
       "repository": "ttenneb/vqro-extension-delegation",
+      "source_commit": "38100255731eeb6e0245be7d993b9372375b6c68",
+      "source_sha256": "c87f5cea404f61141869a55fb9180eb016e9c2a34e4a074d5cfd5b8596d5f992",
+      "manifest_sha256": "2239e86a7ed3e0287a844e4bc612184c26af8b0f0631cd15423863f79d3e0ca5",
       "name": "Delegation",
       "summary": "Create and manage agent delegation trees.",
       "details": "First-party delegation workflows. The package tracks the public delegation contract while extraction from the host is completed.",
       "version": "1.0.0",
-      "categories": ["Workflow", "Agents"],
-      "package": { "kind": "bundled", "provider": "delegation" },
+      "categories": [
+        "Workflow",
+        "Agents"
+      ],
+      "package": {
+        "kind": "bundled",
+        "provider": "delegation"
+      },
       "default_installed": true,
       "default_enabled": true
     },
     {
       "id": "vqro.agent-status",
       "repository": "ttenneb/vqro-extension-agent-status",
+      "source_commit": "1ac123b7937e625eceb4b5f80f838ec3d4640a89",
+      "source_sha256": "7095070701cc0859a76a1afd489735818bf726505583497cf9a5d373666d4ddc",
+      "manifest_sha256": "8a27e04302fdcaa1861b1d5434b8a5fa3121d63241c7eedea52880d27a5782af",
       "name": "Agent Status",
       "summary": "Agent lifecycle status, labels, and attention signals.",
       "details": "First-party status presentation backed by versioned agent reporting and screen-detection fallback contracts.",
       "version": "1.0.0",
-      "categories": ["Agents", "Interface"],
-      "package": { "kind": "bundled", "provider": "agent-status" },
+      "categories": [
+        "Agents",
+        "Interface"
+      ],
+      "package": {
+        "kind": "bundled",
+        "provider": "agent-status"
+      },
       "default_installed": true,
       "default_enabled": true
     },
     {
       "id": "vqro.pi",
       "repository": "ttenneb/vqro-extension-pi",
+      "source_commit": "25ee9bd8fc578550a920b88701e5e90adb1eb80c",
+      "source_sha256": "b2f3a0200edf5d1de061233da96a6664dcde5beff6db3e43f64177a115c3a48a",
+      "manifest_sha256": "da58595d75e971c48fe343b354bd01b1c92f05d7edbc95215c1e7c9ba06a6157",
       "name": "Pi",
       "summary": "Lifecycle and resumable-session integration for Pi.",
-      "details": "Installs Vqro's checked-in Pi extension into the configured Pi agent directory.",
-      "version": "9",
-      "categories": ["Agents"],
-      "package": { "kind": "agent_integration", "target": "pi" },
+      "details": "Packages Vqro's checked-in Pi extension into the configured Pi agent directory.",
+      "version": "9.0.0",
+      "categories": [
+        "Agents"
+      ],
+      "package": {
+        "kind": "agent_integration",
+        "target": "pi"
+      },
       "default_installed": true,
       "default_enabled": true
     },
     {
       "id": "vqro.claude",
       "repository": "ttenneb/vqro-extension-claude",
+      "source_commit": "3009116ab57c661cea4c01d3c7d5657f956b5df9",
+      "source_sha256": "c58ed2ca63124d0d8fa22bf9ae56db5cd15c3c991d61824adf5eb8347471fd8a",
+      "manifest_sha256": "142b2c6cbab4c76e177986a9253a33f83e5de0f7574f37e49bb9505d78322277",
       "name": "Claude Code",
       "summary": "Resumable-session integration for Claude Code.",
-      "details": "Installs Vqro's managed Claude hook while preserving unrelated Claude settings.",
-      "version": "10",
-      "categories": ["Agents"],
-      "package": { "kind": "agent_integration", "target": "claude" },
+      "details": "Packages Vqro's managed Claude hook while preserving unrelated Claude settings.",
+      "version": "10.0.0",
+      "categories": [
+        "Agents"
+      ],
+      "package": {
+        "kind": "agent_integration",
+        "target": "claude"
+      },
       "default_installed": true,
       "default_enabled": true
     },
     {
       "id": "vqro.codex",
       "repository": "ttenneb/vqro-extension-codex",
+      "source_commit": "f0439dc74e481b8dd58fbc1313b6c503e64f9676",
+      "source_sha256": "277a50c23dc0e913f3be9293b12cddd6a5dfd1b3a5dbf281dd103065e632f391",
+      "manifest_sha256": "e03b482c5352930cc1e766357aec5d1cdbc46d0dc85ac1e7ab4eeca344e5c865",
       "name": "Codex",
       "summary": "Resumable-session integration for Codex CLI.",
-      "details": "Installs Vqro's managed Codex notify hook and keeps screen detection as lifecycle fallback.",
-      "version": "8",
-      "categories": ["Agents"],
-      "package": { "kind": "agent_integration", "target": "codex" },
+      "details": "Packages Vqro's managed Codex notify hook and keeps screen detection as lifecycle fallback.",
+      "version": "8.0.0",
+      "categories": [
+        "Agents"
+      ],
+      "package": {
+        "kind": "agent_integration",
+        "target": "codex"
+      },
       "default_installed": true,
       "default_enabled": true
     },
@@ -92,8 +152,13 @@
       "summary": "Lifecycle and resumable-session integration for OMP.",
       "details": "Curated agent integration shipped with Vqro.",
       "version": "10",
-      "categories": ["Agents"],
-      "package": { "kind": "agent_integration", "target": "omp" }
+      "categories": [
+        "Agents"
+      ],
+      "package": {
+        "kind": "agent_integration",
+        "target": "omp"
+      }
     },
     {
       "id": "vqro.copilot",
@@ -102,8 +167,13 @@
       "summary": "Resumable-session integration for GitHub Copilot CLI.",
       "details": "Curated agent integration shipped with Vqro.",
       "version": "3",
-      "categories": ["Agents"],
-      "package": { "kind": "agent_integration", "target": "copilot" }
+      "categories": [
+        "Agents"
+      ],
+      "package": {
+        "kind": "agent_integration",
+        "target": "copilot"
+      }
     },
     {
       "id": "vqro.devin",
@@ -112,8 +182,13 @@
       "summary": "Resumable-session integration for Devin CLI.",
       "details": "Curated agent integration shipped with Vqro.",
       "version": "2",
-      "categories": ["Agents"],
-      "package": { "kind": "agent_integration", "target": "devin" }
+      "categories": [
+        "Agents"
+      ],
+      "package": {
+        "kind": "agent_integration",
+        "target": "devin"
+      }
     },
     {
       "id": "vqro.droid",
@@ -122,8 +197,13 @@
       "summary": "Resumable-session integration for Droid.",
       "details": "Curated agent integration shipped with Vqro.",
       "version": "3",
-      "categories": ["Agents"],
-      "package": { "kind": "agent_integration", "target": "droid" }
+      "categories": [
+        "Agents"
+      ],
+      "package": {
+        "kind": "agent_integration",
+        "target": "droid"
+      }
     },
     {
       "id": "vqro.kimi",
@@ -132,8 +212,13 @@
       "summary": "Lifecycle and resumable-session integration for Kimi Code CLI.",
       "details": "Curated agent integration shipped with Vqro.",
       "version": "7",
-      "categories": ["Agents"],
-      "package": { "kind": "agent_integration", "target": "kimi" }
+      "categories": [
+        "Agents"
+      ],
+      "package": {
+        "kind": "agent_integration",
+        "target": "kimi"
+      }
     },
     {
       "id": "vqro.opencode",
@@ -142,8 +227,13 @@
       "summary": "Lifecycle and resumable-session integration for OpenCode.",
       "details": "Curated agent integration shipped with Vqro.",
       "version": "12",
-      "categories": ["Agents"],
-      "package": { "kind": "agent_integration", "target": "opencode" }
+      "categories": [
+        "Agents"
+      ],
+      "package": {
+        "kind": "agent_integration",
+        "target": "opencode"
+      }
     },
     {
       "id": "vqro.kilo",
@@ -152,8 +242,13 @@
       "summary": "Lifecycle and resumable-session integration for Kilo Code CLI.",
       "details": "Curated agent integration shipped with Vqro.",
       "version": "4",
-      "categories": ["Agents"],
-      "package": { "kind": "agent_integration", "target": "kilo" }
+      "categories": [
+        "Agents"
+      ],
+      "package": {
+        "kind": "agent_integration",
+        "target": "kilo"
+      }
     },
     {
       "id": "vqro.hermes",
@@ -162,8 +257,13 @@
       "summary": "Resumable-session integration for Hermes Agent.",
       "details": "Curated agent integration shipped with Vqro.",
       "version": "5",
-      "categories": ["Agents"],
-      "package": { "kind": "agent_integration", "target": "hermes" }
+      "categories": [
+        "Agents"
+      ],
+      "package": {
+        "kind": "agent_integration",
+        "target": "hermes"
+      }
     },
     {
       "id": "vqro.qodercli",
@@ -172,8 +272,13 @@
       "summary": "Resumable-session integration for Qoder CLI.",
       "details": "Curated agent integration shipped with Vqro.",
       "version": "3",
-      "categories": ["Agents"],
-      "package": { "kind": "agent_integration", "target": "qodercli" }
+      "categories": [
+        "Agents"
+      ],
+      "package": {
+        "kind": "agent_integration",
+        "target": "qodercli"
+      }
     },
     {
       "id": "vqro.qwen",
@@ -182,8 +287,13 @@
       "summary": "Resumable-session integration for Qwen Code.",
       "details": "Curated agent integration shipped with Vqro.",
       "version": "1",
-      "categories": ["Agents"],
-      "package": { "kind": "agent_integration", "target": "qwen" }
+      "categories": [
+        "Agents"
+      ],
+      "package": {
+        "kind": "agent_integration",
+        "target": "qwen"
+      }
     },
     {
       "id": "vqro.letta",
@@ -192,8 +302,13 @@
       "summary": "Resumable-session integration for Letta Code.",
       "details": "Curated experimental agent integration shipped with Vqro.",
       "version": "1",
-      "categories": ["Agents"],
-      "package": { "kind": "agent_integration", "target": "letta" }
+      "categories": [
+        "Agents"
+      ],
+      "package": {
+        "kind": "agent_integration",
+        "target": "letta"
+      }
     },
     {
       "id": "vqro.cursor",
@@ -202,8 +317,13 @@
       "summary": "Resumable-session integration for Cursor Agent CLI.",
       "details": "Curated agent integration shipped with Vqro.",
       "version": "1",
-      "categories": ["Agents"],
-      "package": { "kind": "agent_integration", "target": "cursor" }
+      "categories": [
+        "Agents"
+      ],
+      "package": {
+        "kind": "agent_integration",
+        "target": "cursor"
+      }
     },
     {
       "id": "vqro.mastracode",
@@ -212,8 +332,13 @@
       "summary": "Lifecycle and resumable-session integration for MastraCode.",
       "details": "Curated agent integration shipped with Vqro.",
       "version": "2",
-      "categories": ["Agents"],
-      "package": { "kind": "agent_integration", "target": "mastracode" }
+      "categories": [
+        "Agents"
+      ],
+      "package": {
+        "kind": "agent_integration",
+        "target": "mastracode"
+      }
     },
     {
       "id": "vqro.antigravity-cli",
@@ -222,8 +347,13 @@
       "summary": "Resumable-session integration for Antigravity CLI.",
       "details": "Curated agent integration shipped with Vqro.",
       "version": "3",
-      "categories": ["Agents"],
-      "package": { "kind": "agent_integration", "target": "antigravity-cli" }
+      "categories": [
+        "Agents"
+      ],
+      "package": {
+        "kind": "agent_integration",
+        "target": "antigravity-cli"
+      }
     },
     {
       "id": "vqro.grok",
@@ -232,8 +362,13 @@
       "summary": "Resumable-session integration for Grok CLI.",
       "details": "Curated agent integration shipped with Vqro.",
       "version": "2",
-      "categories": ["Agents"],
-      "package": { "kind": "agent_integration", "target": "grok" }
+      "categories": [
+        "Agents"
+      ],
+      "package": {
+        "kind": "agent_integration",
+        "target": "grok"
+      }
     }
   ]
 }
