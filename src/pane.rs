@@ -153,6 +153,20 @@ fn apply_pane_launch_env(cmd: &mut CommandBuilder, launch_env: &PaneLaunchEnv) {
     for (key, value) in &launch_env.extra {
         cmd.env(key, value);
     }
+    // A Vqro pane may be launched from inside Herdr. Never let the upstream
+    // runtime identity activate Herdr-owned hooks against the wrong server.
+    for key in [
+        "HERDR_ENV",
+        "HERDR_SOCKET_PATH",
+        "HERDR_CLIENT_SOCKET_PATH",
+        "HERDR_PANE_ID",
+        "HERDR_TAB_ID",
+        "HERDR_WORKSPACE_ID",
+        "HERDR_BIN_PATH",
+        "HERDR_SESSION",
+    ] {
+        cmd.env_remove(key);
+    }
     cmd.env(crate::HERDR_ENV_VAR, crate::HERDR_ENV_VALUE);
     crate::integration::apply_pane_base_env(cmd);
     crate::platform::apply_pane_runtime_marker(cmd);

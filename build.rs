@@ -29,6 +29,45 @@ fn env_bool(name: &str) -> Option<bool> {
     }
 }
 
+fn copy_vendored_source(source: &std::path::Path, destination: &std::path::Path) {
+    if destination.exists() {
+        fs::remove_dir_all(destination).expect("failed to clear staged libghostty-vt source");
+    }
+    fs::create_dir_all(destination).expect("failed to create staged libghostty-vt source");
+    copy_vendored_directory(source, destination);
+}
+
+fn copy_vendored_directory(source: &std::path::Path, destination: &std::path::Path) {
+    for entry in fs::read_dir(source).expect("failed to read vendored libghostty-vt source") {
+        let entry = entry.expect("failed to inspect vendored libghostty-vt source entry");
+        let name = entry.file_name();
+        if matches!(
+            name.to_str(),
+            Some(".zig-cache" | "zig-cache" | "zig-out" | "zig-pkg")
+        ) {
+            continue;
+        }
+        let source_path = entry.path();
+        let destination_path = destination.join(&name);
+        let kind = entry
+            .file_type()
+            .expect("failed to inspect vendored libghostty-vt source type");
+        if kind.is_dir() {
+            fs::create_dir_all(&destination_path)
+                .expect("failed to create staged libghostty-vt directory");
+            copy_vendored_directory(&source_path, &destination_path);
+        } else if kind.is_file() {
+            fs::copy(&source_path, &destination_path)
+                .expect("failed to stage vendored libghostty-vt file");
+        } else {
+            panic!(
+                "unsupported entry in vendored libghostty-vt source: {}",
+                source_path.display()
+            );
+        }
+    }
+}
+
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=vendor/libghostty-vt.vendor.json");
@@ -51,8 +90,20 @@ fn main() {
     );
 
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
-    let vendored_dir = manifest_dir.join("vendor/libghostty-vt");
+    let source_vendored_dir = manifest_dir.join("vendor/libghostty-vt");
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR"));
+    let system_dir = env::var_os("LIBGHOSTTY_VT_ZIG_SYSTEM_DIR").map(PathBuf::from);
+    // Zig 0.16 materializes fetched dependencies in `zig-pkg` beneath the build
+    // root even when its caches and prefix point elsewhere. Build a staged copy
+    // when no pre-fetched system directory is supplied so Cargo package
+    // verification never mutates its extracted source tree.
+    let vendored_dir = if system_dir.is_some() {
+        source_vendored_dir
+    } else {
+        let staged = out_dir.join("libghostty-vt-source");
+        copy_vendored_source(&source_vendored_dir, &staged);
+        staged
+    };
     let zig_prefix = out_dir.join("libghostty-vt");
     let zig_cache = out_dir.join("zig-cache");
     let zig_global_cache = out_dir.join("zig-global-cache");
@@ -92,7 +143,7 @@ fn main() {
             command.arg("--libc").arg(libc_file);
         }
     }
-    if let Ok(system_dir) = env::var("LIBGHOSTTY_VT_ZIG_SYSTEM_DIR") {
+    if let Some(system_dir) = system_dir {
         command.arg("--system").arg(system_dir);
     }
 

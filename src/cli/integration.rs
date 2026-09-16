@@ -36,7 +36,10 @@ fn integration_status(args: &[String]) -> std::io::Result<i32> {
         return Ok(0);
     }
 
-    for status in crate::integration::installed_integration_statuses() {
+    for status in crate::integration::installed_integration_statuses()
+        .into_iter()
+        .filter(|status| crate::integration::integration_mutation_enabled(status.target))
+    {
         let target = crate::integration::integration_target_label(status.target);
         let state = describe_integration_state(
             status.state,
@@ -44,19 +47,6 @@ fn integration_status(args: &[String]) -> std::io::Result<i32> {
             status.expected_version,
         );
         println!("{target}: {state} ({})", status.path.display());
-    }
-
-    if let Some(status) = crate::integration::experimental_letta_integration_status() {
-        let state = describe_integration_state(
-            status.state,
-            status.installed_version,
-            status.expected_version,
-        );
-        println!(
-            "{} (experimental): {state} ({})",
-            status.label,
-            status.path.display()
-        );
     }
 
     Ok(0)
@@ -89,30 +79,36 @@ fn integration_install(args: &[String]) -> std::io::Result<i32> {
     let Some(target) = parse_integration_target(args, "install")? else {
         return Ok(2);
     };
-    match &target {
-        IntegrationCommandTarget::Builtin(target) => {
-            let _ = target;
-        }
-        IntegrationCommandTarget::Letta => {}
+    let IntegrationCommandTarget::Builtin(target) = target else {
+        eprintln!("vqro integration installation is disabled for non-namespaced integrations");
+        return Ok(1);
+    };
+    if !crate::integration::integration_mutation_enabled(target) {
+        eprintln!("vqro integration installation is disabled for non-namespaced integrations");
+        return Ok(1);
     }
-    eprintln!(
-        "vqro integration installation is disabled until integrations use the vqro namespace"
-    );
-    Ok(1)
+    for message in crate::integration::install_target(target)? {
+        println!("{message}");
+    }
+    Ok(0)
 }
 
 fn integration_uninstall(args: &[String]) -> std::io::Result<i32> {
     let Some(target) = parse_integration_target(args, "uninstall")? else {
         return Ok(2);
     };
-    match &target {
-        IntegrationCommandTarget::Builtin(target) => {
-            let _ = target;
-        }
-        IntegrationCommandTarget::Letta => {}
+    let IntegrationCommandTarget::Builtin(target) = target else {
+        eprintln!("vqro integration removal is disabled for non-namespaced integrations");
+        return Ok(1);
+    };
+    if !crate::integration::integration_mutation_enabled(target) {
+        eprintln!("vqro integration removal is disabled for non-namespaced integrations");
+        return Ok(1);
     }
-    eprintln!("vqro integration removal is disabled to avoid modifying Herdr-owned integrations");
-    Ok(1)
+    for message in crate::integration::uninstall_target(target)? {
+        println!("{message}");
+    }
+    Ok(0)
 }
 
 /// Integration target accepted by the CLI. Letta is deliberately kept out of

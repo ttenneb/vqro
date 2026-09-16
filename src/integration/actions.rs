@@ -16,6 +16,12 @@ use super::{KIMI_MIN_VERSION, PI_EXTENSION_INSTALL_NAME};
 pub(crate) fn install_target(
     target: crate::api::schema::IntegrationTarget,
 ) -> io::Result<Vec<String>> {
+    if !super::integration_mutation_enabled(target) {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "vqro integration changes are disabled until integrations use the vqro namespace",
+        ));
+    }
     let result = install_target_inner(target);
     let outcome = if result.is_ok() { "ok" } else { "error" };
     crate::logging::integration_action("install", integration_target_label(target), outcome);
@@ -330,6 +336,12 @@ fn install_target_inner(target: crate::api::schema::IntegrationTarget) -> io::Re
 pub(crate) fn uninstall_target(
     target: crate::api::schema::IntegrationTarget,
 ) -> io::Result<Vec<String>> {
+    if !super::integration_mutation_enabled(target) {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "vqro integration changes are disabled until integrations use the vqro namespace",
+        ));
+    }
     let messages = match target {
         crate::api::schema::IntegrationTarget::Pi => {
             let result = uninstall_pi()?;

@@ -370,6 +370,10 @@ pub(crate) fn hook_command_variants(hook_path: &Path, action: Option<&str>) -> V
     push_unique_command(&mut commands, legacy_bash_hook_command(hook_path, action));
 
     #[cfg(windows)]
+    if !hook_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.starts_with("vqro-"))
     {
         push_unique_command(
             &mut commands,

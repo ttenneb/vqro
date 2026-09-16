@@ -1325,17 +1325,17 @@ impl TerminalState {
         matches!(
             (source, agent_label, session_start_source),
             (
-                "herdr:claude",
+                "vqro:claude",
                 "claude",
                 Some("clear" | "resume" | "compact")
             ) | (
-                "herdr:codex",
+                "vqro:codex",
                 "codex",
                 Some("startup" | "clear" | "resume" | "compact")
             ) | ("herdr:mastracode", "mastracode", Some("startup"))
                 | ("herdr:hermes", "hermes", Some("startup" | "new" | "resume"))
                 | ("herdr:opencode", "opencode", Some("select"))
-                | ("herdr:pi", "pi", Some("new" | "resume" | "fork"))
+                | ("vqro:pi", "pi", Some("new" | "resume" | "fork"))
                 | ("herdr:grok", "grok", Some("new"))
                 | (
                     "herdr:omp",
@@ -2315,7 +2315,7 @@ mod tests {
             Duration::from_millis(20),
         );
         timed_out.set_managed_agent_launch_session(crate::agent_resume::PersistedAgentSession {
-            source: "herdr:codex".into(),
+            source: "vqro:codex".into(),
             agent: "codex".into(),
             session_ref: crate::agent_resume::AgentSessionRef::id("codex-session").unwrap(),
         });
@@ -2345,12 +2345,12 @@ mod tests {
         anchor_full_lifecycle_session(
             &mut terminal,
             Agent::Pi,
-            "herdr:pi",
+            "vqro:pi",
             "pi",
             crate::agent_resume::AgentSessionRef::path(test_session_path("root.jsonl")).unwrap(),
         );
         terminal.set_hook_authority(
-            "herdr:pi".into(),
+            "vqro:pi".into(),
             "pi".into(),
             AgentState::Working,
             None,
@@ -2421,7 +2421,7 @@ mod tests {
     #[test]
     fn session_only_report_does_not_create_hook_authority() {
         for (agent, source, label, session_id) in [
-            (Agent::Codex, "herdr:codex", "codex", "codex-session"),
+            (Agent::Codex, "vqro:codex", "codex", "codex-session"),
             (Agent::Devin, "herdr:devin", "devin", "devin-session"),
         ] {
             let mut terminal = test_terminal();
@@ -2621,7 +2621,7 @@ mod tests {
             let new_session = test_session_path(&format!("pi-{reason}-new.jsonl"));
             terminal.set_detected_state(Some(Agent::Pi), AgentState::Idle);
             terminal.set_hook_authority_with_session_ref(
-                "herdr:pi".into(),
+                "vqro:pi".into(),
                 "pi".into(),
                 AgentState::Idle,
                 None,
@@ -2630,7 +2630,7 @@ mod tests {
             );
 
             let session_report = terminal.set_agent_session_ref_for_session_start(
-                "herdr:pi".into(),
+                "vqro:pi".into(),
                 "pi".into(),
                 crate::agent_resume::AgentSessionRef::path(new_session.clone()),
                 Some(11),
@@ -2644,7 +2644,7 @@ mod tests {
             assert!(terminal.hook_authority.is_none());
 
             let working = terminal.set_hook_authority_with_session_ref(
-                "herdr:pi".into(),
+                "vqro:pi".into(),
                 "pi".into(),
                 AgentState::Working,
                 None,
@@ -2671,7 +2671,7 @@ mod tests {
         let session_b = test_session_path("pi-session-b.jsonl");
         terminal.set_detected_state(Some(Agent::Pi), AgentState::Idle);
         terminal.set_hook_authority_with_session_ref(
-            "herdr:pi".into(),
+            "vqro:pi".into(),
             "pi".into(),
             AgentState::Idle,
             None,
@@ -2680,14 +2680,14 @@ mod tests {
         );
 
         terminal.set_agent_session_ref_for_session_start(
-            "herdr:pi".into(),
+            "vqro:pi".into(),
             "pi".into(),
             crate::agent_resume::AgentSessionRef::path(session_b.clone()),
             Some(11),
             Some("new".into()),
         );
         terminal.set_hook_authority_with_session_ref(
-            "herdr:pi".into(),
+            "vqro:pi".into(),
             "pi".into(),
             AgentState::Idle,
             None,
@@ -2696,14 +2696,14 @@ mod tests {
         );
 
         let resumed = terminal.set_agent_session_ref_for_session_start(
-            "herdr:pi".into(),
+            "vqro:pi".into(),
             "pi".into(),
             crate::agent_resume::AgentSessionRef::path(session_a.clone()),
             Some(13),
             Some("resume".into()),
         );
         let working = terminal.set_hook_authority_with_session_ref(
-            "herdr:pi".into(),
+            "vqro:pi".into(),
             "pi".into(),
             AgentState::Working,
             None,
@@ -2720,7 +2720,7 @@ mod tests {
         );
 
         let late_session_b = terminal.set_hook_authority_with_session_ref(
-            "herdr:pi".into(),
+            "vqro:pi".into(),
             "pi".into(),
             AgentState::Idle,
             None,
@@ -2738,14 +2738,14 @@ mod tests {
         let new_session = test_session_path("pi-startup-new.jsonl");
         terminal.set_detected_state(Some(Agent::Pi), AgentState::Idle);
         terminal.set_persisted_agent_session(crate::agent_resume::PersistedAgentSession {
-            source: "herdr:pi".into(),
+            source: "vqro:pi".into(),
             agent: "pi".into(),
             session_ref: crate::agent_resume::AgentSessionRef::path(old_session)
                 .expect("test session path should be valid"),
         });
 
         let startup = terminal.set_agent_session_ref_for_session_start(
-            "herdr:pi".into(),
+            "vqro:pi".into(),
             "pi".into(),
             crate::agent_resume::AgentSessionRef::path(new_session.clone()),
             Some(11),
@@ -2756,7 +2756,7 @@ mod tests {
         assert_eq!(
             terminal.current_session_identity_for_persistence(),
             Some((
-                "herdr:pi".into(),
+                "vqro:pi".into(),
                 "pi".into(),
                 crate::agent_resume::AgentSessionRefKind::Path,
                 new_session,
@@ -2774,12 +2774,12 @@ mod tests {
             anchor_full_lifecycle_session(
                 &mut terminal,
                 Agent::Pi,
-                "herdr:pi",
+                "vqro:pi",
                 "pi",
                 crate::agent_resume::AgentSessionRef::path(old_session.clone()).unwrap(),
             );
             terminal.set_hook_authority_with_session_ref(
-                "herdr:pi".into(),
+                "vqro:pi".into(),
                 "pi".into(),
                 AgentState::Idle,
                 None,
@@ -2788,14 +2788,14 @@ mod tests {
             );
 
             let session_report = terminal.set_agent_session_ref_for_session_start(
-                "herdr:pi".into(),
+                "vqro:pi".into(),
                 "pi".into(),
                 crate::agent_resume::AgentSessionRef::path(new_session.clone()),
                 Some(11),
                 reason.map(str::to_string),
             );
             let working = terminal.set_hook_authority_with_session_ref(
-                "herdr:pi".into(),
+                "vqro:pi".into(),
                 "pi".into(),
                 AgentState::Working,
                 None,
@@ -2885,7 +2885,7 @@ mod tests {
         let session_path = test_session_path("pi.jsonl");
         terminal.set_detected_state(Some(Agent::Pi), AgentState::Working);
         terminal.set_hook_authority_with_session_ref(
-            "herdr:pi".into(),
+            "vqro:pi".into(),
             "pi".into(),
             AgentState::Working,
             None,
@@ -2903,7 +2903,7 @@ mod tests {
             now + Duration::from_millis(1),
         );
         let late = terminal.set_hook_authority_with_session_ref(
-            "herdr:pi".into(),
+            "vqro:pi".into(),
             "pi".into(),
             AgentState::Working,
             None,
@@ -2923,12 +2923,12 @@ mod tests {
         anchor_full_lifecycle_session(
             &mut terminal,
             Agent::Pi,
-            "herdr:pi",
+            "vqro:pi",
             "pi",
             crate::agent_resume::AgentSessionRef::path(test_session_path("one.jsonl")).unwrap(),
         );
         terminal.set_hook_authority_with_session_ref(
-            "herdr:pi".into(),
+            "vqro:pi".into(),
             "pi".into(),
             AgentState::Working,
             None,
@@ -2937,7 +2937,7 @@ mod tests {
         );
 
         let mutation = terminal.set_hook_authority_with_session_ref(
-            "herdr:pi".into(),
+            "vqro:pi".into(),
             "pi".into(),
             AgentState::Idle,
             None,
@@ -2964,7 +2964,7 @@ mod tests {
         let new_session = test_session_path("new-process-exit.jsonl");
         terminal.set_detected_state(Some(Agent::Pi), AgentState::Idle);
         terminal.set_hook_authority_with_session_ref(
-            "herdr:pi".into(),
+            "vqro:pi".into(),
             "pi".into(),
             AgentState::Working,
             None,
@@ -3003,7 +3003,7 @@ mod tests {
         );
 
         let late_old = terminal.set_hook_authority_with_session_ref(
-            "herdr:pi".into(),
+            "vqro:pi".into(),
             "pi".into(),
             AgentState::Working,
             None,
@@ -3011,7 +3011,7 @@ mod tests {
             Some(500),
         );
         let fresh_new = terminal.set_hook_authority_with_session_ref(
-            "herdr:pi".into(),
+            "vqro:pi".into(),
             "pi".into(),
             AgentState::Working,
             None,
@@ -3023,7 +3023,7 @@ mod tests {
         assert!(fresh_new.is_none());
         terminal
             .set_agent_session_ref_for_session_start(
-                "herdr:pi".into(),
+                "vqro:pi".into(),
                 "pi".into(),
                 crate::agent_resume::AgentSessionRef::path(new_session),
                 Some(400),
@@ -3041,7 +3041,7 @@ mod tests {
         let now = Instant::now();
         terminal.set_detected_state(Some(Agent::Pi), AgentState::Idle);
         terminal.set_hook_authority_at(
-            "herdr:pi".into(),
+            "vqro:pi".into(),
             "pi".into(),
             AgentState::Working,
             None,
@@ -3060,7 +3060,7 @@ mod tests {
         );
 
         let lower_sequence = terminal.set_hook_authority_at(
-            "herdr:pi".into(),
+            "vqro:pi".into(),
             "pi".into(),
             AgentState::Idle,
             None,
@@ -3069,7 +3069,7 @@ mod tests {
             now + Duration::from_millis(2),
         );
         let missing_sequence = terminal.set_hook_authority_at(
-            "herdr:pi".into(),
+            "vqro:pi".into(),
             "pi".into(),
             AgentState::Idle,
             None,
@@ -3078,7 +3078,7 @@ mod tests {
             now + Duration::from_millis(3),
         );
         let buffered_working = terminal.set_hook_authority_at(
-            "herdr:pi".into(),
+            "vqro:pi".into(),
             "pi".into(),
             AgentState::Working,
             None,
@@ -3087,7 +3087,7 @@ mod tests {
             now + Duration::from_millis(4),
         );
         let startup = terminal.set_agent_session_ref_for_session_start(
-            "herdr:pi".into(),
+            "vqro:pi".into(),
             "pi".into(),
             crate::agent_resume::AgentSessionRef::path(session_path),
             Some(2000),
@@ -3122,12 +3122,12 @@ mod tests {
         anchor_full_lifecycle_session(
             &mut terminal,
             Agent::Pi,
-            "herdr:pi",
+            "vqro:pi",
             "pi",
             crate::agent_resume::AgentSessionRef::path(old_session.clone()).unwrap(),
         );
         terminal.set_hook_authority_at(
-            "herdr:pi".into(),
+            "vqro:pi".into(),
             "pi".into(),
             AgentState::Working,
             None,
@@ -3154,7 +3154,7 @@ mod tests {
             now + Duration::from_millis(2),
         );
         terminal.set_hook_authority_at(
-            "herdr:pi".into(),
+            "vqro:pi".into(),
             "pi".into(),
             AgentState::Working,
             None,
@@ -3183,7 +3183,7 @@ mod tests {
         );
         terminal
             .set_agent_session_ref_for_session_start(
-                "herdr:pi".into(),
+                "vqro:pi".into(),
                 "pi".into(),
                 crate::agent_resume::AgentSessionRef::path(shared_session),
                 Some(100),
@@ -3202,7 +3202,7 @@ mod tests {
         let process_exit_at = Instant::now() - Duration::from_secs(1);
         terminal.set_detected_state(Some(Agent::Pi), AgentState::Idle);
         terminal.set_hook_authority_at(
-            "herdr:pi".into(),
+            "vqro:pi".into(),
             "pi".into(),
             AgentState::Working,
             None,
@@ -3239,7 +3239,7 @@ mod tests {
             process_exit_at + Duration::from_millis(2),
         );
         let startup = terminal.set_agent_session_ref_for_session_start(
-            "herdr:pi".into(),
+            "vqro:pi".into(),
             "pi".into(),
             crate::agent_resume::AgentSessionRef::path(session_path),
             Some(2000),
@@ -3257,7 +3257,7 @@ mod tests {
         let now = Instant::now();
         terminal.set_detected_state(Some(Agent::Pi), AgentState::Idle);
         terminal.set_hook_authority_at(
-            "herdr:pi".into(),
+            "vqro:pi".into(),
             "pi".into(),
             AgentState::Working,
             None,
@@ -3276,7 +3276,7 @@ mod tests {
         );
 
         let early_new = terminal.set_hook_authority_at(
-            "herdr:pi".into(),
+            "vqro:pi".into(),
             "pi".into(),
             AgentState::Working,
             None,
@@ -3307,7 +3307,7 @@ mod tests {
             now + Duration::from_millis(4),
         );
         let fresh_new = terminal.set_agent_session_ref_for_session_start(
-            "herdr:pi".into(),
+            "vqro:pi".into(),
             "pi".into(),
             crate::agent_resume::AgentSessionRef::path(new_session),
             Some(400),
@@ -3326,7 +3326,7 @@ mod tests {
         let now = Instant::now();
         terminal.set_detected_state(Some(Agent::Pi), AgentState::Idle);
         terminal.set_hook_authority_at(
-            "herdr:pi".into(),
+            "vqro:pi".into(),
             "pi".into(),
             AgentState::Working,
             None,
@@ -3345,7 +3345,7 @@ mod tests {
         );
 
         let early_without_session = terminal.set_hook_authority_at(
-            "herdr:pi".into(),
+            "vqro:pi".into(),
             "pi".into(),
             AgentState::Working,
             None,
@@ -3376,7 +3376,7 @@ mod tests {
             now + Duration::from_millis(4),
         );
         let fresh_without_session = terminal.set_hook_authority_at(
-            "herdr:pi".into(),
+            "vqro:pi".into(),
             "pi".into(),
             AgentState::Working,
             None,
@@ -3389,7 +3389,7 @@ mod tests {
 
         terminal
             .set_agent_session_ref_for_session_start(
-                "herdr:pi".into(),
+                "vqro:pi".into(),
                 "pi".into(),
                 crate::agent_resume::AgentSessionRef::path(test_session_path(
                     "fresh-after-nosession-process-exit.jsonl",
@@ -3399,7 +3399,7 @@ mod tests {
             )
             .expect("fresh root session should claim the process generation");
         let child_update = terminal.set_hook_authority_at(
-            "herdr:pi".into(),
+            "vqro:pi".into(),
             "pi".into(),
             AgentState::Working,
             None,
@@ -3525,7 +3525,7 @@ mod tests {
         let mut terminal = test_terminal();
         terminal.set_detected_state(Some(Agent::Codex), AgentState::Idle);
         terminal.set_hook_authority(
-            "herdr:codex".into(),
+            "vqro:codex".into(),
             "codex".into(),
             AgentState::Working,
             None,
@@ -3556,12 +3556,12 @@ mod tests {
         anchor_full_lifecycle_session(
             &mut terminal,
             Agent::Pi,
-            "herdr:pi",
+            "vqro:pi",
             "pi",
             crate::agent_resume::AgentSessionRef::path(test_session_path("root.jsonl")).unwrap(),
         );
         terminal.set_hook_authority(
-            "herdr:pi".into(),
+            "vqro:pi".into(),
             "pi".into(),
             AgentState::Working,
             None,
@@ -3586,7 +3586,7 @@ mod tests {
         let mut terminal = test_terminal();
         terminal.set_detected_state(Some(Agent::Codex), AgentState::Idle);
         terminal.set_hook_authority(
-            "herdr:codex".into(),
+            "vqro:codex".into(),
             "codex".into(),
             AgentState::Working,
             None,
@@ -3611,7 +3611,7 @@ mod tests {
         let mut terminal = test_terminal();
         terminal.set_detected_state(Some(Agent::Codex), AgentState::Working);
         terminal.set_hook_authority(
-            "herdr:codex".into(),
+            "vqro:codex".into(),
             "codex".into(),
             AgentState::Blocked,
             None,
@@ -3660,7 +3660,7 @@ mod tests {
         let mut terminal = test_terminal();
         terminal.set_detected_state(Some(Agent::Claude), AgentState::Working);
         terminal.set_hook_authority_at(
-            "herdr:claude".into(),
+            "vqro:claude".into(),
             "claude".into(),
             AgentState::Working,
             None,
@@ -3724,7 +3724,7 @@ mod tests {
         let mut terminal = test_terminal();
         terminal.set_detected_state(Some(Agent::Claude), AgentState::Idle);
         terminal.set_hook_authority_at(
-            "herdr:claude".into(),
+            "vqro:claude".into(),
             "claude".into(),
             AgentState::Idle,
             None,
@@ -3837,7 +3837,7 @@ mod tests {
         );
 
         let change = terminal.set_hook_authority_at(
-            "herdr:claude".into(),
+            "vqro:claude".into(),
             "claude".into(),
             AgentState::Idle,
             None,
@@ -3871,7 +3871,7 @@ mod tests {
             now,
         );
         terminal.set_hook_authority_at(
-            "herdr:codex".into(),
+            "vqro:codex".into(),
             "codex".into(),
             AgentState::Blocked,
             None,
@@ -3902,7 +3902,7 @@ mod tests {
         let mut terminal = test_terminal();
         terminal.set_detected_state(Some(Agent::Codex), AgentState::Working);
         terminal.set_hook_authority(
-            "herdr:codex".into(),
+            "vqro:codex".into(),
             "codex".into(),
             AgentState::Working,
             None,
@@ -3927,7 +3927,7 @@ mod tests {
         let mut terminal = test_terminal();
         terminal.set_detected_state(Some(Agent::Grok), AgentState::Working);
         let change = terminal.set_hook_authority(
-            "herdr:claude".into(),
+            "vqro:claude".into(),
             "claude".into(),
             AgentState::Blocked,
             None,
@@ -3945,7 +3945,7 @@ mod tests {
     fn detected_agent_clears_conflicting_known_hook_authority() {
         let mut terminal = test_terminal();
         terminal.set_hook_authority(
-            "herdr:claude".into(),
+            "vqro:claude".into(),
             "claude".into(),
             AgentState::Blocked,
             None,
@@ -4008,12 +4008,12 @@ mod tests {
         anchor_full_lifecycle_session(
             &mut terminal,
             Agent::Pi,
-            "herdr:pi",
+            "vqro:pi",
             "pi",
             crate::agent_resume::AgentSessionRef::path(test_session_path("root.jsonl")).unwrap(),
         );
         terminal.set_hook_authority_at(
-            "herdr:pi".into(),
+            "vqro:pi".into(),
             "pi".into(),
             AgentState::Working,
             None,
@@ -4065,7 +4065,7 @@ mod tests {
         let mut terminal = test_terminal();
         terminal.set_detected_state(Some(Agent::Codex), AgentState::Working);
         terminal.set_hook_authority(
-            "herdr:codex".into(),
+            "vqro:codex".into(),
             "codex".into(),
             AgentState::Working,
             None,
@@ -4085,7 +4085,7 @@ mod tests {
         let mut terminal = test_terminal();
         terminal.set_detected_state(Some(Agent::Codex), AgentState::Working);
         terminal.set_hook_authority(
-            "herdr:codex".into(),
+            "vqro:codex".into(),
             "codex".into(),
             AgentState::Working,
             None,
@@ -4120,7 +4120,7 @@ mod tests {
             observed,
         );
         terminal.set_hook_authority_at(
-            "herdr:claude".into(),
+            "vqro:claude".into(),
             "claude".into(),
             AgentState::Working,
             None,
@@ -4268,7 +4268,7 @@ mod tests {
             observed,
         );
         terminal.set_hook_authority_at(
-            "herdr:codex".into(),
+            "vqro:codex".into(),
             "codex".into(),
             AgentState::Working,
             None,
@@ -4277,7 +4277,7 @@ mod tests {
             observed,
         );
         terminal.set_hook_authority_at(
-            "herdr:codex".into(),
+            "vqro:codex".into(),
             "codex".into(),
             AgentState::Working,
             None,
@@ -4306,7 +4306,7 @@ mod tests {
         let mut terminal = test_terminal();
         terminal.set_detected_state(Some(Agent::Codex), AgentState::Idle);
         terminal.set_hook_authority(
-            "herdr:codex".into(),
+            "vqro:codex".into(),
             "codex".into(),
             AgentState::Idle,
             None,
@@ -4328,12 +4328,12 @@ mod tests {
         anchor_full_lifecycle_session(
             &mut terminal,
             Agent::Pi,
-            "herdr:pi",
+            "vqro:pi",
             "pi",
             crate::agent_resume::AgentSessionRef::path(test_session_path("root.jsonl")).unwrap(),
         );
         terminal.set_hook_authority(
-            "herdr:pi".into(),
+            "vqro:pi".into(),
             "pi".into(),
             AgentState::Working,
             None,
@@ -4341,7 +4341,7 @@ mod tests {
         );
 
         let change = terminal.set_hook_authority(
-            "herdr:pi".into(),
+            "vqro:pi".into(),
             "pi".into(),
             AgentState::Idle,
             None,
@@ -4363,13 +4363,13 @@ mod tests {
         anchor_full_lifecycle_session(
             &mut terminal,
             Agent::Pi,
-            "herdr:pi",
+            "vqro:pi",
             "pi",
             crate::agent_resume::AgentSessionRef::path(session_path.clone()).unwrap(),
         );
         let mutation = terminal
             .set_hook_authority_with_session_ref(
-                "herdr:pi".into(),
+                "vqro:pi".into(),
                 "pi".into(),
                 AgentState::Working,
                 None,
@@ -4400,12 +4400,12 @@ mod tests {
         anchor_full_lifecycle_session(
             &mut terminal,
             Agent::Pi,
-            "herdr:pi",
+            "vqro:pi",
             "pi",
             crate::agent_resume::AgentSessionRef::path(session_path.clone()).unwrap(),
         );
         terminal.set_hook_authority_with_session_ref(
-            "herdr:pi".into(),
+            "vqro:pi".into(),
             "pi".into(),
             AgentState::Working,
             None,
@@ -4414,7 +4414,7 @@ mod tests {
         );
 
         let mutation = terminal.set_hook_authority_with_session_ref(
-            "herdr:pi".into(),
+            "vqro:pi".into(),
             "pi".into(),
             AgentState::Working,
             None,
@@ -4440,12 +4440,12 @@ mod tests {
         anchor_full_lifecycle_session(
             &mut terminal,
             Agent::Pi,
-            "herdr:pi",
+            "vqro:pi",
             "pi",
             crate::agent_resume::AgentSessionRef::path(session_path.clone()).unwrap(),
         );
         terminal.set_hook_authority_with_session_ref(
-            "herdr:pi".into(),
+            "vqro:pi".into(),
             "pi".into(),
             AgentState::Working,
             None,
@@ -4455,7 +4455,7 @@ mod tests {
 
         let mutation = terminal
             .set_hook_authority_with_session_ref(
-                "herdr:pi".into(),
+                "vqro:pi".into(),
                 "pi".into(),
                 AgentState::Working,
                 None,
@@ -4479,7 +4479,7 @@ mod tests {
         let mut terminal = test_terminal();
         terminal
             .set_agent_session_ref(
-                "herdr:claude".into(),
+                "vqro:claude".into(),
                 "claude".into(),
                 crate::agent_resume::AgentSessionRef::id("claude-session"),
                 Some(20),
@@ -4487,17 +4487,14 @@ mod tests {
             .expect("initial session should be accepted");
 
         let mutation = terminal.set_agent_session_ref(
-            "herdr:claude".into(),
+            "vqro:claude".into(),
             "claude".into(),
             crate::agent_resume::AgentSessionRef::id("nested-session"),
             Some(21),
         );
 
         assert!(mutation.is_none());
-        assert_eq!(
-            terminal.hook_report_sequences.get("herdr:claude"),
-            Some(&21)
-        );
+        assert_eq!(terminal.hook_report_sequences.get("vqro:claude"), Some(&21));
         assert_eq!(
             terminal
                 .persisted_agent_session
@@ -4512,7 +4509,7 @@ mod tests {
         let mut terminal = test_terminal();
         terminal
             .set_agent_session_ref(
-                "herdr:claude".into(),
+                "vqro:claude".into(),
                 "claude".into(),
                 crate::agent_resume::AgentSessionRef::id("claude-session"),
                 Some(20),
@@ -4520,7 +4517,7 @@ mod tests {
             .expect("initial session should be accepted");
 
         let mutation = terminal.set_agent_session_ref_for_session_start(
-            "herdr:claude".into(),
+            "vqro:claude".into(),
             "claude".into(),
             crate::agent_resume::AgentSessionRef::id("nested-session"),
             Some(21),
@@ -4543,7 +4540,7 @@ mod tests {
             let mut terminal = test_terminal();
             terminal
                 .set_agent_session_ref(
-                    "herdr:claude".into(),
+                    "vqro:claude".into(),
                     "claude".into(),
                     crate::agent_resume::AgentSessionRef::id("claude-session"),
                     Some(20),
@@ -4553,7 +4550,7 @@ mod tests {
             let next_session = format!("{session_start_source}-session");
             let mutation = terminal
                 .set_agent_session_ref_for_session_start(
-                    "herdr:claude".into(),
+                    "vqro:claude".into(),
                     "claude".into(),
                     crate::agent_resume::AgentSessionRef::id(&next_session),
                     Some(21),
@@ -4582,7 +4579,7 @@ mod tests {
             let mut terminal = test_terminal();
             terminal
                 .set_agent_session_ref(
-                    "herdr:codex".into(),
+                    "vqro:codex".into(),
                     "codex".into(),
                     crate::agent_resume::AgentSessionRef::id("codex-session"),
                     Some(20),
@@ -4592,7 +4589,7 @@ mod tests {
             let next_session = format!("codex-{session_start_source}-session");
             let mutation = terminal
                 .set_agent_session_ref_for_session_start(
-                    "herdr:codex".into(),
+                    "vqro:codex".into(),
                     "codex".into(),
                     crate::agent_resume::AgentSessionRef::id(&next_session),
                     Some(21),
@@ -5038,7 +5035,7 @@ mod tests {
         terminal.set_detected_state(Some(Agent::Pi), AgentState::Idle);
         terminal
             .set_agent_session_ref_for_session_start(
-                "herdr:pi".into(),
+                "vqro:pi".into(),
                 "pi".into(),
                 crate::agent_resume::AgentSessionRef::id("pi-old"),
                 Some(20),
@@ -5049,7 +5046,7 @@ mod tests {
 
         terminal
             .set_agent_session_ref_for_session_start(
-                "herdr:pi".into(),
+                "vqro:pi".into(),
                 "pi".into(),
                 crate::agent_resume::AgentSessionRef::id("pi-new"),
                 Some(21),
@@ -5144,7 +5141,7 @@ mod tests {
             .expect("initial session should be accepted");
 
         let mutation = terminal.set_agent_session_ref_for_session_start(
-            "herdr:claude".into(),
+            "vqro:claude".into(),
             "claude".into(),
             crate::agent_resume::AgentSessionRef::id("claude-session"),
             Some(21),
@@ -5166,7 +5163,7 @@ mod tests {
     fn grok_new_session_does_not_replace_a_different_owner() {
         let mut terminal = test_terminal();
         terminal.set_persisted_agent_session(crate::agent_resume::PersistedAgentSession {
-            source: "herdr:claude".into(),
+            source: "vqro:claude".into(),
             agent: "claude".into(),
             session_ref: crate::agent_resume::AgentSessionRef::id("claude-session").unwrap(),
         });
@@ -5187,7 +5184,7 @@ mod tests {
                 session.agent.as_str(),
                 session.session_ref.value.as_str()
             )),
-            Some(("herdr:claude", "claude", "claude-session"))
+            Some(("vqro:claude", "claude", "claude-session"))
         );
     }
 
@@ -5196,7 +5193,7 @@ mod tests {
         for session_start_source in ["resume", "startup"] {
             let mut terminal = test_terminal();
             terminal.set_persisted_agent_session(crate::agent_resume::PersistedAgentSession {
-                source: "herdr:codex".into(),
+                source: "vqro:codex".into(),
                 agent: "codex".into(),
                 session_ref: crate::agent_resume::AgentSessionRef::id("codex-session").unwrap(),
             });
@@ -5204,7 +5201,7 @@ mod tests {
 
             let mutation = terminal
                 .set_agent_session_ref_for_session_start(
-                    "herdr:claude".into(),
+                    "vqro:claude".into(),
                     "claude".into(),
                     crate::agent_resume::AgentSessionRef::id("claude-session"),
                     Some(21),
@@ -5221,7 +5218,7 @@ mod tests {
                     session.agent.as_str(),
                     session.session_ref.value.as_str()
                 )),
-                Some(("herdr:claude", "claude", "claude-session")),
+                Some(("vqro:claude", "claude", "claude-session")),
                 "{session_start_source} should store claude session"
             );
         }
@@ -5232,14 +5229,14 @@ mod tests {
         for session_start_source in [None, Some("other")] {
             let mut terminal = test_terminal();
             terminal.set_persisted_agent_session(crate::agent_resume::PersistedAgentSession {
-                source: "herdr:codex".into(),
+                source: "vqro:codex".into(),
                 agent: "codex".into(),
                 session_ref: crate::agent_resume::AgentSessionRef::id("codex-session").unwrap(),
             });
             terminal.set_detected_state(Some(Agent::Claude), AgentState::Idle);
 
             let mutation = terminal.set_agent_session_ref_for_session_start(
-                "herdr:claude".into(),
+                "vqro:claude".into(),
                 "claude".into(),
                 crate::agent_resume::AgentSessionRef::id("claude-session"),
                 Some(21),
@@ -5256,7 +5253,7 @@ mod tests {
                     session.agent.as_str(),
                     session.session_ref.value.as_str()
                 )),
-                Some(("herdr:codex", "codex", "codex-session"))
+                Some(("vqro:codex", "codex", "codex-session"))
             );
         }
     }
@@ -5267,14 +5264,14 @@ mod tests {
             for detected_agent in [None, Some(Agent::Codex)] {
                 let mut terminal = test_terminal();
                 terminal.set_persisted_agent_session(crate::agent_resume::PersistedAgentSession {
-                    source: "herdr:codex".into(),
+                    source: "vqro:codex".into(),
                     agent: "codex".into(),
                     session_ref: crate::agent_resume::AgentSessionRef::id("codex-session").unwrap(),
                 });
                 terminal.set_detected_state(detected_agent, AgentState::Idle);
 
                 let mutation = terminal.set_agent_session_ref_for_session_start(
-                    "herdr:claude".into(),
+                    "vqro:claude".into(),
                     "claude".into(),
                     crate::agent_resume::AgentSessionRef::id("claude-session"),
                     Some(21),
@@ -5291,7 +5288,7 @@ mod tests {
                         session.agent.as_str(),
                         session.session_ref.value.as_str()
                     )),
-                    Some(("herdr:codex", "codex", "codex-session"))
+                    Some(("vqro:codex", "codex", "codex-session"))
                 );
             }
         }
@@ -5301,7 +5298,7 @@ mod tests {
     fn custom_session_report_does_not_replace_different_owner_session_ref() {
         let mut terminal = test_terminal();
         terminal.set_persisted_agent_session(crate::agent_resume::PersistedAgentSession {
-            source: "herdr:codex".into(),
+            source: "vqro:codex".into(),
             agent: "codex".into(),
             session_ref: crate::agent_resume::AgentSessionRef::id("codex-session").unwrap(),
         });
@@ -5322,7 +5319,7 @@ mod tests {
                 session.agent.as_str(),
                 session.session_ref.value.as_str()
             )),
-            Some(("herdr:codex", "codex", "codex-session"))
+            Some(("vqro:codex", "codex", "codex-session"))
         );
     }
 
@@ -5360,7 +5357,7 @@ mod tests {
 
         let mutation = terminal
             .set_agent_session_ref_for_session_start(
-                "herdr:codex".into(),
+                "vqro:codex".into(),
                 "codex".into(),
                 crate::agent_resume::AgentSessionRef::id("codex-session"),
                 Some(21),
@@ -5373,7 +5370,7 @@ mod tests {
         assert_eq!(
             terminal.current_session_identity_for_persistence(),
             Some((
-                "herdr:codex".into(),
+                "vqro:codex".into(),
                 "codex".into(),
                 crate::agent_resume::AgentSessionRefKind::Id,
                 "codex-session".into()
@@ -5423,7 +5420,7 @@ mod tests {
             .expect("initial session should be accepted");
 
         let mutation = terminal.set_hook_authority_with_session_ref(
-            "herdr:pi".into(),
+            "vqro:pi".into(),
             "pi".into(),
             AgentState::Working,
             None,
@@ -5448,7 +5445,7 @@ mod tests {
         let mut terminal = test_terminal();
         terminal
             .set_agent_session_ref(
-                "herdr:claude".into(),
+                "vqro:claude".into(),
                 "claude".into(),
                 crate::agent_resume::AgentSessionRef::id("claude-session"),
                 Some(20),
@@ -5457,7 +5454,7 @@ mod tests {
 
         let mutation = terminal
             .set_agent_session_ref(
-                "herdr:claude".into(),
+                "vqro:claude".into(),
                 "claude".into(),
                 crate::agent_resume::AgentSessionRef::id("claude-session"),
                 Some(21),
@@ -5516,7 +5513,7 @@ mod tests {
         terminal.set_detected_state(Some(Agent::Claude), AgentState::Working);
         terminal
             .set_agent_session_ref(
-                "herdr:claude".into(),
+                "vqro:claude".into(),
                 "claude".into(),
                 crate::agent_resume::AgentSessionRef::id("claude-session"),
                 Some(20),
@@ -5527,7 +5524,7 @@ mod tests {
         assert!(!clear.session_ref_changed);
 
         let mutation = terminal.set_agent_session_ref(
-            "herdr:claude".into(),
+            "vqro:claude".into(),
             "claude".into(),
             crate::agent_resume::AgentSessionRef::id("new-session"),
             Some(21),
@@ -5550,12 +5547,12 @@ mod tests {
         anchor_full_lifecycle_session(
             &mut terminal,
             Agent::Pi,
-            "herdr:pi",
+            "vqro:pi",
             "pi",
             crate::agent_resume::AgentSessionRef::path(session_path.clone()).unwrap(),
         );
         terminal.set_hook_authority_with_session_ref(
-            "herdr:pi".into(),
+            "vqro:pi".into(),
             "pi".into(),
             AgentState::Working,
             None,
@@ -5564,7 +5561,7 @@ mod tests {
         );
 
         let mutation = terminal
-            .clear_hook_authority_with_mutation(Some("herdr:pi"), Some(21))
+            .clear_hook_authority_with_mutation(Some("vqro:pi"), Some(21))
             .expect("accepted clear");
 
         assert!(mutation.session_ref_changed);
@@ -5673,7 +5670,7 @@ mod tests {
 
         terminal.set_agent_name("replacement".into());
         let mutation = terminal
-            .release_agent_with_mutation("herdr:codex", "codex", None)
+            .release_agent_with_mutation("vqro:codex", "codex", None)
             .expect("detected agent release should be accepted");
         assert!(!mutation.agent_released);
         assert_eq!(terminal.agent_name.as_deref(), Some("replacement"));
@@ -5709,7 +5706,7 @@ mod tests {
     fn agent_replacement_clears_alias_owned_by_hook_identity() {
         let mut terminal = test_terminal();
         terminal.set_hook_authority(
-            "herdr:claude".into(),
+            "vqro:claude".into(),
             "claude".into(),
             AgentState::Working,
             None,
@@ -5762,13 +5759,13 @@ mod tests {
         anchor_full_lifecycle_session(
             &mut terminal,
             Agent::Pi,
-            "herdr:pi",
+            "vqro:pi",
             "pi",
             crate::agent_resume::AgentSessionRef::path(test_session_path("first.jsonl")).unwrap(),
         );
         terminal
             .set_hook_authority_at(
-                "herdr:pi".into(),
+                "vqro:pi".into(),
                 "pi".into(),
                 AgentState::Working,
                 None,
@@ -5779,13 +5776,13 @@ mod tests {
             .expect("initial hook should be accepted");
         terminal.set_agent_name("reviewer".into());
         terminal
-            .clear_hook_authority_with_mutation(Some("herdr:pi"), Some(21))
+            .clear_hook_authority_with_mutation(Some("vqro:pi"), Some(21))
             .expect("hook clear should be accepted");
         assert_eq!(terminal.agent_name.as_deref(), Some("reviewer"));
 
         terminal
             .set_hook_authority_at(
-                "herdr:pi".into(),
+                "vqro:pi".into(),
                 "pi".into(),
                 AgentState::Idle,
                 None,
@@ -5828,14 +5825,14 @@ mod tests {
     fn release_agent_preserves_foreign_persisted_session_ref() {
         let mut terminal = test_terminal();
         terminal.set_persisted_agent_session(crate::agent_resume::PersistedAgentSession {
-            source: "herdr:claude".into(),
+            source: "vqro:claude".into(),
             agent: "claude".into(),
             session_ref: crate::agent_resume::AgentSessionRef::id("claude-session").unwrap(),
         });
         terminal.set_detected_state(Some(Agent::Pi), AgentState::Idle);
 
         let mutation = terminal
-            .release_agent_with_mutation("herdr:pi", "pi", Some(21))
+            .release_agent_with_mutation("vqro:pi", "pi", Some(21))
             .expect("visible agent release should be accepted");
 
         assert!(!mutation.session_ref_changed);
@@ -5845,7 +5842,7 @@ mod tests {
                 session.agent.as_str(),
                 session.session_ref.value.as_str()
             )),
-            Some(("herdr:claude", "claude", "claude-session"))
+            Some(("vqro:claude", "claude", "claude-session"))
         );
     }
 
@@ -5855,7 +5852,7 @@ mod tests {
         let session_ref =
             crate::agent_resume::AgentSessionRef::path(test_session_path("pi.jsonl")).unwrap();
         terminal.set_persisted_agent_session(crate::agent_resume::PersistedAgentSession {
-            source: "herdr:pi".into(),
+            source: "vqro:pi".into(),
             agent: "pi".into(),
             session_ref: session_ref.clone(),
         });
@@ -5875,7 +5872,7 @@ mod tests {
         assert!(terminal.persisted_agent_session.is_none());
 
         let delayed = terminal.set_agent_session_ref(
-            "herdr:pi".into(),
+            "vqro:pi".into(),
             "pi".into(),
             Some(session_ref),
             Some(21),
@@ -5888,7 +5885,7 @@ mod tests {
     fn process_exit_preserves_foreign_persisted_session_ref() {
         let mut terminal = test_terminal();
         terminal.set_persisted_agent_session(crate::agent_resume::PersistedAgentSession {
-            source: "herdr:claude".into(),
+            source: "vqro:claude".into(),
             agent: "claude".into(),
             session_ref: crate::agent_resume::AgentSessionRef::id("claude-session").unwrap(),
         });
@@ -5920,7 +5917,7 @@ mod tests {
         terminal.respawn_shell_on_exit = true;
         terminal.set_agent_name("codex".into());
         terminal.set_persisted_agent_session(crate::agent_resume::PersistedAgentSession {
-            source: "herdr:codex".into(),
+            source: "vqro:codex".into(),
             agent: "codex".into(),
             session_ref: crate::agent_resume::AgentSessionRef::id("codex-session").unwrap(),
         });
@@ -5974,7 +5971,7 @@ mod tests {
     fn detected_conflict_clears_live_hook_but_preserves_session_ref() {
         let mut terminal = test_terminal();
         terminal.set_hook_authority_with_session_ref(
-            "herdr:claude".into(),
+            "vqro:claude".into(),
             "claude".into(),
             AgentState::Working,
             None,
@@ -5993,7 +5990,7 @@ mod tests {
                 session.agent.as_str(),
                 session.session_ref.value.as_str()
             )),
-            Some(("herdr:claude", "claude", "claude-session"))
+            Some(("vqro:claude", "claude", "claude-session"))
         );
     }
 
@@ -6065,12 +6062,12 @@ mod tests {
         anchor_full_lifecycle_session(
             &mut terminal,
             Agent::Pi,
-            "herdr:pi",
+            "vqro:pi",
             "pi",
             crate::agent_resume::AgentSessionRef::path(test_session_path("root.jsonl")).unwrap(),
         );
         terminal.set_hook_authority(
-            "herdr:pi".into(),
+            "vqro:pi".into(),
             "pi".into(),
             AgentState::Working,
             None,
@@ -6078,7 +6075,7 @@ mod tests {
         );
 
         let change = terminal.set_hook_authority(
-            "herdr:pi".into(),
+            "vqro:pi".into(),
             "pi".into(),
             AgentState::Idle,
             None,
@@ -6096,12 +6093,12 @@ mod tests {
         anchor_full_lifecycle_session(
             &mut terminal,
             Agent::Pi,
-            "herdr:pi",
+            "vqro:pi",
             "pi",
             crate::agent_resume::AgentSessionRef::path(test_session_path("root.jsonl")).unwrap(),
         );
         terminal.set_hook_authority(
-            "herdr:pi".into(),
+            "vqro:pi".into(),
             "pi".into(),
             AgentState::Working,
             None,
@@ -6120,7 +6117,7 @@ mod tests {
         let mut terminal = test_terminal();
         terminal.set_detected_state(Some(Agent::Pi), AgentState::Idle);
         terminal.set_hook_authority(
-            "herdr:pi".into(),
+            "vqro:pi".into(),
             "pi".into(),
             AgentState::Working,
             None,

@@ -41,6 +41,7 @@ rustPlatform.buildRustPackage {
       lib.fileset.unions [
         ../assets
         ../distribution/install.ps1
+        ../distribution/latest.json
         ../docs/next/api/herdr-api.schema.json
         ../docs/next/api/vqro-api.schema.json
         ../docs/next/api/vqro-extension-manifest.schema.json
@@ -50,7 +51,7 @@ rustPlatform.buildRustPackage {
         ../extensions/reference-host-document
         ../extensions/terminal-inspector
         ../src
-        ../tests/fixtures/extensions
+        ../tests/fixtures
         ../vendor/libghostty-vt
         ../vendor/libghostty-vt.vendor.json
         ../vendor/portable-pty
@@ -58,6 +59,7 @@ rustPlatform.buildRustPackage {
         ../Cargo.lock
         ../Cargo.toml
         ../skills/herdr/SKILL.md
+        ../skills/vqro/SKILL.md
       ]
     );
   };

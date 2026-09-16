@@ -39,6 +39,13 @@ const WINDOWS_REMOTE_INSTALL_DIR_MARKER: &str = "vqro-remote-install-dir:1:";
 const WINDOWS_REMOTE_INSTALL_RESULT_MARKER: &str = "vqro-remote-install-result:1:";
 const SSH_CONTROL_SOCKET_NAME: &str = "ctl";
 pub(crate) fn run_remote(remote: RemoteLaunch) -> io::Result<()> {
+    if !crate::product::REMOTE_ENABLED {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "vqro remote mode is disabled until remote discovery and installation use the vqro namespace",
+        ));
+    }
+
     let session_name = crate::session::active_name()
         .unwrap_or_else(|| crate::session::DEFAULT_SESSION_NAME.to_string());
     let local_socket = local_forward_socket_path(&remote.target, &session_name);
@@ -87,6 +94,13 @@ pub(crate) fn run_remote(remote: RemoteLaunch) -> io::Result<()> {
 }
 
 pub(crate) fn prepare_saved_ssh(target: &str, session_name: &str) -> io::Result<()> {
+    if !crate::product::REMOTE_ENABLED {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "vqro remote mode is disabled until remote discovery and installation use the vqro namespace",
+        ));
+    }
+
     super::validate_remote_target(target)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
     crate::session::validate_name(session_name)

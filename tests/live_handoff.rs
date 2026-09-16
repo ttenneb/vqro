@@ -1470,7 +1470,7 @@ fn live_handoff_keeps_unmanaged_agent_name_bound_to_saved_session() {
             "method": "pane.report_agent_session",
             "params": {
                 "pane_id": pane_id,
-                "source": "herdr:pi",
+                "source": "vqro:pi",
                 "agent": "pi",
                 "seq": 1,
                 "agent_session_path": old_session,
@@ -1485,7 +1485,7 @@ fn live_handoff_keeps_unmanaged_agent_name_bound_to_saved_session() {
             "method": "pane.report_agent",
             "params": {
                 "pane_id": pane_id,
-                "source": "herdr:pi",
+                "source": "vqro:pi",
                 "agent": "pi",
                 "state": "idle",
                 "seq": 2,
@@ -1535,7 +1535,7 @@ fn live_handoff_keeps_unmanaged_agent_name_bound_to_saved_session() {
             "method": "pane.report_agent_session",
             "params": {
                 "pane_id": pane_id,
-                "source": "herdr:pi",
+                "source": "vqro:pi",
                 "agent": "pi",
                 "seq": 3,
                 "agent_session_path": new_session,

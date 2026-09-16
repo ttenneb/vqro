@@ -903,14 +903,20 @@ fn restore_plan_for_snapshot(
         return None;
     }
     let persisted = persisted_agent_session_from_snapshot(session)?;
-    crate::agent_resume::plan(&session.source, &session.agent, &persisted.session_ref)
+    crate::agent_resume::plan(&persisted.source, &persisted.agent, &persisted.session_ref)
 }
 
 fn persisted_agent_session_from_snapshot(
     session: &PaneAgentSessionSnapshot,
 ) -> Option<crate::agent_resume::PersistedAgentSession> {
+    let source = match (session.source.as_str(), session.agent.as_str()) {
+        ("herdr:pi", "pi") => "vqro:pi",
+        ("herdr:claude", "claude") => "vqro:claude",
+        ("herdr:codex", "codex") => "vqro:codex",
+        _ => &session.source,
+    };
     crate::agent_resume::session_ref_from_snapshot(
-        &session.source,
+        source,
         &session.agent,
         session.kind,
         &session.value,
@@ -1314,7 +1320,7 @@ mod tests {
     fn restore_plan_respects_opt_in_and_allowlist() {
         let pi_session_path = test_session_path("pi-session.jsonl");
         let session = super::super::snapshot::PaneAgentSessionSnapshot {
-            source: "herdr:pi".into(),
+            source: "vqro:pi".into(),
             agent: "pi".into(),
             kind: crate::agent_resume::AgentSessionRefKind::Path,
             value: pi_session_path.clone(),
@@ -1325,9 +1331,20 @@ mod tests {
             restore_plan_for_snapshot(&session, true).unwrap().argv,
             vec!["pi", "--session", pi_session_path.as_str()]
         );
+        let inherited_session = super::super::snapshot::PaneAgentSessionSnapshot {
+            source: "herdr:pi".into(),
+            ..session.clone()
+        };
+        let migrated = restore_plan_for_snapshot(&inherited_session, true)
+            .expect("legacy snapshot source should migrate during restore");
+        assert_eq!(
+            migrated.argv,
+            vec!["pi", "--session", pi_session_path.as_str()]
+        );
+        assert!(migrated.dedupe_key.starts_with("vqro:pi\0"));
 
         let unsupported_path = super::super::snapshot::PaneAgentSessionSnapshot {
-            source: "herdr:claude".into(),
+            source: "vqro:claude".into(),
             agent: "claude".into(),
             kind: crate::agent_resume::AgentSessionRefKind::Path,
             value: test_session_path("claude-session"),
@@ -1339,7 +1356,7 @@ mod tests {
     fn restore_plan_selection_suppresses_duplicates() {
         let pi_session_path = test_session_path("pi-session.jsonl");
         let session = super::super::snapshot::PaneAgentSessionSnapshot {
-            source: "herdr:pi".into(),
+            source: "vqro:pi".into(),
             agent: "pi".into(),
             kind: crate::agent_resume::AgentSessionRefKind::Path,
             value: pi_session_path.clone(),
@@ -1361,7 +1378,7 @@ mod tests {
     #[test]
     fn pane_restore_startup_suppresses_history_for_native_agent_resume() {
         let session = super::super::snapshot::PaneAgentSessionSnapshot {
-            source: "herdr:pi".into(),
+            source: "vqro:pi".into(),
             agent: "pi".into(),
             kind: crate::agent_resume::AgentSessionRefKind::Path,
             value: test_session_path("pi-session.jsonl"),
@@ -1386,7 +1403,7 @@ mod tests {
     #[test]
     fn pane_restore_startup_suppresses_history_for_duplicate_native_agent_session() {
         let session = super::super::snapshot::PaneAgentSessionSnapshot {
-            source: "herdr:pi".into(),
+            source: "vqro:pi".into(),
             agent: "pi".into(),
             kind: crate::agent_resume::AgentSessionRefKind::Path,
             value: test_session_path("pi-session.jsonl"),
@@ -1497,7 +1514,7 @@ mod tests {
     #[test]
     fn pane_restore_startup_keeps_history_without_native_agent_resume() {
         let session = super::super::snapshot::PaneAgentSessionSnapshot {
-            source: "herdr:pi".into(),
+            source: "vqro:pi".into(),
             agent: "pi".into(),
             kind: crate::agent_resume::AgentSessionRefKind::Path,
             value: test_session_path("pi-session.jsonl"),
@@ -1539,7 +1556,7 @@ mod tests {
     #[test]
     fn restore_does_not_rehydrate_duplicate_agent_session_metadata() {
         let session = super::super::snapshot::PaneAgentSessionSnapshot {
-            source: "herdr:pi".into(),
+            source: "vqro:pi".into(),
             agent: "pi".into(),
             kind: crate::agent_resume::AgentSessionRefKind::Path,
             value: test_session_path("pi-session.jsonl"),
@@ -1750,7 +1767,7 @@ mod tests {
             agent_name: Some("planner".into()),
             managed_agent_kind: None,
             agent_session: Some(super::super::snapshot::PaneAgentSessionSnapshot {
-                source: "herdr:codex".into(),
+                source: "vqro:codex".into(),
                 agent: "codex".into(),
                 kind: crate::agent_resume::AgentSessionRefKind::Id,
                 value: "codex-session".into(),
@@ -1923,7 +1940,7 @@ mod tests {
                             agent_name: None,
                             managed_agent_kind: None,
                             agent_session: Some(super::super::snapshot::PaneAgentSessionSnapshot {
-                                source: "herdr:codex".into(),
+                                source: "vqro:codex".into(),
                                 agent: "codex".into(),
                                 kind: crate::agent_resume::AgentSessionRefKind::Id,
                                 value: "codex-session".into(),

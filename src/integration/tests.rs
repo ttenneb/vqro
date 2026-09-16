@@ -145,6 +145,80 @@ fn clear_integration_path_env() {
     std::env::remove_var(GROK_HOME_ENV_VAR);
 }
 
+#[test]
+fn vqro_integration_entry_points_preserve_herdr_owned_files() {
+    let _lock = integration_env_lock();
+    let base = std::env::temp_dir().join(format!(
+        "vqro-integration-quarantine-test-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let pi = base.join("pi");
+    let claude = base.join("claude");
+    let codex = base.join("codex");
+    for directory in [&pi, &claude, &codex] {
+        fs::create_dir_all(directory).unwrap();
+    }
+    let herdr_hook_name = if cfg!(windows) {
+        "herdr-agent-state.ps1"
+    } else {
+        "herdr-agent-state.sh"
+    };
+    let herdr_files = [
+        pi.join("herdr-agent-state.ts"),
+        claude.join("hooks").join(herdr_hook_name),
+        codex.join(herdr_hook_name),
+    ];
+    fs::create_dir_all(herdr_files[1].parent().unwrap()).unwrap();
+    for path in &herdr_files {
+        fs::write(path, b"preserve exactly").unwrap();
+    }
+
+    let variables = [
+        (PI_CODING_AGENT_DIR_ENV_VAR, &pi),
+        (CLAUDE_CONFIG_DIR_ENV_VAR, &claude),
+        (CODEX_HOME_ENV_VAR, &codex),
+    ];
+    let previous = variables
+        .iter()
+        .map(|(name, _)| (*name, std::env::var_os(name)))
+        .collect::<Vec<_>>();
+    for (name, value) in variables {
+        std::env::set_var(name, value);
+    }
+
+    for target in [
+        crate::api::schema::IntegrationTarget::Pi,
+        crate::api::schema::IntegrationTarget::Claude,
+        crate::api::schema::IntegrationTarget::Codex,
+    ] {
+        install_target(target).expect("Vqro-owned integration must install");
+        uninstall_target(target).expect("Vqro-owned integration must uninstall");
+    }
+    let disabled = install_target(crate::api::schema::IntegrationTarget::Kimi)
+        .expect_err("inherited integration must remain quarantined");
+    assert_eq!(disabled.kind(), std::io::ErrorKind::Unsupported);
+
+    for path in &herdr_files {
+        assert_eq!(fs::read(path).unwrap(), b"preserve exactly");
+    }
+    assert!(!pi.join("vqro-agent-state.ts").exists());
+    assert!(!claude.join("hooks").join(CLAUDE_HOOK_INSTALL_NAME).exists());
+    assert!(!codex.join(CODEX_HOOK_INSTALL_NAME).exists());
+
+    for (name, value) in previous {
+        if let Some(value) = value {
+            std::env::set_var(name, value);
+        } else {
+            std::env::remove_var(name);
+        }
+    }
+    fs::remove_dir_all(base).unwrap();
+}
+
 fn kimi_hook_command(hook_path: &Path, action: &str) -> String {
     hook_command(hook_path, Some(action))
 }
@@ -635,8 +709,8 @@ fn install_omp_removes_legacy_pi_integration_from_omp_extensions_dir() {
     let home = base.join("home");
     let ext_dir = home.join(".omp/agent/extensions");
     fs::create_dir_all(&ext_dir).unwrap();
-    let legacy_path = ext_dir.join(PI_EXTENSION_INSTALL_NAME);
-    fs::write(&legacy_path, PI_EXTENSION_ASSET).unwrap();
+    let legacy_path = ext_dir.join(LEGACY_PI_EXTENSION_INSTALL_NAME);
+    fs::write(&legacy_path, include_str!("assets/pi/herdr-agent-state.ts")).unwrap();
     std::env::set_var("HOME", &home);
 
     let installed = install_omp().unwrap();
@@ -659,7 +733,7 @@ fn install_omp_preserves_non_herdr_file_with_pi_install_name() {
     let home = base.join("home");
     let ext_dir = home.join(".omp/agent/extensions");
     fs::create_dir_all(&ext_dir).unwrap();
-    let user_path = ext_dir.join(PI_EXTENSION_INSTALL_NAME);
+    let user_path = ext_dir.join(LEGACY_PI_EXTENSION_INSTALL_NAME);
     fs::write(&user_path, "// user extension\n").unwrap();
     std::env::set_var("HOME", &home);
 

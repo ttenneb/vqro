@@ -238,7 +238,8 @@ pub(crate) fn integration_recommendations() -> Vec<super::IntegrationRecommendat
     integration_specs()
         .into_iter()
         .filter_map(|(target, path, expected_version)| {
-            if !integration_target_supported(target) {
+            if !super::integration_mutation_enabled(target) || !integration_target_supported(target)
+            {
                 return None;
             }
             let path = path.ok()?;
@@ -370,7 +371,7 @@ pub(crate) fn integration_update_instructions(
         .iter()
         .map(|target| {
             format!(
-                "`herdr integration install {}`",
+                "`vqro integration install {}`",
                 integration_target_label(*target)
             )
         })
@@ -392,9 +393,13 @@ pub(crate) fn print_outdated_update_notice() -> bool {
     let targets = outdated
         .iter()
         .map(|integration| integration.target)
+        .filter(|target| super::integration_mutation_enabled(*target))
         .collect::<Vec<_>>();
+    if targets.is_empty() {
+        return false;
+    }
     eprintln!(
-        "installed herdr integrations need updating; {}.",
+        "installed vqro integrations need updating; {}.",
         integration_update_instructions(&targets).replace('`', "")
     );
     true
@@ -498,23 +503,6 @@ pub(crate) fn integration_status_at(
 /// `IntegrationTarget` enum so published generation-1 clients never receive an
 /// unknown variant. It is installable and reportable as an experimental
 /// CLI-only target until the agent registry replaces the enum-keyed registry.
-pub(crate) fn experimental_letta_integration_status() -> Option<super::ExperimentalIntegrationStatus>
-{
-    let path = letta_dir()
-        .ok()?
-        .join("hooks")
-        .join(super::LETTA_HOOK_INSTALL_NAME);
-    let (state, installed_version) =
-        integration_state_for_path(&path, super::LETTA_INTEGRATION_VERSION);
-    Some(super::ExperimentalIntegrationStatus {
-        label: "letta",
-        path,
-        state,
-        installed_version,
-        expected_version: super::LETTA_INTEGRATION_VERSION,
-    })
-}
-
 pub(crate) fn parse_integration_version(content: &str) -> Option<u32> {
     content.lines().find_map(|line| {
         let marker_line = line
@@ -523,7 +511,8 @@ pub(crate) fn parse_integration_version(content: &str) -> Option<u32> {
             .trim_start_matches('#')
             .trim();
         marker_line
-            .strip_prefix(super::INTEGRATION_VERSION_MARKER)?
+            .strip_prefix(super::INTEGRATION_VERSION_MARKER)
+            .or_else(|| marker_line.strip_prefix(super::LEGACY_INTEGRATION_VERSION_MARKER))?
             .trim()
             .parse()
             .ok()

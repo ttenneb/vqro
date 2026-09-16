@@ -248,7 +248,7 @@ fn dead_server_cli_reports_one_session_aware_json_line() {
 }
 
 #[test]
-fn inherited_integration_mutation_is_disabled_during_alpha() {
+fn vqro_owned_integration_mutation_preserves_inherited_files() {
     let base = unique_test_dir();
     let home_dir = base.join("home");
     let extensions_dir = home_dir.join(".pi/agent/extensions");
@@ -259,11 +259,10 @@ fn inherited_integration_mutation_is_disabled_during_alpha() {
     register_runtime_dir(&runtime_dir);
     let missing_socket = runtime_dir.join("missing.sock");
 
-    let expected_extension = extensions_dir.join("herdr-agent-state.ts");
-    assert!(
-        !expected_extension.exists(),
-        "test setup should start without extension file"
-    );
+    let inherited_extension = extensions_dir.join("herdr-agent-state.ts");
+    fs::write(&inherited_extension, "preserve exactly\n").unwrap();
+    let expected_extension = extensions_dir.join("vqro-agent-state.ts");
+    assert!(!expected_extension.exists());
 
     let workspace_list = Command::new(env!("CARGO_BIN_EXE_vqro"))
         .args(["workspace", "list"])
@@ -279,11 +278,20 @@ fn inherited_integration_mutation_is_disabled_during_alpha() {
         .env("HOME", &home_dir)
         .output()
         .unwrap();
-    assert_eq!(integration_install.status.code(), Some(1));
-    assert!(
-        !expected_extension.exists(),
-        "vqro must not overwrite the installed Herdr integration during alpha"
+    assert_eq!(integration_install.status.code(), Some(0));
+    assert!(expected_extension.exists());
+    assert_eq!(
+        fs::read_to_string(&inherited_extension).unwrap(),
+        "preserve exactly\n"
     );
+
+    let inherited_install = Command::new(env!("CARGO_BIN_EXE_vqro"))
+        .args(["integration", "install", "kimi"])
+        .env("VQRO_SOCKET_PATH", &missing_socket)
+        .env("HOME", &home_dir)
+        .output()
+        .unwrap();
+    assert_eq!(inherited_install.status.code(), Some(1));
 
     let integration_status = Command::new(env!("CARGO_BIN_EXE_vqro"))
         .args(["integration", "status"])
@@ -293,7 +301,7 @@ fn inherited_integration_mutation_is_disabled_during_alpha() {
         .unwrap();
     assert_eq!(integration_status.status.code(), Some(0));
     let status_stdout = String::from_utf8_lossy(&integration_status.stdout);
-    assert!(status_stdout.contains("pi: not installed"));
+    assert!(status_stdout.contains("pi: current"));
     assert!(status_stdout.contains("claude: not installed"));
 
     let integration_uninstall = Command::new(env!("CARGO_BIN_EXE_vqro"))
@@ -302,17 +310,18 @@ fn inherited_integration_mutation_is_disabled_during_alpha() {
         .env("HOME", &home_dir)
         .output()
         .unwrap();
-    assert_eq!(integration_uninstall.status.code(), Some(1));
-    assert!(
-        !expected_extension.exists(),
-        "vqro must not remove Herdr-owned integration files during alpha"
+    assert_eq!(integration_uninstall.status.code(), Some(0));
+    assert!(!expected_extension.exists());
+    assert_eq!(
+        fs::read_to_string(&inherited_extension).unwrap(),
+        "preserve exactly\n"
     );
 
     cleanup_test_base(&base);
 }
 
 #[test]
-fn integration_status_outdated_only_prints_action_for_legacy_install() {
+fn integration_status_ignores_legacy_herdr_install() {
     let base = unique_test_dir();
     let home_dir = base.join("home");
     let extensions_dir = home_dir.join(".pi/agent/extensions");
@@ -337,9 +346,7 @@ fn integration_status_outdated_only_prints_action_for_legacy_install() {
 
     assert_eq!(output.status.code(), Some(0));
     assert!(output.stdout.is_empty());
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("installed herdr integrations need updating"));
-    assert!(stderr.contains("herdr integration install pi"));
+    assert!(output.stderr.is_empty());
 
     cleanup_test_base(&base);
 }

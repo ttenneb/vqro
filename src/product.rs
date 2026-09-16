@@ -26,6 +26,9 @@ pub(crate) const BIN_PATH_ENV: &str = "VQRO_BIN_PATH";
 
 /// No vqro release feed exists during the alpha identity bootstrap.
 pub(crate) const SELF_UPDATE_ENABLED: bool = false;
+/// Remote discovery still targets Herdr-owned paths and must remain unavailable
+/// until the complete remote install and transport chain is product-scoped.
+pub(crate) const REMOTE_ENABLED: bool = false;
 
 pub(crate) fn app_dir_name(debug: bool) -> &'static str {
     if debug {
@@ -77,8 +80,11 @@ mod tests {
     }
 
     #[test]
-    fn inherited_self_update_is_quarantined() {
-        const { assert!(!SELF_UPDATE_ENABLED) };
+    fn inherited_self_update_and_remote_install_are_quarantined() {
+        const {
+            assert!(!SELF_UPDATE_ENABLED);
+            assert!(!REMOTE_ENABLED);
+        };
     }
 
     #[test]

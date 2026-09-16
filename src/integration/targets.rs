@@ -53,8 +53,8 @@ use super::{
     GROK_HOOK_ASSET, GROK_HOOK_CONFIG_INSTALL_NAME, GROK_HOOK_INSTALL_NAME,
     HERMES_PLUGIN_INIT_ASSET, HERMES_PLUGIN_INIT_INSTALL_NAME, HERMES_PLUGIN_MANIFEST_ASSET,
     HERMES_PLUGIN_MANIFEST_INSTALL_NAME, KILO_PLUGIN_ASSET, KILO_PLUGIN_INSTALL_NAME,
-    KIMI_HOOK_ASSET, KIMI_HOOK_INSTALL_NAME, LETTA_HOOK_ASSET, LETTA_HOOK_INSTALL_NAME,
-    LETTA_HOOK_TIMEOUT_MS, MASTRACODE_HOOK_ASSET, MASTRACODE_HOOK_EVENTS,
+    KIMI_HOOK_ASSET, KIMI_HOOK_INSTALL_NAME, LEGACY_PI_EXTENSION_INSTALL_NAME, LETTA_HOOK_ASSET,
+    LETTA_HOOK_INSTALL_NAME, LETTA_HOOK_TIMEOUT_MS, MASTRACODE_HOOK_ASSET, MASTRACODE_HOOK_EVENTS,
     MASTRACODE_HOOK_INSTALL_NAME, MASTRACODE_HOOK_TIMEOUT_MS, MASTRACODE_REMOVED_HOOK_EVENTS,
     OMP_EXTENSION_ASSET, OMP_EXTENSION_INSTALL_NAME, OPENCODE_PLUGIN_ASSET,
     OPENCODE_PLUGIN_INSTALL_NAME, OPENCODE_TUI_PLUGIN_ASSET, OPENCODE_TUI_PLUGIN_INSTALL_NAME,
@@ -106,7 +106,7 @@ pub(crate) fn install_omp() -> io::Result<OmpInstallPaths> {
 }
 
 pub(crate) fn remove_legacy_pi_extension_from_omp_dir(dir: &Path) -> io::Result<bool> {
-    let legacy_path = dir.join(PI_EXTENSION_INSTALL_NAME);
+    let legacy_path = dir.join(LEGACY_PI_EXTENSION_INSTALL_NAME);
     if !legacy_path.is_file() {
         return Ok(false);
     }
@@ -143,7 +143,6 @@ pub(crate) fn install_claude() -> io::Result<ClaudeInstallPaths> {
         "{}".to_string()
     };
     let updated_settings = install_claude_settings(&existing_settings, &settings_path, &hook_path)?;
-    remove_legacy_bash_hook_file(&hook_path)?;
 
     if updated_settings != existing_settings {
         fs::write(&settings_path, updated_settings)?;
@@ -196,7 +195,6 @@ pub(crate) fn install_codex() -> io::Result<CodexInstallPaths> {
         10,
         None,
     )?;
-    remove_legacy_bash_hook_file(&hook_path)?;
 
     fs::write(&hooks_path, serde_json::to_string_pretty(&hooks_file)?)?;
 
@@ -577,8 +575,7 @@ pub(crate) fn uninstall_claude() -> io::Result<ClaudeUninstallResult> {
         }
     }
 
-    let removed_hook_file =
-        remove_file_if_exists(&hook_path)? | remove_legacy_bash_hook_file(&hook_path)?;
+    let removed_hook_file = remove_file_if_exists(&hook_path)?;
 
     Ok(ClaudeUninstallResult {
         hook_path,
@@ -624,8 +621,7 @@ pub(crate) fn uninstall_codex() -> io::Result<CodexUninstallResult> {
         }
     }
 
-    let removed_hook_file =
-        remove_file_if_exists(&hook_path)? | remove_legacy_bash_hook_file(&hook_path)?;
+    let removed_hook_file = remove_file_if_exists(&hook_path)?;
 
     Ok(CodexUninstallResult {
         hook_path,

@@ -6442,7 +6442,7 @@ async fn headless_scheduled_tasks_start_pending_agent_resume_without_foreground_
         .pending_agent_resume_plan = Some(crate::agent_resume::AgentResumePlan {
         agent: "codex".into(),
         argv: vec!["/bin/sh".into(), "-c".into(), "sleep 5".into()],
-        dedupe_key: "herdr:codex\0codex\0Id\0codex-session".into(),
+        dedupe_key: "vqro:codex\0codex\0Id\0codex-session".into(),
     });
 
     server.render_and_stream();
@@ -7990,7 +7990,7 @@ fn stale_api_agent_report_does_not_forward_done_sound() {
         .get_mut(&terminal_id)
         .unwrap()
         .set_persisted_agent_session(crate::agent_resume::PersistedAgentSession {
-            source: "herdr:pi".into(),
+            source: "vqro:pi".into(),
             agent: "pi".into(),
             session_ref: crate::agent_resume::AgentSessionRef::path(
                 std::env::current_dir()
@@ -8008,7 +8008,7 @@ fn stale_api_agent_report_does_not_forward_done_sound() {
         .get_mut(&terminal_id)
         .unwrap()
         .set_hook_authority(
-            "herdr:pi".into(),
+            "vqro:pi".into(),
             "pi".into(),
             crate::detect::AgentState::Working,
             None,
@@ -8039,7 +8039,7 @@ fn stale_api_agent_report_does_not_forward_done_sound() {
             id: "stale".into(),
             method: api::schema::Method::PaneReportAgent(api::schema::PaneReportAgentParams {
                 pane_id: public_pane_id,
-                source: "herdr:pi".into(),
+                source: "vqro:pi".into(),
                 agent: "pi".into(),
                 state: api::schema::PaneAgentState::Idle,
                 message: None,
