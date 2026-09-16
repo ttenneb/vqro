@@ -288,6 +288,35 @@ impl DurableExtensionStateV1 {
         Ok(self.commit(&transaction.namespace, revision, self.sequence, false))
     }
 
+    pub fn clear_namespace(
+        &mut self,
+        namespace: &str,
+        idempotency_key: String,
+    ) -> Result<Option<ExtensionStateCommitV1>, ExtensionStateError> {
+        validate_namespace(namespace)?;
+        let Some(state) = self.namespaces.get(namespace) else {
+            return Ok(None);
+        };
+        let operations = state
+            .values
+            .keys()
+            .cloned()
+            .map(|key| ExtensionStateOperationV1 { key, value: None })
+            .collect::<Vec<_>>();
+        if operations.is_empty() {
+            return Ok(None);
+        }
+        self.transact(&ExtensionStateTransactionV1 {
+            contract: EXTENSION_STATE_CONTRACT_V1.into(),
+            namespace: namespace.into(),
+            expected_store_generation: self.store_generation,
+            expected_revision: state.revision,
+            idempotency_key,
+            operations,
+        })
+        .map(Some)
+    }
+
     pub fn events_after(&self, sequence: u64, limit: usize) -> ExtensionStateEventPageV1 {
         let earliest_sequence = self
             .events
@@ -514,6 +543,26 @@ mod tests {
             store.transact(&conflicting),
             Err(ExtensionStateError::IdempotencyConflict)
         );
+    }
+
+    #[test]
+    fn clearing_a_namespace_removes_all_owned_values() {
+        let mut store = DurableExtensionStateV1::new("session:one".into(), 1).unwrap();
+        store.transact(&transaction(0, "request-1")).unwrap();
+        let commit = store
+            .clear_namespace("example.extension", "delete-data".into())
+            .unwrap()
+            .unwrap();
+        assert_eq!(commit.revision, 2);
+        assert!(store
+            .snapshot("example.extension")
+            .unwrap()
+            .values
+            .is_empty());
+        assert!(store
+            .clear_namespace("missing.extension", "delete-missing".into())
+            .unwrap()
+            .is_none());
     }
 
     #[test]

@@ -16,7 +16,7 @@ fn extension_info(installed: bool) -> crate::api::schema::ExtensionInfo {
         summary: "Group related terminal panes.".into(),
         details: "First-party collection workflows through a public contract.".into(),
         categories: vec!["Workflow".into(), "Interface".into()],
-        package_kind: "bundled".into(),
+        package_kind: crate::api::schema::ExtensionPackageKind::Bundled,
         integration_target: None,
         integration_status: None,
         available_version: "1.0.0".into(),

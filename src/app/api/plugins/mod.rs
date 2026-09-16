@@ -50,7 +50,7 @@ impl App {
         );
         let bundled_provider_priorities = crate::extensions::bundled_provider_priorities(
             &self.extension_index,
-            &self.extension_state,
+            &self.marketplace_state,
         );
         let host_document_services = crate::extension_service::HostDocumentServiceCatalog::bundled(
             &self.disabled_extensions,

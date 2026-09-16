@@ -171,7 +171,7 @@ fn persist_extension_repository_identity(common_dir: &Path, local_id: &str) {
             file.sync_all()
         })
         .and_then(|()| crate::platform::replace_file(&temporary, &path))
-        .and_then(|()| crate::platform::sync_parent_directory(&path));
+        .and_then(|()| crate::platform::sync_containing_directory(&path));
     if committed.is_err() {
         let _ = std::fs::remove_file(temporary);
     }
@@ -223,7 +223,7 @@ pub(crate) fn stable_repository_id(common_dir: &Path) -> RepositoryId {
                 file.sync_all()
             })
             .and_then(|()| crate::platform::replace_file(&temporary, &identity_path))
-            .and_then(|()| crate::platform::sync_parent_directory(&identity_path));
+            .and_then(|()| crate::platform::sync_containing_directory(&identity_path));
         if committed.is_err() {
             let _ = std::fs::remove_file(temporary);
         }

@@ -46,16 +46,20 @@ pub(crate) fn replace_file(source: &Path, destination: &Path) -> std::io::Result
 
 #[cfg(not(windows))]
 pub(crate) fn sync_parent_directory(path: &Path) -> std::io::Result<()> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| std::io::Error::other("state path has no parent directory"))?;
-    std::fs::File::open(parent)?.sync_all()
+    std::fs::File::open(path)?.sync_all()
 }
 
 #[cfg(windows)]
 pub(crate) fn sync_parent_directory(_path: &Path) -> std::io::Result<()> {
     // replace_file uses MOVEFILE_WRITE_THROUGH on Windows.
     Ok(())
+}
+
+pub(crate) fn sync_containing_directory(path: &Path) -> std::io::Result<()> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| std::io::Error::other("state path has no parent directory"))?;
+    sync_parent_directory(parent)
 }
 
 /// Replace a synced temporary file and restore the previous file if publishing
@@ -79,13 +83,13 @@ pub(crate) fn durable_replace_file(source: &Path, destination: &Path) -> std::io
         let _ = std::fs::remove_file(&backup);
         return Err(error);
     }
-    if let Err(sync_error) = sync_parent_directory(destination) {
+    if let Err(sync_error) = sync_containing_directory(destination) {
         let rollback = if had_previous {
             replace_file(&backup, destination)
         } else {
             std::fs::remove_file(destination)
         };
-        let _ = sync_parent_directory(destination);
+        let _ = sync_containing_directory(destination);
         return match rollback {
             Ok(()) => Err(sync_error),
             Err(rollback_error) => Err(std::io::Error::other(format!(
@@ -94,7 +98,7 @@ pub(crate) fn durable_replace_file(source: &Path, destination: &Path) -> std::io
         };
     }
     if had_previous && std::fs::remove_file(&backup).is_ok() {
-        let _ = sync_parent_directory(destination);
+        let _ = sync_containing_directory(destination);
     }
     Ok(())
 }

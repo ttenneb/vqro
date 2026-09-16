@@ -212,6 +212,14 @@ impl ClientShellState {
             outcome.repaint = true;
             return;
         }
+        if !extension.enabled
+            && !extension.artifact_verified
+            && extension.package_kind == crate::api::schema::ExtensionPackageKind::AgentIntegration
+        {
+            self.set_extension_confirmation(ClientExtensionConfirmation::Update);
+            outcome.repaint = true;
+            return;
+        }
         self.queue_extension_mutation(
             crate::api::schema::Method::ExtensionEnable(
                 crate::api::schema::ExtensionSetEnabledParams {
@@ -409,7 +417,9 @@ impl ClientShellState {
             }
             KeyCode::Char('u') if modifiers.is_empty() => {
                 if self.selected_extension().is_some_and(|extension| {
-                    extension.installed && extension.package_kind == "agent_integration"
+                    extension.installed
+                        && extension.package_kind
+                            == crate::api::schema::ExtensionPackageKind::AgentIntegration
                 }) {
                     self.set_extension_confirmation(ClientExtensionConfirmation::Update);
                 }
@@ -417,7 +427,8 @@ impl ClientShellState {
             KeyCode::Char('b')
                 if modifiers.is_empty()
                     && self.selected_extension().is_some_and(|extension| {
-                        extension.package_kind == "agent_integration"
+                        extension.package_kind
+                            == crate::api::schema::ExtensionPackageKind::AgentIntegration
                             && extension.rollback_version.is_some()
                     }) =>
             {

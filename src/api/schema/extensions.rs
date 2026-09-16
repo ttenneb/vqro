@@ -48,6 +48,24 @@ pub struct ExtensionUpdateParams {
     pub approved: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ExtensionPackageKind {
+    Bundled,
+    AgentIntegration,
+    GithubPlugin,
+}
+
+impl std::fmt::Display for ExtensionPackageKind {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::Bundled => "bundled",
+            Self::AgentIntegration => "agent integration",
+            Self::GithubPlugin => "GitHub plugin",
+        })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ExtensionInfo {
     pub id: String,
@@ -64,12 +82,12 @@ pub struct ExtensionInfo {
     pub summary: String,
     pub details: String,
     pub categories: Vec<String>,
-    pub package_kind: String,
+    pub package_kind: ExtensionPackageKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub integration_target: Option<String>,
+    pub integration_target: Option<super::IntegrationTarget>,
     /// Deployment state of an agent adapter, distinct from package install state.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub integration_status: Option<String>,
+    pub integration_status: Option<super::IntegrationState>,
     pub available_version: String,
     pub active_version: String,
     pub installed: bool,
@@ -77,7 +95,8 @@ pub struct ExtensionInfo {
     /// Whether this host can perform a fresh installation of the package.
     #[serde(default)]
     pub install_supported: bool,
-    /// True only when the active retained source artifact re-verifies locally.
+    /// True when an artifact verified at installation remains in managed storage.
+    /// Activation and rollback re-verify its digests before use.
     #[serde(default)]
     pub artifact_verified: bool,
     #[serde(default)]

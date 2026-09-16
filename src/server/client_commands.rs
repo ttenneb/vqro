@@ -459,7 +459,7 @@ mod tests {
                 offset_from_bottom: None,
             }
         )));
-        assert!(supports_client_shell_method(&Method::ExtensionList(
+        assert!(!supports_client_shell_method(&Method::ExtensionList(
             crate::api::schema::ExtensionListParams::default()
         )));
     }

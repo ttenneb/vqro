@@ -13,6 +13,8 @@ use serde::{Deserialize, Serialize};
 
 pub(crate) const CATALOG_SCHEMA_VERSION: u32 = 1;
 pub(crate) const STATE_SCHEMA_VERSION: u32 = 1;
+const MAX_MARKETPLACE_STATE_BYTES: u64 = 1024 * 1024;
+const MAX_MARKETPLACE_JOURNAL_BYTES: u64 = 64 * 1024;
 static NEXT_STATE_TEMP_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -47,18 +49,54 @@ pub(crate) struct CuratedExtension {
     pub default_enabled: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CuratedIntegrationTarget {
+    Supported(crate::api::schema::IntegrationTarget),
+    Letta,
+}
+
+impl CuratedIntegrationTarget {
+    pub(crate) fn supported(self) -> Option<crate::api::schema::IntegrationTarget> {
+        match self {
+            Self::Supported(target) => Some(target),
+            Self::Letta => None,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for CuratedIntegrationTarget {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = String::deserialize(deserializer)?;
+        if value == "letta" {
+            return Ok(Self::Letta);
+        }
+        serde_json::from_value(serde_json::Value::String(value.replace('-', "_")))
+            .map(Self::Supported)
+            .map_err(serde::de::Error::custom)
+    }
+}
+
+impl Serialize for CuratedIntegrationTarget {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Self::Supported(target) => target.serialize(serializer),
+            Self::Letta => serializer.serialize_str("letta"),
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub(crate) enum ExtensionPackage {
     Bundled { provider: String },
-    AgentIntegration { target: String },
+    AgentIntegration { target: CuratedIntegrationTarget },
     GithubPlugin { source: String },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct ExtensionStateFile {
+pub(crate) struct MarketplaceStateFile {
     pub schema_version: u32,
-    pub entries: BTreeMap<String, ExtensionInstallState>,
+    pub entries: BTreeMap<String, MarketplaceInstallState>,
     /// Earliest loads first. Conflicting contributions from later entries win.
     pub load_order: Vec<String>,
 }
@@ -75,7 +113,7 @@ pub(crate) struct VerifiedExtensionArtifact {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct ExtensionInstallState {
+pub(crate) struct MarketplaceInstallState {
     /// Persistent namespace for config/state deletion. It does not change when
     /// display or manifest ids are renamed under the same repository identity.
     #[serde(default)]
@@ -253,7 +291,7 @@ impl CuratedIndex {
     }
 }
 
-impl ExtensionStateFile {
+impl MarketplaceStateFile {
     pub(crate) fn defaults(index: &CuratedIndex) -> Self {
         let entries = index
             .extensions
@@ -261,7 +299,7 @@ impl ExtensionStateFile {
             .map(|extension| {
                 (
                     extension.repository.clone(),
-                    ExtensionInstallState {
+                    MarketplaceInstallState {
                         data_id: extension.id.clone(),
                         installed: extension.default_installed,
                         enabled: extension.default_enabled,
@@ -308,7 +346,7 @@ impl ExtensionStateFile {
             let state = self
                 .entries
                 .entry(extension.repository.clone())
-                .or_insert_with(|| ExtensionInstallState {
+                .or_insert_with(|| MarketplaceInstallState {
                     data_id: extension.id.clone(),
                     installed: false,
                     enabled: false,
@@ -333,7 +371,7 @@ impl ExtensionStateFile {
         let state = self
             .entries
             .entry(extension.repository.clone())
-            .or_insert_with(|| ExtensionInstallState {
+            .or_insert_with(|| MarketplaceInstallState {
                 data_id: extension.id.clone(),
                 installed: false,
                 enabled: false,
@@ -562,20 +600,18 @@ fn lock_state_file_inner(
     }))
 }
 
-pub(crate) fn load_state(index: &CuratedIndex) -> ExtensionStateFile {
+pub(crate) fn load_state(index: &CuratedIndex) -> MarketplaceStateFile {
     let configured_path = state_path();
     let loaded = (|| {
         let path = state_storage_path()?;
         let _guard = lock_state_file(&path)?;
-        let mut state = load_state_from_path(&path, index)?;
-        finish_extension_data_deletion(&path, &mut state)?;
-        Ok::<_, String>(state)
+        load_state_from_path(&path, index)
     })();
     match loaded {
         Ok(state) => state,
         Err(error) => {
             tracing::warn!(path = %configured_path.display(), %error, "failed to load extension state; disabling extensions");
-            let mut state = ExtensionStateFile::defaults(index);
+            let mut state = MarketplaceStateFile::defaults(index);
             for entry in state.entries.values_mut() {
                 entry.enabled = false;
                 entry.activation_error = Some("extension state is unreadable".into());
@@ -587,7 +623,7 @@ pub(crate) fn load_state(index: &CuratedIndex) -> ExtensionStateFile {
 
 pub(crate) fn bundled_provider_priorities(
     index: &CuratedIndex,
-    state: &ExtensionStateFile,
+    state: &MarketplaceStateFile,
 ) -> BTreeMap<String, i32> {
     state
         .load_order
@@ -611,7 +647,7 @@ pub(crate) fn bundled_provider_priorities(
 
 pub(crate) fn unavailable_bundled_providers(
     index: &CuratedIndex,
-    state: &ExtensionStateFile,
+    state: &MarketplaceStateFile,
 ) -> BTreeSet<String> {
     index
         .extensions
@@ -632,17 +668,30 @@ pub(crate) fn unavailable_bundled_providers(
         .collect()
 }
 
+fn bounded_read(path: &Path, maximum: u64, label: &str) -> Result<Vec<u8>, String> {
+    let metadata = std::fs::metadata(path).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            format!("{label} not found")
+        } else {
+            format!("inspect {label}: {error}")
+        }
+    })?;
+    if metadata.len() > maximum {
+        return Err(format!("{label} exceeds its size limit"));
+    }
+    std::fs::read(path).map_err(|error| format!("read {label}: {error}"))
+}
+
 pub(crate) fn load_state_from_path(
     path: &Path,
     index: &CuratedIndex,
-) -> Result<ExtensionStateFile, String> {
+) -> Result<MarketplaceStateFile, String> {
     if !path.exists() {
-        return Ok(ExtensionStateFile::defaults(index));
+        return Ok(MarketplaceStateFile::defaults(index));
     }
-    let mut state: ExtensionStateFile = serde_json::from_slice(
-        &std::fs::read(path).map_err(|error| format!("read extension state: {error}"))?,
-    )
-    .map_err(|error| format!("parse extension state: {error}"))?;
+    let bytes = bounded_read(path, MAX_MARKETPLACE_STATE_BYTES, "extension state")?;
+    let mut state: MarketplaceStateFile = serde_json::from_slice(&bytes)
+        .map_err(|error| format!("parse extension state: {error}"))?;
     if state.schema_version != STATE_SCHEMA_VERSION {
         return Err(format!(
             "unsupported extension state schema {}",
@@ -653,7 +702,7 @@ pub(crate) fn load_state_from_path(
     Ok(state)
 }
 
-pub(crate) fn save_state_to_path(path: &Path, state: &ExtensionStateFile) -> Result<(), String> {
+pub(crate) fn save_state_to_path(path: &Path, state: &MarketplaceStateFile) -> Result<(), String> {
     let target = crate::platform::resolve_write_target(path)
         .map_err(|error| format!("resolve extension state path: {error}"))?;
     let path = target.as_path();
@@ -686,7 +735,7 @@ pub(crate) fn save_state_to_path(path: &Path, state: &ExtensionStateFile) -> Res
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct PendingExtensionLifecycle {
     pub(crate) repository: String,
-    pub(crate) target: String,
+    pub(crate) target: crate::api::schema::IntegrationTarget,
     pub(crate) installed: bool,
     pub(crate) enabled: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -731,19 +780,23 @@ pub(crate) fn begin_extension_lifecycle(
 pub(crate) fn pending_extension_lifecycle(
     state_path: &Path,
 ) -> Result<Option<PendingExtensionLifecycle>, String> {
-    match std::fs::read(lifecycle_journal_path(state_path)) {
+    match bounded_read(
+        &lifecycle_journal_path(state_path),
+        MAX_MARKETPLACE_JOURNAL_BYTES,
+        "extension lifecycle journal",
+    ) {
         Ok(bytes) => serde_json::from_slice(&bytes)
             .map(Some)
             .map_err(|error| format!("decode extension lifecycle journal: {error}")),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(format!("read extension lifecycle journal: {error}")),
+        Err(error) if error.contains("not found") => Ok(None),
+        Err(error) => Err(error),
     }
 }
 
 pub(crate) fn finish_extension_lifecycle(state_path: &Path) -> Result<(), String> {
     let path = lifecycle_journal_path(state_path);
     match std::fs::remove_file(&path) {
-        Ok(()) => crate::platform::sync_parent_directory(&path)
+        Ok(()) => crate::platform::sync_containing_directory(&path)
             .map_err(|error| format!("sync extension lifecycle journal removal: {error}")),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(format!("remove extension lifecycle journal: {error}")),
@@ -806,26 +859,36 @@ pub(crate) fn purge_extension_data(extension_id: &str) -> Result<(), String> {
     Ok(())
 }
 
-pub(crate) fn finish_extension_data_deletion(
+pub(crate) fn apply_extension_data_deletion(
     state_path: &Path,
-    state: &mut ExtensionStateFile,
-) -> Result<bool, String> {
+    state: &mut MarketplaceStateFile,
+) -> Result<Option<String>, String> {
     let journal_path = data_deletion_journal_path(state_path);
-    let bytes = match std::fs::read(&journal_path) {
+    let bytes = match bounded_read(
+        &journal_path,
+        MAX_MARKETPLACE_JOURNAL_BYTES,
+        "data deletion journal",
+    ) {
         Ok(bytes) => bytes,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-        Err(error) => return Err(format!("read data deletion journal: {error}")),
+        Err(error) if error.contains("not found") => return Ok(None),
+        Err(error) => return Err(error),
     };
     let pending: PendingExtensionDataDeletion = serde_json::from_slice(&bytes)
         .map_err(|error| format!("decode data deletion journal: {error}"))?;
     purge_extension_data(&pending.data_id)?;
     state.clear_retained_data(&pending.repository)?;
     save_state_to_path(state_path, state)?;
-    std::fs::remove_file(&journal_path)
-        .map_err(|error| format!("remove data deletion journal: {error}"))?;
-    crate::platform::sync_parent_directory(&journal_path)
-        .map_err(|error| format!("sync data deletion journal removal: {error}"))?;
-    Ok(true)
+    Ok(Some(pending.data_id))
+}
+
+pub(crate) fn finish_extension_data_deletion(state_path: &Path) -> Result<(), String> {
+    let journal_path = data_deletion_journal_path(state_path);
+    match std::fs::remove_file(&journal_path) {
+        Ok(()) => crate::platform::sync_containing_directory(&journal_path)
+            .map_err(|error| format!("sync data deletion journal removal: {error}")),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!("remove data deletion journal: {error}")),
+    }
 }
 
 #[cfg(test)]
@@ -863,7 +926,7 @@ mod tests {
     fn removal_retains_overrides_and_reinstall_enables_immediately() {
         let index = CuratedIndex::bundled().unwrap();
         let extension = index.extension("vqro.collections").unwrap();
-        let mut state = ExtensionStateFile::defaults(&index);
+        let mut state = MarketplaceStateFile::defaults(&index);
         state
             .set_repository_override(&extension.repository, "repo_1".into(), Some(false))
             .unwrap();
@@ -884,7 +947,7 @@ mod tests {
     fn data_deletion_clears_retained_repository_configuration() {
         let index = CuratedIndex::bundled().unwrap();
         let extension = index.extension("vqro.collections").unwrap();
-        let mut state = ExtensionStateFile::defaults(&index);
+        let mut state = MarketplaceStateFile::defaults(&index);
         state
             .set_repository_override(&extension.repository, "repo_1".into(), Some(false))
             .unwrap();
@@ -901,7 +964,7 @@ mod tests {
     fn globally_disabled_bundled_provider_is_unavailable_to_runtime_catalogs() {
         let index = CuratedIndex::bundled().unwrap();
         let extension = index.extension("vqro.delegation").unwrap();
-        let mut state = ExtensionStateFile::defaults(&index);
+        let mut state = MarketplaceStateFile::defaults(&index);
         state.set_enabled(&extension.repository, false).unwrap();
 
         assert!(unavailable_bundled_providers(&index, &state).contains("vqro.delegation"));
@@ -910,7 +973,7 @@ mod tests {
     #[test]
     fn repository_override_changes_effective_bundled_runtime_state() {
         let index = CuratedIndex::bundled().unwrap();
-        let mut state = ExtensionStateFile::defaults(&index);
+        let mut state = MarketplaceStateFile::defaults(&index);
         let collections = index
             .extensions
             .iter()
@@ -935,7 +998,7 @@ mod tests {
     fn repository_override_identity_migration_preserves_explicit_state() {
         let index = CuratedIndex::bundled().unwrap();
         let extension = index.extension("vqro.collections").unwrap();
-        let mut state = ExtensionStateFile::defaults(&index);
+        let mut state = MarketplaceStateFile::defaults(&index);
         state
             .set_repository_override(&extension.repository, "local-id".into(), Some(false))
             .unwrap();
@@ -963,7 +1026,7 @@ mod tests {
         let state_path = directory.join("extensions.json");
         let pending = PendingExtensionLifecycle {
             repository: "example/agent".into(),
-            target: "pi".into(),
+            target: crate::api::schema::IntegrationTarget::Pi,
             installed: true,
             enabled: true,
             active_artifact: None,
@@ -986,7 +1049,7 @@ mod tests {
     fn activation_failure_keeps_package_installed_but_disabled() {
         let index = CuratedIndex::bundled().unwrap();
         let extension = index.extension("vqro.spaces").unwrap();
-        let mut state = ExtensionStateFile::defaults(&index);
+        let mut state = MarketplaceStateFile::defaults(&index);
         state
             .finish_activation(&extension.repository, Err("service exited".into()))
             .unwrap();
@@ -1002,12 +1065,12 @@ mod tests {
     #[test]
     fn load_order_is_deterministic_and_later_entries_win() {
         let index = CuratedIndex::bundled().unwrap();
-        let mut state = ExtensionStateFile::defaults(&index);
+        let mut state = MarketplaceStateFile::defaults(&index);
         let first = state.load_order[0].clone();
         state.move_to(&first, usize::MAX).unwrap();
         assert_eq!(state.load_order.last(), Some(&first));
         let json = serde_json::to_string(&state).unwrap();
-        let restored: ExtensionStateFile = serde_json::from_str(&json).unwrap();
+        let restored: MarketplaceStateFile = serde_json::from_str(&json).unwrap();
         assert_eq!(restored.load_order, state.load_order);
     }
 }

@@ -68,19 +68,22 @@ impl App {
                     .is_some_and(|focused| repository.checkout_workspace_ids.contains(focused)),
             })
             .collect();
-        let space_order = self
-            .state
-            .space_order
-            .iter()
-            .map(|space| match space {
-                crate::repository::SpaceRef::Repository(id) => {
-                    crate::api::schema::SpaceInfo::Repository(id.clone())
-                }
-                crate::repository::SpaceRef::StandaloneWorkspace(id) => {
-                    crate::api::schema::SpaceInfo::StandaloneWorkspace(id.clone())
-                }
-            })
-            .collect();
+        let space_order = if self.disabled_extensions.contains("vqro.spaces") {
+            Vec::new()
+        } else {
+            self.state
+                .space_order
+                .iter()
+                .map(|space| match space {
+                    crate::repository::SpaceRef::Repository(id) => {
+                        crate::api::schema::SpaceInfo::Repository(id.clone())
+                    }
+                    crate::repository::SpaceRef::StandaloneWorkspace(id) => {
+                        crate::api::schema::SpaceInfo::StandaloneWorkspace(id.clone())
+                    }
+                })
+                .collect()
+        };
 
         SessionSnapshot {
             version: crate::build_info::version(),
@@ -94,13 +97,21 @@ impl App {
             tabs,
             panes: self.collect_panes_for_workspace(None).unwrap_or_default(),
             layouts,
-            agents: self.collect_agent_infos(),
-            collections: if include_structure {
+            agents: if self.disabled_extensions.contains("vqro.agent-status") {
+                Vec::new()
+            } else {
+                self.collect_agent_infos()
+            },
+            collections: if include_structure
+                && !self.disabled_extensions.contains("vqro.collections")
+            {
                 self.collection_infos(None, None)
             } else {
                 Vec::new()
             },
-            delegations: if include_structure {
+            delegations: if include_structure
+                && !self.disabled_extensions.contains("vqro.delegation")
+            {
                 self.delegation_tree()
             } else {
                 Vec::new()
@@ -216,6 +227,20 @@ mod tests {
         let endpoint_v1_source = app.session_snapshot_v1_compat();
         assert!(endpoint_v1_source.collections.is_empty());
         assert!(endpoint_v1_source.delegations.is_empty());
+    }
+
+    #[test]
+    fn session_snapshot_hides_disabled_spaces_projection() {
+        let mut app = app_with_two_tabs();
+        let workspace_id = app.state.workspaces[0].id.clone();
+        app.state
+            .space_order
+            .push(crate::repository::SpaceRef::StandaloneWorkspace(
+                workspace_id,
+            ));
+        assert!(!app.session_snapshot().space_order.is_empty());
+        app.disabled_extensions.insert("vqro.spaces".into());
+        assert!(app.session_snapshot().space_order.is_empty());
     }
 
     #[test]

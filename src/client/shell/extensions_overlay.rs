@@ -235,14 +235,16 @@ pub(super) fn render_extensions_overlay(
                 details.x + 1,
                 y,
                 details.width.saturating_sub(2),
-                if extension.package_kind == "bundled" {
+                if extension.package_kind == crate::api::schema::ExtensionPackageKind::Bundled {
                     "source pin: catalog attestation · runtime: native host provider"
                 } else if extension.artifact_verified {
                     "source artifact: retained (press u to reverify)"
                 } else {
                     "source artifact: not retained (press u to verify)"
                 },
-                if extension.package_kind == "bundled" || extension.artifact_verified {
+                if extension.package_kind == crate::api::schema::ExtensionPackageKind::Bundled
+                    || extension.artifact_verified
+                {
                     base.fg(palette.green)
                 } else {
                     base.fg(palette.yellow)
@@ -250,14 +252,19 @@ pub(super) fn render_extensions_overlay(
             );
             y += 1;
         }
-        if let Some(status) = extension.integration_status.as_deref() {
+        if let Some(status) = extension.integration_status {
+            let status_label = match status {
+                crate::api::schema::IntegrationState::NotInstalled => "not installed",
+                crate::api::schema::IntegrationState::Current => "current",
+                crate::api::schema::IntegrationState::Outdated => "outdated",
+            };
             put_text(
                 buffer,
                 details.x + 1,
                 y,
                 details.width.saturating_sub(2),
-                &format!("adapter: {}", status.replace('_', " ")),
-                if status == "current" {
+                &format!("adapter: {status_label}"),
+                if status == crate::api::schema::IntegrationState::Current {
                     base.fg(palette.green)
                 } else {
                     base.fg(palette.yellow)

@@ -183,7 +183,7 @@ pub struct App {
     pub(crate) extension_services: crate::extension_service::ExtensionServiceManager,
     pub(crate) host_document_services: crate::extension_service::HostDocumentServiceCatalog,
     pub(crate) extension_index: crate::extensions::CuratedIndex,
-    pub(crate) extension_state: crate::extensions::ExtensionStateFile,
+    pub(crate) marketplace_state: crate::extensions::MarketplaceStateFile,
     pub(crate) configured_disabled_extensions: std::collections::BTreeSet<String>,
     pub(crate) disabled_extensions: std::collections::BTreeSet<String>,
     pub(crate) collections_shadow_documents:
@@ -596,20 +596,20 @@ impl App {
         let installed_plugins = load_plugin_registry(policy.persist_plugin_registry);
         let extension_index = crate::extensions::CuratedIndex::bundled()
             .expect("bundled extension index is validated by tests");
-        let extension_state = if policy.persist_plugin_registry {
+        let marketplace_state = if policy.persist_plugin_registry {
             crate::extensions::load_state(&extension_index)
         } else {
-            crate::extensions::ExtensionStateFile::defaults(&extension_index)
+            crate::extensions::MarketplaceStateFile::defaults(&extension_index)
         };
         let mut disabled_extensions =
-            crate::extensions::unavailable_bundled_providers(&extension_index, &extension_state);
+            crate::extensions::unavailable_bundled_providers(&extension_index, &marketplace_state);
         // Preserve the legacy config as an additive kill switch while clients migrate
         // to the global extension registry.
         disabled_extensions.extend(config.extensions.disabled.iter().cloned());
         let extension_services =
             crate::extension_service::manager_for_plugins(&installed_plugins, event_tx.clone());
         let bundled_provider_priorities =
-            crate::extensions::bundled_provider_priorities(&extension_index, &extension_state);
+            crate::extensions::bundled_provider_priorities(&extension_index, &marketplace_state);
         let host_document_services = crate::extension_service::HostDocumentServiceCatalog::bundled(
             &disabled_extensions,
             &bundled_provider_priorities,
@@ -850,7 +850,7 @@ impl App {
             extension_services,
             host_document_services,
             extension_index,
-            extension_state,
+            marketplace_state,
             configured_disabled_extensions: config.extensions.disabled.clone(),
             disabled_extensions,
             collections_shadow_documents: HashMap::new(),
@@ -876,6 +876,7 @@ impl App {
         };
         app.configure_tab_bar_status(&config.ui.tab_bar_right, &config.ui.tab_bar_right_separator);
         app.configure_window_title(&config.ui.window_title);
+        app.recover_extension_data_deletion_on_startup();
         app.refresh_collection_documents();
         app
     }

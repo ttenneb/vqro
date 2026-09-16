@@ -52,7 +52,7 @@ pub(crate) struct ExtensionArtifactStageResult {
     pub(crate) id: String,
     pub(crate) repository: String,
     pub(crate) action: ExtensionArtifactAction,
-    pub(crate) expected_state: crate::extensions::ExtensionInstallState,
+    pub(crate) expected_state: crate::extensions::MarketplaceInstallState,
     pub(crate) staged: Result<StagedExtensionArtifact, String>,
     pub(crate) activation_asset: Result<Option<Vec<u8>>, String>,
     pub(crate) respond_to: std::sync::mpsc::Sender<String>,
@@ -211,7 +211,7 @@ pub(crate) fn commit(
     }
     fs::rename(staged.root.join("source.tar"), &retained_archive)
         .map_err(|error| format!("retain verified extension archive: {error}"))?;
-    crate::platform::sync_parent_directory(&retained_archive)
+    crate::platform::sync_containing_directory(&retained_archive)
         .map_err(|error| format!("sync retained extension archive: {error}"))?;
     let destination = artifact_root()?
         .join(storage_component(data_id))
@@ -228,7 +228,7 @@ pub(crate) fn commit(
         }
         fs::remove_dir_all(&destination)
             .map_err(|error| format!("remove corrupt retained extension artifact: {error}"))?;
-        crate::platform::sync_parent_directory(&destination)
+        crate::platform::sync_containing_directory(&destination)
             .map_err(|error| format!("sync corrupt artifact removal: {error}"))?;
     }
     let parent = destination
@@ -239,7 +239,7 @@ pub(crate) fn commit(
     ensure_managed_path(parent)?;
     crate::platform::replace_file(&staged.extracted, &destination)
         .map_err(|error| format!("commit verified extension artifact: {error}"))?;
-    crate::platform::sync_parent_directory(&destination)
+    crate::platform::sync_containing_directory(&destination)
         .map_err(|error| format!("sync extension artifact directory: {error}"))?;
     staged.descriptor.path = destination.display().to_string();
     Ok(staged.descriptor.clone())
@@ -307,7 +307,7 @@ pub(crate) fn purge_artifact(descriptor: &VerifiedExtensionArtifact) -> Result<(
     let path = Path::new(&descriptor.path);
     ensure_managed_path(path)?;
     match fs::remove_dir_all(path) {
-        Ok(()) => crate::platform::sync_parent_directory(path)
+        Ok(()) => crate::platform::sync_containing_directory(path)
             .map_err(|error| format!("sync obsolete extension artifact deletion: {error}")),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(format!("delete obsolete extension artifact: {error}")),
@@ -317,7 +317,7 @@ pub(crate) fn purge_artifact(descriptor: &VerifiedExtensionArtifact) -> Result<(
 pub(crate) fn purge(data_id: &str) -> Result<(), String> {
     let path = artifact_root()?.join(storage_component(data_id));
     match fs::remove_dir_all(&path) {
-        Ok(()) => crate::platform::sync_parent_directory(&path)
+        Ok(()) => crate::platform::sync_containing_directory(&path)
             .map_err(|error| format!("sync extension artifact deletion: {error}")),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(format!("delete extension artifacts: {error}")),

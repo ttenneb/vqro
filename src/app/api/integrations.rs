@@ -19,16 +19,17 @@ impl App {
         path: &std::path::Path,
         target: crate::api::schema::IntegrationTarget,
     ) -> Result<bool, String> {
+        if crate::extensions::pending_extension_lifecycle(path)?.is_some() {
+            return Err(
+                "a marketplace integration recovery is still pending; retry shortly".into(),
+            );
+        }
         let state = crate::extensions::load_state_from_path(path, &self.extension_index)?;
-        let target = serde_json::to_value(target)
-            .ok()
-            .and_then(|value| value.as_str().map(str::to_owned))
-            .unwrap_or_default();
         Ok(self.extension_index.extensions.iter().any(|extension| {
             matches!(
                 &extension.package,
                 crate::extensions::ExtensionPackage::AgentIntegration { target: extension_target }
-                    if extension_target.eq_ignore_ascii_case(&target)
+                    if extension_target.supported() == Some(target)
             ) && state
                 .entries
                 .get(&extension.repository)

@@ -93,7 +93,7 @@ fn durable_write(path: &Path, contents: impl AsRef<[u8]>) -> io::Result<()> {
 fn durable_remove_file_if_exists(path: &Path) -> io::Result<bool> {
     let removed = remove_file_if_exists(path)?;
     if removed {
-        crate::platform::sync_parent_directory(path)?;
+        crate::platform::sync_containing_directory(path)?;
     }
     Ok(removed)
 }
