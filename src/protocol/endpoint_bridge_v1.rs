@@ -63,6 +63,12 @@ mod tests {
             )))
             .unwrap();
         assert_eq!(
+            fixture.len(),
+            38,
+            "generation-1 method fixture is append-closed"
+        );
+        assert_eq!(super::METHODS.len(), 38);
+        assert_eq!(
             super::METHODS,
             fixture.keys().map(String::as_str).collect::<Vec<_>>()
         );

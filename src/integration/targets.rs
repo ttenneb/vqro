@@ -112,14 +112,18 @@ fn ensure_extension_dir(dir: &Path, agent: &str) -> io::Result<()> {
 }
 
 pub(crate) fn install_pi() -> io::Result<PathBuf> {
-    install_pi_asset(PI_EXTENSION_ASSET.as_bytes())
+    install_pi_asset_named(PI_EXTENSION_ASSET.as_bytes(), PI_EXTENSION_INSTALL_NAME)
 }
 
 pub(crate) fn install_pi_asset(asset: &[u8]) -> io::Result<PathBuf> {
+    install_pi_asset_named(asset, PI_EXTENSION_INSTALL_NAME)
+}
+
+fn install_pi_asset_named(asset: &[u8], install_name: &str) -> io::Result<PathBuf> {
     let dir = pi_extension_dir()?;
     ensure_extension_dir(&dir, "pi")?;
 
-    let path = dir.join(PI_EXTENSION_INSTALL_NAME);
+    let path = dir.join(install_name);
     durable_write(&path, asset)?;
     Ok(path)
 }
@@ -160,10 +164,14 @@ pub(crate) fn remove_legacy_pi_extension_from_omp_dir(dir: &Path) -> io::Result<
 }
 
 pub(crate) fn install_claude() -> io::Result<ClaudeInstallPaths> {
-    install_claude_asset(CLAUDE_HOOK_ASSET.as_bytes())
+    install_claude_asset_named(CLAUDE_HOOK_ASSET.as_bytes(), CLAUDE_HOOK_INSTALL_NAME)
 }
 
 pub(crate) fn install_claude_asset(asset: &[u8]) -> io::Result<ClaudeInstallPaths> {
+    install_claude_asset_named(asset, CLAUDE_HOOK_INSTALL_NAME)
+}
+
+fn install_claude_asset_named(asset: &[u8], install_name: &str) -> io::Result<ClaudeInstallPaths> {
     let dir = claude_dir()?;
     if !dir.is_dir() {
         return Err(io::Error::other(format!(
@@ -175,7 +183,7 @@ pub(crate) fn install_claude_asset(asset: &[u8]) -> io::Result<ClaudeInstallPath
     let hooks_dir = dir.join("hooks");
     fs::create_dir_all(&hooks_dir)?;
 
-    let hook_path = hooks_dir.join(CLAUDE_HOOK_INSTALL_NAME);
+    let hook_path = hooks_dir.join(install_name);
     durable_write(&hook_path, asset)?;
     make_executable(&hook_path)?;
     fs::OpenOptions::new()
@@ -202,10 +210,14 @@ pub(crate) fn install_claude_asset(asset: &[u8]) -> io::Result<ClaudeInstallPath
 }
 
 pub(crate) fn install_codex() -> io::Result<CodexInstallPaths> {
-    install_codex_asset(CODEX_HOOK_ASSET.as_bytes())
+    install_codex_asset_named(CODEX_HOOK_ASSET.as_bytes(), CODEX_HOOK_INSTALL_NAME)
 }
 
 pub(crate) fn install_codex_asset(asset: &[u8]) -> io::Result<CodexInstallPaths> {
+    install_codex_asset_named(asset, CODEX_HOOK_INSTALL_NAME)
+}
+
+fn install_codex_asset_named(asset: &[u8], install_name: &str) -> io::Result<CodexInstallPaths> {
     let dir = codex_dir()?;
     if !dir.is_dir() {
         return Err(io::Error::other(format!(
@@ -214,7 +226,7 @@ pub(crate) fn install_codex_asset(asset: &[u8]) -> io::Result<CodexInstallPaths>
         )));
     }
 
-    let hook_path = dir.join(CODEX_HOOK_INSTALL_NAME);
+    let hook_path = dir.join(install_name);
     durable_write(&hook_path, asset)?;
     make_executable(&hook_path)?;
     fs::OpenOptions::new()
@@ -596,7 +608,15 @@ pub(crate) fn install_hermes() -> io::Result<HermesInstallPaths> {
 }
 
 pub(crate) fn uninstall_pi() -> io::Result<PiUninstallResult> {
-    let extension_path = pi_extension_dir()?.join(PI_EXTENSION_INSTALL_NAME);
+    uninstall_pi_named(PI_EXTENSION_INSTALL_NAME)
+}
+
+pub(crate) fn uninstall_pi_asset() -> io::Result<PiUninstallResult> {
+    uninstall_pi_named(PI_EXTENSION_INSTALL_NAME)
+}
+
+fn uninstall_pi_named(install_name: &str) -> io::Result<PiUninstallResult> {
+    let extension_path = pi_extension_dir()?.join(install_name);
     let removed_extension = durable_remove_file_if_exists(&extension_path)?;
 
     Ok(PiUninstallResult {
@@ -616,7 +636,15 @@ pub(crate) fn uninstall_omp() -> io::Result<OmpUninstallResult> {
 }
 
 pub(crate) fn uninstall_claude() -> io::Result<ClaudeUninstallResult> {
-    let hook_path = claude_dir()?.join("hooks").join(CLAUDE_HOOK_INSTALL_NAME);
+    uninstall_claude_named(CLAUDE_HOOK_INSTALL_NAME)
+}
+
+pub(crate) fn uninstall_claude_asset() -> io::Result<ClaudeUninstallResult> {
+    uninstall_claude_named(CLAUDE_HOOK_INSTALL_NAME)
+}
+
+fn uninstall_claude_named(install_name: &str) -> io::Result<ClaudeUninstallResult> {
+    let hook_path = claude_dir()?.join("hooks").join(install_name);
     let settings_path = claude_dir()?.join("settings.json");
     let mut updated_settings = false;
 
@@ -641,8 +669,16 @@ pub(crate) fn uninstall_claude() -> io::Result<ClaudeUninstallResult> {
 }
 
 pub(crate) fn uninstall_codex() -> io::Result<CodexUninstallResult> {
+    uninstall_codex_named(CODEX_HOOK_INSTALL_NAME)
+}
+
+pub(crate) fn uninstall_codex_asset() -> io::Result<CodexUninstallResult> {
+    uninstall_codex_named(CODEX_HOOK_INSTALL_NAME)
+}
+
+fn uninstall_codex_named(install_name: &str) -> io::Result<CodexUninstallResult> {
     let codex_dir = codex_dir()?;
-    let hook_path = codex_dir.join(CODEX_HOOK_INSTALL_NAME);
+    let hook_path = codex_dir.join(install_name);
     let hooks_path = codex_dir.join("hooks.json");
     let config_path = codex_dir.join("config.toml");
     let mut updated_hooks = false;

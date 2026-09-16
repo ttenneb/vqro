@@ -37,7 +37,7 @@ impl ClientShellState {
         outcome.repaint = true;
     }
 
-    fn move_extension_selection(&mut self, delta: isize) {
+    pub(super) fn move_extension_selection(&mut self, delta: isize) {
         let Some(ClientShellOverlay::Extensions(extensions)) = self.overlay.as_mut() else {
             return;
         };

@@ -134,8 +134,11 @@ impl App {
         if self.extension_state_persistence_blocked {
             return Err("authoritative extension state is unavailable".into());
         }
+        if self.extension_state_transaction_pending {
+            return Err("authoritative extension state is busy; retry shortly".into());
+        }
         let mut candidate = self.extension_state.clone();
-        candidate
+        let commit = candidate
             .clear_namespace(&namespace, format!("marketplace-delete-{namespace}"))
             .map_err(|error| format!("clear authoritative extension state: {error:?}"))?;
         if let Some(state_path) = self.extension_state_path.as_deref() {
@@ -150,6 +153,9 @@ impl App {
             }
         }
         self.extension_state = candidate;
+        if let Some(commit) = commit.as_ref() {
+            self.emit_extension_state_committed(commit);
+        }
         crate::extensions::finish_extension_data_deletion(path)?;
         Ok(true)
     }
@@ -173,6 +179,22 @@ impl App {
         }
     }
 
+    fn adopt_external_marketplace_state(
+        &mut self,
+        marketplace_state: crate::extensions::MarketplaceStateFile,
+    ) -> bool {
+        if marketplace_state == self.marketplace_state {
+            return false;
+        }
+        let load_order_changed = self.marketplace_state.load_order != marketplace_state.load_order;
+        self.marketplace_state = marketplace_state;
+        let rebuilt_for_enablement = self.apply_bundled_extension_state();
+        if load_order_changed && !rebuilt_for_enablement {
+            self.rebuild_extension_catalogs();
+        }
+        true
+    }
+
     fn lock_extension_state_for_mutation(
         &mut self,
     ) -> Result<Option<crate::extensions::ExtensionStateLock>, String> {
@@ -185,14 +207,13 @@ impl App {
         let mut marketplace_state =
             crate::extensions::load_state_from_path(&path, &self.extension_index)?;
         self.recover_extension_data_deletion(&path, &mut marketplace_state)?;
-        self.marketplace_state = marketplace_state;
         if crate::extensions::pending_extension_lifecycle(&path)?.is_some() {
             return Err(
                 "a previous extension lifecycle change is still being recovered; retry shortly"
                     .into(),
             );
         }
-        self.apply_bundled_extension_state();
+        self.adopt_external_marketplace_state(marketplace_state);
         Ok(Some(guard))
     }
 
@@ -261,14 +282,19 @@ impl App {
                         .map(|_| ())
                         .map_err(|error| error.to_string())
                 } else if requires_artifact {
-                    Err("verified source artifact is missing during lifecycle recovery".into())
+                    // A journal without a previous artifact represents package state that was
+                    // enabled before any adapter was deployed. Remove a possibly half-applied
+                    // new adapter and restore that artifact-free state.
+                    crate::integration::uninstall_target_artifact(target)
+                        .map(|_| ())
+                        .map_err(|error| error.to_string())
                 } else {
                     crate::integration::install_target(target)
                         .map(|_| ())
                         .map_err(|error| error.to_string())
                 }
             } else {
-                crate::integration::uninstall_target(target)
+                crate::integration::uninstall_target_artifact(target)
                     .map(|_| ())
                     .map_err(|error| error.to_string())
             };
@@ -289,6 +315,9 @@ impl App {
                 .rollback_artifact
                 .as_ref()
                 .map(|artifact| artifact.version.clone());
+            if !pending.load_order.is_empty() {
+                loaded.load_order = pending.load_order;
+            }
             if let Err(error) = crate::extensions::save_state_to_path(&path, &loaded) {
                 tracing::warn!(%error, "failed to persist recovered extension lifecycle");
                 return false;
@@ -314,12 +343,9 @@ impl App {
                 return false;
             }
         }
-        if loaded == self.marketplace_state {
+        if !self.adopt_external_marketplace_state(loaded) {
             return false;
         }
-        self.marketplace_state = loaded;
-        self.apply_bundled_extension_state();
-        self.rebuild_extension_catalogs();
         self.refresh_collection_documents();
         true
     }
@@ -354,6 +380,7 @@ impl App {
                 active_artifact: state.active_artifact.clone(),
                 rollback_artifact: state.rollback_artifact.clone(),
                 active_version: Some(state.active_version.clone()),
+                load_order: recovery_state.load_order.clone(),
             },
         )?;
         Ok(true)
@@ -423,6 +450,26 @@ impl App {
         .map_err(|error| error.to_string())
     }
 
+    fn repository_identity(&self, repository: &crate::repository::Repository) -> Option<String> {
+        repository
+            .checkout_workspace_ids
+            .iter()
+            .filter_map(|workspace_id| {
+                self.state
+                    .workspaces
+                    .iter()
+                    .find(|workspace| &workspace.id == workspace_id)
+            })
+            .filter_map(|workspace| self.git_status_cache.get(&workspace.cached_git_status_key))
+            .filter_map(|entry| entry.fingerprint.as_ref())
+            .find_map(|fingerprint| {
+                crate::repository::canonical_repository_web_url(
+                    fingerprint.preferred_repository_remote_url()?,
+                )
+            })
+            .or_else(|| Some(repository.id.clone()))
+    }
+
     fn repository_identity_for_workspace(&self, ws_idx: usize) -> Option<String> {
         let workspace = self.state.workspaces.get(ws_idx)?;
         let repository = self
@@ -430,14 +477,7 @@ impl App {
             .repositories
             .iter()
             .find(|repository| repository.checkout_workspace_ids.contains(&workspace.id))?;
-        std::fs::read_to_string(
-            repository
-                .git_common_dir
-                .join("vqro-extension-repository-identity"),
-        )
-        .ok()
-        .and_then(|identity| identity.lines().next().map(str::trim).map(str::to_owned))
-        .filter(|identity| !identity.is_empty())
+        self.repository_identity(repository)
     }
 
     pub(crate) fn bundled_extension_enabled(&self, provider: &str, ws_idx: Option<usize>) -> bool {
@@ -456,7 +496,7 @@ impl App {
             .enabled_for_repository(&extension.repository, repository_identity.as_deref())
     }
 
-    pub(crate) fn apply_bundled_extension_state(&mut self) {
+    pub(crate) fn apply_bundled_extension_state(&mut self) -> bool {
         let mut disabled_extensions = crate::extensions::unavailable_bundled_providers(
             &self.extension_index,
             &self.marketplace_state,
@@ -465,6 +505,9 @@ impl App {
         if self.disabled_extensions != disabled_extensions {
             self.disabled_extensions = disabled_extensions;
             self.rebuild_extension_catalogs();
+            true
+        } else {
+            false
         }
     }
 
@@ -499,15 +542,13 @@ impl App {
                     crate::integration::install_target_from_artifact(target, artifact)
                         .map(|_| ())
                         .map_err(|error| error.to_string())
-                } else if extension.has_pinned_source() && self.policy.persist_plugin_registry {
+                } else if extension.has_pinned_source() {
                     Err(
-                        "verified source artifact is not retained; verify the pinned package before enabling it"
+                        "verified Vqro source artifact is not retained; verify the pinned package before enabling it"
                             .into(),
                     )
                 } else {
-                    crate::integration::install_target(target)
-                        .map(|_| ())
-                        .map_err(|error| error.to_string())
+                    Err("feature_disabled: this adapter has no Vqro extension artifact".into())
                 }
             }
             ExtensionPackage::GithubPlugin { .. } => {
@@ -526,7 +567,16 @@ impl App {
                 let Some(target) = target.supported() else {
                     return Ok(());
                 };
-                crate::integration::uninstall_target(target)
+                let marketplace_managed = self
+                    .marketplace_state
+                    .entries
+                    .get(&extension.repository)
+                    .and_then(|state| state.active_artifact.as_ref())
+                    .is_some();
+                if !marketplace_managed {
+                    return Ok(());
+                }
+                crate::integration::uninstall_target_artifact(target)
                     .map(|_| ())
                     .map_err(|error| error.to_string())
             }
@@ -547,7 +597,13 @@ impl App {
             .extensions
             .iter()
             .find(|extension| &extension.repository == repository)
-            .is_some_and(CuratedExtension::has_pinned_source)
+            .is_some_and(|extension| {
+                extension.has_pinned_source()
+                    && matches!(
+                        &extension.package,
+                        ExtensionPackage::AgentIntegration { .. }
+                    )
+            })
     }
 
     pub(crate) fn start_deferred_extension_artifact_request(
@@ -721,6 +777,16 @@ impl App {
                 );
             }
         };
+        if !matches!(
+            &extension.package,
+            ExtensionPackage::AgentIntegration { .. }
+        ) {
+            return encode_error(
+                result.id.clone(),
+                "extension_artifact_unsupported",
+                "native bundled providers update with the Vqro binary",
+            );
+        }
         if staged.descriptor().version != extension.version
             || staged.descriptor().commit != extension.source_commit.clone().unwrap_or_default()
         {
@@ -948,11 +1014,17 @@ impl App {
         if !install_supported {
             return encode_error(
                 id,
-                "extension_install_unavailable",
-                "installation is not supported for this curated entry",
+                "feature_disabled",
+                "this adapter cannot be installed until a verified Vqro extension artifact is published",
             );
         }
-        if self.policy.persist_plugin_registry && extension.has_pinned_source() {
+        if self.policy.persist_plugin_registry
+            && extension.has_pinned_source()
+            && matches!(
+                &extension.package,
+                ExtensionPackage::AgentIntegration { .. }
+            )
+        {
             return encode_error(
                 id,
                 "extension_artifact_staging_required",
@@ -1187,15 +1259,21 @@ impl App {
             {
                 return encode_error(id, "extension_state_invalid", error);
             }
-            if let Err(error) = self
+            let commit = match self
                 .extension_state
                 .clear_namespace(&data_id, format!("marketplace-delete-{data_id}"))
             {
-                return encode_error(
-                    id,
-                    "extension_state_invalid",
-                    format!("clear authoritative extension state: {error:?}"),
-                );
+                Ok(commit) => commit,
+                Err(error) => {
+                    return encode_error(
+                        id,
+                        "extension_state_invalid",
+                        format!("clear authoritative extension state: {error:?}"),
+                    );
+                }
+            };
+            if let Some(commit) = commit.as_ref() {
+                self.emit_extension_state_committed(commit);
             }
             return encode_success(
                 id,
@@ -1290,8 +1368,7 @@ impl App {
             );
         }
         let repository_identity_is_current = self.state.repositories.iter().any(|repository| {
-            crate::repository::extension_repository_identities(&repository.git_common_dir).first()
-                == Some(&params.repository_id)
+            self.repository_identity(repository).as_ref() == Some(&params.repository_id)
         });
         if !repository_identity_is_current {
             return encode_error(
@@ -1633,6 +1710,47 @@ mod tests {
     }
 
     #[test]
+    fn externally_reordered_state_rebuilds_runtime_arbitration() {
+        let mut app = test_app();
+        let before = app
+            .host_document_services
+            .generation("vqro.collections")
+            .unwrap();
+        let mut external = app.marketplace_state.clone();
+        external.load_order.swap(0, 1);
+
+        assert!(app.adopt_external_marketplace_state(external));
+
+        let after = app
+            .host_document_services
+            .generation("vqro.collections")
+            .unwrap();
+        assert_ne!(before, after);
+    }
+
+    #[test]
+    fn native_bundled_install_does_not_stage_source_attestations() {
+        let app = test_app();
+        let native = Request {
+            id: "install-native".into(),
+            method: Method::ExtensionInstall(ExtensionConfirmedParams {
+                repository: "ttenneb/vqro-extension-collections".into(),
+                confirmed: true,
+            }),
+        };
+        let agent = Request {
+            id: "install-agent".into(),
+            method: Method::ExtensionInstall(ExtensionConfirmedParams {
+                repository: "ttenneb/vqro-extension-pi".into(),
+                confirmed: true,
+            }),
+        };
+
+        assert!(!app.extension_artifact_request_requires_staging(&native));
+        assert!(app.extension_artifact_request_requires_staging(&agent));
+    }
+
+    #[test]
     fn data_deletion_clears_authoritative_extension_namespace() {
         let mut app = test_app();
         app.extension_state
@@ -1671,6 +1789,49 @@ mod tests {
     }
 
     #[test]
+    fn default_disable_and_remove_never_mutate_legacy_herdr_adapter_files() {
+        let _env = crate::integration::integration_env_lock();
+        let root = std::env::temp_dir().join(format!(
+            "vqro-marketplace-preserve-herdr-{}",
+            std::process::id()
+        ));
+        let extensions = root.join("extensions");
+        std::fs::create_dir_all(&extensions).unwrap();
+        let legacy = extensions.join("herdr-agent-state.ts");
+        std::fs::write(&legacy, "legacy-herdr-adapter").unwrap();
+        let previous = std::env::var_os("PI_CODING_AGENT_DIR");
+        unsafe { std::env::set_var("PI_CODING_AGENT_DIR", &root) };
+
+        let mut app = test_app();
+        assert!(!extensions.join("vqro-agent-state.ts").exists());
+        for method in [
+            Method::ExtensionEnable(ExtensionSetEnabledParams {
+                repository: "ttenneb/vqro-extension-pi".into(),
+                enabled: false,
+            }),
+            Method::ExtensionRemove(ExtensionConfirmedParams {
+                repository: "ttenneb/vqro-extension-pi".into(),
+                confirmed: true,
+            }),
+        ] {
+            let _ = result(&app.handle_api_request(Request {
+                id: "preserve".into(),
+                method,
+            }));
+            assert_eq!(
+                std::fs::read_to_string(&legacy).unwrap(),
+                "legacy-herdr-adapter"
+            );
+        }
+
+        match previous {
+            Some(value) => unsafe { std::env::set_var("PI_CODING_AGENT_DIR", value) },
+            None => unsafe { std::env::remove_var("PI_CODING_AGENT_DIR") },
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn unsupported_curated_agent_install_is_rejected_without_state_change() {
         let mut app = test_app();
         let repository = "vqro/bundled-integrations#letta";
@@ -1683,7 +1844,7 @@ mod tests {
         }))
         .unwrap();
 
-        assert_eq!(response["error"]["code"], "extension_install_unavailable");
+        assert_eq!(response["error"]["code"], "feature_disabled");
         assert!(!app.marketplace_state.entries[repository].installed);
     }
 

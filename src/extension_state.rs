@@ -297,24 +297,48 @@ impl DurableExtensionStateV1 {
         let Some(state) = self.namespaces.get(namespace) else {
             return Ok(None);
         };
-        let operations = state
-            .values
-            .keys()
-            .cloned()
-            .map(|key| ExtensionStateOperationV1 { key, value: None })
-            .collect::<Vec<_>>();
-        if operations.is_empty() {
+        if !valid_identifier(&idempotency_key, 128) {
+            return Err(ExtensionStateError::InvalidIdempotencyKey);
+        }
+        let mut changed_keys = state.values.keys().cloned().collect::<Vec<_>>();
+        if changed_keys.is_empty() {
             return Ok(None);
         }
-        self.transact(&ExtensionStateTransactionV1 {
-            contract: EXTENSION_STATE_CONTRACT_V1.into(),
+        changed_keys.sort();
+        let revision = state
+            .revision
+            .checked_add(1)
+            .ok_or(ExtensionStateError::LimitExceeded("revision exhausted"))?;
+        let sequence = self
+            .sequence
+            .checked_add(1)
+            .ok_or(ExtensionStateError::LimitExceeded("sequence exhausted"))?;
+        let store_generation =
+            self.store_generation
+                .checked_add(1)
+                .ok_or(ExtensionStateError::LimitExceeded(
+                    "store generation exhausted",
+                ))?;
+        let state = self
+            .namespaces
+            .get_mut(namespace)
+            .ok_or(ExtensionStateError::InvalidNamespace)?;
+        state.values.clear();
+        state.receipts.clear();
+        state.revision = revision;
+        self.store_generation = store_generation;
+        self.sequence = sequence;
+        self.events.retain(|event| event.namespace != namespace);
+        self.events.push_back(ExtensionStateEventV1 {
+            sequence,
             namespace: namespace.into(),
-            expected_store_generation: self.store_generation,
-            expected_revision: state.revision,
-            idempotency_key,
-            operations,
-        })
-        .map(Some)
+            revision,
+            changed_keys,
+        });
+        while self.events.len() > MAX_STATE_EVENTS {
+            self.events.pop_front();
+        }
+        Ok(Some(self.commit(namespace, revision, sequence, false)))
     }
 
     pub fn events_after(&self, sequence: u64, limit: usize) -> ExtensionStateEventPageV1 {
@@ -563,6 +587,73 @@ mod tests {
             .clear_namespace("missing.extension", "delete-missing".into())
             .unwrap()
             .is_none());
+    }
+
+    #[test]
+    fn clearing_a_namespace_invalidates_receipts_and_prior_events() {
+        let mut store = DurableExtensionStateV1::new("session:one".into(), 1).unwrap();
+        store.transact(&transaction(0, "reusable")).unwrap();
+        store
+            .clear_namespace("example.extension", "delete-all".into())
+            .unwrap();
+
+        let commit = store
+            .transact(&ExtensionStateTransactionV1 {
+                contract: EXTENSION_STATE_CONTRACT_V1.into(),
+                namespace: "example.extension".into(),
+                expected_store_generation: 2,
+                expected_revision: 2,
+                idempotency_key: "reusable".into(),
+                operations: vec![ExtensionStateOperationV1 {
+                    key: "setting".into(),
+                    value: Some(serde_json::json!("restored")),
+                }],
+            })
+            .unwrap();
+
+        assert!(!commit.replayed);
+        assert_eq!(commit.revision, 3);
+        assert!(store.events_after(0, MAX_STATE_EVENTS).gap);
+        let events = store.events_after(1, MAX_STATE_EVENTS).events;
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].revision, 2);
+        assert_eq!(events[1].revision, 3);
+    }
+
+    #[test]
+    fn clearing_a_namespace_supports_the_full_key_limit() {
+        let mut store = DurableExtensionStateV1::new("session:one".into(), 1).unwrap();
+        for batch in 0..4_u64 {
+            let revision = store.snapshot("example.extension").unwrap().revision;
+            store
+                .transact(&ExtensionStateTransactionV1 {
+                    contract: EXTENSION_STATE_CONTRACT_V1.into(),
+                    namespace: "example.extension".into(),
+                    expected_store_generation: store.store_generation,
+                    expected_revision: revision,
+                    idempotency_key: format!("populate-{batch}"),
+                    operations: (0..MAX_STATE_OPERATIONS)
+                        .map(|offset| ExtensionStateOperationV1 {
+                            key: format!("key-{batch}-{offset}"),
+                            value: Some(serde_json::json!(offset)),
+                        })
+                        .collect(),
+                })
+                .unwrap();
+        }
+
+        let commit = store
+            .clear_namespace("example.extension", "delete-all".into())
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(commit.revision, 5);
+        assert!(store
+            .snapshot("example.extension")
+            .unwrap()
+            .values
+            .is_empty());
+        assert_eq!(store.events_after(4, 1).events[0].changed_keys.len(), 512);
     }
 
     #[test]

@@ -94,6 +94,14 @@ pub(crate) fn request_changes_ui(request: &Request) -> bool {
             | Method::PluginPaneOpen(_)
             | Method::PluginPaneFocus(_)
             | Method::PluginPaneClose(_)
+            | Method::ExtensionInstall(_)
+            | Method::ExtensionEnable(_)
+            | Method::ExtensionRemove(_)
+            | Method::ExtensionDataDelete(_)
+            | Method::ExtensionReorder(_)
+            | Method::ExtensionRepositoryOverrideSet(_)
+            | Method::ExtensionUpdate(_)
+            | Method::ExtensionRollback(_)
     )
 }
 
@@ -138,5 +146,23 @@ mod tests {
             method: Method::CollectionList(Default::default()),
         };
         assert!(!request_changes_ui(&query));
+    }
+
+    #[test]
+    fn every_extension_mutation_requests_a_client_redraw() {
+        let cases = [
+            r#"{"id":"1","method":"extension.install","params":{"repository":"r","confirmed":true}}"#,
+            r#"{"id":"1","method":"extension.enable","params":{"repository":"r","enabled":false}}"#,
+            r#"{"id":"1","method":"extension.remove","params":{"repository":"r","confirmed":true}}"#,
+            r#"{"id":"1","method":"extension.data.delete","params":{"repository":"r","confirmed":true}}"#,
+            r#"{"id":"1","method":"extension.reorder","params":{"repository":"r","index":0}}"#,
+            r#"{"id":"1","method":"extension.repository_override.set","params":{"repository":"r","repository_id":"repo","enabled":false}}"#,
+            r#"{"id":"1","method":"extension.update","params":{"repository":"r","version":"2","approved":true}}"#,
+            r#"{"id":"1","method":"extension.rollback","params":{"repository":"r","confirmed":true}}"#,
+        ];
+        for encoded in cases {
+            let request: Request = serde_json::from_str(encoded).unwrap();
+            assert!(request_changes_ui(&request), "{encoded}");
+        }
     }
 }

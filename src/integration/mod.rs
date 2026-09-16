@@ -14,7 +14,7 @@ mod version;
 // stays gated. Marketplace lifecycle uses only verified Vqro artifact paths.
 pub(crate) use actions::{
     artifact_asset_path, install_target, install_target_from_artifact, install_target_from_asset,
-    uninstall_target,
+    uninstall_target, uninstall_target_artifact,
 };
 #[cfg(test)]
 pub(crate) use env::integration_env_lock;

@@ -286,16 +286,45 @@ impl ClientShellState {
         let Some(snapshot) = endpoint.snapshot.clone() else {
             return false;
         };
+        let endpoint_boot_id = snapshot.boot_id.clone();
         if endpoint_id != &self.active_endpoint_id {
+            let previous_boot_id = self
+                .endpoints
+                .iter()
+                .find(|candidate| candidate.endpoint_id == self.active_endpoint_id)
+                .and_then(|candidate| {
+                    candidate
+                        .snapshot
+                        .as_ref()
+                        .map(|snapshot| snapshot.boot_id.clone())
+                });
+            if let Some(previous_boot_id) = previous_boot_id {
+                let pending = self
+                    .pending_requests
+                    .iter()
+                    .filter(|(_, request)| request.boot_id == previous_boot_id)
+                    .map(|(request_id, _)| request_id.clone())
+                    .collect::<Vec<_>>();
+                for request_id in pending {
+                    self.cancel_endpoint_request(&request_id);
+                }
+            }
             self.active_endpoint_id = endpoint_id.clone();
             self.inspector = None;
             self.last_pane_viewport_request = None;
             if matches!(
                 self.overlay.as_ref(),
-                Some(ClientShellOverlay::PaneInterruptConfirm(_))
+                Some(
+                    ClientShellOverlay::PaneInterruptConfirm(_) | ClientShellOverlay::Extensions(_)
+                )
             ) {
                 self.overlay = None;
             }
+            // Fence any response sent by the previous server after its requests
+            // were removed above. The new endpoint may reuse request IDs, but not
+            // the previous endpoint boot identity.
+            self.pending_requests
+                .retain(|_, request| request.boot_id == endpoint_boot_id);
             self.pane_surface = None;
             self.pending_pane_surface = None;
         }

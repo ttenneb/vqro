@@ -361,6 +361,13 @@ impl MarketplaceStateFile {
             if state.data_id.is_empty() {
                 state.data_id = extension.id.clone();
             }
+            if matches!(&extension.package, ExtensionPackage::Bundled { .. }) {
+                state.active_version = extension.version.clone();
+                state.rollback_version = None;
+                state.pending_version = None;
+                state.active_artifact = None;
+                state.rollback_artifact = None;
+            }
             if state.installed && seen.insert(extension.repository.clone()) {
                 self.load_order.push(extension.repository.clone());
             }
@@ -387,6 +394,12 @@ impl MarketplaceStateFile {
         state.enabled = true;
         state.active_version = extension.version.clone();
         state.activation_error = None;
+        if matches!(&extension.package, ExtensionPackage::Bundled { .. }) {
+            state.rollback_version = None;
+            state.pending_version = None;
+            state.active_artifact = None;
+            state.rollback_artifact = None;
+        }
         if !self.load_order.contains(&extension.repository) {
             self.load_order.push(extension.repository.clone());
         }
@@ -712,6 +725,9 @@ pub(crate) fn save_state_to_path(path: &Path, state: &MarketplaceStateFile) -> R
     }
     let bytes = serde_json::to_vec_pretty(state)
         .map_err(|error| format!("encode extension state: {error}"))?;
+    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MAX_MARKETPLACE_STATE_BYTES {
+        return Err("extension state exceeds its size limit".into());
+    }
     let temporary = path.with_extension(format!(
         "json.{}.{}.tmp",
         std::process::id(),
@@ -744,6 +760,8 @@ pub(crate) struct PendingExtensionLifecycle {
     pub(crate) rollback_artifact: Option<VerifiedExtensionArtifact>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) active_version: Option<String>,
+    #[serde(default)]
+    pub(crate) load_order: Vec<String>,
 }
 
 fn lifecycle_journal_path(state_path: &Path) -> PathBuf {
@@ -923,6 +941,114 @@ mod tests {
     }
 
     #[test]
+    fn bundled_marketplace_entries_match_authoritative_declarations() {
+        let index = CuratedIndex::bundled().unwrap();
+        let mut declarations = crate::app::bundled_document_service_declarations()
+            .unwrap()
+            .into_iter()
+            .map(|declaration| (declaration.namespace.clone(), declaration))
+            .collect::<BTreeMap<_, _>>();
+
+        for extension in &index.extensions {
+            let ExtensionPackage::Bundled { provider } = &extension.package else {
+                continue;
+            };
+            let declaration = declarations
+                .remove(&extension.id)
+                .unwrap_or_else(|| panic!("missing bundled declaration for {}", extension.id));
+            assert_eq!(
+                declaration.service.command.last().map(String::as_str),
+                Some(provider.as_str())
+            );
+        }
+        assert!(declarations.is_empty());
+    }
+
+    #[test]
+    fn curated_pins_and_bundled_service_declarations_are_exact() {
+        use sha2::{Digest, Sha256};
+
+        let index = CuratedIndex::bundled().unwrap();
+        let expected = [
+            (
+                "vqro.collections",
+                "f1a585cc65b73c871f490d4977905a0d208816a2",
+                "eabc2167a5e1d2a2f3fc786482c7c0ed7862588de082d2b6e09b1a9f6124c766",
+                "bc28c51e8056c092502a5fe89da7a063b071e40b60faedbff5d25922f18329f5",
+            ),
+            (
+                "vqro.spaces",
+                "5a8b9b9b6329fbaec68d100e88d20bc6aad0a6ca",
+                "fc2c8d08a069c9d5611ffb75daa220c367f2fff5467fb57b3755bc62ad285b00",
+                "605534056a08b304816a9f5b60f774c5d9ef8833ae0a1b796a90768199997ef5",
+            ),
+            (
+                "vqro.delegation",
+                "cc8d261cbbb65cd07b070f42b79bdefca500f98a",
+                "1d43481a5e8bc3fc78244d9945e931b69054c88de3247ce89f2d3a18fb083b65",
+                "6e76acb6f489a8c62d393bedd7dda27b6b9732f9bbebfdd5bbae38b37ec5c416",
+            ),
+            (
+                "vqro.agent-status",
+                "71c8faecedb7ac8079704a8250c2c0d737459dca",
+                "58b5af316078d0bcef9e6a5462f1aafa7e192dd7b52e770508dec1fe04b1f2e7",
+                "4695727a8cfa4cc12856a47cec0621f792e3c5e36bd6d8395ac1c9b212518153",
+            ),
+            (
+                "vqro.pi",
+                "fa791b57138f163c4f4538f6545f139b378ef188",
+                "a631b0e815fbf3a2b457fd53d4d752fa2a813916175473365d4442e9644ed94e",
+                "dc3826d1ec045e626af9cbafd501606fff416965a9622a2c13f5dc47516e577a",
+            ),
+            (
+                "vqro.claude",
+                "535ede550c4bf3b97830265b9abca298249617dd",
+                "acfc2c07463b1fc3624dea66c02aabcab7ed6a925e5a2e4c41a1290b4c64465b",
+                "0d9017f7477e86085fc7d2fddb0e0abd3053597a8b0dc39284179a511b86c2ba",
+            ),
+            (
+                "vqro.codex",
+                "4eb9623ffe13c3d9b2115f17225713078ab40a5c",
+                "1acdf92f4c67541cff0ed7e6839bb1d086ff944d06c555e2593c82b5dee2abeb",
+                "fc92cadf0c2e71f13965c0cb36f97d6f5365c19cbc25884762595e0b3929228d",
+            ),
+        ];
+        for (id, commit, source_digest, manifest_digest) in expected {
+            let extension = index.extension(id).unwrap();
+            assert_eq!(extension.source_commit.as_deref(), Some(commit));
+            assert_eq!(extension.source_sha256.as_deref(), Some(source_digest));
+            assert_eq!(extension.manifest_sha256.as_deref(), Some(manifest_digest));
+            assert_eq!(extension.manifest_path, "vqro-extension.toml");
+        }
+
+        for (id, manifest) in [
+            (
+                "vqro.collections",
+                include_bytes!("../extensions/first-party/collections/vqro-extension.toml")
+                    .as_slice(),
+            ),
+            (
+                "vqro.spaces",
+                include_bytes!("../extensions/first-party/spaces/vqro-extension.toml").as_slice(),
+            ),
+            (
+                "vqro.delegation",
+                include_bytes!("../extensions/first-party/delegation/vqro-extension.toml")
+                    .as_slice(),
+            ),
+            (
+                "vqro.agent-status",
+                include_bytes!("../extensions/first-party/agent-status/vqro-extension.toml")
+                    .as_slice(),
+            ),
+        ] {
+            let extension = index.extension(id).unwrap();
+            let digest = format!("{:x}", Sha256::digest(manifest));
+            assert_eq!(extension.manifest_sha256.as_deref(), Some(digest.as_str()));
+        }
+    }
+
+    #[test]
     fn removal_retains_overrides_and_reinstall_enables_immediately() {
         let index = CuratedIndex::bundled().unwrap();
         let extension = index.extension("vqro.collections").unwrap();
@@ -1032,6 +1158,7 @@ mod tests {
             active_artifact: None,
             rollback_artifact: None,
             active_version: Some("1.0.0".into()),
+            load_order: vec!["example/agent".into()],
         };
 
         begin_extension_lifecycle(&state_path, &pending).unwrap();
@@ -1040,6 +1167,7 @@ mod tests {
         assert_eq!(loaded.target, pending.target);
         assert!(loaded.installed);
         assert!(loaded.enabled);
+        assert_eq!(loaded.load_order, pending.load_order);
         finish_extension_lifecycle(&state_path).unwrap();
         assert!(pending_extension_lifecycle(&state_path).unwrap().is_none());
         std::fs::remove_dir_all(directory).unwrap();

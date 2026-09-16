@@ -103,10 +103,9 @@ pub(super) fn structure_projection(
                         .find_map(|workspace| workspace.checkout.as_ref())
                 })
                 .map(|checkout| checkout.checkout_path.display().to_string());
-            let durable_identity =
-                crate::repository::extension_repository_identities(&repository.git_common_dir)
-                    .into_iter()
-                    .next();
+            // Repository remotes come from the background Git-status cache. Never read
+            // identity marker files while projecting a frame for each attached client.
+            let durable_identity = web_url.clone().or_else(|| Some(repository.id.clone()));
             protocol::endpoint::ClientShellRepository {
                 repository_id: repository.id.clone(),
                 label: repository.display_label().to_owned(),
@@ -138,10 +137,17 @@ pub(super) fn structure_projection(
         })
         .collect();
     if !app.bundled_extension_enabled("spaces", None) {
+        let repository_workspaces = app
+            .state
+            .repositories
+            .iter()
+            .flat_map(|repository| repository.checkout_workspace_ids.iter())
+            .collect::<std::collections::HashSet<_>>();
         space_order = app
             .state
             .workspaces
             .iter()
+            .filter(|workspace| !repository_workspaces.contains(&workspace.id))
             .map(|workspace| protocol::endpoint::ClientShellSpaceRef {
                 kind: protocol::endpoint::ClientShellSpaceKind::StandaloneWorkspace,
                 id: workspace.id.clone(),
@@ -920,6 +926,58 @@ mod tests {
         let structure = structure_projection(&app, "boot", 1);
         assert_eq!(structure.collections.len(), 1);
         assert_eq!(structure.collections[0].members.len(), 1);
+
+        app.configured_disabled_extensions
+            .insert("vqro.collections".into());
+        app.apply_bundled_extension_state();
+        let fallback = app.session_snapshot_v1_compat();
+        assert_eq!(fallback.layouts[0].panes.len(), 2);
+        let fallback_structure = structure_projection(&app, "boot", 2);
+        assert!(fallback_structure.collections.is_empty());
+    }
+
+    #[test]
+    fn disabled_spaces_projects_repository_workspaces_only_through_repositories() {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = crate::app::App::new(
+            &crate::config::Config::default(),
+            crate::app::AppPolicy::TEST,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        let mut repository_workspace = crate::workspace::Workspace::test_new("repo");
+        repository_workspace.checkout = Some(crate::repository::CheckoutProvenance {
+            repository_id: "repo_1".into(),
+            checkout_path: "/repo".into(),
+            kind: crate::repository::CheckoutKind::Primary,
+        });
+        let repository_workspace_id = repository_workspace.id.clone();
+        let standalone = crate::workspace::Workspace::test_new("scratch");
+        let standalone_id = standalone.id.clone();
+        app.state.workspaces = vec![repository_workspace, standalone];
+        app.state.repositories = vec![crate::repository::Repository {
+            id: "repo_1".into(),
+            git_common_dir: "/repo/.git".into(),
+            label: "repo".into(),
+            custom_name: None,
+            preferred_base: None,
+            checkout_workspace_ids: vec![repository_workspace_id],
+            last_focused_workspace_id: None,
+        }];
+        app.configured_disabled_extensions
+            .insert("vqro.spaces".into());
+        app.apply_bundled_extension_state();
+
+        let projection = structure_projection(&app, "boot", 1);
+
+        assert_eq!(projection.repositories.len(), 1);
+        assert_eq!(projection.space_order.len(), 1);
+        assert_eq!(projection.space_order[0].id, standalone_id);
+        assert_eq!(
+            projection.space_order[0].kind,
+            protocol::endpoint::ClientShellSpaceKind::StandaloneWorkspace
+        );
     }
 
     #[test]

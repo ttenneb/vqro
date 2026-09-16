@@ -18,6 +18,7 @@ include = [
     "docs/next/api/vqro-extension-service.schema.json",
     "docs/next/api/vqro-extension.schema.json",
     "extensions/first-party/*/vqro-extension.toml",
+    "extensions/index-v1.json",
     "extensions/reference-host-document/README.md",
     "extensions/reference-host-document/fixtures/*.json",
     "extensions/reference-host-document/service.py",

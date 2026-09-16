@@ -2068,7 +2068,39 @@ impl App {
         let ws = self.state.workspaces.get(ws_idx)?;
         let tab = ws.tabs.get(tab_idx)?;
         let area = self.state.view.terminal_area;
-        let focused_pane_id = self.public_pane_id(ws_idx, tab.layout.focused())?;
+        let focused = tab.layout.focused();
+        let focused_pane_id = self.public_pane_id(ws_idx, focused)?;
+        if !self.bundled_extension_enabled("collections", Some(ws_idx)) {
+            let pane_ids = tab.layout.pane_ids();
+            let count = u16::try_from(pane_ids.len()).unwrap_or(u16::MAX).max(1);
+            let base_height = area.height / count;
+            let remainder = area.height % count;
+            let mut y = area.y;
+            let panes = pane_ids
+                .into_iter()
+                .enumerate()
+                .filter_map(|(index, pane_id)| {
+                    let extra = u16::from(u16::try_from(index).ok()? < remainder);
+                    let height = base_height.saturating_add(extra);
+                    let rect = ratatui::layout::Rect::new(area.x, y, area.width, height);
+                    y = y.saturating_add(height);
+                    Some(PaneLayoutPane {
+                        pane_id: self.public_pane_id(ws_idx, pane_id)?,
+                        focused: pane_id == focused,
+                        rect: rect.into(),
+                    })
+                })
+                .collect();
+            return Some(PaneLayoutSnapshot {
+                workspace_id: self.public_workspace_id(ws_idx),
+                tab_id: self.public_tab_id(ws_idx, tab_idx)?,
+                zoomed: false,
+                area: area.into(),
+                focused_pane_id,
+                panes,
+                splits: Vec::new(),
+            });
+        }
         let panes = crate::ui::apply_pane_chrome(
             tab.layout.panes(area),
             self.state.pane_borders,

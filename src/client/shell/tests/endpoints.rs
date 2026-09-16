@@ -210,6 +210,35 @@ fn endpoint_switch_and_rollback_restore_matching_cached_structure() {
 }
 
 #[test]
+fn switching_endpoints_closes_endpoint_local_extensions_overlay() {
+    let (mut state, remote) = state_with_remote();
+    let mut outcome = ClientShellInput::default();
+    state.open_extensions_overlay(&mut outcome);
+    assert!(matches!(
+        state.overlay,
+        Some(ClientShellOverlay::Extensions(_))
+    ));
+    let generation = match state.overlay.as_ref().unwrap() {
+        ClientShellOverlay::Extensions(extensions) => extensions.generation,
+        _ => unreachable!(),
+    };
+    state.pending_requests.insert(
+        "old-extension-list".into(),
+        PendingEndpointRequest {
+            boot_id: "boot-1".into(),
+            method_name: "extension.list".into(),
+            confirmation_workspace_id: None,
+            kind: PendingEndpointKind::ExtensionList(generation),
+        },
+    );
+
+    assert!(state.activate_endpoint_projection(&remote));
+
+    assert!(state.overlay.is_none());
+    assert!(!state.pending_requests.contains_key("old-extension-list"));
+}
+
+#[test]
 fn switching_machines_from_copy_mode_restores_terminal_input() {
     let (mut state, remote) = state_with_remote();
     let mut local_surface = surface();

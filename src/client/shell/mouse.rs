@@ -1618,6 +1618,21 @@ impl ClientShellState {
             if mutating {
                 return;
             }
+            if super::contains(self.hits.extensions_popup, point) {
+                match mouse.kind {
+                    MouseEventKind::ScrollUp => {
+                        self.move_extension_selection(-1);
+                        outcome.repaint = true;
+                        return;
+                    }
+                    MouseEventKind::ScrollDown => {
+                        self.move_extension_selection(1);
+                        outcome.repaint = true;
+                        return;
+                    }
+                    _ => {}
+                }
+            }
             if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
                 if let Some((_, tab)) = self
                     .hits
