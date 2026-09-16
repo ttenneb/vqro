@@ -1625,7 +1625,7 @@ mod tests {
     }
 
     #[test]
-    fn resize_member_targets_its_collection_leaf_and_restores_focus() {
+    fn collection_selected_member_focus_and_resize_target_same_terminal() {
         let (mut layout, root) = TileLayout::new();
         let member = layout.split_focused(Direction::Vertical);
         let collection = CollectionId::from_raw(9_600_001).expect("valid collection id");
@@ -1637,20 +1637,43 @@ mod tests {
         ));
         assert!(layout.remove_tiled_pane_for_collection(member));
         assert!(layout.add_collection_member(collection, member));
+        assert!(layout.select_collection_member(collection, member));
+        layout.focus_pane(member);
         let previous_focus = layout.focused_leaf();
 
+        assert_eq!(layout.focused(), member);
+        assert_eq!(
+            layout.collection(collection).unwrap().selected(),
+            Some(member)
+        );
         assert!(layout.resize_pane(member, NavDirection::Left, 0.05, Rect::new(0, 0, 100, 40),));
 
         assert_eq!(layout.focused_leaf(), previous_focus);
+        assert_eq!(layout.focused(), member);
         let splits = layout.splits(Rect::new(0, 0, 100, 40));
         assert!((splits[0].ratio - 0.45).abs() < f32::EPSILON);
     }
 
     #[test]
-    fn collection_lifecycle_preserves_exactly_one_placement() {
+    fn collection_member_has_exactly_one_placement_after_every_mutation() {
         let (mut layout, root) = TileLayout::new();
         let first = layout.split_focused(Direction::Horizontal);
         let second = layout.split_focused(Direction::Vertical);
+        let assert_unique = |layout: &TileLayout| {
+            for pane in [root, first, second] {
+                assert_eq!(
+                    layout
+                        .pane_ids()
+                        .iter()
+                        .filter(|candidate| **candidate == pane)
+                        .count(),
+                    1,
+                    "pane {pane:?} must have exactly one placement"
+                );
+                assert!(layout.placement(pane).is_some());
+            }
+        };
+        assert_unique(&layout);
         let collection = CollectionId::from_raw(9_700_001).expect("collection id");
         assert!(layout.insert_collection_near(
             LayoutLeaf::Pane(root),
@@ -1658,33 +1681,32 @@ mod tests {
             Direction::Vertical,
             0.5
         ));
+        assert_unique(&layout);
         for pane in [first, second] {
             assert!(layout.remove_tiled_pane_for_collection(pane));
             assert!(layout.add_collection_member(collection, pane));
+            assert_unique(&layout);
             assert_eq!(
                 layout.placement(pane),
                 Some(PanePlacement::Collection(collection))
             );
         }
         assert!(layout.reorder_collection_member(collection, second, 0));
+        assert_unique(&layout);
         assert!(layout.select_collection_member(collection, second));
+        assert_unique(&layout);
         assert!(layout.set_member_archived(collection, second, true));
+        assert_unique(&layout);
         let group = layout.collection(collection).expect("collection");
         assert_eq!(group.members(), &[second, first]);
         assert_eq!(group.selected(), Some(second));
         assert!(group.is_archived(second));
         assert!(layout.set_member_archived(collection, second, false));
+        assert_unique(&layout);
         assert!(layout.remove_collection_member(collection, second));
         assert!(layout.insert_pane_near(root, second, Direction::Horizontal, 0.5, true));
+        assert_unique(&layout);
         assert_eq!(layout.placement(second), Some(PanePlacement::Tiled));
-        assert_eq!(
-            layout
-                .pane_ids()
-                .iter()
-                .filter(|pane| **pane == second)
-                .count(),
-            1
-        );
     }
 
     #[test]

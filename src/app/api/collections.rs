@@ -2327,6 +2327,178 @@ mod tests {
         (app, collection, member)
     }
 
+    fn assert_collection_success(response: String) {
+        serde_json::from_str::<crate::api::schema::SuccessResponse>(&response)
+            .expect("collection mutation succeeds");
+    }
+
+    fn normalized_collection(
+        app: &App,
+        collection: CollectionId,
+        aliases: &std::collections::HashMap<String, &'static str>,
+        action: &str,
+    ) -> serde_json::Value {
+        let info = app
+            .collection_info(0, 0, collection)
+            .expect("collection exists");
+        serde_json::json!({
+            "action": action,
+            "members": info.members.iter().map(|member| serde_json::json!({
+                "pane": aliases[&member.pane_id],
+                "archived": member.archived,
+                "selected": member.selected,
+            })).collect::<Vec<_>>()
+        })
+    }
+
+    fn run_collection_mutation_parity_sequence() -> (App, Vec<serde_json::Value>, u64) {
+        let mut app = app_with_workspace();
+        let root = app.state.workspaces[0].tabs[0].root_pane;
+        let first = app.state.workspaces[0].test_split(ratatui::layout::Direction::Horizontal);
+        let second = app.state.workspaces[0].test_split(ratatui::layout::Direction::Vertical);
+        app.state.ensure_test_terminals();
+        let root_public = app.public_pane_id(0, root).unwrap();
+        let first_public = app.public_pane_id(0, first).unwrap();
+        let second_public = app.public_pane_id(0, second).unwrap();
+        let aliases = std::collections::HashMap::from([
+            (root_public.clone(), "root"),
+            (first_public.clone(), "first"),
+            (second_public.clone(), "second"),
+        ]);
+        let event_start = app.event_hub.current_sequence();
+        let mut states = Vec::new();
+
+        assert_collection_success(app.handle_collection_create(
+            "create".into(),
+            CollectionCreateParams {
+                target_pane_id: root_public.clone(),
+                direction: SplitDirection::Right,
+                ratio: Some(0.5),
+                label: Some("helpers".into()),
+                focus: true,
+            },
+        ));
+        let collection = app.state.workspaces[0].tabs[0].layout.collection_ids()[0];
+        let collection_id = collection_id_text(collection);
+        states.push(normalized_collection(&app, collection, &aliases, "create"));
+        for (action, pane_id) in [("add_first", &first_public), ("add_second", &second_public)] {
+            assert_collection_success(app.handle_collection_add(
+                action.into(),
+                CollectionAddParams {
+                    collection_id: collection_id.clone(),
+                    pane_id: pane_id.clone(),
+                },
+            ));
+            states.push(normalized_collection(&app, collection, &aliases, action));
+        }
+        assert_collection_success(app.handle_collection_select(
+            "select".into(),
+            CollectionSelectParams {
+                collection_id: collection_id.clone(),
+                pane_id: second_public.clone(),
+                focus: true,
+            },
+        ));
+        states.push(normalized_collection(
+            &app,
+            collection,
+            &aliases,
+            "select_second",
+        ));
+        assert_collection_success(app.handle_collection_reorder(
+            "reorder".into(),
+            CollectionReorderParams {
+                collection_id: collection_id.clone(),
+                pane_id: second_public.clone(),
+                index: 0,
+            },
+        ));
+        states.push(normalized_collection(
+            &app,
+            collection,
+            &aliases,
+            "reorder_second",
+        ));
+        for (action, archived) in [("archive_first", true), ("restore_first", false)] {
+            assert_collection_success(app.handle_collection_archive(
+                action.into(),
+                CollectionMemberTarget {
+                    collection_id: collection_id.clone(),
+                    pane_id: first_public.clone(),
+                },
+                archived,
+            ));
+            states.push(normalized_collection(&app, collection, &aliases, action));
+        }
+        assert_collection_success(app.handle_collection_promote(
+            "promote".into(),
+            CollectionPromoteParams {
+                pane_id: second_public,
+                target_pane_id: root_public,
+                direction: SplitDirection::Right,
+                ratio: Some(0.5),
+                focus: false,
+            },
+        ));
+        states.push(normalized_collection(
+            &app,
+            collection,
+            &aliases,
+            "promote_second",
+        ));
+        assert_collection_success(app.handle_collection_close(
+            "close".into(),
+            CollectionCloseParams {
+                collection_id,
+                disposition: Some(CollectionCloseDisposition::CascadeClose),
+            },
+        ));
+        states.push(serde_json::json!({"action": "close", "members": null}));
+        (app, states, event_start)
+    }
+
+    #[test]
+    fn collection_mutation_parity_fixture_covers_create_add_select_reorder_archive_restore_promote_close(
+    ) {
+        let (_app, actual, _event_start) = run_collection_mutation_parity_sequence();
+        let expected: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/collections-mutation-parity-v1.json"
+        ))
+        .unwrap();
+        assert_eq!(serde_json::json!(actual), expected["states"]);
+    }
+
+    #[test]
+    fn collection_events_have_exact_kind_payload_order_and_revision() {
+        let (app, states, event_start) = run_collection_mutation_parity_sequence();
+        let expected: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/collections-mutation-parity-v1.json"
+        ))
+        .unwrap();
+        let events = app.event_hub.events_after(event_start);
+        let collection_events = events
+            .iter()
+            .filter_map(|(sequence, event)| match &event.data {
+                crate::api::schema::EventData::CollectionUpdated { action, collection } => {
+                    Some((*sequence, action.as_str(), collection.members.len()))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let expected_actions = expected["event_actions"].as_array().unwrap();
+        assert_eq!(collection_events.len(), expected_actions.len());
+        for (index, ((sequence, action, member_count), expected_action)) in
+            collection_events.iter().zip(expected_actions).enumerate()
+        {
+            assert_eq!(*sequence, event_start + index as u64 + 1);
+            assert_eq!(*action, expected_action.as_str().unwrap());
+            assert_eq!(
+                *member_count,
+                states[index]["members"].as_array().unwrap().len()
+            );
+        }
+    }
+
     #[test]
     fn collection_shadow_uses_stable_terminal_identity_and_generic_contracts() {
         let (app, collection, member) = app_with_nonempty_collection();
@@ -2374,6 +2546,33 @@ mod tests {
                 .pane_id,
             app.public_pane_id(0, member).unwrap()
         );
+    }
+
+    #[test]
+    fn collection_close_failure_is_atomic_and_allocates_nothing() {
+        let (mut app, collection, _member) = app_with_nonempty_collection();
+        let before = serde_json::to_value(app.collection_info(0, 0, collection)).unwrap();
+        let event_sequence = app.event_hub.current_sequence();
+        let next_pane = crate::layout::PaneId::next_for_test();
+        let next_terminal = crate::terminal::TerminalId::next_for_test();
+
+        let response = app.handle_collection_close(
+            "missing-disposition".into(),
+            CollectionCloseParams {
+                collection_id: collection_id_text(collection),
+                disposition: None,
+            },
+        );
+        let response: crate::api::schema::ErrorResponse = serde_json::from_str(&response).unwrap();
+
+        assert_eq!(response.error.code, "collection_disposition_required");
+        assert_eq!(
+            serde_json::to_value(app.collection_info(0, 0, collection)).unwrap(),
+            before
+        );
+        assert_eq!(app.event_hub.current_sequence(), event_sequence);
+        assert_eq!(crate::layout::PaneId::next_for_test(), next_pane);
+        assert_eq!(crate::terminal::TerminalId::next_for_test(), next_terminal);
     }
 
     #[test]
@@ -2628,7 +2827,7 @@ mod tests {
     }
 
     #[test]
-    fn terminal_interrupt_requires_confirmation_before_dispatch() {
+    fn host_document_action_rejects_stale_generation_revision_confirmation_and_scope() {
         let mut app = app_with_workspace();
         let namespace = "example.interrupt";
         app.host_document_services =
@@ -2674,6 +2873,14 @@ mod tests {
             confirmed: false,
             confirmation_token: None,
         };
+        let mut wrong_generation = stale_params.clone();
+        wrong_generation.generation = 7;
+        assert!(app
+            .authorize_host_document_action(&wrong_generation)
+            .is_err());
+        let mut wrong_scope = stale_params.clone();
+        wrong_scope.scope_id = "w-missing:t-missing".into();
+        assert!(app.authorize_host_document_action(&wrong_scope).is_err());
         assert!(app
             .authorize_host_document_action(&stale_params)
             .unwrap_err()

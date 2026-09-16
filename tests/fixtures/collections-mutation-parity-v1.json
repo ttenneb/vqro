@@ -1,0 +1,43 @@
+{
+  "contract": "vqro.collections.mutation-parity.v1",
+  "states": [
+    { "action": "create", "members": [] },
+    { "action": "add_first", "members": [
+      { "pane": "first", "archived": false, "selected": true }
+    ] },
+    { "action": "add_second", "members": [
+      { "pane": "first", "archived": false, "selected": true },
+      { "pane": "second", "archived": false, "selected": false }
+    ] },
+    { "action": "select_second", "members": [
+      { "pane": "first", "archived": false, "selected": false },
+      { "pane": "second", "archived": false, "selected": true }
+    ] },
+    { "action": "reorder_second", "members": [
+      { "pane": "second", "archived": false, "selected": true },
+      { "pane": "first", "archived": false, "selected": false }
+    ] },
+    { "action": "archive_first", "members": [
+      { "pane": "second", "archived": false, "selected": true },
+      { "pane": "first", "archived": true, "selected": false }
+    ] },
+    { "action": "restore_first", "members": [
+      { "pane": "second", "archived": false, "selected": true },
+      { "pane": "first", "archived": false, "selected": false }
+    ] },
+    { "action": "promote_second", "members": [
+      { "pane": "first", "archived": false, "selected": true }
+    ] },
+    { "action": "close", "members": null }
+  ],
+  "event_actions": [
+    "created",
+    "member_added",
+    "member_added",
+    "member_updated",
+    "member_updated",
+    "member_updated",
+    "member_updated",
+    "member_promoted"
+  ]
+}

@@ -4942,7 +4942,7 @@ fn terminal_observe_allows_multiple_clients_without_attach_ownership() {
 }
 
 #[test]
-fn terminal_view_interest_is_the_visibility_authority_for_hidden_collection_members() {
+fn collection_hidden_members_parse_but_do_not_trigger_presentation_work() {
     let mut server = test_headless_server();
     let mut workspace = crate::workspace::Workspace::test_new("nested-visibility");
     let root = workspace.tabs[0].root_pane;
@@ -4979,6 +4979,10 @@ fn terminal_view_interest_is_the_visibility_authority_for_hidden_collection_memb
     server.clients.insert(1, client);
     assert!(server.pty_sources_visible_to_any_render_target(&HashSet::from([selected])));
     assert!(!server.pty_sources_visible_to_any_render_target(&HashSet::from([hidden])));
+    let _ = server.app.render_dirty.take();
+    server.sync_immediate_pty_sources();
+    assert!(server.app.render_dirty.request_pty(hidden));
+    assert!(!server.app.render_dirty.has_immediate_work());
     server
         .clients
         .get_mut(&1)
@@ -4994,7 +4998,6 @@ fn terminal_view_interest_is_the_visibility_authority_for_hidden_collection_memb
         });
     assert!(server.pty_sources_visible_to_any_render_target(&HashSet::from([hidden])));
     server.sync_immediate_pty_sources();
-    assert!(server.app.render_dirty.request_pty(hidden));
     assert!(server.app.render_dirty.has_immediate_work());
 }
 

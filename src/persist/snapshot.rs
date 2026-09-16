@@ -1357,9 +1357,11 @@ mod tests {
     }
 
     #[test]
-    fn capture_preserves_empty_collection_identity_and_typed_leaf() {
+    fn collection_saved_layout_round_trip_preserves_ids_members_selection_archive_and_focus() {
         let mut state = state_with_workspaces(&["collections"]);
         let root = state.workspaces[0].tabs[0].root_pane;
+        let first = state.workspaces[0].test_split(Direction::Horizontal);
+        let second = state.workspaces[0].test_split(Direction::Vertical);
         let collection = state.workspaces[0].tabs[0]
             .create_collection_near(
                 crate::layout::LayoutLeaf::Pane(root),
@@ -1368,19 +1370,40 @@ mod tests {
                 Some("helpers".into()),
             )
             .expect("collection");
+        for pane in [first, second] {
+            state.workspaces[0].tabs[0]
+                .collect_tiled_pane(pane, collection)
+                .unwrap();
+        }
+        state.workspaces[0].tabs[0]
+            .select_collection_member(collection, second)
+            .unwrap();
+        state.workspaces[0].tabs[0]
+            .set_collection_member_archived(collection, first, true)
+            .unwrap();
+        assert!(state.workspaces[0].tabs[0]
+            .layout
+            .focus_leaf(crate::layout::LayoutLeaf::Collection(collection)));
+
         let snapshot = capture_from_state(&state);
-        let tab = &snapshot.workspaces[0].tabs[0];
-        assert_eq!(tab.collections.len(), 1);
-        assert_eq!(tab.collections[0].id, collection);
-        assert_eq!(tab.collections[0].label.as_deref(), Some("helpers"));
+        let json = serde_json::to_string(&snapshot).expect("serialize");
+        let decoded = parse_snapshot(&json).expect("deserialize");
+        let tab = &decoded.workspaces[0].tabs[0];
+        let saved = &tab.collections[0];
+        assert_eq!(saved.id, collection);
+        assert_eq!(saved.label.as_deref(), Some("helpers"));
+        assert_eq!(saved.members, vec![first.raw(), second.raw()]);
+        assert_eq!(saved.selected, Some(second.raw()));
+        assert_eq!(saved.archived, vec![first.raw()]);
+        assert_eq!(
+            tab.focused_leaf,
+            Some(LayoutLeafSnapshot::Collection(collection))
+        );
         assert!(matches!(
             tab.layout,
             LayoutSnapshot::Split { ref second, .. }
                 if matches!(second.as_ref(), LayoutSnapshot::Collection(id) if *id == collection)
         ));
-        let json = serde_json::to_string(&snapshot).expect("serialize");
-        let decoded = parse_snapshot(&json).expect("deserialize");
-        assert_eq!(decoded.workspaces[0].tabs[0].collections[0].id, collection);
     }
 
     #[test]

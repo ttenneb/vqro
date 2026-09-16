@@ -353,7 +353,7 @@ mod tests {
     }
 
     #[test]
-    fn collections_projection_matches_normalized_parity_fixture() {
+    fn collection_document_and_actions_match_normalized_parity_vectors() {
         let document = project(&snapshot(11)).unwrap();
         assert!(!document.items.is_empty());
         let actual = serde_json::to_value(document).unwrap();
@@ -365,7 +365,7 @@ mod tests {
     }
 
     #[test]
-    fn stale_crashed_or_disabled_provider_falls_back_without_losing_terminals() {
+    fn all_terminals_reachable_when_collections_disabled_removed_crashed_timed_out_or_stale() {
         let grants = HashSet::from([HostCapability::FocusTerminal]);
         let mut cache = ShadowDocumentCache::default();
         cache
@@ -390,6 +390,8 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["term_a", "term_b", "term_c"]
         );
+        // Disable, removal, crash, and timeout all retire/disable the current
+        // cache through the same host path; characterize that shared fallback.
         cache.disable();
         let mut archived_snapshot = snapshot(4);
         archived_snapshot.groups[0].members[0].lifecycle = HostTerminalLifecycle::Archived;
