@@ -12,6 +12,7 @@ use crate::layout::{CollectionId, LayoutLeaf};
 const MAX_HOST_DOCUMENT_CONFIRMATION_GRANTS: usize = 8_192;
 const MAX_HOST_SPACES_RETRY_ATTEMPTS: u32 = 6;
 const MAX_HOST_SEMANTIC_RETRY_ATTEMPTS: u32 = 6;
+const MAX_HOST_DOCUMENT_RETRY_ATTEMPTS: u32 = 6;
 const MAX_HOST_DOCUMENTS_PROJECTION_BYTES: usize = crate::protocol::MAX_FRAME_SIZE / 2;
 
 fn bounded_document_text(value: &str) -> String {
@@ -109,6 +110,10 @@ impl App {
             .retain(|(_, scope_id), _| live_tab_ids.contains(scope_id));
         self.host_document_retry_snapshots
             .retain(|(_, scope_id), _| live_tab_ids.contains(scope_id));
+        self.host_document_retry_scheduled
+            .retain(|(_, scope_id, _, _)| live_tab_ids.contains(scope_id));
+        self.host_document_retry_attempts
+            .retain(|(_, scope_id, _, _), _| live_tab_ids.contains(scope_id));
         self.host_document_retry_order.retain(|key| {
             live_tab_ids.contains(&key.1) && self.host_document_retry_snapshots.contains_key(key)
         });
@@ -224,21 +229,101 @@ impl App {
         &mut self,
         key: (String, String),
         snapshot: crate::extension_contract::HostTerminalGroupsV1,
-    ) {
+    ) -> bool {
         if !self.host_document_retry_snapshots.contains_key(&key) {
             if self.host_document_retry_snapshots.len()
                 >= crate::admission::MAX_SESSION_PANES
                     * crate::extension_contract::MAX_DOCUMENT_PROVIDERS
             {
-                return;
+                return false;
             }
             self.host_document_retry_order.push_back(key.clone());
         }
         self.host_document_retry_snapshots
             .insert(key, DeferredHostDocumentSnapshot::TerminalGroups(snapshot));
+        true
     }
 
-    fn retry_one_host_document_render(&mut self) {
+    pub(super) fn schedule_host_document_render_retry(
+        &mut self,
+        key: (String, String),
+        snapshot: crate::extension_contract::HostTerminalGroupsV1,
+    ) -> bool {
+        let retry = (
+            key.0.clone(),
+            key.1.clone(),
+            snapshot.generation,
+            snapshot.revision,
+        );
+        let attempts = self
+            .host_document_retry_attempts
+            .get(&retry)
+            .copied()
+            .unwrap_or(0);
+        if attempts >= MAX_HOST_DOCUMENT_RETRY_ATTEMPTS
+            || self.host_document_services.generation(&key.0) != Some(snapshot.generation)
+        {
+            if attempts >= MAX_HOST_DOCUMENT_RETRY_ATTEMPTS {
+                tracing::warn!(
+                    namespace = %key.0,
+                    scope_id = %key.1,
+                    attempts,
+                    "host document provider retry budget exhausted; retaining native fallback"
+                );
+            }
+            return false;
+        }
+        if !self.defer_host_document_render(key.clone(), snapshot) {
+            return false;
+        }
+        if self
+            .host_document_retry_scheduled
+            .iter()
+            .any(|scheduled| scheduled.0 == retry.0 && scheduled.1 == retry.1)
+        {
+            return true;
+        }
+        self.host_document_retry_attempts
+            .retain(|attempt, _| attempt.0 != retry.0 || attempt.1 != retry.1 || *attempt == retry);
+        if !self.host_document_retry_scheduled.insert(retry.clone()) {
+            return true;
+        }
+        self.host_document_retry_attempts
+            .insert(retry.clone(), attempts.saturating_add(1));
+        let delay_ms = 100_u64.saturating_mul(1_u64 << attempts.min(6)).min(5_000);
+        let event_tx = self.event_tx.clone();
+        let event_retry = retry.clone();
+        match std::thread::Builder::new()
+            .name("vqro-document-retry".into())
+            .spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+                let mut event = crate::events::AppEvent::HostDocumentRetryDue {
+                    namespace: event_retry.0,
+                    scope_id: event_retry.1,
+                    generation: event_retry.2,
+                    revision: event_retry.3,
+                };
+                loop {
+                    match event_tx.try_send(event) {
+                        Ok(()) | Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => return,
+                        Err(tokio::sync::mpsc::error::TrySendError::Full(returned)) => {
+                            event = returned;
+                            std::thread::sleep(std::time::Duration::from_millis(10));
+                        }
+                    }
+                }
+            }) {
+            Ok(_) => true,
+            Err(error) => {
+                self.host_document_retry_scheduled.remove(&retry);
+                self.host_document_retry_attempts.remove(&retry);
+                tracing::warn!(%error, "failed to schedule host document provider retry");
+                false
+            }
+        }
+    }
+
+    pub(super) fn retry_one_host_document_render(&mut self) {
         while let Some(key) = self.host_document_retry_order.pop_front() {
             let Some(snapshot) = self.host_document_retry_snapshots.remove(&key) else {
                 continue;
@@ -263,6 +348,12 @@ impl App {
                     self.host_document_retry_snapshots
                         .insert(key.clone(), snapshot);
                     self.host_document_retry_order.push_back(key);
+                    return;
+                }
+                Err(_) if key.0 == crate::first_party::collections::NAMESPACE => {
+                    if let DeferredHostDocumentSnapshot::TerminalGroups(snapshot) = snapshot {
+                        self.schedule_host_document_render_retry(key, snapshot);
+                    }
                     return;
                 }
                 Err(_) => continue,
@@ -1065,15 +1156,17 @@ impl App {
         mut result: crate::extension_service::HostDocumentAsyncResult,
     ) {
         let render_slot = result._render_slot.take();
-        self.apply_host_document_result(result);
+        let delayed_retry = self.apply_host_document_result(result);
         drop(render_slot);
-        self.retry_one_host_document_render();
+        if !delayed_retry {
+            self.retry_one_host_document_render();
+        }
     }
 
     fn apply_host_document_result(
         &mut self,
         result: crate::extension_service::HostDocumentAsyncResult,
-    ) {
+    ) -> bool {
         self.host_document_services.complete_render(
             &result.namespace,
             &result.snapshot.scope_id,
@@ -1089,8 +1182,24 @@ impl App {
                 *watermark == (result.snapshot.generation, result.snapshot.revision)
             });
         if current_generation != Some(result.snapshot.generation) || !is_current_request {
-            return;
+            return false;
         }
+        let retry_id = (
+            result.namespace.clone(),
+            result.snapshot.scope_id.clone(),
+            result.snapshot.generation,
+            result.snapshot.revision,
+        );
+        if result.result.is_ok() {
+            self.host_document_retry_attempts.remove(&retry_id);
+            self.host_document_retry_scheduled.remove(&retry_id);
+            self.host_document_retry_snapshots.remove(&request_key);
+            self.host_document_retry_order
+                .retain(|queued| queued != &request_key);
+        }
+        let retry_snapshot = (result.namespace == crate::first_party::collections::NAMESPACE
+            && result.result.is_err())
+        .then(|| (request_key.clone(), result.snapshot.clone()));
         let available = {
             let cache = self
                 .collections_shadow_documents
@@ -1099,9 +1208,11 @@ impl App {
             if cache.current().is_some_and(|current| {
                 current.generation > result.snapshot.generation
                     || (current.generation == result.snapshot.generation
-                        && current.revision >= result.snapshot.revision)
+                        && (current.revision > result.snapshot.revision
+                            || (current.revision == result.snapshot.revision
+                                && current.namespace != "host.fallback")))
             }) {
-                return;
+                return false;
             }
             let published = result.result.and_then(|document| {
                 if document.revision != result.snapshot.revision
@@ -1141,6 +1252,8 @@ impl App {
             result.snapshot.revision,
             available,
         );
+        retry_snapshot
+            .is_some_and(|(key, snapshot)| self.schedule_host_document_render_retry(key, snapshot))
     }
 
     pub(super) fn authorize_host_document_action(
@@ -2260,6 +2373,61 @@ mod tests {
         assert_eq!(app.next_host_document_revision(), 1);
         assert_eq!(app.next_host_document_revision(), 2);
         assert_eq!(app.next_host_document_revision(), 3);
+    }
+
+    #[test]
+    fn failed_collections_render_schedules_delayed_recovery() {
+        let mut app = app_with_workspace();
+        app.host_document_services =
+            crate::extension_service::HostDocumentServiceCatalog::with_test_provider(
+                crate::first_party::collections::NAMESPACE,
+                7,
+            );
+        let snapshot = app.collections_shadow_snapshot(0, 0, 7, 1).unwrap();
+        let key = (
+            crate::first_party::collections::NAMESPACE.to_string(),
+            snapshot.scope_id.clone(),
+        );
+        let retry = (key.0.clone(), key.1.clone(), 7, 1);
+        handle_current_result(
+            &mut app,
+            crate::extension_service::HostDocumentAsyncResult {
+                _render_slot: None,
+                namespace: key.0.clone(),
+                provider_priority: 100,
+                snapshot: snapshot.clone(),
+                result: Err("provider crashed".into()),
+                grants: std::collections::HashSet::new(),
+            },
+        );
+
+        assert!(app.host_document_retry_snapshots.contains_key(&key));
+        assert!(app.host_document_retry_scheduled.contains(&retry));
+        assert_eq!(app.host_document_retry_attempts.get(&retry), Some(&1));
+        assert!(app
+            .host_documents()
+            .iter()
+            .any(|entry| entry.document.namespace == "host.fallback"));
+
+        handle_current_result(
+            &mut app,
+            crate::extension_service::HostDocumentAsyncResult {
+                _render_slot: None,
+                namespace: key.0,
+                provider_priority: 100,
+                result: crate::first_party::collections::project(&snapshot)
+                    .map_err(|error| error.to_string()),
+                snapshot,
+                grants: std::collections::HashSet::from([
+                    crate::extension_contract::HostCapability::FocusTerminal,
+                ]),
+            },
+        );
+        assert!(app
+            .host_documents()
+            .iter()
+            .any(|entry| entry.document.namespace == crate::first_party::collections::NAMESPACE));
+        assert!(!app.host_document_retry_scheduled.contains(&retry));
     }
 
     #[test]

@@ -228,7 +228,9 @@ impl ShadowDocumentCache {
         if self.document.as_ref().is_some_and(|current| {
             current.generation > document.generation
                 || (current.generation == document.generation
-                    && current.revision >= document.revision)
+                    && (current.revision > document.revision
+                        || (current.revision == document.revision
+                            && current.namespace != "host.fallback")))
         }) {
             return Err(HostDocumentError("stale document revision".into()));
         }

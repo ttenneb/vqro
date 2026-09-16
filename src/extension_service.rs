@@ -1716,7 +1716,9 @@ fn host_document_specs(
     crate::api::schema::HostDocumentSourceKind,
 )> {
     let mut specs = Vec::new();
-    for plugin in plugins.values().filter(|plugin| plugin.enabled) {
+    for plugin in plugins.values().filter(|plugin| {
+        plugin.enabled && crate::persist::plugin_registry::manifest_available(plugin)
+    }) {
         if !supports_current_platform(plugin.platforms.as_deref()) {
             continue;
         }
@@ -1776,7 +1778,9 @@ pub fn manager_for_plugins(
     event_tx: tokio::sync::mpsc::Sender<crate::events::AppEvent>,
 ) -> ExtensionServiceManager {
     let mut specs = Vec::new();
-    for plugin in plugins.values().filter(|plugin| plugin.enabled) {
+    for plugin in plugins.values().filter(|plugin| {
+        plugin.enabled && crate::persist::plugin_registry::manifest_available(plugin)
+    }) {
         if !supports_current_platform(plugin.platforms.as_deref()) {
             continue;
         }
@@ -1845,6 +1849,27 @@ fn manager_for_specs(
             .name(format!("vqro-ext-{}", service_id))
             .spawn(move || {
                 while let Ok(request) = request_rx.recv() {
+                    let (queued_generation, queued_identity, queued_canceled) = match &request {
+                        ExtensionWorkerRequest::Render {
+                            service_generation,
+                            identity,
+                            canceled,
+                            ..
+                        }
+                        | ExtensionWorkerRequest::Action {
+                            service_generation,
+                            identity,
+                            canceled,
+                            ..
+                        } => (*service_generation, identity, canceled),
+                    };
+                    if queued_canceled.load(Ordering::Acquire)
+                        || thread_generation.load(Ordering::Acquire) != queued_generation
+                    {
+                        EXTENSION_WORK_SLOTS.fetch_sub(1, Ordering::AcqRel);
+                        remove_admission(&thread_admissions, queued_identity);
+                        continue;
+                    }
                     let (service_generation, identity, canceled, result_permit, kind) =
                         match request {
                             ExtensionWorkerRequest::Render {
@@ -2351,7 +2376,6 @@ impl ExtensionServiceSupervisor {
                         )
                     })?;
                 self.runtime = Some(runtime);
-                self.failures = 0;
                 self.status = ExtensionServiceStatus::Running;
                 Ok(())
             }
@@ -2416,18 +2440,7 @@ impl ExtensionServiceSupervisor {
                 })?;
                 Ok(view)
             });
-        match result {
-            Ok(view) => Ok(view),
-            Err(error) => {
-                if error.requires_restart() {
-                    self.runtime = None;
-                    if error.counts_as_failure() {
-                        self.record_failure(&error);
-                    }
-                }
-                Err(error)
-            }
-        }
+        self.finish_request(result)
     }
 
     fn render_host_document_cancellable(
@@ -2456,18 +2469,7 @@ impl ExtensionServiceSupervisor {
                     })?;
                     Ok(document)
                 });
-        match result {
-            Ok(document) => Ok(document),
-            Err(error) => {
-                if error.requires_restart() {
-                    self.runtime = None;
-                    if error.counts_as_failure() {
-                        self.record_failure(&error);
-                    }
-                }
-                Err(error)
-            }
-        }
+        self.finish_request(result)
     }
 
     #[cfg(test)]
@@ -2499,15 +2501,7 @@ impl ExtensionServiceSupervisor {
         let result = runtime
             .request_cancellable("host.document.action", params, canceled)
             .map(|_| ());
-        if let Err(error) = &result {
-            if error.requires_restart() {
-                self.runtime = None;
-                if error.counts_as_failure() {
-                    self.record_failure(error);
-                }
-            }
-        }
-        result
+        self.finish_request(result)
     }
 
     /// Blocking provider I/O. Call only from a bounded extension worker, never the App actor or
@@ -2573,15 +2567,7 @@ impl ExtensionServiceSupervisor {
                     set: choices,
                 })
             });
-        if let Err(error) = &result {
-            if error.requires_restart() {
-                self.runtime = None;
-                if error.counts_as_failure() {
-                    self.record_failure(error);
-                }
-            }
-        }
-        result
+        self.finish_request(result)
     }
 
     /// Blocking provider I/O. Invocation carries only the validated choice identity.
@@ -2640,15 +2626,7 @@ impl ExtensionServiceSupervisor {
                 canceled,
             )
             .map(|_| ());
-        if let Err(error) = &result {
-            if error.requires_restart() {
-                self.runtime = None;
-                if error.counts_as_failure() {
-                    self.record_failure(error);
-                }
-            }
-        }
-        result
+        self.finish_request(result)
     }
 
     fn invoke_action_cancellable(
@@ -2675,18 +2653,7 @@ impl ExtensionServiceSupervisor {
                     ExtensionServiceError::Protocol(format!("invalid action response: {error}"))
                 })
             });
-        match result {
-            Ok(response) => Ok(response.effect),
-            Err(error) => {
-                if error.requires_restart() {
-                    self.runtime = None;
-                    if error.counts_as_failure() {
-                        self.record_failure(&error);
-                    }
-                }
-                Err(error)
-            }
-        }
+        self.finish_request(result.map(|response| response.effect))
     }
 
     pub(crate) fn conformance_request(
@@ -2695,15 +2662,38 @@ impl ExtensionServiceSupervisor {
         params: serde_json::Value,
     ) -> Result<serde_json::Value, ExtensionServiceError> {
         self.ensure_running_cancellable(Instant::now(), &AtomicBool::new(false))?;
-        self.runtime
+        let result = self
+            .runtime
             .as_mut()
             .ok_or_else(|| ExtensionServiceError::Protocol("service is not running".into()))?
-            .request_cancellable(method, params, &AtomicBool::new(false))
+            .request_cancellable(method, params, &AtomicBool::new(false));
+        self.finish_request(result)
     }
 
     pub fn stop(&mut self) {
         self.runtime = None;
         self.status = ExtensionServiceStatus::Stopped;
+    }
+
+    fn finish_request<T>(
+        &mut self,
+        result: Result<T, ExtensionServiceError>,
+    ) -> Result<T, ExtensionServiceError> {
+        match &result {
+            Ok(_) | Err(ExtensionServiceError::Remote(_)) => self.record_success(),
+            Err(ExtensionServiceError::Canceled) => {
+                self.runtime = None;
+                self.status = ExtensionServiceStatus::Stopped;
+            }
+            Err(error) if error.requires_restart() => self.record_failure(error),
+            Err(_) => {}
+        }
+        result
+    }
+
+    fn record_success(&mut self) {
+        self.failures = 0;
+        self.status = ExtensionServiceStatus::Running;
     }
 
     fn record_failure(&mut self, error: &ExtensionServiceError) {
@@ -3433,42 +3423,33 @@ while IFS= read -r request; do sleep 5; done
         // Cancellation permits a newer identity for the client while retaining ownership of the
         // exact old identity until its worker observes cancellation; tokens and tombstones fence
         // late publication from the old queued/in-flight jobs.
+        let inflight_replacement = identity_for(1, "inflight-replacement", "w1:p1", 2);
+        let queued_replacement = identity_for(2, "queued-replacement", "w1:p2", 2);
         manager
-            .request_view(
-                identity_for(1, "inflight-replacement", "w1:p1", 2),
-                serde_json::json!({}),
-            )
+            .request_view(inflight_replacement.clone(), serde_json::json!({}))
             .expect("in-flight replacement admitted immediately");
         manager
-            .request_view(
-                identity_for(2, "queued-replacement", "w1:p2", 2),
-                serde_json::json!({}),
-            )
+            .request_view(queued_replacement.clone(), serde_json::json!({}))
             .expect("queued replacement admitted immediately");
 
         let started = Instant::now();
-        let event = loop {
-            if let Ok(event) = event_rx.try_recv() {
-                break event;
-            }
-            assert!(started.elapsed() < Duration::from_millis(600));
+        while [
+            &inflight,
+            &queued,
+            &fair,
+            &inflight_replacement,
+            &queued_replacement,
+        ]
+        .into_iter()
+        .any(|identity| manager.is_admitted_for_test(identity))
+        {
+            assert!(started.elapsed() < Duration::from_secs(2));
             std::thread::sleep(Duration::from_millis(5));
-        };
-        let crate::events::AppEvent::ExtensionServiceFinished(result) = event else {
-            panic!("expected extension result");
-        };
-        assert_eq!(result.identity, fair);
-        assert!(matches!(
-            result.kind,
-            ExtensionAsyncResultKind::Render(Err(_))
-        ));
-        while let Ok(event) = event_rx.try_recv() {
-            let crate::events::AppEvent::ExtensionServiceFinished(result) = event else {
-                continue;
-            };
-            assert_ne!(result.identity, inflight, "in-flight cancel published");
-            assert_ne!(result.identity, queued, "queued cancel published");
         }
+        assert!(
+            event_rx.try_recv().is_err(),
+            "canceled or generation-stale queued work must not publish"
+        );
     }
 
     #[test]
@@ -3549,6 +3530,82 @@ printf '{"type":"response","id":%s,"result":{"document":{"title":"bad\\u001b","s
         assert!(matches!(
             supervisor.status,
             ExtensionServiceStatus::Backoff { failures: 1, .. }
+        ));
+    }
+
+    #[test]
+    fn cancellation_stops_runtime_without_consuming_restart_budget() {
+        let mut supervisor = ExtensionServiceSupervisor::new(ExtensionServiceSpec {
+            id: "test.cancellation".into(),
+            command: vec!["unused".into()],
+            cwd: PathBuf::from("."),
+            priority: 0,
+            granted_capabilities: Vec::new(),
+        })
+        .unwrap();
+        supervisor.failures = 2;
+        supervisor.status = ExtensionServiceStatus::Running;
+
+        let result = supervisor.finish_request::<()>(Err(ExtensionServiceError::Canceled));
+
+        assert!(matches!(result, Err(ExtensionServiceError::Canceled)));
+        assert_eq!(supervisor.failures, 2);
+        assert!(matches!(supervisor.status, ExtensionServiceStatus::Stopped));
+    }
+
+    #[test]
+    fn valid_remote_error_breaks_consecutive_crash_streak() {
+        let mut supervisor = ExtensionServiceSupervisor::new(ExtensionServiceSpec {
+            id: "test.remote-error".into(),
+            command: vec!["unused".into()],
+            cwd: PathBuf::from("."),
+            priority: 0,
+            granted_capabilities: Vec::new(),
+        })
+        .unwrap();
+        supervisor.failures = 2;
+        supervisor.status = ExtensionServiceStatus::Running;
+
+        let result =
+            supervisor.finish_request::<()>(Err(ExtensionServiceError::Remote("rejected".into())));
+
+        assert!(matches!(result, Err(ExtensionServiceError::Remote(_))));
+        assert_eq!(supervisor.failures, 0);
+        assert!(matches!(supervisor.status, ExtensionServiceStatus::Running));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn repeated_post_handshake_crashes_exhaust_restart_budget() {
+        let script = r#"
+printf '%s\n' '{"type":"hello","protocol":2,"service_id":"test.crash-loop","methods":["view.render"]}'
+IFS= read -r welcome
+IFS= read -r request
+exit 1
+"#;
+        let spec = ExtensionServiceSpec {
+            id: "test.crash-loop".into(),
+            command: vec!["sh".into(), "-c".into(), script.into()],
+            cwd: PathBuf::from("."),
+            priority: 0,
+            granted_capabilities: Vec::new(),
+        };
+        let mut supervisor = ExtensionServiceSupervisor::new(spec).unwrap();
+
+        for expected_failures in 1..=MAX_RESTARTS + 1 {
+            if let ExtensionServiceStatus::Backoff { retry_at, .. } = supervisor.status {
+                std::thread::sleep(retry_at.saturating_duration_since(Instant::now()));
+            }
+            assert!(supervisor.render_view(serde_json::json!({})).is_err());
+            assert_eq!(supervisor.failures, expected_failures);
+        }
+        assert!(matches!(
+            supervisor.status,
+            ExtensionServiceStatus::Failed(_)
+        ));
+        assert!(matches!(
+            supervisor.render_view(serde_json::json!({})),
+            Err(ExtensionServiceError::RestartBudget(_))
         ));
     }
 
@@ -4265,6 +4322,21 @@ sleep 2
         assert!(specs[0]
             .2
             .contains(&crate::extension_contract::HostCapability::FocusTerminal));
+
+        let mut unavailable = plugins;
+        unavailable
+            .get_mut("example.docs")
+            .unwrap()
+            .warnings
+            .push(format!(
+                "{}missing manifest",
+                crate::persist::plugin_registry::MANIFEST_UNAVAILABLE_WARNING_PREFIX
+            ));
+        assert!(host_document_specs(&unavailable).is_empty());
+        let (event_tx, _event_rx) = tokio::sync::mpsc::channel(1);
+        assert!(manager_for_plugins(&unavailable, event_tx)
+            .workers
+            .is_empty());
     }
 
     #[test]

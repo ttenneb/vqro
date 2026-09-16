@@ -1729,6 +1729,7 @@ impl AppState {
             | AppEvent::HostSpacesDocumentFinished(_)
             | AppEvent::HostRelationshipsDocumentFinished(_)
             | AppEvent::HostAgentActivityDocumentFinished(_)
+            | AppEvent::HostDocumentRetryDue { .. }
             | AppEvent::HostSpacesRetryDue { .. }
             | AppEvent::HostSemanticDocumentRetryDue { .. }
             | AppEvent::HostDocumentProviderActionFinished { .. } => Vec::new(),
@@ -3517,7 +3518,7 @@ mod tests {
         });
         state.handle_app_event(AppEvent::HookStateReported {
             pane_id: bg_pane_id,
-            source: "herdr:codex".into(),
+            source: "vqro:codex".into(),
             agent_label: "codex".into(),
             state: AgentState::Working,
             message: None,
@@ -3565,7 +3566,7 @@ mod tests {
         });
         state.handle_app_event(AppEvent::HookStateReported {
             pane_id,
-            source: "herdr:claude".into(),
+            source: "vqro:claude".into(),
             agent_label: "claude".into(),
             state: AgentState::Blocked,
             message: None,
@@ -3614,7 +3615,7 @@ mod tests {
         });
         let terminal = state.terminals.get_mut(&terminal_id).unwrap();
         terminal.set_persisted_agent_session(crate::agent_resume::PersistedAgentSession {
-            source: "herdr:pi".into(),
+            source: "vqro:pi".into(),
             agent: "pi".into(),
             session_ref: crate::agent_resume::AgentSessionRef::path(
                 std::env::current_dir()
@@ -3626,7 +3627,7 @@ mod tests {
             .unwrap(),
         });
         terminal.set_hook_authority(
-            "herdr:pi".into(),
+            "vqro:pi".into(),
             "pi".into(),
             AgentState::Working,
             None,
@@ -3637,7 +3638,7 @@ mod tests {
 
         let updates = state.handle_app_event(AppEvent::HookAgentReleased {
             pane_id,
-            source: "herdr:pi".into(),
+            source: "vqro:pi".into(),
             agent_label: "pi".into(),
             known_agent: Some(Agent::Pi),
             seq: Some(2),

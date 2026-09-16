@@ -93,6 +93,8 @@ impl App {
         self.host_document_confirmation_grants.clear();
         self.host_document_retry_snapshots.clear();
         self.host_document_retry_order.clear();
+        self.host_document_retry_scheduled.clear();
+        self.host_document_retry_attempts.clear();
         self.host_spaces_last_desired = None;
         self.host_relationships_last_desired = None;
         self.host_agent_activity_last_desired = None;
@@ -853,9 +855,7 @@ fn normalize_optional_plugin_id(
 }
 
 fn plugin_manifest_available(plugin: &InstalledPluginInfo) -> bool {
-    !plugin.warnings.iter().any(|warning| {
-        warning.starts_with(crate::persist::plugin_registry::MANIFEST_UNAVAILABLE_WARNING_PREFIX)
-    })
+    crate::persist::plugin_registry::manifest_available(plugin)
 }
 
 fn manifest_action_info(

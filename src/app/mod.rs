@@ -192,6 +192,8 @@ pub struct App {
     pub(crate) host_document_retry_snapshots:
         HashMap<(String, String), api::DeferredHostDocumentSnapshot>,
     pub(crate) host_document_retry_order: std::collections::VecDeque<(String, String)>,
+    pub(crate) host_document_retry_scheduled: std::collections::HashSet<(String, String, u64, u64)>,
+    pub(crate) host_document_retry_attempts: HashMap<(String, String, u64, u64), u32>,
     pub(crate) host_spaces_last_desired: Option<crate::extension_contract::HostSpacesV1>,
     pub(crate) host_relationships_last_desired:
         Option<crate::extension_contract::HostRelationshipsV1>,
@@ -836,6 +838,8 @@ impl App {
             host_document_request_watermarks: HashMap::new(),
             host_document_retry_snapshots: HashMap::new(),
             host_document_retry_order: std::collections::VecDeque::new(),
+            host_document_retry_scheduled: std::collections::HashSet::new(),
+            host_document_retry_attempts: HashMap::new(),
             host_spaces_last_desired: None,
             host_relationships_last_desired: None,
             host_agent_activity_last_desired: None,
@@ -3109,7 +3113,7 @@ mod tests {
         assert_eq!(
             retry["result"]["agent"]["agent_session"],
             serde_json::json!({
-                "source": "herdr:codex",
+                "source": "vqro:codex",
                 "agent": "codex",
                 "kind": "id",
                 "value": "codex-session",

@@ -185,6 +185,12 @@ pub enum AppEvent {
     HostAgentActivityDocumentFinished(
         Box<crate::extension_service::HostAgentActivityDocumentAsyncResult>,
     ),
+    HostDocumentRetryDue {
+        namespace: String,
+        scope_id: String,
+        generation: u64,
+        revision: u64,
+    },
     HostSpacesRetryDue {
         epoch: u64,
     },

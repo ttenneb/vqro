@@ -185,6 +185,37 @@ impl App {
                 self.handle_host_agent_activity_document_result(*result);
                 return Vec::new();
             }
+            AppEvent::HostDocumentRetryDue {
+                namespace,
+                scope_id,
+                generation,
+                revision,
+            } => {
+                let retry = (namespace.clone(), scope_id.clone(), generation, revision);
+                if self.host_document_retry_scheduled.remove(&retry) {
+                    let key = (namespace, scope_id);
+                    let snapshot = self.host_document_retry_snapshots.get(&key).cloned();
+                    match snapshot {
+                        Some(crate::app::api::DeferredHostDocumentSnapshot::TerminalGroups(
+                            snapshot,
+                        )) if (snapshot.generation, snapshot.revision)
+                            == (generation, revision) =>
+                        {
+                            self.host_document_retry_order
+                                .retain(|queued| queued != &key);
+                            self.host_document_retry_order.push_front(key);
+                            self.retry_one_host_document_render();
+                        }
+                        Some(crate::app::api::DeferredHostDocumentSnapshot::TerminalGroups(
+                            snapshot,
+                        )) => {
+                            self.schedule_host_document_render_retry(key, snapshot);
+                        }
+                        Some(_) | None => {}
+                    }
+                }
+                return Vec::new();
+            }
             AppEvent::HostSpacesRetryDue { epoch } => {
                 if epoch == self.host_spaces_retry_epoch {
                     self.host_spaces_retry_scheduled = false;
@@ -2376,7 +2407,7 @@ mod tests {
         terminal.set_detected_state(Some(Agent::Codex), AgentState::Working);
         terminal
             .set_hook_authority_at(
-                "herdr:codex".into(),
+                "vqro:codex".into(),
                 "codex".into(),
                 AgentState::Working,
                 None,
@@ -2523,7 +2554,7 @@ mod tests {
         terminal.set_detected_state(Some(crate::detect::Agent::Codex), AgentState::Working);
         terminal.set_agent_name("codex".into());
         terminal.set_persisted_agent_session(crate::agent_resume::PersistedAgentSession {
-            source: "herdr:codex".into(),
+            source: "vqro:codex".into(),
             agent: "codex".into(),
             session_ref: crate::agent_resume::AgentSessionRef::id("codex-session")
                 .expect("test session id should be valid"),

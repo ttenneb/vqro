@@ -6,6 +6,13 @@ use tracing::warn;
 use crate::api::schema::InstalledPluginInfo;
 
 pub const MANIFEST_UNAVAILABLE_WARNING_PREFIX: &str = "manifest unavailable: ";
+
+pub fn manifest_available(plugin: &InstalledPluginInfo) -> bool {
+    !plugin
+        .warnings
+        .iter()
+        .any(|warning| warning.starts_with(MANIFEST_UNAVAILABLE_WARNING_PREFIX))
+}
 const REGISTRY_LOCK_FILE: &str = ".plugins.lock";
 
 fn registry_path() -> PathBuf {
