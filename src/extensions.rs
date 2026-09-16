@@ -99,6 +99,15 @@ pub(crate) struct MarketplaceStateFile {
     pub entries: BTreeMap<String, MarketplaceInstallState>,
     /// Earliest loads first. Conflicting contributions from later entries win.
     pub load_order: Vec<String>,
+    /// Package-v1 registrations share one lifecycle registry regardless of
+    /// whether their source is curated, an immutable file, or a trusted link.
+    /// Legacy marketplace entries remain projected through the compatibility
+    /// adapter below until their real package artifacts exist.
+    #[serde(
+        default,
+        skip_serializing_if = "crate::extension_package::PackageRegistryV1::is_empty"
+    )]
+    pub packages: crate::extension_package::PackageRegistryV1,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -110,6 +119,23 @@ pub(crate) struct VerifiedExtensionArtifact {
     pub manifest_sha256: String,
     pub manifest_path: String,
     pub path: String,
+}
+
+// M1a compatibility projection is consumed by the package API in M1b; keep it
+// additive without routing current first-party activation through it yet.
+#[allow(dead_code)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(tag = "source_model", rename_all = "snake_case")]
+pub(crate) enum PackageLifecycleView<'a> {
+    PackageV1 {
+        record: &'a crate::extension_package::PackageLifecycleRecordV1,
+    },
+    LegacyCompatibility {
+        id: &'a str,
+        repository: &'a str,
+        installed: bool,
+        enabled: bool,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -323,6 +349,7 @@ impl MarketplaceStateFile {
                 .filter(|extension| extension.default_installed)
                 .map(|extension| extension.repository.clone())
                 .collect(),
+            packages: crate::extension_package::PackageRegistryV1::default(),
         }
     }
 
@@ -389,7 +416,53 @@ impl MarketplaceStateFile {
                 ));
             }
         }
+        self.packages.validate()?;
+        let package_namespaces = self.packages.namespace_owners();
+        if let Some(namespace) = self.entries.values().find_map(|state| {
+            package_namespaces
+                .contains_key(&state.data_id)
+                .then_some(state.data_id.as_str())
+        }) {
+            return Err(format!(
+                "package namespace '{namespace}' collides with legacy extension data"
+            ));
+        }
         Ok(())
+    }
+
+    // M1a compatibility adapter; current marketplace responses remain frozen.
+    #[allow(dead_code)]
+    pub(crate) fn package_lifecycle_views<'a>(
+        &'a self,
+        index: &'a CuratedIndex,
+    ) -> Vec<PackageLifecycleView<'a>> {
+        let mut views = self
+            .packages
+            .load_order
+            .iter()
+            .filter_map(|id| self.packages.packages.get(id))
+            .map(|record| PackageLifecycleView::PackageV1 { record })
+            .collect::<Vec<_>>();
+        views.extend(index.extensions.iter().filter_map(|extension| {
+            let state = self.entries.get(&extension.repository)?;
+            Some(PackageLifecycleView::LegacyCompatibility {
+                id: &extension.id,
+                repository: &extension.repository,
+                installed: state.installed,
+                enabled: state.enabled,
+            })
+        }));
+        views
+    }
+
+    // M1a registration primitive; runtime activation is deliberately deferred.
+    #[allow(dead_code)]
+    pub(crate) fn register_package_v1(
+        &mut self,
+        record: crate::extension_package::PackageLifecycleRecordV1,
+        expected_registry_revision: u64,
+    ) -> Result<u64, String> {
+        self.packages.register(record, expected_registry_revision)
     }
 
     pub(crate) fn install(&mut self, extension: &CuratedExtension) {
@@ -1077,6 +1150,135 @@ mod tests {
             let digest = format!("{:x}", Sha256::digest(manifest));
             assert_eq!(extension.manifest_sha256.as_deref(), Some(digest.as_str()));
         }
+    }
+
+    #[test]
+    fn package_v1_registry_and_legacy_marketplace_use_explicit_compatibility_views() {
+        let index = CuratedIndex::bundled().unwrap();
+        let mut state = MarketplaceStateFile::defaults(&index);
+        let record = crate::extension_package::PackageLifecycleRecordV1 {
+            package_id: "example.local".into(),
+            source: crate::extension_package::PackageProvenanceV1::File {
+                package_sha256: "a".repeat(64),
+            },
+            previous_source: None,
+            namespaces: vec!["example.local".into()],
+            revision: 1,
+            status: crate::extension_package::PackageLifecycleStatusV1::Disabled,
+            active: None,
+            previous: None,
+            activation_error: None,
+            retained_data: true,
+        };
+        state.register_package_v1(record, 0).unwrap();
+
+        let views = state.package_lifecycle_views(&index);
+        assert!(matches!(
+            views.first(),
+            Some(PackageLifecycleView::PackageV1 { record })
+                if record.package_id == "example.local"
+        ));
+        assert_eq!(
+            views
+                .iter()
+                .filter(|view| matches!(view, PackageLifecycleView::LegacyCompatibility { .. }))
+                .count(),
+            index.extensions.len()
+        );
+        assert!(serde_json::to_value(&views)
+            .unwrap()
+            .to_string()
+            .contains("legacy_compatibility"));
+    }
+
+    #[test]
+    fn package_v1_registry_round_trips_through_marketplace_state() {
+        let index = CuratedIndex::bundled().unwrap();
+        let mut state = MarketplaceStateFile::defaults(&index);
+        state
+            .register_package_v1(
+                crate::extension_package::PackageLifecycleRecordV1 {
+                    package_id: "example.link".into(),
+                    source: crate::extension_package::PackageProvenanceV1::Link {
+                        canonical_path: "/tmp/example-link".into(),
+                        trust_id: "approved-once".into(),
+                        trusted: true,
+                    },
+                    previous_source: None,
+                    namespaces: vec!["example.link".into()],
+                    revision: 1,
+                    status: crate::extension_package::PackageLifecycleStatusV1::Disabled,
+                    active: None,
+                    previous: None,
+                    activation_error: None,
+                    retained_data: true,
+                },
+                0,
+            )
+            .unwrap();
+        let directory = std::env::temp_dir().join(format!(
+            "vqro-package-registry-state-{}-{}",
+            std::process::id(),
+            NEXT_STATE_TEMP_ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("extensions.json");
+        save_state_to_path(&path, &state).unwrap();
+        let restored = load_state_from_path(&path, &index).unwrap();
+        assert_eq!(restored.packages, state.packages);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn marketplace_state_accepts_missing_package_registry_and_rejects_invalid_claims() {
+        let index = CuratedIndex::bundled().unwrap();
+        let directory = std::env::temp_dir().join(format!(
+            "vqro-package-registry-validation-{}-{}",
+            std::process::id(),
+            NEXT_STATE_TEMP_ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("extensions.json");
+        let state = MarketplaceStateFile::defaults(&index);
+        let mut legacy = serde_json::to_value(&state).unwrap();
+        legacy.as_object_mut().unwrap().remove("packages");
+        std::fs::write(&path, serde_json::to_vec(&legacy).unwrap()).unwrap();
+        assert!(load_state_from_path(&path, &index)
+            .unwrap()
+            .packages
+            .is_empty());
+
+        let mut invalid = state;
+        invalid
+            .register_package_v1(
+                crate::extension_package::PackageLifecycleRecordV1 {
+                    package_id: "example.invalid".into(),
+                    source: crate::extension_package::PackageProvenanceV1::File {
+                        package_sha256: "a".repeat(64),
+                    },
+                    previous_source: None,
+                    namespaces: vec!["example.valid".into()],
+                    revision: 1,
+                    status: crate::extension_package::PackageLifecycleStatusV1::Disabled,
+                    active: None,
+                    previous: None,
+                    activation_error: None,
+                    retained_data: true,
+                },
+                0,
+            )
+            .unwrap();
+        invalid
+            .packages
+            .packages
+            .get_mut("example.invalid")
+            .unwrap()
+            .namespaces = vec!["host.forbidden".into()];
+        std::fs::write(&path, serde_json::to_vec(&invalid).unwrap()).unwrap();
+        assert!(load_state_from_path(&path, &index)
+            .unwrap_err()
+            .contains("permanently reserved"));
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

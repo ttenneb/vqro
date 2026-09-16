@@ -15,6 +15,12 @@ schemas are published under `docs/next/api/`. The legacy `herdr-plugin.toml` and
 `min_herdr_version` spellings remain read-only compatibility aliases, but new
 packages should use `vqro-extension.toml` and `min_vqro_version`.
 
+The additive manifest-v2 and deterministic `.vqrox` package foundation is
+specified in `docs/next/api/vqro-package-v1.md`.
+It does not replace manifest v1 or grant runtime authority yet. Local files are
+installed into immutable content-addressed storage; developer-directory links
+require explicit trust and remain visibly mutable.
+
 Validate the same parser and limits used by the host before publishing:
 
 ```bash

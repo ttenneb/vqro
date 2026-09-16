@@ -8,6 +8,55 @@ pub const EXTENSION_MANIFEST_SCHEMA_ID_V1: &str = "https://vqro.dev/schema/exten
 pub const EXTENSION_SERVICE_CONTRACT_V1: &str = "vqro.extension-service.v1";
 pub const EXTENSION_SERVICE_SCHEMA_ID_V1: &str = "https://vqro.dev/schema/extension-service/v1";
 pub const EXTENSION_BUNDLE_SCHEMA_ID_V1: &str = "https://vqro.dev/schema/extensions/v1";
+pub const PACKAGE_SCHEMA_ID_V1: &str = crate::extension_package::PACKAGE_SCHEMA_ID_V1;
+pub const EXTENSION_MANIFEST_SCHEMA_ID_V2: &str = crate::extension_package::MANIFEST_SCHEMA_ID_V2;
+
+pub fn manifest_v2_schema_document() -> serde_json::Value {
+    let mut schema = scoped_schema::<crate::extension_package::PackageManifestV2>("manifest_v2");
+    let object = schema
+        .as_object_mut()
+        .expect("generated manifest-v2 schema is an object");
+    object.insert(
+        "$id".into(),
+        serde_json::Value::String(EXTENSION_MANIFEST_SCHEMA_ID_V2.into()),
+    );
+    object.insert(
+        "title".into(),
+        serde_json::Value::String("vqro extension manifest v2".into()),
+    );
+    object.insert(
+        "contract".into(),
+        serde_json::Value::String(crate::extension_package::PACKAGE_CONTRACT_V1.into()),
+    );
+    schema
+}
+
+pub fn package_schema_document() -> serde_json::Value {
+    serde_json::json!({
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$id": PACKAGE_SCHEMA_ID_V1,
+        "title": "vqro package contract v1",
+        "contract": crate::extension_package::PACKAGE_CONTRACT_V1,
+        "archive": {
+            "extension": ".vqrox",
+            "format": "deterministic uncompressed ustar",
+            "manifest": crate::extension_package::PACKAGE_MANIFEST_FILE,
+            "checksums": crate::extension_package::PACKAGE_CHECKSUM_FILE,
+            "max_archive_bytes": crate::extension_package::MAX_PACKAGE_BYTES,
+            "max_expanded_bytes": crate::extension_package::MAX_EXPANDED_BYTES,
+            "max_entries": crate::extension_package::MAX_PACKAGE_ENTRIES,
+        },
+        "schemas": {
+            "manifest": scoped_schema::<crate::extension_package::PackageManifestV2>("manifest"),
+            "provenance": scoped_schema::<crate::extension_package::PackageProvenanceV1>("provenance"),
+            "validated_package": scoped_schema::<crate::extension_package::ValidatedPackageV1>("validated_package"),
+            "installed_package": scoped_schema::<crate::extension_package::InstalledPackageV1>("installed_package"),
+            "linked_package": scoped_schema::<crate::extension_package::LinkedPackageV1>("linked_package"),
+            "registry": scoped_schema::<crate::extension_package::PackageRegistryV1>("registry"),
+            "activation_journal": scoped_schema::<crate::extension_package::PackageActivationJournalV1>("activation_journal"),
+        }
+    })
+}
 
 pub fn manifest_schema_document() -> serde_json::Value {
     let mut schema = crate::app::manifest_json_schema();
@@ -121,6 +170,14 @@ pub fn manifest_schema_json() -> &'static str {
     include_str!("../docs/next/api/vqro-extension-manifest.schema.json")
 }
 
+pub fn manifest_v2_schema_json() -> &'static str {
+    include_str!("../docs/next/api/vqro-extension-manifest-v2.schema.json")
+}
+
+pub fn package_schema_json() -> &'static str {
+    include_str!("../docs/next/api/vqro-package-v1.schema.json")
+}
+
 pub fn service_schema_json() -> &'static str {
     include_str!("../docs/next/api/vqro-extension-service.schema.json")
 }
@@ -136,6 +193,29 @@ pub fn manifest_schema_sha256() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn generated_package_and_manifest_v2_schema_artifacts_are_current() {
+        for (relative, document) in [
+            (
+                "docs/next/api/vqro-extension-manifest-v2.schema.json",
+                manifest_v2_schema_document(),
+            ),
+            (
+                "docs/next/api/vqro-package-v1.schema.json",
+                package_schema_document(),
+            ),
+        ] {
+            let actual = format!("{}\n", serde_json::to_string_pretty(&document).unwrap());
+            let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(relative);
+            if std::env::var_os("HERDR_UPDATE_API_SCHEMA").is_some() {
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::write(&path, &actual).unwrap();
+            } else {
+                assert_eq!(std::fs::read_to_string(path).unwrap(), actual);
+            }
+        }
+    }
 
     #[test]
     fn generated_manifest_schema_artifact_is_current() {
