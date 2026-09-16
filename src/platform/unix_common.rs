@@ -402,11 +402,25 @@ pub(crate) fn fill_secure_random(bytes: &mut [u8]) -> std::io::Result<()> {
 }
 
 #[derive(Debug)]
-pub(crate) struct ExtensionServiceContainment;
+pub(crate) struct ExtensionServiceContainment {
+    process_group: i32,
+}
 
 impl ExtensionServiceContainment {
-    pub(crate) fn new(_child: &std::process::Child) -> std::io::Result<Self> {
-        Ok(Self)
+    pub(crate) fn new(child: &std::process::Child) -> std::io::Result<Self> {
+        let process_group = i32::try_from(child.id())
+            .map_err(|_| std::io::Error::other("extension process ID exceeds i32"))?;
+        Ok(Self { process_group })
+    }
+}
+
+impl Drop for ExtensionServiceContainment {
+    fn drop(&mut self) {
+        // The service is launched as its own process group. Killing the group also
+        // covers idle root-process exits whose descendants retained no stdio.
+        unsafe {
+            libc::kill(-self.process_group, libc::SIGKILL);
+        }
     }
 }
 

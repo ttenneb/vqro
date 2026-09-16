@@ -31,6 +31,7 @@ mod extension_artifact;
 pub mod extension_contract;
 pub mod extension_package;
 pub mod extension_resource;
+mod extension_runtime;
 mod extension_service;
 pub mod extension_spec;
 pub mod extension_state;

@@ -2874,6 +2874,48 @@ mod tests {
     };
 
     #[test]
+    fn extension_service_containment_kills_descendants_on_drop() {
+        let pid_file = std::env::temp_dir().join(format!(
+            "vqro-extension-descendant-{}.pid",
+            std::process::id()
+        ));
+        let _ = fs::remove_file(&pid_file);
+        let mut command = Command::new("powershell.exe");
+        command
+            .args([
+                "-NoLogo",
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "$p = Start-Process -FilePath \"$env:SystemRoot\\System32\\ping.exe\" -ArgumentList \"-n\",\"30\",\"127.0.0.1\" -PassThru; Set-Content -LiteralPath $env:VQRO_TEST_PID_FILE -Value $p.Id; Wait-Process -Id $p.Id",
+            ])
+            .env("VQRO_TEST_PID_FILE", &pid_file)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        super::configure_extension_service_command(&mut command);
+        let mut child = command.spawn().unwrap();
+        let containment = super::ExtensionServiceContainment::new(&child).unwrap();
+        let started = Instant::now();
+        let descendant = loop {
+            if let Ok(contents) = fs::read_to_string(&pid_file) {
+                break contents.trim().parse::<u32>().unwrap();
+            }
+            assert!(started.elapsed() < Duration::from_secs(10));
+            thread::sleep(Duration::from_millis(20));
+        };
+        assert!(super::ProcessIdentity::open(descendant).is_some_and(|process| process.running()));
+        drop(containment);
+        let started = Instant::now();
+        while super::ProcessIdentity::open(descendant).is_some_and(|process| process.running()) {
+            assert!(started.elapsed() < Duration::from_secs(5));
+            thread::sleep(Duration::from_millis(20));
+        }
+        let _ = child.wait();
+        fs::remove_file(pid_file).unwrap();
+    }
+
+    #[test]
     fn windows_standard_plugin_runtime_paths_drop_only_disk_and_unc_verbatim_prefixes() {
         assert_eq!(
             super::standard_windows_path(std::path::Path::new(r"\\?\C:\plugins\example")),

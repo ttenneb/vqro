@@ -34,6 +34,13 @@ FORBIDDEN_CALLS = (
         re.compile(r"\bforeground_job\s*\("),
         "process-tree inspection",
     ),
+    (
+        re.compile(
+            r"\b(?:ExtensionRuntimeDispatcher|ExtensionServiceSupervisor)\b"
+            r"|(?:\.|::)request_cancellable\s*\("
+        ),
+        "extension RPC from a render or frame-fanout hot path",
+    ),
 )
 
 

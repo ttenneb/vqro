@@ -4,24 +4,23 @@
 //! renderer callbacks or terminal escape surface; inspector providers return validated
 //! [`crate::view_document::ViewDocument`] values.
 
-use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
-use std::process::{Child, Stdio};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     mpsc, Arc, Mutex,
 };
 use std::time::{Duration, Instant};
 
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
-pub const EXTENSION_SERVICE_PROTOCOL: u16 = 2;
-const MAX_FRAME_BYTES: usize = crate::extension_contract::MAX_EXTENSION_FRAME_BYTES;
-const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(3);
-const REQUEST_TIMEOUT: Duration = Duration::from_millis(750);
+pub(crate) use crate::extension_runtime::process::{
+    ExtensionServiceRequestV1, ExtensionServiceResponseV1, ExtensionServiceWelcomeV1, ServiceHello,
+    EXTENSION_SERVICE_PROTOCOL,
+};
+use crate::extension_runtime::{
+    RuntimeError as ExtensionServiceError, HANDSHAKE_TIMEOUT, REQUEST_TIMEOUT,
+};
 const MAX_RESTARTS: u32 = 3;
-const MAX_STDERR_LINE_BYTES: usize = 4 * 1024;
-const MAX_STDERR_LINES_PER_MINUTE: usize = 20;
 const MAX_CANCELLATION_TOMBSTONES: usize = 64;
 
 #[derive(Debug, Clone)]
@@ -45,7 +44,8 @@ pub enum ExtensionServiceStatus {
 #[derive(Debug)]
 pub struct ExtensionServiceSupervisor {
     spec: ExtensionServiceSpec,
-    runtime: Option<ExtensionServiceRuntime>,
+    runtime_factory: crate::extension_runtime::RuntimeFactory,
+    runtime: Option<crate::extension_runtime::ExtensionRuntimeDispatcher>,
     status: ExtensionServiceStatus,
     failures: u32,
     runtime_generation: u64,
@@ -2387,13 +2387,61 @@ impl ExtensionServiceSupervisor {
                 "service command must not be empty".into(),
             ));
         }
+        let runtime_factory = crate::extension_runtime::RuntimeFactory::legacy(
+            spec.id.clone(),
+            spec.command.clone(),
+            spec.cwd.clone(),
+            spec.granted_capabilities.clone(),
+        );
         Ok(Self {
             spec,
+            runtime_factory,
             runtime: None,
             status: ExtensionServiceStatus::Stopped,
             failures: 0,
             runtime_generation: 0,
         })
+    }
+
+    // M1b package lifecycle entry point; activation wiring follows after review.
+    #[allow(dead_code)]
+    pub fn from_installed_process(
+        installed: &crate::extension_package::InstalledPackageV1,
+        service_id: &str,
+        priority: i32,
+    ) -> Result<Self, ExtensionServiceError> {
+        let runtime_factory =
+            crate::extension_runtime::RuntimeFactory::installed_process(installed, service_id)?;
+        Ok(Self {
+            spec: ExtensionServiceSpec {
+                id: format!("{}.{}", installed.package_id, service_id),
+                command: Vec::new(),
+                cwd: PathBuf::from(&installed.immutable_root),
+                priority,
+                granted_capabilities: match &runtime_factory {
+                    crate::extension_runtime::RuntimeFactory::Process(factory) => {
+                        factory.grants().legacy
+                    }
+                },
+            },
+            runtime_factory,
+            runtime: None,
+            status: ExtensionServiceStatus::Stopped,
+            failures: 0,
+            runtime_generation: 0,
+        })
+    }
+
+    // M1b package lifecycle entry point; activation wiring follows after review.
+    #[allow(dead_code)]
+    pub fn preflight_installed_process(
+        installed: &crate::extension_package::InstalledPackageV1,
+        service_id: &str,
+    ) -> Result<(), ExtensionServiceError> {
+        let mut supervisor = Self::from_installed_process(installed, service_id, 0)?;
+        supervisor.start()?;
+        supervisor.stop();
+        Ok(())
     }
 
     pub fn start(&mut self) -> Result<(), ExtensionServiceError> {
@@ -2403,14 +2451,16 @@ impl ExtensionServiceSupervisor {
     fn start_cancellable(&mut self, canceled: &AtomicBool) -> Result<(), ExtensionServiceError> {
         self.stop();
         self.status = ExtensionServiceStatus::Starting;
-        match ExtensionServiceRuntime::spawn(&self.spec, canceled) {
+        let next_generation = self.runtime_generation.checked_add(1).ok_or_else(|| {
+            ExtensionServiceError::RestartBudget("extension service generation exhausted".into())
+        })?;
+        match crate::extension_runtime::ExtensionRuntimeDispatcher::start(
+            &self.runtime_factory,
+            next_generation,
+            canceled,
+        ) {
             Ok(runtime) => {
-                self.runtime_generation =
-                    self.runtime_generation.checked_add(1).ok_or_else(|| {
-                        ExtensionServiceError::RestartBudget(
-                            "extension service generation exhausted".into(),
-                        )
-                    })?;
+                self.runtime_generation = next_generation;
                 self.runtime = Some(runtime);
                 self.status = ExtensionServiceStatus::Running;
                 Ok(())
@@ -2529,7 +2579,7 @@ impl ExtensionServiceSupervisor {
             .runtime
             .as_mut()
             .ok_or_else(|| ExtensionServiceError::Protocol("service is not running".into()))?;
-        if !runtime.methods.contains("host.document.action") {
+        if !runtime.methods().contains("host.document.action") {
             return Err(ExtensionServiceError::Protocol(
                 "service did not advertise host.document.action".into(),
             ));
@@ -2572,7 +2622,7 @@ impl ExtensionServiceSupervisor {
             .as_mut()
             .ok_or_else(|| ExtensionServiceError::Protocol("service is not running".into()))?;
         if !runtime
-            .methods
+            .methods()
             .contains(crate::action_choices::ACTION_CHOICES_LIST_METHOD_V1)
         {
             return Err(ExtensionServiceError::Protocol(
@@ -2648,7 +2698,7 @@ impl ExtensionServiceSupervisor {
             .as_mut()
             .ok_or_else(|| ExtensionServiceError::Protocol("service is not running".into()))?;
         if !runtime
-            .methods
+            .methods()
             .contains(crate::action_choices::ACTION_CHOICE_INVOKE_METHOD_V1)
         {
             return Err(ExtensionServiceError::Protocol(
@@ -2707,6 +2757,9 @@ impl ExtensionServiceSupervisor {
     }
 
     pub fn stop(&mut self) {
+        if let Some(runtime) = self.runtime.as_mut() {
+            runtime.stop(crate::extension_runtime::RuntimeStopReason::Requested);
+        }
         self.runtime = None;
         self.status = ExtensionServiceStatus::Stopped;
     }
@@ -2718,10 +2771,23 @@ impl ExtensionServiceSupervisor {
         match &result {
             Ok(_) | Err(ExtensionServiceError::Remote(_)) => self.record_success(),
             Err(ExtensionServiceError::Canceled) => {
+                if let Some(runtime) = self.runtime.as_mut() {
+                    runtime.stop(crate::extension_runtime::RuntimeStopReason::Canceled);
+                }
                 self.runtime = None;
                 self.status = ExtensionServiceStatus::Stopped;
             }
-            Err(error) if error.requires_restart() => self.record_failure(error),
+            Err(error) if error.requires_restart() => {
+                if let Some(runtime) = self.runtime.as_mut() {
+                    let reason = if matches!(error, ExtensionServiceError::Timeout) {
+                        crate::extension_runtime::RuntimeStopReason::Deadline
+                    } else {
+                        crate::extension_runtime::RuntimeStopReason::Protocol
+                    };
+                    runtime.stop(reason);
+                }
+                self.record_failure(error);
+            }
             Err(_) => {}
         }
         result
@@ -2747,319 +2813,6 @@ impl ExtensionServiceSupervisor {
     }
 }
 
-#[derive(Debug)]
-struct ExtensionServiceRuntime {
-    child: Child,
-    containment: Option<crate::platform::ExtensionServiceContainment>,
-    writes: mpsc::SyncSender<Vec<u8>>,
-    frames: mpsc::Receiver<Result<Vec<u8>, ExtensionServiceError>>,
-    methods: std::collections::HashSet<String>,
-    next_request_id: u64,
-}
-
-impl ExtensionServiceRuntime {
-    fn spawn(
-        spec: &ExtensionServiceSpec,
-        canceled: &AtomicBool,
-    ) -> Result<Self, ExtensionServiceError> {
-        let program = spec.command.first().ok_or_else(|| {
-            ExtensionServiceError::Configuration("service command must not be empty".into())
-        })?;
-        let args = spec.command.iter().skip(1).cloned().collect::<Vec<_>>();
-        let mut command = crate::plugin_command::command_for_argv_in_dir(program, &args, &spec.cwd);
-        command
-            .env("VQRO_EXTENSION_SERVICE_ID", &spec.id)
-            .env(
-                "VQRO_EXTENSION_SERVICE_PROTOCOL",
-                EXTENSION_SERVICE_PROTOCOL.to_string(),
-            )
-            .env(crate::product::ENV_MARKER, "1")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        for key in [
-            "HERDR_ENV",
-            "HERDR_SOCKET_PATH",
-            "HERDR_CLIENT_SOCKET_PATH",
-            "HERDR_SESSION",
-            "HERDR_WORKSPACE_ID",
-            "HERDR_TAB_ID",
-            "HERDR_PANE_ID",
-            "HERDR_BIN_PATH",
-            "HERDR_STARTUP_CWD",
-            "VQRO_SOCKET_PATH",
-            "VQRO_CLIENT_SOCKET_PATH",
-            "VQRO_SESSION",
-            "VQRO_WORKSPACE_ID",
-            "VQRO_TAB_ID",
-            "VQRO_PANE_ID",
-            "VQRO_BIN_PATH",
-            "VQRO_STARTUP_CWD",
-        ] {
-            command.env_remove(key);
-        }
-        crate::platform::configure_extension_service_command(&mut command);
-        let mut child = command.spawn().map_err(ExtensionServiceError::Io)?;
-        let containment = match crate::platform::ExtensionServiceContainment::new(&child) {
-            Ok(containment) => containment,
-            Err(error) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(ExtensionServiceError::Io(error));
-            }
-        };
-        let stdin = child.stdin.take().ok_or_else(|| {
-            ExtensionServiceError::Protocol("service stdin was not captured".into())
-        })?;
-        let stdout = child.stdout.take().ok_or_else(|| {
-            ExtensionServiceError::Protocol("service stdout was not captured".into())
-        })?;
-        let stderr = child.stderr.take().ok_or_else(|| {
-            ExtensionServiceError::Protocol("service stderr was not captured".into())
-        })?;
-        spawn_bounded_stderr_reader(spec.id.clone(), stderr);
-        // Welcome and the first request may be queued before the writer thread is scheduled.
-        // Requests are otherwise strictly sequential, so two slots are sufficient and bounded.
-        let (write_tx, write_rx) = mpsc::sync_channel::<Vec<u8>>(2);
-        std::thread::spawn(move || {
-            let mut stdin = stdin;
-            while let Ok(bytes) = write_rx.recv() {
-                if stdin.write_all(&bytes).and_then(|_| stdin.flush()).is_err() {
-                    break;
-                }
-            }
-        });
-        let (frame_tx, frames) = mpsc::sync_channel(8);
-        std::thread::spawn(move || {
-            let mut reader = BufReader::new(stdout);
-            loop {
-                let frame = read_bounded_frame(&mut reader);
-                let eof = matches!(&frame, Ok(bytes) if bytes.is_empty());
-                let framing_failure = frame.is_err();
-                if frame_tx.send(frame).is_err() || eof || framing_failure {
-                    break;
-                }
-            }
-        });
-        let mut runtime = Self {
-            child,
-            containment: Some(containment),
-            writes: write_tx,
-            frames,
-            methods: std::collections::HashSet::new(),
-            next_request_id: 1,
-        };
-        runtime.handshake(&spec.id, &spec.granted_capabilities, canceled)?;
-        Ok(runtime)
-    }
-
-    fn handshake(
-        &mut self,
-        expected_id: &str,
-        granted_capabilities: &[crate::api::schema::ExtensionServiceCapability],
-        canceled: &AtomicBool,
-    ) -> Result<(), ExtensionServiceError> {
-        let frame = self.recv_frame_cancellable(HANDSHAKE_TIMEOUT, canceled)?;
-        let hello: ServiceHello = serde_json::from_slice(&frame).map_err(|error| {
-            ExtensionServiceError::Protocol(format!("invalid service hello: {error}"))
-        })?;
-        if hello.kind != "hello"
-            || hello.protocol != EXTENSION_SERVICE_PROTOCOL
-            || hello.service_id != expected_id
-        {
-            return Err(ExtensionServiceError::Protocol(
-                "service hello identity or protocol mismatch".into(),
-            ));
-        }
-        let requires_view = granted_capabilities
-            .contains(&crate::api::schema::ExtensionServiceCapability::ViewContribution);
-        let requires_document = granted_capabilities
-            .contains(&crate::api::schema::ExtensionServiceCapability::HostDocument);
-        let requires_action = requires_view
-            && granted_capabilities
-                .contains(&crate::api::schema::ExtensionServiceCapability::TerminalInterrupt);
-        let requires_choices = granted_capabilities
-            .contains(&crate::api::schema::ExtensionServiceCapability::ActionChoices);
-        if (requires_view && !hello.methods.iter().any(|method| method == "view.render"))
-            || (requires_document
-                && !hello
-                    .methods
-                    .iter()
-                    .any(|method| method == "host.document.render"))
-            || (requires_action && !hello.methods.iter().any(|method| method == "view.action"))
-            || (requires_choices
-                && (!hello
-                    .methods
-                    .iter()
-                    .any(|method| method == crate::action_choices::ACTION_CHOICES_LIST_METHOD_V1)
-                    || !hello.methods.iter().any(|method| {
-                        method == crate::action_choices::ACTION_CHOICE_INVOKE_METHOD_V1
-                    })))
-        {
-            return Err(ExtensionServiceError::Protocol(
-                "service does not support the granted methods".into(),
-            ));
-        }
-        if hello
-            .requested_capabilities
-            .iter()
-            .any(|requested| !granted_capabilities.contains(requested))
-            || granted_capabilities
-                .iter()
-                .any(|granted| !hello.requested_capabilities.contains(granted))
-        {
-            return Err(ExtensionServiceError::Protocol(
-                "service capability request does not match host grants".into(),
-            ));
-        }
-        self.methods = hello.methods.iter().cloned().collect();
-        let mut host_methods = vec![
-            "view.render",
-            "view.action",
-            "host.document.render",
-            "host.document.action",
-        ];
-        if requires_choices {
-            host_methods.push(crate::action_choices::ACTION_CHOICES_LIST_METHOD_V1);
-            host_methods.push(crate::action_choices::ACTION_CHOICE_INVOKE_METHOD_V1);
-        }
-        let welcome = ExtensionServiceWelcomeV1 {
-            kind: "welcome".into(),
-            protocol: EXTENSION_SERVICE_PROTOCOL,
-            granted_capabilities: granted_capabilities.to_vec(),
-            methods: host_methods.into_iter().map(str::to_owned).collect(),
-            trust: "trusted_same_user_not_sandboxed".into(),
-        };
-        let mut bytes = serde_json::to_vec(&welcome).map_err(|error| {
-            ExtensionServiceError::Protocol(format!("cannot encode service welcome: {error}"))
-        })?;
-        bytes.push(b'\n');
-        self.writes.try_send(bytes).map_err(|error| {
-            ExtensionServiceError::Protocol(format!("service input queue unavailable: {error}"))
-        })
-    }
-
-    fn request_cancellable(
-        &mut self,
-        method: &str,
-        params: serde_json::Value,
-        canceled: &AtomicBool,
-    ) -> Result<serde_json::Value, ExtensionServiceError> {
-        let request_id = self.next_request_id;
-        self.next_request_id = self.next_request_id.saturating_add(1);
-        let request = ExtensionServiceRequestV1 {
-            kind: "request".into(),
-            id: request_id,
-            method: method.into(),
-            params,
-        };
-        let mut bytes = serde_json::to_vec(&request).map_err(|error| {
-            ExtensionServiceError::Protocol(format!("cannot encode service request: {error}"))
-        })?;
-        if bytes.len() > MAX_FRAME_BYTES {
-            return Err(ExtensionServiceError::Protocol(
-                "service request exceeds frame limit".into(),
-            ));
-        }
-        bytes.push(b'\n');
-        if canceled.load(Ordering::Acquire) {
-            return Err(ExtensionServiceError::Canceled);
-        }
-        self.writes.try_send(bytes).map_err(|error| {
-            ExtensionServiceError::Protocol(format!("service input queue unavailable: {error}"))
-        })?;
-        let frame = self.recv_frame_cancellable(REQUEST_TIMEOUT, canceled)?;
-        let response: ExtensionServiceResponseV1 =
-            serde_json::from_slice(&frame).map_err(|error| {
-                ExtensionServiceError::Protocol(format!("invalid service response: {error}"))
-            })?;
-        if response.kind != "response" || response.id != request_id {
-            return Err(ExtensionServiceError::Protocol(
-                "service response request id mismatch".into(),
-            ));
-        }
-        match (response.result, response.error) {
-            (Some(result), None) => Ok(result),
-            (None, Some(error)) => Err(ExtensionServiceError::Remote(error)),
-            (None, None) => Err(ExtensionServiceError::Protocol(
-                "service response omitted result and error".into(),
-            )),
-            (Some(_), Some(_)) => Err(ExtensionServiceError::Protocol(
-                "service response cannot contain both result and error".into(),
-            )),
-        }
-    }
-
-    fn recv_frame_cancellable(
-        &mut self,
-        timeout: Duration,
-        canceled: &AtomicBool,
-    ) -> Result<Vec<u8>, ExtensionServiceError> {
-        let deadline = Instant::now() + timeout;
-        loop {
-            if canceled.load(Ordering::Acquire) {
-                return Err(ExtensionServiceError::Canceled);
-            }
-            let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
-                return Err(ExtensionServiceError::Timeout);
-            };
-            match self
-                .frames
-                .recv_timeout(remaining.min(Duration::from_millis(25)))
-            {
-                Ok(Ok(frame)) if frame.is_empty() => return Err(ExtensionServiceError::Exited),
-                Ok(frame) => return frame,
-                Err(mpsc::RecvTimeoutError::Timeout) => {}
-                Err(mpsc::RecvTimeoutError::Disconnected) => {
-                    return Err(ExtensionServiceError::Exited);
-                }
-            }
-        }
-    }
-}
-
-impl Drop for ExtensionServiceRuntime {
-    fn drop(&mut self) {
-        // Close kill-on-close containment before waiting so descendants cannot
-        // retain inherited stdio and keep teardown blocked.
-        self.containment.take();
-        crate::platform::terminate_extension_service_process_group(&self.child);
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct ServiceHello {
-    #[serde(rename = "type")]
-    pub kind: String,
-    pub protocol: u16,
-    pub service_id: String,
-    #[serde(default)]
-    pub requested_capabilities: Vec<crate::api::schema::ExtensionServiceCapability>,
-    #[serde(default)]
-    pub methods: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct ExtensionServiceWelcomeV1 {
-    #[serde(rename = "type")]
-    pub kind: String,
-    pub protocol: u16,
-    pub granted_capabilities: Vec<crate::api::schema::ExtensionServiceCapability>,
-    pub methods: Vec<String>,
-    pub trust: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct ExtensionServiceRequestV1 {
-    #[serde(rename = "type")]
-    pub kind: String,
-    pub id: u64,
-    pub method: String,
-    pub params: serde_json::Value,
-}
-
 #[derive(Debug, Clone, Deserialize)]
 pub struct ExtensionView {
     pub document: crate::view_document::ViewDocument,
@@ -3076,138 +2829,6 @@ pub enum ExtensionHostEffect {
 #[derive(Deserialize)]
 struct ExtensionActionResponse {
     effect: ExtensionHostEffect,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct ExtensionServiceResponseV1 {
-    #[serde(rename = "type")]
-    pub kind: String,
-    pub id: u64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub result: Option<serde_json::Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
-}
-
-#[derive(Debug)]
-pub enum ExtensionServiceError {
-    Configuration(String),
-    Io(std::io::Error),
-    Protocol(String),
-    Remote(String),
-    Timeout,
-    Canceled,
-    Exited,
-    Backoff,
-    RestartBudget(String),
-}
-
-impl ExtensionServiceError {
-    fn requires_restart(&self) -> bool {
-        matches!(
-            self,
-            Self::Io(_) | Self::Protocol(_) | Self::Timeout | Self::Canceled | Self::Exited
-        )
-    }
-
-    fn counts_as_failure(&self) -> bool {
-        !matches!(self, Self::Canceled)
-    }
-}
-
-impl std::fmt::Display for ExtensionServiceError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Configuration(message) | Self::Protocol(message) | Self::Remote(message) => {
-                formatter.write_str(message)
-            }
-            Self::Io(error) => write!(formatter, "{error}"),
-            Self::Timeout => formatter.write_str("extension service timed out"),
-            Self::Canceled => formatter.write_str("extension service request was canceled"),
-            Self::Exited => formatter.write_str("extension service exited"),
-            Self::Backoff => formatter.write_str("extension service is restarting"),
-            Self::RestartBudget(message) => {
-                write!(
-                    formatter,
-                    "extension service restart budget exhausted: {message}"
-                )
-            }
-        }
-    }
-}
-
-impl std::error::Error for ExtensionServiceError {}
-
-fn spawn_bounded_stderr_reader(service_id: String, stderr: std::process::ChildStderr) {
-    std::thread::spawn(move || {
-        let mut reader = BufReader::new(stderr);
-        let mut window_started = Instant::now();
-        let mut emitted = 0usize;
-        loop {
-            let mut line = Vec::with_capacity(MAX_STDERR_LINE_BYTES.min(256));
-            let mut truncated = false;
-            let mut eof = false;
-            loop {
-                let available = match reader.fill_buf() {
-                    Ok(available) => available,
-                    Err(error) => {
-                        tracing::warn!(%service_id, %error, "extension service stderr read failed");
-                        return;
-                    }
-                };
-                if available.is_empty() {
-                    eof = true;
-                    break;
-                }
-                let newline = available.iter().position(|byte| *byte == b'\n');
-                let consumed = newline.map_or(available.len(), |index| index + 1);
-                let content = newline.map_or(available, |index| &available[..index]);
-                let remaining = MAX_STDERR_LINE_BYTES.saturating_sub(line.len());
-                line.extend_from_slice(&content[..content.len().min(remaining)]);
-                truncated |= content.len() > remaining;
-                reader.consume(consumed);
-                if newline.is_some() {
-                    break;
-                }
-            }
-            if line.is_empty() && eof {
-                return;
-            }
-            if window_started.elapsed() >= Duration::from_secs(60) {
-                window_started = Instant::now();
-                emitted = 0;
-            }
-            if emitted < MAX_STDERR_LINES_PER_MINUTE {
-                let message = String::from_utf8_lossy(&line);
-                tracing::warn!(%service_id, truncated, message = %message, "extension service stderr");
-                emitted += 1;
-            }
-            if eof {
-                return;
-            }
-        }
-    });
-}
-
-fn read_bounded_frame(reader: &mut impl BufRead) -> Result<Vec<u8>, ExtensionServiceError> {
-    let mut frame = Vec::new();
-    let mut limited = std::io::Read::take(&mut *reader, (MAX_FRAME_BYTES + 1) as u64);
-    let read = limited
-        .read_until(b'\n', &mut frame)
-        .map_err(ExtensionServiceError::Io)?;
-    if read == 0 {
-        return Ok(Vec::new());
-    }
-    if frame.len() > MAX_FRAME_BYTES || !frame.ends_with(b"\n") {
-        return Err(ExtensionServiceError::Protocol(
-            "extension service frame exceeds limit".into(),
-        ));
-    }
-    frame.pop();
-    if frame.ends_with(b"\r") {
-        frame.pop();
-    }
-    Ok(frame)
 }
 
 fn validate_service_id(id: &str) -> Result<(), ExtensionServiceError> {
@@ -3301,20 +2922,6 @@ mod tests {
             &[unknown],
             &[crate::api::schema::ExtensionServiceCapability::TerminalInterrupt]
         ));
-    }
-
-    #[test]
-    fn bounded_reader_rejects_oversized_or_unterminated_frames() {
-        let mut oversized = std::io::Cursor::new(vec![b'x'; MAX_FRAME_BYTES + 2]);
-        assert!(matches!(
-            read_bounded_frame(&mut oversized),
-            Err(ExtensionServiceError::Protocol(_))
-        ));
-        let mut normal = std::io::Cursor::new(b"{\"type\":\"hello\"}\n".to_vec());
-        assert_eq!(
-            read_bounded_frame(&mut normal).unwrap(),
-            b"{\"type\":\"hello\"}"
-        );
     }
 
     #[cfg(unix)]
