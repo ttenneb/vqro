@@ -2353,31 +2353,133 @@ mod tests {
         (app, collection, member)
     }
 
-    fn assert_collection_success(response: String) {
-        serde_json::from_str::<crate::api::schema::SuccessResponse>(&response)
-            .expect("collection mutation succeeds");
+    fn normalize_collection_ids(
+        value: &mut serde_json::Value,
+        collection_id: &str,
+        workspace_id: &str,
+        tab_id: &str,
+        pane_aliases: &std::collections::HashMap<String, &'static str>,
+    ) {
+        match value {
+            serde_json::Value::Array(values) => {
+                for value in values {
+                    normalize_collection_ids(
+                        value,
+                        collection_id,
+                        workspace_id,
+                        tab_id,
+                        pane_aliases,
+                    );
+                }
+            }
+            serde_json::Value::Object(fields) => {
+                for (key, value) in fields {
+                    if let Some(raw) = value.as_str() {
+                        let alias = match key.as_str() {
+                            "collection_id" if raw == collection_id => Some("collection"),
+                            "workspace_id" if raw == workspace_id => Some("workspace"),
+                            "tab_id" if raw == tab_id => Some("tab"),
+                            "pane_id" | "selected_pane_id" | "focused_pane_id" => {
+                                pane_aliases.get(raw).copied()
+                            }
+                            _ => None,
+                        };
+                        if let Some(alias) = alias {
+                            *value = serde_json::Value::String(alias.into());
+                            continue;
+                        }
+                    }
+                    normalize_collection_ids(
+                        value,
+                        collection_id,
+                        workspace_id,
+                        tab_id,
+                        pane_aliases,
+                    );
+                }
+            }
+            _ => {}
+        }
     }
 
     fn normalized_collection(
+        info: &CollectionInfo,
+        collection_id: &str,
+        workspace_id: &str,
+        tab_id: &str,
+        pane_aliases: &std::collections::HashMap<String, &'static str>,
+    ) -> serde_json::Value {
+        assert_eq!(info.collection_id, collection_id);
+        assert_eq!(info.workspace_id, workspace_id);
+        assert_eq!(info.tab_id, tab_id);
+        let mut value = serde_json::to_value(info).expect("serialize collection info");
+        normalize_collection_ids(
+            &mut value,
+            collection_id,
+            workspace_id,
+            tab_id,
+            pane_aliases,
+        );
+        value
+    }
+
+    fn normalized_collection_state(
         app: &App,
         collection: CollectionId,
-        aliases: &std::collections::HashMap<String, &'static str>,
-        action: &str,
-    ) -> serde_json::Value {
-        let info = app
-            .collection_info(0, 0, collection)
-            .expect("collection exists");
-        serde_json::json!({
-            "action": action,
-            "members": info.members.iter().map(|member| serde_json::json!({
-                "pane": aliases[&member.pane_id],
-                "archived": member.archived,
-                "selected": member.selected,
-            })).collect::<Vec<_>>()
+        collection_id: &str,
+        workspace_id: &str,
+        tab_id: &str,
+        pane_aliases: &std::collections::HashMap<String, &'static str>,
+    ) -> Option<serde_json::Value> {
+        app.collection_info(0, 0, collection).map(|info| {
+            normalized_collection(&info, collection_id, workspace_id, tab_id, pane_aliases)
         })
     }
 
-    fn run_collection_mutation_parity_sequence() -> (App, Vec<serde_json::Value>, u64) {
+    fn normalized_collection_response(
+        response: String,
+        request_id: &str,
+        collection_id: &str,
+        workspace_id: &str,
+        tab_id: &str,
+        pane_aliases: &std::collections::HashMap<String, &'static str>,
+    ) -> serde_json::Value {
+        let mut response: serde_json::Value =
+            serde_json::from_str(&response).expect("parse raw collection response");
+        let response_id = response
+            .get_mut("id")
+            .expect("response request ID must be present");
+        assert_eq!(response_id.as_str(), Some(request_id));
+        *response_id = serde_json::Value::String("request".into());
+        normalize_collection_ids(
+            &mut response,
+            collection_id,
+            workspace_id,
+            tab_id,
+            pane_aliases,
+        );
+        response
+    }
+
+    fn assert_every_pane_has_one_placement(app: &App) {
+        for workspace in &app.state.workspaces {
+            for tab in &workspace.tabs {
+                let placed = tab.layout.pane_ids();
+                assert_eq!(placed.len(), tab.panes.len());
+                for pane in tab.panes.keys() {
+                    assert_eq!(
+                        placed.iter().filter(|candidate| *candidate == pane).count(),
+                        1,
+                        "pane {pane:?} must have exactly one placement"
+                    );
+                    assert!(tab.layout.placement(*pane).is_some());
+                }
+            }
+        }
+    }
+
+    fn run_collection_mutation_parity_sequence() -> (Vec<serde_json::Value>, Vec<serde_json::Value>)
+    {
         let mut app = app_with_workspace();
         let root = app.state.workspaces[0].tabs[0].root_pane;
         let first = app.state.workspaces[0].test_split(ratatui::layout::Direction::Horizontal);
@@ -2391,10 +2493,12 @@ mod tests {
             (first_public.clone(), "first"),
             (second_public.clone(), "second"),
         ]);
+        let workspace_id = app.public_workspace_id(0);
+        let tab_id = app.public_tab_id(0, 0).unwrap();
         let event_start = app.event_hub.current_sequence();
-        let mut states = Vec::new();
+        let mut transitions = Vec::new();
 
-        assert_collection_success(app.handle_collection_create(
+        let response = app.handle_collection_create(
             "create".into(),
             CollectionCreateParams {
                 target_pane_id: root_public.clone(),
@@ -2403,61 +2507,123 @@ mod tests {
                 label: Some("helpers".into()),
                 focus: true,
             },
-        ));
+        );
         let collection: CollectionId =
             app.state.workspaces[0].tabs[0].layout.collection_ids()[0].into();
         let collection_id = collection_id_text(collection);
-        states.push(normalized_collection(&app, collection, &aliases, "create"));
-        for (action, pane_id) in [("add_first", &first_public), ("add_second", &second_public)] {
-            assert_collection_success(app.handle_collection_add(
-                action.into(),
+        assert_every_pane_has_one_placement(&app);
+        transitions.push(serde_json::json!({
+            "operation": "create",
+            "response": normalized_collection_response(
+                response, "create", &collection_id, &workspace_id, &tab_id, &aliases,
+            ),
+            "state": normalized_collection_state(
+                &app, collection, &collection_id, &workspace_id, &tab_id, &aliases,
+            ),
+        }));
+        for (operation, pane_id) in [("add_first", &first_public), ("add_second", &second_public)] {
+            let response = app.handle_collection_add(
+                operation.into(),
                 CollectionAddParams {
                     collection_id: collection_id.clone(),
                     pane_id: pane_id.clone(),
                 },
-            ));
-            states.push(normalized_collection(&app, collection, &aliases, action));
+            );
+            assert_every_pane_has_one_placement(&app);
+            transitions.push(serde_json::json!({
+                "operation": operation,
+                "response": normalized_collection_response(
+                    response, operation, &collection_id, &workspace_id, &tab_id, &aliases,
+                ),
+                "state": normalized_collection_state(
+                    &app, collection, &collection_id, &workspace_id, &tab_id, &aliases,
+                ),
+            }));
         }
-        assert_collection_success(app.handle_collection_select(
+        let state_before_rejected_add = app.collection_info(0, 0, collection);
+        let event_sequence_before_rejected_add = app.event_hub.current_sequence();
+        let response = app.handle_collection_add(
+            "add_first_again".into(),
+            CollectionAddParams {
+                collection_id: collection_id.clone(),
+                pane_id: first_public.clone(),
+            },
+        );
+        assert_eq!(
+            app.collection_info(0, 0, collection),
+            state_before_rejected_add
+        );
+        assert_eq!(
+            app.event_hub.current_sequence(),
+            event_sequence_before_rejected_add
+        );
+        assert_every_pane_has_one_placement(&app);
+        transitions.push(serde_json::json!({
+            "operation": "add_first_again",
+            "response": normalized_collection_response(
+                response, "add_first_again", &collection_id, &workspace_id, &tab_id, &aliases,
+            ),
+            "state": normalized_collection_state(
+                &app, collection, &collection_id, &workspace_id, &tab_id, &aliases,
+            ),
+        }));
+        let response = app.handle_collection_select(
             "select".into(),
             CollectionSelectParams {
                 collection_id: collection_id.clone(),
                 pane_id: second_public.clone(),
                 focus: true,
             },
-        ));
-        states.push(normalized_collection(
-            &app,
-            collection,
-            &aliases,
-            "select_second",
-        ));
-        assert_collection_success(app.handle_collection_reorder(
+        );
+        assert_every_pane_has_one_placement(&app);
+        transitions.push(serde_json::json!({
+            "operation": "select_second",
+            "response": normalized_collection_response(
+                response, "select", &collection_id, &workspace_id, &tab_id, &aliases,
+            ),
+            "state": normalized_collection_state(
+                &app, collection, &collection_id, &workspace_id, &tab_id, &aliases,
+            ),
+        }));
+        let response = app.handle_collection_reorder(
             "reorder".into(),
             CollectionReorderParams {
                 collection_id: collection_id.clone(),
                 pane_id: second_public.clone(),
                 index: 0,
             },
-        ));
-        states.push(normalized_collection(
-            &app,
-            collection,
-            &aliases,
-            "reorder_second",
-        ));
-        for (action, archived) in [("archive_first", true), ("restore_first", false)] {
-            assert_collection_success(app.handle_collection_archive(
-                action.into(),
+        );
+        assert_every_pane_has_one_placement(&app);
+        transitions.push(serde_json::json!({
+            "operation": "reorder_second",
+            "response": normalized_collection_response(
+                response, "reorder", &collection_id, &workspace_id, &tab_id, &aliases,
+            ),
+            "state": normalized_collection_state(
+                &app, collection, &collection_id, &workspace_id, &tab_id, &aliases,
+            ),
+        }));
+        for (operation, archived) in [("archive_first", true), ("restore_first", false)] {
+            let response = app.handle_collection_archive(
+                operation.into(),
                 CollectionMemberTarget {
                     collection_id: collection_id.clone(),
                     pane_id: first_public.clone(),
                 },
                 archived,
-            ));
-            states.push(normalized_collection(&app, collection, &aliases, action));
+            );
+            assert_every_pane_has_one_placement(&app);
+            transitions.push(serde_json::json!({
+                "operation": operation,
+                "response": normalized_collection_response(
+                    response, operation, &collection_id, &workspace_id, &tab_id, &aliases,
+                ),
+                "state": normalized_collection_state(
+                    &app, collection, &collection_id, &workspace_id, &tab_id, &aliases,
+                ),
+            }));
         }
-        assert_collection_success(app.handle_collection_promote(
+        let response = app.handle_collection_promote(
             "promote".into(),
             CollectionPromoteParams {
                 pane_id: second_public,
@@ -2466,64 +2632,75 @@ mod tests {
                 ratio: Some(0.5),
                 focus: false,
             },
-        ));
-        states.push(normalized_collection(
-            &app,
-            collection,
-            &aliases,
-            "promote_second",
-        ));
-        assert_collection_success(app.handle_collection_close(
+        );
+        assert_every_pane_has_one_placement(&app);
+        transitions.push(serde_json::json!({
+            "operation": "promote_second",
+            "response": normalized_collection_response(
+                response, "promote", &collection_id, &workspace_id, &tab_id, &aliases,
+            ),
+            "state": normalized_collection_state(
+                &app, collection, &collection_id, &workspace_id, &tab_id, &aliases,
+            ),
+        }));
+        let response = app.handle_collection_close(
             "close".into(),
             CollectionCloseParams {
-                collection_id,
+                collection_id: collection_id.clone(),
                 disposition: Some(CollectionCloseDisposition::CascadeClose),
             },
-        ));
-        states.push(serde_json::json!({"action": "close", "members": null}));
-        (app, states, event_start)
+        );
+        assert_every_pane_has_one_placement(&app);
+        transitions.push(serde_json::json!({
+            "operation": "close",
+            "response": normalized_collection_response(
+                response, "close", &collection_id, &workspace_id, &tab_id, &aliases,
+            ),
+            "state": normalized_collection_state(
+                &app, collection, &collection_id, &workspace_id, &tab_id, &aliases,
+            ),
+        }));
+        let events = app
+            .event_hub
+            .events_after(event_start)
+            .iter()
+            .map(|(sequence, event)| {
+                let mut event = serde_json::to_value(event).expect("serialize event envelope");
+                normalize_collection_ids(
+                    &mut event,
+                    &collection_id,
+                    &workspace_id,
+                    &tab_id,
+                    &aliases,
+                );
+                serde_json::json!({
+                    "sequence": sequence - event_start,
+                    "envelope": event,
+                })
+            })
+            .collect();
+        (transitions, events)
     }
 
     #[test]
     fn collection_mutation_parity_fixture_covers_create_add_select_reorder_archive_restore_promote_close(
     ) {
-        let (_app, actual, _event_start) = run_collection_mutation_parity_sequence();
+        let (actual, _events) = run_collection_mutation_parity_sequence();
         let expected: serde_json::Value = serde_json::from_str(include_str!(
             "../../../tests/fixtures/collections-mutation-parity-v1.json"
         ))
         .unwrap();
-        assert_eq!(serde_json::json!(actual), expected["states"]);
+        assert_eq!(serde_json::json!(actual), expected["transitions"]);
     }
 
     #[test]
     fn collection_events_have_exact_kind_payload_order_and_revision() {
-        let (app, states, event_start) = run_collection_mutation_parity_sequence();
+        let (_transitions, actual) = run_collection_mutation_parity_sequence();
         let expected: serde_json::Value = serde_json::from_str(include_str!(
             "../../../tests/fixtures/collections-mutation-parity-v1.json"
         ))
         .unwrap();
-        let events = app.event_hub.events_after(event_start);
-        let collection_events = events
-            .iter()
-            .filter_map(|(sequence, event)| match &event.data {
-                crate::api::schema::EventData::CollectionUpdated { action, collection } => {
-                    Some((*sequence, action.as_str(), collection.members.len()))
-                }
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        let expected_actions = expected["event_actions"].as_array().unwrap();
-        assert_eq!(collection_events.len(), expected_actions.len());
-        for (index, ((sequence, action, member_count), expected_action)) in
-            collection_events.iter().zip(expected_actions).enumerate()
-        {
-            assert_eq!(*sequence, event_start + index as u64 + 1);
-            assert_eq!(*action, expected_action.as_str().unwrap());
-            assert_eq!(
-                *member_count,
-                states[index]["members"].as_array().unwrap().len()
-            );
-        }
+        assert_eq!(serde_json::json!(actual), expected["events"]);
     }
 
     #[test]

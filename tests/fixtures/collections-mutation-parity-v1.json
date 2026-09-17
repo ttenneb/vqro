@@ -1,43 +1,729 @@
 {
   "contract": "vqro.collections.mutation-parity.v1",
-  "states": [
-    { "action": "create", "members": [] },
-    { "action": "add_first", "members": [
-      { "pane": "first", "archived": false, "selected": true }
-    ] },
-    { "action": "add_second", "members": [
-      { "pane": "first", "archived": false, "selected": true },
-      { "pane": "second", "archived": false, "selected": false }
-    ] },
-    { "action": "select_second", "members": [
-      { "pane": "first", "archived": false, "selected": false },
-      { "pane": "second", "archived": false, "selected": true }
-    ] },
-    { "action": "reorder_second", "members": [
-      { "pane": "second", "archived": false, "selected": true },
-      { "pane": "first", "archived": false, "selected": false }
-    ] },
-    { "action": "archive_first", "members": [
-      { "pane": "second", "archived": false, "selected": true },
-      { "pane": "first", "archived": true, "selected": false }
-    ] },
-    { "action": "restore_first", "members": [
-      { "pane": "second", "archived": false, "selected": true },
-      { "pane": "first", "archived": false, "selected": false }
-    ] },
-    { "action": "promote_second", "members": [
-      { "pane": "first", "archived": false, "selected": true }
-    ] },
-    { "action": "close", "members": null }
+  "transitions": [
+    {
+      "operation": "create",
+      "response": {
+        "id": "request",
+        "result": {
+          "type": "collection_info",
+          "collection": {
+            "collection_id": "collection",
+            "workspace_id": "workspace",
+            "tab_id": "tab",
+            "label": "helpers",
+            "focused": true,
+            "members": []
+          }
+        }
+      },
+      "state": {
+        "collection_id": "collection",
+        "workspace_id": "workspace",
+        "tab_id": "tab",
+        "label": "helpers",
+        "focused": true,
+        "members": []
+      }
+    },
+    {
+      "operation": "add_first",
+      "response": {
+        "id": "request",
+        "result": {
+          "type": "collection_info",
+          "collection": {
+            "collection_id": "collection",
+            "workspace_id": "workspace",
+            "tab_id": "tab",
+            "label": "helpers",
+            "focused": true,
+            "selected_pane_id": "first",
+            "members": [
+              {
+                "pane_id": "first",
+                "index": 0,
+                "archived": false,
+                "selected": true
+              }
+            ]
+          }
+        }
+      },
+      "state": {
+        "collection_id": "collection",
+        "workspace_id": "workspace",
+        "tab_id": "tab",
+        "label": "helpers",
+        "focused": true,
+        "selected_pane_id": "first",
+        "members": [
+          {
+            "pane_id": "first",
+            "index": 0,
+            "archived": false,
+            "selected": true
+          }
+        ]
+      }
+    },
+    {
+      "operation": "add_second",
+      "response": {
+        "id": "request",
+        "result": {
+          "type": "collection_info",
+          "collection": {
+            "collection_id": "collection",
+            "workspace_id": "workspace",
+            "tab_id": "tab",
+            "label": "helpers",
+            "focused": true,
+            "selected_pane_id": "first",
+            "members": [
+              {
+                "pane_id": "first",
+                "index": 0,
+                "archived": false,
+                "selected": true
+              },
+              {
+                "pane_id": "second",
+                "index": 1,
+                "archived": false,
+                "selected": false
+              }
+            ]
+          }
+        }
+      },
+      "state": {
+        "collection_id": "collection",
+        "workspace_id": "workspace",
+        "tab_id": "tab",
+        "label": "helpers",
+        "focused": true,
+        "selected_pane_id": "first",
+        "members": [
+          {
+            "pane_id": "first",
+            "index": 0,
+            "archived": false,
+            "selected": true
+          },
+          {
+            "pane_id": "second",
+            "index": 1,
+            "archived": false,
+            "selected": false
+          }
+        ]
+      }
+    },
+    {
+      "operation": "add_first_again",
+      "response": {
+        "id": "request",
+        "error": {
+          "code": "invalid_placement",
+          "message": "pane could not be added to the collection"
+        }
+      },
+      "state": {
+        "collection_id": "collection",
+        "workspace_id": "workspace",
+        "tab_id": "tab",
+        "label": "helpers",
+        "focused": true,
+        "selected_pane_id": "first",
+        "members": [
+          {
+            "pane_id": "first",
+            "index": 0,
+            "archived": false,
+            "selected": true
+          },
+          {
+            "pane_id": "second",
+            "index": 1,
+            "archived": false,
+            "selected": false
+          }
+        ]
+      }
+    },
+    {
+      "operation": "select_second",
+      "response": {
+        "id": "request",
+        "result": {
+          "type": "collection_info",
+          "collection": {
+            "collection_id": "collection",
+            "workspace_id": "workspace",
+            "tab_id": "tab",
+            "label": "helpers",
+            "focused": true,
+            "selected_pane_id": "second",
+            "members": [
+              {
+                "pane_id": "first",
+                "index": 0,
+                "archived": false,
+                "selected": false
+              },
+              {
+                "pane_id": "second",
+                "index": 1,
+                "archived": false,
+                "selected": true
+              }
+            ]
+          }
+        }
+      },
+      "state": {
+        "collection_id": "collection",
+        "workspace_id": "workspace",
+        "tab_id": "tab",
+        "label": "helpers",
+        "focused": true,
+        "selected_pane_id": "second",
+        "members": [
+          {
+            "pane_id": "first",
+            "index": 0,
+            "archived": false,
+            "selected": false
+          },
+          {
+            "pane_id": "second",
+            "index": 1,
+            "archived": false,
+            "selected": true
+          }
+        ]
+      }
+    },
+    {
+      "operation": "reorder_second",
+      "response": {
+        "id": "request",
+        "result": {
+          "type": "collection_info",
+          "collection": {
+            "collection_id": "collection",
+            "workspace_id": "workspace",
+            "tab_id": "tab",
+            "label": "helpers",
+            "focused": true,
+            "selected_pane_id": "second",
+            "members": [
+              {
+                "pane_id": "second",
+                "index": 0,
+                "archived": false,
+                "selected": true
+              },
+              {
+                "pane_id": "first",
+                "index": 1,
+                "archived": false,
+                "selected": false
+              }
+            ]
+          }
+        }
+      },
+      "state": {
+        "collection_id": "collection",
+        "workspace_id": "workspace",
+        "tab_id": "tab",
+        "label": "helpers",
+        "focused": true,
+        "selected_pane_id": "second",
+        "members": [
+          {
+            "pane_id": "second",
+            "index": 0,
+            "archived": false,
+            "selected": true
+          },
+          {
+            "pane_id": "first",
+            "index": 1,
+            "archived": false,
+            "selected": false
+          }
+        ]
+      }
+    },
+    {
+      "operation": "archive_first",
+      "response": {
+        "id": "request",
+        "result": {
+          "type": "collection_info",
+          "collection": {
+            "collection_id": "collection",
+            "workspace_id": "workspace",
+            "tab_id": "tab",
+            "label": "helpers",
+            "focused": true,
+            "selected_pane_id": "second",
+            "members": [
+              {
+                "pane_id": "second",
+                "index": 0,
+                "archived": false,
+                "selected": true
+              },
+              {
+                "pane_id": "first",
+                "index": 1,
+                "archived": true,
+                "selected": false
+              }
+            ]
+          }
+        }
+      },
+      "state": {
+        "collection_id": "collection",
+        "workspace_id": "workspace",
+        "tab_id": "tab",
+        "label": "helpers",
+        "focused": true,
+        "selected_pane_id": "second",
+        "members": [
+          {
+            "pane_id": "second",
+            "index": 0,
+            "archived": false,
+            "selected": true
+          },
+          {
+            "pane_id": "first",
+            "index": 1,
+            "archived": true,
+            "selected": false
+          }
+        ]
+      }
+    },
+    {
+      "operation": "restore_first",
+      "response": {
+        "id": "request",
+        "result": {
+          "type": "collection_info",
+          "collection": {
+            "collection_id": "collection",
+            "workspace_id": "workspace",
+            "tab_id": "tab",
+            "label": "helpers",
+            "focused": true,
+            "selected_pane_id": "second",
+            "members": [
+              {
+                "pane_id": "second",
+                "index": 0,
+                "archived": false,
+                "selected": true
+              },
+              {
+                "pane_id": "first",
+                "index": 1,
+                "archived": false,
+                "selected": false
+              }
+            ]
+          }
+        }
+      },
+      "state": {
+        "collection_id": "collection",
+        "workspace_id": "workspace",
+        "tab_id": "tab",
+        "label": "helpers",
+        "focused": true,
+        "selected_pane_id": "second",
+        "members": [
+          {
+            "pane_id": "second",
+            "index": 0,
+            "archived": false,
+            "selected": true
+          },
+          {
+            "pane_id": "first",
+            "index": 1,
+            "archived": false,
+            "selected": false
+          }
+        ]
+      }
+    },
+    {
+      "operation": "promote_second",
+      "response": {
+        "id": "request",
+        "result": {
+          "type": "collection_info",
+          "collection": {
+            "collection_id": "collection",
+            "workspace_id": "workspace",
+            "tab_id": "tab",
+            "label": "helpers",
+            "focused": false,
+            "selected_pane_id": "first",
+            "members": [
+              {
+                "pane_id": "first",
+                "index": 0,
+                "archived": false,
+                "selected": true
+              }
+            ]
+          }
+        }
+      },
+      "state": {
+        "collection_id": "collection",
+        "workspace_id": "workspace",
+        "tab_id": "tab",
+        "label": "helpers",
+        "focused": false,
+        "selected_pane_id": "first",
+        "members": [
+          {
+            "pane_id": "first",
+            "index": 0,
+            "archived": false,
+            "selected": true
+          }
+        ]
+      }
+    },
+    {
+      "operation": "close",
+      "response": {
+        "id": "request",
+        "result": {
+          "type": "ok"
+        }
+      },
+      "state": null
+    }
   ],
-  "event_actions": [
-    "created",
-    "member_added",
-    "member_added",
-    "member_updated",
-    "member_updated",
-    "member_updated",
-    "member_updated",
-    "member_promoted"
+  "events": [
+    {
+      "sequence": 1,
+      "envelope": {
+        "event": "collection_updated",
+        "data": {
+          "type": "collection_updated",
+          "action": "created",
+          "collection": {
+            "collection_id": "collection",
+            "workspace_id": "workspace",
+            "tab_id": "tab",
+            "label": "helpers",
+            "focused": true,
+            "members": []
+          }
+        }
+      }
+    },
+    {
+      "sequence": 2,
+      "envelope": {
+        "event": "collection_updated",
+        "data": {
+          "type": "collection_updated",
+          "action": "member_added",
+          "collection": {
+            "collection_id": "collection",
+            "workspace_id": "workspace",
+            "tab_id": "tab",
+            "label": "helpers",
+            "focused": true,
+            "selected_pane_id": "first",
+            "members": [
+              {
+                "pane_id": "first",
+                "index": 0,
+                "archived": false,
+                "selected": true
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "sequence": 3,
+      "envelope": {
+        "event": "collection_updated",
+        "data": {
+          "type": "collection_updated",
+          "action": "member_added",
+          "collection": {
+            "collection_id": "collection",
+            "workspace_id": "workspace",
+            "tab_id": "tab",
+            "label": "helpers",
+            "focused": true,
+            "selected_pane_id": "first",
+            "members": [
+              {
+                "pane_id": "first",
+                "index": 0,
+                "archived": false,
+                "selected": true
+              },
+              {
+                "pane_id": "second",
+                "index": 1,
+                "archived": false,
+                "selected": false
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "sequence": 4,
+      "envelope": {
+        "event": "collection_updated",
+        "data": {
+          "type": "collection_updated",
+          "action": "member_updated",
+          "collection": {
+            "collection_id": "collection",
+            "workspace_id": "workspace",
+            "tab_id": "tab",
+            "label": "helpers",
+            "focused": true,
+            "selected_pane_id": "second",
+            "members": [
+              {
+                "pane_id": "first",
+                "index": 0,
+                "archived": false,
+                "selected": false
+              },
+              {
+                "pane_id": "second",
+                "index": 1,
+                "archived": false,
+                "selected": true
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "sequence": 5,
+      "envelope": {
+        "event": "collection_updated",
+        "data": {
+          "type": "collection_updated",
+          "action": "member_updated",
+          "collection": {
+            "collection_id": "collection",
+            "workspace_id": "workspace",
+            "tab_id": "tab",
+            "label": "helpers",
+            "focused": true,
+            "selected_pane_id": "second",
+            "members": [
+              {
+                "pane_id": "second",
+                "index": 0,
+                "archived": false,
+                "selected": true
+              },
+              {
+                "pane_id": "first",
+                "index": 1,
+                "archived": false,
+                "selected": false
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "sequence": 6,
+      "envelope": {
+        "event": "collection_updated",
+        "data": {
+          "type": "collection_updated",
+          "action": "member_updated",
+          "collection": {
+            "collection_id": "collection",
+            "workspace_id": "workspace",
+            "tab_id": "tab",
+            "label": "helpers",
+            "focused": true,
+            "selected_pane_id": "second",
+            "members": [
+              {
+                "pane_id": "second",
+                "index": 0,
+                "archived": false,
+                "selected": true
+              },
+              {
+                "pane_id": "first",
+                "index": 1,
+                "archived": true,
+                "selected": false
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "sequence": 7,
+      "envelope": {
+        "event": "collection_updated",
+        "data": {
+          "type": "collection_updated",
+          "action": "member_updated",
+          "collection": {
+            "collection_id": "collection",
+            "workspace_id": "workspace",
+            "tab_id": "tab",
+            "label": "helpers",
+            "focused": true,
+            "selected_pane_id": "second",
+            "members": [
+              {
+                "pane_id": "second",
+                "index": 0,
+                "archived": false,
+                "selected": true
+              },
+              {
+                "pane_id": "first",
+                "index": 1,
+                "archived": false,
+                "selected": false
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "sequence": 8,
+      "envelope": {
+        "event": "collection_updated",
+        "data": {
+          "type": "collection_updated",
+          "action": "member_promoted",
+          "collection": {
+            "collection_id": "collection",
+            "workspace_id": "workspace",
+            "tab_id": "tab",
+            "label": "helpers",
+            "focused": false,
+            "selected_pane_id": "first",
+            "members": [
+              {
+                "pane_id": "first",
+                "index": 0,
+                "archived": false,
+                "selected": true
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "sequence": 9,
+      "envelope": {
+        "event": "pane_closed",
+        "data": {
+          "type": "pane_closed",
+          "pane_id": "first",
+          "workspace_id": "workspace"
+        }
+      }
+    },
+    {
+      "sequence": 10,
+      "envelope": {
+        "event": "layout_updated",
+        "data": {
+          "type": "layout_updated",
+          "layout": {
+            "workspace_id": "workspace",
+            "tab_id": "tab",
+            "zoomed": false,
+            "area": {
+              "x": 0,
+              "y": 0,
+              "width": 0,
+              "height": 0
+            },
+            "focused_pane_id": "root",
+            "panes": [
+              {
+                "pane_id": "root",
+                "rect": {
+                  "x": 0,
+                  "y": 0,
+                  "width": 0,
+                  "height": 0
+                },
+                "focused": true
+              },
+              {
+                "pane_id": "second",
+                "rect": {
+                  "x": 0,
+                  "y": 0,
+                  "width": 0,
+                  "height": 0
+                },
+                "focused": false
+              }
+            ],
+            "splits": [
+              {
+                "id": "split_0_root",
+                "rect": {
+                  "x": 0,
+                  "y": 0,
+                  "width": 0,
+                  "height": 0
+                },
+                "direction": "right",
+                "ratio": 0.5
+              },
+              {
+                "id": "split_1_0",
+                "rect": {
+                  "x": 0,
+                  "y": 0,
+                  "width": 0,
+                  "height": 0
+                },
+                "direction": "right",
+                "ratio": 0.5
+              }
+            ]
+          }
+        }
+      }
+    }
   ]
 }
