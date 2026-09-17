@@ -23,6 +23,7 @@ mod checksum;
 mod cli;
 mod client;
 mod collection_compat;
+mod collection_mirror;
 mod collection_policy;
 mod config;
 mod copy_mode;
