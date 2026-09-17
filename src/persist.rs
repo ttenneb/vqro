@@ -6,6 +6,8 @@
 
 // Kept separate from ordinary session saves so rejected bytes remain authoritative.
 pub(crate) mod extension_state;
+// Staged foundation only: no production persistence path invokes the coordinator yet.
+pub(crate) mod coordinator;
 mod io;
 pub mod plugin_registry;
 mod restore;
