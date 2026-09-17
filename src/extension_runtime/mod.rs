@@ -1,7 +1,8 @@
 //! Runtime-neutral extension dispatch and lifecycle contracts.
 //!
-//! Process protocol 2 and WASI Preview 2 components implement one dispatcher,
-//! identity, capability, cancellation, deadline, and lifecycle contract.
+//! Legacy configured process services and WASI Preview 2 components implement one
+//! dispatcher contract. Installed packages are admitted only as constrained components;
+//! the process adapter remains solely for backwards-compatible host configuration.
 
 pub(crate) mod component;
 pub(crate) mod process;
@@ -427,8 +428,10 @@ impl RuntimeFactory {
             .ok_or_else(|| RuntimeError::Configuration("package service is not declared".into()))?;
         match &service.runtime {
             crate::extension_package::PackageRuntimeV1::Process { .. } => {
-                ProcessRuntimeFactory::installed(installed, service_id, namespace)
-                    .map(Self::Process)
+                Err(RuntimeError::Unsupported(
+                    "installed extension packages must use the constrained component runtime"
+                        .into(),
+                ))
             }
             crate::extension_package::PackageRuntimeV1::Component { .. } => {
                 ComponentRuntimeFactory::installed(installed, service_id, namespace)

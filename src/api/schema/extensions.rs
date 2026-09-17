@@ -82,6 +82,10 @@ pub struct ExtensionInfo {
     pub summary: String,
     pub details: String,
     pub categories: Vec<String>,
+    /// Capabilities requested by executable package services. An empty list means
+    /// that this catalog item has no downloaded executable service.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub requested_capabilities: Vec<String>,
     pub package_kind: ExtensionPackageKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub integration_target: Option<super::IntegrationTarget>,

@@ -252,6 +252,28 @@ pub(super) fn render_extensions_overlay(
             );
             y += 1;
         }
+        let capabilities = if extension.requested_capabilities.is_empty() {
+            "requested capabilities: none".to_string()
+        } else {
+            format!(
+                "requested capabilities: {}",
+                extension.requested_capabilities.join(", ")
+            )
+        };
+        for line in wrap_text(&capabilities, details.width.saturating_sub(2)) {
+            if y >= details.bottom().saturating_sub(6) {
+                break;
+            }
+            put_text(
+                buffer,
+                details.x + 1,
+                y,
+                details.width.saturating_sub(2),
+                &line,
+                base.fg(palette.yellow),
+            );
+            y += 1;
+        }
         if let Some(status) = extension.integration_status {
             let status_label = match status {
                 crate::api::schema::IntegrationState::NotInstalled => "not installed",
@@ -361,7 +383,9 @@ pub(super) fn render_extensions_overlay(
         " Working…"
     } else if let Some(confirmation) = extensions.confirmation {
         match confirmation {
-            ClientExtensionConfirmation::Install => " Install and enable this extension?",
+            ClientExtensionConfirmation::Install => {
+                " Confirm the exact source, revision, and capabilities shown above?"
+            }
             ClientExtensionConfirmation::Remove => {
                 " Remove this extension? Config and state are retained."
             }
@@ -423,7 +447,7 @@ pub(super) fn render_extensions_overlay(
             footer.x,
             footer.y + 1,
             footer.width,
-            " Extensions run as trusted same-user code; they are not sandboxed.",
+            " Executable packages run only as constrained WASI components.",
             muted.bg(palette.surface0),
         );
     }

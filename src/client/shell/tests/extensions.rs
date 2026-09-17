@@ -16,6 +16,7 @@ fn extension_info(installed: bool) -> crate::api::schema::ExtensionInfo {
         summary: "Group related terminal panes.".into(),
         details: "First-party collection workflows through a public contract.".into(),
         categories: vec!["Workflow".into(), "Interface".into()],
+        requested_capabilities: vec!["host.document.render".into()],
         package_kind: crate::api::schema::ExtensionPackageKind::Bundled,
         integration_target: None,
         integration_status: None,
@@ -96,7 +97,8 @@ fn extension_overlay_renders_categories_details_and_installed_tab() {
     assert!(text.contains("Agents"));
     assert!(text.contains("Workflow"));
     assert!(text.contains("Collections"));
-    assert!(text.contains("trusted same-user code"));
+    assert!(text.contains("requested capabilities: host.document.render"));
+    assert!(text.contains("constrained WASI components"));
     assert!(!state.hits.extensions_rows.is_empty());
 }
 

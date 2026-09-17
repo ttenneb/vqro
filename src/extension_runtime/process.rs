@@ -1007,14 +1007,23 @@ while IFS= read -r request; do
 done
 "#;
         let (root, installed) = install_process_package(script, &[]);
-        crate::extension_service::ExtensionServiceSupervisor::preflight_installed_process(
-            &installed,
-            "echo",
-            "example.runtime",
-        )
-        .unwrap();
+        assert!(matches!(
+            crate::extension_service::ExtensionServiceSupervisor::preflight_installed_process(
+                &installed,
+                "echo",
+                "example.runtime",
+            ),
+            Err(ExtensionServiceError::Unsupported(message))
+                if message.contains("constrained component runtime")
+        ));
+        assert!(matches!(
+            super::super::RuntimeFactory::installed(&installed, "echo", "example.runtime"),
+            Err(ExtensionServiceError::Unsupported(message))
+                if message.contains("constrained component runtime")
+        ));
         let factory =
-            super::super::RuntimeFactory::installed(&installed, "echo", "example.runtime").unwrap();
+            super::super::RuntimeFactory::installed_process(&installed, "echo", "example.runtime")
+                .unwrap();
         assert!(matches!(factory, super::super::RuntimeFactory::Process(_)));
         let canceled = AtomicBool::new(false);
         let mut dispatcher =

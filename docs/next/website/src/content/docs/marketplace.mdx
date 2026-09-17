@@ -44,10 +44,18 @@ integrations remain available in Browse. Agent cards report the separately
 reconciled adapter deployment state; an enabled marketplace package does not
 claim that an adapter managed outside Vqro's namespace was installed.
 
-Extensions execute as trusted same-user code. They are not sandboxed. New
-marketplace methods are optional endpoint capabilities, so an older compatible
-server disables only marketplace actions and does not affect attached PTYs or
-the generation-1 client bridge.
+Downloaded executable packages are admitted only when every service uses the
+`vqro:extension/service@1.0.0` component world. They execute in the same bounded
+WASI component sandbox with explicit host capabilities, fuel, memory, table,
+stack, frame, host-call, cancellation, and deadline limits; curated status never
+adds a capability or selects a more privileged runtime. First-party native host
+providers and managed agent assets contain no downloaded executable service.
+Legacy explicitly configured process plugins remain a separate compatibility
+surface and cannot be installed as extension packages.
+
+New marketplace methods are optional endpoint capabilities, so an older
+compatible server disables only marketplace actions and does not affect attached
+PTYs or the generation-1 client bridge.
 
 ## Browse plugins
 

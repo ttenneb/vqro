@@ -9352,6 +9352,13 @@
               },
               "type": "array"
             },
+            "requested_capabilities": {
+              "description": "Capabilities requested by executable package services. An empty list means\nthat this catalog item has no downloaded executable service.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
             "rollback_version": {
               "type": [
                 "string",

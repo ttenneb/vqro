@@ -44,6 +44,9 @@ impl App {
             summary: extension.summary.clone(),
             details: extension.details.clone(),
             categories: extension.categories.clone(),
+            // Bundled catalog entries are host providers or managed agent assets,
+            // not downloaded package-v1 executable services.
+            requested_capabilities: Vec::new(),
             package_kind,
             integration_status: integration_target.and_then(|target| {
                 statuses
