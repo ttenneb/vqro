@@ -167,9 +167,15 @@ fn collections_candidate_passes_authoritative_host_gate() {
     // failed instantiation; the counter is established before all directly observed calls.
     assert_eq!(host_call_count.load(Ordering::Acquire), 0);
 
-    let host_calls = Arc::new(RuntimeHostCallRouter::new(RejectingHostCalls {
-        count: Arc::clone(&host_call_count),
-    }));
+    let identity = runtime.descriptor().identity.clone();
+    let host_calls = Arc::new(RuntimeHostCallRouter::new(
+        identity.clone(),
+        identity.namespace.clone(),
+        BTreeMap::new(),
+        RejectingHostCalls {
+            count: Arc::clone(&host_call_count),
+        },
+    ));
     let invocation = RuntimeRequestV1 {
         contract: EXTENSION_SERVICE_CONTRACT_V1.into(),
         request_id: "collections-candidate-gate".into(),

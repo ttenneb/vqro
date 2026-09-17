@@ -2,7 +2,7 @@
 
 Status: staged, read-only package-runtime contract. Production package activation does not issue terminal leases. Legacy services, package preflight, and uninstalled runtimes receive no capability.
 
-The sole capability is the exact string `host.terminals.read`; its sole method is `terminals.snapshot`. Calls require `{ "contract": "host.terminals.v1" }` and are bound to one stable workspace ID and opaque `TabId`, plus the package, service, artifact, catalog, provider, and runtime generations captured by the host-created invocation lease.
+The sole capability is the exact string `host.terminals.read`; its sole method is `terminals.snapshot`. Calls require `{ "contract": "host.terminals.v1" }` and are bound to one stable workspace ID and opaque `TabId`, plus the package, service, artifact, catalog, provider, and runtime generations captured by the host-created invocation lease. Read-only conformance invocations may combine this scope with package-bound `state.snapshot` in one atomically staged internal context; the shared router still permits only exact depth 1, one concurrently outstanding call, and the bounded total call count.
 
 A successful response is one coherent App-actor snapshot. It contains only workspace identity, tab identity, ordered tiled-terminal or neutral-container layout items, stable `TerminalId` values, neutral container identities, and the lease fence. `PaneId`, collection labels, archive state, agent state, status, policy, UI state, and client state are not exposed. Empty containers and ungrouped tiled terminals are representable. Every terminal in the scoped tab must occur exactly once or the call fails as malformed host state.
 

@@ -140,6 +140,10 @@ pub(crate) enum HostTerminalsActorMethod {
 #[derive(Debug)]
 pub(crate) struct HostTerminalsActorRequest {
     pub(crate) lease: HostTerminalsInvocationLease,
+    #[cfg(test)]
+    pub(crate) call_id: String,
+    #[cfg(test)]
+    pub(crate) capability: String,
     pub(crate) method: HostTerminalsActorMethod,
     pub(crate) respond_to: mpsc::SyncSender<Result<serde_json::Value, RuntimeErrorBodyV1>>,
 }
@@ -250,8 +254,11 @@ impl HostTerminalsCallHandler {
 
     fn actor_roundtrip(
         &self,
+        call: &RuntimeHostCallV1,
         method: HostTerminalsActorMethod,
     ) -> Result<serde_json::Value, RuntimeErrorBodyV1> {
+        #[cfg(not(test))]
+        let _ = call;
         if self.lease.canceled.load(Ordering::Acquire) {
             return Err(canceled_error());
         }
@@ -261,6 +268,10 @@ impl HostTerminalsCallHandler {
         let (respond_to, response) = mpsc::sync_channel(1);
         let request = HostTerminalsActorRequest {
             lease: self.lease.clone(),
+            #[cfg(test)]
+            call_id: call.call_id.clone(),
+            #[cfg(test)]
+            capability: call.capability.clone(),
             method,
             respond_to,
         };
@@ -304,14 +315,14 @@ impl RuntimeHostCallHandler for HostTerminalsCallHandler {
         if Instant::now() >= self.lease.deadline {
             return self.response_error(&call, timeout_error());
         }
-        let result = match self.actor_roundtrip(HostTerminalsActorMethod::Capture) {
+        let result = match self.actor_roundtrip(&call, HostTerminalsActorMethod::Capture) {
             Ok(result) => result,
             Err(error) => return self.response_error(&call, error),
         };
         // Snapshot data linearized in the Capture actor turn. This second turn is
         // only a final authorization gate: authority/scope revocation processed
         // after capture can reject the captured result, but data is not recaptured.
-        if let Err(error) = self.actor_roundtrip(HostTerminalsActorMethod::Validate) {
+        if let Err(error) = self.actor_roundtrip(&call, HostTerminalsActorMethod::Validate) {
             return self.response_error(&call, error);
         }
         #[cfg(test)]
@@ -1054,10 +1065,15 @@ mod tests {
     #[test]
     fn process_and_component_share_the_canonical_terminal_handler() {
         let dispatcher = include_str!("extension_runtime/mod.rs");
+        let composite = include_str!("extension_host_invocation.rs");
         let process = include_str!("extension_runtime/process.rs");
         let component = include_str!("extension_runtime/component.rs");
         assert_eq!(
             dispatcher.matches("HostTerminalsCallHandler::new").count(),
+            1
+        );
+        assert_eq!(
+            composite.matches("HostTerminalsCallHandler::new").count(),
             1
         );
         assert!(!process.contains("HostTerminalsCallHandler"));

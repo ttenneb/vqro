@@ -19,6 +19,23 @@ APP_SERVER_SOURCES = (
 )
 RECOVERY_MODEL_SOURCE = PROJECT_ROOT / "src" / "client" / "shell" / "recovery_browser.rs"
 EXTENSION_STATE_ACTOR_SOURCE = PROJECT_ROOT / "src" / "app" / "api" / "extension_state.rs"
+COMPOSITE_HOST_READ_REFERENCE = re.compile(
+    r"\b(?:HostReadInvocationAuthorization|HostReadInvocationPurpose|"
+    r"stage_host_read_authorization|invoke_with_host_reads)\b"
+)
+COMPOSITE_HOST_READ_MODULE = PROJECT_ROOT / "src" / "extension_host_invocation.rs"
+COMPOSITE_HOST_READ_APP_MODULE = (
+    PROJECT_ROOT / "src" / "app" / "api" / "extension_invocation.rs"
+)
+COMPOSITE_HOST_READ_BOUNDARY_SOURCES = frozenset(
+    {
+        PROJECT_ROOT / "src" / "main.rs",
+        PROJECT_ROOT / "src" / "app" / "api.rs",
+        PROJECT_ROOT / "src" / "extension_runtime" / "mod.rs",
+        COMPOSITE_HOST_READ_MODULE,
+        COMPOSITE_HOST_READ_APP_MODULE,
+    }
+)
 DOCUMENT_V2_SOURCES = (
     PROJECT_ROOT / "src" / "host_document_v2.rs",
     PROJECT_ROOT / "src" / "quarantined_audit_cache.rs",
@@ -523,6 +540,41 @@ class UiHotPathArchitectureTests(unittest.TestCase):
                     [(DOCUMENT_V2_SCHEMA_SOURCE, source + "\n" + addition + "\n")]
                 )
                 self.assertTrue(violations)
+
+    def test_composite_host_read_modules_and_dispatch_entry_are_cfg_test_only(self) -> None:
+        main = (PROJECT_ROOT / "src" / "main.rs").read_text(encoding="utf-8")
+        app_api = (PROJECT_ROOT / "src" / "app" / "api.rs").read_text(encoding="utf-8")
+        runtime = (PROJECT_ROOT / "src" / "extension_runtime" / "mod.rs").read_text(
+            encoding="utf-8"
+        )
+        self.assertRegex(main, r"#\[cfg\(test\)\]\s*mod extension_host_invocation;")
+        self.assertRegex(app_api, r"#\[cfg\(test\)\]\s*mod extension_invocation;")
+        self.assertRegex(
+            runtime,
+            r"#\[cfg\(test\)\]\s*pub\(crate\) fn invoke_with_host_reads\(",
+        )
+        self.assertRegex(
+            runtime,
+            r"#\[cfg\(test\)\]\s*Composite\(Box<crate::extension_host_invocation::",
+        )
+        self.assertRegex(
+            runtime,
+            r"#\[cfg\(test\)\]\s*Some\(\(HostInvocationAuthorization::Composite",
+        )
+
+    def test_composite_host_read_symbols_stay_inside_cfg_test_boundaries(self) -> None:
+        violations = []
+        for path in ALL_SRC_SOURCES:
+            if path in COMPOSITE_HOST_READ_BOUNDARY_SOURCES:
+                continue
+            code = production_code(path.read_text(encoding="utf-8"))
+            if COMPOSITE_HOST_READ_REFERENCE.search(code):
+                violations.append(str(path.relative_to(PROJECT_ROOT)))
+        self.assertEqual(
+            violations,
+            [],
+            "Composite symbols must not escape their compile-gated modules/runtime entry",
+        )
 
     def test_extension_state_actor_handler_never_invokes_extension_runtime(self) -> None:
         body = rust_function_body(

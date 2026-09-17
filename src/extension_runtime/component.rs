@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use super::{
     ExtensionRuntime, NegotiatedRuntimeDescriptor, RuntimeError, RuntimeGrants, RuntimeHostCallV1,
     RuntimeIdentityV1, RuntimeRequestV1, RuntimeStopReason, SharedRuntimeHostCalls,
-    HANDSHAKE_TIMEOUT, MAX_HOST_CALLS_PER_INVOCATION, MAX_RUNTIME_FRAME_BYTES,
+    HANDSHAKE_TIMEOUT, MAX_RUNTIME_FRAME_BYTES,
 };
 use wasmtime::component::{Component, HasSelf, Linker};
 use wasmtime::{Config, Engine, Store, StoreLimits, StoreLimitsBuilder, Trap};
@@ -168,7 +168,6 @@ struct ComponentState {
     host_calls: Option<SharedRuntimeHostCalls>,
     canceled: Arc<AtomicBool>,
     log_bytes: usize,
-    host_call_count: usize,
 }
 
 impl vqro::extension::types::Host for ComponentState {}
@@ -178,12 +177,6 @@ impl vqro::extension::host::Host for ComponentState {
         &mut self,
         request: Vec<u8>,
     ) -> wasmtime::Result<Result<Vec<u8>, vqro::extension::host::HostError>> {
-        if self.host_call_count >= MAX_HOST_CALLS_PER_INVOCATION {
-            return Err(wasmtime::Error::msg(
-                "component exceeded the host-call bound",
-            ));
-        }
-        self.host_call_count += 1;
         if request.len() > MAX_RUNTIME_FRAME_BYTES {
             return Ok(Err(vqro::extension::host::HostError {
                 code: "frame_too_large".into(),
@@ -291,7 +284,6 @@ impl ComponentRuntime {
                 host_calls: None,
                 canceled: Arc::clone(&canceled_state),
                 log_bytes: 0,
-                host_call_count: 0,
             },
         );
         store.limiter(|state| &mut state.limits);
@@ -382,7 +374,6 @@ impl ExtensionRuntime for ComponentRuntime {
         }
         self.store.data_mut().host_calls = Some(Arc::clone(host_calls));
         self.store.data_mut().log_bytes = 0;
-        self.store.data_mut().host_call_count = 0;
         let result = call_with_interrupt(
             &self.engine,
             &mut self.store,
@@ -1304,6 +1295,9 @@ mod tests {
         runtime.fuel_per_invocation = 1;
         let identity = factory.identity(31);
         let host_calls = Arc::new(super::super::RuntimeHostCallRouter::new(
+            identity.clone(),
+            identity.namespace.clone(),
+            std::collections::BTreeMap::new(),
             super::super::DisabledHostCalls {
                 identity: identity.clone(),
                 grants: factory.grants(),
@@ -1376,7 +1370,7 @@ mod tests {
     }
 
     #[test]
-    fn component_executes_staged_host_state_snapshot_through_actor() {
+    fn component_event_harness_handles_unrelated_state_snapshot_first() {
         let wat = include_str!("../../tests/fixtures/extension-component-service.wat")
             .replace(";; INVOKE_BODY", HOST_CALL_BODY)
             .replace(
@@ -1424,6 +1418,8 @@ mod tests {
             .try_send(crate::events::AppEvent::ExtensionHostStateCall(Box::new(
                 crate::extension_host_state::HostStateActorRequest {
                     lease: decoy_lease,
+                    call_id: "decoy".into(),
+                    capability: crate::extension_host_state::HOST_STATE_READ_CAPABILITY.into(),
                     method: crate::extension_host_state::HostStateActorMethod::Snapshot,
                     respond_to: decoy_respond_to,
                 },
@@ -1451,19 +1447,18 @@ mod tests {
             "component host-state snapshot",
             join,
             |event| {
-                matches!(
+                super::super::host_state_actor_request_matches(
                     event,
-                    crate::events::AppEvent::ExtensionHostStateCall(request)
-                        if request.lease.outer_request_id == "1"
-                            && request.lease.identity.package_id == "example.component"
-                            && request.lease.identity.namespace == "example.component"
-                            && request.lease.identity.service_id == "echo"
-                            && request.lease.identity.generation == 26
-                            && request.lease.namespace == "example.component"
-                            && matches!(
-                                &request.method,
-                                crate::extension_host_state::HostStateActorMethod::Snapshot
-                            )
+                    "1",
+                    &super::super::RuntimeIdentityV1 {
+                        package_id: "example.component".into(),
+                        namespace: "example.component".into(),
+                        service_id: "echo".into(),
+                        generation: 26,
+                    },
+                    "call-1",
+                    crate::extension_host_state::HOST_STATE_READ_CAPABILITY,
+                    crate::extension_host_state::HOST_STATE_SNAPSHOT_METHOD,
                 )
             },
         );
@@ -1471,6 +1466,117 @@ mod tests {
         let response = join.join().unwrap().unwrap();
         assert_eq!(response["result"]["contract"], "host.state.v1");
         assert_eq!(response["result"]["namespace"], "example.component");
+        cleanup(root);
+    }
+
+    #[test]
+    fn component_uses_one_composite_state_and_terminal_read_context() {
+        let terminal_call = r#"{\22call_id\22:\22terminals\22,\22capability\22:\22host.terminals.read\22,\22depth\22:1,\22identity\22:{\22generation\22:26,\22namespace\22:\22example.component\22,\22package_id\22:\22example.component\22,\22service_id\22:\22echo\22},\22method\22:\22terminals.snapshot\22,\22namespace\22:\22example.component\22,\22params\22:{\22contract\22:\22host.terminals.v1\22},\22type\22:\22host_call\22}"#;
+        let state_call = r#"{\22call_id\22:\22state\22,\22capability\22:\22host.state.read\22,\22depth\22:1,\22identity\22:{\22generation\22:26,\22namespace\22:\22example.component\22,\22package_id\22:\22example.component\22,\22service_id\22:\22echo\22},\22method\22:\22state.snapshot\22,\22namespace\22:\22example.component\22,\22params\22:{\22contract\22:\22host.state.v1\22},\22type\22:\22host_call\22}"#;
+        let body = r#"
+    i32.const 500 i32.const 305 i32.const 2000 call $host-call
+    i32.const 2000 i32.load8_u
+    if unreachable end
+    i32.const 1000 i32.const 289 i32.const 4000 call $host-call
+    i32.const 4000 i32.load8_u
+    if unreachable end
+    i32.const 64 i32.const 0 i32.store8
+    i32.const 68 i32.const 4004 i32.load i32.store
+    i32.const 72 i32.const 4008 i32.load i32.store
+    i32.const 64
+"#;
+        let mut wat = include_str!("../../tests/fixtures/extension-component-service.wat")
+            .replace(";; INVOKE_BODY", body);
+        let data_start = wat.find("  (data (i32.const 500)").unwrap();
+        let data_end = wat[data_start..].find('\n').unwrap() + data_start;
+        wat.replace_range(
+            data_start..data_end,
+            &format!(
+                "  (data (i32.const 500) \"{terminal_call}\")\n  (data (i32.const 1000) \"{state_call}\")"
+            ),
+        );
+        let component = component_bytes_from_wat(&wat);
+        let (root, installed) = install_component(
+            &component,
+            &[
+                crate::extension_host_state::HOST_STATE_READ_CAPABILITY,
+                crate::extension_host_terminals::HOST_TERMINALS_READ_CAPABILITY,
+            ],
+        );
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = crate::app::App::new(
+            &crate::config::Config::default(),
+            crate::app::AppPolicy::TEST,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        let _ = crate::extension_host_terminals::install_test_package_and_authorize(
+            &mut app,
+            &installed,
+            "echo",
+            "example.component",
+            26,
+        );
+        let binding = crate::extension_host_state::HostProviderBinding::from_installed(
+            &installed,
+            "echo",
+            "example.component",
+        )
+        .unwrap();
+        let workspace_id = app.state.workspaces[0].id.clone();
+        let tab_id = app.state.workspaces[0].tabs[0].id.clone();
+        let authorization = app
+            .stage_host_read_authorization(
+                &binding,
+                crate::extension_host_invocation::HostReadInvocationPurpose {
+                    state_snapshot: true,
+                    terminals: Some((workspace_id, tab_id)),
+                },
+                5,
+                7,
+                26,
+            )
+            .unwrap();
+        let factory =
+            super::super::RuntimeFactory::installed(&installed, "echo", "example.component")
+                .unwrap();
+        let canceled = Arc::new(AtomicBool::new(false));
+        let join = std::thread::spawn(move || {
+            let mut dispatcher =
+                super::super::ExtensionRuntimeDispatcher::start(&factory, 26, canceled.as_ref())
+                    .unwrap();
+            dispatcher.invoke_with_host_reads(
+                "conformance.echo",
+                serde_json::json!({}),
+                26,
+                Instant::now() + Duration::from_millis(750),
+                canceled,
+                authorization,
+            )
+        });
+        let join = super::super::handle_app_events_until(
+            &mut app,
+            "component composite reads",
+            join,
+            |event| {
+                super::super::host_state_actor_request_matches(
+                    event,
+                    "1",
+                    &super::super::RuntimeIdentityV1 {
+                        package_id: "example.component".into(),
+                        namespace: "example.component".into(),
+                        service_id: "echo".into(),
+                        generation: 26,
+                    },
+                    "state",
+                    crate::extension_host_state::HOST_STATE_READ_CAPABILITY,
+                    crate::extension_host_state::HOST_STATE_SNAPSHOT_METHOD,
+                )
+            },
+        );
+        let response = join.join().unwrap().unwrap();
+        assert_eq!(response["result"]["contract"], "host.state.v1");
         cleanup(root);
     }
 
@@ -1528,8 +1634,18 @@ mod tests {
                 authorization,
             )
         });
+        let expected_identity = super::super::RuntimeIdentityV1 {
+            package_id: "example.component".into(),
+            namespace: "example.component".into(),
+            service_id: "echo".into(),
+            generation: 26,
+        };
         let capture = super::super::take_host_terminals_actor_request(
             &mut app,
+            "1",
+            &expected_identity,
+            "call-1",
+            crate::extension_host_terminals::HOST_TERMINALS_READ_CAPABILITY,
             crate::extension_host_terminals::HostTerminalsActorMethod::Capture,
             "component terminal capture",
         );
@@ -1537,6 +1653,10 @@ mod tests {
         app.state.workspaces[0].tabs[0].id = crate::workspace::TabId::alloc().unwrap();
         let validate = super::super::take_host_terminals_actor_request(
             &mut app,
+            "1",
+            &expected_identity,
+            "call-1",
+            crate::extension_host_terminals::HOST_TERMINALS_READ_CAPABILITY,
             crate::extension_host_terminals::HostTerminalsActorMethod::Validate,
             "component terminal final authorization",
         );
@@ -1637,27 +1757,33 @@ mod tests {
                 "component host-state transaction",
                 join,
                 |event| {
-                    matches!(
+                    let outer_request_id = if expected_revision == 1 { "1" } else { "2" };
+                    let call_id = if expected_revision == 1 {
+                        "set-null"
+                    } else {
+                        "delete-null"
+                    };
+                    super::super::host_state_actor_request_matches(
+                        event,
+                        outer_request_id,
+                        &super::super::RuntimeIdentityV1 {
+                            package_id: "example.component".into(),
+                            namespace: "example.component".into(),
+                            service_id: "echo".into(),
+                            generation: 26,
+                        },
+                        call_id,
+                        crate::extension_host_state::HOST_STATE_WRITE_CAPABILITY,
+                        crate::extension_host_state::HOST_STATE_TRANSACT_METHOD,
+                    ) && matches!(
                         event,
                         crate::events::AppEvent::ExtensionHostStateCall(request)
-                            if request.lease.outer_request_id
-                                == if expected_revision == 1 { "1" } else { "2" }
-                                && request.lease.identity.package_id == "example.component"
-                                && request.lease.identity.namespace == "example.component"
-                                && request.lease.identity.service_id == "echo"
-                                && request.lease.identity.generation == 26
-                                && request.lease.namespace == "example.component"
-                                && matches!(
-                                    &request.method,
-                                    crate::extension_host_state::HostStateActorMethod::Transact(transaction)
-                                        if transaction.expected_revision == expected_revision - 1
-                                            && transaction.idempotency_key
-                                                == if expected_revision == 1 {
-                                                    "set-null"
-                                                } else {
-                                                    "delete-null"
-                                                }
-                                )
+                            if matches!(
+                                &request.method,
+                                crate::extension_host_state::HostStateActorMethod::Transact(transaction)
+                                    if transaction.expected_revision == expected_revision - 1
+                                        && transaction.idempotency_key == call_id
+                            )
                     )
                 },
             );

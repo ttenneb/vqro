@@ -7,6 +7,8 @@ pub(crate) use collections::DeferredHostDocumentSnapshot;
 pub(crate) use collections::HostDocumentConfirmationGrant;
 mod delegations;
 mod env;
+#[cfg(test)]
+mod extension_invocation;
 pub(crate) mod extension_state;
 mod extension_terminals;
 mod extensions;

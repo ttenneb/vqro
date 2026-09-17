@@ -30,6 +30,8 @@ mod detect;
 mod events;
 mod extension_artifact;
 pub mod extension_contract;
+#[cfg(test)]
+mod extension_host_invocation;
 mod extension_host_state;
 mod extension_host_terminals;
 pub mod extension_package;

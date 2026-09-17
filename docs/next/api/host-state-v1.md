@@ -1,6 +1,6 @@
 # `host.state.v1` (staged)
 
-`host.state.v1` is staged infrastructure for package-runtime conformance. It is **not generally available**: production package activation does not yet issue host-state leases. Legacy services and package preflight receive no host calls.
+`host.state.v1` is staged infrastructure for package-runtime conformance. It is **not generally available**: production package activation does not yet issue host-state leases. Legacy services and package preflight receive no host calls. Read-only conformance invocations may receive `state.snapshot` together with `terminals.snapshot` through one atomically staged package-bound context. That composite context never grants `state.transact`; write conformance remains on a separate staged path.
 
 The contract wraps the existing `DurableExtensionStateV1` authority; it does not create another store.
 

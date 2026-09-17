@@ -10,8 +10,7 @@ use serde::{Deserialize, Serialize};
 use super::{
     ExtensionRuntime, NegotiatedRuntimeDescriptor, RuntimeError, RuntimeGrants, RuntimeHostCallV1,
     RuntimeIdentityV1, RuntimeRequestV1, RuntimeStopReason, SharedRuntimeHostCalls,
-    HANDSHAKE_TIMEOUT, MAX_HOST_CALLS_PER_INVOCATION, MAX_RUNTIME_FRAME_BYTES,
-    MAX_RUNTIME_QUEUE_DEPTH,
+    HANDSHAKE_TIMEOUT, MAX_RUNTIME_FRAME_BYTES, MAX_RUNTIME_QUEUE_DEPTH,
 };
 use RuntimeError as ExtensionServiceError;
 
@@ -557,7 +556,6 @@ impl ExtensionRuntime for ProcessRuntime {
             method: request.method.clone(),
             params: request.params.clone(),
         })?;
-        let mut host_call_count = 0_usize;
         loop {
             let frame = self.recv_frame_cancellable(deadline, canceled)?;
             let envelope: ProcessInboundEnvelope =
@@ -588,12 +586,6 @@ impl ExtensionRuntime for ProcessRuntime {
                     };
                 }
                 ProcessInboundEnvelope::HostCall(call) => {
-                    host_call_count += 1;
-                    if host_call_count > MAX_HOST_CALLS_PER_INVOCATION {
-                        return Err(ExtensionServiceError::Protocol(
-                            "service exceeded the host-call bound".into(),
-                        ));
-                    }
                     let response = host_calls.handle(call);
                     self.send_json(&response)?;
                 }
@@ -1122,6 +1114,103 @@ esac
 
     #[cfg(unix)]
     #[test]
+    fn terminal_wrapper_does_not_pre_reject_an_ungranted_no_call_invocation() {
+        let script = r#"#!/bin/sh
+printf '%s\n' '{"type":"hello","protocol":2,"service_id":"echo","requested_capabilities":[],"methods":["conformance.echo"]}'
+IFS= read -r welcome
+IFS= read -r request
+id=$(printf '%s' "$request" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
+printf '{"type":"response","id":%s,"result":"ran"}\n' "$id"
+"#;
+        let (root, installed) = install_package_bytes(process_package_with(script, &[], &[], &[]));
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = crate::app::App::new(
+            &crate::config::Config::default(),
+            crate::app::AppPolicy::TEST,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        let authorization = crate::extension_host_terminals::install_test_package_and_authorize(
+            &mut app,
+            &installed,
+            "echo",
+            "example.runtime",
+            9,
+        );
+        let factory =
+            super::super::RuntimeFactory::installed_process(&installed, "echo", "example.runtime")
+                .unwrap();
+        let canceled = Arc::new(AtomicBool::new(false));
+        let mut dispatcher =
+            super::super::ExtensionRuntimeDispatcher::start(&factory, 9, canceled.as_ref())
+                .unwrap();
+        let result = dispatcher
+            .invoke_with_host_terminals(
+                "conformance.echo",
+                serde_json::json!({}),
+                9,
+                Instant::now() + Duration::from_millis(750),
+                canceled,
+                authorization,
+            )
+            .unwrap();
+        assert_eq!(result, "ran");
+        cleanup_package_root(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn terminal_wrapper_reports_capability_denied_for_an_ungranted_attempt() {
+        let script = r#"#!/bin/sh
+printf '%s\n' '{"type":"hello","protocol":2,"service_id":"echo","requested_capabilities":[],"methods":["conformance.echo"]}'
+IFS= read -r welcome
+IFS= read -r request
+printf '%s\n' '{"type":"host_call","call_id":"terminal","identity":{"package_id":"example.runtime","namespace":"example.runtime","service_id":"echo","generation":9},"depth":1,"capability":"host.terminals.read","method":"terminals.snapshot","namespace":"example.runtime","params":{"contract":"host.terminals.v1"}}'
+IFS= read -r host_response
+id=$(printf '%s' "$request" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
+printf '{"type":"response","id":%s,"result":%s}\n' "$id" "$host_response"
+"#;
+        let (root, installed) = install_package_bytes(process_package_with(script, &[], &[], &[]));
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = crate::app::App::new(
+            &crate::config::Config::default(),
+            crate::app::AppPolicy::TEST,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        let authorization = crate::extension_host_terminals::install_test_package_and_authorize(
+            &mut app,
+            &installed,
+            "echo",
+            "example.runtime",
+            9,
+        );
+        let factory =
+            super::super::RuntimeFactory::installed_process(&installed, "echo", "example.runtime")
+                .unwrap();
+        let canceled = Arc::new(AtomicBool::new(false));
+        let mut dispatcher =
+            super::super::ExtensionRuntimeDispatcher::start(&factory, 9, canceled.as_ref())
+                .unwrap();
+        let result = dispatcher
+            .invoke_with_host_terminals(
+                "conformance.echo",
+                serde_json::json!({}),
+                9,
+                Instant::now() + Duration::from_millis(750),
+                canceled,
+                authorization,
+            )
+            .unwrap();
+        assert_eq!(result["error"]["code"], "capability_denied");
+        assert!(app.event_rx.try_recv().is_err());
+        cleanup_package_root(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn installed_process_executes_staged_host_state_snapshot_through_actor() {
         let script = r#"#!/bin/sh
 printf '%s\n' '{"type":"hello","protocol":2,"service_id":"echo","requested_capabilities":[],"methods":["conformance.echo"]}'
@@ -1175,19 +1264,18 @@ printf '{"type":"response","id":%s,"result":%s}\n' "$id" "$host_response"
             "process host-state snapshot",
             join,
             |event| {
-                matches!(
+                super::super::host_state_actor_request_matches(
                     event,
-                    crate::events::AppEvent::ExtensionHostStateCall(request)
-                        if request.lease.outer_request_id == "1"
-                            && request.lease.identity.package_id == "example.runtime"
-                            && request.lease.identity.namespace == "example.runtime"
-                            && request.lease.identity.service_id == "echo"
-                            && request.lease.identity.generation == 9
-                            && request.lease.namespace == "example.runtime"
-                            && matches!(
-                                &request.method,
-                                crate::extension_host_state::HostStateActorMethod::Snapshot
-                            )
+                    "1",
+                    &super::super::RuntimeIdentityV1 {
+                        package_id: "example.runtime".into(),
+                        namespace: "example.runtime".into(),
+                        service_id: "echo".into(),
+                        generation: 9,
+                    },
+                    "call-1",
+                    crate::extension_host_state::HOST_STATE_READ_CAPABILITY,
+                    crate::extension_host_state::HOST_STATE_SNAPSHOT_METHOD,
                 )
             },
         );
@@ -1199,7 +1287,111 @@ printf '{"type":"response","id":%s,"result":%s}\n' "$id" "$host_response"
 
     #[cfg(unix)]
     #[test]
-    fn installed_process_terminal_snapshot_rejects_catalog_change_at_final_authorization() {
+    fn installed_process_uses_one_composite_state_and_terminal_read_context() {
+        let script = r#"#!/bin/sh
+printf '%s\n' '{"type":"hello","protocol":2,"service_id":"echo","requested_capabilities":[],"methods":["conformance.echo"]}'
+IFS= read -r welcome
+IFS= read -r request
+printf '%s\n' '{"type":"host_call","call_id":"terminals","identity":{"package_id":"example.runtime","namespace":"example.runtime","service_id":"echo","generation":9},"depth":1,"capability":"host.terminals.read","method":"terminals.snapshot","namespace":"example.runtime","params":{"contract":"host.terminals.v1"}}'
+IFS= read -r terminal_response
+printf '%s\n' '{"type":"host_call","call_id":"state","identity":{"package_id":"example.runtime","namespace":"example.runtime","service_id":"echo","generation":9},"depth":1,"capability":"host.state.read","method":"state.snapshot","namespace":"example.runtime","params":{"contract":"host.state.v1"}}'
+IFS= read -r state_response
+id=$(printf '%s' "$request" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
+printf '{"type":"response","id":%s,"result":{"terminals":%s,"state":%s}}\n' "$id" "$terminal_response" "$state_response"
+"#;
+        let (root, installed) = install_package_bytes(process_package_with(
+            script,
+            &[],
+            &[
+                crate::extension_host_state::HOST_STATE_READ_CAPABILITY,
+                crate::extension_host_terminals::HOST_TERMINALS_READ_CAPABILITY,
+            ],
+            &[],
+        ));
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = crate::app::App::new(
+            &crate::config::Config::default(),
+            crate::app::AppPolicy::TEST,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        let _ = crate::extension_host_terminals::install_test_package_and_authorize(
+            &mut app,
+            &installed,
+            "echo",
+            "example.runtime",
+            9,
+        );
+        let binding = crate::extension_host_state::HostProviderBinding::from_installed(
+            &installed,
+            "echo",
+            "example.runtime",
+        )
+        .unwrap();
+        let workspace_id = app.state.workspaces[0].id.clone();
+        let tab_id = app.state.workspaces[0].tabs[0].id.clone();
+        let authorization = app
+            .stage_host_read_authorization(
+                &binding,
+                crate::extension_host_invocation::HostReadInvocationPurpose {
+                    state_snapshot: true,
+                    terminals: Some((workspace_id, tab_id)),
+                },
+                5,
+                7,
+                9,
+            )
+            .unwrap();
+        let factory =
+            super::super::RuntimeFactory::installed_process(&installed, "echo", "example.runtime")
+                .unwrap();
+        let canceled = Arc::new(AtomicBool::new(false));
+        let join = std::thread::spawn(move || {
+            let mut dispatcher =
+                super::super::ExtensionRuntimeDispatcher::start(&factory, 9, canceled.as_ref())
+                    .unwrap();
+            dispatcher.invoke_with_host_reads(
+                "conformance.echo",
+                serde_json::json!({}),
+                9,
+                Instant::now() + Duration::from_millis(750),
+                canceled,
+                authorization,
+            )
+        });
+        let join = super::super::handle_app_events_until(
+            &mut app,
+            "process composite reads",
+            join,
+            |event| {
+                super::super::host_state_actor_request_matches(
+                    event,
+                    "1",
+                    &super::super::RuntimeIdentityV1 {
+                        package_id: "example.runtime".into(),
+                        namespace: "example.runtime".into(),
+                        service_id: "echo".into(),
+                        generation: 9,
+                    },
+                    "state",
+                    crate::extension_host_state::HOST_STATE_READ_CAPABILITY,
+                    crate::extension_host_state::HOST_STATE_SNAPSHOT_METHOD,
+                )
+            },
+        );
+        let response = join.join().unwrap().unwrap();
+        assert_eq!(
+            response["terminals"]["result"]["contract"],
+            "host.terminals.v1"
+        );
+        assert_eq!(response["state"]["result"]["contract"], "host.state.v1");
+        cleanup_package_root(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn terminal_harness_handles_unrelated_same_method_before_catalog_race() {
         let script = r#"#!/bin/sh
 printf '%s\n' '{"type":"hello","protocol":2,"service_id":"echo","requested_capabilities":[],"methods":["conformance.echo"]}'
 IFS= read -r welcome
@@ -1230,6 +1422,31 @@ printf '{"type":"response","id":%s,"result":%s}\n' "$id" "$host_response"
             "example.runtime",
             9,
         );
+        let expected_identity = super::super::RuntimeIdentityV1 {
+            package_id: "example.runtime".into(),
+            namespace: "example.runtime".into(),
+            service_id: "echo".into(),
+            generation: 9,
+        };
+        let decoy_lease = authorization.bind(
+            "unrelated".into(),
+            expected_identity.clone(),
+            Instant::now() + Duration::from_secs(2),
+            Arc::new(AtomicBool::new(false)),
+        );
+        let (decoy_respond_to, decoy_response) = std::sync::mpsc::sync_channel(1);
+        app.event_tx
+            .try_send(crate::events::AppEvent::ExtensionHostTerminalsCall(
+                Box::new(crate::extension_host_terminals::HostTerminalsActorRequest {
+                    lease: decoy_lease,
+                    call_id: "call-1".into(),
+                    capability: crate::extension_host_terminals::HOST_TERMINALS_READ_CAPABILITY
+                        .into(),
+                    method: crate::extension_host_terminals::HostTerminalsActorMethod::Capture,
+                    respond_to: decoy_respond_to,
+                }),
+            ))
+            .unwrap();
         let factory =
             super::super::RuntimeFactory::installed_process(&installed, "echo", "example.runtime")
                 .unwrap();
@@ -1249,13 +1466,22 @@ printf '{"type":"response","id":%s,"result":%s}\n' "$id" "$host_response"
         });
         let capture = super::super::take_host_terminals_actor_request(
             &mut app,
+            "1",
+            &expected_identity,
+            "call-1",
+            crate::extension_host_terminals::HOST_TERMINALS_READ_CAPABILITY,
             crate::extension_host_terminals::HostTerminalsActorMethod::Capture,
             "process terminal capture",
         );
+        assert!(decoy_response.try_recv().unwrap().is_ok());
         app.handle_extension_host_terminals_call(*capture);
         app.marketplace_state.packages.revision += 1;
         let validate = super::super::take_host_terminals_actor_request(
             &mut app,
+            "1",
+            &expected_identity,
+            "call-1",
+            crate::extension_host_terminals::HOST_TERMINALS_READ_CAPABILITY,
             crate::extension_host_terminals::HostTerminalsActorMethod::Validate,
             "process terminal final authorization",
         );
@@ -1341,27 +1567,33 @@ done
                 "process host-state transaction",
                 join,
                 |event| {
-                    matches!(
+                    let outer_request_id = if expected_revision == 1 { "1" } else { "2" };
+                    let call_id = if expected_revision == 1 {
+                        "set-null"
+                    } else {
+                        "delete-null"
+                    };
+                    super::super::host_state_actor_request_matches(
+                        event,
+                        outer_request_id,
+                        &super::super::RuntimeIdentityV1 {
+                            package_id: "example.runtime".into(),
+                            namespace: "example.runtime".into(),
+                            service_id: "echo".into(),
+                            generation: 19,
+                        },
+                        call_id,
+                        crate::extension_host_state::HOST_STATE_WRITE_CAPABILITY,
+                        crate::extension_host_state::HOST_STATE_TRANSACT_METHOD,
+                    ) && matches!(
                         event,
                         crate::events::AppEvent::ExtensionHostStateCall(request)
-                            if request.lease.outer_request_id
-                                == if expected_revision == 1 { "1" } else { "2" }
-                                && request.lease.identity.package_id == "example.runtime"
-                                && request.lease.identity.namespace == "example.runtime"
-                                && request.lease.identity.service_id == "echo"
-                                && request.lease.identity.generation == 19
-                                && request.lease.namespace == "example.runtime"
-                                && matches!(
-                                    &request.method,
-                                    crate::extension_host_state::HostStateActorMethod::Transact(transaction)
-                                        if transaction.expected_revision == expected_revision - 1
-                                            && transaction.idempotency_key
-                                                == if expected_revision == 1 {
-                                                    "set-null"
-                                                } else {
-                                                    "delete-null"
-                                                }
-                                )
+                            if matches!(
+                                &request.method,
+                                crate::extension_host_state::HostStateActorMethod::Transact(transaction)
+                                    if transaction.expected_revision == expected_revision - 1
+                                        && transaction.idempotency_key == call_id
+                            )
                     )
                 },
             );

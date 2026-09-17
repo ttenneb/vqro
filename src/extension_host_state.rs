@@ -185,6 +185,8 @@ pub(crate) struct HostProviderBinding {
     namespace: String,
     artifact_sha256: String,
     artifact_version: String,
+    #[cfg(test)]
+    capabilities: BTreeSet<String>,
 }
 
 impl HostProviderBinding {
@@ -225,6 +227,13 @@ impl HostProviderBinding {
             namespace: namespace.into(),
             artifact_sha256: installed.package_sha256.clone(),
             artifact_version: installed.version.clone(),
+            #[cfg(test)]
+            capabilities: manifest
+                .services
+                .iter()
+                .find(|service| service.id == service_id)
+                .map(|service| service.capabilities.iter().cloned().collect())
+                .ok_or_else(|| "package service is not declared".to_string())?,
         })
     }
 
@@ -249,6 +258,11 @@ impl HostProviderBinding {
     }
 
     #[cfg(test)]
+    pub(crate) fn capabilities(&self) -> &BTreeSet<String> {
+        &self.capabilities
+    }
+
+    #[cfg(test)]
     pub(crate) fn test_new(
         package_id: &str,
         service_id: &str,
@@ -262,6 +276,12 @@ impl HostProviderBinding {
             namespace: namespace.into(),
             artifact_sha256,
             artifact_version: artifact_version.into(),
+            capabilities: [
+                HOST_STATE_READ_CAPABILITY.to_string(),
+                crate::extension_host_terminals::HOST_TERMINALS_READ_CAPABILITY.to_string(),
+            ]
+            .into_iter()
+            .collect(),
         }
     }
 }
@@ -352,6 +372,10 @@ pub(crate) enum HostStateActorMethod {
 #[derive(Debug)]
 pub(crate) struct HostStateActorRequest {
     pub(crate) lease: HostStateInvocationLease,
+    #[cfg(test)]
+    pub(crate) call_id: String,
+    #[cfg(test)]
+    pub(crate) capability: String,
     pub(crate) method: HostStateActorMethod,
     pub(crate) respond_to: mpsc::SyncSender<Result<serde_json::Value, RuntimeErrorBodyV1>>,
 }
@@ -545,6 +569,10 @@ impl RuntimeHostCallHandler for HostStateCallHandler {
         let (respond_to, response) = mpsc::sync_channel(1);
         let request = HostStateActorRequest {
             lease: self.lease.clone(),
+            #[cfg(test)]
+            call_id: call.call_id.clone(),
+            #[cfg(test)]
+            capability: call.capability.clone(),
             method,
             respond_to,
         };
