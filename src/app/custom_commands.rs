@@ -384,6 +384,7 @@ impl App {
             .ok_or_else(|| std::io::Error::other("active workspace disappeared"))?;
         self.admit_new_panes(Some(ws_idx), Some(tab_idx), 1)
             .map_err(|error| std::io::Error::other(error.to_string()))?;
+        let terminal_id = self.allocate_terminal_id()?;
 
         let ws = self
             .state
@@ -403,6 +404,7 @@ impl App {
             )
         });
         let new_pane = ws.split_focused_command(
+            terminal_id,
             Direction::Horizontal,
             new_rows,
             new_cols,
@@ -489,6 +491,7 @@ impl App {
             })
         });
 
+        let terminal_id = self.allocate_terminal_id()?;
         let (tab_idx, new_pane, workspace_id) = {
             let ws = self
                 .state
@@ -497,6 +500,7 @@ impl App {
                 .ok_or_else(|| std::io::Error::other("active workspace disappeared"))?;
             let previous_zoomed = ws.active_tab().map(|tab| tab.zoomed).unwrap_or(false);
             let result = ws.split_pane_argv_command(
+                terminal_id,
                 previous_focus,
                 Direction::Horizontal,
                 new_rows,

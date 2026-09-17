@@ -123,11 +123,16 @@ impl App {
             crate::api::schema::SplitDirection::Down => Direction::Vertical,
         };
         let (rows, cols) = self.state.estimate_pane_size();
+        let terminal_id = match self.allocate_terminal_id() {
+            Ok(id) => id,
+            Err(error) => return encode_error(id, "plugin_pane_open_failed", error.to_string()),
+        };
         let previous_focus = self.state.current_pane_focus_target();
         let Some(ws) = self.state.workspaces.get_mut(ws_idx) else {
             return encode_error(id, "workspace_not_found", "workspace not found");
         };
         let result = ws.split_pane_argv_command(
+            terminal_id,
             target_pane,
             direction,
             rows.max(4),
@@ -207,10 +212,15 @@ impl App {
                 Err((code, message)) => return encode_error(id, &code, message),
             };
         let (rows, cols) = self.state.estimate_pane_size();
+        let terminal_id = match self.allocate_terminal_id() {
+            Ok(id) => id,
+            Err(error) => return encode_error(id, "plugin_pane_open_failed", error.to_string()),
+        };
         let Some(ws) = self.state.workspaces.get_mut(ws_idx) else {
             return encode_error(id, "workspace_not_found", "workspace not found");
         };
         let (tab_idx, terminal, runtime) = match ws.create_tab_argv_command(
+            terminal_id,
             rows.max(4),
             cols.max(10),
             cwd,

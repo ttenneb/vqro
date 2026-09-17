@@ -5,7 +5,8 @@ pub mod support;
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::os::unix::net::UnixStream;
+use std::os::fd::AsRawFd;
+use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, MutexGuard, OnceLock};
@@ -281,6 +282,23 @@ fn assert_ok(response: serde_json::Value) {
         response.get("result").is_some(),
         "api request failed: {response}"
     );
+}
+
+fn terminal_id_for_pane(socket_path: &Path, pane_id: &str) -> String {
+    let panes = request(
+        socket_path,
+        serde_json::json!({"id":"test:terminal-identity","method":"pane.list","params":{}}),
+    );
+    panes["result"]["panes"]
+        .as_array()
+        .and_then(|panes| {
+            panes
+                .iter()
+                .find(|pane| pane["pane_id"].as_str() == Some(pane_id))
+        })
+        .and_then(|pane| pane["terminal_id"].as_str())
+        .expect("pane terminal identity")
+        .to_owned()
 }
 
 fn wait_for_api(socket_path: &Path, timeout: Duration) {
@@ -985,6 +1003,9 @@ fn live_handoff_preserves_pane_process_io() {
         .as_str()
         .unwrap()
         .to_string();
+    let terminal_id_before = terminal_id_for_pane(&api_socket, &pane_id);
+    let second_terminal_id_before = terminal_id_for_pane(&api_socket, &second_pane_id);
+    assert_ne!(terminal_id_before, second_terminal_id_before);
 
     let command = format!(
         "sh -c 'echo READY $$ > {}; trap \"echo HUP >> {}\" HUP; while read line; do echo got:$line; echo got:$line >> {}; done'",
@@ -1071,6 +1092,14 @@ fn live_handoff_preserves_pane_process_io() {
     thread::sleep(Duration::from_millis(300));
     wait_for_api(&api_socket, Duration::from_secs(10));
     wait_for_socket(&client_socket, Duration::from_secs(5));
+    assert_eq!(
+        terminal_id_for_pane(&api_socket, &pane_id),
+        terminal_id_before
+    );
+    assert_eq!(
+        terminal_id_for_pane(&api_socket, &second_pane_id),
+        second_terminal_id_before
+    );
     assert_eq!(unsafe { libc::kill(child_pid as libc::pid_t, 0) }, 0);
     assert_eq!(unsafe { libc::kill(second_child_pid as libc::pid_t, 0) }, 0);
     assert!(
@@ -1974,6 +2003,227 @@ fn live_handoff_bad_expected_protocol_rolls_back_old_server() {
     cleanup_test_base(&base);
 }
 
+fn read_handoff_line(stream: &UnixStream) -> String {
+    let mut reader = BufReader::new(stream.try_clone().unwrap());
+    let mut line = String::new();
+    reader.read_line(&mut line).unwrap();
+    line.trim_end().to_string()
+}
+
+fn send_legacy_handoff_fd(stream: &UnixStream, fd: std::os::fd::RawFd) {
+    let mut byte = [1_u8];
+    let mut iov = libc::iovec {
+        iov_base: byte.as_mut_ptr().cast(),
+        iov_len: byte.len(),
+    };
+    let control_len = unsafe { libc::CMSG_SPACE(std::mem::size_of::<libc::c_int>() as _) } as usize;
+    let mut control = vec![0_u8; control_len];
+    let mut message: libc::msghdr = unsafe { std::mem::zeroed() };
+    message.msg_iov = &mut iov;
+    message.msg_iovlen = 1;
+    message.msg_control = control.as_mut_ptr().cast();
+    message.msg_controllen = control.len();
+    unsafe {
+        let header = libc::CMSG_FIRSTHDR(&message);
+        (*header).cmsg_level = libc::SOL_SOCKET;
+        (*header).cmsg_type = libc::SCM_RIGHTS;
+        (*header).cmsg_len = libc::CMSG_LEN(std::mem::size_of::<libc::c_int>() as _) as usize;
+        std::ptr::copy_nonoverlapping(
+            (&fd as *const std::os::fd::RawFd).cast::<u8>(),
+            libc::CMSG_DATA(header),
+            std::mem::size_of::<libc::c_int>(),
+        );
+        message.msg_controllen = (*header).cmsg_len;
+        assert_eq!(libc::sendmsg(stream.as_raw_fd(), &message, 0), 1);
+    }
+}
+
+fn run_legacy_v1_source_harness(commit: bool) {
+    let _lock = test_lock();
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let api_socket = runtime_dir.join("herdr.sock");
+    let client_socket = runtime_dir.join("herdr-client.sock");
+    let handoff_socket = runtime_dir.join("legacy-handoff.sock");
+    fs::create_dir_all(config_home.join("vqro-dev")).unwrap();
+    fs::create_dir_all(&runtime_dir).unwrap();
+    fs::write(
+        config_home.join("vqro-dev/config.toml"),
+        "onboarding = false\n",
+    )
+    .unwrap();
+
+    let pair = native_pty_system()
+        .openpty(PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .unwrap();
+    let mut shell = CommandBuilder::new("/bin/sh");
+    shell.env("TERM", "xterm-256color");
+    let mut shell_child = pair.slave.spawn_command(shell).unwrap();
+    drop(pair.slave);
+    let master_fd = pair.master.as_raw_fd().unwrap();
+    let mut source_reader = pair.master.try_clone_reader().unwrap();
+    let mut source_writer = pair.master.take_writer().unwrap();
+
+    let snapshot = if commit {
+        serde_json::json!({
+            "version": 4,
+            "workspaces": [],
+            "repositories": [],
+            "space_order": [],
+            "active": null,
+            "selected": 0
+        })
+    } else {
+        serde_json::json!({
+            "version": 4,
+            "workspaces": [{
+                "id": "legacy-w1",
+                "custom_name": "legacy",
+                "identity_cwd": "/tmp",
+                "public_pane_numbers": {"1": 1},
+                "next_public_pane_number": 2,
+                "public_tab_numbers": [1],
+                "next_public_tab_number": 2,
+                "tabs": [{
+                    "custom_name": null,
+                    "layout": {"Pane": 1},
+                    "panes": {"1": {"cwd": "/tmp"}},
+                    "zoomed": false,
+                    "focused": 1,
+                    "root_pane": 1
+                }],
+                "active_tab": 0
+            }],
+            "repositories": [],
+            "space_order": [],
+            "active": 0,
+            "selected": 0
+        })
+    };
+    let panes = if commit {
+        serde_json::json!([])
+    } else {
+        serde_json::json!([{
+            "pane_id": 1,
+            "child_pid": shell_child.process_id(),
+            "rows": 24,
+            "cols": 80,
+            "cell_width_px": 0,
+            "cell_height_px": 0,
+            "keyboard_protocol_flags": 0
+        }])
+    };
+    let manifest = serde_json::json!({
+        "version": 1,
+        "source_version": "legacy-harness",
+        "source_protocol": 22,
+        "expected_version": null,
+        "expected_protocol": null,
+        "snapshot": snapshot,
+        "panes": panes
+    });
+    let session_path = config_home.join("vqro-dev/session.json");
+    let mut legacy_bytes = serde_json::to_vec_pretty(&manifest["snapshot"]).unwrap();
+    legacy_bytes.push(b'\n');
+    fs::write(&session_path, &legacy_bytes).unwrap();
+
+    let listener = UnixListener::bind(&handoff_socket).unwrap();
+    let token = "legacy-token";
+    let mut target = std::process::Command::new(env!("CARGO_BIN_EXE_vqro"))
+        .arg("server")
+        .arg("--handoff-import")
+        .arg(&handoff_socket)
+        .arg(token)
+        .env("XDG_CONFIG_HOME", &config_home)
+        .env("XDG_RUNTIME_DIR", &runtime_dir)
+        .env("VQRO_SOCKET_PATH", &api_socket)
+        .env("VQRO_CLIENT_SOCKET_PATH", &client_socket)
+        .env("SHELL", "/bin/sh")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let (mut stream, _) = listener.accept().unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(30)))
+        .unwrap();
+    assert_eq!(read_handoff_line(&stream), token);
+    serde_json::to_writer(&mut stream, &manifest).unwrap();
+    stream.write_all(b"\n").unwrap();
+    stream.flush().unwrap();
+    assert_eq!(read_handoff_line(&stream), "validated");
+    if !commit {
+        send_legacy_handoff_fd(&stream, master_fd);
+    }
+    assert_eq!(read_handoff_line(&stream), "restored");
+    assert_eq!(read_handoff_line(&stream), "ready");
+    assert!(
+        !api_socket.exists(),
+        "legacy ready must not expose target API"
+    );
+    assert_eq!(fs::read(&session_path).unwrap(), legacy_bytes);
+
+    if commit {
+        stream.write_all(b"committed\n").unwrap();
+        stream.flush().unwrap();
+        drop(source_reader);
+        drop(source_writer);
+        drop(pair.master);
+        assert_eq!(read_handoff_line(&stream), "owned");
+        wait_for_api(&api_socket, Duration::from_secs(10));
+        let published: serde_json::Value =
+            serde_json::from_slice(&fs::read(&session_path).unwrap()).unwrap();
+        assert_eq!(published["version"], 5);
+        assert!(published["workspaces"].as_array().unwrap().is_empty());
+        let _ = request(
+            &api_socket,
+            serde_json::json!({"id":"legacy:stop","method":"server.stop","params":{}}),
+        );
+    } else {
+        drop(stream);
+        assert!(support::wait_until(
+            Duration::from_secs(5),
+            Duration::from_millis(25),
+            || target.try_wait().unwrap().is_some()
+        ));
+        source_writer
+            .write_all(b"echo legacy-rollback-ok\n")
+            .unwrap();
+        source_writer.flush().unwrap();
+        let (found_tx, found_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut output = Vec::new();
+            let mut chunk = [0_u8; 1024];
+            loop {
+                match source_reader.read(&mut chunk) {
+                    Ok(0) | Err(_) => break,
+                    Ok(read) => {
+                        output.extend_from_slice(&chunk[..read]);
+                        if String::from_utf8_lossy(&output).contains("legacy-rollback-ok") {
+                            let _ = found_tx.send(());
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+        found_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(fs::read(&session_path).unwrap(), legacy_bytes);
+    }
+
+    let _ = shell_child.kill();
+    let _ = target.kill();
+    let _ = target.wait();
+    cleanup_test_base(&base);
+}
+
 fn live_handoff_import_failure_rolls_back_old_server_at(failure_point: &str) {
     let _lock = test_lock();
     let base = unique_test_dir();
@@ -1983,13 +2233,48 @@ fn live_handoff_import_failure_rolls_back_old_server_at(failure_point: &str) {
     let client_socket = runtime_dir.join("herdr-client.sock");
     let marker = base.join("child.pid");
     let received_marker = base.join("received");
+    let v1_harness = (failure_point == "v1-only").then(|| {
+        use std::os::unix::fs::PermissionsExt;
 
-    let spawned = spawn_server_with_env(
-        &config_home,
-        &runtime_dir,
-        &api_socket,
-        &[("VQRO_TEST_HANDOFF_IMPORT_FAIL", failure_point)],
-    );
+        fs::create_dir_all(&base).unwrap();
+        let path = base.join("v1-handoff-receiver.py");
+        fs::write(
+            &path,
+            r#"#!/usr/bin/env python3
+import json
+import socket
+import sys
+
+connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+connection.connect(sys.argv[3])
+connection.sendall((sys.argv[4] + "\n").encode())
+line = b""
+while not line.endswith(b"\n"):
+    chunk = connection.recv(4096)
+    if not chunk:
+        raise RuntimeError("source closed before manifest")
+    line += chunk
+manifest = json.loads(line)
+if manifest.get("version") != 2:
+    raise RuntimeError(f"expected handoff v2, got {manifest.get('version')}")
+connection.sendall(b"unsupported handoff version 2\n")
+"#,
+        )
+        .unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    });
+
+    let spawned = if v1_harness.is_some() {
+        spawn_server(&config_home, &runtime_dir, &api_socket)
+    } else {
+        spawn_server_with_env(
+            &config_home,
+            &runtime_dir,
+            &api_socket,
+            &[("VQRO_TEST_HANDOFF_IMPORT_FAIL", failure_point)],
+        )
+    };
     wait_for_socket(&api_socket, Duration::from_secs(10));
     register_runtime_dir(&runtime_dir);
 
@@ -2022,9 +2307,13 @@ fn live_handoff_import_failure_rolls_back_old_server_at(failure_point: &str) {
     let pid_text = fs::read_to_string(&marker).unwrap();
     let child_pid: u32 = pid_text.split_whitespace().last().unwrap().parse().unwrap();
 
+    let params = v1_harness.as_ref().map_or_else(
+        || serde_json::json!({}),
+        |path| serde_json::json!({"import_exe": path}),
+    );
     let failed = request(
         &api_socket,
-        serde_json::json!({"id":"test:handoff-fail","method":"server.live_handoff","params":{}}),
+        serde_json::json!({"id":"test:handoff-fail","method":"server.live_handoff","params":params}),
     );
     assert!(
         failed.get("error").is_some(),
@@ -2047,11 +2336,96 @@ fn live_handoff_import_failure_rolls_back_old_server_at(failure_point: &str) {
         &format!("got:{failure_point}"),
         Duration::from_secs(5),
     );
-
     let _ = request(
         &api_socket,
         serde_json::json!({"id":"test:stop","method":"server.stop","params":{}}),
     );
+    drop(spawned);
+    cleanup_test_base(&base);
+}
+
+#[test]
+fn live_handoff_v2_to_v1_rejection_rolls_back_source_and_preserves_pty() {
+    live_handoff_import_failure_rolls_back_old_server_at("v1-only");
+}
+
+#[test]
+fn legacy_v1_source_precommit_rollback_preserves_v4_and_source_pty() {
+    run_legacy_v1_source_harness(false);
+}
+
+#[test]
+fn legacy_v1_source_commit_publishes_v5_before_target_exposure() {
+    run_legacy_v1_source_harness(true);
+}
+
+#[test]
+fn postcommit_publication_failure_fails_closed_without_source_resume() {
+    let _lock = test_lock();
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let api_socket = runtime_dir.join("herdr.sock");
+    let marker = base.join("child.pid");
+    let spawned = spawn_server_with_env(
+        &config_home,
+        &runtime_dir,
+        &api_socket,
+        &[("VQRO_TEST_HANDOFF_IMPORT_FAIL", "publish_after_commit")],
+    );
+    wait_for_socket(&api_socket, Duration::from_secs(10));
+    register_runtime_dir(&runtime_dir);
+
+    let created = request(
+        &api_socket,
+        serde_json::json!({
+            "id": "test:workspace:create",
+            "method": "workspace.create",
+            "params": {"cwd": "/tmp", "focus": true}
+        }),
+    );
+    let pane_id = created["result"]["root_pane"]["pane_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_ok(request(
+        &api_socket,
+        serde_json::json!({
+            "id": "test:pane:run",
+            "method": "pane.send_input",
+            "params": {
+                "pane_id": pane_id,
+                "text": format!("sh -c 'echo $$ > {}; sleep 30'", marker.display()),
+                "keys": ["Enter"]
+            }
+        }),
+    ));
+    support::wait_for_file(&marker, Duration::from_secs(5));
+    let child_pid: u32 = fs::read_to_string(&marker).unwrap().trim().parse().unwrap();
+    let session_path = config_home.join("vqro-dev/session.json");
+    let legacy = b"{\"version\":4,\"workspaces\":[],\"repositories\":[],\"space_order\":[],\"active\":null,\"selected\":0}\n";
+    fs::write(&session_path, legacy).unwrap();
+
+    let failed = request(
+        &api_socket,
+        serde_json::json!({"id":"test:handoff","method":"server.live_handoff","params":{}}),
+    );
+    assert!(
+        failed.get("error").is_some(),
+        "handoff should fail closed: {failed}"
+    );
+    assert!(support::wait_until(
+        Duration::from_secs(5),
+        Duration::from_millis(25),
+        || UnixStream::connect(&api_socket).is_err()
+    ));
+    assert!(support::wait_until(
+        Duration::from_secs(5),
+        Duration::from_millis(25),
+        || unsafe { libc::kill(child_pid as libc::pid_t, 0) } != 0
+    ));
+    assert_eq!(fs::read(&session_path).unwrap(), legacy);
+
     drop(spawned);
     cleanup_test_base(&base);
 }

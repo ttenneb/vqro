@@ -62,6 +62,10 @@ impl App {
         let host_terminal_theme = self.state.host_terminal_theme;
         let host_terminal_appearance = self.state.host_terminal_appearance;
         let previous_focus = self.state.current_pane_focus_target();
+        let terminal_id = match self.allocate_terminal_id() {
+            Ok(id) => id,
+            Err(error) => return encode_error(id, "pane_split_failed", error.to_string()),
+        };
         let Some(ws) = self.state.workspaces.get_mut(ws_idx) else {
             return encode_error(id, "pane_not_found", "pane not found");
         };
@@ -72,6 +76,7 @@ impl App {
         let shell_config = crate::pane::PaneShellConfig::new(&default_shell, self.state.shell_mode);
         let split_result = match params.ratio {
             Some(ratio) => ws.split_pane_with_ratio(
+                terminal_id,
                 target_pane_id,
                 direction,
                 ratio,
@@ -86,6 +91,7 @@ impl App {
                 params.focus,
             ),
             None => ws.split_pane(
+                terminal_id,
                 target_pane_id,
                 direction,
                 rows,

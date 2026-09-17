@@ -131,8 +131,10 @@ impl App {
     ) -> std::io::Result<usize> {
         self.admit_new_panes(None, None, 1)
             .map_err(|error| std::io::Error::other(error.to_string()))?;
+        let terminal_id = self.allocate_terminal_id()?;
         let (rows, cols) = self.state.estimate_pane_size();
         let (ws, terminal, runtime) = Workspace::new_with_extra_env(
+            terminal_id,
             initial_cwd,
             rows,
             cols,
@@ -450,6 +452,38 @@ mod admission_tests {
     use super::*;
 
     #[test]
+    fn terminal_allocator_collision_then_failure_rejects_before_workspace_pty_spawn() {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &crate::config::Config::default(),
+            crate::app::AppPolicy::TEST,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        app.state.workspaces = vec![crate::workspace::Workspace::test_new("existing")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.ensure_test_terminals();
+        let occupied = app.state.terminals.keys().next().unwrap().clone();
+        app.inject_terminal_id_candidates_for_test([
+            Ok(occupied),
+            Err(std::io::Error::other("injected entropy failure")),
+        ]);
+        let panes_before = crate::layout::PaneId::next_for_test();
+        let runtimes_before = app.terminal_runtimes.len();
+
+        let error = app
+            .create_workspace_with_options(std::path::PathBuf::from("/rejected"), true)
+            .unwrap_err();
+
+        assert_eq!(error.to_string(), "injected entropy failure");
+        assert_eq!(crate::layout::PaneId::next_for_test(), panes_before);
+        assert_eq!(app.terminal_runtimes.len(), runtimes_before);
+        assert_eq!(app.state.workspaces.len(), 1);
+    }
+
+    #[test]
     fn session_pane_limit_rejects_before_identity_runtime_or_persistence_allocation() {
         let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
         let mut app = App::new(
@@ -467,7 +501,6 @@ mod admission_tests {
         app.state.session_dirty = false;
         app.session_save_deadline = None;
         let panes_before = crate::layout::PaneId::next_for_test();
-        let terminals_before = crate::terminal::TerminalId::next_for_test();
         let workspace_count = app.state.workspaces.len();
         let terminal_count = app.state.terminals.len();
         let runtime_count = app.terminal_runtimes.len();
@@ -481,10 +514,6 @@ mod admission_tests {
         assert_eq!(app.state.terminals.len(), terminal_count);
         assert_eq!(app.terminal_runtimes.len(), runtime_count);
         assert_eq!(crate::layout::PaneId::next_for_test(), panes_before);
-        assert_eq!(
-            crate::terminal::TerminalId::next_for_test(),
-            terminals_before
-        );
         assert!(!app.state.session_dirty);
         assert!(app.session_save_deadline.is_none());
     }

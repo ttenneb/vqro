@@ -104,6 +104,7 @@ impl Tab {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         number: usize,
+        terminal_id: TerminalId,
         initial_cwd: PathBuf,
         rows: u16,
         cols: u16,
@@ -129,6 +130,7 @@ impl Tab {
             events,
             render_notify,
             render_dirty,
+            terminal_id,
             None,
         )
     }
@@ -137,6 +139,7 @@ impl Tab {
     #[allow(clippy::too_many_arguments)]
     pub fn new_argv_command(
         number: usize,
+        terminal_id: TerminalId,
         initial_cwd: PathBuf,
         rows: u16,
         cols: u16,
@@ -162,6 +165,7 @@ impl Tab {
             events,
             render_notify,
             render_dirty,
+            terminal_id,
             Some(argv),
         )
     }
@@ -180,6 +184,7 @@ impl Tab {
         events: mpsc::Sender<AppEvent>,
         render_notify: Arc<Notify>,
         render_dirty: Arc<RenderSignal>,
+        terminal_id: TerminalId,
         argv: Option<&[String]>,
     ) -> std::io::Result<(Self, TerminalState, TerminalRuntime)> {
         let (layout, root_id) = TileLayout::new();
@@ -216,7 +221,6 @@ impl Tab {
             )?
         };
 
-        let terminal_id = TerminalId::alloc();
         let terminal = match argv {
             Some(argv) => {
                 TerminalState::new(terminal_id.clone(), initial_cwd).with_launch_argv(argv.to_vec())
@@ -625,6 +629,7 @@ impl Tab {
 
     pub fn split_focused_command(
         &mut self,
+        terminal_id: TerminalId,
         direction: Direction,
         rows: u16,
         cols: u16,
@@ -637,6 +642,7 @@ impl Tab {
     ) -> std::io::Result<NewPane> {
         self.split_pane_with_runtime(
             self.layout.focused(),
+            terminal_id,
             true,
             direction,
             None,
@@ -662,6 +668,7 @@ impl Tab {
     pub(crate) fn split_pane_shell(
         &mut self,
         target: PaneId,
+        terminal_id: TerminalId,
         focus_new_pane: bool,
         direction: Direction,
         ratio: Option<f32>,
@@ -676,6 +683,7 @@ impl Tab {
     ) -> std::io::Result<NewPane> {
         self.split_pane_with_runtime(
             target,
+            terminal_id,
             focus_new_pane,
             direction,
             ratio,
@@ -697,6 +705,7 @@ impl Tab {
     pub(crate) fn split_pane_argv(
         &mut self,
         target: PaneId,
+        terminal_id: TerminalId,
         focus_new_pane: bool,
         direction: Direction,
         ratio: Option<f32>,
@@ -711,6 +720,7 @@ impl Tab {
     ) -> std::io::Result<NewPane> {
         self.split_pane_with_runtime(
             target,
+            terminal_id,
             focus_new_pane,
             direction,
             ratio,
@@ -731,6 +741,7 @@ impl Tab {
     fn split_pane_with_runtime(
         &mut self,
         target: PaneId,
+        terminal_id: TerminalId,
         focus_new_pane: bool,
         direction: Direction,
         ratio: Option<f32>,
@@ -811,7 +822,6 @@ impl Tab {
             ),
         };
         let runtime = runtime?;
-        let terminal_id = TerminalId::alloc();
         let terminal = match launch_argv {
             Some(argv) => {
                 TerminalState::new(terminal_id.clone(), actual_cwd).with_launch_argv(argv)

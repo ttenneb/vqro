@@ -1,7 +1,7 @@
 #[cfg(unix)]
 use std::io::{self, Read, Write};
 #[cfg(unix)]
-use std::os::fd::{AsRawFd, RawFd};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 #[cfg(unix)]
 use std::os::unix::net::{UnixListener, UnixStream};
 #[cfg(unix)]
@@ -17,7 +17,11 @@ use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
 #[cfg(unix)]
-const HANDOFF_VERSION: u32 = 1;
+const HANDOFF_VERSION: u32 = 2;
+#[cfg(unix)]
+const LEGACY_HANDOFF_VERSION: u32 = 1;
+#[cfg(unix)]
+const MAX_HANDOFF_ENVELOPE_BYTES: usize = 16 * 1024 * 1024;
 #[cfg(unix)]
 const READY_TIMEOUT: Duration = Duration::from_secs(30);
 #[cfg(unix)]
@@ -42,6 +46,10 @@ pub(crate) struct HandoffManifest {
     pub expected_protocol: Option<u32>,
     pub snapshot: crate::persist::SessionSnapshot,
     pub panes: Vec<crate::handoff_runtime::HandoffRuntimeState>,
+    /// Snapshot panes intentionally lacking an FD because native agent resume
+    /// is deferred until the replacement has a usable host terminal.
+    #[serde(default)]
+    pub deferred_panes: Vec<u32>,
     /// An outer window title set over the API outlives the server that took the
     /// call, so a handoff carries it rather than falling back to the config.
     /// Absent from manifests written before this field existed.
@@ -52,7 +60,9 @@ pub(crate) struct HandoffManifest {
 #[cfg(unix)]
 pub(crate) struct ReceivedHandoff {
     pub manifest: HandoffManifest,
-    pub fds: Vec<RawFd>,
+    /// Owned until each descriptor is moved into an imported runtime. Any
+    /// early-return path closes the remainder automatically.
+    pub fds: Vec<OwnedFd>,
     pub stream: UnixStream,
 }
 
@@ -190,6 +200,16 @@ pub(crate) fn send_fds_and_wait_restored(stream: &mut UnixStream, fds: &[RawFd])
 }
 
 #[cfg(unix)]
+pub(crate) fn wait_prepared(stream: &mut UnixStream) -> io::Result<()> {
+    stream.set_read_timeout(Some(READY_TIMEOUT))?;
+    let prepared = read_line_unbuffered(&mut *stream)?;
+    if prepared.trim_end() != "prepared" {
+        return Err(io::Error::other("handoff import did not report prepared"));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
 pub(crate) fn wait_ready(stream: &mut UnixStream) -> io::Result<()> {
     stream.set_read_timeout(Some(READY_TIMEOUT))?;
     let ready = read_line_unbuffered(&mut *stream)?;
@@ -226,6 +246,144 @@ pub(crate) fn wait_owned_ack(stream: &mut UnixStream) {
 }
 
 #[cfg(unix)]
+fn validate_and_normalize_manifest(manifest: &mut HandoffManifest) -> io::Result<()> {
+    if manifest.version != LEGACY_HANDOFF_VERSION && manifest.version != HANDOFF_VERSION {
+        return Err(io::Error::other(format!(
+            "unsupported handoff version {}",
+            manifest.version
+        )));
+    }
+
+    let normalized = crate::persist::normalize_terminal_identities(&mut manifest.snapshot, false)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    if manifest.version == HANDOFF_VERSION && normalized {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "handoff v2 snapshot was not terminal-identity normalized",
+        ));
+    }
+    crate::persist::validate_snapshot_admission(&manifest.snapshot).map_err(|error| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("handoff rejected before terminal ownership transfer: {error}"),
+        )
+    })?;
+
+    let mut snapshot_terminals = std::collections::HashMap::new();
+    let mut deferred_eligible_panes = std::collections::HashSet::new();
+    for workspace in &manifest.snapshot.workspaces {
+        for tab in &workspace.tabs {
+            for (&pane_id, pane) in &tab.panes {
+                let terminal_id = crate::persist::terminal_id_for_pane_snapshot(pane)
+                    .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+                if snapshot_terminals.insert(pane_id, terminal_id).is_some() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "handoff snapshot contains duplicate pane identities",
+                    ));
+                }
+                if pane.agent_session.is_some() {
+                    deferred_eligible_panes.insert(pane_id);
+                }
+            }
+        }
+    }
+
+    let mut runtime_panes = std::collections::HashSet::new();
+    let mut runtime_terminals = std::collections::HashSet::new();
+    for runtime in &mut manifest.panes {
+        if !runtime_panes.insert(runtime.pane_id) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "handoff contains duplicate runtime pane entries",
+            ));
+        }
+        let expected = snapshot_terminals.get(&runtime.pane_id).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "handoff runtime has no matching snapshot pane",
+            )
+        })?;
+        if manifest.version == LEGACY_HANDOFF_VERSION && runtime.terminal_id.is_none() {
+            runtime.terminal_id = Some(expected.as_str().to_owned());
+        }
+        let raw = runtime.terminal_id.as_deref().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "handoff v2 runtime is missing terminal identity",
+            )
+        })?;
+        if raw.len() > crate::terminal::MAX_TERMINAL_ID_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "handoff runtime terminal identity exceeds its size limit",
+            ));
+        }
+        let terminal_id = crate::terminal::TerminalId::parse(raw).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "handoff runtime terminal identity is invalid",
+            )
+        })?;
+        if &terminal_id != expected {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "handoff runtime terminal identity does not match snapshot",
+            ));
+        }
+        if !runtime_terminals.insert(terminal_id) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "handoff contains duplicate runtime terminal entries",
+            ));
+        }
+    }
+    if manifest.version == LEGACY_HANDOFF_VERSION && manifest.deferred_panes.is_empty() {
+        manifest.deferred_panes = snapshot_terminals
+            .keys()
+            .filter(|pane_id| !runtime_panes.contains(pane_id))
+            .copied()
+            .collect();
+        manifest.deferred_panes.sort_unstable();
+    }
+
+    let mut deferred_panes = std::collections::HashSet::new();
+    for pane_id in &manifest.deferred_panes {
+        if !deferred_panes.insert(*pane_id) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "handoff contains duplicate deferred pane entries",
+            ));
+        }
+        if runtime_panes.contains(pane_id) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "handoff pane cannot own both an FD and deferred-resume contract",
+            ));
+        }
+        if !snapshot_terminals.contains_key(pane_id) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "handoff deferred pane has no matching snapshot pane",
+            ));
+        }
+        if !deferred_eligible_panes.contains(pane_id) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "handoff deferred pane has no persisted agent session",
+            ));
+        }
+    }
+    if runtime_panes.len() + deferred_panes.len() != snapshot_terminals.len() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "handoff runtime and deferred entries do not cover the snapshot",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
 pub(crate) fn receive(socket_path: &Path, token: &str) -> io::Result<ReceivedHandoff> {
     let mut stream = UnixStream::connect(socket_path)?;
     stream.write_all(token.as_bytes())?;
@@ -233,14 +391,9 @@ pub(crate) fn receive(socket_path: &Path, token: &str) -> io::Result<ReceivedHan
     stream.flush()?;
 
     let manifest_line = read_line_unbuffered(&mut stream)?;
-    let manifest: HandoffManifest =
+    let mut manifest: HandoffManifest =
         serde_json::from_str(&manifest_line).map_err(io::Error::other)?;
-    if manifest.version != HANDOFF_VERSION {
-        return Err(io::Error::other(format!(
-            "unsupported handoff version {}",
-            manifest.version
-        )));
-    }
+    validate_and_normalize_manifest(&mut manifest)?;
     if manifest
         .expected_protocol
         .is_some_and(|protocol| protocol != crate::protocol::PROTOCOL_VERSION)
@@ -262,12 +415,6 @@ pub(crate) fn receive(socket_path: &Path, token: &str) -> io::Result<ReceivedHan
             crate::build_info::version()
         )));
     }
-    crate::persist::validate_snapshot_admission(&manifest.snapshot).map_err(|error| {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("handoff rejected before terminal ownership transfer: {error}"),
-        )
-    })?;
     stream.write_all(b"validated\n")?;
     stream.flush()?;
     let fds = recv_fds(&stream, manifest.panes.len())?;
@@ -281,6 +428,12 @@ pub(crate) fn receive(socket_path: &Path, token: &str) -> io::Result<ReceivedHan
 #[cfg(unix)]
 pub(crate) fn report_restored(stream: &mut UnixStream) -> io::Result<()> {
     stream.write_all(b"restored\n")?;
+    stream.flush()
+}
+
+#[cfg(unix)]
+pub(crate) fn report_prepared(stream: &mut UnixStream) -> io::Result<()> {
+    stream.write_all(b"prepared\n")?;
     stream.flush()
 }
 
@@ -310,6 +463,7 @@ pub(crate) fn report_owned(stream: &mut UnixStream) -> io::Result<()> {
 pub(crate) fn manifest_for(
     snapshot: crate::persist::SessionSnapshot,
     panes: Vec<crate::handoff_runtime::HandoffRuntimeState>,
+    deferred_panes: Vec<u32>,
     expected_protocol: Option<u32>,
     expected_version: Option<String>,
     api_window_title: Option<String>,
@@ -322,6 +476,7 @@ pub(crate) fn manifest_for(
         expected_protocol,
         snapshot,
         panes,
+        deferred_panes,
         api_window_title,
     }
 }
@@ -374,7 +529,7 @@ fn read_line_unbuffered(stream: &mut UnixStream) -> io::Result<String> {
             return String::from_utf8(bytes)
                 .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err));
         }
-        if bytes.len() > 16 * 1024 * 1024 {
+        if bytes.len() > MAX_HANDOFF_ENVELOPE_BYTES {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "handoff line exceeded maximum size",
@@ -433,20 +588,13 @@ fn close_raw_fds(fds: &[RawFd]) {
 }
 
 #[cfg(unix)]
-fn recv_fds(stream: &UnixStream, expected: usize) -> io::Result<Vec<RawFd>> {
-    let mut out: Vec<RawFd> = Vec::with_capacity(expected);
+fn recv_fds(stream: &UnixStream, expected: usize) -> io::Result<Vec<OwnedFd>> {
+    let mut out: Vec<OwnedFd> = Vec::with_capacity(expected);
     while out.len() < expected {
         let wanted = (expected - out.len()).min(FDS_PER_MESSAGE);
-        let batch = match recv_fd_batch(stream, wanted) {
-            Ok(batch) => batch,
-            Err(err) => {
-                close_raw_fds(&out);
-                return Err(err);
-            }
-        };
+        let batch = recv_fd_batch(stream, wanted)?;
         if batch.is_empty() {
             let received = out.len();
-            close_raw_fds(&out);
             return Err(io::Error::new(
                 io::ErrorKind::UnexpectedEof,
                 format!(
@@ -454,7 +602,11 @@ fn recv_fds(stream: &UnixStream, expected: usize) -> io::Result<Vec<RawFd>> {
                 ),
             ));
         }
-        out.extend(batch);
+        out.extend(
+            batch
+                .into_iter()
+                .map(|fd| unsafe { OwnedFd::from_raw_fd(fd) }),
+        );
     }
     Ok(out)
 }
@@ -550,10 +702,204 @@ mod tests {
         }
     }
 
+    fn one_pane_snapshot() -> crate::persist::SessionSnapshot {
+        let mut snapshot = crate::persist::SessionSnapshot {
+            delegations: Vec::new(),
+            version: 4,
+            repositories: Vec::new(),
+            space_order: Vec::new(),
+            workspaces: vec![crate::persist::WorkspaceSnapshot {
+                id: Some("w1".into()),
+                custom_name: None,
+                identity_cwd: "/tmp".into(),
+                checkout: None,
+                worktree_space: None,
+                public_pane_numbers: std::collections::HashMap::from([(1, 1)]),
+                next_public_pane_number: 2,
+                public_tab_numbers: vec![1],
+                next_public_tab_number: 2,
+                tabs: vec![crate::persist::TabSnapshot {
+                    custom_name: None,
+                    layout: crate::persist::LayoutSnapshot::Pane(1),
+                    collections: Vec::new(),
+                    panes: std::collections::HashMap::from([(
+                        1,
+                        crate::persist::PaneSnapshot::without_terminal_id("/tmp".into()),
+                    )]),
+                    zoomed: false,
+                    focused: Some(1),
+                    focused_leaf: None,
+                    root_pane: Some(1),
+                }],
+                active_tab: 0,
+            }],
+            active: Some(0),
+            selected: 0,
+            sidebar_width: None,
+            sidebar_section_split: None,
+            collapsed_space_keys: Default::default(),
+        };
+        crate::persist::normalize_terminal_identities(&mut snapshot, false).unwrap();
+        snapshot
+    }
+
+    fn runtime_for(
+        pane_id: u32,
+        terminal_id: Option<String>,
+    ) -> crate::handoff_runtime::HandoffRuntimeState {
+        crate::handoff_runtime::HandoffRuntimeState {
+            pane_id,
+            terminal_id,
+            child_pid: 1,
+            rows: 24,
+            cols: 80,
+            cell_width_px: 0,
+            cell_height_px: 0,
+            keyboard_protocol_flags: 0,
+            keyboard_protocol_ansi: None,
+            input_state: None,
+            terminal_title: None,
+            initial_history_ansi: None,
+        }
+    }
+
+    #[test]
+    fn legacy_v1_handoff_fixture_normalizes_identity_before_fd_transfer() {
+        let mut manifest: HandoffManifest = serde_json::from_str(include_str!(
+            "../../tests/fixtures/handoff-manifest-v1.json"
+        ))
+        .expect("legacy v1 fixture should retain its original wire shape");
+
+        validate_and_normalize_manifest(&mut manifest).unwrap();
+        assert_eq!(manifest.snapshot.version, 5);
+        let snapshot_id = crate::persist::terminal_id_for_pane_snapshot(
+            &manifest.snapshot.workspaces[0].tabs[0].panes[&1],
+        )
+        .unwrap();
+        assert_eq!(
+            manifest.panes[0].terminal_id.as_deref(),
+            Some(snapshot_id.as_str())
+        );
+
+        let path = std::env::temp_dir().join(format!(
+            "vqro-handoff-v1-normalized-{}-{}.json",
+            std::process::id(),
+            snapshot_id.as_str()
+        ));
+        crate::persist::publish_handoff_snapshot_to_path(&path, &manifest.snapshot).unwrap();
+        let persisted = std::fs::read_to_string(&path).unwrap();
+        let restored = crate::persist::parse_snapshot(&persisted).unwrap();
+        assert_eq!(
+            crate::persist::terminal_id_for_pane_snapshot(
+                &restored.workspaces[0].tabs[0].panes[&1]
+            )
+            .unwrap(),
+            snapshot_id
+        );
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn handoff_v2_rejects_duplicate_or_non_bijective_runtime_entries() {
+        let snapshot = one_pane_snapshot();
+        let terminal_id = crate::persist::terminal_id_for_pane_snapshot(
+            &snapshot.workspaces[0].tabs[0].panes[&1],
+        )
+        .unwrap();
+        let runtime = runtime_for(1, Some(terminal_id.to_string()));
+        let mut duplicate = HandoffManifest {
+            version: HANDOFF_VERSION,
+            source_version: "current".into(),
+            source_protocol: crate::protocol::PROTOCOL_VERSION,
+            expected_version: None,
+            expected_protocol: None,
+            snapshot: snapshot.clone(),
+            panes: vec![runtime.clone(), runtime],
+            deferred_panes: Vec::new(),
+            api_window_title: None,
+        };
+        assert!(validate_and_normalize_manifest(&mut duplicate).is_err());
+
+        let mut missing = HandoffManifest {
+            panes: Vec::new(),
+            ..duplicate
+        };
+        assert!(validate_and_normalize_manifest(&mut missing).is_err());
+    }
+
+    #[test]
+    fn handoff_v2_accepts_explicit_deferred_resume_without_an_fd() {
+        let mut snapshot = one_pane_snapshot();
+        snapshot.workspaces[0].tabs[0]
+            .panes
+            .get_mut(&1)
+            .unwrap()
+            .agent_session = Some(crate::persist::PaneAgentSessionSnapshot {
+            source: "vqro:codex".into(),
+            agent: "codex".into(),
+            kind: crate::agent_resume::AgentSessionRefKind::Id,
+            value: "session-1".into(),
+        });
+        let mut manifest = HandoffManifest {
+            version: HANDOFF_VERSION,
+            source_version: "current".into(),
+            source_protocol: crate::protocol::PROTOCOL_VERSION,
+            expected_version: None,
+            expected_protocol: None,
+            snapshot: snapshot.clone(),
+            panes: Vec::new(),
+            deferred_panes: vec![1],
+            api_window_title: None,
+        };
+        validate_and_normalize_manifest(&mut manifest).unwrap();
+
+        let mut legacy = HandoffManifest {
+            version: LEGACY_HANDOFF_VERSION,
+            source_version: "legacy".into(),
+            source_protocol: crate::protocol::PROTOCOL_VERSION,
+            expected_version: None,
+            expected_protocol: None,
+            snapshot,
+            panes: Vec::new(),
+            deferred_panes: Vec::new(),
+            api_window_title: None,
+        };
+        validate_and_normalize_manifest(&mut legacy).unwrap();
+        assert_eq!(legacy.deferred_panes, vec![1]);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn partial_fd_receive_closes_already_received_descriptors() {
+        let before = std::fs::read_dir("/proc/self/fd").unwrap().count();
+        let (sender, receiver) = UnixStream::pair().unwrap();
+        let mut pipe = [0; 2];
+        assert_eq!(unsafe { libc::pipe(pipe.as_mut_ptr()) }, 0);
+        let during = std::fs::read_dir("/proc/self/fd").unwrap().count();
+        let send_fd = pipe[0];
+        let writer = std::thread::spawn(move || {
+            send_fds(&sender, &[send_fd]).unwrap();
+            drop(sender);
+        });
+        assert!(recv_fds(&receiver, 2).is_err());
+        writer.join().unwrap();
+        assert_eq!(
+            std::fs::read_dir("/proc/self/fd").unwrap().count(),
+            during - 1
+        );
+        unsafe {
+            libc::close(pipe[0]);
+            libc::close(pipe[1]);
+        }
+        drop(receiver);
+        assert_eq!(std::fs::read_dir("/proc/self/fd").unwrap().count(), before);
+    }
+
     #[test]
     fn a_handoff_carries_an_api_set_window_title() {
         let manifest = manifest_for(
             empty_snapshot(),
+            Vec::new(),
             Vec::new(),
             None,
             None,
@@ -567,6 +913,7 @@ mod tests {
     fn a_manifest_written_before_the_title_field_still_loads() {
         let manifest = manifest_for(
             empty_snapshot(),
+            Vec::new(),
             Vec::new(),
             None,
             None,

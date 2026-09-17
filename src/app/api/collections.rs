@@ -2551,7 +2551,6 @@ mod tests {
         let before = serde_json::to_value(app.collection_info(0, 0, collection)).unwrap();
         let event_sequence = app.event_hub.current_sequence();
         let next_pane = crate::layout::PaneId::next_for_test();
-        let next_terminal = crate::terminal::TerminalId::next_for_test();
 
         let response = app.handle_collection_close(
             "missing-disposition".into(),
@@ -2569,7 +2568,6 @@ mod tests {
         );
         assert_eq!(app.event_hub.current_sequence(), event_sequence);
         assert_eq!(crate::layout::PaneId::next_for_test(), next_pane);
-        assert_eq!(crate::terminal::TerminalId::next_for_test(), next_terminal);
     }
 
     #[test]

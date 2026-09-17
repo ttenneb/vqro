@@ -118,12 +118,17 @@ impl App {
             Err(message) => return encode_error(id, "invalid_layout", message),
         };
 
+        let terminal_id = match self.allocate_terminal_id() {
+            Ok(id) => id,
+            Err(error) => return encode_error(id, "layout_apply_failed", error.to_string()),
+        };
         let created = {
             let Some(ws) = self.state.workspaces.get_mut(ws_idx) else {
                 return encode_error(id, "workspace_not_found", "workspace not found");
             };
             if let Some(argv) = command.as_deref() {
                 ws.create_tab_argv_command(
+                    terminal_id,
                     rows,
                     cols,
                     first_cwd,
@@ -135,6 +140,7 @@ impl App {
                 )
             } else {
                 ws.create_tab(
+                    terminal_id,
                     rows,
                     cols,
                     first_cwd,
@@ -493,12 +499,16 @@ impl App {
             SplitDirection::Down => Direction::Vertical,
         };
         let command = layout_command(pane)?;
+        let terminal_id = self
+            .allocate_terminal_id()
+            .map_err(|error| error.to_string())?;
         let result = {
             let Some(ws) = self.state.workspaces.get_mut(ws_idx) else {
                 return Err("workspace not found".into());
             };
             if let Some(argv) = command.as_deref() {
                 ws.split_pane_argv_command_with_ratio(
+                    terminal_id,
                     target_pane_id,
                     direction,
                     ratio,
@@ -514,6 +524,7 @@ impl App {
                 )
             } else {
                 ws.split_pane_with_ratio(
+                    terminal_id,
                     target_pane_id,
                     direction,
                     ratio,

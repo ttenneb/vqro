@@ -2221,7 +2221,10 @@ mod tests {
     use crate::detect::AgentDetection;
 
     fn test_terminal() -> TerminalState {
-        TerminalState::new(TerminalId::alloc(), "/tmp".into())
+        TerminalState::new(
+            TerminalId::alloc().expect("test terminal identity"),
+            "/tmp".into(),
+        )
     }
 
     fn test_session_path(name: &str) -> String {

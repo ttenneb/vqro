@@ -1932,6 +1932,7 @@ impl PaneRuntime {
         let (rows, cols, cell_width_px, cell_height_px) = self.current_size.get();
         crate::handoff_runtime::HandoffRuntimeState {
             pane_id,
+            terminal_id: None,
             child_pid,
             rows,
             cols,
@@ -2145,6 +2146,7 @@ impl PaneRuntime {
         let crate::handoff_runtime::ImportedHandoffRuntime { master_fd, state } = import;
         let crate::handoff_runtime::HandoffRuntimeState {
             pane_id,
+            terminal_id: _,
             child_pid,
             rows,
             cols,
@@ -2157,9 +2159,6 @@ impl PaneRuntime {
             initial_history_ansi,
         } = state;
         let pane_id = PaneId::from_raw(pane_id);
-        use std::os::fd::FromRawFd;
-
-        let master_fd = unsafe { std::os::fd::OwnedFd::from_raw_fd(master_fd) };
 
         let (response_tx, _response_rx) = mpsc::channel::<Bytes>(1);
         let mut terminal = crate::ghostty::Terminal::new(cols, rows, scrollback_limit_bytes)

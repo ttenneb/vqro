@@ -277,6 +277,7 @@ impl Workspace {
     }
 
     pub fn new(
+        terminal_id: TerminalId,
         initial_cwd: PathBuf,
         rows: u16,
         cols: u16,
@@ -289,6 +290,7 @@ impl Workspace {
         render_dirty: Arc<RenderSignal>,
     ) -> std::io::Result<(Self, TerminalState, TerminalRuntime)> {
         Self::new_with_tab(
+            terminal_id,
             initial_cwd,
             rows,
             cols,
@@ -306,6 +308,7 @@ impl Workspace {
 
     #[allow(clippy::too_many_arguments)]
     pub fn new_with_extra_env(
+        terminal_id: TerminalId,
         initial_cwd: PathBuf,
         rows: u16,
         cols: u16,
@@ -320,6 +323,7 @@ impl Workspace {
     ) -> std::io::Result<(Self, TerminalState, TerminalRuntime)> {
         if extra_env.is_empty() {
             return Self::new(
+                terminal_id,
                 initial_cwd,
                 rows,
                 cols,
@@ -333,6 +337,7 @@ impl Workspace {
             );
         }
         Self::new_with_tab(
+            terminal_id,
             initial_cwd,
             rows,
             cols,
@@ -350,6 +355,7 @@ impl Workspace {
 
     #[allow(clippy::too_many_arguments)]
     fn new_with_tab(
+        terminal_id: TerminalId,
         initial_cwd: PathBuf,
         rows: u16,
         cols: u16,
@@ -372,6 +378,7 @@ impl Workspace {
         let (tab, terminal, runtime) = if let Some(argv) = argv {
             Tab::new_argv_command(
                 1,
+                terminal_id,
                 initial_cwd.clone(),
                 rows,
                 cols,
@@ -387,6 +394,7 @@ impl Workspace {
         } else {
             Tab::new(
                 1,
+                terminal_id,
                 initial_cwd.clone(),
                 rows,
                 cols,
@@ -470,6 +478,7 @@ impl Workspace {
 
     pub fn create_tab(
         &mut self,
+        terminal_id: TerminalId,
         rows: u16,
         cols: u16,
         cwd: PathBuf,
@@ -487,6 +496,7 @@ impl Workspace {
             host_terminal_theme,
             host_terminal_appearance,
             shell_config,
+            terminal_id,
             None,
             extra_env,
         )
@@ -494,6 +504,7 @@ impl Workspace {
 
     pub fn create_tab_argv_command(
         &mut self,
+        terminal_id: TerminalId,
         rows: u16,
         cols: u16,
         cwd: PathBuf,
@@ -511,6 +522,7 @@ impl Workspace {
             host_terminal_theme,
             host_terminal_appearance,
             crate::pane::PaneShellConfig::new("", crate::config::ShellModeConfig::NonLogin),
+            terminal_id,
             Some(argv),
             extra_env,
         )
@@ -525,6 +537,7 @@ impl Workspace {
         host_terminal_theme: crate::terminal_theme::TerminalTheme,
         host_terminal_appearance: Option<crate::terminal_theme::HostAppearance>,
         shell_config: crate::pane::PaneShellConfig<'_>,
+        terminal_id: TerminalId,
         argv: Option<&[String]>,
         extra_env: Vec<(String, String)>,
     ) -> std::io::Result<(usize, TerminalState, TerminalRuntime)> {
@@ -548,6 +561,7 @@ impl Workspace {
         let (tab, terminal, runtime) = if let Some(argv) = argv {
             Tab::new_argv_command(
                 number,
+                terminal_id,
                 cwd,
                 rows,
                 cols,
@@ -563,6 +577,7 @@ impl Workspace {
         } else {
             Tab::new(
                 number,
+                terminal_id,
                 cwd,
                 rows,
                 cols,
@@ -630,6 +645,7 @@ impl Workspace {
     #[allow(clippy::too_many_arguments)]
     pub fn split_focused_command(
         &mut self,
+        terminal_id: TerminalId,
         direction: Direction,
         rows: u16,
         cols: u16,
@@ -650,6 +666,7 @@ impl Workspace {
             .active_tab_mut()
             .expect("workspace must always have at least one tab")
             .split_focused_command(
+                terminal_id,
                 direction,
                 rows,
                 cols,
@@ -668,6 +685,7 @@ impl Workspace {
     #[allow(clippy::too_many_arguments)]
     pub fn split_pane(
         &mut self,
+        terminal_id: TerminalId,
         pane_id: PaneId,
         direction: Direction,
         rows: u16,
@@ -681,6 +699,7 @@ impl Workspace {
         focus_new_pane: bool,
     ) -> Option<std::io::Result<(usize, crate::workspace::tab::NewPane)>> {
         self.split_pane_with_runtime(
+            terminal_id,
             pane_id,
             direction,
             None,
@@ -700,6 +719,7 @@ impl Workspace {
     #[allow(clippy::too_many_arguments)]
     pub fn split_pane_with_ratio(
         &mut self,
+        terminal_id: TerminalId,
         pane_id: PaneId,
         direction: Direction,
         ratio: f32,
@@ -714,6 +734,7 @@ impl Workspace {
         focus_new_pane: bool,
     ) -> Option<std::io::Result<(usize, crate::workspace::tab::NewPane)>> {
         self.split_pane_with_runtime(
+            terminal_id,
             pane_id,
             direction,
             Some(ratio),
@@ -733,6 +754,7 @@ impl Workspace {
     #[allow(clippy::too_many_arguments)]
     pub fn split_pane_argv_command(
         &mut self,
+        terminal_id: TerminalId,
         pane_id: PaneId,
         direction: Direction,
         rows: u16,
@@ -746,6 +768,7 @@ impl Workspace {
         focus_new_pane: bool,
     ) -> Option<std::io::Result<(usize, crate::workspace::tab::NewPane)>> {
         self.split_pane_with_runtime(
+            terminal_id,
             pane_id,
             direction,
             None,
@@ -765,6 +788,7 @@ impl Workspace {
     #[allow(clippy::too_many_arguments)]
     pub fn split_pane_argv_command_with_ratio(
         &mut self,
+        terminal_id: TerminalId,
         pane_id: PaneId,
         direction: Direction,
         ratio: f32,
@@ -779,6 +803,7 @@ impl Workspace {
         focus_new_pane: bool,
     ) -> Option<std::io::Result<(usize, crate::workspace::tab::NewPane)>> {
         self.split_pane_with_runtime(
+            terminal_id,
             pane_id,
             direction,
             Some(ratio),
@@ -798,6 +823,7 @@ impl Workspace {
     #[allow(clippy::too_many_arguments)]
     fn split_pane_with_runtime(
         &mut self,
+        terminal_id: TerminalId,
         pane_id: PaneId,
         direction: Direction,
         ratio: Option<f32>,
@@ -825,6 +851,7 @@ impl Workspace {
         let new_pane = match if let Some(argv) = argv {
             tab.split_pane_argv(
                 pane_id,
+                terminal_id,
                 focus_new_pane,
                 direction,
                 ratio,
@@ -840,6 +867,7 @@ impl Workspace {
         } else {
             tab.split_pane_shell(
                 pane_id,
+                terminal_id,
                 focus_new_pane,
                 direction,
                 ratio,
@@ -1204,7 +1232,7 @@ impl Workspace {
         let render_dirty = Arc::new(RenderSignal::new());
         let identity_cwd = std::env::current_dir().unwrap_or_else(|_| "/".into());
         let (layout, root_id) = TileLayout::new();
-        let terminal_id = TerminalId::alloc();
+        let terminal_id = TerminalId::alloc().expect("test terminal identity");
         let mut panes = HashMap::new();
         panes.insert(root_id, PaneState::new(terminal_id));
         let tab = Tab {
@@ -1252,8 +1280,10 @@ impl Workspace {
     pub(crate) fn test_split(&mut self, direction: Direction) -> PaneId {
         let tab = self.active_tab_mut().expect("workspace must have tab");
         let new_id = tab.layout.split_focused(direction);
-        tab.panes
-            .insert(new_id, PaneState::new(TerminalId::alloc()));
+        tab.panes.insert(
+            new_id,
+            PaneState::new(TerminalId::alloc().expect("test terminal identity")),
+        );
         self.register_new_pane(new_id);
         new_id
     }
@@ -1264,7 +1294,10 @@ impl Workspace {
         let render_dirty = Arc::new(RenderSignal::new());
         let (layout, root_id) = TileLayout::new();
         let mut panes = HashMap::new();
-        panes.insert(root_id, PaneState::new(TerminalId::alloc()));
+        panes.insert(
+            root_id,
+            PaneState::new(TerminalId::alloc().expect("test terminal identity")),
+        );
         let tab = Tab {
             custom_name: name.map(str::to_string),
             number: self.next_public_tab_number,

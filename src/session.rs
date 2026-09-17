@@ -177,7 +177,7 @@ pub fn data_dir_for(name: Option<&str>) -> PathBuf {
     }
 }
 
-fn strip_imported_agent_resume_metadata(snapshot: &mut serde_json::Value) {
+fn strip_imported_runtime_identity(snapshot: &mut serde_json::Value) {
     let Some(workspaces) = snapshot
         .get_mut("workspaces")
         .and_then(|value| value.as_array_mut())
@@ -197,6 +197,9 @@ fn strip_imported_agent_resume_metadata(snapshot: &mut serde_json::Value) {
             };
             for pane in panes.values_mut() {
                 if let Some(pane) = pane.as_object_mut() {
+                    // Imported sessions create new logical terminals and PTYs;
+                    // source terminal identity must never be cloned.
+                    pane.remove("terminal_id");
                     pane.remove("agent_name");
                     pane.remove("managed_agent_kind");
                     pane.remove("agent_session");
@@ -305,10 +308,20 @@ fn import_herdr_session_from_roots(
         .map_err(|err| format!("incompatible Herdr session snapshot: {err}"))?;
     let mut imported_value = serde_json::from_str(&content)
         .map_err(|err| format!("cannot prepare Herdr session snapshot: {err}"))?;
-    strip_imported_agent_resume_metadata(&mut imported_value);
-    content = serde_json::to_string_pretty(&imported_value)
+    strip_imported_runtime_identity(&mut imported_value);
+    let stripped = serde_json::to_string(&imported_value)
+        .map_err(|err| format!("cannot prepare imported session snapshot: {err}"))?;
+    let imported_snapshot = crate::persist::parse_snapshot(&stripped)
+        .map_err(|err| format!("cannot regenerate imported terminal identities: {err}"))?;
+    content = serde_json::to_string_pretty(&imported_snapshot)
         .map_err(|err| format!("cannot encode imported session snapshot: {err}"))?;
     content.push('\n');
+    if content.len() as u64 > MAX_IMPORTED_SNAPSHOT_BYTES {
+        return Err(format!(
+            "regenerated session snapshot exceeds the {} MiB import limit",
+            MAX_IMPORTED_SNAPSHOT_BYTES / (1024 * 1024)
+        ));
+    }
 
     std::fs::create_dir_all(vqro_root)
         .map_err(|err| format!("cannot create {}: {err}", vqro_root.display()))?;
@@ -801,14 +814,12 @@ mod tests {
         let imported =
             import_herdr_session_from_roots(&herdr_root, &vqro_root, None, "from-default").unwrap();
         assert_eq!(imported.source, DEFAULT_SESSION_NAME);
-        assert_eq!(
-            serde_json::from_str::<serde_json::Value>(
-                &std::fs::read_to_string(vqro_root.join("sessions/from-default/session.json"))
-                    .unwrap()
-            )
-            .unwrap(),
-            serde_json::from_str::<serde_json::Value>(snapshot).unwrap()
-        );
+        let imported_snapshot: crate::persist::SessionSnapshot = serde_json::from_slice(
+            &std::fs::read(vqro_root.join("sessions/from-default/session.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(imported_snapshot.version, 5);
+        assert!(imported_snapshot.workspaces.is_empty());
         let named =
             import_herdr_session_from_roots(&herdr_root, &vqro_root, Some("source"), "from-named")
                 .unwrap();
@@ -826,12 +837,13 @@ mod tests {
     }
 
     #[test]
-    fn herdr_import_strips_agent_resume_metadata() {
+    fn herdr_import_strips_terminal_and_agent_runtime_identity() {
         let mut snapshot = serde_json::json!({
             "workspaces": [{
                 "tabs": [{
                     "panes": {
                         "1": {
+                            "terminal_id": "term_00000000000000000000000000000001",
                             "cwd": "/tmp",
                             "label": "manual label",
                             "agent_name": "reviewer",
@@ -844,9 +856,10 @@ mod tests {
             }]
         });
 
-        strip_imported_agent_resume_metadata(&mut snapshot);
+        strip_imported_runtime_identity(&mut snapshot);
 
         let pane = &snapshot["workspaces"][0]["tabs"][0]["panes"]["1"];
+        assert!(pane.get("terminal_id").is_none());
         assert!(pane.get("agent_name").is_none());
         assert!(pane.get("managed_agent_kind").is_none());
         assert!(pane.get("agent_session").is_none());
@@ -871,7 +884,7 @@ mod tests {
         std::fs::create_dir_all(&cwd).unwrap();
         std::fs::create_dir_all(&herdr_root).unwrap();
         let source = serde_json::json!({
-            "version": 4,
+            "version": 5,
             "workspaces": [{
                 "id": "w-imported",
                 "custom_name": "manual workspace",
@@ -896,6 +909,7 @@ mod tests {
                         "archived": []
                     }],
                     "panes": {"7": {
+                        "terminal_id": "term_00000000000000000000000000000077",
                         "cwd": cwd,
                         "label": "manual pane",
                         "agent_name": "reviewer",
@@ -950,6 +964,11 @@ mod tests {
         let pane = &imported.workspaces[0].tabs[0].panes[&7];
         assert_eq!(pane.cwd, cwd);
         assert_eq!(pane.label.as_deref(), Some("manual pane"));
+        let imported_terminal_id = crate::persist::terminal_id_for_pane_snapshot(pane).unwrap();
+        assert_ne!(
+            imported_terminal_id.as_str(),
+            "term_00000000000000000000000000000077"
+        );
         assert!(pane.agent_name.is_none());
         assert!(pane.managed_agent_kind.is_none());
         assert!(pane.agent_session.is_none());
@@ -994,6 +1013,7 @@ mod tests {
         assert_eq!(workspaces[0].tabs[0].layout.collection_ids().len(), 1);
         let restored_pane = *workspaces[0].tabs[0].panes.keys().next().unwrap();
         let terminal_id = &workspaces[0].tabs[0].panes[&restored_pane].attached_terminal_id;
+        assert_eq!(terminal_id, &imported_terminal_id);
         let terminal = &terminals[terminal_id];
         assert_eq!(terminal.cwd, cwd);
         assert_eq!(terminal.manual_label.as_deref(), Some("manual pane"));

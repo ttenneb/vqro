@@ -117,6 +117,9 @@ pub struct App {
     pub(crate) direct_graphics_available: bool,
     pub(crate) pixel_mouse_available: bool,
     pub(crate) terminal_runtimes: crate::terminal::TerminalRuntimeRegistry,
+    #[cfg(test)]
+    terminal_id_candidates:
+        std::collections::VecDeque<std::io::Result<crate::terminal::TerminalId>>,
     pub event_tx: mpsc::Sender<AppEvent>,
     pub(crate) event_rx: mpsc::Receiver<AppEvent>,
     pub(crate) api_rx: tokio::sync::mpsc::UnboundedReceiver<crate::api::ApiRequestMessage>,
@@ -412,6 +415,30 @@ pub(crate) fn client_palette_for_appearance(
 }
 
 impl App {
+    pub(crate) fn allocate_terminal_id(&mut self) -> std::io::Result<crate::terminal::TerminalId> {
+        let occupied = self
+            .state
+            .terminals
+            .keys()
+            .cloned()
+            .collect::<std::collections::HashSet<_>>();
+        crate::terminal::TerminalId::alloc_unique_with(&occupied, || {
+            #[cfg(test)]
+            if let Some(candidate) = self.terminal_id_candidates.pop_front() {
+                return candidate;
+            }
+            crate::terminal::TerminalId::alloc()
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn inject_terminal_id_candidates_for_test(
+        &mut self,
+        candidates: impl IntoIterator<Item = std::io::Result<crate::terminal::TerminalId>>,
+    ) {
+        self.terminal_id_candidates.extend(candidates);
+    }
+
     pub(crate) fn admit_new_panes(
         &self,
         workspace_index: Option<usize>,
@@ -797,6 +824,8 @@ impl App {
             direct_graphics_available: false,
             pixel_mouse_available: false,
             terminal_runtimes: restored_terminal_runtimes,
+            #[cfg(test)]
+            terminal_id_candidates: std::collections::VecDeque::new(),
             event_tx,
             event_rx,
             last_git_remote_status_refresh: Instant::now() - GIT_REMOTE_STATUS_REFRESH_INTERVAL,
@@ -894,6 +923,7 @@ impl App {
         api_rx: tokio::sync::mpsc::UnboundedReceiver<crate::api::ApiRequestMessage>,
         event_hub: crate::api::EventHub,
         snapshot: &crate::persist::SessionSnapshot,
+        deferred_panes: &[u32],
         imports: &mut std::collections::HashMap<
             u32,
             crate::handoff_runtime::ImportedHandoffRuntime,
@@ -937,7 +967,38 @@ impl App {
             state::Mode::Navigate
         };
         app.state.reconcile_repositories();
-        app.state.session_dirty = false;
+        let expected_deferred = snapshot
+            .workspaces
+            .iter()
+            .flat_map(|workspace| &workspace.tabs)
+            .flat_map(|tab| {
+                deferred_panes.iter().filter_map(|pane_id| {
+                    tab.panes
+                        .get(pane_id)
+                        .and_then(|pane| crate::persist::terminal_id_for_pane_snapshot(pane).ok())
+                })
+            })
+            .collect::<std::collections::HashSet<_>>();
+        if expected_deferred.len() != deferred_panes.len() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "handoff deferred pane contract did not map uniquely to terminals",
+            ));
+        }
+        for (terminal_id, terminal) in &app.state.terminals {
+            let has_runtime = app.terminal_runtimes.get(terminal_id).is_some();
+            let is_deferred = terminal.pending_agent_resume_plan.is_some();
+            if has_runtime == is_deferred || is_deferred != expected_deferred.contains(terminal_id)
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "handoff terminal {terminal_id} violated its runtime/deferred contract"
+                    ),
+                ));
+            }
+        }
+        app.state.session_dirty = true;
         app.last_focus = app.state.active.and_then(|idx| {
             app.state
                 .workspaces
@@ -949,6 +1010,11 @@ impl App {
         // empty startup documents until an unrelated mutation happens.
         app.refresh_collection_documents();
         Ok(app)
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn mark_handoff_snapshot_durable(&mut self) {
+        self.state.session_dirty = false;
     }
 
     #[cfg(unix)]
@@ -1256,6 +1322,45 @@ impl App {
             diagnostics,
         }
     }
+
+    #[cfg(test)]
+    pub(crate) fn assert_terminal_runtime_invariants_for_test(&self) {
+        self.state.assert_terminal_identity_invariants_for_test();
+        let runtime_ids = self
+            .terminal_runtimes
+            .iter()
+            .map(|(terminal_id, _)| terminal_id.clone())
+            .collect::<std::collections::HashSet<_>>();
+        assert_eq!(runtime_ids.len(), self.terminal_runtimes.len());
+        for terminal_id in &runtime_ids {
+            assert!(
+                self.state.terminals.contains_key(terminal_id),
+                "runtime {} has no logical terminal state",
+                terminal_id
+            );
+        }
+        for (terminal_id, terminal) in &self.state.terminals {
+            let has_runtime = runtime_ids.contains(terminal_id);
+            let is_deferred_resume = terminal.pending_agent_resume_plan.is_some();
+            assert_ne!(
+                has_runtime, is_deferred_resume,
+                "terminal {} must own exactly one runtime or explicit deferred-resume plan",
+                terminal_id
+            );
+            if self
+                .state
+                .popup_pane
+                .as_ref()
+                .is_some_and(|popup| popup.terminal_id == *terminal_id)
+            {
+                assert!(
+                    has_runtime,
+                    "popup terminal {} cannot be deferred",
+                    terminal_id
+                );
+            }
+        }
+    }
 }
 #[cfg(test)]
 mod tests {
@@ -1277,6 +1382,82 @@ mod tests {
         );
         app.state.default_shell = exiting_test_command().into();
         app
+    }
+
+    #[test]
+    fn app_runtime_invariants_are_separate_from_pure_identity_invariants() {
+        let mut app = test_app();
+        app.state.workspaces = vec![Workspace::test_new("runtime-invariants")];
+        app.state.ensure_test_terminals();
+        for terminal in app.state.terminals.values_mut() {
+            terminal.pending_agent_resume_plan = Some(crate::agent_resume::AgentResumePlan {
+                agent: "codex".into(),
+                argv: vec!["codex".into()],
+                dedupe_key: format!("deferred:{}", terminal.id),
+            });
+        }
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.assert_terminal_identity_invariants_for_test();
+        app.assert_terminal_runtime_invariants_for_test();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn handoff_app_accepts_explicit_deferred_terminal_and_stays_dirty_until_publication() {
+        let mut source = AppState::test_new();
+        source.workspaces = vec![Workspace::test_new("deferred")];
+        source.active = Some(0);
+        source.selected = 0;
+        source.ensure_test_terminals();
+        let root = source.workspaces[0].tabs[0].root_pane;
+        let terminal_id = source.workspaces[0].terminal_id(root).unwrap().clone();
+        source
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_persisted_agent_session(crate::agent_resume::PersistedAgentSession {
+                source: "vqro:codex".into(),
+                agent: "codex".into(),
+                session_ref: crate::agent_resume::AgentSessionRef::id("deferred-session").unwrap(),
+            });
+        let snapshot = crate::persist::capture(
+            &source.workspaces,
+            &source.repositories,
+            &source.space_order,
+            &source.terminals,
+            &crate::terminal::TerminalRuntimeRegistry::new(),
+            source.active,
+            source.selected,
+        );
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut imports = std::collections::HashMap::new();
+        let mut app = App::new_from_handoff(
+            &Config::default(),
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+            &snapshot,
+            &[root.raw()],
+            &mut imports,
+        )
+        .unwrap();
+
+        assert!(app.state.session_dirty);
+        app.assert_terminal_runtime_invariants_for_test();
+        app.mark_handoff_snapshot_durable();
+        assert!(!app.state.session_dirty);
+    }
+
+    #[test]
+    #[should_panic(expected = "must own exactly one runtime or explicit deferred-resume plan")]
+    fn app_runtime_invariants_reject_terminal_without_runtime_or_deferred_resume() {
+        let mut app = test_app();
+        app.state.workspaces = vec![Workspace::test_new("runtime-invariants")];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.assert_terminal_runtime_invariants_for_test();
     }
 
     fn unique_temp_path(name: &str) -> std::path::PathBuf {

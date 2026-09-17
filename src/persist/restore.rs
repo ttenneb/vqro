@@ -161,7 +161,7 @@ pub fn restore_delegations(
     repaired
 }
 
-pub(crate) fn validate_snapshot_admission(snapshot: &SessionSnapshot) -> Result<(), String> {
+pub(crate) fn validate_snapshot_pane_admission(snapshot: &SessionSnapshot) -> Result<(), String> {
     let mut session_panes = 0usize;
     for workspace in &snapshot.workspaces {
         let mut workspace_panes = 0usize;
@@ -175,6 +175,23 @@ pub(crate) fn validate_snapshot_admission(snapshot: &SessionSnapshot) -> Result<
             workspace_panes = workspace_panes
                 .checked_add(tab_panes)
                 .ok_or_else(|| "workspace pane count overflow".to_string())?;
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_snapshot_admission(snapshot: &SessionSnapshot) -> Result<(), String> {
+    validate_snapshot_pane_admission(snapshot)?;
+    let mut terminal_ids = HashSet::new();
+    for pane in snapshot
+        .workspaces
+        .iter()
+        .flat_map(|workspace| &workspace.tabs)
+        .flat_map(|tab| tab.panes.values())
+    {
+        let terminal_id = super::snapshot::terminal_id_for_pane_snapshot(pane)?;
+        if !terminal_ids.insert(terminal_id) {
+            return Err("snapshot contains duplicate terminal identities".into());
         }
     }
     // Collection and relationship records are semantic projections. They are
@@ -247,10 +264,13 @@ pub fn restore(
     render_notify: Arc<Notify>,
     render_dirty: Arc<RenderSignal>,
 ) -> Result<RestoredSession, String> {
-    validate_snapshot_admission(snapshot)?;
+    validate_snapshot_pane_admission(snapshot)?;
+    let mut normalized = snapshot.clone();
+    super::snapshot::normalize_terminal_identities(&mut normalized, false)?;
+    validate_snapshot_admission(&normalized)?;
     let mut imported_panes = HashMap::new();
     Ok(restore_with_imports(
-        snapshot,
+        &normalized,
         history,
         rows,
         cols,
@@ -275,10 +295,15 @@ pub fn restore_handoff(
     render_notify: Arc<Notify>,
     render_dirty: Arc<RenderSignal>,
 ) -> std::io::Result<RestoredSession> {
-    validate_snapshot_admission(snapshot)
+    validate_snapshot_pane_admission(snapshot)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    let mut normalized = snapshot.clone();
+    super::snapshot::normalize_terminal_identities(&mut normalized, false)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    validate_snapshot_admission(&normalized)
         .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
     restore_with_imports_strict(
-        snapshot,
+        &normalized,
         None,
         24,
         80,
@@ -657,6 +682,23 @@ fn restore_tab(
     for id in &pane_ids {
         let old_id = reverse_id_map.get(id);
         let saved_pane = old_id.and_then(|old_id| snap.panes.get(old_id));
+        let terminal_id = match saved_pane
+            .map(super::snapshot::terminal_id_for_pane_snapshot)
+            .transpose()
+        {
+            Ok(Some(terminal_id)) => terminal_id,
+            Ok(None) => {
+                error!(
+                    pane_id = id.raw(),
+                    "restored pane has no persisted terminal identity"
+                );
+                return (None, failed_imports);
+            }
+            Err(error) => {
+                error!(pane_id = id.raw(), %error, "restored pane terminal identity is invalid");
+                return (None, failed_imports);
+            }
+        };
         let saved_cwd = saved_pane
             .map(|p| p.cwd.clone())
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| "/".into()));
@@ -722,7 +764,6 @@ fn restore_tab(
             startup.restore_plan.clone()
         };
         if let Some(plan) = pending_native_agent_restore {
-            let terminal_id = TerminalId::alloc();
             let mut terminal = TerminalState::new(terminal_id.clone(), cwd.clone())
                 .with_pending_agent_resume_plan(plan);
             if let Some(label) = saved_label {
@@ -815,7 +856,6 @@ fn restore_tab(
 
         match runtime_result {
             Ok(runtime) => {
-                let terminal_id = TerminalId::alloc();
                 let mut terminal = TerminalState::new(terminal_id.clone(), cwd.clone());
                 if was_imported {
                     if let Some(argv) = saved_launch_argv {
@@ -1594,7 +1634,7 @@ mod tests {
                 archived: Vec::new(),
             })
             .collect();
-        let snapshot = SessionSnapshot {
+        let mut snapshot = SessionSnapshot {
             version: super::super::snapshot::SNAPSHOT_VERSION,
             workspaces: vec![WorkspaceSnapshot {
                 id: Some("pty-first".into()),
@@ -1613,6 +1653,7 @@ mod tests {
                     panes: HashMap::from([(
                         1,
                         PaneSnapshot {
+                            terminal_id: None,
                             cwd: std::path::PathBuf::from("/tmp"),
                             label: None,
                             agent_name: None,
@@ -1638,6 +1679,8 @@ mod tests {
             delegations: Vec::new(),
         };
 
+        super::super::snapshot::normalize_terminal_identities(&mut snapshot, false)
+            .expect("identity normalization");
         validate_snapshot_admission(&snapshot).expect("semantic overflow is repaired after PTYs");
     }
 
@@ -1899,12 +1942,13 @@ mod tests {
     }
 
     #[test]
-    fn oversized_snapshot_is_rejected_before_terminal_or_pane_identity_allocation() {
+    fn oversized_snapshot_is_rejected_before_restore() {
         use super::super::snapshot::{PaneSnapshot, TabSnapshot, WorkspaceSnapshot};
 
         let panes = HashMap::from([(
             1,
             PaneSnapshot {
+                terminal_id: None,
                 cwd: std::path::PathBuf::from("/tmp"),
                 label: None,
                 agent_name: None,
@@ -1955,8 +1999,6 @@ mod tests {
             collapsed_space_keys: HashSet::new(),
             delegations: Vec::new(),
         };
-        let pane_identity = PaneId::next_for_test();
-        let terminal_identity = TerminalId::next_for_test();
         let (events, _event_rx) = mpsc::channel(4);
 
         let error = match restore(
@@ -1977,8 +2019,6 @@ mod tests {
         };
 
         assert!(error.contains("pane limit"));
-        assert_eq!(PaneId::next_for_test(), pane_identity);
-        assert_eq!(TerminalId::next_for_test(), terminal_identity);
     }
 
     #[test]
@@ -2064,6 +2104,7 @@ mod tests {
                     panes: HashMap::from([(
                         0,
                         super::super::snapshot::PaneSnapshot {
+                            terminal_id: None,
                             cwd,
                             label: Some("reviewer".into()),
                             agent_name: Some("reviewer".into()),
@@ -2126,9 +2167,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn restore_preserves_public_id_mapping_after_pane_id_remap() {
+    async fn restore_preserves_public_id_mapping_and_terminal_identity_after_pane_id_remap() {
         let cwd = std::env::current_dir().unwrap();
-        let snapshot = SessionSnapshot {
+        let mut snapshot = SessionSnapshot {
             delegations: Vec::new(),
             version: super::super::snapshot::SNAPSHOT_VERSION,
             repositories: Vec::new(),
@@ -2157,6 +2198,7 @@ mod tests {
                         (
                             10,
                             super::super::snapshot::PaneSnapshot {
+                                terminal_id: None,
                                 cwd: cwd.clone(),
                                 label: None,
                                 agent_name: None,
@@ -2168,6 +2210,7 @@ mod tests {
                         (
                             20,
                             super::super::snapshot::PaneSnapshot {
+                                terminal_id: None,
                                 cwd: cwd.clone(),
                                 label: None,
                                 agent_name: None,
@@ -2189,6 +2232,17 @@ mod tests {
             sidebar_section_split: None,
             collapsed_space_keys: Default::default(),
         };
+        super::super::snapshot::normalize_terminal_identities(&mut snapshot, false).unwrap();
+        let expected = snapshot.workspaces[0].tabs[0]
+            .panes
+            .iter()
+            .map(|(&pane, saved)| {
+                (
+                    pane,
+                    super::super::snapshot::terminal_id_for_pane_snapshot(saved).unwrap(),
+                )
+            })
+            .collect::<HashMap<_, _>>();
         let (events, _event_rx) = mpsc::channel(4);
 
         let (workspaces, _terminals, _runtimes) = restore(
@@ -2213,6 +2267,17 @@ mod tests {
         assert_eq!(workspace.next_public_pane_number, 4);
         assert_eq!(workspace.tabs[0].number, 5);
         assert_eq!(workspace.next_public_tab_number, 6);
+        for (old_pane, public_number) in [(10, 1), (20, 3)] {
+            let restored_pane = workspace
+                .public_pane_numbers
+                .iter()
+                .find_map(|(pane, number)| (*number == public_number).then_some(*pane))
+                .unwrap();
+            assert_eq!(
+                workspace.terminal_id(restored_pane),
+                Some(&expected[&old_pane])
+            );
+        }
     }
 
     #[tokio::test]
@@ -2222,6 +2287,7 @@ mod tests {
             (
                 id.parse::<u32>().unwrap(),
                 super::super::snapshot::PaneSnapshot {
+                    terminal_id: None,
                     cwd: cwd.clone(),
                     label: None,
                     agent_name: None,
@@ -2232,6 +2298,7 @@ mod tests {
             )
         };
         let final_pane = super::super::snapshot::PaneSnapshot {
+            terminal_id: None,
             cwd: cwd.clone(),
             label: Some("planner".into()),
             agent_name: Some("planner".into()),
@@ -2405,6 +2472,7 @@ mod tests {
                     panes: HashMap::from([(
                         0,
                         super::super::snapshot::PaneSnapshot {
+                            terminal_id: None,
                             cwd,
                             label: None,
                             agent_name: None,
@@ -2574,6 +2642,7 @@ mod tests {
         panes.insert(
             0,
             super::super::snapshot::PaneSnapshot {
+                terminal_id: None,
                 cwd: cwd.clone(),
                 label: None,
                 agent_name: None,

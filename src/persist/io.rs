@@ -1,10 +1,11 @@
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 use tracing::warn;
 
 use super::snapshot::{
-    parse_history_snapshot, parse_snapshot, snapshot_file_version, SessionHistorySnapshot,
-    SessionSnapshot, SNAPSHOT_VERSION,
+    parse_history_snapshot, snapshot_file_version, SessionHistorySnapshot, SessionSnapshot,
+    MAX_HISTORY_SNAPSHOT_BYTES, MAX_SESSION_SNAPSHOT_BYTES, SNAPSHOT_VERSION,
 };
 
 fn session_path() -> PathBuf {
@@ -42,22 +43,44 @@ fn resolve_write_target(path: &Path) -> std::io::Result<PathBuf> {
 }
 
 pub(super) fn save_to_path(path: &Path, snapshot: &SessionSnapshot) -> std::io::Result<()> {
-    save_json_to_path(path, snapshot)
+    save_json_to_path(path, snapshot, MAX_SESSION_SNAPSHOT_BYTES)
 }
 
-fn save_json_to_path<T: serde::Serialize>(path: &Path, snapshot: &T) -> std::io::Result<()> {
+fn save_json_to_path<T: serde::Serialize>(
+    path: &Path,
+    snapshot: &T,
+    maximum: u64,
+) -> std::io::Result<()> {
     let target = resolve_write_target(path)?;
     if let Some(parent) = target.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let json = serde_json::to_string_pretty(snapshot)?;
-    let tmp_path = target.with_extension("json.tmp");
-    std::fs::write(&tmp_path, &json)?;
-    if let Err(err) = std::fs::rename(&tmp_path, &target) {
-        let _ = std::fs::remove_file(&tmp_path);
-        return Err(err);
+    let mut json = serde_json::to_vec_pretty(snapshot)?;
+    json.push(b'\n');
+    if json.len() as u64 > maximum {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "session file exceeds its size limit",
+        ));
     }
-    Ok(())
+    let mut random = [0_u8; 16];
+    crate::platform::fill_secure_random(&mut random)?;
+    let suffix = random
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let tmp_path = target.with_extension(format!("json.tmp.{suffix}"));
+    let mut temporary = crate::platform::create_private_state_file(&tmp_path)?;
+    let result = (|| {
+        temporary.write_all(&json)?;
+        temporary.sync_all()?;
+        drop(temporary);
+        crate::platform::durable_replace_file(&tmp_path, &target)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp_path);
+    }
+    result
 }
 
 pub(super) fn save_to_paths(
@@ -68,7 +91,7 @@ pub(super) fn save_to_paths(
 ) -> std::io::Result<()> {
     save_to_path(session_path, snapshot)?;
     if let Some(history) = history {
-        save_json_to_path(history_path, history)?;
+        save_json_to_path(history_path, history, MAX_HISTORY_SNAPSHOT_BYTES)?;
     } else {
         clear_path(history_path)?;
     }
@@ -81,6 +104,17 @@ pub(super) fn clear_path(path: &Path) -> std::io::Result<()> {
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(err) => Err(err),
     }
+}
+
+pub(crate) fn publish_handoff_snapshot_to_path(
+    path: &Path,
+    snapshot: &SessionSnapshot,
+) -> std::io::Result<()> {
+    save_to_path(path, snapshot)
+}
+
+pub(crate) fn publish_handoff_snapshot(snapshot: &SessionSnapshot) -> std::io::Result<()> {
+    publish_handoff_snapshot_to_path(&session_path(), snapshot)
 }
 
 pub fn save(snapshot: &SessionSnapshot, history: Option<&SessionHistorySnapshot>) {
@@ -120,11 +154,35 @@ pub(crate) fn load_for_startup() -> StartupSessionLoad {
     load_for_startup_from_path(&session_path())
 }
 
+fn read_bounded_text(path: &Path, maximum: u64) -> std::io::Result<String> {
+    let target = crate::platform::resolve_write_target(path)?;
+    let mut file = std::fs::File::open(target)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() || metadata.len() > maximum {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "session file is not a bounded regular file",
+        ));
+    }
+    let mut bytes = Vec::with_capacity(usize::try_from(metadata.len()).unwrap_or(0));
+    Read::by_ref(&mut file)
+        .take(maximum.saturating_add(1))
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > maximum {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "session file exceeds its size limit",
+        ));
+    }
+    String::from_utf8(bytes)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+}
+
 fn load_for_startup_from_path(path: &Path) -> StartupSessionLoad {
     if !path.exists() {
         return StartupSessionLoad::Missing;
     }
-    let content = match std::fs::read_to_string(path) {
+    let content = match read_bounded_text(path, MAX_SESSION_SNAPSHOT_BYTES) {
         Ok(content) => content,
         Err(err) => {
             let diagnostic = format!("failed to read existing session file: {err}");
@@ -132,8 +190,24 @@ fn load_for_startup_from_path(path: &Path) -> StartupSessionLoad {
             return StartupSessionLoad::Rejected(diagnostic);
         }
     };
-    match parse_snapshot(&content) {
-        Ok(snapshot) => StartupSessionLoad::Loaded(snapshot),
+    match super::snapshot::parse_snapshot_with_status(&content) {
+        Ok((snapshot, normalized)) => {
+            if let Err(error) = super::restore::validate_snapshot_admission(&snapshot) {
+                let diagnostic = format!("failed to validate existing session file: {error}");
+                warn!(%diagnostic);
+                return StartupSessionLoad::Rejected(diagnostic);
+            }
+            if normalized {
+                if let Err(error) = save_to_path(path, &snapshot) {
+                    let diagnostic = format!(
+                        "failed to durably publish migrated session snapshot before restore: {error}"
+                    );
+                    warn!(%diagnostic);
+                    return StartupSessionLoad::Rejected(diagnostic);
+                }
+            }
+            StartupSessionLoad::Loaded(snapshot)
+        }
         Err(err) => {
             let diagnostic = if let Some(version) = snapshot_file_version(&content) {
                 if version > SNAPSHOT_VERSION {
@@ -174,7 +248,7 @@ fn load_history_for_startup_from_path(path: &Path) -> StartupHistoryLoad {
     if !path.exists() {
         return StartupHistoryLoad::Missing;
     }
-    let content = match std::fs::read_to_string(path) {
+    let content = match read_bounded_text(path, MAX_HISTORY_SNAPSHOT_BYTES) {
         Ok(content) => content,
         Err(err) => {
             return StartupHistoryLoad::Rejected(format!(
@@ -277,8 +351,10 @@ mod tests {
         let history_newer =
             temp_session_path("newer-history").with_file_name("session-history.json");
         std::fs::create_dir_all(history_newer.parent().unwrap()).unwrap();
-        let newer_history_bytes =
-            format!("{{\"version\":{},\"workspaces\":[]}}", SNAPSHOT_VERSION + 1);
+        let newer_history_bytes = format!(
+            "{{\"version\":{},\"workspaces\":[]}}",
+            super::super::snapshot::HISTORY_SNAPSHOT_VERSION + 1
+        );
         std::fs::write(&history_newer, &newer_history_bytes).unwrap();
         assert!(matches!(
             load_history_for_startup_from_path(&history_newer),
@@ -320,6 +396,43 @@ mod tests {
                 }],
             }],
         }
+    }
+
+    #[test]
+    fn startup_durably_publishes_normalized_v5_before_returning_snapshot() {
+        let path = temp_session_path("publish-v5-before-restore");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            br#"{"version":4,"workspaces":[{"id":"w1","identity_cwd":"/tmp","tabs":[{"layout":{"Pane":1},"panes":{"1":{"cwd":"/tmp"}},"zoomed":false}]}]}"#,
+        )
+        .unwrap();
+
+        let StartupSessionLoad::Loaded(snapshot) = load_for_startup_from_path(&path) else {
+            panic!("legacy snapshot should migrate");
+        };
+        assert_eq!(snapshot.version, SNAPSHOT_VERSION);
+        let published: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(published["version"], SNAPSHOT_VERSION);
+        let terminal_id = published["workspaces"][0]["tabs"][0]["panes"]["1"]["terminal_id"]
+            .as_str()
+            .expect("published terminal identity");
+        assert!(crate::terminal::TerminalId::parse(terminal_id).is_ok());
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn startup_rejects_session_files_over_the_bounded_read_limit() {
+        let path = temp_session_path("bounded-read");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let file = std::fs::File::create(&path).unwrap();
+        file.set_len(MAX_SESSION_SNAPSHOT_BYTES + 1).unwrap();
+        assert!(matches!(
+            load_for_startup_from_path(&path),
+            StartupSessionLoad::Rejected(_)
+        ));
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 
     #[test]
@@ -393,7 +506,9 @@ mod tests {
             .unwrap()
             .file_type()
             .is_symlink());
-        let parsed = parse_snapshot(&std::fs::read_to_string(&target).unwrap()).unwrap();
+        let parsed =
+            super::super::snapshot::parse_snapshot(&std::fs::read_to_string(&target).unwrap())
+                .unwrap();
         assert_eq!(parsed.selected, 7);
     }
 

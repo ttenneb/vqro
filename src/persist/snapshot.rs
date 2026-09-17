@@ -9,11 +9,15 @@ use crate::layout::Node;
 use crate::terminal::TerminalRuntimeRegistry;
 use crate::workspace::Workspace;
 
-/// Current snapshot format version.
-pub(super) const SNAPSHOT_VERSION: u32 = 4;
+/// Current structural session snapshot format version.
+pub(super) const SNAPSHOT_VERSION: u32 = 5;
+/// Pane history has no terminal-identity fields and remains wire-compatible at v4.
+pub(super) const HISTORY_SNAPSHOT_VERSION: u32 = 4;
+pub(super) const MAX_SESSION_SNAPSHOT_BYTES: u64 = 16 * 1024 * 1024;
+pub(super) const MAX_HISTORY_SNAPSHOT_BYTES: u64 = 64 * 1024 * 1024;
 
 /// Serializable snapshot of the entire herdr session.
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct SessionSnapshot {
     /// Format version — used to detect incompatible changes.
     #[serde(default)]
@@ -38,25 +42,26 @@ pub struct SessionSnapshot {
     pub delegations: Vec<crate::delegation::DelegationRecord>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct SessionHistorySnapshot {
-    /// Format version follows the matching session snapshot version.
+    /// History remains independently versioned because v5 changes only the
+    /// structural session snapshot.
     #[serde(default)]
     pub version: u32,
     pub workspaces: Vec<WorkspaceHistorySnapshot>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct WorkspaceHistorySnapshot {
     pub tabs: Vec<TabHistorySnapshot>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct TabHistorySnapshot {
     pub panes: HashMap<u32, PaneHistorySnapshot>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct WorkspaceSnapshot {
     #[serde(default)]
     pub id: Option<String>,
@@ -93,7 +98,7 @@ struct LegacyWorkspaceSnapshot {
     root_pane: Option<u32>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct TabSnapshot {
     #[serde(default)]
     pub custom_name: Option<String>,
@@ -130,8 +135,57 @@ pub enum LayoutLeafSnapshot {
     Collection(crate::layout::CollectionId),
 }
 
-#[derive(Serialize, Deserialize)]
+/// Bounded persistence DTO. Validation into a logical `TerminalId` happens in
+/// the deterministic snapshot-normalization pass, never during JSON allocation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RawTerminalId(Option<String>);
+
+impl RawTerminalId {
+    fn validated(&self) -> Option<crate::terminal::TerminalId> {
+        self.0
+            .as_deref()
+            .and_then(|raw| crate::terminal::TerminalId::parse(raw).ok())
+    }
+
+    fn from_validated(id: &crate::terminal::TerminalId) -> Self {
+        Self(Some(id.as_str().to_owned()))
+    }
+}
+
+impl Serialize for RawTerminalId {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        self.0.serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for RawTerminalId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        // The containing session read is bounded. Keep only a bounded string
+        // candidate; every other JSON shape is repairable malformed input.
+        let raw = serde_json::Value::deserialize(deserializer)?;
+        let candidate = match raw {
+            serde_json::Value::String(value)
+                if value.len() <= crate::terminal::MAX_TERMINAL_ID_BYTES =>
+            {
+                Some(value)
+            }
+            _ => None,
+        };
+        Ok(Self(candidate))
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize)]
 pub struct PaneSnapshot {
+    /// Added in snapshot v5. Older snapshots are normalized before restoration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_id: Option<RawTerminalId>,
     pub cwd: PathBuf,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
@@ -145,6 +199,24 @@ pub struct PaneSnapshot {
     pub launch_argv: Option<Vec<String>>,
 }
 
+impl PaneSnapshot {
+    pub(crate) fn without_terminal_id(cwd: PathBuf) -> Self {
+        Self {
+            terminal_id: None,
+            cwd,
+            label: None,
+            agent_name: None,
+            managed_agent_kind: None,
+            agent_session: None,
+            launch_argv: None,
+        }
+    }
+
+    fn legacy_layout_only() -> Self {
+        Self::without_terminal_id(std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")))
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PaneAgentSessionSnapshot {
     pub source: String,
@@ -153,14 +225,14 @@ pub struct PaneAgentSessionSnapshot {
     pub value: String,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct PaneHistorySnapshot {
     pub ansi: String,
     pub lines: usize,
 }
 
 /// Serializable BSP tree.
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub enum LayoutSnapshot {
     Pane(u32),
     Collection(crate::layout::CollectionId),
@@ -172,7 +244,7 @@ pub enum LayoutSnapshot {
     },
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub enum DirectionSnapshot {
     Horizontal,
     Vertical,
@@ -232,7 +304,8 @@ struct RawSessionSnapshot {
     delegations: Vec<crate::delegation::DelegationRecord>,
 }
 
-fn migrate_snapshot(raw: RawSessionSnapshot) -> Result<SessionSnapshot, String> {
+fn migrate_snapshot(raw: RawSessionSnapshot) -> Result<(SessionSnapshot, bool), String> {
+    let original_version = raw.version;
     let workspaces = raw
         .workspaces
         .into_iter()
@@ -243,8 +316,8 @@ fn migrate_snapshot(raw: RawSessionSnapshot) -> Result<SessionSnapshot, String> 
     } else {
         (raw.repositories, raw.space_order)
     };
-    Ok(SessionSnapshot {
-        version: raw.version,
+    let mut snapshot = SessionSnapshot {
+        version: original_version,
         workspaces,
         repositories,
         space_order,
@@ -254,7 +327,113 @@ fn migrate_snapshot(raw: RawSessionSnapshot) -> Result<SessionSnapshot, String> 
         sidebar_section_split: raw.sidebar_section_split,
         collapsed_space_keys: raw.collapsed_space_keys,
         delegations: raw.delegations,
-    })
+    };
+    super::restore::validate_snapshot_pane_admission(&snapshot)?;
+    let normalized = normalize_terminal_identities(&mut snapshot, false)?;
+    Ok((snapshot, normalized || original_version != SNAPSHOT_VERSION))
+}
+
+/// Validate persisted terminal IDs without trusting their raw JSON strings.
+///
+/// Pass one deterministically keeps the first valid unique identity in
+/// workspace/tab/pane order. Pass two fills every rejected or legacy slot with
+/// a fresh session-unique identity. No PTY is constructed until this completes.
+pub(crate) fn normalize_terminal_identities(
+    snapshot: &mut SessionSnapshot,
+    regenerate_all: bool,
+) -> Result<bool, String> {
+    normalize_terminal_identities_with(snapshot, regenerate_all, crate::terminal::TerminalId::alloc)
+}
+
+fn normalize_terminal_identities_with<F>(
+    snapshot: &mut SessionSnapshot,
+    regenerate_all: bool,
+    mut generate: F,
+) -> Result<bool, String>
+where
+    F: FnMut() -> std::io::Result<crate::terminal::TerminalId>,
+{
+    let mut changed = snapshot.version != SNAPSHOT_VERSION;
+    let mut occupied = std::collections::HashSet::new();
+
+    fn collect_layout_panes(layout: &LayoutSnapshot, panes: &mut Vec<u32>) {
+        match layout {
+            LayoutSnapshot::Pane(id) => panes.push(*id),
+            LayoutSnapshot::Collection(_) => {}
+            LayoutSnapshot::Split { first, second, .. } => {
+                collect_layout_panes(first, panes);
+                collect_layout_panes(second, panes);
+            }
+        }
+    }
+    for workspace in &mut snapshot.workspaces {
+        for tab in &mut workspace.tabs {
+            let mut layout_panes = Vec::new();
+            collect_layout_panes(&tab.layout, &mut layout_panes);
+            layout_panes.sort_unstable();
+            layout_panes.dedup();
+            for pane_id in layout_panes {
+                if let std::collections::hash_map::Entry::Vacant(entry) = tab.panes.entry(pane_id) {
+                    entry.insert(PaneSnapshot::legacy_layout_only());
+                    changed = true;
+                }
+            }
+        }
+    }
+
+    for workspace in &mut snapshot.workspaces {
+        for tab in &mut workspace.tabs {
+            let mut pane_ids = tab.panes.keys().copied().collect::<Vec<_>>();
+            pane_ids.sort_unstable();
+            for pane_id in pane_ids {
+                let pane = tab
+                    .panes
+                    .get_mut(&pane_id)
+                    .ok_or_else(|| "pane disappeared during identity normalization".to_string())?;
+                let accepted = (!regenerate_all)
+                    .then(|| pane.terminal_id.as_ref().and_then(RawTerminalId::validated))
+                    .flatten()
+                    .filter(|id| occupied.insert(id.clone()));
+                if accepted.is_none() {
+                    changed |= pane.terminal_id.is_some();
+                    pane.terminal_id = None;
+                }
+            }
+        }
+    }
+
+    for workspace in &mut snapshot.workspaces {
+        for tab in &mut workspace.tabs {
+            let mut pane_ids = tab.panes.keys().copied().collect::<Vec<_>>();
+            pane_ids.sort_unstable();
+            for pane_id in pane_ids {
+                let pane = tab
+                    .panes
+                    .get_mut(&pane_id)
+                    .ok_or_else(|| "pane disappeared during identity allocation".to_string())?;
+                if pane.terminal_id.is_some() {
+                    continue;
+                }
+                let allocated =
+                    crate::terminal::TerminalId::alloc_unique_with(&occupied, &mut generate)
+                        .map_err(|error| format!("allocate terminal identity: {error}"))?;
+                occupied.insert(allocated.clone());
+                pane.terminal_id = Some(RawTerminalId::from_validated(&allocated));
+                changed = true;
+            }
+        }
+    }
+    snapshot.version = SNAPSHOT_VERSION;
+    Ok(changed)
+}
+
+pub(crate) fn terminal_id_for_pane_snapshot(
+    pane: &PaneSnapshot,
+) -> Result<crate::terminal::TerminalId, String> {
+    pane.terminal_id
+        .as_ref()
+        .and_then(RawTerminalId::validated)
+        .ok_or_else(|| "snapshot pane has no validated terminal identity".to_string())
 }
 
 fn migrate_workspace(raw: serde_json::Value) -> Result<WorkspaceSnapshot, String> {
@@ -424,6 +603,9 @@ fn capture_tab(
         panes.insert(
             id.raw(),
             PaneSnapshot {
+                terminal_id: Some(RawTerminalId::from_validated(
+                    &tab.panes[id].attached_terminal_id,
+                )),
                 cwd,
                 label,
                 agent_name,
@@ -465,7 +647,7 @@ pub fn capture_history(
     terminal_runtimes: &TerminalRuntimeRegistry,
 ) -> SessionHistorySnapshot {
     SessionHistorySnapshot {
-        version: SNAPSHOT_VERSION,
+        version: HISTORY_SNAPSHOT_VERSION,
         workspaces: workspaces
             .iter()
             .map(|workspace| WorkspaceHistorySnapshot {
@@ -563,7 +745,7 @@ pub(crate) fn validate_snapshot(content: &str) -> Result<(), String> {
     super::restore::validate_snapshot_admission(&snapshot)
 }
 
-pub(super) fn parse_snapshot(content: &str) -> Result<SessionSnapshot, String> {
+pub(super) fn parse_snapshot_with_status(content: &str) -> Result<(SessionSnapshot, bool), String> {
     let raw = serde_json::from_str::<RawSessionSnapshot>(content).map_err(|e| e.to_string())?;
     if raw.version > SNAPSHOT_VERSION {
         return Err(format!(
@@ -574,13 +756,17 @@ pub(super) fn parse_snapshot(content: &str) -> Result<SessionSnapshot, String> {
     migrate_snapshot(raw)
 }
 
+pub(crate) fn parse_snapshot(content: &str) -> Result<SessionSnapshot, String> {
+    parse_snapshot_with_status(content).map(|(snapshot, _)| snapshot)
+}
+
 pub(super) fn parse_history_snapshot(content: &str) -> Result<SessionHistorySnapshot, String> {
     let snapshot =
         serde_json::from_str::<SessionHistorySnapshot>(content).map_err(|e| e.to_string())?;
-    if snapshot.version > SNAPSHOT_VERSION {
+    if snapshot.version > HISTORY_SNAPSHOT_VERSION {
         return Err(format!(
             "history snapshot version {} is newer than supported {}",
-            snapshot.version, SNAPSHOT_VERSION
+            snapshot.version, HISTORY_SNAPSHOT_VERSION
         ));
     }
     Ok(snapshot)
@@ -793,6 +979,7 @@ mod tests {
         panes.insert(
             0,
             PaneSnapshot {
+                terminal_id: None,
                 cwd: PathBuf::from("/home/can/Projects/herdr"),
                 label: None,
                 agent_name: None,
@@ -804,6 +991,7 @@ mod tests {
         panes.insert(
             1,
             PaneSnapshot {
+                terminal_id: None,
                 cwd: PathBuf::from("/home/can/Projects/website"),
                 label: Some("website".into()),
                 agent_name: None,
@@ -879,7 +1067,7 @@ mod tests {
     fn current_session_fixture_parses() {
         let snap = parse_snapshot(session_fixture("current-herdr")).unwrap();
 
-        assert_eq!(snap.version, 3);
+        assert_eq!(snap.version, SNAPSHOT_VERSION);
         assert_eq!(snap.workspaces.len(), 2);
         assert_eq!(snap.active, Some(0));
         assert_eq!(snap.selected, 0);
@@ -896,7 +1084,7 @@ mod tests {
     fn current_dev_session_fixture_parses_additive_fields() {
         let snap = parse_snapshot(session_fixture("current-herdr-dev")).unwrap();
 
-        assert_eq!(snap.version, 3);
+        assert_eq!(snap.version, SNAPSHOT_VERSION);
         assert_eq!(snap.workspaces.len(), 2);
         assert_eq!(snap.sidebar_section_split, Some(0.4));
         assert_eq!(snap.workspaces[0].active_tab, 1);
@@ -960,7 +1148,7 @@ mod tests {
         let snap = parse_snapshot(session_fixture("legacy-pre-tabs-v2")).unwrap();
         let ws = &snap.workspaces[0];
 
-        assert_eq!(snap.version, 2);
+        assert_eq!(snap.version, SNAPSHOT_VERSION);
         assert_eq!(snap.workspaces.len(), 1);
         assert_eq!(ws.custom_name.as_deref(), Some("legacy"));
         assert_eq!(ws.identity_cwd, PathBuf::from("/tmp/pion"));
@@ -1339,10 +1527,146 @@ mod tests {
     }
 
     #[test]
-    fn old_unversioned_snapshot_loads_as_version_0() {
+    fn old_unversioned_snapshot_normalizes_to_current_version() {
         let json = r#"{"workspaces":[],"active":null,"selected":0}"#;
         let snap = parse_snapshot(json).unwrap();
-        assert_eq!(snap.version, 0);
+        assert_eq!(snap.version, SNAPSHOT_VERSION);
+    }
+
+    #[test]
+    fn v4_to_v5_normalization_is_two_pass_and_round_trip_stable() {
+        let json = r#"{
+            "version":4,
+            "workspaces":[{
+                "id":"w1",
+                "identity_cwd":"/tmp",
+                "tabs":[{
+                    "layout":{"Split":{"direction":"Horizontal","ratio":0.5,"first":{"Pane":2},"second":{"Pane":1}}},
+                    "panes":{"2":{"cwd":"/tmp"},"1":{"cwd":"/tmp"}},
+                    "zoomed":false
+                }]
+            }]
+        }"#;
+        let (snapshot, changed) = parse_snapshot_with_status(json).unwrap();
+        assert!(changed);
+        assert_eq!(snapshot.version, SNAPSHOT_VERSION);
+        let first =
+            terminal_id_for_pane_snapshot(&snapshot.workspaces[0].tabs[0].panes[&1]).unwrap();
+        let second =
+            terminal_id_for_pane_snapshot(&snapshot.workspaces[0].tabs[0].panes[&2]).unwrap();
+        assert_ne!(first, second);
+
+        let encoded = serde_json::to_string(&snapshot).unwrap();
+        let (round_trip, changed) = parse_snapshot_with_status(&encoded).unwrap();
+        assert!(!changed);
+        assert_eq!(
+            terminal_id_for_pane_snapshot(&round_trip.workspaces[0].tabs[0].panes[&1]).unwrap(),
+            first
+        );
+        assert_eq!(
+            terminal_id_for_pane_snapshot(&round_trip.workspaces[0].tabs[0].panes[&2]).unwrap(),
+            second
+        );
+    }
+
+    #[test]
+    fn v5_normalization_repairs_invalid_and_duplicate_ids_without_dropping_panes() {
+        let duplicate = "term_00000000000000000000000000000001";
+        let json = format!(
+            r#"{{"version":5,"workspaces":[{{"id":"w1","identity_cwd":"/tmp","tabs":[{{"layout":{{"Pane":1}},"panes":{{"1":{{"terminal_id":"{duplicate}","cwd":"/tmp"}},"2":{{"terminal_id":"{duplicate}","cwd":"/tmp"}},"3":{{"terminal_id":"bad","cwd":"/tmp"}}}},"zoomed":false}}]}}]}}"#
+        );
+        let (snapshot, changed) = parse_snapshot_with_status(&json).unwrap();
+        assert!(changed);
+        let panes = &snapshot.workspaces[0].tabs[0].panes;
+        assert_eq!(panes.len(), 3);
+        assert_eq!(
+            terminal_id_for_pane_snapshot(&panes[&1]).unwrap().as_str(),
+            duplicate
+        );
+        let ids = panes
+            .values()
+            .map(terminal_id_for_pane_snapshot)
+            .collect::<Result<std::collections::HashSet<_>, _>>()
+            .unwrap();
+        assert_eq!(ids.len(), 3);
+    }
+
+    #[test]
+    fn malformed_terminal_id_json_shapes_are_repaired_without_dropping_panes() {
+        let oversized = "x".repeat(crate::terminal::MAX_TERMINAL_ID_BYTES + 1);
+        for malformed in [
+            serde_json::Value::String(oversized),
+            serde_json::json!(42),
+            serde_json::json!({"unexpected": ["shape"]}),
+            serde_json::Value::Null,
+        ] {
+            let json = serde_json::json!({
+                "version": 5,
+                "workspaces": [{
+                    "id": "w1",
+                    "identity_cwd": "/tmp",
+                    "tabs": [{
+                        "layout": {"Pane": 1},
+                        "panes": {"1": {"terminal_id": malformed, "cwd": "/tmp"}},
+                        "zoomed": false
+                    }]
+                }]
+            });
+            let (snapshot, changed) = parse_snapshot_with_status(&json.to_string()).unwrap();
+            assert!(changed);
+            assert_eq!(snapshot.workspaces[0].tabs[0].panes.len(), 1);
+            terminal_id_for_pane_snapshot(&snapshot.workspaces[0].tabs[0].panes[&1]).unwrap();
+        }
+    }
+
+    #[test]
+    fn identity_normalization_is_independent_of_hashmap_insertion_order() {
+        fn normalize(json: &str) -> Vec<(u32, String)> {
+            let mut snapshot: SessionSnapshot = serde_json::from_str(json).unwrap();
+            let generated = [
+                "term_00000000000000000000000000000011",
+                "term_00000000000000000000000000000012",
+                "term_00000000000000000000000000000013",
+            ];
+            let mut generated = generated
+                .into_iter()
+                .map(|raw| crate::terminal::TerminalId::parse(raw).unwrap());
+            normalize_terminal_identities_with(&mut snapshot, false, || {
+                Ok(generated.next().unwrap())
+            })
+            .unwrap();
+            let mut ids = snapshot.workspaces[0].tabs[0]
+                .panes
+                .iter()
+                .map(|(&pane_id, pane)| {
+                    (
+                        pane_id,
+                        terminal_id_for_pane_snapshot(pane).unwrap().to_string(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            ids.sort_unstable();
+            ids
+        }
+        let prefix = r#"{"version":4,"workspaces":[{"id":"w1","identity_cwd":"/tmp","tabs":[{"layout":{"Pane":1},"panes":{"#;
+        let suffix = r#"},"zoomed":false}]}],"active":null,"selected":0}"#;
+        let ascending = format!(
+            "{prefix}{}{}",
+            r#""1":{"cwd":"/tmp"},"2":{"cwd":"/tmp"},"3":{"cwd":"/tmp"}"#, suffix
+        );
+        let descending = format!(
+            "{prefix}{}{}",
+            r#""3":{"cwd":"/tmp"},"2":{"cwd":"/tmp"},"1":{"cwd":"/tmp"}"#, suffix
+        );
+
+        assert_eq!(normalize(&ascending), normalize(&descending));
+    }
+
+    #[test]
+    fn pane_history_format_remains_explicitly_version_four() {
+        let history = capture_history(&[], &TerminalRuntimeRegistry::new());
+        assert_eq!(history.version, HISTORY_SNAPSHOT_VERSION);
+        assert_eq!(history.version, 4);
     }
 
     #[test]
@@ -1420,7 +1744,7 @@ mod tests {
     fn snapshot_v4_collection_json_matches_frozen_golden_shape() {
         let id = crate::layout::CollectionId::from_raw(7_300_001).unwrap();
         let snapshot = SessionSnapshot {
-            version: SNAPSHOT_VERSION,
+            version: 4,
             workspaces: vec![WorkspaceSnapshot {
                 id: Some("workspace".into()),
                 custom_name: None,
@@ -1471,6 +1795,7 @@ mod tests {
         panes.insert(
             0,
             PaneSnapshot {
+                terminal_id: None,
                 cwd: PathBuf::from("/tmp/this-directory-does-not-exist-for-herdr-test"),
                 label: None,
                 agent_name: None,
@@ -1482,6 +1807,7 @@ mod tests {
         panes.insert(
             1,
             PaneSnapshot {
+                terminal_id: None,
                 cwd: std::env::var("HOME")
                     .map(PathBuf::from)
                     .unwrap_or_else(|_| PathBuf::from("/tmp")),

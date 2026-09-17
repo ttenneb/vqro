@@ -77,6 +77,10 @@ impl App {
             Ok(env) => env,
             Err((code, message)) => return encode_error(id, &code, message),
         };
+        let terminal_id = match self.allocate_terminal_id() {
+            Ok(id) => id,
+            Err(error) => return encode_error(id, "tab_create_failed", error.to_string()),
+        };
         let result = self
             .state
             .workspaces
@@ -84,6 +88,7 @@ impl App {
             .ok_or_else(|| std::io::Error::other("workspace disappeared"))
             .and_then(|ws| {
                 ws.create_tab(
+                    terminal_id,
                     rows,
                     cols,
                     cwd,

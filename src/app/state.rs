@@ -1181,7 +1181,66 @@ impl AppState {
         state
     }
 
+    pub fn assert_terminal_identity_invariants_for_test(&self) {
+        let mut attached = std::collections::HashSet::new();
+        for (pane_id, pane) in self
+            .workspaces
+            .iter()
+            .flat_map(|workspace| &workspace.tabs)
+            .flat_map(|tab| &tab.panes)
+        {
+            assert!(
+                attached.insert(pane.attached_terminal_id.clone()),
+                "terminal {} is attached to more than one pane, including {:?}",
+                pane.attached_terminal_id,
+                pane_id
+            );
+            assert!(
+                crate::terminal::TerminalId::parse(pane.attached_terminal_id.as_str()).is_ok(),
+                "pane {:?} has noncanonical terminal identity {}",
+                pane_id,
+                pane.attached_terminal_id
+            );
+            let terminal = self
+                .terminals
+                .get(&pane.attached_terminal_id)
+                .unwrap_or_else(|| panic!("pane {:?} references missing terminal", pane_id));
+            assert_eq!(
+                terminal.id, pane.attached_terminal_id,
+                "terminal-state key and logical identity diverged"
+            );
+        }
+        if let Some(popup) = &self.popup_pane {
+            assert!(
+                attached.insert(popup.terminal_id.clone()),
+                "popup terminal is also attached to a pane"
+            );
+            let terminal = self
+                .terminals
+                .get(&popup.terminal_id)
+                .expect("popup references missing terminal state");
+            assert_eq!(terminal.id, popup.terminal_id);
+        }
+        for (terminal_id, terminal) in &self.terminals {
+            assert_eq!(
+                terminal_id, &terminal.id,
+                "terminal-state key and logical identity diverged"
+            );
+            assert!(
+                attached.contains(terminal_id),
+                "terminal state {} is not attached to a tiled or popup pane",
+                terminal_id
+            );
+        }
+        assert_eq!(
+            attached.len(),
+            self.terminals.len(),
+            "pane/terminal-state identity projection is not bijective"
+        );
+    }
+
     pub fn assert_invariants_for_test(&self) {
+        self.assert_terminal_identity_invariants_for_test();
         if self.workspaces.is_empty() {
             assert!(
                 self.active.is_none(),
@@ -1394,9 +1453,22 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "is not attached to a tiled or popup pane")]
+    fn pure_identity_invariants_reject_orphan_terminal_state() {
+        let mut state = AppState::test_new();
+        let terminal_id = crate::terminal::TerminalId::alloc().unwrap();
+        state.terminals.insert(
+            terminal_id.clone(),
+            crate::terminal::TerminalState::new(terminal_id, "/tmp".into()),
+        );
+        state.assert_terminal_identity_invariants_for_test();
+    }
+
+    #[test]
     fn adversarial_identity_state_satisfies_app_invariants_after_mutation() {
         let mut state = AppState::test_with_adversarial_identity_state();
         state.assert_invariants_for_test();
+        state.assert_terminal_identity_invariants_for_test();
 
         let ws = &mut state.workspaces[0];
         let active_public = ws.tabs[ws.active_tab].number;
@@ -1406,6 +1478,18 @@ mod tests {
         state.ensure_test_terminals();
 
         state.assert_invariants_for_test();
+        state.assert_terminal_identity_invariants_for_test();
+        for workspace in &state.workspaces {
+            for tab in &workspace.tabs {
+                for (pane_id, pane) in &tab.panes {
+                    assert_ne!(
+                        pane.attached_terminal_id.as_str(),
+                        pane_id.raw().to_string(),
+                        "logical terminal identity must not derive from PaneId"
+                    );
+                }
+            }
+        }
     }
 
     fn rgb_luminance(color: Color) -> f64 {
