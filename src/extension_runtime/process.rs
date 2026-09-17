@@ -1343,6 +1343,7 @@ printf '{"type":"response","id":%s,"result":{"terminals":%s,"state":%s}}\n' "$id
                 9,
             )
             .unwrap();
+        let observations = authorization.terminal_observations();
         let factory =
             super::super::RuntimeFactory::installed_process(&installed, "echo", "example.runtime")
                 .unwrap();
@@ -1386,6 +1387,15 @@ printf '{"type":"response","id":%s,"result":{"terminals":%s,"state":%s}}\n' "$id
             "host.terminals.v1"
         );
         assert_eq!(response["state"]["result"]["contract"], "host.state.v1");
+        let snapshot = observations.exactly_one().unwrap();
+        let dependency = crate::host_document_v2::terminal_snapshot_dependency(
+            snapshot.tab_id.as_str(),
+            &snapshot.fingerprint_sha256,
+            snapshot.lease_fence.provider_generation,
+        )
+        .unwrap();
+        assert_eq!(dependency.contract, "host.terminals.v1");
+        assert_eq!(dependency.generation, 7);
         cleanup_package_root(root);
     }
 

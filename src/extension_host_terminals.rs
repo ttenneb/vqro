@@ -23,6 +23,8 @@ pub const HOST_TERMINALS_CONTRACT_V1: &str = "host.terminals.v1";
 pub const HOST_TERMINALS_READ_CAPABILITY: &str = "host.terminals.read";
 pub const HOST_TERMINALS_SNAPSHOT_METHOD: &str = "terminals.snapshot";
 pub const MAX_HOST_TERMINALS_RESPONSE_BYTES: usize = 64 * 1024;
+pub(crate) const MAX_HOST_TERMINALS_WORKSPACE_ID_BYTES: usize = 32;
+pub(crate) const HOST_CONTAINER_ID_BYTES: usize = "container_".len() + 16;
 const ACTOR_WAIT_POLL: Duration = Duration::from_millis(10);
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -32,6 +34,7 @@ pub struct HostTerminalsSnapshotParamsV1 {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct HostTerminalsLeaseFenceV1 {
     pub catalog_generation: u64,
     pub package_generation: u64,
@@ -42,7 +45,7 @@ pub struct HostTerminalsLeaseFenceV1 {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum HostTerminalLayoutItemV1 {
     Tiled {
         terminal_id: crate::terminal::TerminalId,
@@ -55,6 +58,7 @@ pub enum HostTerminalLayoutItemV1 {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct HostTerminalsSnapshotV1 {
     pub contract: String,
     pub workspace_id: String,
@@ -375,6 +379,140 @@ fn timeout_error() -> RuntimeErrorBodyV1 {
     }
 }
 
+pub(crate) fn snapshot_fingerprint(snapshot: &HostTerminalsSnapshotV1) -> Result<String, String> {
+    #[derive(Serialize)]
+    struct FingerprintInput<'a> {
+        contract: &'a str,
+        workspace_id: &'a str,
+        tab_id: &'a crate::workspace::TabId,
+        lease_fence: &'a HostTerminalsLeaseFenceV1,
+        layout: &'a [HostTerminalLayoutItemV1],
+    }
+    let canonical = serde_json::to_vec(&FingerprintInput {
+        contract: &snapshot.contract,
+        workspace_id: &snapshot.workspace_id,
+        tab_id: &snapshot.tab_id,
+        lease_fence: &snapshot.lease_fence,
+        layout: &snapshot.layout,
+    })
+    .map_err(|error| format!("cannot fingerprint terminal snapshot: {error}"))?;
+    Ok(format!("{:x}", Sha256::digest(&canonical)))
+}
+
+#[cfg(test)]
+pub(crate) fn validate_snapshot_value(
+    value: serde_json::Value,
+) -> Result<HostTerminalsSnapshotV1, String> {
+    let encoded = serde_json::to_vec(&value)
+        .map_err(|error| format!("cannot encode terminal snapshot: {error}"))?;
+    if encoded.len() > MAX_HOST_TERMINALS_RESPONSE_BYTES {
+        return Err("terminal snapshot exceeds 64 KiB".into());
+    }
+    let snapshot: HostTerminalsSnapshotV1 = serde_json::from_slice(&encoded)
+        .map_err(|error| format!("invalid host.terminals.v1 snapshot: {error}"))?;
+    validate_snapshot(&snapshot)?;
+    Ok(snapshot)
+}
+
+fn validate_snapshot(snapshot: &HostTerminalsSnapshotV1) -> Result<(), String> {
+    if snapshot.contract != HOST_TERMINALS_CONTRACT_V1 {
+        return Err("unsupported terminal snapshot contract".into());
+    }
+    if snapshot.workspace_id.len() > MAX_HOST_TERMINALS_WORKSPACE_ID_BYTES
+        || crate::workspace::public_workspace_number(&snapshot.workspace_id)
+            .is_none_or(|id| id == 0)
+    {
+        return Err("invalid terminal snapshot workspace id".into());
+    }
+    if snapshot.fingerprint_sha256.len() != 64
+        || !snapshot
+            .fingerprint_sha256
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err("invalid terminal snapshot fingerprint".into());
+    }
+    let fence = &snapshot.lease_fence;
+    if [
+        fence.catalog_generation,
+        fence.package_generation,
+        fence.service_generation,
+        fence.artifact_generation,
+        fence.provider_generation,
+        fence.runtime_generation,
+    ]
+    .contains(&0)
+    {
+        return Err("terminal snapshot fence generations must be nonzero".into());
+    }
+    if snapshot.layout.len()
+        > crate::admission::MAX_TAB_PANES + crate::admission::MAX_GROUPS_PER_TAB
+    {
+        return Err("terminal snapshot layout exceeds admission bounds".into());
+    }
+    let mut terminals = HashSet::new();
+    let mut containers = HashSet::new();
+    let mut terminal_count = 0_usize;
+    for item in &snapshot.layout {
+        match item {
+            HostTerminalLayoutItemV1::Tiled { terminal_id } => {
+                terminal_count = terminal_count
+                    .checked_add(1)
+                    .ok_or_else(|| "terminal snapshot terminal count overflowed".to_string())?;
+                if !terminals.insert(terminal_id) {
+                    return Err("terminal snapshot duplicates a terminal id".into());
+                }
+            }
+            HostTerminalLayoutItemV1::Container {
+                container_id,
+                terminal_ids,
+                selected_terminal_id,
+            } => {
+                let Some(hex) = container_id.strip_prefix("container_") else {
+                    return Err("invalid terminal snapshot container id".into());
+                };
+                if container_id.len() != HOST_CONTAINER_ID_BYTES
+                    || !hex
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+                    || !containers.insert(container_id)
+                {
+                    return Err("invalid or duplicate terminal snapshot container id".into());
+                }
+                if terminal_ids.len() > crate::admission::MAX_GROUP_MEMBERS {
+                    return Err("terminal snapshot container exceeds admission bounds".into());
+                }
+                if terminal_ids.is_empty() != selected_terminal_id.is_none()
+                    || selected_terminal_id
+                        .as_ref()
+                        .is_some_and(|selected| !terminal_ids.contains(selected))
+                {
+                    return Err(
+                        "terminal snapshot container selection is missing or invalid".into(),
+                    );
+                }
+                for terminal_id in terminal_ids {
+                    terminal_count = terminal_count
+                        .checked_add(1)
+                        .ok_or_else(|| "terminal snapshot terminal count overflowed".to_string())?;
+                    if !terminals.insert(terminal_id) {
+                        return Err("terminal snapshot duplicates a terminal id".into());
+                    }
+                }
+            }
+        }
+    }
+    if containers.len() > crate::admission::MAX_GROUPS_PER_TAB
+        || terminal_count > crate::admission::MAX_TAB_PANES
+    {
+        return Err("terminal snapshot topology exceeds admission bounds".into());
+    }
+    if snapshot_fingerprint(snapshot)? != snapshot.fingerprint_sha256 {
+        return Err("terminal snapshot fingerprint does not match its canonical payload".into());
+    }
+    Ok(())
+}
+
 pub(crate) fn build_snapshot(
     workspace: &crate::workspace::Workspace,
     tab: &crate::workspace::Tab,
@@ -492,33 +630,20 @@ pub(crate) fn build_snapshot(
         ));
     }
 
-    #[derive(Serialize)]
-    struct FingerprintInput<'a> {
-        contract: &'a str,
-        workspace_id: &'a str,
-        tab_id: &'a crate::workspace::TabId,
-        lease_fence: &'a HostTerminalsLeaseFenceV1,
-        layout: &'a [HostTerminalLayoutItemV1],
-    }
-    let canonical = serde_json::to_vec(&FingerprintInput {
-        contract: HOST_TERMINALS_CONTRACT_V1,
-        workspace_id: &workspace.id,
-        tab_id: &tab.id,
-        lease_fence: &fence,
-        layout: &layout,
-    })
-    .map_err(|error| RuntimeErrorBodyV1 {
-        code: "host_call_unavailable".into(),
-        message: format!("cannot fingerprint terminal snapshot: {error}"),
-    })?;
-    let snapshot = HostTerminalsSnapshotV1 {
+    let mut snapshot = HostTerminalsSnapshotV1 {
         contract: HOST_TERMINALS_CONTRACT_V1.into(),
         workspace_id: workspace.id.clone(),
         tab_id: tab.id.clone(),
         lease_fence: fence,
-        fingerprint_sha256: format!("{:x}", Sha256::digest(&canonical)),
+        fingerprint_sha256: String::new(),
         layout,
     };
+    snapshot.fingerprint_sha256 =
+        snapshot_fingerprint(&snapshot).map_err(|message| RuntimeErrorBodyV1 {
+            code: "host_call_unavailable".into(),
+            message,
+        })?;
+    validate_snapshot(&snapshot).map_err(|message| malformed_error(&message))?;
     let encoded = serde_json::to_vec(&snapshot).map_err(|error| RuntimeErrorBodyV1 {
         code: "host_call_unavailable".into(),
         message: format!("cannot encode terminal snapshot: {error}"),

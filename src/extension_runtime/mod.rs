@@ -216,6 +216,12 @@ pub(crate) trait RuntimeHostCallHandler: Send + Sync {
     fn handle_host_call(&self, call: RuntimeHostCallV1) -> RuntimeHostCallResponseV1;
 }
 
+#[cfg(test)]
+pub(crate) trait RuntimeHostCallObserver: Send + Sync {
+    /// Receives only responses whose envelope has passed the router's exact validation.
+    fn observe_accepted(&self, method: &str, response: &RuntimeHostCallResponseV1);
+}
+
 pub(crate) struct RuntimeHostCallRouter {
     identity: RuntimeIdentityV1,
     namespace: String,
@@ -224,6 +230,8 @@ pub(crate) struct RuntimeHostCallRouter {
     total_calls: AtomicUsize,
     call_limit_exceeded: AtomicBool,
     handler: Box<dyn RuntimeHostCallHandler>,
+    #[cfg(test)]
+    observer: Option<Box<dyn RuntimeHostCallObserver>>,
 }
 
 impl RuntimeHostCallRouter {
@@ -241,7 +249,18 @@ impl RuntimeHostCallRouter {
             total_calls: AtomicUsize::new(0),
             call_limit_exceeded: AtomicBool::new(false),
             handler: Box::new(handler),
+            #[cfg(test)]
+            observer: None,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_observer(
+        mut self,
+        observer: impl RuntimeHostCallObserver + 'static,
+    ) -> Self {
+        self.observer = Some(Box::new(observer));
+        self
     }
 
     pub(crate) fn handle(&self, call: RuntimeHostCallV1) -> RuntimeHostCallResponseV1 {
@@ -302,6 +321,8 @@ impl RuntimeHostCallRouter {
         let _guard = OutstandingGuard(&self.outstanding);
         let expected_call_id = call.call_id.clone();
         let expected_identity = call.identity.clone();
+        #[cfg(test)]
+        let accepted_method = call.method.clone();
         let response = self.handler.handle_host_call(call);
         if response.kind != "host_response"
             || response.call_id != expected_call_id
@@ -318,6 +339,10 @@ impl RuntimeHostCallRouter {
                     message: "host-call handler returned a malformed response envelope".into(),
                 }),
             };
+        }
+        #[cfg(test)]
+        if let Some(observer) = &self.observer {
+            observer.observe_accepted(&accepted_method, &response);
         }
         response
     }
@@ -689,6 +714,7 @@ impl ExtensionRuntimeDispatcher {
         let host_calls = match host_authorization {
             #[cfg(test)]
             Some((HostInvocationAuthorization::Composite(authorization), canceled)) => {
+                let observer = authorization.terminal_observations();
                 let bound = authorization.bind(
                     request.request_id.clone(),
                     self.identity.clone(),
@@ -696,12 +722,15 @@ impl ExtensionRuntimeDispatcher {
                     deadline,
                     canceled,
                 )?;
-                Arc::new(RuntimeHostCallRouter::new(
-                    bound.identity(),
-                    bound.namespace(),
-                    bound.allowed_methods(),
-                    bound,
-                ))
+                Arc::new(
+                    RuntimeHostCallRouter::new(
+                        bound.identity(),
+                        bound.namespace(),
+                        bound.allowed_methods(),
+                        bound,
+                    )
+                    .with_observer(observer),
+                )
             }
             Some((HostInvocationAuthorization::LegacyTerminals(authorization), canceled)) => {
                 let event_tx = authorization.event_tx.clone();

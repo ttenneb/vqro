@@ -10,6 +10,8 @@ pub const EXTENSION_SERVICE_SCHEMA_ID_V1: &str = "https://vqro.dev/schema/extens
 pub const RUNTIME_SERVICE_SCHEMA_ID_V1: &str = "https://vqro.dev/schema/service/v1";
 pub const HOST_STATE_SCHEMA_ID_V1: &str = "https://vqro.dev/schema/host-state/v1";
 pub const HOST_DOCUMENT_SCHEMA_ID_V2: &str = crate::host_document_v2::HOST_DOCUMENT_SCHEMA_ID_V2;
+pub const HOST_DOCUMENT_RENDER_SCHEMA_ID_V2: &str =
+    crate::host_document_v2::HOST_DOCUMENT_RENDER_SCHEMA_ID_V2;
 pub const HOST_TERMINALS_SCHEMA_ID_V1: &str = "https://vqro.dev/schema/host-terminals/v1";
 pub const EXTENSION_BUNDLE_SCHEMA_ID_V1: &str = "https://vqro.dev/schema/extensions/v1";
 pub const PACKAGE_SCHEMA_ID_V1: &str = crate::extension_package::PACKAGE_SCHEMA_ID_V1;
@@ -225,6 +227,83 @@ pub fn host_document_v2_schema_document() -> serde_json::Value {
     schema
 }
 
+pub fn host_document_render_v2_schema_document() -> serde_json::Value {
+    let mut schema = serde_json::to_value(schemars::schema_for!(
+        crate::host_document_v2::HostDocumentRenderParamsV2
+    ))
+    .expect("generated host.document.render.v2 schema serializes");
+    let object = schema
+        .as_object_mut()
+        .expect("generated host.document.render.v2 schema is an object");
+    object.insert(
+        "$id".into(),
+        serde_json::Value::String(HOST_DOCUMENT_RENDER_SCHEMA_ID_V2.into()),
+    );
+    object.insert(
+        "title".into(),
+        serde_json::Value::String("host document render request v2".into()),
+    );
+    object.insert(
+        "contract".into(),
+        serde_json::Value::String(crate::host_document_v2::HOST_DOCUMENT_RENDER_CONTRACT_V2.into()),
+    );
+    object.insert(
+        "limits".into(),
+        serde_json::json!({
+            "max_encoded_bytes": crate::host_document_v2::MAX_DOCUMENT_RENDER_V2_BYTES,
+            "actions": 0,
+            "effects": 0,
+            "authorized_terminal_ids": 0,
+            "dependencies": 0,
+        }),
+    );
+    schema["properties"]["contract"] = serde_json::json!({
+        "const": crate::host_document_v2::HOST_DOCUMENT_RENDER_CONTRACT_V2,
+        "type": "string",
+    });
+    schema["properties"]["requested_revision"]["minimum"] = serde_json::json!(1);
+    schema["properties"]["requested_revision"]["maximum"] = serde_json::json!(u64::MAX);
+    for field in [
+        "runtime_generation",
+        "provider_generation",
+        "scope_generation",
+    ] {
+        schema["$defs"]["DocumentProducerFenceV2"]["properties"][field]["minimum"] =
+            serde_json::json!(1);
+        schema["$defs"]["DocumentProducerFenceV2"]["properties"][field]["maximum"] =
+            serde_json::json!(u64::MAX);
+    }
+    schema["$defs"]["DocumentProducerFenceV2"]["properties"]["package_id"] = serde_json::json!({
+        "maxLength": crate::host_document_v2::MAX_DOCUMENT_V2_IDENTIFIER_BYTES,
+        "pattern": "^[a-z0-9-]+(?:\\.[a-z0-9-]+)+$",
+        "type": "string",
+    });
+    schema["$defs"]["DocumentProducerFenceV2"]["properties"]["service_id"] = serde_json::json!({
+        "maxLength": crate::host_document_v2::MAX_DOCUMENT_V2_IDENTIFIER_BYTES,
+        "minLength": 1,
+        "pattern": "^[A-Za-z0-9._:/-]+$",
+        "type": "string",
+    });
+    schema["$defs"]["DocumentProducerFenceV2"]["properties"]["artifact_sha256"] = serde_json::json!({
+        "maxLength": 64,
+        "minLength": 64,
+        "pattern": "^[0-9a-f]{64}$",
+        "type": "string",
+    });
+    schema["$defs"]["DocumentScopeV2"]["properties"]["contract"] = serde_json::json!({
+        "maxLength": crate::host_document_v2::MAX_DOCUMENT_V2_IDENTIFIER_BYTES,
+        "pattern": "^[a-z0-9-]+(?:\\.[a-z0-9-]+)+$",
+        "type": "string",
+    });
+    schema["$defs"]["DocumentScopeV2"]["properties"]["scope_id"] = serde_json::json!({
+        "maxLength": crate::host_document_v2::MAX_DOCUMENT_V2_IDENTIFIER_BYTES,
+        "minLength": 1,
+        "pattern": "^[A-Za-z0-9._:/-]+$",
+        "type": "string",
+    });
+    schema
+}
+
 pub fn host_terminals_schema_document() -> serde_json::Value {
     let mut document = serde_json::json!({
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -241,6 +320,7 @@ pub fn host_terminals_schema_document() -> serde_json::Value {
             "max_terminals_per_tab": crate::admission::MAX_TAB_PANES,
             "max_containers_per_tab": crate::admission::MAX_GROUPS_PER_TAB,
             "max_members_per_container": crate::admission::MAX_GROUP_MEMBERS,
+            "max_layout_items": crate::admission::MAX_TAB_PANES + crate::admission::MAX_GROUPS_PER_TAB,
         },
         "schemas": {
             "snapshot_params": scoped_schema::<crate::extension_host_terminals::HostTerminalsSnapshotParamsV1>("snapshot_params"),
@@ -253,6 +333,65 @@ pub fn host_terminals_schema_document() -> serde_json::Value {
             "type": "string",
         });
     }
+    document["validation_authority"] = serde_json::json!({
+        "json_schema": "structural, canonical field forms, and per-array bounds",
+        "rust_validator": "normative for recomputed fingerprint, global identity uniqueness, container selection integrity, and cross-field topology bounds",
+    });
+    let snapshot = &mut document["schemas"]["snapshot"];
+    for field in [
+        "catalog_generation",
+        "package_generation",
+        "service_generation",
+        "artifact_generation",
+        "provider_generation",
+        "runtime_generation",
+    ] {
+        snapshot["$defs"]["HostTerminalsLeaseFenceV1"]["properties"][field]["minimum"] =
+            serde_json::json!(1);
+        snapshot["$defs"]["HostTerminalsLeaseFenceV1"]["properties"][field]["maximum"] =
+            serde_json::json!(u64::MAX);
+    }
+    snapshot["properties"]["fingerprint_sha256"] = serde_json::json!({
+        "maxLength": 64,
+        "minLength": 64,
+        "pattern": "^[0-9a-f]{64}$",
+        "type": "string",
+    });
+    snapshot["$defs"]["TabId"] = serde_json::json!({
+        "description": "Stable opaque identity for a server-owned tab.",
+        "maxLength": crate::workspace::MAX_TAB_ID_BYTES,
+        "minLength": crate::workspace::MAX_TAB_ID_BYTES,
+        "pattern": "^tab_[0-9a-f]{32}$",
+        "type": "string",
+    });
+    snapshot["$defs"]["TerminalId"] = serde_json::json!({
+        "description": "Stable opaque identity for a server-owned logical terminal.",
+        "maxLength": crate::terminal::MAX_TERMINAL_ID_BYTES,
+        "minLength": crate::terminal::MAX_TERMINAL_ID_BYTES,
+        "pattern": "^term_[0-9a-f]{32}$",
+        "type": "string",
+    });
+    snapshot["properties"]["workspace_id"] = serde_json::json!({
+        "maxLength": crate::extension_host_terminals::MAX_HOST_TERMINALS_WORKSPACE_ID_BYTES,
+        "minLength": 2,
+        "pattern": "^w[123456789ABCDEFGHJKMNPQRSTVWXYZ0]+$",
+        "type": "string",
+    });
+    snapshot["properties"]["layout"]["maxItems"] =
+        serde_json::json!(crate::admission::MAX_TAB_PANES + crate::admission::MAX_GROUPS_PER_TAB);
+    snapshot["properties"]["layout"]["uniqueItems"] = serde_json::json!(true);
+    let variants = snapshot["$defs"]["HostTerminalLayoutItemV1"]["oneOf"]
+        .as_array_mut()
+        .expect("terminal layout variants are an array");
+    variants[1]["properties"]["container_id"] = serde_json::json!({
+        "maxLength": crate::extension_host_terminals::HOST_CONTAINER_ID_BYTES,
+        "minLength": crate::extension_host_terminals::HOST_CONTAINER_ID_BYTES,
+        "pattern": "^container_[0-9a-f]{16}$",
+        "type": "string",
+    });
+    variants[1]["properties"]["terminal_ids"]["maxItems"] =
+        serde_json::json!(crate::admission::MAX_GROUP_MEMBERS);
+    variants[1]["properties"]["terminal_ids"]["uniqueItems"] = serde_json::json!(true);
     document
 }
 
@@ -409,6 +548,10 @@ pub fn host_state_schema_json() -> &'static str {
 
 pub fn host_document_v2_schema_json() -> &'static str {
     include_str!("../docs/next/api/host-document-v2.schema.json")
+}
+
+pub fn host_document_render_v2_schema_json() -> &'static str {
+    include_str!("../docs/next/api/host-document-render-v2.schema.json")
 }
 
 pub fn host_terminals_schema_json() -> &'static str {
@@ -588,6 +731,106 @@ mod tests {
     }
 
     #[test]
+    fn host_terminals_schema_matches_strict_snapshot_validation() {
+        let schema = host_terminals_schema_document();
+        let snapshot = &schema["schemas"]["snapshot"];
+        assert_eq!(
+            schema["schemas"]["snapshot_params"]["properties"]["contract"]["const"],
+            crate::extension_host_terminals::HOST_TERMINALS_CONTRACT_V1
+        );
+        assert_eq!(
+            snapshot["properties"]["contract"]["const"],
+            crate::extension_host_terminals::HOST_TERMINALS_CONTRACT_V1
+        );
+        for field in [
+            "catalog_generation",
+            "package_generation",
+            "service_generation",
+            "artifact_generation",
+            "provider_generation",
+            "runtime_generation",
+        ] {
+            let generation = &snapshot["$defs"]["HostTerminalsLeaseFenceV1"]["properties"][field];
+            assert_eq!(generation["minimum"], 1);
+            assert_eq!(generation["maximum"], serde_json::json!(u64::MAX));
+        }
+        let fingerprint = &snapshot["properties"]["fingerprint_sha256"];
+        assert_eq!(fingerprint["pattern"], "^[0-9a-f]{64}$");
+        assert_eq!(fingerprint["minLength"], 64);
+        assert_eq!(fingerprint["maxLength"], 64);
+        let tab_id = &snapshot["$defs"]["TabId"];
+        assert_eq!(tab_id["pattern"], "^tab_[0-9a-f]{32}$");
+        assert_eq!(tab_id["minLength"], crate::workspace::MAX_TAB_ID_BYTES);
+        assert_eq!(tab_id["maxLength"], crate::workspace::MAX_TAB_ID_BYTES);
+        let terminal_id = &snapshot["$defs"]["TerminalId"];
+        assert_eq!(terminal_id["pattern"], "^term_[0-9a-f]{32}$");
+        assert_eq!(
+            terminal_id["minLength"],
+            crate::terminal::MAX_TERMINAL_ID_BYTES
+        );
+        assert_eq!(
+            terminal_id["maxLength"],
+            crate::terminal::MAX_TERMINAL_ID_BYTES
+        );
+        let workspace_id = &snapshot["properties"]["workspace_id"];
+        assert_eq!(
+            workspace_id["pattern"],
+            "^w[123456789ABCDEFGHJKMNPQRSTVWXYZ0]+$"
+        );
+        assert_eq!(workspace_id["minLength"], 2);
+        assert_eq!(
+            workspace_id["maxLength"],
+            crate::extension_host_terminals::MAX_HOST_TERMINALS_WORKSPACE_ID_BYTES
+        );
+        assert_eq!(
+            snapshot["properties"]["layout"]["maxItems"],
+            crate::admission::MAX_TAB_PANES + crate::admission::MAX_GROUPS_PER_TAB
+        );
+        assert_eq!(snapshot["properties"]["layout"]["uniqueItems"], true);
+        let container = &snapshot["$defs"]["HostTerminalLayoutItemV1"]["oneOf"][1];
+        let container_id = &container["properties"]["container_id"];
+        assert_eq!(container_id["pattern"], "^container_[0-9a-f]{16}$");
+        assert_eq!(
+            container_id["minLength"],
+            crate::extension_host_terminals::HOST_CONTAINER_ID_BYTES
+        );
+        assert_eq!(
+            container_id["maxLength"],
+            crate::extension_host_terminals::HOST_CONTAINER_ID_BYTES
+        );
+        assert_eq!(
+            container["properties"]["terminal_ids"]["maxItems"],
+            crate::admission::MAX_GROUP_MEMBERS
+        );
+        assert_eq!(container["properties"]["terminal_ids"]["uniqueItems"], true);
+    }
+
+    #[test]
+    fn host_document_render_v2_schema_is_strict_and_authority_free() {
+        let schema = host_document_render_v2_schema_document();
+        assert_eq!(
+            schema["properties"]["contract"]["const"],
+            crate::host_document_v2::HOST_DOCUMENT_RENDER_CONTRACT_V2
+        );
+        assert_eq!(schema["additionalProperties"], false);
+        assert_eq!(schema["properties"]["requested_revision"]["minimum"], 1);
+        let properties = schema["properties"].as_object().unwrap();
+        assert_eq!(
+            properties.keys().map(String::as_str).collect::<Vec<_>>(),
+            ["contract", "producer", "requested_revision", "scope"]
+        );
+        for forbidden in [
+            "dependencies",
+            "terminal_ids",
+            "authorized_terminal_ids",
+            "actions",
+            "effects",
+        ] {
+            assert!(!properties.contains_key(forbidden));
+        }
+    }
+
+    #[test]
     fn golden_fixtures_observe_the_structural_schema_boundary() {
         let fixture = |name: &str| {
             let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -622,6 +865,10 @@ mod tests {
             (
                 "docs/next/api/host-document-v2.schema.json",
                 host_document_v2_schema_document(),
+            ),
+            (
+                "docs/next/api/host-document-render-v2.schema.json",
+                host_document_render_v2_schema_document(),
             ),
             (
                 "docs/next/api/host-terminals-v1.schema.json",
@@ -731,6 +978,7 @@ mod tests {
             manifest_schema_document(),
             service_schema_document(),
             host_document_v2_schema_document(),
+            host_document_render_v2_schema_document(),
         ] {
             assert_refs_resolve_against(&schema, &schema);
         }

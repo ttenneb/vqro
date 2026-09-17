@@ -12,7 +12,12 @@ use crate::terminal::TerminalId;
 
 pub const HOST_DOCUMENT_CONTRACT_V2: &str = "host.document.v2";
 pub const HOST_DOCUMENT_SCHEMA_ID_V2: &str = "https://vqro.dev/schema/host-document/v2";
+pub const HOST_DOCUMENT_RENDER_CONTRACT_V2: &str = "host.document.render.v2";
+pub const HOST_DOCUMENT_RENDER_SCHEMA_ID_V2: &str =
+    "https://vqro.dev/schema/host-document-render/v2";
+pub const HOST_TERMINALS_DEPENDENCY_CONTRACT_V1: &str = "host.terminals.v1";
 pub const MAX_DOCUMENT_V2_BYTES: usize = 128 * 1024;
+pub const MAX_DOCUMENT_RENDER_V2_BYTES: usize = 2 * 1024;
 pub const MAX_DOCUMENT_V2_NODES: usize = 512;
 pub const MAX_DOCUMENT_V2_DEPTH: usize = 16;
 pub const MAX_DOCUMENT_V2_DEPENDENCIES: usize = 64;
@@ -82,6 +87,19 @@ pub struct HostDocumentV2 {
     pub roots: Vec<String>,
     #[serde(default)]
     pub nodes: Vec<DocumentNodeV2>,
+}
+
+/// Host-created parameters for one off-render-loop producer request.
+///
+/// The DTO deliberately carries no terminal authorization, dependency claims, actions, or
+/// effects. Those facts are observed and audited independently by the host.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct HostDocumentRenderParamsV2 {
+    pub contract: String,
+    pub producer: DocumentProducerFenceV2,
+    pub scope: DocumentScopeV2,
+    pub requested_revision: u64,
 }
 
 #[derive(
@@ -202,6 +220,79 @@ impl std::fmt::Display for HostDocumentV2Error {
 }
 
 impl std::error::Error for HostDocumentV2Error {}
+
+impl HostDocumentRenderParamsV2 {
+    /// Strictly decodes host-created request parameters. Unknown fields are denied.
+    pub fn validate_json(encoded: &[u8]) -> Result<Self, HostDocumentV2Error> {
+        if encoded.len() > MAX_DOCUMENT_RENDER_V2_BYTES {
+            return invalid("render request exceeds the 2 KiB encoded limit");
+        }
+        let params: Self = serde_json::from_slice(encoded).map_err(|error| {
+            HostDocumentV2Error(format!("invalid host.document.render.v2 JSON: {error}"))
+        })?;
+        params.validate()?;
+        Ok(params)
+    }
+
+    pub fn validate(&self) -> Result<(), HostDocumentV2Error> {
+        match serialized_len_capped(self, MAX_DOCUMENT_RENDER_V2_BYTES) {
+            Ok(_) => {}
+            Err(CappedSerializationError::LimitExceeded) => {
+                return invalid("render request exceeds the 2 KiB encoded limit");
+            }
+            Err(CappedSerializationError::Serialization) => {
+                return invalid("cannot encode render request");
+            }
+        }
+        if self.contract != HOST_DOCUMENT_RENDER_CONTRACT_V2 {
+            return invalid("unsupported host document render contract");
+        }
+        validate_producer_fence(&self.producer)?;
+        validate_scope(&self.scope)?;
+        if self.requested_revision == 0 {
+            return invalid("requested document revision must be non-zero");
+        }
+        Ok(())
+    }
+}
+
+/// Constructs the sole normative terminal-snapshot dependency representation.
+///
+/// `tab_id` is the full stable tab ID, `fingerprint_sha256` is the canonical snapshot digest,
+/// and `provider_generation` comes from `snapshot.lease_fence.provider_generation`.
+pub fn terminal_snapshot_dependency(
+    tab_id: &str,
+    fingerprint_sha256: &str,
+    provider_generation: u64,
+) -> Result<DocumentDependencyV2, HostDocumentV2Error> {
+    let tab_hex = tab_id
+        .strip_prefix("tab_")
+        .filter(|hex| hex.len() == 32)
+        .filter(|hex| {
+            hex.bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        })
+        .ok_or_else(|| HostDocumentV2Error("invalid terminal dependency tab id".into()))?;
+    debug_assert_eq!(tab_hex.len(), 32);
+    if fingerprint_sha256.len() != 64
+        || !fingerprint_sha256
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return invalid("invalid terminal dependency fingerprint");
+    }
+    if provider_generation == 0 {
+        return invalid("terminal dependency generation must be non-zero");
+    }
+    let scope_id = format!("{tab_id}/{fingerprint_sha256}");
+    validate_opaque_id(&scope_id, "terminal dependency scope id")?;
+    Ok(DocumentDependencyV2 {
+        contract: HOST_TERMINALS_DEPENDENCY_CONTRACT_V1.into(),
+        scope_id,
+        revision: 1,
+        generation: provider_generation,
+    })
+}
 
 impl HostDocumentV2 {
     /// Strictly decodes and validates producer bytes. Unknown fields are denied by every DTO.
@@ -495,6 +586,66 @@ mod tests {
 
     fn valid_bytes() -> Vec<u8> {
         include_bytes!("../docs/next/api/host-document-v2.fixtures/valid.json").to_vec()
+    }
+
+    #[test]
+    fn render_request_is_strict_host_authored_input() {
+        let value = serde_json::json!({
+            "contract": HOST_DOCUMENT_RENDER_CONTRACT_V2,
+            "producer": {
+                "package_id": "example.document",
+                "service_id": "producer",
+                "artifact_sha256": "a".repeat(64),
+                "runtime_generation": 3,
+                "provider_generation": 4,
+                "scope_generation": 5
+            },
+            "scope": {"contract": "host.session.v1", "scope_id": "session"},
+            "requested_revision": 9
+        });
+        let encoded = serde_json::to_vec(&value).unwrap();
+        assert_eq!(
+            HostDocumentRenderParamsV2::validate_json(&encoded)
+                .unwrap()
+                .requested_revision,
+            9
+        );
+
+        for forbidden in ["dependencies", "terminal_ids", "actions", "effects"] {
+            let mut invalid = value.clone();
+            invalid[forbidden] = serde_json::json!([]);
+            assert!(HostDocumentRenderParamsV2::validate_json(
+                &serde_json::to_vec(&invalid).unwrap()
+            )
+            .is_err());
+        }
+        let mut zero = value;
+        zero["requested_revision"] = serde_json::json!(0);
+        assert!(
+            HostDocumentRenderParamsV2::validate_json(&serde_json::to_vec(&zero).unwrap()).is_err()
+        );
+    }
+
+    #[test]
+    fn terminal_dependency_convention_is_exact_and_strict() {
+        let tab = "tab_0123456789abcdef0123456789abcdef";
+        let fingerprint = "ab".repeat(32);
+        let dependency = terminal_snapshot_dependency(tab, &fingerprint, 7).unwrap();
+        assert_eq!(dependency.contract, "host.terminals.v1");
+        assert_eq!(dependency.scope_id, format!("{tab}/{fingerprint}"));
+        assert_eq!(dependency.revision, 1);
+        assert_eq!(dependency.generation, 7);
+
+        for invalid_tab in [
+            "tab_0123456789ABCDEF0123456789abcdef",
+            "tab_0123",
+            "pane_0123456789abcdef0123456789abcdef",
+        ] {
+            assert!(terminal_snapshot_dependency(invalid_tab, &fingerprint, 7).is_err());
+        }
+        assert!(terminal_snapshot_dependency(tab, &"A".repeat(64), 7).is_err());
+        assert!(terminal_snapshot_dependency(tab, &"a".repeat(63), 7).is_err());
+        assert!(terminal_snapshot_dependency(tab, &fingerprint, 0).is_err());
     }
 
     #[test]

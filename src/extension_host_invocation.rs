@@ -37,9 +37,14 @@ pub(crate) struct HostReadInvocationAuthorization {
         Option<crate::extension_host_terminals::HostTerminalsInvocationAuthorization>,
     pub(crate) allowed_methods: BTreeMap<String, String>,
     pub(crate) authority: Arc<crate::extension_host_state::HostInvocationAuthority>,
+    pub(crate) terminal_observations: TrustedTerminalSnapshotObservations,
 }
 
 impl HostReadInvocationAuthorization {
+    pub(crate) fn terminal_observations(&self) -> TrustedTerminalSnapshotObservations {
+        self.terminal_observations.clone()
+    }
+
     pub(crate) fn bind(
         self,
         outer_request_id: String,
@@ -155,6 +160,65 @@ impl HostReadInvocationAuthorization {
             state,
             terminals,
         })
+    }
+}
+
+#[derive(Debug, Default)]
+struct TerminalObservationState {
+    snapshots: Vec<crate::extension_host_terminals::HostTerminalsSnapshotV1>,
+    invalid: Option<String>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct TrustedTerminalSnapshotObservations {
+    state: Arc<std::sync::Mutex<TerminalObservationState>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum TerminalObservationError {
+    Zero,
+    Multiple(usize),
+    Invalid(String),
+}
+
+impl crate::extension_runtime::RuntimeHostCallObserver for TrustedTerminalSnapshotObservations {
+    fn observe_accepted(&self, method: &str, response: &RuntimeHostCallResponseV1) {
+        if method != crate::extension_host_terminals::HOST_TERMINALS_SNAPSHOT_METHOD
+            || response.error.is_some()
+        {
+            return;
+        }
+        let validation = response
+            .result
+            .clone()
+            .ok_or_else(|| "accepted terminal response has no result".to_string())
+            .and_then(crate::extension_host_terminals::validate_snapshot_value);
+        let mut state = self.state.lock().expect("terminal observation lock");
+        match validation {
+            Ok(snapshot) => state.snapshots.push(snapshot),
+            Err(error) => {
+                if state.invalid.is_none() {
+                    state.invalid = Some(error);
+                }
+            }
+        }
+    }
+}
+
+impl TrustedTerminalSnapshotObservations {
+    pub(crate) fn exactly_one(
+        &self,
+    ) -> Result<crate::extension_host_terminals::HostTerminalsSnapshotV1, TerminalObservationError>
+    {
+        let state = self.state.lock().expect("terminal observation lock");
+        if let Some(error) = &state.invalid {
+            return Err(TerminalObservationError::Invalid(error.clone()));
+        }
+        match state.snapshots.as_slice() {
+            [] => Err(TerminalObservationError::Zero),
+            [snapshot] => Ok(snapshot.clone()),
+            many => Err(TerminalObservationError::Multiple(many.len())),
+        }
     }
 }
 
@@ -284,6 +348,244 @@ mod tests {
             method: method.into(),
             namespace: identity.namespace.clone(),
             params: serde_json::json!({"contract": contract}),
+        }
+    }
+
+    #[derive(Clone)]
+    struct ScriptedResponse(RuntimeHostCallResponseV1);
+
+    impl RuntimeHostCallHandler for ScriptedResponse {
+        fn handle_host_call(&self, _call: RuntimeHostCallV1) -> RuntimeHostCallResponseV1 {
+            self.0.clone()
+        }
+    }
+
+    fn observation_identity() -> RuntimeIdentityV1 {
+        RuntimeIdentityV1 {
+            package_id: "example.package".into(),
+            namespace: "example.extension".into(),
+            service_id: "reader".into(),
+            generation: 4,
+        }
+    }
+
+    fn valid_snapshot() -> crate::extension_host_terminals::HostTerminalsSnapshotV1 {
+        let mut snapshot = crate::extension_host_terminals::HostTerminalsSnapshotV1 {
+            contract: crate::extension_host_terminals::HOST_TERMINALS_CONTRACT_V1.into(),
+            workspace_id: "w1".into(),
+            tab_id: crate::workspace::TabId::parse("tab_0123456789abcdef0123456789abcdef").unwrap(),
+            lease_fence: crate::extension_host_terminals::HostTerminalsLeaseFenceV1 {
+                catalog_generation: 1,
+                package_generation: 2,
+                service_generation: 3,
+                artifact_generation: 4,
+                provider_generation: 5,
+                runtime_generation: 4,
+            },
+            fingerprint_sha256: String::new(),
+            layout: Vec::new(),
+        };
+        snapshot.fingerprint_sha256 =
+            crate::extension_host_terminals::snapshot_fingerprint(&snapshot).unwrap();
+        snapshot
+    }
+
+    fn accepted_response(result: serde_json::Value) -> RuntimeHostCallResponseV1 {
+        RuntimeHostCallResponseV1 {
+            kind: "host_response".into(),
+            call_id: crate::extension_host_terminals::HOST_TERMINALS_SNAPSHOT_METHOD.into(),
+            identity: observation_identity(),
+            result: Some(result),
+            error: None,
+        }
+    }
+
+    fn observation_router(
+        response: RuntimeHostCallResponseV1,
+    ) -> (
+        RuntimeHostCallRouter,
+        TrustedTerminalSnapshotObservations,
+        RuntimeHostCallV1,
+    ) {
+        let identity = observation_identity();
+        let observations = TrustedTerminalSnapshotObservations::default();
+        let router = RuntimeHostCallRouter::new(
+            identity.clone(),
+            identity.namespace.clone(),
+            BTreeMap::from([(
+                crate::extension_host_terminals::HOST_TERMINALS_SNAPSHOT_METHOD.into(),
+                crate::extension_host_terminals::HOST_TERMINALS_READ_CAPABILITY.into(),
+            )]),
+            ScriptedResponse(response),
+        )
+        .with_observer(observations.clone());
+        let call = call(
+            &identity,
+            crate::extension_host_terminals::HOST_TERMINALS_READ_CAPABILITY,
+            crate::extension_host_terminals::HOST_TERMINALS_SNAPSHOT_METHOD,
+        );
+        (router, observations, call)
+    }
+
+    fn canonicalize_snapshot_value(mut value: serde_json::Value) -> serde_json::Value {
+        value["fingerprint_sha256"] = serde_json::Value::String(String::new());
+        let snapshot: crate::extension_host_terminals::HostTerminalsSnapshotV1 =
+            serde_json::from_value(value.clone()).unwrap();
+        value["fingerprint_sha256"] = serde_json::Value::String(
+            crate::extension_host_terminals::snapshot_fingerprint(&snapshot).unwrap(),
+        );
+        value
+    }
+
+    #[test]
+    fn router_observation_detects_zero_and_multiple_successes() {
+        let response = accepted_response(serde_json::to_value(valid_snapshot()).unwrap());
+        let (router, observations, call) = observation_router(response);
+        assert_eq!(
+            observations.exactly_one(),
+            Err(TerminalObservationError::Zero)
+        );
+        assert!(router.handle(call.clone()).error.is_none());
+        assert_eq!(observations.exactly_one(), Ok(valid_snapshot()));
+        assert!(router.handle(call).error.is_none());
+        assert_eq!(
+            observations.exactly_one(),
+            Err(TerminalObservationError::Multiple(2))
+        );
+    }
+
+    #[test]
+    fn router_rejected_envelopes_never_poison_observations() {
+        let valid = accepted_response(serde_json::to_value(valid_snapshot()).unwrap());
+        let mut wrong_kind = valid.clone();
+        wrong_kind.kind = "response".into();
+        let mut wrong_call_id = valid.clone();
+        wrong_call_id.call_id = "other".into();
+        let mut wrong_identity = valid.clone();
+        wrong_identity.identity.namespace = "other.extension".into();
+        let mut both = valid.clone();
+        both.error = Some(crate::extension_runtime::RuntimeErrorBodyV1 {
+            code: "malicious".into(),
+            message: "both".into(),
+        });
+        let mut neither = valid.clone();
+        neither.result = None;
+        for response in [wrong_kind, wrong_call_id, wrong_identity, both, neither] {
+            let (router, observations, call) = observation_router(response);
+            assert_eq!(
+                router.handle(call).error.unwrap().code,
+                "invalid_host_response"
+            );
+            assert_eq!(
+                observations.exactly_one(),
+                Err(TerminalObservationError::Zero)
+            );
+        }
+
+        let mut failed = valid;
+        failed.result = None;
+        failed.error = Some(crate::extension_runtime::RuntimeErrorBodyV1 {
+            code: "stale_host_call_lease".into(),
+            message: "revoked".into(),
+        });
+        let (router, observations, call) = observation_router(failed);
+        assert_eq!(
+            router.handle(call).error.unwrap().code,
+            "stale_host_call_lease"
+        );
+        assert_eq!(
+            observations.exactly_one(),
+            Err(TerminalObservationError::Zero)
+        );
+    }
+
+    #[test]
+    fn malformed_accepted_snapshots_poison_observations_as_invalid() {
+        let base = serde_json::to_value(valid_snapshot()).unwrap();
+        let terminal_a = "term_00000000000000000000000000000001";
+        let terminal_b = "term_00000000000000000000000000000002";
+        let mut cases = Vec::new();
+
+        let mut unknown = base.clone();
+        unknown["unknown"] = serde_json::json!(true);
+        cases.push(unknown);
+        let mut unknown_fence = base.clone();
+        unknown_fence["lease_fence"]["unknown"] = serde_json::json!(true);
+        cases.push(unknown_fence);
+        let mut contract = base.clone();
+        contract["contract"] = serde_json::json!("host.terminals.v2");
+        cases.push(contract);
+        let mut workspace = base.clone();
+        workspace["workspace_id"] = serde_json::json!("workspace");
+        cases.push(workspace);
+        let mut oversized_workspace = base.clone();
+        oversized_workspace["workspace_id"] = serde_json::json!(format!("w{}", "1".repeat(32)));
+        cases.push(oversized_workspace);
+        let mut tab = base.clone();
+        tab["tab_id"] = serde_json::json!("tab_BAD");
+        cases.push(tab);
+        let mut fingerprint = base.clone();
+        fingerprint["fingerprint_sha256"] = serde_json::json!("A".repeat(64));
+        cases.push(fingerprint);
+        let mut mismatch = base.clone();
+        mismatch["fingerprint_sha256"] = serde_json::json!("a".repeat(64));
+        cases.push(mismatch);
+        for field in [
+            "catalog_generation",
+            "package_generation",
+            "service_generation",
+            "artifact_generation",
+            "provider_generation",
+            "runtime_generation",
+        ] {
+            let mut fence = base.clone();
+            fence["lease_fence"][field] = serde_json::json!(0);
+            cases.push(fence);
+        }
+
+        let mut bad_container = base.clone();
+        bad_container["layout"] = serde_json::json!([{
+            "kind": "container",
+            "container_id": "container_BAD",
+            "terminal_ids": [],
+            "selected_terminal_id": null
+        }]);
+        cases.push(canonicalize_snapshot_value(bad_container));
+        let mut unknown_layout_field = base.clone();
+        unknown_layout_field["layout"] = serde_json::json!([{
+            "kind": "tiled",
+            "terminal_id": terminal_a,
+            "unknown": true
+        }]);
+        cases.push(unknown_layout_field);
+        let mut duplicate_terminal = base.clone();
+        duplicate_terminal["layout"] = serde_json::json!([
+            {"kind": "tiled", "terminal_id": terminal_a},
+            {"kind": "tiled", "terminal_id": terminal_a}
+        ]);
+        cases.push(canonicalize_snapshot_value(duplicate_terminal));
+        let mut duplicate_container = base.clone();
+        duplicate_container["layout"] = serde_json::json!([
+            {"kind": "container", "container_id": "container_0000000000000001", "terminal_ids": [], "selected_terminal_id": null},
+            {"kind": "container", "container_id": "container_0000000000000001", "terminal_ids": [], "selected_terminal_id": null}
+        ]);
+        cases.push(canonicalize_snapshot_value(duplicate_container));
+        let mut missing_selected = base;
+        missing_selected["layout"] = serde_json::json!([{
+            "kind": "container",
+            "container_id": "container_0000000000000001",
+            "terminal_ids": [terminal_a],
+            "selected_terminal_id": terminal_b
+        }]);
+        cases.push(canonicalize_snapshot_value(missing_selected));
+
+        for value in cases {
+            let (router, observations, call) = observation_router(accepted_response(value));
+            assert!(router.handle(call).error.is_none());
+            assert!(matches!(
+                observations.exactly_one(),
+                Err(TerminalObservationError::Invalid(_))
+            ));
         }
     }
 

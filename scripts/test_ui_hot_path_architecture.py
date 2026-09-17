@@ -111,7 +111,16 @@ DOCUMENT_V2_ALLOWED_DECLARATION_LINES = Counter(
 DOCUMENT_V2_ALLOWED_SCHEMA_LINES = Counter(
     [
         "pub const HOST_DOCUMENT_SCHEMA_ID_V2: &str = crate::host_document_v2::HOST_DOCUMENT_SCHEMA_ID_V2;",
+        "crate::host_document_v2::HOST_DOCUMENT_RENDER_SCHEMA_ID_V2;",
         "crate::host_document_v2::HostDocumentV2",
+        "crate::host_document_v2::HostDocumentRenderParamsV2",
+        "serde_json::Value::String(crate::host_document_v2::HOST_DOCUMENT_RENDER_CONTRACT_V2.into()),",
+        ": crate::host_document_v2::MAX_DOCUMENT_RENDER_V2_BYTES,",
+        ": crate::host_document_v2::HOST_DOCUMENT_RENDER_CONTRACT_V2,",
+        ": crate::host_document_v2::MAX_DOCUMENT_V2_IDENTIFIER_BYTES,",
+        ": crate::host_document_v2::MAX_DOCUMENT_V2_IDENTIFIER_BYTES,",
+        ": crate::host_document_v2::MAX_DOCUMENT_V2_IDENTIFIER_BYTES,",
+        ": crate::host_document_v2::MAX_DOCUMENT_V2_IDENTIFIER_BYTES,",
         "serde_json::Value::String(crate::host_document_v2::HOST_DOCUMENT_CONTRACT_V2.into()),",
         ": crate::host_document_v2::MAX_DOCUMENT_V2_BYTES,",
         ": crate::host_document_v2::MAX_DOCUMENT_V2_NODES,",

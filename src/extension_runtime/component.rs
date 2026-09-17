@@ -1538,6 +1538,7 @@ mod tests {
                 26,
             )
             .unwrap();
+        let observations = authorization.terminal_observations();
         let factory =
             super::super::RuntimeFactory::installed(&installed, "echo", "example.component")
                 .unwrap();
@@ -1577,6 +1578,15 @@ mod tests {
         );
         let response = join.join().unwrap().unwrap();
         assert_eq!(response["result"]["contract"], "host.state.v1");
+        let snapshot = observations.exactly_one().unwrap();
+        let dependency = crate::host_document_v2::terminal_snapshot_dependency(
+            snapshot.tab_id.as_str(),
+            &snapshot.fingerprint_sha256,
+            snapshot.lease_fence.provider_generation,
+        )
+        .unwrap();
+        assert_eq!(dependency.contract, "host.terminals.v1");
+        assert_eq!(dependency.generation, 7);
         cleanup(root);
     }
 

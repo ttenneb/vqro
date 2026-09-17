@@ -157,6 +157,8 @@ impl App {
                 terminals,
                 allowed_methods,
                 authority,
+                terminal_observations:
+                    crate::extension_host_invocation::TrustedTerminalSnapshotObservations::default(),
             },
         )
     }
