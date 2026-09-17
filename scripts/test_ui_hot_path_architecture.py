@@ -15,6 +15,16 @@ APP_SERVER_SOURCES = (
     *sorted((PROJECT_ROOT / "src" / "app").rglob("*.rs")),
     *sorted((PROJECT_ROOT / "src" / "server").rglob("*.rs")),
 )
+RECOVERY_MODEL_SOURCE = PROJECT_ROOT / "src" / "client" / "shell" / "recovery_browser.rs"
+RECOVERY_FORBIDDEN_REFERENCES = (
+    ("agents", re.compile(r"\.agents\b")),
+    ("collections", re.compile(r"\.collections\b")),
+    ("delegations", re.compile(r"\.delegations\b")),
+    ("host_documents", re.compile(r"\bhost_documents\b")),
+    ("structure", re.compile(r"\bstructure\b")),
+    ("ExtensionRuntimeDispatcher", re.compile(r"\bExtensionRuntimeDispatcher\b")),
+    ("ExtensionServiceSupervisor", re.compile(r"\bExtensionServiceSupervisor\b")),
+)
 TEST_MODULE = re.compile(r"(?m)^#\[cfg\(test\)\]\s*\nmod\s+\w+\s*\{")
 INPUT_STATE_CALL = re.compile(r"(?:\.|::)input_state\b")
 KEYBOARD_STATE_ANSI_CALL = re.compile(
@@ -142,6 +152,11 @@ def production_code(source: str) -> str:
     return code
 
 
+def recovery_forbidden_references(source: str) -> list[str]:
+    code = production_code(source)
+    return [name for name, pattern in RECOVERY_FORBIDDEN_REFERENCES if pattern.search(code)]
+
+
 def find_violations(paths, rules) -> list[str]:
     violations: list[str] = []
     for path in paths:
@@ -163,6 +178,31 @@ class UiHotPathArchitectureTests(unittest.TestCase):
             [],
             "Render/layout code must not perform pane-scaled expensive reads:\n"
             + "\n".join(violations),
+        )
+
+    def test_recovery_model_uses_only_cached_neutral_snapshot_facts(self) -> None:
+        violations = recovery_forbidden_references(
+            RECOVERY_MODEL_SOURCE.read_text(encoding="utf-8")
+        )
+        self.assertEqual(
+            violations,
+            [],
+            "Recovery navigation must not depend on feature/provider state: "
+            + ", ".join(violations),
+        )
+
+    def test_recovery_reference_scanner_uses_real_word_boundaries(self) -> None:
+        self.assertEqual(
+            recovery_forbidden_references(
+                "fn projection() { let agents = provider.agents; }"
+            ),
+            ["agents"],
+        )
+        self.assertEqual(
+            recovery_forbidden_references(
+                "fn projection() { let agents_extra = 1; }"
+            ),
+            [],
         )
 
     def test_app_and_server_avoid_aggregate_terminal_state(self) -> None:

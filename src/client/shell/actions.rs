@@ -343,6 +343,105 @@ impl ClientShellState {
         true
     }
 
+    pub(super) fn push_recovery_notice(
+        &mut self,
+        endpoint_id: &ClientEndpointId,
+        boot_id: &str,
+        code: impl Into<String>,
+        title: impl Into<String>,
+        body: impl Into<String>,
+    ) -> bool {
+        let key = ClientEndpointNoticeKey {
+            boot_id: boot_id.to_owned(),
+            kind: ClientEndpointNoticeKind::Rejected,
+            code: format!("{}:{}", endpoint_id.storage_key(), code.into()),
+        };
+        let body = body.into();
+        if self
+            .visible_endpoint_notice
+            .as_ref()
+            .is_some_and(|notice| notice.key == key && notice.body == body)
+        {
+            return false;
+        }
+        self.visible_endpoint_notice = Some(ClientVisibleEndpointNotice {
+            key,
+            title: title.into(),
+            body,
+            deadline: std::time::Instant::now() + std::time::Duration::from_secs(3),
+        });
+        true
+    }
+
+    pub(super) fn push_endpoint_method_for_endpoint(
+        &mut self,
+        endpoint_id: &ClientEndpointId,
+        method: crate::api::schema::Method,
+        outcome: &mut ClientShellInput,
+    ) -> bool {
+        let Some(endpoint) = self
+            .endpoints
+            .iter()
+            .find(|endpoint| &endpoint.endpoint_id == endpoint_id)
+        else {
+            return false;
+        };
+        let label = endpoint.label.clone();
+        let Some(snapshot) = endpoint.snapshot.as_deref() else {
+            outcome.repaint |= self.receive_endpoint_unavailable(format!("{label} is not ready"));
+            return false;
+        };
+        let boot_id = snapshot.boot_id.clone();
+        let method_name = crate::api::api_method_name(&method).to_owned();
+        let supports_method = endpoint
+            .methods
+            .as_ref()
+            .is_none_or(|methods| methods.contains(&method_name));
+        let confirmation_workspace_id = match &method {
+            crate::api::schema::Method::PaneClose(target) => snapshot
+                .panes
+                .iter()
+                .find(|pane| pane.pane_id == target.pane_id)
+                .map(|pane| pane.workspace_id.clone()),
+            _ => None,
+        };
+        if !self.endpoint_is_online(endpoint_id) {
+            outcome.repaint |= self.receive_endpoint_unavailable(format!("{label} is not ready"));
+            return false;
+        }
+        if !supports_method {
+            outcome.repaint |= self.push_recovery_notice(
+                endpoint_id,
+                &boot_id,
+                method_name.clone(),
+                "Action unavailable",
+                format!("This server does not support {method_name} yet."),
+            );
+            return false;
+        }
+        let request_id = self.next_request_id;
+        self.next_request_id = self.next_request_id.saturating_add(1);
+        let request_id = format!("client-shell:{request_id}");
+        self.pending_requests.insert(
+            request_id.clone(),
+            PendingEndpointRequest {
+                boot_id: boot_id.clone(),
+                method_name,
+                confirmation_workspace_id,
+                kind: PendingEndpointKind::Generic,
+            },
+        );
+        outcome.actions.push(ClientShellAction::Endpoint {
+            endpoint_id: endpoint_id.clone(),
+            boot_id,
+            request: Box::new(crate::api::schema::Request {
+                id: request_id,
+                method,
+            }),
+        });
+        true
+    }
+
     pub(super) fn push_endpoint_method_with_kind(
         &mut self,
         method: crate::api::schema::Method,

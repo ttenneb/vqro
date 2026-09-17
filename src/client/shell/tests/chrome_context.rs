@@ -44,6 +44,7 @@ fn assert_shell_hits_within_bounds(state: &ClientShellState, bounds: Rect) {
         state.hits.inspector_refresh,
         state.hits.navigator_popup,
         state.hits.navigator_search,
+        state.hits.recovery_popup,
         state.hits.worktree_search,
         state.hits.help_popup,
         state.hits.help_scrollbar,
@@ -120,6 +121,13 @@ fn assert_shell_hits_within_bounds(state: &ClientShellState, bounds: Rect) {
                 .map(|(rect, _)| *rect),
         )
         .chain(state.hits.navigator_rows.iter().map(|(rect, _)| *rect))
+        .chain(
+            state
+                .hits
+                .recovery_rows
+                .iter()
+                .flat_map(|hit| [hit.rect, hit.close]),
+        )
         .chain(state.hits.worktree_rows.iter().map(|(rect, _)| *rect))
         .chain(state.hits.settings_tabs.iter().map(|(rect, _)| *rect))
         .chain(state.hits.settings_choices.iter().map(|(rect, _)| *rect))
@@ -2208,8 +2216,13 @@ fn global_menu_opens_from_sidebar_and_routes_client_actions() {
     assert!(help.actions.is_empty());
     assert!(matches!(state.overlay, Some(ClientShellOverlay::Help(_))));
 
+    let detach_index =
+        super::super::global_menu::global_menu_items(state.snapshot.as_deref().expect("snapshot"))
+            .iter()
+            .position(|(label, _)| *label == "detach")
+            .expect("detach menu item");
     state.overlay = Some(ClientShellOverlay::GlobalMenu(ClientGlobalMenuOverlay {
-        highlighted: 4,
+        highlighted: detach_index,
     }));
     let detach = state.handle_input_bytes(b"\r");
     assert!(detach.detach);

@@ -131,6 +131,12 @@ impl ClientShellState {
                 .any(|endpoint| &endpoint.endpoint_id == endpoint_id)
         });
         self.endpoints = next;
+        if let Some(endpoint_id) = self.overlay.as_ref().and_then(|overlay| match overlay {
+            ClientShellOverlay::Recovery(recovery) => Some(recovery.endpoint_id.clone()),
+            _ => None,
+        }) {
+            self.refresh_recovery_overlay(&endpoint_id);
+        }
     }
 
     pub(crate) fn select_unavailable_local(&mut self) {
@@ -162,6 +168,7 @@ impl ClientShellState {
             endpoint.pending_agent_view_projection = None;
             endpoint.agent_view_projection_supported = false;
         }
+        self.refresh_recovery_overlay(endpoint_id);
     }
 
     pub(crate) fn set_endpoint_status(
@@ -723,6 +730,7 @@ impl ClientShellState {
                 endpoint.agent_view_projection = None;
             }
         }
+        self.refresh_recovery_overlay(endpoint_id);
     }
 
     pub(crate) fn acknowledge_active_surface_agents(&mut self, surface: &PaneSurfaceFrame) -> bool {

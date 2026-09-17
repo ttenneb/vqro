@@ -1008,12 +1008,19 @@ impl ClientShellState {
                 self.hits.global_menu_rows = rendered.menu_rows;
                 None
             } else {
+                let recovery_presentation = match overlay {
+                    ClientShellOverlay::Recovery(recovery) => {
+                        self.recovery_presentations.get(&recovery.endpoint_id)
+                    }
+                    _ => None,
+                };
                 let rendered = render::render_client_overlay(
                     &mut composed,
                     overlay,
                     snapshot,
                     &self.endpoints,
                     &self.active_endpoint_id,
+                    recovery_presentation,
                     &self.config.keybinds,
                     &self.config.palette,
                 )?;
@@ -1024,6 +1031,9 @@ impl ClientShellState {
                 self.hits.navigator_popup = rendered.navigator_popup;
                 self.hits.navigator_search = rendered.navigator_search;
                 self.hits.navigator_rows = rendered.navigator_rows;
+                self.hits.recovery_popup = rendered.recovery_popup;
+                self.hits.recovery_projection_token = rendered.recovery_projection_token;
+                self.hits.recovery_rows = rendered.recovery_rows;
                 self.hits.worktree_search = rendered.worktree_search;
                 self.hits.worktree_rows = rendered.worktree_rows;
                 self.hits.help_popup = rendered.help_popup;

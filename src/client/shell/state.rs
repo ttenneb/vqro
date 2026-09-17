@@ -185,6 +185,9 @@ pub(super) struct ShellHitMap {
     pub(super) navigator_popup: Rect,
     pub(super) navigator_search: Rect,
     pub(super) navigator_rows: Vec<(Rect, ClientNavigatorTarget)>,
+    pub(super) recovery_popup: Rect,
+    pub(super) recovery_projection_token: Option<u64>,
+    pub(super) recovery_rows: Vec<super::recovery_browser::RecoveryRowHit>,
     pub(super) worktree_search: Rect,
     pub(super) worktree_rows: Vec<(Rect, usize)>,
     pub(super) help_popup: Rect,
@@ -399,6 +402,7 @@ pub(super) enum ClientShellOverlayKind {
     ConfirmClose,
     Help,
     Navigator,
+    Recovery,
     WorktreeCreate,
     WorktreeOpen,
     WorktreeRemove,
@@ -779,6 +783,7 @@ pub(super) enum ClientConfirmCloseTarget {
     Workspace { workspace_id: String },
     Collection { collection_id: String },
     HostDocumentAction(crate::api::schema::HostDocumentActionParams),
+    RecoveryPane(super::recovery_browser::RecoveryCloseLease),
 }
 
 #[derive(Debug)]
@@ -812,6 +817,7 @@ pub(super) enum ClientShellOverlay {
     PaneInterruptConfirm(ClientPaneInterruptConfirmOverlay),
     Help(ClientHelpOverlay),
     Navigator(ClientNavigatorOverlay),
+    Recovery(super::recovery_browser::ClientRecoveryOverlay),
     WorktreeCreate(ClientWorktreeCreateOverlay),
     WorktreeOpen(ClientWorktreeOpenOverlay),
     WorktreeRemove(ClientWorktreeRemoveOverlay),
@@ -833,6 +839,7 @@ impl ClientShellOverlay {
             }
             Self::Help(_) => ClientShellOverlayKind::Help,
             Self::Navigator(_) => ClientShellOverlayKind::Navigator,
+            Self::Recovery(_) => ClientShellOverlayKind::Recovery,
             Self::WorktreeCreate(_) => ClientShellOverlayKind::WorktreeCreate,
             Self::WorktreeOpen(_) => ClientShellOverlayKind::WorktreeOpen,
             Self::WorktreeRemove(_) => ClientShellOverlayKind::WorktreeRemove,
@@ -1110,6 +1117,10 @@ pub(crate) struct ClientShellState {
     pub(super) collection_preview_heights: HashMap<String, u16>,
     pub(super) collection_entered_pane: Option<String>,
     pub(super) collection_maximized_pane: Option<(String, String)>,
+    /// Stable local presentation preferences; never carries connection/action authority.
+    pub(super) recovery_presentations:
+        HashMap<ClientEndpointId, super::recovery_browser::RecoveryPresentationState>,
+    pub(super) next_recovery_projection_token: u64,
     pub(super) terminal_view_surfaces:
         HashMap<String, crate::protocol::endpoint::ServerTerminalViewSurface>,
     pub(super) last_terminal_views_interest:
@@ -1290,6 +1301,8 @@ impl ClientShellState {
             collection_preview_heights: HashMap::new(),
             collection_entered_pane: None,
             collection_maximized_pane: None,
+            recovery_presentations: HashMap::new(),
+            next_recovery_projection_token: 0,
             terminal_view_surfaces: HashMap::new(),
             last_terminal_views_interest: None,
             workspace_scroll: 0,

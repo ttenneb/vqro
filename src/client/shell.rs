@@ -31,6 +31,7 @@ mod notification_policy;
 mod notifications;
 mod overlay_input;
 mod preferences;
+mod recovery_browser;
 mod render;
 mod scroll;
 mod settings;

@@ -306,6 +306,7 @@ fn every_dialog_and_menu_occludes_its_panel_not_the_whole_screen() {
                 snapshot,
                 &state.endpoints,
                 &state.active_endpoint_id,
+                state.recovery_presentations.get(&state.active_endpoint_id),
                 &state.config.keybinds,
                 &state.config.palette,
             ),

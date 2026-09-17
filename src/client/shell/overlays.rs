@@ -14,6 +14,9 @@ pub(crate) struct OverlayRender {
     pub(crate) navigator_popup: Rect,
     pub(crate) navigator_search: Rect,
     pub(crate) navigator_rows: Vec<(Rect, ClientNavigatorTarget)>,
+    pub(crate) recovery_popup: Rect,
+    pub(crate) recovery_projection_token: Option<u64>,
+    pub(crate) recovery_rows: Vec<super::recovery_browser::RecoveryRowHit>,
     pub(crate) worktree_search: Rect,
     pub(crate) worktree_rows: Vec<(Rect, usize)>,
     pub(crate) help_popup: Rect,
@@ -44,12 +47,14 @@ pub(crate) fn render_client_overlay(
     s: &ClientShellSnapshot,
     endpoints: &[ClientShellEndpoint],
     active_endpoint_id: &ClientEndpointId,
+    recovery_presentation: Option<&super::recovery_browser::RecoveryPresentationState>,
     k: &LiveKeybindConfig,
     p: &Palette,
 ) -> Option<OverlayRender> {
     if !matches!(
         o,
         ClientShellOverlay::Navigator(_)
+            | ClientShellOverlay::Recovery(_)
             | ClientShellOverlay::ContextMenu(_)
             | ClientShellOverlay::GlobalMenu(_)
     ) {
@@ -83,6 +88,7 @@ pub(crate) fn render_client_overlay(
         ClientShellOverlay::Navigator(v) => {
             render_navigator_overlay(b, v, endpoints, active_endpoint_id, p)
         }
+        ClientShellOverlay::Recovery(v) => render_recovery_overlay(b, v, recovery_presentation?, p),
         ClientShellOverlay::Settings(v) => {
             settings_overlay::render_settings_overlay(b, v, s.integration_updates_available, p)
         }
@@ -1560,6 +1566,153 @@ fn render_navigator_overlay(
             visible: true,
             shape: 0,
         }),
+        ..OverlayRender::default()
+    })
+}
+
+fn render_recovery_overlay(
+    buffer: &mut Buffer,
+    recovery: &super::recovery_browser::ClientRecoveryOverlay,
+    presentation: &super::recovery_browser::RecoveryPresentationState,
+    palette: &Palette,
+) -> Option<OverlayRender> {
+    let area = buffer.area;
+    let margin_x = (area.width / 16)
+        .max(2)
+        .min(area.width.saturating_sub(4) / 2);
+    let margin_y = (area.height / 10)
+        .max(1)
+        .min(area.height.saturating_sub(4) / 2);
+    let popup = Rect::new(
+        area.x.saturating_add(margin_x),
+        area.y.saturating_add(margin_y),
+        area.width.saturating_sub(margin_x.saturating_mul(2)),
+        area.height.saturating_sub(margin_y.saturating_mul(2)),
+    );
+    let inner = panel(buffer, popup, palette.accent, palette.panel_bg)?;
+    put_text(
+        buffer,
+        inner.x,
+        inner.y,
+        inner.width,
+        " Terminal recovery",
+        Style::default()
+            .fg(palette.text)
+            .bg(palette.panel_bg)
+            .add_modifier(Modifier::BOLD),
+    );
+    put_right_text(
+        buffer,
+        inner,
+        inner.y,
+        &format!("{} terminals", recovery.terminal_count),
+        Style::default().fg(palette.overlay0).bg(palette.panel_bg),
+    );
+    put_text(
+        buffer,
+        inner.x,
+        inner.y + 1,
+        inner.width,
+        &"─".repeat(inner.width as usize),
+        Style::default().fg(palette.surface1).bg(palette.panel_bg),
+    );
+    let body = Rect::new(
+        inner.x,
+        inner.y + 2,
+        inner.width,
+        inner.height.saturating_sub(3),
+    );
+    let selected = presentation.selected_index.unwrap_or(0);
+    let max_scroll = recovery.rows.len().saturating_sub(body.height as usize);
+    let scroll = presentation
+        .scroll
+        .max(selected.saturating_sub(body.height.saturating_sub(1) as usize))
+        .min(selected)
+        .min(max_scroll);
+    // Optimization debt: recovery rendering still allocates this hit vector and short,
+    // visible-geometry strings per frame. Keep them bounded; the 1/15-pane profile is flat.
+    // Row normalization, selection lookup, counts, and labels stay cached off this path.
+    let mut hits = Vec::with_capacity(recovery.rows.len().min(body.height as usize));
+    for (index, row) in recovery
+        .rows
+        .iter()
+        .enumerate()
+        .skip(scroll)
+        .take(body.height as usize)
+    {
+        let rect = Rect::new(body.x, body.y + (index - scroll) as u16, body.width, 1);
+        let style = if !row.enabled() {
+            Style::default()
+                .fg(palette.overlay0)
+                .bg(palette.panel_bg)
+                .add_modifier(Modifier::DIM)
+        } else if index == selected {
+            Style::default()
+                .fg(contrast(palette))
+                .bg(palette.accent)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+                .fg(if row.current {
+                    palette.text
+                } else {
+                    palette.subtext0
+                })
+                .bg(palette.panel_bg)
+        };
+        buffer.set_style(rect, style);
+        let prefix = match row.depth {
+            0 => " ▾ ",
+            1 => "   └─ ",
+            _ => "      └─ ",
+        };
+        put_text(buffer, rect.x, rect.y, rect.width, prefix, style);
+        let mut label_x = rect.x.saturating_add(display_width(prefix));
+        if row.current {
+            put_text(
+                buffer,
+                label_x,
+                rect.y,
+                rect.right().saturating_sub(label_x),
+                "◆ ",
+                style,
+            );
+            label_x = label_x.saturating_add(2);
+        }
+        put_text(
+            buffer,
+            label_x,
+            rect.y,
+            rect.right().saturating_sub(label_x),
+            &row.label,
+            style,
+        );
+        let close = if row.close_pane_id.is_some() && rect.width >= 9 {
+            let close = Rect::new(rect.right().saturating_sub(8), rect.y, 8, 1);
+            put_text(buffer, close.x, close.y, close.width, " [close]", style);
+            close
+        } else {
+            Rect::default()
+        };
+        hits.push(super::recovery_browser::RecoveryRowHit {
+            rect,
+            close,
+            row_index: index,
+        });
+    }
+    put_text(
+        buffer,
+        inner.x,
+        inner.bottom().saturating_sub(1),
+        inner.width,
+        " move j/k or ↑/↓ · focus enter · close x/delete · esc",
+        Style::default().fg(palette.overlay0).bg(palette.panel_bg),
+    );
+    Some(OverlayRender {
+        area: popup,
+        recovery_popup: popup,
+        recovery_projection_token: Some(recovery.projection_token),
+        recovery_rows: hits,
         ..OverlayRender::default()
     })
 }

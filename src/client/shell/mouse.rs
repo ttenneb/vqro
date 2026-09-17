@@ -1845,6 +1845,56 @@ impl ClientShellState {
             }
             return;
         }
+        if matches!(self.overlay, Some(ClientShellOverlay::Recovery(_))) {
+            let rendered_projection_is_current = self.overlay.as_ref().is_some_and(|overlay| {
+                matches!(overlay, ClientShellOverlay::Recovery(recovery)
+                    if self.hits.recovery_projection_token == Some(recovery.projection_token))
+            });
+            if !rendered_projection_is_current {
+                outcome.repaint = true;
+                return;
+            }
+            let row_hit = self
+                .hits
+                .recovery_rows
+                .iter()
+                .find(|hit| super::contains(hit.rect, point))
+                .cloned();
+            match mouse.kind {
+                MouseEventKind::Moved => {
+                    if let Some(hit) = row_hit {
+                        if self.select_recovery_row(hit.row_index) {
+                            outcome.repaint = true;
+                        }
+                    }
+                }
+                MouseEventKind::Down(MouseButton::Left) => {
+                    if let Some(hit) = row_hit {
+                        if !self.select_recovery_row(hit.row_index) {
+                            return;
+                        }
+                        if !hit.close.is_empty() && super::contains(hit.close, point) {
+                            self.request_recovery_close(outcome);
+                        } else {
+                            self.activate_recovery_selection(outcome);
+                        }
+                    } else if !super::contains(self.hits.recovery_popup, point) {
+                        self.overlay = None;
+                        outcome.repaint = true;
+                    }
+                }
+                MouseEventKind::ScrollUp => {
+                    self.move_recovery_selection(-3);
+                    outcome.repaint = true;
+                }
+                MouseEventKind::ScrollDown => {
+                    self.move_recovery_selection(3);
+                    outcome.repaint = true;
+                }
+                _ => {}
+            }
+            return;
+        }
         if matches!(self.overlay, Some(ClientShellOverlay::Navigator(_))) {
             let row_hit = self
                 .hits
@@ -1960,6 +2010,14 @@ impl ClientShellState {
                             ClientConfirmCloseTarget::HostDocumentAction(params) => {
                                 crate::api::schema::Method::HostDocumentAction(params)
                             }
+                            ClientConfirmCloseTarget::RecoveryPane(lease) => {
+                                let endpoint_id = lease.endpoint_id.clone();
+                                if !self.confirm_recovery_close(lease, outcome) {
+                                    self.open_recovery_browser_for(&endpoint_id);
+                                }
+                                outcome.repaint = true;
+                                return;
+                            }
                         };
                         self.push_endpoint_method(method, outcome);
                         outcome.repaint = true;
@@ -1973,7 +2031,17 @@ impl ClientShellState {
                     outcome.repaint = true;
                 }
             } else {
+                let recovery_endpoint = self.overlay.as_ref().and_then(|overlay| match overlay {
+                    ClientShellOverlay::ConfirmClose(ClientConfirmCloseOverlay {
+                        target: ClientConfirmCloseTarget::RecoveryPane(lease),
+                        ..
+                    }) => Some(lease.endpoint_id.clone()),
+                    _ => None,
+                });
                 self.overlay = None;
+                if let Some(endpoint_id) = recovery_endpoint {
+                    self.open_recovery_browser_for(&endpoint_id);
+                }
                 outcome.repaint = true;
             }
             return;

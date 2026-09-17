@@ -312,6 +312,16 @@ fn print_token_rule_profiles() {
     }
 }
 
+fn print_recovery_browser_profile() {
+    let rows = [1usize, 15].map(|count| {
+        let mut pipeline = RenderPipeline::new(active_panes(count));
+        pipeline.client.open_recovery_browser();
+        (count, profile_pipeline(pipeline))
+    });
+    println!("neutral recovery browser (cached rows; normalization outside samples)");
+    print_stage("client shell composition", &rows, |stats| stats.client);
+}
+
 fn print_terminal_views_profile() {
     println!("independent terminal view projection");
     for count in [1usize, 15] {
@@ -352,5 +362,6 @@ async fn render_scale_profile() {
     print_profiles("active panes (one workspace)", active_panes);
     print_snapshot_encoding_profiles("active panes", active_panes);
     print_token_rule_profiles();
+    print_recovery_browser_profile();
     print_terminal_views_profile();
 }
