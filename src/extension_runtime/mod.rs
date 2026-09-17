@@ -7,7 +7,7 @@ pub(crate) mod component;
 pub(crate) mod process;
 
 use std::collections::BTreeSet;
-use std::sync::{atomic::AtomicBool, Arc, Mutex};
+use std::sync::{atomic::AtomicBool, Arc};
 use std::time::{Duration, Instant};
 
 use schemars::JsonSchema;
@@ -130,6 +130,8 @@ pub struct RuntimeIdentityV1 {
 pub struct RuntimeGrants {
     pub legacy: Vec<crate::api::schema::ExtensionServiceCapability>,
     pub capabilities: BTreeSet<String>,
+    /// Only verified package-v1 runtimes may receive staged host-call leases.
+    pub installed_package: bool,
 }
 
 impl RuntimeGrants {
@@ -204,8 +206,8 @@ pub enum RuntimeStopReason {
     Drop,
 }
 
-pub(crate) trait RuntimeHostCallHandler: Send {
-    fn handle_host_call(&mut self, call: RuntimeHostCallV1) -> RuntimeHostCallResponseV1;
+pub(crate) trait RuntimeHostCallHandler: Send + Sync {
+    fn handle_host_call(&self, call: RuntimeHostCallV1) -> RuntimeHostCallResponseV1;
 }
 
 pub(crate) struct RuntimeHostCallRouter {
@@ -213,18 +215,18 @@ pub(crate) struct RuntimeHostCallRouter {
 }
 
 impl RuntimeHostCallRouter {
-    fn new(handler: impl RuntimeHostCallHandler + 'static) -> Self {
+    pub(crate) fn new(handler: impl RuntimeHostCallHandler + 'static) -> Self {
         Self {
             handler: Box::new(handler),
         }
     }
 
-    pub(crate) fn handle(&mut self, call: RuntimeHostCallV1) -> RuntimeHostCallResponseV1 {
+    pub(crate) fn handle(&self, call: RuntimeHostCallV1) -> RuntimeHostCallResponseV1 {
         self.handler.handle_host_call(call)
     }
 }
 
-pub(crate) type SharedRuntimeHostCalls = Arc<Mutex<RuntimeHostCallRouter>>;
+pub(crate) type SharedRuntimeHostCalls = Arc<RuntimeHostCallRouter>;
 
 pub(crate) trait ExtensionRuntime: Send {
     fn descriptor(&self) -> &NegotiatedRuntimeDescriptor;
@@ -278,6 +280,7 @@ impl RuntimeFactory {
     pub(crate) fn installed(
         installed: &crate::extension_package::InstalledPackageV1,
         service_id: &str,
+        namespace: &str,
     ) -> Result<Self, RuntimeError> {
         let archive = std::path::Path::new(&installed.immutable_root).join("package.vqrox");
         let package = crate::extension_package::validate_package_file(
@@ -294,10 +297,12 @@ impl RuntimeFactory {
             .ok_or_else(|| RuntimeError::Configuration("package service is not declared".into()))?;
         match &service.runtime {
             crate::extension_package::PackageRuntimeV1::Process { .. } => {
-                ProcessRuntimeFactory::installed(installed, service_id).map(Self::Process)
+                ProcessRuntimeFactory::installed(installed, service_id, namespace)
+                    .map(Self::Process)
             }
             crate::extension_package::PackageRuntimeV1::Component { .. } => {
-                ComponentRuntimeFactory::installed(installed, service_id).map(Self::Component)
+                ComponentRuntimeFactory::installed(installed, service_id, namespace)
+                    .map(Self::Component)
             }
         }
     }
@@ -306,8 +311,9 @@ impl RuntimeFactory {
     pub(crate) fn installed_process(
         installed: &crate::extension_package::InstalledPackageV1,
         service_id: &str,
+        namespace: &str,
     ) -> Result<Self, RuntimeError> {
-        ProcessRuntimeFactory::installed(installed, service_id).map(Self::Process)
+        ProcessRuntimeFactory::installed(installed, service_id, namespace).map(Self::Process)
     }
 
     fn identity(&self, generation: u64) -> RuntimeIdentityV1 {
@@ -421,6 +427,55 @@ impl ExtensionRuntimeDispatcher {
         deadline: Instant,
         canceled: &AtomicBool,
     ) -> Result<serde_json::Value, RuntimeError> {
+        self.invoke_inner(
+            method,
+            params,
+            expected_generation,
+            deadline,
+            canceled,
+            None,
+        )
+    }
+
+    /// Staged package-v1 entry point used by host-state conformance. Package activation
+    /// does not call this until a later milestone explicitly wires it into the catalog.
+    #[allow(dead_code)] // Removed when production package activation issues state leases.
+    pub(crate) fn invoke_with_host_state(
+        &mut self,
+        method: &str,
+        params: serde_json::Value,
+        expected_generation: u64,
+        deadline: Instant,
+        canceled: Arc<AtomicBool>,
+        authorization: crate::extension_host_state::HostStateInvocationAuthorization,
+    ) -> Result<serde_json::Value, RuntimeError> {
+        if !self.grants.installed_package {
+            return Err(RuntimeError::Configuration(
+                "legacy and preflight runtimes cannot receive host-state leases".into(),
+            ));
+        }
+        self.invoke_inner(
+            method,
+            params,
+            expected_generation,
+            deadline,
+            canceled.as_ref(),
+            Some((authorization, canceled.clone())),
+        )
+    }
+
+    fn invoke_inner(
+        &mut self,
+        method: &str,
+        params: serde_json::Value,
+        expected_generation: u64,
+        deadline: Instant,
+        canceled: &AtomicBool,
+        host_state: Option<(
+            crate::extension_host_state::HostStateInvocationAuthorization,
+            Arc<AtomicBool>,
+        )>,
+    ) -> Result<serde_json::Value, RuntimeError> {
         if expected_generation != self.identity.generation {
             return Err(RuntimeError::StaleGeneration {
                 expected: self.identity.generation,
@@ -464,10 +519,28 @@ impl ExtensionRuntimeDispatcher {
             deadline_ms = deadline.saturating_duration_since(Instant::now()).as_millis() as u64,
             "dispatching extension runtime request"
         );
-        let host_calls = Arc::new(Mutex::new(RuntimeHostCallRouter::new(DisabledHostCalls {
-            identity: self.identity.clone(),
-            grants: self.grants.clone(),
-        })));
+        let host_calls = if let Some((authorization, canceled)) = host_state {
+            let event_tx = authorization.event_tx.clone();
+            let lease = authorization.bind(
+                request.request_id.clone(),
+                self.identity.clone(),
+                deadline,
+                canceled,
+            );
+            Arc::new(RuntimeHostCallRouter::new(
+                crate::extension_host_state::HostStateCallHandler::new(
+                    self.identity.clone(),
+                    self.grants.capabilities.clone(),
+                    lease,
+                    event_tx,
+                ),
+            ))
+        } else {
+            Arc::new(RuntimeHostCallRouter::new(DisabledHostCalls {
+                identity: self.identity.clone(),
+                grants: self.grants.clone(),
+            }))
+        };
         let result = self
             .runtime
             .invoke(&request, deadline, canceled, &host_calls);
@@ -545,7 +618,7 @@ struct DisabledHostCalls {
 }
 
 impl RuntimeHostCallHandler for DisabledHostCalls {
-    fn handle_host_call(&mut self, call: RuntimeHostCallV1) -> RuntimeHostCallResponseV1 {
+    fn handle_host_call(&self, call: RuntimeHostCallV1) -> RuntimeHostCallResponseV1 {
         let error = if call.kind != "host_call"
             || call.identity != self.identity
             || call.depth == 0
@@ -635,11 +708,12 @@ mod tests {
             service_id: "echo".into(),
             generation: 7,
         };
-        let mut handler = DisabledHostCalls {
+        let handler = DisabledHostCalls {
             identity: identity.clone(),
             grants: RuntimeGrants {
                 legacy: Vec::new(),
                 capabilities: ["state".to_string()].into_iter().collect(),
+                installed_package: false,
             },
         };
         let call = |namespace: &str, capability: &str| RuntimeHostCallV1 {

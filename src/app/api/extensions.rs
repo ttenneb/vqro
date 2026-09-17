@@ -121,7 +121,7 @@ impl App {
             .ok_or("extension_not_found")
     }
 
-    fn recover_extension_data_deletion(
+    fn recover_extension_data_deletion_while_gated(
         &mut self,
         path: &std::path::Path,
         marketplace_state: &mut crate::extensions::MarketplaceStateFile,
@@ -131,33 +131,26 @@ impl App {
         else {
             return Ok(false);
         };
-        if self.extension_state_persistence_blocked {
-            return Err("authoritative extension state is unavailable".into());
-        }
-        if self.extension_state_transaction_pending {
-            return Err("authoritative extension state is busy; retry shortly".into());
-        }
         let mut candidate = self.extension_state.clone();
         let commit = candidate
             .clear_namespace(&namespace, format!("marketplace-delete-{namespace}"))
             .map_err(|error| format!("clear authoritative extension state: {error:?}"))?;
-        if let Some(state_path) = self.extension_state_path.as_deref() {
-            if let Err(error) =
-                crate::persist::extension_state::save_atomically(state_path, &candidate)
-            {
-                self.extension_state_persistence_blocked = error.replaced;
-                return Err(format!(
-                    "persist authoritative extension state deletion: {}",
-                    error.source
-                ));
-            }
-        }
-        self.extension_state = candidate;
-        if let Some(commit) = commit.as_ref() {
-            self.emit_extension_state_committed(commit);
-        }
+        self.commit_extension_state_candidate_while_gated(candidate, commit.as_ref())
+            .map_err(|error| format!("persist authoritative extension state deletion: {error}"))?;
         crate::extensions::finish_extension_data_deletion(path)?;
         Ok(true)
+    }
+
+    fn recover_extension_data_deletion(
+        &mut self,
+        path: &std::path::Path,
+        marketplace_state: &mut crate::extensions::MarketplaceStateFile,
+    ) -> Result<bool, String> {
+        self.begin_extension_state_mutation()
+            .map_err(|error| error.to_string())?;
+        let result = self.recover_extension_data_deletion_while_gated(path, marketplace_state);
+        self.finish_extension_state_mutation();
+        result
     }
 
     pub(crate) fn recover_extension_state_on_startup(&mut self) {
@@ -1256,63 +1249,57 @@ impl App {
         let data_id = self.marketplace_state.entries[&extension.repository]
             .data_id
             .clone();
-        if !self.policy.persist_plugin_registry {
-            if let Err(error) = crate::extensions::purge_extension_data(&data_id) {
-                return encode_error(id, "extension_data_delete_failed", error);
-            }
-            if let Err(error) = self
-                .marketplace_state
-                .clear_retained_data(&extension.repository)
-            {
-                return encode_error(id, "extension_state_invalid", error);
-            }
-            let commit = match self
-                .extension_state
-                .clear_namespace(&data_id, format!("marketplace-delete-{data_id}"))
-            {
-                Ok(commit) => commit,
-                Err(error) => {
-                    return encode_error(
-                        id,
-                        "extension_state_invalid",
-                        format!("clear authoritative extension state: {error:?}"),
-                    );
-                }
+        if let Err(error) = self.begin_extension_state_mutation() {
+            let code = match error {
+                super::extension_state::ExtensionStateMutationError::Busy => "extension_state_busy",
+                _ => "extension_state_invalid",
             };
-            if let Some(commit) = commit.as_ref() {
-                self.emit_extension_state_committed(commit);
+            return encode_error(id, code, error.to_string());
+        }
+        let result = (|| -> Result<(), (&'static str, String)> {
+            if !self.policy.persist_plugin_registry {
+                crate::extensions::purge_extension_data(&data_id)
+                    .map_err(|error| ("extension_data_delete_failed", error))?;
+                self.marketplace_state
+                    .clear_retained_data(&extension.repository)
+                    .map_err(|error| ("extension_state_invalid", error))?;
+                let mut candidate = self.extension_state.clone();
+                let commit = candidate
+                    .clear_namespace(&data_id, format!("marketplace-delete-{data_id}"))
+                    .map_err(|error| {
+                        (
+                            "extension_state_invalid",
+                            format!("clear authoritative extension state: {error:?}"),
+                        )
+                    })?;
+                self.commit_extension_state_candidate_while_gated(candidate, commit.as_ref())
+                    .map_err(|error| ("extension_state_invalid", error.to_string()))?;
+                return Ok(());
             }
-            return encode_success(
+            let state_path = crate::extensions::state_storage_path()
+                .map_err(|error| ("extension_state_path_failed", error))?;
+            crate::extensions::begin_extension_data_deletion(
+                &state_path,
+                &extension.repository,
+                &data_id,
+            )
+            .map_err(|error| ("extension_data_delete_failed", error))?;
+            let mut marketplace_state = self.marketplace_state.clone();
+            self.recover_extension_data_deletion_while_gated(&state_path, &mut marketplace_state)
+                .map_err(|error| ("extension_data_delete_failed", error))?;
+            self.marketplace_state = marketplace_state;
+            Ok(())
+        })();
+        self.finish_extension_state_mutation();
+        match result {
+            Ok(()) => encode_success(
                 id,
                 ResponseResult::ExtensionDataDeleted {
                     repository: extension.repository,
                 },
-            );
+            ),
+            Err((code, error)) => encode_error(id, code, error),
         }
-        let state_path = match crate::extensions::state_storage_path() {
-            Ok(path) => path,
-            Err(error) => return encode_error(id, "extension_state_path_failed", error),
-        };
-        if let Err(error) = crate::extensions::begin_extension_data_deletion(
-            &state_path,
-            &extension.repository,
-            &data_id,
-        ) {
-            return encode_error(id, "extension_data_delete_failed", error);
-        }
-        let mut marketplace_state = self.marketplace_state.clone();
-        if let Err(error) =
-            self.recover_extension_data_deletion(&state_path, &mut marketplace_state)
-        {
-            return encode_error(id, "extension_data_delete_failed", error);
-        }
-        self.marketplace_state = marketplace_state;
-        encode_success(
-            id,
-            ResponseResult::ExtensionDataDeleted {
-                repository: extension.repository,
-            },
-        )
     }
 
     pub(super) fn handle_extension_reorder(
@@ -1793,6 +1780,82 @@ mod tests {
             .unwrap()
             .values
             .is_empty());
+    }
+
+    #[test]
+    fn pending_transaction_prevents_all_extension_data_deletion_side_effects() {
+        let _env = crate::config::test_config_env_lock().lock().unwrap();
+        let root = std::env::temp_dir().join(format!(
+            "vqro-pending-extension-delete-{}",
+            std::process::id()
+        ));
+        let previous_config = std::env::var_os("XDG_CONFIG_HOME");
+        let previous_state = std::env::var_os("XDG_STATE_HOME");
+        unsafe {
+            std::env::set_var("XDG_CONFIG_HOME", root.join("config"));
+            std::env::set_var("XDG_STATE_HOME", root.join("state"));
+        }
+        let mut app = test_app();
+        app.extension_state
+            .transact(&crate::extension_state::ExtensionStateTransactionV1 {
+                contract: crate::extension_state::EXTENSION_STATE_CONTRACT_V1.into(),
+                namespace: "vqro.collections".into(),
+                expected_store_generation: 1,
+                expected_revision: 0,
+                idempotency_key: "seed-pending-delete".into(),
+                operations: vec![crate::extension_state::ExtensionStateOperationV1 {
+                    key: "retained".into(),
+                    value: Some(serde_json::json!(true)),
+                }],
+            })
+            .unwrap();
+        let _ = result(&app.handle_api_request(Request {
+            id: "remove".into(),
+            method: Method::ExtensionRemove(ExtensionConfirmedParams {
+                repository: "ttenneb/vqro-extension-collections".into(),
+                confirmed: true,
+            }),
+        }));
+        let data_id = app.marketplace_state.entries["ttenneb/vqro-extension-collections"]
+            .data_id
+            .clone();
+        let config_marker = crate::plugin_paths::plugin_config_dir(&data_id).join("marker");
+        let state_marker = crate::plugin_paths::plugin_state_dir(&data_id).join("marker");
+        let artifact_marker = crate::extension_artifact::artifact_data_root(&data_id)
+            .unwrap()
+            .join("marker");
+        std::fs::create_dir_all(config_marker.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(state_marker.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(artifact_marker.parent().unwrap()).unwrap();
+        std::fs::write(&config_marker, "keep").unwrap();
+        std::fs::write(&state_marker, "keep").unwrap();
+        std::fs::write(&artifact_marker, "keep").unwrap();
+        let before_marketplace = app.marketplace_state.clone();
+        let before_state = app.extension_state.clone();
+        app.extension_state_transaction_pending = true;
+        let response: serde_json::Value = serde_json::from_str(&app.handle_api_request(Request {
+            id: "delete".into(),
+            method: Method::ExtensionDataDelete(ExtensionConfirmedParams {
+                repository: "ttenneb/vqro-extension-collections".into(),
+                confirmed: true,
+            }),
+        }))
+        .unwrap();
+        assert_eq!(response["error"]["code"], "extension_state_busy");
+        assert_eq!(app.marketplace_state, before_marketplace);
+        assert_eq!(app.extension_state, before_state);
+        assert_eq!(std::fs::read_to_string(&config_marker).unwrap(), "keep");
+        assert_eq!(std::fs::read_to_string(&state_marker).unwrap(), "keep");
+        assert_eq!(std::fs::read_to_string(&artifact_marker).unwrap(), "keep");
+        match previous_config {
+            Some(value) => unsafe { std::env::set_var("XDG_CONFIG_HOME", value) },
+            None => unsafe { std::env::remove_var("XDG_CONFIG_HOME") },
+        }
+        match previous_state {
+            Some(value) => unsafe { std::env::set_var("XDG_STATE_HOME", value) },
+            None => unsafe { std::env::remove_var("XDG_STATE_HOME") },
+        }
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

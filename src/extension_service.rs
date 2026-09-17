@@ -2408,10 +2408,11 @@ impl ExtensionServiceSupervisor {
     pub fn from_installed_service(
         installed: &crate::extension_package::InstalledPackageV1,
         service_id: &str,
+        namespace: &str,
         priority: i32,
     ) -> Result<Self, ExtensionServiceError> {
         let runtime_factory =
-            crate::extension_runtime::RuntimeFactory::installed(installed, service_id)?;
+            crate::extension_runtime::RuntimeFactory::installed(installed, service_id, namespace)?;
         Ok(Self {
             spec: ExtensionServiceSpec {
                 id: format!("{}.{}", installed.package_id, service_id),
@@ -2440,8 +2441,9 @@ impl ExtensionServiceSupervisor {
     pub fn preflight_installed_service(
         installed: &crate::extension_package::InstalledPackageV1,
         service_id: &str,
+        namespace: &str,
     ) -> Result<(), ExtensionServiceError> {
-        let mut supervisor = Self::from_installed_service(installed, service_id, 0)?;
+        let mut supervisor = Self::from_installed_service(installed, service_id, namespace, 0)?;
         supervisor.start()?;
         supervisor.stop();
         Ok(())
@@ -2451,8 +2453,9 @@ impl ExtensionServiceSupervisor {
     pub fn preflight_installed_process(
         installed: &crate::extension_package::InstalledPackageV1,
         service_id: &str,
+        namespace: &str,
     ) -> Result<(), ExtensionServiceError> {
-        Self::preflight_installed_service(installed, service_id)
+        Self::preflight_installed_service(installed, service_id, namespace)
     }
 
     pub fn start(&mut self) -> Result<(), ExtensionServiceError> {

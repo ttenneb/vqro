@@ -1,16 +1,112 @@
 use super::{responses, App};
 use crate::api::schema::{ExtensionStateEventsParams, ResponseResult};
 
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum ExtensionStateMutationError {
+    Busy,
+    Unavailable,
+    Persist { detail: String, uncertain: bool },
+}
+
+impl std::fmt::Display for ExtensionStateMutationError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Busy => {
+                formatter.write_str("another durable extension-state mutation is pending")
+            }
+            Self::Unavailable => {
+                formatter.write_str("durable extension state authority is unavailable")
+            }
+            Self::Persist { detail, .. } => formatter.write_str(detail),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub(crate) enum ExtensionStateResponseTarget {
+    Native {
+        request_id: String,
+        respond_to: std::sync::mpsc::Sender<String>,
+    },
+    HostState {
+        respond_to: std::sync::mpsc::SyncSender<
+            Result<serde_json::Value, crate::extension_runtime::RuntimeErrorBodyV1>,
+        >,
+    },
+}
+
 #[derive(Debug)]
 pub(crate) struct ExtensionStatePersistResult {
-    pub(crate) request_id: String,
     pub(crate) candidate: crate::extension_state::DurableExtensionStateV1,
     pub(crate) commit: crate::extension_state::ExtensionStateCommitV1,
     pub(crate) persisted: Result<(), crate::persist::extension_state::ExtensionStateSaveError>,
-    pub(crate) respond_to: std::sync::mpsc::Sender<String>,
+    pub(crate) target: ExtensionStateResponseTarget,
 }
 
 impl App {
+    pub(crate) fn begin_extension_state_mutation(
+        &mut self,
+    ) -> Result<(), ExtensionStateMutationError> {
+        if self.extension_state_persistence_blocked {
+            return Err(ExtensionStateMutationError::Unavailable);
+        }
+        if self.extension_state_transaction_pending {
+            return Err(ExtensionStateMutationError::Busy);
+        }
+        self.extension_state_transaction_pending = true;
+        Ok(())
+    }
+
+    pub(crate) fn finish_extension_state_mutation(&mut self) {
+        self.extension_state_transaction_pending = false;
+    }
+
+    pub(crate) fn commit_extension_state_candidate_while_gated(
+        &mut self,
+        candidate: crate::extension_state::DurableExtensionStateV1,
+        commit: Option<&crate::extension_state::ExtensionStateCommitV1>,
+    ) -> Result<(), ExtensionStateMutationError> {
+        if !self.extension_state_transaction_pending {
+            return Err(ExtensionStateMutationError::Busy);
+        }
+        let persisted = self.extension_state_path.as_deref().map_or(Ok(()), |path| {
+            crate::persist::extension_state::save_atomically(path, &candidate)
+        });
+        let result = match persisted {
+            Ok(()) => {
+                self.extension_state = candidate;
+                if let Some(commit) = commit {
+                    self.emit_extension_state_committed(commit);
+                }
+                Ok(())
+            }
+            Err(error) => {
+                self.extension_state_persistence_blocked = error.replaced;
+                let suffix = if error.replaced {
+                    " (the file was replaced before durability failed)"
+                } else {
+                    ""
+                };
+                Err(ExtensionStateMutationError::Persist {
+                    detail: format!("{}{suffix}", error.source),
+                    uncertain: error.replaced,
+                })
+            }
+        };
+        result
+    }
+
+    pub(crate) fn commit_extension_state_candidate_sync(
+        &mut self,
+        candidate: crate::extension_state::DurableExtensionStateV1,
+        commit: Option<&crate::extension_state::ExtensionStateCommitV1>,
+    ) -> Result<(), ExtensionStateMutationError> {
+        self.begin_extension_state_mutation()?;
+        let result = self.commit_extension_state_candidate_while_gated(candidate, commit);
+        self.finish_extension_state_mutation();
+        result
+    }
+
     pub(super) fn emit_extension_state_committed(
         &self,
         commit: &crate::extension_state::ExtensionStateCommitV1,
@@ -76,27 +172,14 @@ impl App {
                 );
             }
         };
-        if let Some(path) = self.extension_state_path.as_deref() {
-            if let Err(error) = crate::persist::extension_state::save_atomically(path, &candidate) {
-                // Only a post-replacement durability failure creates uncertain authority.
-                self.extension_state_persistence_blocked = error.replaced;
-                let detail = if error.replaced {
-                    format!(
-                        "{} (the file was replaced before durability failed)",
-                        error.source
-                    )
-                } else {
-                    error.source.to_string()
-                };
-                return responses::encode_error(
-                    request_id,
-                    "extension_state_persist_failed",
-                    &detail,
-                );
-            }
+        if let Err(error) = self.commit_extension_state_candidate_sync(candidate, Some(&commit)) {
+            let code = match error {
+                ExtensionStateMutationError::Busy => "extension_state_busy",
+                ExtensionStateMutationError::Unavailable => "extension_state_persistence_blocked",
+                ExtensionStateMutationError::Persist { .. } => "extension_state_persist_failed",
+            };
+            return responses::encode_error(request_id, code, error.to_string());
         }
-        self.extension_state = candidate;
-        self.emit_extension_state_committed(&commit);
         responses::encode_success(
             request_id,
             ResponseResult::ExtensionStateCommitted { commit },
@@ -138,8 +221,17 @@ impl App {
             }
         };
         let Some(path) = self.extension_state_path.clone() else {
+            if let Err(error) = self.begin_extension_state_mutation() {
+                let _ = respond_to.send(responses::encode_error(
+                    request_id,
+                    "extension_state_busy",
+                    error.to_string(),
+                ));
+                return false;
+            }
             self.extension_state = candidate;
             self.emit_extension_state_committed(&commit);
+            self.finish_extension_state_mutation();
             let _ = respond_to.send(responses::encode_success(
                 request_id,
                 ResponseResult::ExtensionStateCommitted { commit },
@@ -157,6 +249,14 @@ impl App {
                 return false;
             }
         };
+        if let Err(error) = self.begin_extension_state_mutation() {
+            let _ = respond_to.send(responses::encode_error(
+                request_id,
+                "extension_state_busy",
+                error.to_string(),
+            ));
+            return false;
+        }
         let spawn_request_id = request_id.clone();
         let spawn_respond_to = respond_to.clone();
         let spawn = std::thread::Builder::new()
@@ -165,17 +265,20 @@ impl App {
                 let persisted = crate::persist::extension_state::save_atomically(&path, &candidate);
                 permit.send(crate::events::AppEvent::ExtensionStatePersisted(Box::new(
                     ExtensionStatePersistResult {
-                        request_id,
                         candidate,
                         commit,
                         persisted,
-                        respond_to,
+                        target: ExtensionStateResponseTarget::Native {
+                            request_id,
+                            respond_to,
+                        },
                     },
                 )));
             });
         match spawn {
-            Ok(_) => self.extension_state_transaction_pending = true,
+            Ok(_) => {}
             Err(error) => {
+                self.finish_extension_state_mutation();
                 let _ = spawn_respond_to.send(responses::encode_error(
                     spawn_request_id,
                     "extension_state_persist_failed",
@@ -187,17 +290,12 @@ impl App {
     }
 
     pub(crate) fn handle_extension_state_persisted(&mut self, result: ExtensionStatePersistResult) {
-        self.extension_state_transaction_pending = false;
-        let response = match result.persisted {
+        self.finish_extension_state_mutation();
+        let outcome = match result.persisted {
             Ok(()) => {
                 self.extension_state = result.candidate;
                 self.emit_extension_state_committed(&result.commit);
-                responses::encode_success(
-                    result.request_id,
-                    ResponseResult::ExtensionStateCommitted {
-                        commit: result.commit,
-                    },
-                )
+                Ok(result.commit)
             }
             Err(error) => {
                 self.extension_state_persistence_blocked = error.replaced;
@@ -209,14 +307,335 @@ impl App {
                 } else {
                     error.source.to_string()
                 };
-                responses::encode_error(
-                    result.request_id,
-                    "extension_state_persist_failed",
-                    &detail,
-                )
+                Err((error.replaced, detail))
             }
         };
-        let _ = result.respond_to.send(response);
+        match result.target {
+            ExtensionStateResponseTarget::Native {
+                request_id,
+                respond_to,
+            } => {
+                let response = match outcome {
+                    Ok(commit) => responses::encode_success(
+                        request_id,
+                        ResponseResult::ExtensionStateCommitted { commit },
+                    ),
+                    Err((_, detail)) => responses::encode_error(
+                        request_id,
+                        "extension_state_persist_failed",
+                        &detail,
+                    ),
+                };
+                let _ = respond_to.send(response);
+            }
+            ExtensionStateResponseTarget::HostState { respond_to } => {
+                let response = match outcome {
+                    Ok(commit) => serde_json::to_value(
+                        crate::extension_host_state::HostStateCommitV1::from(commit),
+                    )
+                    .map_err(|error| {
+                        crate::extension_runtime::RuntimeErrorBodyV1 {
+                            code: "host_call_unavailable".into(),
+                            message: format!("cannot encode host-state commit: {error}"),
+                        }
+                    }),
+                    Err((uncertain, detail)) => Err(crate::extension_runtime::RuntimeErrorBodyV1 {
+                        code: if uncertain {
+                            "state_persist_uncertain"
+                        } else {
+                            "state_persist_failed"
+                        }
+                        .into(),
+                        message: detail,
+                    }),
+                };
+                // Durability decides authority even when the invocation has canceled or gone away.
+                let _ = respond_to.try_send(response);
+            }
+        }
+    }
+
+    /// Issues staged package-v1 authorization. No production catalog currently invokes this.
+    #[allow(dead_code)] // Removed when package activation begins issuing these leases.
+    pub(crate) fn stage_host_state_authorization(
+        &mut self,
+        binding: &crate::extension_host_state::HostStateProviderBinding,
+        manager_generation: u64,
+        provider_generation: u64,
+        runtime_generation: u64,
+    ) -> Result<crate::extension_host_state::HostStateInvocationAuthorization, String> {
+        if self.extension_state_persistence_blocked {
+            return Err("durable extension state authority is unavailable".into());
+        }
+        if manager_generation == 0 || provider_generation == 0 || runtime_generation == 0 {
+            return Err("host-state generations must be nonzero".into());
+        }
+        let registry = &self.marketplace_state.packages;
+        let record = registry
+            .packages
+            .get(binding.package_id())
+            .ok_or_else(|| "package is not registered in the package-v1 catalog".to_string())?;
+        let active = record
+            .active
+            .as_ref()
+            .filter(|_| {
+                record.status == crate::extension_package::PackageLifecycleStatusV1::Enabled
+            })
+            .ok_or_else(|| "package is not enabled with an active artifact".to_string())?;
+        if record.package_id != binding.package_id()
+            || !record
+                .namespaces
+                .iter()
+                .any(|owned| owned == binding.namespace())
+            || active.runtime_generation != runtime_generation
+            || active.package_sha256 != binding.artifact_sha256()
+            || active.version != binding.artifact_version()
+        {
+            return Err(
+                "package does not own the requested artifact, service, namespace, or runtime generation"
+                    .into(),
+            );
+        }
+        let catalog_revision = registry.revision;
+        let package_revision = record.revision;
+        let authority_key = (
+            binding.package_id().to_owned(),
+            binding.service_id().to_owned(),
+        );
+        let authority = match self.host_state_lease_authorities.entry(authority_key) {
+            std::collections::hash_map::Entry::Occupied(mut entry) => {
+                if entry.get().is_revoked() {
+                    let replacement = crate::extension_host_state::HostStateLeaseAuthority::new(
+                        manager_generation,
+                        provider_generation,
+                        runtime_generation,
+                    );
+                    entry.insert(replacement.clone());
+                    replacement
+                } else {
+                    entry.get().supersede(
+                        manager_generation,
+                        provider_generation,
+                        runtime_generation,
+                    );
+                    entry.get().clone()
+                }
+            }
+            std::collections::hash_map::Entry::Vacant(entry) => entry
+                .insert(crate::extension_host_state::HostStateLeaseAuthority::new(
+                    manager_generation,
+                    provider_generation,
+                    runtime_generation,
+                ))
+                .clone(),
+        };
+        Ok(
+            crate::extension_host_state::HostStateInvocationAuthorization {
+                package_id: binding.package_id().to_owned(),
+                service_id: binding.service_id().to_owned(),
+                namespace: binding.namespace().to_owned(),
+                artifact_sha256: binding.artifact_sha256().to_owned(),
+                artifact_version: binding.artifact_version().to_owned(),
+                catalog_revision,
+                package_revision,
+                manager_generation,
+                provider_generation,
+                scope_id: self.extension_state.store_id.clone(),
+                scope_revision: package_revision,
+                store_id: self.extension_state.store_id.clone(),
+                store_generation: self.extension_state.store_generation,
+                authority,
+                event_tx: self.event_tx.clone(),
+            },
+        )
+    }
+
+    #[allow(dead_code)] // Used when staged providers are retired before production activation.
+    pub(crate) fn revoke_host_state_authorization(&mut self, package_id: &str, service_id: &str) {
+        if let Some(authority) = self
+            .host_state_lease_authorities
+            .remove(&(package_id.into(), service_id.into()))
+        {
+            authority.revoke();
+        }
+    }
+
+    pub(crate) fn handle_extension_host_state_call(
+        &mut self,
+        request: crate::extension_host_state::HostStateActorRequest,
+    ) {
+        let send_error = |code: &str, message: String| {
+            let _ =
+                request
+                    .respond_to
+                    .try_send(Err(crate::extension_runtime::RuntimeErrorBodyV1 {
+                        code: code.into(),
+                        message,
+                    }));
+        };
+        if request
+            .lease
+            .canceled
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            send_error("host_call_canceled", "outer invocation was canceled".into());
+            return;
+        }
+        if std::time::Instant::now() >= request.lease.deadline {
+            send_error(
+                "host_call_timeout",
+                "outer invocation deadline expired".into(),
+            );
+            return;
+        }
+        if !request.lease.authority.permits(&request.lease) {
+            send_error(
+                "stale_host_call_lease",
+                "host call lease was revoked".into(),
+            );
+            return;
+        }
+        let registry = &self.marketplace_state.packages;
+        let Some(record) = registry.packages.get(&request.lease.package_id) else {
+            send_error(
+                "stale_host_call_lease",
+                "package catalog ownership disappeared".into(),
+            );
+            return;
+        };
+        let ownership_current = !request.lease.outer_request_id.is_empty()
+            && registry.revision == request.lease.catalog_revision
+            && record.revision == request.lease.package_revision
+            && request.lease.scope_revision == record.revision
+            && record.status == crate::extension_package::PackageLifecycleStatusV1::Enabled
+            && record.active.as_ref().is_some_and(|active| {
+                active.runtime_generation == request.lease.runtime_generation
+                    && active.package_sha256 == request.lease.artifact_sha256
+                    && active.version == request.lease.artifact_version
+            })
+            && self
+                .host_state_lease_authorities
+                .get(&(
+                    request.lease.package_id.clone(),
+                    request.lease.service_id.clone(),
+                ))
+                .is_some_and(|authority| {
+                    std::sync::Arc::ptr_eq(authority, &request.lease.authority)
+                })
+            && record
+                .namespaces
+                .iter()
+                .any(|namespace| namespace == &request.lease.namespace)
+            && request.lease.scope_id == self.extension_state.store_id
+            && request.lease.store_id == self.extension_state.store_id
+            && request.lease.store_generation == self.extension_state.store_generation;
+        if !ownership_current {
+            send_error(
+                "stale_host_call_lease",
+                "package ownership, scope, or state generation changed".into(),
+            );
+            return;
+        }
+        if self.extension_state_persistence_blocked {
+            send_error(
+                "state_persist_uncertain",
+                "durable extension state authority is unavailable".into(),
+            );
+            return;
+        }
+        match request.method {
+            crate::extension_host_state::HostStateActorMethod::Snapshot => {
+                let result = self
+                    .extension_state
+                    .snapshot(&request.lease.namespace)
+                    .map(crate::extension_host_state::HostStateSnapshotV1::from)
+                    .map_err(|error| crate::extension_host_state::state_error(&error))
+                    .and_then(|snapshot| {
+                        serde_json::to_value(snapshot).map_err(|error| {
+                            crate::extension_runtime::RuntimeErrorBodyV1 {
+                                code: "host_call_unavailable".into(),
+                                message: format!("cannot encode host-state snapshot: {error}"),
+                            }
+                        })
+                    });
+                let _ = request.respond_to.try_send(result);
+            }
+            crate::extension_host_state::HostStateActorMethod::Transact(transaction) => {
+                if self.extension_state_transaction_pending {
+                    send_error(
+                        "host_call_busy",
+                        "another durable mutation is pending".into(),
+                    );
+                    return;
+                }
+                let mut candidate = self.extension_state.clone();
+                let commit = match candidate.transact(&transaction) {
+                    Ok(commit) => commit,
+                    Err(error) => {
+                        let _ = request
+                            .respond_to
+                            .try_send(Err(crate::extension_host_state::state_error(&error)));
+                        return;
+                    }
+                };
+                let Some(path) = self.extension_state_path.clone() else {
+                    if let Err(error) = self.begin_extension_state_mutation() {
+                        send_error("host_call_busy", error.to_string());
+                        return;
+                    }
+                    self.extension_state = candidate;
+                    self.emit_extension_state_committed(&commit);
+                    self.finish_extension_state_mutation();
+                    let result = serde_json::to_value(
+                        crate::extension_host_state::HostStateCommitV1::from(commit),
+                    )
+                    .map_err(|error| {
+                        crate::extension_runtime::RuntimeErrorBodyV1 {
+                            code: "host_call_unavailable".into(),
+                            message: format!("cannot encode host-state commit: {error}"),
+                        }
+                    });
+                    let _ = request.respond_to.try_send(result);
+                    return;
+                };
+                let permit = match self.event_tx.clone().try_reserve_owned() {
+                    Ok(permit) => permit,
+                    Err(error) => {
+                        send_error(
+                            "host_call_busy",
+                            format!("event queue unavailable: {error}"),
+                        );
+                        return;
+                    }
+                };
+                if let Err(error) = self.begin_extension_state_mutation() {
+                    send_error("host_call_busy", error.to_string());
+                    return;
+                }
+                let target = ExtensionStateResponseTarget::HostState {
+                    respond_to: request.respond_to,
+                };
+                let spawn = std::thread::Builder::new()
+                    .name("vqro-extension-state".into())
+                    .spawn(move || {
+                        let persisted =
+                            crate::persist::extension_state::save_atomically(&path, &candidate);
+                        permit.send(crate::events::AppEvent::ExtensionStatePersisted(Box::new(
+                            ExtensionStatePersistResult {
+                                candidate,
+                                commit,
+                                persisted,
+                                target,
+                            },
+                        )));
+                    });
+                if let Err(error) = spawn {
+                    self.finish_extension_state_mutation();
+                    // The response target moved into the failed closure and disconnects here.
+                    tracing::warn!(%error, "failed to spawn staged host-state persistence");
+                }
+            }
+        }
     }
 
     pub(super) fn handle_extension_state_events(
@@ -280,6 +699,102 @@ mod tests {
             api_rx,
             crate::api::EventHub::default(),
         )
+    }
+
+    fn install_staged_package(app: &mut crate::app::App, runtime_generation: u64) {
+        app.marketplace_state.packages.revision = 1;
+        app.marketplace_state.packages.packages.insert(
+            "example.package".into(),
+            crate::extension_package::PackageLifecycleRecordV1 {
+                package_id: "example.package".into(),
+                source: crate::extension_package::PackageProvenanceV1::File {
+                    package_sha256: "a".repeat(64),
+                },
+                previous_source: None,
+                namespaces: vec!["example.extension".into()],
+                revision: 3,
+                status: crate::extension_package::PackageLifecycleStatusV1::Enabled,
+                active: Some(crate::extension_package::PackageArtifactPointerV1 {
+                    package_sha256: "a".repeat(64),
+                    version: "1.0.0".into(),
+                    runtime_generation,
+                }),
+                previous: None,
+                activation_error: None,
+                pending_activation: None,
+                retained_data: false,
+            },
+        );
+    }
+
+    fn staged_handler(
+        app: &mut crate::app::App,
+        runtime_generation: u64,
+        capabilities: &[&str],
+        canceled: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) -> (
+        crate::extension_host_state::HostStateCallHandler,
+        std::sync::Arc<crate::extension_host_state::HostStateLeaseAuthority>,
+    ) {
+        let binding = crate::extension_host_state::HostStateProviderBinding::test_new(
+            "example.package",
+            "state",
+            "example.extension",
+            "a".repeat(64),
+            "1.0.0",
+        );
+        let authorization = app
+            .stage_host_state_authorization(&binding, 5, 7, runtime_generation)
+            .unwrap();
+        let authority = authorization.authority.clone();
+        let identity = crate::extension_runtime::RuntimeIdentityV1 {
+            package_id: "example.package".into(),
+            namespace: "example.extension".into(),
+            service_id: "state".into(),
+            generation: runtime_generation,
+        };
+        let lease = authorization.bind(
+            "outer-1".into(),
+            identity.clone(),
+            std::time::Instant::now() + std::time::Duration::from_secs(2),
+            canceled,
+        );
+        (
+            crate::extension_host_state::HostStateCallHandler::new(
+                identity,
+                capabilities
+                    .iter()
+                    .map(|value| (*value).to_string())
+                    .collect(),
+                lease,
+                authorization.event_tx,
+            ),
+            authority,
+        )
+    }
+
+    fn host_call(
+        generation: u64,
+        capability: &str,
+        method: &str,
+        namespace: &str,
+        params: serde_json::Value,
+    ) -> crate::extension_runtime::RuntimeHostCallV1 {
+        crate::extension_runtime::RuntimeHostCallV1 {
+            kind: "host_call".into(),
+            call_id: "call-1".into(),
+            identity: crate::extension_runtime::RuntimeIdentityV1 {
+                package_id: "example.package".into(),
+                namespace: "example.extension".into(),
+                service_id: "state".into(),
+                generation,
+            },
+            depth: 1,
+            capability: capability.into(),
+            method: method.into(),
+            namespace: namespace.into(),
+            params,
+        }
     }
 
     fn transaction(generation: u64) -> ExtensionStateTransactionV1 {
@@ -401,6 +916,567 @@ mod tests {
 
         std::env::remove_var("XDG_CONFIG_HOME");
         let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn staged_snapshot_is_package_namespace_and_lease_bound() {
+        use crate::extension_runtime::RuntimeHostCallHandler;
+
+        let mut app = app();
+        install_staged_package(&mut app, 11);
+        for binding in [
+            crate::extension_host_state::HostStateProviderBinding::test_new(
+                "example.package",
+                "other-service",
+                "example.extension",
+                "b".repeat(64),
+                "1.0.0",
+            ),
+            crate::extension_host_state::HostStateProviderBinding::test_new(
+                "example.package",
+                "state",
+                "example.extension",
+                "a".repeat(64),
+                "2.0.0",
+            ),
+        ] {
+            assert!(app
+                .stage_host_state_authorization(&binding, 5, 7, 11)
+                .is_err());
+        }
+        let canceled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (handler, authority) = staged_handler(
+            &mut app,
+            11,
+            &[crate::extension_host_state::HOST_STATE_READ_CAPABILITY],
+            canceled,
+        );
+        let call = host_call(
+            11,
+            crate::extension_host_state::HOST_STATE_READ_CAPABILITY,
+            crate::extension_host_state::HOST_STATE_SNAPSHOT_METHOD,
+            "example.extension",
+            serde_json::json!({"contract": "host.state.v1"}),
+        );
+        let join = std::thread::spawn(move || handler.handle_host_call(call));
+        let event = app.event_rx.blocking_recv().unwrap();
+        app.handle_internal_event(event);
+        let response = join.join().unwrap();
+        assert!(response.error.is_none());
+        assert_eq!(response.result.unwrap()["namespace"], "example.extension");
+
+        let (catalog_handler, _) = staged_handler(
+            &mut app,
+            11,
+            &[crate::extension_host_state::HOST_STATE_READ_CAPABILITY],
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        );
+        app.marketplace_state.packages.revision += 1;
+        let catalog_call = host_call(
+            11,
+            crate::extension_host_state::HOST_STATE_READ_CAPABILITY,
+            crate::extension_host_state::HOST_STATE_SNAPSHOT_METHOD,
+            "example.extension",
+            serde_json::json!({"contract": "host.state.v1"}),
+        );
+        let catalog_join =
+            std::thread::spawn(move || catalog_handler.handle_host_call(catalog_call));
+        let event = app.event_rx.blocking_recv().unwrap();
+        app.handle_internal_event(event);
+        assert_eq!(
+            catalog_join.join().unwrap().error.unwrap().code,
+            "stale_host_call_lease"
+        );
+        app.marketplace_state.packages.revision = 1;
+
+        let (artifact_handler, _) = staged_handler(
+            &mut app,
+            11,
+            &[crate::extension_host_state::HOST_STATE_READ_CAPABILITY],
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        );
+        app.marketplace_state
+            .packages
+            .packages
+            .get_mut("example.package")
+            .unwrap()
+            .active
+            .as_mut()
+            .unwrap()
+            .package_sha256 = "c".repeat(64);
+        let artifact_call = host_call(
+            11,
+            crate::extension_host_state::HOST_STATE_READ_CAPABILITY,
+            crate::extension_host_state::HOST_STATE_SNAPSHOT_METHOD,
+            "example.extension",
+            serde_json::json!({"contract": "host.state.v1"}),
+        );
+        let artifact_join =
+            std::thread::spawn(move || artifact_handler.handle_host_call(artifact_call));
+        let event = app.event_rx.blocking_recv().unwrap();
+        app.handle_internal_event(event);
+        assert_eq!(
+            artifact_join.join().unwrap().error.unwrap().code,
+            "stale_host_call_lease"
+        );
+        app.marketplace_state
+            .packages
+            .packages
+            .get_mut("example.package")
+            .unwrap()
+            .active
+            .as_mut()
+            .unwrap()
+            .package_sha256 = "a".repeat(64);
+
+        authority.revoke();
+        let (revoked_handler, revoked_authority) = staged_handler(
+            &mut app,
+            11,
+            &[crate::extension_host_state::HOST_STATE_READ_CAPABILITY],
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        );
+        revoked_authority.revoke();
+        let revoked = revoked_handler.handle_host_call(host_call(
+            11,
+            crate::extension_host_state::HOST_STATE_READ_CAPABILITY,
+            crate::extension_host_state::HOST_STATE_SNAPSHOT_METHOD,
+            "example.extension",
+            serde_json::json!({"contract": "host.state.v1"}),
+        ));
+        assert_eq!(revoked.error.unwrap().code, "stale_host_call_lease");
+
+        let (superseded_handler, superseded_authority) = staged_handler(
+            &mut app,
+            11,
+            &[crate::extension_host_state::HOST_STATE_READ_CAPABILITY],
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        );
+        superseded_authority.supersede(6, 8, 12);
+        let superseded = superseded_handler.handle_host_call(host_call(
+            11,
+            crate::extension_host_state::HOST_STATE_READ_CAPABILITY,
+            crate::extension_host_state::HOST_STATE_SNAPSHOT_METHOD,
+            "example.extension",
+            serde_json::json!({"contract": "host.state.v1"}),
+        ));
+        assert_eq!(superseded.error.unwrap().code, "stale_host_call_lease");
+
+        let (handler, _) = staged_handler(
+            &mut app,
+            11,
+            &[crate::extension_host_state::HOST_STATE_READ_CAPABILITY],
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        );
+        // A namespace mismatch is rejected before it can enter the App queue.
+        let response = handler.handle_host_call(host_call(
+            11,
+            crate::extension_host_state::HOST_STATE_READ_CAPABILITY,
+            crate::extension_host_state::HOST_STATE_SNAPSHOT_METHOD,
+            "another.namespace",
+            serde_json::json!({"contract": "host.state.v1"}),
+        ));
+        assert_eq!(response.error.unwrap().code, "invalid_host_call");
+    }
+
+    #[test]
+    fn staged_success_is_rechecked_for_cancellation_deadline_and_revocation() {
+        use crate::extension_runtime::RuntimeHostCallHandler;
+
+        enum Race {
+            Cancel,
+            Deadline,
+            Revoke,
+        }
+        for race in [Race::Cancel, Race::Deadline, Race::Revoke] {
+            let mut app = app();
+            install_staged_package(&mut app, 18);
+            let canceled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let (handler, authority) = staged_handler(
+                &mut app,
+                18,
+                &[crate::extension_host_state::HOST_STATE_READ_CAPABILITY],
+                canceled.clone(),
+            );
+            let handler = if matches!(race, Race::Deadline) {
+                handler
+                    .with_deadline(std::time::Instant::now() + std::time::Duration::from_millis(20))
+            } else {
+                handler
+            };
+            let gate = crate::extension_host_state::HostStateSuccessGate::new();
+            let handler = handler.with_success_gate(gate.clone());
+            let call = host_call(
+                18,
+                crate::extension_host_state::HOST_STATE_READ_CAPABILITY,
+                crate::extension_host_state::HOST_STATE_SNAPSHOT_METHOD,
+                "example.extension",
+                serde_json::json!({"contract": "host.state.v1"}),
+            );
+            let join = std::thread::spawn(move || handler.handle_host_call(call));
+            let event = app.event_rx.blocking_recv().unwrap();
+            app.handle_internal_event(event);
+            gate.received.wait();
+            let expected = match race {
+                Race::Cancel => {
+                    canceled.store(true, std::sync::atomic::Ordering::Release);
+                    "host_call_canceled"
+                }
+                Race::Deadline => {
+                    std::thread::sleep(std::time::Duration::from_millis(25));
+                    "host_call_timeout"
+                }
+                Race::Revoke => {
+                    app.revoke_host_state_authorization("example.package", "state");
+                    assert!(authority.is_revoked());
+                    "stale_host_call_lease"
+                }
+            };
+            gate.release.wait();
+            assert_eq!(join.join().unwrap().error.unwrap().code, expected);
+        }
+    }
+
+    #[test]
+    fn staged_transaction_persists_json_null_before_success_and_replays() {
+        use crate::extension_runtime::RuntimeHostCallHandler;
+
+        let mut app = app();
+        install_staged_package(&mut app, 12);
+        let directory = std::env::temp_dir().join(format!(
+            "vqro-host-state-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("state.json");
+        app.extension_state_path = Some(path.clone());
+        let generation = app.extension_state.store_generation;
+        let params = serde_json::json!({
+            "contract": "host.state.v1",
+            "expected_store_generation": generation,
+            "expected_revision": 0,
+            "idempotency_key": "null-1",
+            "operations": [{"op": "set", "key": "nullable", "value": null}]
+        });
+        let run = |app: &mut crate::app::App| {
+            let (handler, _) = staged_handler(
+                app,
+                12,
+                &[crate::extension_host_state::HOST_STATE_WRITE_CAPABILITY],
+                std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            );
+            let call = host_call(
+                12,
+                crate::extension_host_state::HOST_STATE_WRITE_CAPABILITY,
+                crate::extension_host_state::HOST_STATE_TRANSACT_METHOD,
+                "example.extension",
+                params.clone(),
+            );
+            let join = std::thread::spawn(move || handler.handle_host_call(call));
+            let request_event = app.event_rx.blocking_recv().unwrap();
+            app.handle_internal_event(request_event);
+            assert!(app.extension_state_transaction_pending);
+            let persisted_event = app.event_rx.blocking_recv().unwrap();
+            app.handle_internal_event(persisted_event);
+            join.join().unwrap()
+        };
+        let first = run(&mut app);
+        assert!(first.error.is_none());
+        assert_eq!(
+            app.extension_state
+                .snapshot("example.extension")
+                .unwrap()
+                .values["nullable"],
+            serde_json::Value::Null
+        );
+        assert!(matches!(
+            crate::persist::extension_state::load(&path),
+            crate::persist::extension_state::ExtensionStateLoad::Loaded(_)
+        ));
+        let replay = run(&mut app);
+        assert_eq!(replay.result.unwrap()["replayed"], true);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn one_mutation_gate_rejects_native_host_and_namespace_candidates() {
+        use crate::extension_runtime::RuntimeHostCallHandler;
+
+        let mut app = app();
+        install_staged_package(&mut app, 17);
+        app.extension_state_transaction_pending = true;
+
+        let (native_tx, native_rx) = std::sync::mpsc::channel();
+        app.handle_deferred_extension_state_transact(
+            "native".into(),
+            transaction(app.extension_state.store_generation),
+            native_tx,
+        );
+        assert!(native_rx.recv().unwrap().contains("extension_state_busy"));
+
+        let candidate = app.extension_state.clone();
+        assert_eq!(
+            app.commit_extension_state_candidate_sync(candidate, None)
+                .unwrap_err(),
+            super::ExtensionStateMutationError::Busy
+        );
+
+        let (handler, _) = staged_handler(
+            &mut app,
+            17,
+            &[crate::extension_host_state::HOST_STATE_WRITE_CAPABILITY],
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        );
+        let call = host_call(
+            17,
+            crate::extension_host_state::HOST_STATE_WRITE_CAPABILITY,
+            crate::extension_host_state::HOST_STATE_TRANSACT_METHOD,
+            "example.extension",
+            serde_json::json!({
+                "contract": "host.state.v1",
+                "expected_store_generation": app.extension_state.store_generation,
+                "expected_revision": 0,
+                "idempotency_key": "busy",
+                "operations": [{"op": "set", "key": "x", "value": 1}]
+            }),
+        );
+        let join = std::thread::spawn(move || handler.handle_host_call(call));
+        let event = app.event_rx.blocking_recv().unwrap();
+        app.handle_internal_event(event);
+        assert_eq!(join.join().unwrap().error.unwrap().code, "host_call_busy");
+    }
+
+    #[test]
+    fn staged_host_state_queue_saturation_is_nonblocking_and_allocates_nothing() {
+        use crate::extension_runtime::RuntimeHostCallHandler;
+
+        let mut app = app();
+        install_staged_package(&mut app, 16);
+        let (handler, _) = staged_handler(
+            &mut app,
+            16,
+            &[crate::extension_host_state::HOST_STATE_READ_CAPABILITY],
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        );
+        while app
+            .event_tx
+            .try_send(crate::events::AppEvent::UpdateReady {
+                version: "test".into(),
+                install_command: "test".into(),
+            })
+            .is_ok()
+        {}
+        let response = handler.handle_host_call(host_call(
+            16,
+            crate::extension_host_state::HOST_STATE_READ_CAPABILITY,
+            crate::extension_host_state::HOST_STATE_SNAPSHOT_METHOD,
+            "example.extension",
+            serde_json::json!({"contract": "host.state.v1"}),
+        ));
+        assert_eq!(response.error.unwrap().code, "host_call_busy");
+        assert_eq!(
+            app.extension_state
+                .snapshot("example.extension")
+                .unwrap()
+                .revision,
+            0
+        );
+    }
+
+    #[test]
+    fn cancellation_after_persistence_starts_does_not_cancel_authority_commit() {
+        use crate::extension_runtime::RuntimeHostCallHandler;
+
+        let mut app = app();
+        install_staged_package(&mut app, 14);
+        let directory = std::env::temp_dir().join(format!(
+            "vqro-host-state-cancel-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        app.extension_state_path = Some(directory.join("state.json"));
+        let canceled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (handler, _) = staged_handler(
+            &mut app,
+            14,
+            &[crate::extension_host_state::HOST_STATE_WRITE_CAPABILITY],
+            canceled.clone(),
+        );
+        let call = host_call(
+            14,
+            crate::extension_host_state::HOST_STATE_WRITE_CAPABILITY,
+            crate::extension_host_state::HOST_STATE_TRANSACT_METHOD,
+            "example.extension",
+            serde_json::json!({
+                "contract": "host.state.v1",
+                "expected_store_generation": app.extension_state.store_generation,
+                "expected_revision": 0,
+                "idempotency_key": "cancel-1",
+                "operations": [{"op": "set", "key": "committed", "value": true}]
+            }),
+        );
+        let join = std::thread::spawn(move || handler.handle_host_call(call));
+        let request_event = app.event_rx.blocking_recv().unwrap();
+        app.handle_internal_event(request_event);
+        canceled.store(true, std::sync::atomic::Ordering::Release);
+        assert_eq!(
+            join.join().unwrap().error.unwrap().code,
+            "host_call_canceled"
+        );
+        let persisted_event = app.event_rx.blocking_recv().unwrap();
+        app.handle_internal_event(persisted_event);
+        assert_eq!(
+            app.extension_state
+                .snapshot("example.extension")
+                .unwrap()
+                .values["committed"],
+            true
+        );
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn staged_transaction_bounds_and_method_capabilities_fail_closed() {
+        use crate::extension_runtime::RuntimeHostCallHandler;
+
+        let mut app = app();
+        install_staged_package(&mut app, 15);
+        let (handler, authority) = staged_handler(
+            &mut app,
+            15,
+            &[crate::extension_host_state::HOST_STATE_READ_CAPABILITY],
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        );
+        let denied = handler.handle_host_call(host_call(
+            15,
+            crate::extension_host_state::HOST_STATE_READ_CAPABILITY,
+            crate::extension_host_state::HOST_STATE_TRANSACT_METHOD,
+            "example.extension",
+            serde_json::json!({
+                "contract": "host.state.v1",
+                "expected_store_generation": app.extension_state.store_generation,
+                "expected_revision": 0,
+                "idempotency_key": "denied",
+                "operations": []
+            }),
+        ));
+        assert_eq!(denied.error.unwrap().code, "capability_denied");
+        authority.revoke();
+        let stale = handler.handle_host_call(host_call(
+            15,
+            crate::extension_host_state::HOST_STATE_READ_CAPABILITY,
+            crate::extension_host_state::HOST_STATE_SNAPSHOT_METHOD,
+            "example.extension",
+            serde_json::json!({"contract": "host.state.v1"}),
+        ));
+        assert_eq!(stale.error.unwrap().code, "stale_host_call_lease");
+
+        let (handler, _) = staged_handler(
+            &mut app,
+            15,
+            &[crate::extension_host_state::HOST_STATE_WRITE_CAPABILITY],
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        );
+        let operations = (0..=crate::extension_state::MAX_STATE_OPERATIONS)
+            .map(|index| serde_json::json!({"op": "set", "key": format!("k{index}"), "value": index}))
+            .collect::<Vec<_>>();
+        let call = host_call(
+            15,
+            crate::extension_host_state::HOST_STATE_WRITE_CAPABILITY,
+            crate::extension_host_state::HOST_STATE_TRANSACT_METHOD,
+            "example.extension",
+            serde_json::json!({
+                "contract": "host.state.v1",
+                "expected_store_generation": app.extension_state.store_generation,
+                "expected_revision": 0,
+                "idempotency_key": "too-many",
+                "operations": operations
+            }),
+        );
+        let join = std::thread::spawn(move || handler.handle_host_call(call));
+        let event = app.event_rx.blocking_recv().unwrap();
+        app.handle_internal_event(event);
+        assert_eq!(join.join().unwrap().error.unwrap().code, "resource_limit");
+    }
+
+    #[test]
+    fn persistence_faults_distinguish_safe_failure_from_uncertain_replacement() {
+        let mut safe_app = app();
+        let mut safe_candidate = safe_app.extension_state.clone();
+        let safe_commit = safe_candidate
+            .transact(&transaction(safe_candidate.store_generation))
+            .unwrap();
+        let (safe_tx, safe_rx) = std::sync::mpsc::sync_channel(1);
+        safe_app.extension_state_transaction_pending = true;
+        safe_app.handle_extension_state_persisted(super::ExtensionStatePersistResult {
+            candidate: safe_candidate,
+            commit: safe_commit,
+            persisted: Err(crate::persist::extension_state::ExtensionStateSaveError {
+                source: std::io::Error::other("injected write failure"),
+                replaced: false,
+            }),
+            target: super::ExtensionStateResponseTarget::HostState {
+                respond_to: safe_tx,
+            },
+        });
+        assert_eq!(
+            safe_rx.recv().unwrap().unwrap_err().code,
+            "state_persist_failed"
+        );
+        assert!(!safe_app.extension_state_persistence_blocked);
+        assert_eq!(
+            safe_app
+                .extension_state
+                .snapshot("example.extension")
+                .unwrap()
+                .revision,
+            0
+        );
+
+        let mut app = app();
+        install_staged_package(&mut app, 13);
+        let mut candidate = app.extension_state.clone();
+        let commit = candidate
+            .transact(&transaction(candidate.store_generation))
+            .unwrap();
+        let (respond_to, response) = std::sync::mpsc::sync_channel(1);
+        app.extension_state_transaction_pending = true;
+        app.handle_extension_state_persisted(super::ExtensionStatePersistResult {
+            candidate,
+            commit,
+            persisted: Err(crate::persist::extension_state::ExtensionStateSaveError {
+                source: std::io::Error::other("injected directory sync failure"),
+                replaced: true,
+            }),
+            target: super::ExtensionStateResponseTarget::HostState { respond_to },
+        });
+        assert_eq!(
+            response.recv().unwrap().unwrap_err().code,
+            "state_persist_uncertain"
+        );
+        assert!(app.extension_state_persistence_blocked);
+        assert!(app
+            .stage_host_state_authorization(
+                &crate::extension_host_state::HostStateProviderBinding::test_new(
+                    "example.package",
+                    "state",
+                    "example.extension",
+                    "a".repeat(64),
+                    "1.0.0",
+                ),
+                5,
+                7,
+                13,
+            )
+            .is_err());
     }
 
     #[test]

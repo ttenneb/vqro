@@ -48,6 +48,7 @@ impl ComponentRuntimeFactory {
     pub(crate) fn installed(
         installed: &crate::extension_package::InstalledPackageV1,
         service_id: &str,
+        namespace: &str,
     ) -> Result<Self, RuntimeError> {
         crate::extension_package::verify_installed_package(
             Path::new(&installed.immutable_root),
@@ -67,6 +68,17 @@ impl ComponentRuntimeFactory {
         {
             return Err(RuntimeError::Configuration(
                 "installed package descriptor does not match its verified artifact".into(),
+            ));
+        }
+        if !package
+            .descriptor
+            .manifest
+            .namespaces
+            .iter()
+            .any(|owned| owned == namespace)
+        {
+            return Err(RuntimeError::Configuration(
+                "selected runtime namespace is not package-owned".into(),
             ));
         }
         let service = package
@@ -118,17 +130,12 @@ impl ComponentRuntimeFactory {
             component,
             active: Arc::new(AtomicBool::new(false)),
             package_id: installed.package_id.clone(),
-            namespace: package
-                .descriptor
-                .manifest
-                .namespaces
-                .first()
-                .cloned()
-                .unwrap_or_else(|| installed.package_id.clone()),
+            namespace: namespace.into(),
             service_id: service.id.clone(),
             grants: RuntimeGrants {
                 legacy,
                 capabilities,
+                installed_package: true,
             },
             fuel_per_invocation: COMPONENT_FUEL_PER_INVOCATION,
         })
@@ -196,8 +203,6 @@ impl vqro::extension::host::Host for ComponentState {
             .host_calls
             .as_ref()
             .ok_or_else(|| wasmtime::Error::msg("host-call router is unavailable"))?
-            .lock()
-            .map_err(|_| wasmtime::Error::msg("host-call router is unavailable"))?
             .handle(call);
         let bytes = canonical_json_bytes(&response)?;
         if bytes.len() > MAX_RUNTIME_FRAME_BYTES {
@@ -753,13 +758,27 @@ mod tests {
     }
 
     fn package_bytes_with_world(component: &[u8], capabilities: &[&str], world: &str) -> Vec<u8> {
+        package_bytes_with_namespaces(component, capabilities, world, &["example.component"])
+    }
+
+    fn package_bytes_with_namespaces(
+        component: &[u8],
+        capabilities: &[&str],
+        world: &str,
+        namespaces: &[&str],
+    ) -> Vec<u8> {
         let capabilities = capabilities
             .iter()
             .map(|value| serde_json::to_string(value).unwrap())
             .collect::<Vec<_>>()
             .join(", ");
+        let namespaces = namespaces
+            .iter()
+            .map(|value| serde_json::to_string(value).unwrap())
+            .collect::<Vec<_>>()
+            .join(", ");
         let manifest = format!(
-            "manifest_version = 2\npackage_contract = \"vqro.package.v1\"\nid = \"example.component\"\nversion = \"1.0.0\"\nmin_vqro_version = \"0.1.0\"\nnamespaces = [\"example.component\"]\n\n[[services]]\nid = \"echo\"\nprovides = []\ncapabilities = [{capabilities}]\n\n[services.runtime]\nkind = \"component\"\ncomponent = \"services/echo.wasm\"\nworld = \"{world}\"\n"
+            "manifest_version = 2\npackage_contract = \"vqro.package.v1\"\nid = \"example.component\"\nversion = \"1.0.0\"\nmin_vqro_version = \"0.1.0\"\nnamespaces = [{namespaces}]\n\n[[services]]\nid = \"echo\"\nprovides = []\ncapabilities = [{capabilities}]\n\n[services.runtime]\nkind = \"component\"\ncomponent = \"services/echo.wasm\"\nworld = \"{world}\"\n"
         );
         let mut files = vec![
             (
@@ -977,6 +996,34 @@ mod tests {
     }
 
     #[test]
+    fn explicit_component_namespace_is_invariant_under_manifest_order() {
+        let component = component_bytes(ECHO_BODY);
+        let mut identities = Vec::new();
+        for namespaces in [
+            ["example.alpha", "example.beta"],
+            ["example.beta", "example.alpha"],
+        ] {
+            let (root, installed) = install_archive(package_bytes_with_namespaces(
+                &component,
+                &[],
+                "vqro:extension/service@1.0.0",
+                &namespaces,
+            ));
+            let factory =
+                super::super::RuntimeFactory::installed(&installed, "echo", "example.beta")
+                    .unwrap();
+            identities.push(factory.identity(7));
+            assert!(
+                super::super::RuntimeFactory::installed(&installed, "echo", "example.missing",)
+                    .is_err()
+            );
+            cleanup(root);
+        }
+        assert_eq!(identities[0].namespace, "example.beta");
+        assert_eq!(identities[0], identities[1]);
+    }
+
+    #[test]
     fn component_preflight_rejects_wrong_world_and_non_component_payload() {
         let wrong_world =
             package_bytes_with_world(ECHO_COMPONENT, &[], "vqro:extension/service@1.1.0");
@@ -989,7 +1036,7 @@ mod tests {
         let core_module = wat::parse_str("(module)").unwrap();
         let (core_root, installed) = install_component(&core_module, &[]);
         assert!(matches!(
-            super::super::RuntimeFactory::installed(&installed, "echo"),
+            super::super::RuntimeFactory::installed(&installed, "echo", "example.component"),
             Err(RuntimeError::Configuration(message)) if message.contains("compile component")
         ));
         cleanup(core_root);
@@ -998,7 +1045,9 @@ mod tests {
     #[test]
     fn component_preflight_enforces_capability_method_negotiation() {
         let (root, installed) = install_component(ECHO_COMPONENT, &["host_document"]);
-        let factory = super::super::RuntimeFactory::installed(&installed, "echo").unwrap();
+        let factory =
+            super::super::RuntimeFactory::installed(&installed, "echo", "example.component")
+                .unwrap();
         let canceled = AtomicBool::new(false);
         assert!(matches!(
             super::super::ExtensionRuntimeDispatcher::start(&factory, 32, &canceled),
@@ -1012,7 +1061,9 @@ mod tests {
         let canceled = AtomicBool::new(false);
         for component in [MEMORY_LIMIT_COMPONENT, TABLE_LIMIT_COMPONENT] {
             let (root, installed) = install_component(component, &[]);
-            let factory = super::super::RuntimeFactory::installed(&installed, "echo").unwrap();
+            let factory =
+                super::super::RuntimeFactory::installed(&installed, "echo", "example.component")
+                    .unwrap();
             let error = super::super::ExtensionRuntimeDispatcher::start(&factory, 30, &canceled)
                 .unwrap_err();
             assert!(
@@ -1027,10 +1078,14 @@ mod tests {
     fn component_passes_shared_conformance_vectors() {
         let (root, installed) = install_component(ECHO_COMPONENT, &[]);
         crate::extension_service::ExtensionServiceSupervisor::preflight_installed_service(
-            &installed, "echo",
+            &installed,
+            "echo",
+            "example.component",
         )
         .unwrap();
-        let factory = super::super::RuntimeFactory::installed(&installed, "echo").unwrap();
+        let factory =
+            super::super::RuntimeFactory::installed(&installed, "echo", "example.component")
+                .unwrap();
         assert!(matches!(
             factory,
             super::super::RuntimeFactory::Component(_)
@@ -1072,7 +1127,9 @@ mod tests {
     #[test]
     fn component_restart_executes_only_factory_bound_verified_bytes() {
         let (root, installed) = install_component(ECHO_COMPONENT, &[]);
-        let factory = super::super::RuntimeFactory::installed(&installed, "echo").unwrap();
+        let factory =
+            super::super::RuntimeFactory::installed(&installed, "echo", "example.component")
+                .unwrap();
         overwrite(
             &Path::new(&installed.immutable_root).join("package.vqrox"),
             b"replacement bytes must never be compiled or executed",
@@ -1123,7 +1180,9 @@ mod tests {
             (TRAP_COMPONENT, "trap"),
         ] {
             let (root, installed) = install_component(component, &[]);
-            let factory = super::super::RuntimeFactory::installed(&installed, "echo").unwrap();
+            let factory =
+                super::super::RuntimeFactory::installed(&installed, "echo", "example.component")
+                    .unwrap();
             let mut dispatcher =
                 super::super::ExtensionRuntimeDispatcher::start(&factory, 22, &canceled).unwrap();
             let error = dispatcher
@@ -1153,7 +1212,9 @@ mod tests {
     #[test]
     fn component_epoch_interrupts_deadline_and_cancellation() {
         let (deadline_root, installed) = install_component(LOOP_COMPONENT, &[]);
-        let factory = super::super::RuntimeFactory::installed(&installed, "echo").unwrap();
+        let factory =
+            super::super::RuntimeFactory::installed(&installed, "echo", "example.component")
+                .unwrap();
         let canceled = AtomicBool::new(false);
         let mut dispatcher =
             super::super::ExtensionRuntimeDispatcher::start(&factory, 23, &canceled).unwrap();
@@ -1180,7 +1241,9 @@ mod tests {
         cleanup(deadline_root);
 
         let (cancel_root, installed) = install_component(LOOP_COMPONENT, &[]);
-        let factory = super::super::RuntimeFactory::installed(&installed, "echo").unwrap();
+        let factory =
+            super::super::RuntimeFactory::installed(&installed, "echo", "example.component")
+                .unwrap();
         let canceled = AtomicBool::new(false);
         let mut dispatcher =
             super::super::ExtensionRuntimeDispatcher::start(&factory, 24, &canceled).unwrap();
@@ -1214,7 +1277,9 @@ mod tests {
         cleanup(cancel_root);
 
         let (startup_root, installed) = install_component(STARTUP_LOOP_COMPONENT, &[]);
-        let factory = super::super::RuntimeFactory::installed(&installed, "echo").unwrap();
+        let factory =
+            super::super::RuntimeFactory::installed(&installed, "echo", "example.component")
+                .unwrap();
         let canceled = AtomicBool::new(false);
         std::thread::scope(|scope| {
             scope.spawn(|| {
@@ -1232,16 +1297,17 @@ mod tests {
     #[test]
     fn component_fuel_exhaustion_is_typed_and_retires_instance() {
         let (root, installed) = install_component(LOOP_COMPONENT, &[]);
-        let factory = ComponentRuntimeFactory::installed(&installed, "echo").unwrap();
+        let factory =
+            ComponentRuntimeFactory::installed(&installed, "echo", "example.component").unwrap();
         let canceled = AtomicBool::new(false);
         let mut runtime = factory.start(31, &canceled).unwrap();
         runtime.fuel_per_invocation = 1;
         let identity = factory.identity(31);
-        let host_calls = Arc::new(std::sync::Mutex::new(
-            super::super::RuntimeHostCallRouter::new(super::super::DisabledHostCalls {
+        let host_calls = Arc::new(super::super::RuntimeHostCallRouter::new(
+            super::super::DisabledHostCalls {
                 identity: identity.clone(),
                 grants: factory.grants(),
-            }),
+            },
         ));
         let request = RuntimeRequestV1 {
             contract: super::super::EXTENSION_SERVICE_CONTRACT_V1.into(),
@@ -1277,7 +1343,10 @@ mod tests {
         let (root, installed) = install_component(TRAP_COMPONENT, &[]);
         let mut supervisor =
             crate::extension_service::ExtensionServiceSupervisor::from_installed_service(
-                &installed, "echo", 0,
+                &installed,
+                "echo",
+                "example.component",
+                0,
             )
             .unwrap();
         let mut previous_generation = 0;
@@ -1307,10 +1376,184 @@ mod tests {
     }
 
     #[test]
+    fn component_executes_staged_host_state_snapshot_through_actor() {
+        let wat = include_str!("../../tests/fixtures/extension-component-service.wat")
+            .replace(";; INVOKE_BODY", HOST_CALL_BODY)
+            .replace(
+                r#"\22capability\22:\22state\22"#,
+                r#"\22capability\22:\22host.state.read\22"#,
+            )
+            .replace(
+                r#"\22params\22:{}"#,
+                r#"\22params\22:{\22contract\22:\22host.state.v1\22}"#,
+            )
+            .replace("i32.const 500 i32.const 254", "i32.const 500 i32.const 290");
+        let component = component_bytes_from_wat(&wat);
+        let (root, installed) = install_component(
+            &component,
+            &[crate::extension_host_state::HOST_STATE_READ_CAPABILITY],
+        );
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = crate::app::App::new(
+            &crate::config::Config::default(),
+            crate::app::AppPolicy::TEST,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        let (authorization, _) = crate::extension_host_state::install_test_package_and_authorize(
+            &mut app,
+            &installed,
+            "echo",
+            "example.component",
+            26,
+        );
+        let factory =
+            super::super::RuntimeFactory::installed(&installed, "echo", "example.component")
+                .unwrap();
+        let canceled = Arc::new(AtomicBool::new(false));
+        let join = std::thread::spawn(move || {
+            let mut dispatcher =
+                super::super::ExtensionRuntimeDispatcher::start(&factory, 26, canceled.as_ref())
+                    .unwrap();
+            dispatcher.invoke_with_host_state(
+                "conformance.echo",
+                serde_json::json!({}),
+                26,
+                Instant::now() + Duration::from_millis(750),
+                canceled,
+                authorization,
+            )
+        });
+        let event = app.event_rx.blocking_recv().unwrap();
+        app.handle_internal_event(event);
+        let response = join.join().unwrap().unwrap();
+        assert_eq!(response["result"]["contract"], "host.state.v1");
+        assert_eq!(response["result"]["namespace"], "example.component");
+        cleanup(root);
+    }
+
+    #[test]
+    fn component_transact_preserves_json_null_and_delete_semantics() {
+        let set_call = r#"{\22call_id\22:\22set-null\22,\22capability\22:\22host.state.write\22,\22depth\22:1,\22identity\22:{\22generation\22:26,\22namespace\22:\22example.component\22,\22package_id\22:\22example.component\22,\22service_id\22:\22echo\22},\22method\22:\22state.transact\22,\22namespace\22:\22example.component\22,\22params\22:{\22contract\22:\22host.state.v1\22,\22expected_revision\22:0,\22expected_store_generation\22:1,\22idempotency_key\22:\22set-null\22,\22operations\22:[{\22key\22:\22nullable\22,\22op\22:\22set\22,\22value\22:null}]},\22type\22:\22host_call\22}"#;
+        let delete_call = r#"{\22call_id\22:\22delete-null\22,\22capability\22:\22host.state.write\22,\22depth\22:1,\22identity\22:{\22generation\22:26,\22namespace\22:\22example.component\22,\22package_id\22:\22example.component\22,\22service_id\22:\22echo\22},\22method\22:\22state.transact\22,\22namespace\22:\22example.component\22,\22params\22:{\22contract\22:\22host.state.v1\22,\22expected_revision\22:1,\22expected_store_generation\22:1,\22idempotency_key\22:\22delete-null\22,\22operations\22:[{\22key\22:\22nullable\22,\22op\22:\22delete\22}]},\22type\22:\22host_call\22}"#;
+        assert_eq!(set_call.replace(r#"\22"#, "\"").len(), 432);
+        assert_eq!(delete_call.replace(r#"\22"#, "\"").len(), 428);
+        let body = r#"
+    global.get $calls
+    i32.eqz
+    if
+      i32.const 500 i32.const 432 i32.const 2000 call $host-call
+    else
+      i32.const 1200 i32.const 428 i32.const 2000 call $host-call
+    end
+    i32.const 2000 i32.load8_u
+    if unreachable end
+    global.get $calls i32.const 1 i32.add global.set $calls
+    i32.const 64 i32.const 0 i32.store8
+    i32.const 68 i32.const 2004 i32.load i32.store
+    i32.const 72 i32.const 2008 i32.load i32.store
+    i32.const 64
+"#;
+        let mut wat = include_str!("../../tests/fixtures/extension-component-service.wat")
+            .replace(";; INVOKE_BODY", body);
+        let data_start = wat.find("  (data (i32.const 500)").unwrap();
+        let data_end = wat[data_start..].find('\n').unwrap() + data_start;
+        wat.replace_range(
+            data_start..data_end,
+            &format!(
+                "  (data (i32.const 500) \"{set_call}\")\n  (data (i32.const 1200) \"{delete_call}\")"
+            ),
+        );
+        let component = component_bytes_from_wat(&wat);
+        let (root, installed) = install_component(
+            &component,
+            &[crate::extension_host_state::HOST_STATE_WRITE_CAPABILITY],
+        );
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = crate::app::App::new(
+            &crate::config::Config::default(),
+            crate::app::AppPolicy::TEST,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        let (authorization, _) = crate::extension_host_state::install_test_package_and_authorize(
+            &mut app,
+            &installed,
+            "echo",
+            "example.component",
+            26,
+        );
+        let factory =
+            super::super::RuntimeFactory::installed(&installed, "echo", "example.component")
+                .unwrap();
+        let canceled = Arc::new(AtomicBool::new(false));
+        let join = std::thread::spawn(move || {
+            let mut dispatcher =
+                super::super::ExtensionRuntimeDispatcher::start(&factory, 26, canceled.as_ref())
+                    .unwrap();
+            let set = dispatcher
+                .invoke_with_host_state(
+                    "conformance.echo",
+                    serde_json::json!({}),
+                    26,
+                    Instant::now() + Duration::from_millis(750),
+                    canceled.clone(),
+                    authorization.clone(),
+                )
+                .unwrap();
+            let delete = dispatcher
+                .invoke_with_host_state(
+                    "conformance.echo",
+                    serde_json::json!({}),
+                    26,
+                    Instant::now() + Duration::from_millis(750),
+                    canceled,
+                    authorization,
+                )
+                .unwrap();
+            (set, delete)
+        });
+        for expected_revision in [1, 2] {
+            let event = app.event_rx.blocking_recv().unwrap();
+            app.handle_internal_event(event);
+            assert_eq!(
+                app.extension_state
+                    .snapshot("example.component")
+                    .unwrap()
+                    .revision,
+                expected_revision
+            );
+            if expected_revision == 1 {
+                assert_eq!(
+                    app.extension_state
+                        .snapshot("example.component")
+                        .unwrap()
+                        .values["nullable"],
+                    serde_json::Value::Null
+                );
+            }
+        }
+        let (set, delete) = join.join().unwrap();
+        assert_eq!(set["result"]["revision"], 1);
+        assert_eq!(delete["result"]["revision"], 2);
+        assert!(!app
+            .extension_state
+            .snapshot("example.component")
+            .unwrap()
+            .values
+            .contains_key("nullable"));
+        cleanup(root);
+    }
+
+    #[test]
     fn component_fences_generation_denies_host_call_and_restarts_fresh() {
         let canceled = AtomicBool::new(false);
         let (host_root, installed) = install_component(HOST_CALL_COMPONENT, &[]);
-        let factory = super::super::RuntimeFactory::installed(&installed, "echo").unwrap();
+        let factory =
+            super::super::RuntimeFactory::installed(&installed, "echo", "example.component")
+                .unwrap();
         let mut dispatcher =
             super::super::ExtensionRuntimeDispatcher::start(&factory, 26, &canceled).unwrap();
         assert!(matches!(
@@ -1336,10 +1579,33 @@ mod tests {
             )
             .unwrap();
         assert_eq!(denied["error"]["code"], "capability_denied");
+        let invocation_canceled = AtomicBool::new(true);
+        assert!(matches!(
+            dispatcher.invoke(
+                "conformance.echo",
+                serde_json::json!({}),
+                26,
+                Instant::now() + Duration::from_millis(750),
+                &invocation_canceled,
+            ),
+            Err(RuntimeError::Canceled)
+        ));
+        assert!(matches!(
+            dispatcher.invoke(
+                "conformance.echo",
+                serde_json::json!({"oversized": "x".repeat(MAX_RUNTIME_FRAME_BYTES)}),
+                26,
+                Instant::now() + Duration::from_millis(750),
+                &canceled,
+            ),
+            Err(RuntimeError::Protocol(message)) if message.contains("frame limit")
+        ));
         cleanup(host_root);
 
         let (limit_root, installed) = install_component(HOST_CALL_LIMIT_COMPONENT, &[]);
-        let factory = super::super::RuntimeFactory::installed(&installed, "echo").unwrap();
+        let factory =
+            super::super::RuntimeFactory::installed(&installed, "echo", "example.component")
+                .unwrap();
         let mut limited =
             super::super::ExtensionRuntimeDispatcher::start(&factory, 26, &canceled).unwrap();
         let error = limited
@@ -1368,7 +1634,9 @@ mod tests {
         cleanup(limit_root);
 
         let (trap_root, installed) = install_component(TRAP_COMPONENT, &[]);
-        let factory = super::super::RuntimeFactory::installed(&installed, "echo").unwrap();
+        let factory =
+            super::super::RuntimeFactory::installed(&installed, "echo", "example.component")
+                .unwrap();
         let mut old =
             super::super::ExtensionRuntimeDispatcher::start(&factory, 27, &canceled).unwrap();
         assert!(matches!(

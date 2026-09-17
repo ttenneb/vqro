@@ -8,6 +8,7 @@ pub const EXTENSION_MANIFEST_SCHEMA_ID_V1: &str = "https://vqro.dev/schema/exten
 pub const EXTENSION_SERVICE_CONTRACT_V1: &str = "vqro.extension-service.v1";
 pub const EXTENSION_SERVICE_SCHEMA_ID_V1: &str = "https://vqro.dev/schema/extension-service/v1";
 pub const RUNTIME_SERVICE_SCHEMA_ID_V1: &str = "https://vqro.dev/schema/service/v1";
+pub const HOST_STATE_SCHEMA_ID_V1: &str = "https://vqro.dev/schema/host-state/v1";
 pub const EXTENSION_BUNDLE_SCHEMA_ID_V1: &str = "https://vqro.dev/schema/extensions/v1";
 pub const PACKAGE_SCHEMA_ID_V1: &str = crate::extension_package::PACKAGE_SCHEMA_ID_V1;
 pub const EXTENSION_MANIFEST_SCHEMA_ID_V2: &str = crate::extension_package::MANIFEST_SCHEMA_ID_V2;
@@ -56,6 +57,33 @@ pub fn runtime_service_schema_document() -> serde_json::Value {
             "error": scoped_schema::<crate::extension_runtime::RuntimeErrorBodyV1>("error"),
         }
     })
+}
+
+pub fn host_state_schema_document() -> serde_json::Value {
+    let mut document = serde_json::json!({
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$id": HOST_STATE_SCHEMA_ID_V1,
+        "title": "staged host state contract v1",
+        "contract": crate::extension_host_state::HOST_STATE_CONTRACT_V1,
+        "availability": "staged; production package activation is not enabled",
+        "capabilities": {
+            "snapshot": crate::extension_host_state::HOST_STATE_READ_CAPABILITY,
+            "transact": crate::extension_host_state::HOST_STATE_WRITE_CAPABILITY,
+        },
+        "schemas": {
+            "snapshot_params": scoped_schema::<crate::extension_host_state::HostStateSnapshotParamsV1>("snapshot_params"),
+            "snapshot": scoped_schema::<crate::extension_host_state::HostStateSnapshotV1>("snapshot"),
+            "transact_params": scoped_schema::<crate::extension_host_state::HostStateTransactParamsV1>("transact_params"),
+            "commit": scoped_schema::<crate::extension_host_state::HostStateCommitV1>("commit"),
+        }
+    });
+    for schema in ["snapshot_params", "snapshot", "transact_params", "commit"] {
+        document["schemas"][schema]["properties"]["contract"] = serde_json::json!({
+            "const": crate::extension_host_state::HOST_STATE_CONTRACT_V1,
+            "type": "string",
+        });
+    }
+    document
 }
 
 pub fn package_schema_document() -> serde_json::Value {
@@ -205,6 +233,10 @@ pub fn package_schema_json() -> &'static str {
     include_str!("../docs/next/api/vqro-package-v1.schema.json")
 }
 
+pub fn host_state_schema_json() -> &'static str {
+    include_str!("../docs/next/api/host-state-v1.schema.json")
+}
+
 pub fn service_schema_json() -> &'static str {
     include_str!("../docs/next/api/vqro-extension-service.schema.json")
 }
@@ -297,6 +329,10 @@ mod tests {
     #[test]
     fn generated_package_and_manifest_v2_schema_artifacts_are_current() {
         for (relative, document) in [
+            (
+                "docs/next/api/host-state-v1.schema.json",
+                host_state_schema_document(),
+            ),
             (
                 "docs/next/api/vqro-service-v1.schema.json",
                 runtime_service_schema_document(),

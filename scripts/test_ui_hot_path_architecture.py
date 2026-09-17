@@ -16,6 +16,7 @@ APP_SERVER_SOURCES = (
     *sorted((PROJECT_ROOT / "src" / "server").rglob("*.rs")),
 )
 RECOVERY_MODEL_SOURCE = PROJECT_ROOT / "src" / "client" / "shell" / "recovery_browser.rs"
+EXTENSION_STATE_ACTOR_SOURCE = PROJECT_ROOT / "src" / "app" / "api" / "extension_state.rs"
 RECOVERY_FORBIDDEN_REFERENCES = (
     ("agents", re.compile(r"\.agents\b")),
     ("collections", re.compile(r"\.collections\b")),
@@ -169,7 +170,47 @@ def find_violations(paths, rules) -> list[str]:
     return violations
 
 
+def rust_function_body(source: str, function_name: str) -> str:
+    code = production_code(source)
+    match = re.search(rf"\bfn\s+{re.escape(function_name)}\s*\(", code)
+    if match is None:
+        raise AssertionError(f"missing Rust function {function_name}")
+    start = code.find("{", match.end())
+    if start == -1:
+        raise AssertionError(f"missing body for Rust function {function_name}")
+    depth = 0
+    for index in range(start, len(code)):
+        if code[index] == "{":
+            depth += 1
+        elif code[index] == "}":
+            depth -= 1
+            if depth == 0:
+                return code[start : index + 1]
+    raise AssertionError(f"unterminated body for Rust function {function_name}")
+
+
 class UiHotPathArchitectureTests(unittest.TestCase):
+    def test_extension_state_actor_handler_never_invokes_extension_runtime(self) -> None:
+        body = rust_function_body(
+            EXTENSION_STATE_ACTOR_SOURCE.read_text(encoding="utf-8"),
+            "handle_extension_host_state_call",
+        )
+        forbidden = (
+            "ExtensionRuntimeDispatcher",
+            "ExtensionServiceSupervisor",
+            "extension_services",
+            "host_document_services",
+            ".invoke(",
+            ".request_cancellable(",
+        )
+        found = [token for token in forbidden if token in body]
+        self.assertEqual(
+            found,
+            [],
+            "The App host-state handler must only service actor requests; it must never "
+            "call back into an extension runtime.",
+        )
+
     def test_render_hot_paths_avoid_known_expensive_runtime_queries(self) -> None:
         violations = find_violations(HOT_PATH_SOURCES, FORBIDDEN_CALLS)
 

@@ -30,6 +30,7 @@ mod detect;
 mod events;
 mod extension_artifact;
 pub mod extension_contract;
+mod extension_host_state;
 pub mod extension_package;
 pub mod extension_resource;
 mod extension_runtime;

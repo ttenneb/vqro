@@ -380,6 +380,11 @@ fn artifact_root() -> Result<PathBuf, String> {
     Ok(parent.join("extension-artifacts"))
 }
 
+#[cfg(test)]
+pub(crate) fn artifact_data_root(data_id: &str) -> Result<PathBuf, String> {
+    Ok(artifact_root()?.join(storage_component(data_id)))
+}
+
 fn ensure_managed_path(path: &Path) -> Result<(), String> {
     let root = artifact_root()?;
     let canonical_root = fs::canonicalize(&root)

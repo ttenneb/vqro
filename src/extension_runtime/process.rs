@@ -109,6 +109,7 @@ impl ProcessRuntimeFactory {
             grants: RuntimeGrants {
                 legacy: granted_capabilities,
                 capabilities,
+                installed_package: false,
             },
             source: ProcessSource::Legacy { command, cwd },
         }
@@ -119,6 +120,7 @@ impl ProcessRuntimeFactory {
     pub(crate) fn installed(
         installed: &crate::extension_package::InstalledPackageV1,
         service_id: &str,
+        namespace: &str,
     ) -> Result<Self, ExtensionServiceError> {
         crate::extension_package::verify_installed_package(
             Path::new(&installed.immutable_root),
@@ -138,6 +140,17 @@ impl ProcessRuntimeFactory {
         {
             return Err(ExtensionServiceError::Configuration(
                 "installed package descriptor does not match its verified artifact".into(),
+            ));
+        }
+        if !package
+            .descriptor
+            .manifest
+            .namespaces
+            .iter()
+            .any(|owned| owned == namespace)
+        {
+            return Err(ExtensionServiceError::Configuration(
+                "selected runtime namespace is not package-owned".into(),
             ));
         }
         let service = package
@@ -191,17 +204,12 @@ impl ProcessRuntimeFactory {
         legacy.dedup();
         Ok(Self {
             package_id: installed.package_id.clone(),
-            namespace: package
-                .descriptor
-                .manifest
-                .namespaces
-                .first()
-                .cloned()
-                .unwrap_or_else(|| installed.package_id.clone()),
+            namespace: namespace.into(),
             service_id: service.id.clone(),
             grants: RuntimeGrants {
                 legacy,
                 capabilities,
+                installed_package: true,
             },
             source: ProcessSource::Installed {
                 archive,
@@ -586,14 +594,7 @@ impl ExtensionRuntime for ProcessRuntime {
                             "service exceeded the host-call bound".into(),
                         ));
                     }
-                    let response = host_calls
-                        .lock()
-                        .map_err(|_| {
-                            ExtensionServiceError::Protocol(
-                                "runtime host-call router is unavailable".into(),
-                            )
-                        })?
-                        .handle(call);
+                    let response = host_calls.handle(call);
                     self.send_json(&response)?;
                 }
             }
@@ -810,11 +811,12 @@ mod tests {
         root
     }
 
-    fn process_package_with(
+    fn process_package_with_namespaces(
         script: &str,
         provides: &[&str],
         capabilities: &[&str],
         args: &[&str],
+        namespaces: &[&str],
     ) -> Vec<u8> {
         let list = |values: &[&str]| {
             values
@@ -826,8 +828,9 @@ mod tests {
         let provides = list(provides);
         let capabilities = list(capabilities);
         let args = list(args);
+        let namespaces = list(namespaces);
         let manifest = format!(
-            "manifest_version = 2\npackage_contract = \"vqro.package.v1\"\nid = \"example.runtime\"\nversion = \"1.0.0\"\nmin_vqro_version = \"0.1.0\"\nnamespaces = [\"example.runtime\"]\n\n[[services]]\nid = \"echo\"\nprovides = [{provides}]\ncapabilities = [{capabilities}]\n\n[services.runtime]\nkind = \"process\"\nexecutables = {{ linux-x86_64 = \"services/linux-x86_64/service\", linux-aarch64 = \"services/linux-aarch64/service\", macos-x86_64 = \"services/macos-x86_64/service\", macos-aarch64 = \"services/macos-aarch64/service\", windows-x86_64 = \"services/windows-x86_64/service.exe\" }}\nargs = [{args}]\n"
+            "manifest_version = 2\npackage_contract = \"vqro.package.v1\"\nid = \"example.runtime\"\nversion = \"1.0.0\"\nmin_vqro_version = \"0.1.0\"\nnamespaces = [{namespaces}]\n\n[[services]]\nid = \"echo\"\nprovides = [{provides}]\ncapabilities = [{capabilities}]\n\n[services.runtime]\nkind = \"process\"\nexecutables = {{ linux-x86_64 = \"services/linux-x86_64/service\", linux-aarch64 = \"services/linux-aarch64/service\", macos-x86_64 = \"services/macos-x86_64/service\", macos-aarch64 = \"services/macos-aarch64/service\", windows-x86_64 = \"services/windows-x86_64/service.exe\" }}\nargs = [{args}]\n"
         );
         let mut files = vec![(
             crate::extension_package::PACKAGE_MANIFEST_FILE.to_string(),
@@ -872,6 +875,15 @@ mod tests {
             builder.finish().unwrap();
         }
         archive
+    }
+
+    fn process_package_with(
+        script: &str,
+        provides: &[&str],
+        capabilities: &[&str],
+        args: &[&str],
+    ) -> Vec<u8> {
+        process_package_with_namespaces(script, provides, capabilities, args, &["example.runtime"])
     }
 
     fn process_package(script: &str, capabilities: &[&str]) -> Vec<u8> {
@@ -928,6 +940,42 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn explicit_namespace_selection_is_invariant_under_manifest_order() {
+        let script = "#!/bin/sh\nexit 0\n";
+        let mut identities = Vec::new();
+        for namespaces in [
+            ["example.alpha", "example.beta"],
+            ["example.beta", "example.alpha"],
+        ] {
+            let (root, installed) = install_package_bytes(process_package_with_namespaces(
+                script,
+                &[],
+                &[crate::extension_host_state::HOST_STATE_READ_CAPABILITY],
+                &[],
+                &namespaces,
+            ));
+            let factory =
+                ProcessRuntimeFactory::installed(&installed, "echo", "example.beta").unwrap();
+            identities.push(factory.identity(7));
+            assert!(
+                ProcessRuntimeFactory::installed(&installed, "echo", "example.missing",).is_err()
+            );
+            assert!(
+                crate::extension_host_state::HostStateProviderBinding::from_installed(
+                    &installed,
+                    "missing-service",
+                    "example.beta",
+                )
+                .is_err()
+            );
+            cleanup_package_root(root);
+        }
+        assert_eq!(identities[0].namespace, "example.beta");
+        assert_eq!(identities[0], identities[1]);
+    }
+
     #[test]
     fn bounded_reader_rejects_oversized_or_unterminated_frames() {
         let mut oversized = std::io::Cursor::new(vec![b'x'; MAX_RUNTIME_FRAME_BYTES + 2]);
@@ -960,10 +1008,13 @@ done
 "#;
         let (root, installed) = install_process_package(script, &[]);
         crate::extension_service::ExtensionServiceSupervisor::preflight_installed_process(
-            &installed, "echo",
+            &installed,
+            "echo",
+            "example.runtime",
         )
         .unwrap();
-        let factory = super::super::RuntimeFactory::installed(&installed, "echo").unwrap();
+        let factory =
+            super::super::RuntimeFactory::installed(&installed, "echo", "example.runtime").unwrap();
         assert!(matches!(factory, super::super::RuntimeFactory::Process(_)));
         let canceled = AtomicBool::new(false);
         let mut dispatcher =
@@ -1034,7 +1085,9 @@ esac
             &["state"],
             &[],
         ));
-        let factory = super::super::RuntimeFactory::installed_process(&installed, "echo").unwrap();
+        let factory =
+            super::super::RuntimeFactory::installed_process(&installed, "echo", "example.runtime")
+                .unwrap();
         let canceled = AtomicBool::new(false);
         let mut dispatcher =
             super::super::ExtensionRuntimeDispatcher::start(&factory, 9, &canceled).unwrap();
@@ -1069,6 +1122,232 @@ esac
 
     #[cfg(unix)]
     #[test]
+    fn installed_process_executes_staged_host_state_snapshot_through_actor() {
+        let script = r#"#!/bin/sh
+printf '%s\n' '{"type":"hello","protocol":2,"service_id":"echo","requested_capabilities":[],"methods":["conformance.echo"]}'
+IFS= read -r welcome
+IFS= read -r request
+printf '%s\n' '{"type":"host_call","call_id":"call-1","identity":{"package_id":"example.runtime","namespace":"example.runtime","service_id":"echo","generation":9},"depth":1,"capability":"host.state.read","method":"state.snapshot","namespace":"example.runtime","params":{"contract":"host.state.v1"}}'
+IFS= read -r host_response
+id=$(printf '%s' "$request" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
+printf '{"type":"response","id":%s,"result":%s}\n' "$id" "$host_response"
+"#;
+        let (root, installed) = install_package_bytes(process_package_with(
+            script,
+            &[],
+            &[crate::extension_host_state::HOST_STATE_READ_CAPABILITY],
+            &[],
+        ));
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = crate::app::App::new(
+            &crate::config::Config::default(),
+            crate::app::AppPolicy::TEST,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        let (authorization, _) = crate::extension_host_state::install_test_package_and_authorize(
+            &mut app,
+            &installed,
+            "echo",
+            "example.runtime",
+            9,
+        );
+        let factory =
+            super::super::RuntimeFactory::installed_process(&installed, "echo", "example.runtime")
+                .unwrap();
+        let canceled = Arc::new(AtomicBool::new(false));
+        let join = std::thread::spawn(move || {
+            let mut dispatcher =
+                super::super::ExtensionRuntimeDispatcher::start(&factory, 9, canceled.as_ref())
+                    .unwrap();
+            dispatcher.invoke_with_host_state(
+                "conformance.echo",
+                serde_json::json!({}),
+                9,
+                Instant::now() + Duration::from_millis(750),
+                canceled,
+                authorization,
+            )
+        });
+        let event = app.event_rx.blocking_recv().unwrap();
+        app.handle_internal_event(event);
+        let response = join.join().unwrap().unwrap();
+        assert_eq!(response["result"]["contract"], "host.state.v1");
+        assert_eq!(response["result"]["namespace"], "example.runtime");
+        cleanup_package_root(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn installed_process_transact_preserves_json_null_and_delete_semantics() {
+        let script = r#"#!/bin/sh
+printf '%s\n' '{"type":"hello","protocol":2,"service_id":"echo","requested_capabilities":[],"methods":["conformance.echo"]}'
+IFS= read -r welcome
+count=0
+while IFS= read -r request; do
+  id=$(printf '%s' "$request" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
+  if [ "$count" -eq 0 ]; then
+    printf '%s\n' '{"type":"host_call","call_id":"set-null","identity":{"package_id":"example.runtime","namespace":"example.runtime","service_id":"echo","generation":19},"depth":1,"capability":"host.state.write","method":"state.transact","namespace":"example.runtime","params":{"contract":"host.state.v1","expected_store_generation":1,"expected_revision":0,"idempotency_key":"set-null","operations":[{"op":"set","key":"nullable","value":null}]}}'
+  else
+    printf '%s\n' '{"type":"host_call","call_id":"delete-null","identity":{"package_id":"example.runtime","namespace":"example.runtime","service_id":"echo","generation":19},"depth":1,"capability":"host.state.write","method":"state.transact","namespace":"example.runtime","params":{"contract":"host.state.v1","expected_store_generation":1,"expected_revision":1,"idempotency_key":"delete-null","operations":[{"op":"delete","key":"nullable"}]}}'
+  fi
+  IFS= read -r host_response
+  printf '{"type":"response","id":%s,"result":%s}\n' "$id" "$host_response"
+  count=$((count + 1))
+done
+"#;
+        let (root, installed) = install_package_bytes(process_package_with(
+            script,
+            &[],
+            &[crate::extension_host_state::HOST_STATE_WRITE_CAPABILITY],
+            &[],
+        ));
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = crate::app::App::new(
+            &crate::config::Config::default(),
+            crate::app::AppPolicy::TEST,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        let (authorization, _) = crate::extension_host_state::install_test_package_and_authorize(
+            &mut app,
+            &installed,
+            "echo",
+            "example.runtime",
+            19,
+        );
+        let factory =
+            super::super::RuntimeFactory::installed_process(&installed, "echo", "example.runtime")
+                .unwrap();
+        let canceled = Arc::new(AtomicBool::new(false));
+        let join = std::thread::spawn(move || {
+            let mut dispatcher =
+                super::super::ExtensionRuntimeDispatcher::start(&factory, 19, canceled.as_ref())
+                    .unwrap();
+            let set = dispatcher
+                .invoke_with_host_state(
+                    "conformance.echo",
+                    serde_json::json!({}),
+                    19,
+                    Instant::now() + Duration::from_millis(750),
+                    canceled.clone(),
+                    authorization.clone(),
+                )
+                .unwrap();
+            let delete = dispatcher
+                .invoke_with_host_state(
+                    "conformance.echo",
+                    serde_json::json!({}),
+                    19,
+                    Instant::now() + Duration::from_millis(750),
+                    canceled,
+                    authorization,
+                )
+                .unwrap();
+            (set, delete)
+        });
+        for expected_revision in [1, 2] {
+            let event = app.event_rx.blocking_recv().unwrap();
+            app.handle_internal_event(event);
+            assert_eq!(
+                app.extension_state
+                    .snapshot("example.runtime")
+                    .unwrap()
+                    .revision,
+                expected_revision
+            );
+            if expected_revision == 1 {
+                assert_eq!(
+                    app.extension_state
+                        .snapshot("example.runtime")
+                        .unwrap()
+                        .values["nullable"],
+                    serde_json::Value::Null
+                );
+            }
+        }
+        let (set, delete) = join.join().unwrap();
+        assert_eq!(set["result"]["revision"], 1);
+        assert_eq!(delete["result"]["revision"], 2);
+        assert!(!app
+            .extension_state
+            .snapshot("example.runtime")
+            .unwrap()
+            .values
+            .contains_key("nullable"));
+        cleanup_package_root(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn process_transport_normalizes_denial_stale_cancellation_and_oversize_errors() {
+        let script = r#"#!/bin/sh
+printf '%s\n' '{"type":"hello","protocol":2,"service_id":"echo","requested_capabilities":[],"methods":["conformance.echo"]}'
+IFS= read -r welcome
+IFS= read -r request
+printf '%s\n' '{"type":"host_call","call_id":"denied","identity":{"package_id":"example.runtime","namespace":"example.runtime","service_id":"echo","generation":29},"depth":1,"capability":"host.state.read","method":"state.snapshot","namespace":"example.runtime","params":{"contract":"host.state.v1"}}'
+IFS= read -r host_response
+id=$(printf '%s' "$request" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
+printf '{"type":"response","id":%s,"result":%s}\n' "$id" "$host_response"
+"#;
+        let (root, installed) = install_process_package(script, &[]);
+        let factory =
+            super::super::RuntimeFactory::installed_process(&installed, "echo", "example.runtime")
+                .unwrap();
+        let canceled = AtomicBool::new(false);
+        let mut dispatcher =
+            super::super::ExtensionRuntimeDispatcher::start(&factory, 29, &canceled).unwrap();
+        assert_eq!(
+            dispatcher
+                .invoke(
+                    "conformance.echo",
+                    serde_json::json!({}),
+                    29,
+                    Instant::now() + Duration::from_millis(750),
+                    &canceled,
+                )
+                .unwrap()["error"]["code"],
+            "capability_denied"
+        );
+        assert!(matches!(
+            dispatcher.invoke(
+                "conformance.echo",
+                serde_json::json!({}),
+                28,
+                Instant::now() + Duration::from_millis(750),
+                &canceled,
+            ),
+            Err(RuntimeError::StaleGeneration { .. })
+        ));
+        let canceled = AtomicBool::new(true);
+        assert!(matches!(
+            dispatcher.invoke(
+                "conformance.echo",
+                serde_json::json!({}),
+                29,
+                Instant::now() + Duration::from_millis(750),
+                &canceled,
+            ),
+            Err(RuntimeError::Canceled)
+        ));
+        let canceled = AtomicBool::new(false);
+        assert!(matches!(
+            dispatcher.invoke(
+                "conformance.echo",
+                serde_json::json!({"oversized": "x".repeat(MAX_RUNTIME_FRAME_BYTES)}),
+                29,
+                Instant::now() + Duration::from_millis(750),
+                &canceled,
+            ),
+            Err(RuntimeError::Protocol(message)) if message.contains("frame limit")
+        ));
+        cleanup_package_root(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn installed_process_rejects_wrong_response_types_and_changed_archives() {
         use std::os::unix::fs::PermissionsExt;
 
@@ -1080,7 +1359,9 @@ id=$(printf '%s' "$request" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
 printf '{"type":"garbage","id":%s,"result":{}}\n' "$id"
 "#;
         let (root, installed) = install_process_package(script, &[]);
-        let factory = super::super::RuntimeFactory::installed_process(&installed, "echo").unwrap();
+        let factory =
+            super::super::RuntimeFactory::installed_process(&installed, "echo", "example.runtime")
+                .unwrap();
         let canceled = AtomicBool::new(false);
         let mut dispatcher =
             super::super::ExtensionRuntimeDispatcher::start(&factory, 11, &canceled).unwrap();
@@ -1097,7 +1378,9 @@ printf '{"type":"garbage","id":%s,"result":{}}\n' "$id"
         ));
         dispatcher.stop(RuntimeStopReason::Protocol);
 
-        let factory = super::super::RuntimeFactory::installed_process(&installed, "echo").unwrap();
+        let factory =
+            super::super::RuntimeFactory::installed_process(&installed, "echo", "example.runtime")
+                .unwrap();
         let archive = Path::new(&installed.immutable_root).join("package.vqrox");
         let mut permissions = std::fs::metadata(&archive).unwrap().permissions();
         permissions.set_mode(0o600);
@@ -1131,7 +1414,9 @@ fi
             &["space value", "", "quote'value", "雪"],
         );
         let (argv_root, installed) = install_package_bytes(bytes);
-        let factory = super::super::RuntimeFactory::installed_process(&installed, "echo").unwrap();
+        let factory =
+            super::super::RuntimeFactory::installed_process(&installed, "echo", "example.runtime")
+                .unwrap();
         let canceled = AtomicBool::new(false);
         let mut dispatcher =
             super::super::ExtensionRuntimeDispatcher::start(&factory, 13, &canceled).unwrap();
@@ -1158,7 +1443,8 @@ printf '%s\n' "$!"
 exit 0
 "#;
         let (idle_root, installed) = install_process_package(idle_script, &[]);
-        let factory = ProcessRuntimeFactory::installed(&installed, "echo").unwrap();
+        let factory =
+            ProcessRuntimeFactory::installed(&installed, "echo", "example.runtime").unwrap();
         let mut runtime = factory.start(14, &canceled).unwrap();
         let pid_frame = runtime
             .frames
@@ -1195,8 +1481,12 @@ IFS= read -r request
 sleep 2
 "#;
         let (timeout_root, timeout_package) = install_process_package(timeout_script, &[]);
-        let factory =
-            super::super::RuntimeFactory::installed_process(&timeout_package, "echo").unwrap();
+        let factory = super::super::RuntimeFactory::installed_process(
+            &timeout_package,
+            "echo",
+            "example.runtime",
+        )
+        .unwrap();
         let canceled = AtomicBool::new(false);
         let mut dispatcher =
             super::super::ExtensionRuntimeDispatcher::start(&factory, 1, &canceled).unwrap();
@@ -1232,8 +1522,12 @@ IFS= read -r request
 exit 3
 "#;
         let (crash_root, crash_package) = install_process_package(crash_script, &[]);
-        let factory =
-            super::super::RuntimeFactory::installed_process(&crash_package, "echo").unwrap();
+        let factory = super::super::RuntimeFactory::installed_process(
+            &crash_package,
+            "echo",
+            "example.runtime",
+        )
+        .unwrap();
         let mut dispatcher =
             super::super::ExtensionRuntimeDispatcher::start(&factory, 2, &canceled).unwrap();
         assert!(matches!(
@@ -1260,8 +1554,12 @@ printf '{"type":"response","id":%s,"result":%s}\n' "$id" "$descendant"
 wait
 "#;
         let (descendant_root, descendant_package) = install_process_package(descendant_script, &[]);
-        let factory =
-            super::super::RuntimeFactory::installed_process(&descendant_package, "echo").unwrap();
+        let factory = super::super::RuntimeFactory::installed_process(
+            &descendant_package,
+            "echo",
+            "example.runtime",
+        )
+        .unwrap();
         let mut dispatcher =
             super::super::ExtensionRuntimeDispatcher::start(&factory, 3, &canceled).unwrap();
         let pid = dispatcher

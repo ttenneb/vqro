@@ -141,6 +141,10 @@ impl App {
                 }
                 return Vec::new();
             }
+            AppEvent::ExtensionHostStateCall(request) => {
+                self.handle_extension_host_state_call(*request);
+                return Vec::new();
+            }
             AppEvent::ExtensionStatePersisted(result) => {
                 self.handle_extension_state_persisted(*result);
                 return Vec::new();
