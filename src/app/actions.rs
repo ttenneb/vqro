@@ -1723,6 +1723,7 @@ impl AppState {
             AppEvent::TabBarCommandFinished { .. } => Vec::new(),
             AppEvent::PluginCommandFinished { .. }
             | AppEvent::ExtensionArtifactStaged(_)
+            | AppEvent::ExtensionGitPackageFinished(_)
             | AppEvent::ExtensionCatalogCapacityAvailable
             | AppEvent::ExtensionHostStateCall(_)
             | AppEvent::ExtensionHostTerminalsCall(_)

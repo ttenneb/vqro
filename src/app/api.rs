@@ -140,6 +140,10 @@ impl App {
                 self.handle_extension_artifact_staged(*result);
                 return Vec::new();
             }
+            AppEvent::ExtensionGitPackageFinished(result) => {
+                self.handle_extension_git_package_finished(*result);
+                return Vec::new();
+            }
             AppEvent::ExtensionCatalogCapacityAvailable => {
                 if self.extension_catalog_rebuild_pending {
                     self.rebuild_extension_catalogs();
@@ -1556,6 +1560,30 @@ impl App {
             }
             Method::ExtensionRollback(params) => {
                 return self.handle_extension_rollback(request.id, params);
+            }
+            Method::ExtensionPackageList(_) => {
+                return self.handle_extension_package_list(request.id);
+            }
+            Method::ExtensionPackageEnable(params) => {
+                return self.handle_extension_package_enable(request.id, params, true);
+            }
+            Method::ExtensionPackageDisable(params) => {
+                return self.handle_extension_package_enable(request.id, params, false);
+            }
+            Method::ExtensionPackageRemove(params) => {
+                return self.handle_extension_package_remove(request.id, params);
+            }
+            Method::ExtensionPackageRollback(params) => {
+                return self.handle_extension_package_rollback(request.id, params);
+            }
+            Method::ExtensionPackageInspect(_)
+            | Method::ExtensionPackageInstall(_)
+            | Method::ExtensionPackageUpdate(_) => {
+                return responses::encode_error(
+                    request.id,
+                    "deferred_request_required",
+                    "Git package inspection and activation must run off the server event loop",
+                );
             }
             _ => {
                 return responses::encode_error(

@@ -21,6 +21,8 @@ impl ClientShellState {
             confirmation_extension: None,
             repository_context,
             message: None,
+            git_install_mode: false,
+            git_inspection: None,
         }));
         if !self.push_endpoint_method_with_kind(
             crate::api::schema::Method::ExtensionList(
@@ -34,6 +36,11 @@ impl ClientShellState {
                 extensions.message = Some("Extensions are unavailable on this server.".into());
             }
         }
+        let _ = self.push_endpoint_method_with_kind(
+            crate::api::schema::Method::ExtensionPackageList(crate::api::schema::EmptyParams {}),
+            PendingEndpointKind::ExtensionPackageList(generation),
+            outcome,
+        );
         outcome.repaint = true;
     }
 
@@ -123,11 +130,20 @@ impl ClientShellState {
             extensions.search_focused = false;
             extensions.message = None;
         }
-        if !self.push_endpoint_method_with_kind(
+        let pending = if matches!(
             method,
-            PendingEndpointKind::ExtensionMutation(generation),
-            outcome,
+            crate::api::schema::Method::ExtensionPackageInstall(_)
+                | crate::api::schema::Method::ExtensionPackageUpdate(_)
+                | crate::api::schema::Method::ExtensionPackageEnable(_)
+                | crate::api::schema::Method::ExtensionPackageDisable(_)
+                | crate::api::schema::Method::ExtensionPackageRemove(_)
+                | crate::api::schema::Method::ExtensionPackageRollback(_)
         ) {
+            PendingEndpointKind::ExtensionPackageMutation(generation)
+        } else {
+            PendingEndpointKind::ExtensionMutation(generation)
+        };
+        if !self.push_endpoint_method_with_kind(method, pending, outcome) {
             if let Some(ClientShellOverlay::Extensions(extensions)) = self.overlay.as_mut() {
                 extensions.mutating = false;
                 extensions.message = Some("This server does not support that action.".into());
@@ -137,17 +153,69 @@ impl ClientShellState {
     }
 
     pub(super) fn confirm_extension_action(&mut self, outcome: &mut ClientShellInput) {
-        let (confirmation, confirmed_extension) = match self.overlay.as_ref() {
+        let (confirmation, confirmed_extension, git_inspection) = match self.overlay.as_ref() {
             Some(ClientShellOverlay::Extensions(extensions)) => (
                 extensions.confirmation,
                 extensions.confirmation_extension.clone(),
+                extensions.git_inspection.clone(),
             ),
-            _ => (None, None),
+            _ => (None, None, None),
         };
         let Some(extension) = confirmed_extension else {
             return;
         };
         let extension = *extension;
+        let package_method = if extension.package_kind
+            == crate::api::schema::ExtensionPackageKind::GithubPlugin
+        {
+            match confirmation {
+                Some(ClientExtensionConfirmation::Install) => git_inspection.map(|inspection| {
+                    crate::api::schema::Method::ExtensionPackageInstall(
+                        crate::api::schema::ExtensionPackageApprovalParams {
+                            source: inspection.source,
+                            expected_package_sha256: inspection.package_sha256,
+                            expected_manifest_sha256: inspection.manifest_sha256,
+                            approved: true,
+                        },
+                    )
+                }),
+                Some(ClientExtensionConfirmation::Remove) => {
+                    Some(crate::api::schema::Method::ExtensionPackageRemove(
+                        crate::api::schema::ExtensionPackageMutationParams {
+                            package_id: extension.id.clone(),
+                            confirmed: true,
+                        },
+                    ))
+                }
+                Some(ClientExtensionConfirmation::Update) => git_inspection.map(|inspection| {
+                    crate::api::schema::Method::ExtensionPackageUpdate(
+                        crate::api::schema::ExtensionPackageApprovalParams {
+                            source: inspection.source,
+                            expected_package_sha256: inspection.package_sha256,
+                            expected_manifest_sha256: inspection.manifest_sha256,
+                            approved: true,
+                        },
+                    )
+                }),
+                Some(ClientExtensionConfirmation::Rollback) => {
+                    Some(crate::api::schema::Method::ExtensionPackageRollback(
+                        crate::api::schema::ExtensionPackageMutationParams {
+                            package_id: extension.id.clone(),
+                            confirmed: true,
+                        },
+                    ))
+                }
+                _ => None,
+            }
+        } else {
+            None
+        };
+        if extension.package_kind == crate::api::schema::ExtensionPackageKind::GithubPlugin {
+            if let Some(method) = package_method {
+                self.queue_extension_mutation(method, outcome);
+            }
+            return;
+        }
         let method = match confirmation {
             Some(ClientExtensionConfirmation::Install) => {
                 crate::api::schema::Method::ExtensionInstall(
@@ -220,15 +288,75 @@ impl ClientShellState {
             outcome.repaint = true;
             return;
         }
-        self.queue_extension_mutation(
-            crate::api::schema::Method::ExtensionEnable(
-                crate::api::schema::ExtensionSetEnabledParams {
-                    repository: extension.repository,
-                    enabled: !extension.enabled,
+        let method =
+            if extension.package_kind == crate::api::schema::ExtensionPackageKind::GithubPlugin {
+                let params = crate::api::schema::ExtensionPackageMutationParams {
+                    package_id: extension.id,
+                    confirmed: true,
+                };
+                if extension.enabled {
+                    crate::api::schema::Method::ExtensionPackageDisable(params)
+                } else {
+                    crate::api::schema::Method::ExtensionPackageEnable(params)
+                }
+            } else {
+                crate::api::schema::Method::ExtensionEnable(
+                    crate::api::schema::ExtensionSetEnabledParams {
+                        repository: extension.repository,
+                        enabled: !extension.enabled,
+                    },
+                )
+            };
+        self.queue_extension_mutation(method, outcome);
+    }
+
+    fn inspect_git_query(&mut self, outcome: &mut ClientShellInput) {
+        let (generation, query) = match self.overlay.as_ref() {
+            Some(ClientShellOverlay::Extensions(extensions)) => {
+                (extensions.generation, extensions.query.clone())
+            }
+            _ => return,
+        };
+        let mut fields = query.split_whitespace();
+        let (Some(url), Some(commit)) = (fields.next(), fields.next()) else {
+            if let Some(ClientShellOverlay::Extensions(extensions)) = self.overlay.as_mut() {
+                extensions.message = Some(
+                    "Enter: https://repository.example/path.git <40-char commit> [package path]"
+                        .into(),
+                );
+            }
+            return;
+        };
+        let package_path = fields.next().unwrap_or("package.vqrox");
+        if fields.next().is_some() {
+            if let Some(ClientShellOverlay::Extensions(extensions)) = self.overlay.as_mut() {
+                extensions.message = Some("Git package source has too many fields.".into());
+            }
+            return;
+        }
+        if let Some(ClientShellOverlay::Extensions(extensions)) = self.overlay.as_mut() {
+            extensions.loading = true;
+            extensions.search_focused = false;
+            extensions.message = Some("Inspecting exact Git package…".into());
+        }
+        if !self.push_endpoint_method_with_kind(
+            crate::api::schema::Method::ExtensionPackageInspect(
+                crate::api::schema::ExtensionPackageInspectParams {
+                    source: crate::api::schema::ExtensionPackageSource {
+                        url: url.into(),
+                        commit: commit.into(),
+                        package_path: package_path.into(),
+                    },
                 },
             ),
+            PendingEndpointKind::ExtensionPackageInspect(generation),
             outcome,
-        );
+        ) {
+            if let Some(ClientShellOverlay::Extensions(extensions)) = self.overlay.as_mut() {
+                extensions.loading = false;
+                extensions.message = Some("This server cannot inspect Git packages.".into());
+            }
+        }
     }
 
     pub(super) fn route_extensions_key(
@@ -273,7 +401,15 @@ impl ClientShellState {
         if search_focused {
             match code {
                 KeyCode::Enter => {
-                    if let Some(ClientShellOverlay::Extensions(extensions)) = self.overlay.as_mut()
+                    let git_install_mode = matches!(
+                        self.overlay.as_ref(),
+                        Some(ClientShellOverlay::Extensions(extensions))
+                            if extensions.git_install_mode
+                    );
+                    if git_install_mode {
+                        self.inspect_git_query(outcome);
+                    } else if let Some(ClientShellOverlay::Extensions(extensions)) =
+                        self.overlay.as_mut()
                     {
                         extensions.search_focused = false;
                     }
@@ -304,7 +440,22 @@ impl ClientShellState {
             return true;
         }
         match code {
+            KeyCode::Char('g') if modifiers.is_empty() => {
+                if let Some(ClientShellOverlay::Extensions(extensions)) = self.overlay.as_mut() {
+                    extensions.git_install_mode = true;
+                    extensions.git_inspection = None;
+                    extensions.query.clear();
+                    extensions.search_focused = true;
+                    extensions.message = Some(
+                        "Git source: URL, exact 40-character commit, optional package path".into(),
+                    );
+                }
+            }
             KeyCode::Char('/') if modifiers.is_empty() => {
+                if let Some(ClientShellOverlay::Extensions(extensions)) = self.overlay.as_mut() {
+                    extensions.git_install_mode = false;
+                }
+
                 if let Some(ClientShellOverlay::Extensions(extensions)) = self.overlay.as_mut() {
                     extensions.search_focused = true;
                 }
@@ -416,20 +567,42 @@ impl ClientShellState {
                 }
             }
             KeyCode::Char('u') if modifiers.is_empty() => {
-                if self.selected_extension().is_some_and(|extension| {
+                if let Some(extension) = self.selected_extension().filter(|extension| {
                     extension.installed
-                        && extension.package_kind
-                            == crate::api::schema::ExtensionPackageKind::AgentIntegration
+                        && matches!(
+                            extension.package_kind,
+                            crate::api::schema::ExtensionPackageKind::AgentIntegration
+                                | crate::api::schema::ExtensionPackageKind::GithubPlugin
+                        )
                 }) {
-                    self.set_extension_confirmation(ClientExtensionConfirmation::Update);
+                    if extension.package_kind
+                        == crate::api::schema::ExtensionPackageKind::GithubPlugin
+                    {
+                        if let Some(ClientShellOverlay::Extensions(extensions)) =
+                            self.overlay.as_mut()
+                        {
+                            extensions.git_install_mode = true;
+                            extensions.git_inspection = None;
+                            extensions.query = format!("{} ", extension.repository);
+                            extensions.search_focused = true;
+                            extensions.message = Some(
+                                "Update: enter the new exact commit and optional package path"
+                                    .into(),
+                            );
+                        }
+                    } else {
+                        self.set_extension_confirmation(ClientExtensionConfirmation::Update);
+                    }
                 }
             }
             KeyCode::Char('b')
                 if modifiers.is_empty()
                     && self.selected_extension().is_some_and(|extension| {
-                        extension.package_kind
-                            == crate::api::schema::ExtensionPackageKind::AgentIntegration
-                            && extension.rollback_version.is_some()
+                        matches!(
+                            extension.package_kind,
+                            crate::api::schema::ExtensionPackageKind::AgentIntegration
+                                | crate::api::schema::ExtensionPackageKind::GithubPlugin
+                        ) && extension.rollback_version.is_some()
                     }) =>
             {
                 self.set_extension_confirmation(ClientExtensionConfirmation::Rollback);
@@ -438,6 +611,77 @@ impl ClientShellState {
         }
         outcome.repaint = true;
         true
+    }
+
+    fn git_package_extension(
+        package: crate::api::schema::InstalledExtensionPackageInfo,
+    ) -> crate::api::schema::ExtensionInfo {
+        crate::api::schema::ExtensionInfo {
+            id: package.package_id.clone(),
+            repository: package.source.url,
+            source_commit: Some(package.source.commit),
+            source_sha256: Some(package.package_sha256),
+            manifest_sha256: None,
+            manifest_path: Some(package.source.package_path),
+            name: package.package_id,
+            summary: "Pinned Git extension package".into(),
+            details: "Executable services use the constrained WASI component runtime.".into(),
+            categories: Vec::new(),
+            requested_capabilities: package.requested_capabilities,
+            package_kind: crate::api::schema::ExtensionPackageKind::GithubPlugin,
+            integration_target: None,
+            integration_status: None,
+            available_version: package.version.clone(),
+            active_version: package.version,
+            installed: !package.removed_retaining_data,
+            enabled: package.enabled,
+            install_supported: true,
+            artifact_verified: true,
+            repository_override_supported: false,
+            load_order: package.load_order,
+            pending_version: None,
+            rollback_version: package.rollback_version,
+            activation_error: package.activation_error,
+            repository_overrides: Vec::new(),
+        }
+    }
+
+    fn inspected_git_extension(
+        inspection: &crate::api::schema::ExtensionPackageInspection,
+        installed: bool,
+    ) -> crate::api::schema::ExtensionInfo {
+        crate::api::schema::ExtensionInfo {
+            id: inspection.package_id.clone(),
+            repository: inspection.source.url.clone(),
+            source_commit: Some(inspection.source.commit.clone()),
+            source_sha256: Some(inspection.package_sha256.clone()),
+            manifest_sha256: Some(inspection.manifest_sha256.clone()),
+            manifest_path: Some(inspection.source.package_path.clone()),
+            name: inspection.package_id.clone(),
+            summary: "Pinned Git extension package".into(),
+            details: format!(
+                "Component services: {} · namespaces: {}",
+                inspection.services.join(", "),
+                inspection.namespaces.join(", ")
+            ),
+            categories: Vec::new(),
+            requested_capabilities: inspection.requested_capabilities.clone(),
+            package_kind: crate::api::schema::ExtensionPackageKind::GithubPlugin,
+            integration_target: None,
+            integration_status: None,
+            available_version: inspection.version.clone(),
+            active_version: inspection.version.clone(),
+            installed,
+            enabled: installed,
+            install_supported: true,
+            artifact_verified: true,
+            repository_override_supported: false,
+            load_order: usize::MAX,
+            pending_version: None,
+            rollback_version: None,
+            activation_error: None,
+            repository_overrides: Vec::new(),
+        }
     }
 
     pub(super) fn handle_extensions_endpoint_result(
@@ -466,6 +710,17 @@ impl ClientShellState {
                             let selected_repository = extensions
                                 .selected_extension()
                                 .map(|extension| extension.repository.clone());
+                            let mut listed = listed;
+                            listed.extend(
+                                extensions
+                                    .extensions
+                                    .iter()
+                                    .filter(|extension| {
+                                        extension.package_kind
+                                            == crate::api::schema::ExtensionPackageKind::GithubPlugin
+                                    })
+                                    .cloned(),
+                            );
                             extensions.extensions = listed;
                             extensions.selected = selected_repository
                                 .as_ref()
@@ -478,6 +733,125 @@ impl ClientShellState {
                             extensions.message = None;
                         }
                         Ok(_) => extensions.message = Some("Unexpected extension response.".into()),
+                        Err(error) => extensions.message = Some(error.message),
+                    }
+                }
+                (true, Vec::new())
+            }
+            PendingEndpointKind::ExtensionPackageList(generation) => {
+                if !matches!(
+                    self.overlay,
+                    Some(ClientShellOverlay::Extensions(ClientExtensionsOverlay {
+                        generation: current,
+                        ..
+                    })) if current == generation
+                ) {
+                    return (true, Vec::new());
+                }
+                if let Some(ClientShellOverlay::Extensions(extensions)) = self.overlay.as_mut() {
+                    match result {
+                        Ok(crate::api::schema::ResponseResult::ExtensionPackageList {
+                            packages,
+                        }) => {
+                            extensions.extensions.retain(|extension| {
+                                extension.package_kind
+                                    != crate::api::schema::ExtensionPackageKind::GithubPlugin
+                            });
+                            extensions
+                                .extensions
+                                .extend(packages.into_iter().map(Self::git_package_extension));
+                        }
+                        Ok(_) => extensions.message = Some("Unexpected package response.".into()),
+                        Err(_) => {}
+                    }
+                }
+                (true, Vec::new())
+            }
+            PendingEndpointKind::ExtensionPackageInspect(generation) => {
+                if !matches!(
+                    self.overlay,
+                    Some(ClientShellOverlay::Extensions(ClientExtensionsOverlay {
+                        generation: current,
+                        ..
+                    })) if current == generation
+                ) {
+                    return (true, Vec::new());
+                }
+                if let Some(ClientShellOverlay::Extensions(extensions)) = self.overlay.as_mut() {
+                    extensions.loading = false;
+                    match result {
+                        Ok(crate::api::schema::ResponseResult::ExtensionPackageInspected {
+                            inspection,
+                        }) => {
+                            let installed = extensions.extensions.iter().any(|extension| {
+                                extension.id == inspection.package_id && extension.installed
+                            });
+                            let preview = Self::inspected_git_extension(&inspection, installed);
+                            if let Some(existing) = extensions
+                                .extensions
+                                .iter_mut()
+                                .find(|extension| extension.id == preview.id)
+                            {
+                                *existing = preview.clone();
+                            } else {
+                                extensions.extensions.push(preview.clone());
+                            }
+                            extensions.selected = extensions
+                                .filtered_indices()
+                                .iter()
+                                .position(|index| extensions.extensions[*index].id == preview.id)
+                                .unwrap_or(0);
+                            extensions.git_inspection = Some(inspection);
+                            extensions.git_install_mode = false;
+                            extensions.confirmation = Some(if installed {
+                                ClientExtensionConfirmation::Update
+                            } else {
+                                ClientExtensionConfirmation::Install
+                            });
+                            extensions.confirmation_extension = Some(Box::new(preview));
+                            extensions.message = Some(
+                                "Review the exact source, revision, and capabilities; Enter approves."
+                                    .into(),
+                            );
+                        }
+                        Ok(_) => {
+                            extensions.message = Some("Unexpected inspection response.".into())
+                        }
+                        Err(error) => extensions.message = Some(error.message),
+                    }
+                }
+                (true, Vec::new())
+            }
+            PendingEndpointKind::ExtensionPackageMutation(generation) => {
+                if !matches!(
+                    self.overlay,
+                    Some(ClientShellOverlay::Extensions(ClientExtensionsOverlay {
+                        generation: current,
+                        ..
+                    })) if current == generation
+                ) {
+                    return (true, Vec::new());
+                }
+                if let Some(ClientShellOverlay::Extensions(extensions)) = self.overlay.as_mut() {
+                    extensions.mutating = false;
+                    match result {
+                        Ok(crate::api::schema::ResponseResult::ExtensionPackageChanged {
+                            package,
+                        }) => {
+                            let changed = Self::git_package_extension(package);
+                            if let Some(existing) = extensions
+                                .extensions
+                                .iter_mut()
+                                .find(|extension| extension.id == changed.id)
+                            {
+                                *existing = changed;
+                            } else {
+                                extensions.extensions.push(changed);
+                            }
+                            extensions.git_inspection = None;
+                            extensions.message = Some("Extension package updated.".into());
+                        }
+                        Ok(_) => extensions.message = Some("Unexpected package response.".into()),
                         Err(error) => extensions.message = Some(error.message),
                     }
                 }

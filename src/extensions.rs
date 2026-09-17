@@ -284,7 +284,9 @@ impl CuratedIndex {
         self.extensions.iter().find(|extension| extension.id == id)
     }
 
-    fn package_v1_trust(&self) -> BTreeMap<String, crate::extension_package::PackageProvenanceV1> {
+    pub(crate) fn package_v1_trust(
+        &self,
+    ) -> BTreeMap<String, crate::extension_package::PackageProvenanceV1> {
         self.extensions
             .iter()
             .filter_map(|extension| {
@@ -684,6 +686,19 @@ pub(crate) fn state_path() -> PathBuf {
 pub(crate) fn state_storage_path() -> Result<PathBuf, String> {
     crate::platform::resolve_write_target(&state_path())
         .map_err(|error| format!("resolve extension state path: {error}"))
+}
+
+pub(crate) fn package_storage_path() -> Result<PathBuf, String> {
+    let state = state_storage_path()?;
+    let parent = state
+        .parent()
+        .ok_or_else(|| "extension state path has no parent".to_string())?;
+    Ok(parent.join("extension-packages"))
+}
+
+pub(crate) fn package_activation_journal_path() -> Result<PathBuf, String> {
+    let state = state_storage_path()?;
+    Ok(state.with_extension("package-activation.json"))
 }
 
 pub(crate) struct ExtensionStateLock {

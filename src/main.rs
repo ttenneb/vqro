@@ -32,6 +32,7 @@ mod detect;
 mod events;
 mod extension_artifact;
 pub mod extension_contract;
+mod extension_git_package;
 #[cfg(test)]
 mod extension_host_invocation;
 mod extension_host_state;

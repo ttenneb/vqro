@@ -564,6 +564,14 @@ pub(crate) fn api_method_name(method: &Method) -> &'static str {
         Method::ExtensionRepositoryOverrideSet(_) => "extension.repository_override.set",
         Method::ExtensionUpdate(_) => "extension.update",
         Method::ExtensionRollback(_) => "extension.rollback",
+        Method::ExtensionPackageInspect(_) => "extension.package.inspect",
+        Method::ExtensionPackageInstall(_) => "extension.package.install",
+        Method::ExtensionPackageUpdate(_) => "extension.package.update",
+        Method::ExtensionPackageList(_) => "extension.package.list",
+        Method::ExtensionPackageEnable(_) => "extension.package.enable",
+        Method::ExtensionPackageDisable(_) => "extension.package.disable",
+        Method::ExtensionPackageRemove(_) => "extension.package.remove",
+        Method::ExtensionPackageRollback(_) => "extension.package.rollback",
     }
 }
 

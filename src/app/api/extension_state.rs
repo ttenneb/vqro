@@ -468,13 +468,24 @@ impl App {
         )
     }
 
-    #[allow(dead_code)] // Future lifecycle retirement hook; production activation remains disabled.
     pub(crate) fn revoke_host_invocation_authority(&mut self, package_id: &str, service_id: &str) {
         if let Some(authority) = self
             .host_invocation_authorities
             .remove(&(package_id.into(), service_id.into()))
         {
             authority.revoke();
+        }
+    }
+
+    pub(crate) fn revoke_host_invocation_authority_for_package(&mut self, package_id: &str) {
+        let service_ids = self
+            .host_invocation_authorities
+            .keys()
+            .filter(|(candidate, _)| candidate == package_id)
+            .map(|(_, service_id)| service_id.clone())
+            .collect::<Vec<_>>();
+        for service_id in service_ids {
+            self.revoke_host_invocation_authority(package_id, &service_id);
         }
     }
 

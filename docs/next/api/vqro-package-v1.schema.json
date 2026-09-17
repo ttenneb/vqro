@@ -117,6 +117,47 @@
             {
               "additionalProperties": false,
               "properties": {
+                "kind": {
+                  "const": "git",
+                  "type": "string"
+                },
+                "manifest_sha256": {
+                  "type": "string"
+                },
+                "package_id": {
+                  "type": "string"
+                },
+                "package_path": {
+                  "type": "string"
+                },
+                "package_sha256": {
+                  "type": "string"
+                },
+                "source_commit": {
+                  "type": "string"
+                },
+                "url": {
+                  "type": "string"
+                },
+                "version": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind",
+                "url",
+                "source_commit",
+                "package_path",
+                "package_id",
+                "version",
+                "package_sha256",
+                "manifest_sha256"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
                 "canonical_path": {
                   "type": "string"
                 },
@@ -298,6 +339,47 @@
             {
               "additionalProperties": false,
               "properties": {
+                "kind": {
+                  "const": "git",
+                  "type": "string"
+                },
+                "manifest_sha256": {
+                  "type": "string"
+                },
+                "package_id": {
+                  "type": "string"
+                },
+                "package_path": {
+                  "type": "string"
+                },
+                "package_sha256": {
+                  "type": "string"
+                },
+                "source_commit": {
+                  "type": "string"
+                },
+                "url": {
+                  "type": "string"
+                },
+                "version": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind",
+                "url",
+                "source_commit",
+                "package_path",
+                "package_id",
+                "version",
+                "package_sha256",
+                "manifest_sha256"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
                 "canonical_path": {
                   "type": "string"
                 },
@@ -441,6 +523,47 @@
               "required": [
                 "kind",
                 "package_sha256"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "kind": {
+                  "const": "git",
+                  "type": "string"
+                },
+                "manifest_sha256": {
+                  "type": "string"
+                },
+                "package_id": {
+                  "type": "string"
+                },
+                "package_path": {
+                  "type": "string"
+                },
+                "package_sha256": {
+                  "type": "string"
+                },
+                "source_commit": {
+                  "type": "string"
+                },
+                "url": {
+                  "type": "string"
+                },
+                "version": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind",
+                "url",
+                "source_commit",
+                "package_path",
+                "package_id",
+                "version",
+                "package_sha256",
+                "manifest_sha256"
               ],
               "type": "object"
             },
@@ -732,6 +855,47 @@
         {
           "additionalProperties": false,
           "properties": {
+            "kind": {
+              "const": "git",
+              "type": "string"
+            },
+            "manifest_sha256": {
+              "type": "string"
+            },
+            "package_id": {
+              "type": "string"
+            },
+            "package_path": {
+              "type": "string"
+            },
+            "package_sha256": {
+              "type": "string"
+            },
+            "source_commit": {
+              "type": "string"
+            },
+            "url": {
+              "type": "string"
+            },
+            "version": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "url",
+            "source_commit",
+            "package_path",
+            "package_id",
+            "version",
+            "package_sha256",
+            "manifest_sha256"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
             "canonical_path": {
               "type": "string"
             },
@@ -956,6 +1120,47 @@
               "required": [
                 "kind",
                 "package_sha256"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "kind": {
+                  "const": "git",
+                  "type": "string"
+                },
+                "manifest_sha256": {
+                  "type": "string"
+                },
+                "package_id": {
+                  "type": "string"
+                },
+                "package_path": {
+                  "type": "string"
+                },
+                "package_sha256": {
+                  "type": "string"
+                },
+                "source_commit": {
+                  "type": "string"
+                },
+                "url": {
+                  "type": "string"
+                },
+                "version": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind",
+                "url",
+                "source_commit",
+                "package_path",
+                "package_id",
+                "version",
+                "package_sha256",
+                "manifest_sha256"
               ],
               "type": "object"
             },

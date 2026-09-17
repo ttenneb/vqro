@@ -102,6 +102,12 @@ pub(crate) fn request_changes_ui(request: &Request) -> bool {
             | Method::ExtensionRepositoryOverrideSet(_)
             | Method::ExtensionUpdate(_)
             | Method::ExtensionRollback(_)
+            | Method::ExtensionPackageInstall(_)
+            | Method::ExtensionPackageUpdate(_)
+            | Method::ExtensionPackageEnable(_)
+            | Method::ExtensionPackageDisable(_)
+            | Method::ExtensionPackageRemove(_)
+            | Method::ExtensionPackageRollback(_)
     )
 }
 

@@ -57,6 +57,24 @@ New marketplace methods are optional endpoint capabilities, so an older
 compatible server disables only marketplace actions and does not affect attached
 PTYs or the generation-1 client bridge.
 
+### Install from an exact Git revision
+
+Press **g** in **Extensions** and enter a credential-free HTTPS Git URL, a full
+40-character commit, and optionally a repository-relative `.vqrox` path. The
+path defaults to `package.vqrox`. Vqro fetches only that exact commit off the
+server event loop, rejects submodules and linked package paths, validates the
+deterministic package, and refuses the entire package if any service requests a
+native process runtime.
+
+Inspection does not install or execute the package. The confirmation view shows
+the exact URL, commit, package and manifest digests, namespaces, component
+services, and requested capabilities. Approval is bound to those digests; the
+host refetches and revalidates the pinned bytes before activation. An installed
+package appears in **Installed** immediately. Press **u** to inspect and approve
+an exact replacement revision, **b** to use the retained rollback artifact, or
+**r** to remove the package while retaining its namespaced configuration and
+state. These lifecycle operations do not replace or restart pane PTYs.
+
 ## Browse plugins
 
 The [marketplace](/plugins/) lists public repositories tagged with the GitHub

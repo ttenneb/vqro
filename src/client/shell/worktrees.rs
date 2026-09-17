@@ -554,6 +554,9 @@ impl ClientShellState {
                 | PendingEndpointKind::IntegrationList
                 | PendingEndpointKind::IntegrationInstall
                 | PendingEndpointKind::ExtensionList(_)
+                | PendingEndpointKind::ExtensionPackageList(_)
+                | PendingEndpointKind::ExtensionPackageInspect(_)
+                | PendingEndpointKind::ExtensionPackageMutation(_)
                 | PendingEndpointKind::ExtensionMutation(_)
                 | PendingEndpointKind::SelectionCopy
                 | PendingEndpointKind::TerminalInspector { .. }

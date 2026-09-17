@@ -534,6 +534,8 @@ pub(super) struct ClientExtensionsOverlay {
     pub(super) confirmation_extension: Option<Box<crate::api::schema::ExtensionInfo>>,
     pub(super) repository_context: Option<String>,
     pub(super) message: Option<String>,
+    pub(super) git_install_mode: bool,
+    pub(super) git_inspection: Option<crate::api::schema::ExtensionPackageInspection>,
 }
 
 impl ClientExtensionsOverlay {
@@ -864,6 +866,9 @@ pub(super) enum PendingEndpointKind {
     IntegrationList,
     IntegrationInstall,
     ExtensionList(u64),
+    ExtensionPackageList(u64),
+    ExtensionPackageInspect(u64),
+    ExtensionPackageMutation(u64),
     ExtensionMutation(u64),
     PrepareWorktreeCreate {
         workspace_id: String,

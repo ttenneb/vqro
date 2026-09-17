@@ -73,8 +73,10 @@ pub(super) fn render_extensions_overlay(
 
     let search = Rect::new(inner.x + 26, inner.y + 2, inner.width.saturating_sub(27), 1);
     buffer.set_style(search, base.bg(palette.surface0));
-    let search_text = if extensions.query.is_empty() && !extensions.search_focused {
-        " / search".to_string()
+    let search_text = if extensions.git_install_mode && extensions.query.is_empty() {
+        " Git URL commit [package path]".to_string()
+    } else if extensions.query.is_empty() && !extensions.search_focused {
+        " / search · g install Git".to_string()
     } else {
         format!(" / {}", extensions.query)
     };
@@ -401,7 +403,7 @@ pub(super) fn render_extensions_overlay(
     {
         " Installation is unavailable for this curated entry."
     } else {
-        " [ ] order · o repository · r remove · x data · u update · b rollback · c category"
+        " g Git · [ ] order · o repository · r remove · x data · u update · b rollback"
     };
     let unsupported_install = extensions
         .selected_extension()

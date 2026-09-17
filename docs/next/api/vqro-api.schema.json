@@ -2774,6 +2774,74 @@
           },
           "type": "object"
         },
+        "ExtensionPackageApprovalParams": {
+          "properties": {
+            "approved": {
+              "default": false,
+              "type": "boolean"
+            },
+            "expected_manifest_sha256": {
+              "type": "string"
+            },
+            "expected_package_sha256": {
+              "type": "string"
+            },
+            "source": {
+              "$ref": "#/schemas/request/$defs/ExtensionPackageSource"
+            }
+          },
+          "required": [
+            "source",
+            "expected_package_sha256",
+            "expected_manifest_sha256"
+          ],
+          "type": "object"
+        },
+        "ExtensionPackageInspectParams": {
+          "properties": {
+            "source": {
+              "$ref": "#/schemas/request/$defs/ExtensionPackageSource"
+            }
+          },
+          "required": [
+            "source"
+          ],
+          "type": "object"
+        },
+        "ExtensionPackageMutationParams": {
+          "properties": {
+            "confirmed": {
+              "default": false,
+              "type": "boolean"
+            },
+            "package_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "package_id"
+          ],
+          "type": "object"
+        },
+        "ExtensionPackageSource": {
+          "properties": {
+            "commit": {
+              "type": "string"
+            },
+            "package_path": {
+              "default": "package.vqrox",
+              "type": "string"
+            },
+            "url": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "url",
+            "commit"
+          ],
+          "type": "object"
+        },
         "ExtensionReorderParams": {
           "properties": {
             "index": {
@@ -7778,6 +7846,134 @@
             "params"
           ],
           "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "extension.package.inspect",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/ExtensionPackageInspectParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "extension.package.install",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/ExtensionPackageApprovalParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "extension.package.update",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/ExtensionPackageApprovalParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "extension.package.list",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/EmptyParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "extension.package.enable",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/ExtensionPackageMutationParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "extension.package.disable",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/ExtensionPackageMutationParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "extension.package.remove",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/ExtensionPackageMutationParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "extension.package.rollback",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/ExtensionPackageMutationParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
         }
       ],
       "properties": {
@@ -9397,6 +9593,54 @@
           ],
           "type": "object"
         },
+        "ExtensionPackageInspection": {
+          "properties": {
+            "manifest_sha256": {
+              "type": "string"
+            },
+            "namespaces": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "package_id": {
+              "type": "string"
+            },
+            "package_sha256": {
+              "type": "string"
+            },
+            "requested_capabilities": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "services": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "source": {
+              "$ref": "#/schemas/success_response/$defs/ExtensionPackageSource"
+            },
+            "version": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "source",
+            "package_id",
+            "version",
+            "package_sha256",
+            "manifest_sha256",
+            "namespaces",
+            "services",
+            "requested_capabilities"
+          ],
+          "type": "object"
+        },
         "ExtensionPackageKind": {
           "enum": [
             "bundled",
@@ -9404,6 +9648,25 @@
             "github_plugin"
           ],
           "type": "string"
+        },
+        "ExtensionPackageSource": {
+          "properties": {
+            "commit": {
+              "type": "string"
+            },
+            "package_path": {
+              "default": "package.vqrox",
+              "type": "string"
+            },
+            "url": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "url",
+            "commit"
+          ],
+          "type": "object"
         },
         "ExtensionRepositoryOverrideInfo": {
           "properties": {
@@ -9991,6 +10254,62 @@
           },
           "required": [
             "terminal_id"
+          ],
+          "type": "object"
+        },
+        "InstalledExtensionPackageInfo": {
+          "properties": {
+            "activation_error": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "enabled": {
+              "type": "boolean"
+            },
+            "load_order": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "package_id": {
+              "type": "string"
+            },
+            "package_sha256": {
+              "type": "string"
+            },
+            "removed_retaining_data": {
+              "type": "boolean"
+            },
+            "requested_capabilities": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "rollback_version": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "source": {
+              "$ref": "#/schemas/success_response/$defs/ExtensionPackageSource"
+            },
+            "version": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "package_id",
+            "version",
+            "source",
+            "package_sha256",
+            "enabled",
+            "removed_retaining_data",
+            "load_order",
+            "requested_capabilities"
           ],
           "type": "object"
         },
@@ -13321,6 +13640,57 @@
               "required": [
                 "type",
                 "repository"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "inspection": {
+                  "$ref": "#/schemas/success_response/$defs/ExtensionPackageInspection"
+                },
+                "type": {
+                  "const": "extension_package_inspected",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "inspection"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "packages": {
+                  "items": {
+                    "$ref": "#/schemas/success_response/$defs/InstalledExtensionPackageInfo"
+                  },
+                  "type": "array"
+                },
+                "type": {
+                  "const": "extension_package_list",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "packages"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "package": {
+                  "$ref": "#/schemas/success_response/$defs/InstalledExtensionPackageInfo"
+                },
+                "type": {
+                  "const": "extension_package_changed",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "package"
               ],
               "type": "object"
             },

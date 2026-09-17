@@ -77,6 +77,8 @@ fn extension_overlay_renders_categories_details_and_installed_tab() {
         confirmation_extension: None,
         repository_context: None,
         message: None,
+        git_install_mode: false,
+        git_inspection: None,
     }));
 
     let frame = state.compose(110, 34).expect("extensions frame");
@@ -120,6 +122,8 @@ fn install_requires_host_confirmation_before_endpoint_mutation() {
         confirmation_extension: None,
         repository_context: None,
         message: None,
+        git_install_mode: false,
+        git_inspection: None,
     }));
     let mut outcome = ClientShellInput::default();
 
@@ -169,6 +173,8 @@ fn confirmation_remains_bound_to_the_original_extension() {
         confirmation_extension: None,
         repository_context: None,
         message: None,
+        git_install_mode: false,
+        git_inspection: None,
     }));
     let mut outcome = ClientShellInput::default();
 
@@ -185,6 +191,76 @@ fn confirmation_remains_bound_to_the_original_extension() {
                 &request.method,
                 crate::api::schema::Method::ExtensionInstall(params)
                     if params.repository == first.repository
+            )
+    )));
+}
+
+#[test]
+fn inspected_git_package_requires_digest_bound_approval() {
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    state.set_snapshot(Box::new(snapshot()));
+    state.overlay = Some(ClientShellOverlay::Extensions(ClientExtensionsOverlay {
+        generation: 7,
+        tab: ClientExtensionsTab::Browse,
+        query: String::new(),
+        search_focused: false,
+        category: None,
+        selected: 0,
+        extensions: Vec::new(),
+        loading: true,
+        mutating: false,
+        confirmation: None,
+        confirmation_extension: None,
+        repository_context: None,
+        message: None,
+        git_install_mode: true,
+        git_inspection: None,
+    }));
+    let inspection = crate::api::schema::ExtensionPackageInspection {
+        source: crate::api::schema::ExtensionPackageSource {
+            url: "https://example.test/extension.git".into(),
+            commit: "a".repeat(40),
+            package_path: "package.vqrox".into(),
+        },
+        package_id: "example.git".into(),
+        version: "1.0.0".into(),
+        package_sha256: "b".repeat(64),
+        manifest_sha256: "c".repeat(64),
+        namespaces: vec!["example.git".into()],
+        services: vec!["main".into()],
+        requested_capabilities: vec!["host.state.read".into()],
+    };
+
+    let (handled, actions) = state.handle_extensions_endpoint_result(
+        PendingEndpointKind::ExtensionPackageInspect(7),
+        Ok(
+            crate::api::schema::ResponseResult::ExtensionPackageInspected {
+                inspection: inspection.clone(),
+            },
+        ),
+    );
+    assert!(handled);
+    assert!(actions.is_empty());
+    assert!(matches!(
+        state.overlay,
+        Some(ClientShellOverlay::Extensions(ClientExtensionsOverlay {
+            confirmation: Some(ClientExtensionConfirmation::Install),
+            ..
+        }))
+    ));
+
+    let mut outcome = ClientShellInput::default();
+    state.confirm_extension_action(&mut outcome);
+    assert!(outcome.actions.iter().any(|action| matches!(
+        action,
+        ClientShellAction::Endpoint { request, .. }
+            if matches!(
+                &request.method,
+                crate::api::schema::Method::ExtensionPackageInstall(params)
+                    if params.approved
+                        && params.source == inspection.source
+                        && params.expected_package_sha256 == inspection.package_sha256
+                        && params.expected_manifest_sha256 == inspection.manifest_sha256
             )
     )));
 }

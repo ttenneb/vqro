@@ -170,6 +170,8 @@ pub enum AppEvent {
     },
     /// Pinned extension source staging completed off the server event loop.
     ExtensionArtifactStaged(Box<crate::extension_artifact::ExtensionArtifactStageResult>),
+    /// A pinned Git package inspection or approved staging job completed off-loop.
+    ExtensionGitPackageFinished(Box<crate::extension_git_package::GitPackageWorkResult>),
     /// A bounded extension service job completed on its worker thread.
     ExtensionServiceFinished(Box<crate::extension_service::ExtensionAsyncResult>),
     // Unit-test executables cannot recursively host the bundled service binary.

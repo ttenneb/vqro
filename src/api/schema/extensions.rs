@@ -1,5 +1,9 @@
 use serde::{Deserialize, Serialize};
 
+fn default_package_path() -> String {
+    "package.vqrox".into()
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema, Default)]
 pub struct ExtensionListParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -46,6 +50,63 @@ pub struct ExtensionUpdateParams {
     /// an explicit approval from a host-owned confirmation UI.
     #[serde(default)]
     pub approved: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct ExtensionPackageSource {
+    pub url: String,
+    pub commit: String,
+    #[serde(default = "default_package_path")]
+    pub package_path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct ExtensionPackageInspectParams {
+    pub source: ExtensionPackageSource,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct ExtensionPackageApprovalParams {
+    pub source: ExtensionPackageSource,
+    pub expected_package_sha256: String,
+    pub expected_manifest_sha256: String,
+    #[serde(default)]
+    pub approved: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct ExtensionPackageMutationParams {
+    pub package_id: String,
+    #[serde(default)]
+    pub confirmed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct ExtensionPackageInspection {
+    pub source: ExtensionPackageSource,
+    pub package_id: String,
+    pub version: String,
+    pub package_sha256: String,
+    pub manifest_sha256: String,
+    pub namespaces: Vec<String>,
+    pub services: Vec<String>,
+    pub requested_capabilities: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct InstalledExtensionPackageInfo {
+    pub package_id: String,
+    pub version: String,
+    pub source: ExtensionPackageSource,
+    pub package_sha256: String,
+    pub enabled: bool,
+    pub removed_retaining_data: bool,
+    pub load_order: usize,
+    pub requested_capabilities: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rollback_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activation_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]

@@ -124,6 +124,15 @@ pub enum PackageProvenanceV1 {
     File {
         package_sha256: String,
     },
+    Git {
+        url: String,
+        source_commit: String,
+        package_path: String,
+        package_id: String,
+        version: String,
+        package_sha256: String,
+        manifest_sha256: String,
+    },
     Link {
         canonical_path: String,
         trust_id: String,
@@ -660,6 +669,38 @@ pub fn validate_namespace_claims(
         PackageProvenanceV1::File { package_sha256 } => {
             validate_digest(package_sha256, "local file package")?;
         }
+        PackageProvenanceV1::Git {
+            url,
+            source_commit,
+            package_path,
+            package_id,
+            version,
+            package_sha256,
+            manifest_sha256,
+        } => {
+            let authority = url
+                .strip_prefix("https://")
+                .and_then(|rest| rest.split('/').next())
+                .unwrap_or_default();
+            if authority.is_empty()
+                || authority.contains('@')
+                || source_commit.len() != 40
+                || !source_commit
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+                || portable_package_path(Path::new(package_path)).as_deref() != Ok(package_path)
+                || !package_path.ends_with(".vqrox")
+            {
+                return Err("Git package source identity is not canonical".into());
+            }
+            validate_package_id(package_id)?;
+            validate_version(version, "Git package version")?;
+            if package_id != &manifest.id || version != &manifest.version {
+                return Err("Git package manifest identity mismatch".into());
+            }
+            validate_digest(package_sha256, "Git package")?;
+            validate_digest(manifest_sha256, "Git package manifest")?;
+        }
         PackageProvenanceV1::Link {
             canonical_path,
             trust_id,
@@ -693,15 +734,19 @@ pub fn validate_namespace_claims(
                     return Err(format!("curated provenance does not authorize {namespace}"));
                 }
             }
-            PackageProvenanceV1::File { .. } if namespace.starts_with("vqro.") => {
+            PackageProvenanceV1::File { .. } | PackageProvenanceV1::Git { .. }
+                if namespace.starts_with("vqro.") =>
+            {
                 return Err(
-                    "local files cannot claim vqro.* without a trusted link approval".into(),
+                    "untrusted packages cannot claim vqro.* without a trusted approval".into(),
                 );
             }
             PackageProvenanceV1::Link { trusted, .. } if !trusted => {
                 return Err("developer link namespace claims require explicit trust".into());
             }
-            PackageProvenanceV1::Link { .. } | PackageProvenanceV1::File { .. } => {}
+            PackageProvenanceV1::Link { .. }
+            | PackageProvenanceV1::File { .. }
+            | PackageProvenanceV1::Git { .. } => {}
         }
     }
     Ok(())
@@ -1085,7 +1130,8 @@ fn validate_provenance_digest(
             }
             package_sha256
         }
-        PackageProvenanceV1::File { package_sha256 } => package_sha256,
+        PackageProvenanceV1::File { package_sha256 }
+        | PackageProvenanceV1::Git { package_sha256, .. } => package_sha256,
         PackageProvenanceV1::Link { .. } => {
             return Err("developer-link provenance cannot install an immutable file".into());
         }
@@ -1411,6 +1457,32 @@ fn validate_lifecycle_record(record: &PackageLifecycleRecordV1) -> Result<(), St
             validate_digest(package_sha256, "local package")?;
             Some(package_sha256)
         }
+        PackageProvenanceV1::Git {
+            url,
+            source_commit,
+            package_path,
+            package_id,
+            version,
+            package_sha256,
+            manifest_sha256,
+        } => {
+            validate_package_id(package_id)?;
+            validate_version(version, "Git package version")?;
+            validate_digest(package_sha256, "Git package")?;
+            validate_digest(manifest_sha256, "Git package manifest")?;
+            if url.is_empty()
+                || package_path.is_empty()
+                || source_commit.len() != 40
+                || package_id != &record.package_id
+                || record
+                    .active
+                    .as_ref()
+                    .is_some_and(|active| &active.version != version)
+            {
+                return Err("Git package source does not match lifecycle record".into());
+            }
+            Some(package_sha256)
+        }
         PackageProvenanceV1::Link {
             canonical_path,
             trust_id,
@@ -1465,6 +1537,7 @@ fn lifecycle_manifest(record: &PackageLifecycleRecordV1) -> PackageManifestV2 {
         id: record.package_id.clone(),
         version: match &record.source {
             PackageProvenanceV1::Curated { version, .. }
+            | PackageProvenanceV1::Git { version, .. }
             | PackageProvenanceV1::Link { version, .. } => version.clone(),
             PackageProvenanceV1::File { .. } => record
                 .active
@@ -1893,6 +1966,16 @@ fn source_matches_pointer(
                 && package_sha256 == &pointer.package_sha256
         }
         PackageProvenanceV1::File { package_sha256 } => package_sha256 == &pointer.package_sha256,
+        PackageProvenanceV1::Git {
+            package_id: source_id,
+            version,
+            package_sha256,
+            ..
+        } => {
+            source_id == package_id
+                && version == &pointer.version
+                && package_sha256 == &pointer.package_sha256
+        }
         PackageProvenanceV1::Link {
             package_id: source_id,
             version,

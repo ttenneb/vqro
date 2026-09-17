@@ -1164,6 +1164,9 @@ impl ClientShellState {
                 return self.handle_settings_endpoint_result(kind, result);
             }
             kind @ (PendingEndpointKind::ExtensionList(_)
+            | PendingEndpointKind::ExtensionPackageList(_)
+            | PendingEndpointKind::ExtensionPackageInspect(_)
+            | PendingEndpointKind::ExtensionPackageMutation(_)
             | PendingEndpointKind::ExtensionMutation(_)) => {
                 return self.handle_extensions_endpoint_result(kind, result);
             }

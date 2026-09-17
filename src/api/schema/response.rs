@@ -307,6 +307,15 @@ pub enum ResponseResult {
     ExtensionDataDeleted {
         repository: String,
     },
+    ExtensionPackageInspected {
+        inspection: super::extensions::ExtensionPackageInspection,
+    },
+    ExtensionPackageList {
+        packages: Vec<super::extensions::InstalledExtensionPackageInfo>,
+    },
+    ExtensionPackageChanged {
+        package: super::extensions::InstalledExtensionPackageInfo,
+    },
     PluginActionList {
         actions: Vec<PluginActionInfo>,
     },

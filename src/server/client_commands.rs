@@ -78,6 +78,14 @@ pub(crate) const CLIENT_SHELL_OPTIONAL_METHODS: &[&str] = &[
     "extension.enable",
     "extension.install",
     "extension.list",
+    "extension.package.disable",
+    "extension.package.enable",
+    "extension.package.inspect",
+    "extension.package.install",
+    "extension.package.list",
+    "extension.package.remove",
+    "extension.package.rollback",
+    "extension.package.update",
     "extension.remove",
     "extension.reorder",
     "extension.repository_override.set",
@@ -379,7 +387,21 @@ mod tests {
             .copied()
             .filter(|method| method.starts_with("extension."))
             .collect::<Vec<_>>();
-        let actual = endpoint_method_shape_digests(&methods);
+        let mut actual = endpoint_method_shape_digests(&methods);
+        let additive: BTreeMap<String, String> = serde_json::from_value(serde_json::json!({
+            "extension.package.disable": "135f469b07ad4cc2d8385ede5fdd9093486d72b48157d1abea512eff05404b56",
+            "extension.package.enable": "7a494a42a8353fa7e3048677543dabe7d46d03573ed3c938054b4cfc9f6dcde0",
+            "extension.package.inspect": "a1cd0ef6a93d9ce3001a93d97afe62978cdf094b59d71f607d01c867c832fc82",
+            "extension.package.install": "5f9ab324e89f903d3f953883604a5f55e37d8a11a51f573ff63eb23e1dcb1797",
+            "extension.package.list": "1b2d9d96ea121ef1f8ba608d25fd4e160561caabde6d274b877c39484a175000",
+            "extension.package.remove": "be368ca3ea9f6dbab2dc652f043f6da5a357acbd1ba6fe9eccea8aa56e06e9ea",
+            "extension.package.rollback": "f6b797c62fb75de8b0e59f217f667b557c3b0dcd31c9d3f3a768074870a303d3",
+            "extension.package.update": "43cf65a362e165b65bd468bbc1c5d00197fb5ea092ac530ae7660af0347b4dd9"
+        }))
+        .expect("additive package method shapes");
+        for (method, digest) in additive {
+            assert_eq!(actual.remove(&method).as_ref(), Some(&digest));
+        }
         let expected: BTreeMap<String, String> = serde_json::from_value(serde_json::json!({
             "extension.data.delete": "d059ee1c7131f2009ef6fb90f4396f2584f1cfc29f06f01045c7913c0775cb0d",
             "extension.enable": "84c5c02436e0b3495bbdb8c2cc7e169a5e1ae3fefc69b6d3944faa5c22042d6e",

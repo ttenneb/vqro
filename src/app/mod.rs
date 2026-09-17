@@ -186,6 +186,12 @@ pub struct App {
     pub(crate) terminal_telemetry_cache:
         HashMap<crate::terminal::TerminalId, terminal_inspector::CachedTerminalTelemetry>,
     pub(crate) extension_services: crate::extension_service::ExtensionServiceManager,
+    /// Live component supervisors owned by package-v1 lifecycle state. Removing or
+    /// replacing a package drops only these runtimes; pane PTYs remain independently owned.
+    pub(crate) extension_package_services: std::collections::BTreeMap<
+        String,
+        Vec<crate::extension_service::ExtensionServiceSupervisor>,
+    >,
     pub(crate) host_document_services: crate::extension_service::HostDocumentServiceCatalog,
     pub(crate) extension_index: crate::extensions::CuratedIndex,
     pub(crate) marketplace_state: crate::extensions::MarketplaceStateFile,
@@ -928,6 +934,7 @@ impl App {
             endpoint_commands,
             terminal_telemetry_cache: HashMap::new(),
             extension_services,
+            extension_package_services: std::collections::BTreeMap::new(),
             host_document_services,
             extension_index,
             marketplace_state,
@@ -960,6 +967,7 @@ impl App {
         app.configure_tab_bar_status(&config.ui.tab_bar_right, &config.ui.tab_bar_right_separator);
         app.configure_window_title(&config.ui.window_title);
         app.recover_extension_state_on_startup();
+        app.activate_persisted_extension_packages();
         app.refresh_collection_documents();
         app
     }

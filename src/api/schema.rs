@@ -340,6 +340,22 @@ pub enum Method {
     ExtensionUpdate(ExtensionUpdateParams),
     #[serde(rename = "extension.rollback")]
     ExtensionRollback(ExtensionConfirmedParams),
+    #[serde(rename = "extension.package.inspect")]
+    ExtensionPackageInspect(ExtensionPackageInspectParams),
+    #[serde(rename = "extension.package.install")]
+    ExtensionPackageInstall(ExtensionPackageApprovalParams),
+    #[serde(rename = "extension.package.update")]
+    ExtensionPackageUpdate(ExtensionPackageApprovalParams),
+    #[serde(rename = "extension.package.list")]
+    ExtensionPackageList(EmptyParams),
+    #[serde(rename = "extension.package.enable")]
+    ExtensionPackageEnable(ExtensionPackageMutationParams),
+    #[serde(rename = "extension.package.disable")]
+    ExtensionPackageDisable(ExtensionPackageMutationParams),
+    #[serde(rename = "extension.package.remove")]
+    ExtensionPackageRemove(ExtensionPackageMutationParams),
+    #[serde(rename = "extension.package.rollback")]
+    ExtensionPackageRollback(ExtensionPackageMutationParams),
 }
 
 #[cfg(test)]

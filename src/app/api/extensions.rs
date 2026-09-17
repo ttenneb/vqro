@@ -1,7 +1,8 @@
 use crate::api::schema::{
     ExtensionConfirmedParams, ExtensionInfo, ExtensionListParams, ExtensionPackageKind,
-    ExtensionReorderParams, ExtensionRepositoryOverrideInfo, ExtensionRepositoryOverrideParams,
-    ExtensionSetEnabledParams, ExtensionUpdateParams, IntegrationState, ResponseResult,
+    ExtensionPackageMutationParams, ExtensionReorderParams, ExtensionRepositoryOverrideInfo,
+    ExtensionRepositoryOverrideParams, ExtensionSetEnabledParams, ExtensionUpdateParams,
+    InstalledExtensionPackageInfo, IntegrationState, ResponseResult,
 };
 use crate::app::App;
 use crate::extensions::{CuratedExtension, ExtensionPackage};
@@ -167,6 +168,7 @@ impl App {
                 crate::extensions::load_state_from_path(&path, &self.extension_index)?;
             self.recover_extension_data_deletion(&path, &mut marketplace_state)?;
             self.recover_extension_lifecycle(&path, &mut marketplace_state)?;
+            self.recover_package_activation(&mut marketplace_state)?;
             self.marketplace_state = marketplace_state;
             self.apply_bundled_extension_state();
             Ok::<(), String>(())
@@ -174,6 +176,63 @@ impl App {
         if let Err(error) = result {
             tracing::warn!(%error, "failed to recover extension state during startup");
         }
+    }
+
+    fn recover_package_activation(
+        &self,
+        marketplace_state: &mut crate::extensions::MarketplaceStateFile,
+    ) -> Result<bool, String> {
+        use crate::extension_package::ActivationRecoveryV1;
+
+        let journal_path = crate::extensions::package_activation_journal_path()?;
+        let Some(journal) = crate::extension_package::read_activation_journal(&journal_path)?
+        else {
+            return Ok(false);
+        };
+        let active = marketplace_state
+            .packages
+            .packages
+            .get(&journal.package_id)
+            .and_then(|record| record.active.as_ref());
+        match journal.recovery(active) {
+            ActivationRecoveryV1::KeepCommittedCandidate
+            | ActivationRecoveryV1::RollBackCandidate => {}
+            ActivationRecoveryV1::CommitCandidate => {
+                let record = marketplace_state
+                    .packages
+                    .packages
+                    .get(&journal.package_id)
+                    .ok_or_else(|| {
+                        "package activation journal references a missing package".to_string()
+                    })?;
+                let prepared = marketplace_state.packages.prepare_activation(
+                    &journal.package_id,
+                    marketplace_state.packages.revision,
+                    record.revision,
+                    journal.operation_id.clone(),
+                    journal.candidate.clone(),
+                    journal.candidate_source.clone(),
+                    &self.extension_index.package_v1_trust(),
+                )?;
+                if prepared.expected_registry_revision != journal.expected_registry_revision
+                    || prepared.expected_package_revision != journal.expected_package_revision
+                {
+                    return Err("package activation recovery revision mismatch".into());
+                }
+                marketplace_state.packages.commit_activation(&journal)?;
+                crate::extensions::save_state_to_path(
+                    &crate::extensions::state_storage_path()?,
+                    marketplace_state,
+                )?;
+            }
+            ActivationRecoveryV1::Conflict => {
+                return Err(
+                    "package activation journal conflicts with durable registry state".into(),
+                )
+            }
+        }
+        crate::extension_package::remove_activation_journal(&journal_path)?;
+        Ok(true)
     }
 
     fn recover_extension_lifecycle(
@@ -330,6 +389,10 @@ impl App {
             tracing::warn!(%error, "failed to recover extension lifecycle during refresh");
             return false;
         }
+        if let Err(error) = self.recover_package_activation(&mut loaded) {
+            tracing::warn!(%error, "failed to recover package activation during refresh");
+            return false;
+        }
         let mut migrated = false;
         for repository in &self.state.repositories {
             let identities =
@@ -349,6 +412,7 @@ impl App {
         if !self.adopt_external_marketplace_state(loaded) {
             return false;
         }
+        self.activate_persisted_extension_packages();
         self.refresh_collection_documents();
         true
     }
@@ -591,6 +655,14 @@ impl App {
         &self,
         request: &crate::api::schema::Request,
     ) -> bool {
+        if matches!(
+            request.method,
+            crate::api::schema::Method::ExtensionPackageInspect(_)
+                | crate::api::schema::Method::ExtensionPackageInstall(_)
+                | crate::api::schema::Method::ExtensionPackageUpdate(_)
+        ) {
+            return true;
+        }
         let repository = match &request.method {
             crate::api::schema::Method::ExtensionInstall(params) => &params.repository,
             crate::api::schema::Method::ExtensionUpdate(params) => &params.repository,
@@ -614,6 +686,15 @@ impl App {
         request: crate::api::schema::Request,
         respond_to: std::sync::mpsc::Sender<String>,
     ) {
+        if matches!(
+            request.method,
+            crate::api::schema::Method::ExtensionPackageInspect(_)
+                | crate::api::schema::Method::ExtensionPackageInstall(_)
+                | crate::api::schema::Method::ExtensionPackageUpdate(_)
+        ) {
+            self.start_deferred_extension_git_package_request(request, respond_to);
+            return;
+        }
         let id = request.id;
         let (repository, action) = match request.method {
             crate::api::schema::Method::ExtensionInstall(params) if params.confirmed => (
@@ -743,6 +824,336 @@ impl App {
                 }),
             ));
         });
+    }
+
+    fn start_deferred_extension_git_package_request(
+        &self,
+        request: crate::api::schema::Request,
+        respond_to: std::sync::mpsc::Sender<String>,
+    ) {
+        use crate::extension_git_package::GitPackageAction;
+
+        let id = request.id;
+        let (source, action) = match request.method {
+            crate::api::schema::Method::ExtensionPackageInspect(params) => {
+                (params.source, GitPackageAction::Inspect)
+            }
+            crate::api::schema::Method::ExtensionPackageInstall(params) if params.approved => (
+                params.source,
+                GitPackageAction::Install {
+                    expected_package_sha256: params.expected_package_sha256,
+                    expected_manifest_sha256: params.expected_manifest_sha256,
+                },
+            ),
+            crate::api::schema::Method::ExtensionPackageUpdate(params) if params.approved => (
+                params.source,
+                GitPackageAction::Update {
+                    expected_package_sha256: params.expected_package_sha256,
+                    expected_manifest_sha256: params.expected_manifest_sha256,
+                },
+            ),
+            crate::api::schema::Method::ExtensionPackageInstall(_)
+            | crate::api::schema::Method::ExtensionPackageUpdate(_) => {
+                let _ = respond_to.send(encode_error(
+                    id,
+                    "confirmation_required",
+                    "package installation or update requires explicit approval",
+                ));
+                return;
+            }
+            _ => {
+                let _ = respond_to.send(encode_error(
+                    id,
+                    "extension_package_invalid",
+                    "request is not a Git package operation",
+                ));
+                return;
+            }
+        };
+        let event_tx = self.event_tx.clone();
+        std::thread::spawn(move || {
+            let inspection = crate::extension_git_package::inspect(
+                &source.url,
+                &source.commit,
+                Some(&source.package_path),
+            );
+            let _ = event_tx.blocking_send(crate::events::AppEvent::ExtensionGitPackageFinished(
+                Box::new(crate::extension_git_package::GitPackageWorkResult {
+                    id,
+                    action,
+                    inspection,
+                    respond_to,
+                }),
+            ));
+        });
+    }
+
+    pub(crate) fn handle_extension_git_package_finished(
+        &mut self,
+        result: crate::extension_git_package::GitPackageWorkResult,
+    ) {
+        let respond_to = result.respond_to.clone();
+        let response = self.finish_extension_git_package(result);
+        let _ = respond_to.send(response);
+    }
+
+    fn finish_extension_git_package(
+        &mut self,
+        result: crate::extension_git_package::GitPackageWorkResult,
+    ) -> String {
+        use crate::extension_git_package::GitPackageAction;
+        use crate::extension_package::{
+            PackageArtifactPointerV1, PackageLifecycleRecordV1, PackageLifecycleStatusV1,
+            PackageProvenanceV1,
+        };
+
+        let inspection = match result.inspection {
+            Ok(inspection) => inspection,
+            Err(error) => {
+                return encode_error(result.id, "extension_package_inspect_failed", error)
+            }
+        };
+        let manifest = &inspection.package.manifest;
+        let api_inspection = crate::api::schema::ExtensionPackageInspection {
+            source: crate::api::schema::ExtensionPackageSource {
+                url: inspection.source_url.clone(),
+                commit: inspection.commit.clone(),
+                package_path: inspection.package_path.clone(),
+            },
+            package_id: manifest.id.clone(),
+            version: manifest.version.clone(),
+            package_sha256: inspection.package.package_sha256.clone(),
+            manifest_sha256: inspection.package.manifest_sha256.clone(),
+            namespaces: manifest.namespaces.clone(),
+            services: manifest
+                .services
+                .iter()
+                .map(|service| service.id.clone())
+                .collect(),
+            requested_capabilities: inspection.capabilities.clone(),
+        };
+        let (expected_package, expected_manifest, updating) = match result.action {
+            GitPackageAction::Inspect => {
+                return encode_success(
+                    result.id,
+                    ResponseResult::ExtensionPackageInspected {
+                        inspection: api_inspection,
+                    },
+                );
+            }
+            GitPackageAction::Install {
+                expected_package_sha256,
+                expected_manifest_sha256,
+            } => (expected_package_sha256, expected_manifest_sha256, false),
+            GitPackageAction::Update {
+                expected_package_sha256,
+                expected_manifest_sha256,
+            } => (expected_package_sha256, expected_manifest_sha256, true),
+        };
+        if expected_package != inspection.package.package_sha256
+            || expected_manifest != inspection.package.manifest_sha256
+        {
+            return encode_error(
+                result.id,
+                "extension_package_approval_mismatch",
+                "approved package digests do not match the pinned Git artifact",
+            );
+        }
+        let _lock = match self.lock_extension_state_for_mutation() {
+            Ok(lock) => lock,
+            Err(error) => return encode_error(result.id, "extension_state_busy", error),
+        };
+        let previous = self.marketplace_state.clone();
+        let provenance = PackageProvenanceV1::Git {
+            url: inspection.source_url,
+            source_commit: inspection.commit,
+            package_path: inspection.package_path,
+            package_id: manifest.id.clone(),
+            version: manifest.version.clone(),
+            package_sha256: inspection.package.package_sha256.clone(),
+            manifest_sha256: inspection.package.manifest_sha256.clone(),
+        };
+        let store = match crate::extensions::package_storage_path() {
+            Ok(store) => store,
+            Err(error) => return encode_error(result.id, "extension_package_store_failed", error),
+        };
+        let incoming = match crate::platform::SecurePackageStaging::create(&store.join(".incoming"))
+        {
+            Ok(incoming) => incoming,
+            Err(error) => {
+                return encode_error(
+                    result.id,
+                    "extension_package_store_failed",
+                    error.to_string(),
+                )
+            }
+        };
+        if let Err(error) = incoming.write_file(
+            std::path::Path::new("package.vqrox"),
+            &inspection.package_bytes,
+            0o600,
+        ) {
+            return encode_error(
+                result.id,
+                "extension_package_store_failed",
+                error.to_string(),
+            );
+        }
+        let occupied = self.marketplace_state.packages.namespace_owners();
+        let installed = match crate::extension_package::install_local_file(
+            &incoming.path().join("package.vqrox"),
+            &store,
+            Some(&inspection.package.package_sha256),
+            provenance.clone(),
+            &occupied,
+            None,
+        ) {
+            Ok(installed) => installed,
+            Err(error) => {
+                return encode_error(result.id, "extension_package_install_failed", error)
+            }
+        };
+        let candidate_services = match Self::start_installed_package_services(&installed) {
+            Ok(services) => services,
+            Err(error) => {
+                return encode_error(result.id, "extension_package_activation_failed", error)
+            }
+        };
+        let generation = match self
+            .marketplace_state
+            .packages
+            .packages
+            .get(&manifest.id)
+            .and_then(|record| record.active.as_ref())
+        {
+            Some(active) => match active.runtime_generation.checked_add(1) {
+                Some(generation) => generation,
+                None => {
+                    return encode_error(
+                        result.id,
+                        "extension_revision_exhausted",
+                        "runtime generation exhausted",
+                    )
+                }
+            },
+            None => 1,
+        };
+        let pointer = PackageArtifactPointerV1 {
+            package_sha256: inspection.package.package_sha256,
+            version: manifest.version.clone(),
+            runtime_generation: generation,
+        };
+        let mut activation_journal = None;
+        let mutation = if updating {
+            let Some(record) = self.marketplace_state.packages.packages.get(&manifest.id) else {
+                return encode_error(
+                    result.id,
+                    "extension_package_not_found",
+                    "install the package before updating it",
+                );
+            };
+            let mut journal = match self.marketplace_state.packages.prepare_activation(
+                &manifest.id,
+                self.marketplace_state.packages.revision,
+                record.revision,
+                format!("git-update-{generation}"),
+                pointer,
+                provenance,
+                &self.extension_index.package_v1_trust(),
+            ) {
+                Ok(journal) => journal,
+                Err(error) => {
+                    return encode_error(result.id, "extension_package_update_failed", error)
+                }
+            };
+            let journal_path = match crate::extensions::package_activation_journal_path() {
+                Ok(path) => path,
+                Err(error) => {
+                    return encode_error(result.id, "extension_package_update_failed", error)
+                }
+            };
+            if let Err(error) =
+                crate::extension_package::write_activation_journal(&journal_path, &journal)
+            {
+                Err(error)
+            } else if let Err(error) = journal.advance(
+                crate::extension_package::ActivationPhaseV1::Prepared,
+                crate::extension_package::ActivationPhaseV1::ArtifactCommitted,
+            ) {
+                Err(error)
+            } else if let Err(error) =
+                crate::extension_package::write_activation_journal(&journal_path, &journal)
+            {
+                Err(error)
+            } else {
+                let committed = self.marketplace_state.packages.commit_activation(&journal);
+                if committed.is_ok() {
+                    activation_journal = Some((journal_path, journal));
+                }
+                committed
+            }
+        } else {
+            let record = PackageLifecycleRecordV1 {
+                package_id: manifest.id.clone(),
+                source: provenance,
+                previous_source: None,
+                namespaces: manifest.namespaces.clone(),
+                revision: 1,
+                status: PackageLifecycleStatusV1::Enabled,
+                active: Some(pointer),
+                previous: None,
+                activation_error: None,
+                pending_activation: None,
+                retained_data: true,
+            };
+            self.marketplace_state
+                .register_package_v1(
+                    &self.extension_index,
+                    record,
+                    self.marketplace_state.packages.revision,
+                )
+                .map(|_| ())
+        };
+        if let Err(error) = mutation {
+            self.marketplace_state = previous;
+            if let Ok(path) = crate::extensions::package_activation_journal_path() {
+                let _ = crate::extension_package::remove_activation_journal(&path);
+            }
+            return encode_error(result.id, "extension_package_activation_failed", error);
+        }
+        if let Err(error) = self.save_extension_state(_lock.as_ref()) {
+            self.marketplace_state = previous;
+            if let Some((journal_path, _)) = activation_journal.as_ref() {
+                let _ = crate::extension_package::remove_activation_journal(journal_path);
+            }
+            return encode_error(result.id, "extension_state_save_failed", error);
+        }
+        if let Some((journal_path, mut journal)) = activation_journal {
+            if let Err(error) = journal
+                .advance(
+                    crate::extension_package::ActivationPhaseV1::ArtifactCommitted,
+                    crate::extension_package::ActivationPhaseV1::RegistryCommitted,
+                )
+                .and_then(|()| {
+                    crate::extension_package::write_activation_journal(&journal_path, &journal)
+                })
+                .and_then(|()| crate::extension_package::remove_activation_journal(&journal_path))
+            {
+                tracing::warn!(%error, "package update committed but journal cleanup remains for startup recovery");
+            }
+        }
+        // Publish the already-running candidate only after its registry pointer is durable.
+        // Dropping the replaced supervisors retires the previous component runtime.
+        self.extension_package_services
+            .insert(manifest.id.clone(), candidate_services);
+        self.revoke_host_invocation_authority_for_package(&manifest.id);
+        match self.installed_git_package_info(&manifest.id) {
+            Ok(package) => encode_success(
+                result.id,
+                ResponseResult::ExtensionPackageChanged { package },
+            ),
+            Err(error) => encode_error(result.id, "extension_package_invalid", error),
+        }
     }
 
     pub(crate) fn handle_extension_artifact_staged(
@@ -962,6 +1373,436 @@ impl App {
                 extension: self.extension_info(&extension),
             },
         )
+    }
+
+    fn start_installed_package_services(
+        installed: &crate::extension_package::InstalledPackageV1,
+    ) -> Result<Vec<crate::extension_service::ExtensionServiceSupervisor>, String> {
+        let package = crate::extension_package::validate_package_file(
+            &std::path::Path::new(&installed.immutable_root).join("package.vqrox"),
+            Some(&installed.package_sha256),
+        )?;
+        let namespace = package
+            .descriptor
+            .manifest
+            .namespaces
+            .first()
+            .map_or(package.descriptor.manifest.id.as_str(), String::as_str);
+        let mut supervisors = Vec::new();
+        for service in &package.descriptor.manifest.services {
+            let mut supervisor =
+                crate::extension_service::ExtensionServiceSupervisor::from_installed_service(
+                    installed,
+                    &service.id,
+                    namespace,
+                    0,
+                )
+                .map_err(|error| error.to_string())?;
+            supervisor.start().map_err(|error| error.to_string())?;
+            supervisors.push(supervisor);
+        }
+        Ok(supervisors)
+    }
+
+    fn installed_package_from_record(
+        &self,
+        package_id: &str,
+        pointer: &crate::extension_package::PackageArtifactPointerV1,
+        source: &crate::extension_package::PackageProvenanceV1,
+    ) -> Result<crate::extension_package::InstalledPackageV1, String> {
+        let manifest_sha256 = match source {
+            crate::extension_package::PackageProvenanceV1::Git {
+                manifest_sha256, ..
+            }
+            | crate::extension_package::PackageProvenanceV1::Curated {
+                manifest_sha256, ..
+            }
+            | crate::extension_package::PackageProvenanceV1::Link {
+                manifest_sha256, ..
+            } => manifest_sha256.clone(),
+            crate::extension_package::PackageProvenanceV1::File { .. } => {
+                let root = crate::extensions::package_storage_path()?
+                    .join("sha256")
+                    .join(&pointer.package_sha256);
+                crate::extension_package::validate_package_file(
+                    &root.join("package.vqrox"),
+                    Some(&pointer.package_sha256),
+                )?
+                .descriptor
+                .manifest_sha256
+            }
+        };
+        Ok(crate::extension_package::InstalledPackageV1 {
+            package_id: package_id.into(),
+            version: pointer.version.clone(),
+            package_sha256: pointer.package_sha256.clone(),
+            manifest_sha256,
+            immutable_root: crate::extensions::package_storage_path()?
+                .join("sha256")
+                .join(&pointer.package_sha256)
+                .to_string_lossy()
+                .into_owned(),
+            provenance: source.clone(),
+        })
+    }
+
+    pub(crate) fn activate_persisted_extension_packages(&mut self) {
+        let package_ids = self
+            .marketplace_state
+            .packages
+            .packages
+            .iter()
+            .filter(|(_, record)| {
+                record.status == crate::extension_package::PackageLifecycleStatusV1::Enabled
+                    && matches!(
+                        record.source,
+                        crate::extension_package::PackageProvenanceV1::Git { .. }
+                    )
+            })
+            .map(|(package_id, _)| package_id.clone())
+            .collect::<Vec<_>>();
+        let mut active = std::collections::BTreeMap::new();
+        for package_id in package_ids {
+            let result = (|| {
+                let record = &self.marketplace_state.packages.packages[&package_id];
+                let pointer = record
+                    .active
+                    .as_ref()
+                    .ok_or_else(|| "enabled package has no active artifact".to_string())?;
+                let installed =
+                    self.installed_package_from_record(&package_id, pointer, &record.source)?;
+                Self::start_installed_package_services(&installed)
+            })();
+            match result {
+                Ok(supervisors) => {
+                    active.insert(package_id, supervisors);
+                }
+                Err(error) => {
+                    tracing::warn!(%package_id, %error, "failed to restore extension package runtime")
+                }
+            }
+        }
+        self.extension_package_services = active;
+    }
+
+    fn retire_extension_package_runtime(&mut self, package_id: &str) {
+        self.extension_package_services.remove(package_id);
+        self.revoke_host_invocation_authority_for_package(package_id);
+    }
+
+    fn installed_git_package_info(
+        &self,
+        package_id: &str,
+    ) -> Result<InstalledExtensionPackageInfo, String> {
+        use crate::extension_package::{PackageLifecycleStatusV1, PackageProvenanceV1};
+
+        let record = self
+            .marketplace_state
+            .packages
+            .packages
+            .get(package_id)
+            .ok_or_else(|| "package is not installed".to_string())?;
+        let PackageProvenanceV1::Git {
+            url,
+            source_commit,
+            package_path,
+            version,
+            package_sha256,
+            ..
+        } = &record.source
+        else {
+            return Err("package is not a Git-installed extension".into());
+        };
+        let root = crate::extensions::package_storage_path()?
+            .join("sha256")
+            .join(package_sha256);
+        let archive = root.join("package.vqrox");
+        let validated =
+            crate::extension_package::validate_package_file(&archive, Some(package_sha256))?;
+        let mut requested_capabilities = validated
+            .descriptor
+            .manifest
+            .services
+            .iter()
+            .flat_map(|service| service.capabilities.iter().cloned())
+            .collect::<Vec<_>>();
+        requested_capabilities.sort();
+        requested_capabilities.dedup();
+        Ok(InstalledExtensionPackageInfo {
+            package_id: package_id.into(),
+            version: version.clone(),
+            source: crate::api::schema::ExtensionPackageSource {
+                url: url.clone(),
+                commit: source_commit.clone(),
+                package_path: package_path.clone(),
+            },
+            package_sha256: package_sha256.clone(),
+            enabled: record.status == PackageLifecycleStatusV1::Enabled,
+            removed_retaining_data: record.status == PackageLifecycleStatusV1::RemovedRetainingData,
+            load_order: self
+                .marketplace_state
+                .packages
+                .load_order
+                .iter()
+                .position(|candidate| candidate == package_id)
+                .unwrap_or(usize::MAX),
+            requested_capabilities,
+            rollback_version: record
+                .previous
+                .as_ref()
+                .map(|previous| previous.version.clone()),
+            activation_error: record.activation_error.clone(),
+        })
+    }
+
+    pub(super) fn handle_extension_package_list(&self, id: String) -> String {
+        let mut packages = self
+            .marketplace_state
+            .packages
+            .packages
+            .iter()
+            .filter(|(_, record)| {
+                matches!(
+                    record.source,
+                    crate::extension_package::PackageProvenanceV1::Git { .. }
+                )
+            })
+            .map(|(package_id, _)| self.installed_git_package_info(package_id))
+            .collect::<Result<Vec<_>, _>>();
+        match packages.as_mut() {
+            Ok(packages) => {
+                packages.sort_by_key(|package| package.load_order);
+                encode_success(
+                    id,
+                    ResponseResult::ExtensionPackageList {
+                        packages: std::mem::take(packages),
+                    },
+                )
+            }
+            Err(error) => encode_error(id, "extension_package_invalid", error.clone()),
+        }
+    }
+
+    pub(super) fn handle_extension_package_enable(
+        &mut self,
+        id: String,
+        params: ExtensionPackageMutationParams,
+        enabled: bool,
+    ) -> String {
+        if !params.confirmed {
+            return encode_error(
+                id,
+                "confirmation_required",
+                "changing package enablement requires explicit confirmation",
+            );
+        }
+        let lock = match self.lock_extension_state_for_mutation() {
+            Ok(lock) => lock,
+            Err(error) => return encode_error(id, "extension_state_busy", error),
+        };
+        let previous = self.marketplace_state.clone();
+        let candidate_services = if enabled {
+            let Some(record) = self
+                .marketplace_state
+                .packages
+                .packages
+                .get(&params.package_id)
+            else {
+                return encode_error(
+                    id,
+                    "extension_package_not_found",
+                    "package is not installed",
+                );
+            };
+            let Some(pointer) = record.active.as_ref() else {
+                return encode_error(
+                    id,
+                    "extension_package_invalid",
+                    "package has no active artifact",
+                );
+            };
+            let installed = match self.installed_package_from_record(
+                &params.package_id,
+                pointer,
+                &record.source,
+            ) {
+                Ok(installed) => installed,
+                Err(error) => return encode_error(id, "extension_package_invalid", error),
+            };
+            match Self::start_installed_package_services(&installed) {
+                Ok(services) => Some(services),
+                Err(error) => {
+                    return encode_error(id, "extension_package_activation_failed", error)
+                }
+            }
+        } else {
+            None
+        };
+        let Some(record) = self
+            .marketplace_state
+            .packages
+            .packages
+            .get_mut(&params.package_id)
+        else {
+            return encode_error(
+                id,
+                "extension_package_not_found",
+                "package is not installed",
+            );
+        };
+        record.status = if enabled {
+            crate::extension_package::PackageLifecycleStatusV1::Enabled
+        } else {
+            crate::extension_package::PackageLifecycleStatusV1::Disabled
+        };
+        let Some(package_revision) = record.revision.checked_add(1) else {
+            return encode_error(
+                id,
+                "extension_revision_exhausted",
+                "package revision exhausted",
+            );
+        };
+        record.revision = package_revision;
+        let Some(registry_revision) = self.marketplace_state.packages.revision.checked_add(1)
+        else {
+            self.marketplace_state = previous;
+            return encode_error(
+                id,
+                "extension_revision_exhausted",
+                "registry revision exhausted",
+            );
+        };
+        self.marketplace_state.packages.revision = registry_revision;
+        if enabled
+            && !self
+                .marketplace_state
+                .packages
+                .load_order
+                .contains(&params.package_id)
+        {
+            self.marketplace_state
+                .packages
+                .load_order
+                .push(params.package_id.clone());
+        }
+        if let Err(error) = self.save_extension_state(lock.as_ref()) {
+            self.marketplace_state = previous;
+            return encode_error(id, "extension_state_save_failed", error);
+        }
+        if let Some(services) = candidate_services {
+            self.extension_package_services
+                .insert(params.package_id.clone(), services);
+        } else {
+            self.retire_extension_package_runtime(&params.package_id);
+        }
+        match self.installed_git_package_info(&params.package_id) {
+            Ok(package) => encode_success(id, ResponseResult::ExtensionPackageChanged { package }),
+            Err(error) => encode_error(id, "extension_package_invalid", error),
+        }
+    }
+
+    pub(super) fn handle_extension_package_remove(
+        &mut self,
+        id: String,
+        params: ExtensionPackageMutationParams,
+    ) -> String {
+        if !params.confirmed {
+            return encode_error(
+                id,
+                "confirmation_required",
+                "package removal requires explicit confirmation",
+            );
+        }
+        let lock = match self.lock_extension_state_for_mutation() {
+            Ok(lock) => lock,
+            Err(error) => return encode_error(id, "extension_state_busy", error),
+        };
+        let previous = self.marketplace_state.clone();
+        if let Err(error) = self
+            .marketplace_state
+            .packages
+            .remove_retaining_data(&params.package_id)
+        {
+            return encode_error(id, "extension_package_remove_failed", error);
+        }
+        if let Err(error) = self.save_extension_state(lock.as_ref()) {
+            self.marketplace_state = previous;
+            return encode_error(id, "extension_state_save_failed", error);
+        }
+        self.retire_extension_package_runtime(&params.package_id);
+        match self.installed_git_package_info(&params.package_id) {
+            Ok(package) => encode_success(id, ResponseResult::ExtensionPackageChanged { package }),
+            Err(error) => encode_error(id, "extension_package_invalid", error),
+        }
+    }
+
+    pub(super) fn handle_extension_package_rollback(
+        &mut self,
+        id: String,
+        params: ExtensionPackageMutationParams,
+    ) -> String {
+        if !params.confirmed {
+            return encode_error(
+                id,
+                "confirmation_required",
+                "package rollback requires explicit confirmation",
+            );
+        }
+        let lock = match self.lock_extension_state_for_mutation() {
+            Ok(lock) => lock,
+            Err(error) => return encode_error(id, "extension_state_busy", error),
+        };
+        let previous = self.marketplace_state.clone();
+        let candidate_services = {
+            let Some(record) = self
+                .marketplace_state
+                .packages
+                .packages
+                .get(&params.package_id)
+            else {
+                return encode_error(
+                    id,
+                    "extension_package_not_found",
+                    "package is not installed",
+                );
+            };
+            let (Some(pointer), Some(source)) =
+                (record.previous.as_ref(), record.previous_source.as_ref())
+            else {
+                return encode_error(
+                    id,
+                    "extension_package_rollback_failed",
+                    "package has no retained rollback artifact",
+                );
+            };
+            let installed =
+                match self.installed_package_from_record(&params.package_id, pointer, source) {
+                    Ok(installed) => installed,
+                    Err(error) => {
+                        return encode_error(id, "extension_package_rollback_failed", error)
+                    }
+                };
+            match Self::start_installed_package_services(&installed) {
+                Ok(services) => services,
+                Err(error) => {
+                    return encode_error(id, "extension_package_activation_failed", error)
+                }
+            }
+        };
+        if let Err(error) = self.marketplace_state.packages.rollback(&params.package_id) {
+            return encode_error(id, "extension_package_rollback_failed", error);
+        }
+        if let Err(error) = self.save_extension_state(lock.as_ref()) {
+            self.marketplace_state = previous;
+            return encode_error(id, "extension_state_save_failed", error);
+        }
+        self.extension_package_services
+            .insert(params.package_id.clone(), candidate_services);
+        self.revoke_host_invocation_authority_for_package(&params.package_id);
+        match self.installed_git_package_info(&params.package_id) {
+            Ok(package) => encode_success(id, ResponseResult::ExtensionPackageChanged { package }),
+            Err(error) => encode_error(id, "extension_package_invalid", error),
+        }
     }
 
     pub(super) fn handle_extension_list(&self, id: String, params: ExtensionListParams) -> String {
@@ -2060,5 +2901,73 @@ mod tests {
             }
         ));
         assert!(!app.disabled_extensions.contains("vqro.collections"));
+    }
+
+    #[tokio::test]
+    async fn package_retirement_revokes_extension_authority_without_destroying_host_ptys() {
+        let mut app = test_app();
+        app.state.workspaces = vec![crate::workspace::Workspace::test_new("retained-pty")];
+        app.state.ensure_test_terminals();
+        let terminal_ids = app.state.terminals.keys().cloned().collect::<Vec<_>>();
+        let mut receivers = Vec::new();
+        for terminal_id in &terminal_ids {
+            let (runtime, receiver) =
+                crate::terminal::TerminalRuntime::test_with_channel_capacity(80, 24, 1);
+            app.terminal_runtimes.insert(terminal_id.clone(), runtime);
+            receivers.push(receiver);
+        }
+        let runtime_count = app.terminal_runtimes.len();
+        assert!(!terminal_ids.is_empty());
+        assert!(terminal_ids
+            .iter()
+            .all(|terminal_id| app.terminal_runtimes.get(terminal_id).is_some()));
+
+        app.marketplace_state
+            .packages
+            .register(
+                crate::extension_package::PackageLifecycleRecordV1 {
+                    package_id: "example.retained".into(),
+                    source: crate::extension_package::PackageProvenanceV1::File {
+                        package_sha256: "a".repeat(64),
+                    },
+                    previous_source: None,
+                    namespaces: vec!["example.retained".into()],
+                    revision: 1,
+                    status: crate::extension_package::PackageLifecycleStatusV1::Enabled,
+                    active: Some(crate::extension_package::PackageArtifactPointerV1 {
+                        package_sha256: "a".repeat(64),
+                        version: "1.0.0".into(),
+                        runtime_generation: 1,
+                    }),
+                    previous: None,
+                    activation_error: None,
+                    pending_activation: None,
+                    retained_data: true,
+                },
+                0,
+                &std::collections::BTreeMap::new(),
+            )
+            .unwrap();
+        app.marketplace_state
+            .packages
+            .remove_retaining_data("example.retained")
+            .unwrap();
+        app.retire_extension_package_runtime("example.retained");
+
+        let record = &app.marketplace_state.packages.packages["example.retained"];
+        assert!(record.retained_data);
+        assert_eq!(
+            record.status,
+            crate::extension_package::PackageLifecycleStatusV1::RemovedRetainingData
+        );
+        assert!(app
+            .marketplace_state
+            .packages
+            .namespace_owners()
+            .contains_key("example.retained"));
+        assert_eq!(app.terminal_runtimes.len(), runtime_count);
+        assert!(terminal_ids
+            .iter()
+            .all(|terminal_id| app.terminal_runtimes.get(terminal_id).is_some()));
     }
 }
