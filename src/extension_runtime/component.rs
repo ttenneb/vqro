@@ -1475,6 +1475,78 @@ mod tests {
     }
 
     #[test]
+    fn component_terminal_snapshot_rejects_scope_change_at_final_authorization() {
+        let wat = include_str!("../../tests/fixtures/extension-component-service.wat")
+            .replace(";; INVOKE_BODY", HOST_CALL_BODY)
+            .replace(
+                r#"\22capability\22:\22state\22"#,
+                r#"\22capability\22:\22host.terminals.read\22"#,
+            )
+            .replace(
+                r#"\22method\22:\22state.snapshot\22"#,
+                r#"\22method\22:\22terminals.snapshot\22"#,
+            )
+            .replace(
+                r#"\22params\22:{}"#,
+                r#"\22params\22:{\22contract\22:\22host.terminals.v1\22}"#,
+            )
+            .replace("i32.const 500 i32.const 254", "i32.const 500 i32.const 302");
+        let component = component_bytes_from_wat(&wat);
+        let (root, installed) = install_component(
+            &component,
+            &[crate::extension_host_terminals::HOST_TERMINALS_READ_CAPABILITY],
+        );
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = crate::app::App::new(
+            &crate::config::Config::default(),
+            crate::app::AppPolicy::TEST,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        let authorization = crate::extension_host_terminals::install_test_package_and_authorize(
+            &mut app,
+            &installed,
+            "echo",
+            "example.component",
+            26,
+        );
+        let factory =
+            super::super::RuntimeFactory::installed(&installed, "echo", "example.component")
+                .unwrap();
+        let canceled = Arc::new(AtomicBool::new(false));
+        let join = std::thread::spawn(move || {
+            let mut dispatcher =
+                super::super::ExtensionRuntimeDispatcher::start(&factory, 26, canceled.as_ref())
+                    .unwrap();
+            dispatcher.invoke_with_host_terminals(
+                "conformance.echo",
+                serde_json::json!({}),
+                26,
+                Instant::now() + Duration::from_millis(750),
+                canceled,
+                authorization,
+            )
+        });
+        let capture = super::super::take_host_terminals_actor_request(
+            &mut app,
+            crate::extension_host_terminals::HostTerminalsActorMethod::Capture,
+            "component terminal capture",
+        );
+        app.handle_extension_host_terminals_call(*capture);
+        app.state.workspaces[0].tabs[0].id = crate::workspace::TabId::alloc().unwrap();
+        let validate = super::super::take_host_terminals_actor_request(
+            &mut app,
+            crate::extension_host_terminals::HostTerminalsActorMethod::Validate,
+            "component terminal final authorization",
+        );
+        app.handle_extension_host_terminals_call(*validate);
+        let response = join.join().unwrap().unwrap();
+        assert_eq!(response["error"]["code"], "stale_host_call_lease");
+        cleanup(root);
+    }
+
+    #[test]
     fn component_transact_preserves_json_null_and_delete_semantics() {
         let set_call = r#"{\22call_id\22:\22set-null\22,\22capability\22:\22host.state.write\22,\22depth\22:1,\22identity\22:{\22generation\22:26,\22namespace\22:\22example.component\22,\22package_id\22:\22example.component\22,\22service_id\22:\22echo\22},\22method\22:\22state.transact\22,\22namespace\22:\22example.component\22,\22params\22:{\22contract\22:\22host.state.v1\22,\22expected_revision\22:0,\22expected_store_generation\22:1,\22idempotency_key\22:\22set-null\22,\22operations\22:[{\22key\22:\22nullable\22,\22op\22:\22set\22,\22value\22:null}]},\22type\22:\22host_call\22}"#;
         let delete_call = r#"{\22call_id\22:\22delete-null\22,\22capability\22:\22host.state.write\22,\22depth\22:1,\22identity\22:{\22generation\22:26,\22namespace\22:\22example.component\22,\22package_id\22:\22example.component\22,\22service_id\22:\22echo\22},\22method\22:\22state.transact\22,\22namespace\22:\22example.component\22,\22params\22:{\22contract\22:\22host.state.v1\22,\22expected_revision\22:1,\22expected_store_generation\22:1,\22idempotency_key\22:\22delete-null\22,\22operations\22:[{\22key\22:\22nullable\22,\22op\22:\22delete\22}]},\22type\22:\22host_call\22}"#;

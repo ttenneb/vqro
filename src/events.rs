@@ -203,6 +203,8 @@ pub enum AppEvent {
     ExtensionCatalogCapacityAvailable,
     /// Staged package-v1 host-state request. The App actor remains the sole state authority.
     ExtensionHostStateCall(Box<crate::extension_host_state::HostStateActorRequest>),
+    /// Staged read-only package-v1 terminal snapshot request.
+    ExtensionHostTerminalsCall(Box<crate::extension_host_terminals::HostTerminalsActorRequest>),
     ExtensionStatePersisted(Box<crate::app::ExtensionStatePersistResult>),
     HostDocumentProviderActionFinished {
         request_id: String,

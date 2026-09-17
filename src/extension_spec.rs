@@ -10,6 +10,7 @@ pub const EXTENSION_SERVICE_SCHEMA_ID_V1: &str = "https://vqro.dev/schema/extens
 pub const RUNTIME_SERVICE_SCHEMA_ID_V1: &str = "https://vqro.dev/schema/service/v1";
 pub const HOST_STATE_SCHEMA_ID_V1: &str = "https://vqro.dev/schema/host-state/v1";
 pub const HOST_DOCUMENT_SCHEMA_ID_V2: &str = crate::host_document_v2::HOST_DOCUMENT_SCHEMA_ID_V2;
+pub const HOST_TERMINALS_SCHEMA_ID_V1: &str = "https://vqro.dev/schema/host-terminals/v1";
 pub const EXTENSION_BUNDLE_SCHEMA_ID_V1: &str = "https://vqro.dev/schema/extensions/v1";
 pub const PACKAGE_SCHEMA_ID_V1: &str = crate::extension_package::PACKAGE_SCHEMA_ID_V1;
 pub const EXTENSION_MANIFEST_SCHEMA_ID_V2: &str = crate::extension_package::MANIFEST_SCHEMA_ID_V2;
@@ -224,6 +225,37 @@ pub fn host_document_v2_schema_document() -> serde_json::Value {
     schema
 }
 
+pub fn host_terminals_schema_document() -> serde_json::Value {
+    let mut document = serde_json::json!({
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$id": HOST_TERMINALS_SCHEMA_ID_V1,
+        "title": "staged read-only host terminals contract v1",
+        "contract": crate::extension_host_terminals::HOST_TERMINALS_CONTRACT_V1,
+        "availability": "staged; production package activation is not enabled",
+        "capabilities": {
+            "snapshot": crate::extension_host_terminals::HOST_TERMINALS_READ_CAPABILITY,
+        },
+        "methods": [crate::extension_host_terminals::HOST_TERMINALS_SNAPSHOT_METHOD],
+        "limits": {
+            "max_response_bytes": crate::extension_host_terminals::MAX_HOST_TERMINALS_RESPONSE_BYTES,
+            "max_terminals_per_tab": crate::admission::MAX_TAB_PANES,
+            "max_containers_per_tab": crate::admission::MAX_GROUPS_PER_TAB,
+            "max_members_per_container": crate::admission::MAX_GROUP_MEMBERS,
+        },
+        "schemas": {
+            "snapshot_params": scoped_schema::<crate::extension_host_terminals::HostTerminalsSnapshotParamsV1>("snapshot_params"),
+            "snapshot": scoped_schema::<crate::extension_host_terminals::HostTerminalsSnapshotV1>("snapshot"),
+        }
+    });
+    for schema in ["snapshot_params", "snapshot"] {
+        document["schemas"][schema]["properties"]["contract"] = serde_json::json!({
+            "const": crate::extension_host_terminals::HOST_TERMINALS_CONTRACT_V1,
+            "type": "string",
+        });
+    }
+    document
+}
+
 pub fn package_schema_document() -> serde_json::Value {
     serde_json::json!({
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -377,6 +409,10 @@ pub fn host_state_schema_json() -> &'static str {
 
 pub fn host_document_v2_schema_json() -> &'static str {
     include_str!("../docs/next/api/host-document-v2.schema.json")
+}
+
+pub fn host_terminals_schema_json() -> &'static str {
+    include_str!("../docs/next/api/host-terminals-v1.schema.json")
 }
 
 pub fn service_schema_json() -> &'static str {
@@ -586,6 +622,10 @@ mod tests {
             (
                 "docs/next/api/host-document-v2.schema.json",
                 host_document_v2_schema_document(),
+            ),
+            (
+                "docs/next/api/host-terminals-v1.schema.json",
+                host_terminals_schema_document(),
             ),
             (
                 "docs/next/api/vqro-service-v1.schema.json",

@@ -1199,6 +1199,74 @@ printf '{"type":"response","id":%s,"result":%s}\n' "$id" "$host_response"
 
     #[cfg(unix)]
     #[test]
+    fn installed_process_terminal_snapshot_rejects_catalog_change_at_final_authorization() {
+        let script = r#"#!/bin/sh
+printf '%s\n' '{"type":"hello","protocol":2,"service_id":"echo","requested_capabilities":[],"methods":["conformance.echo"]}'
+IFS= read -r welcome
+IFS= read -r request
+printf '%s\n' '{"type":"host_call","call_id":"call-1","identity":{"package_id":"example.runtime","namespace":"example.runtime","service_id":"echo","generation":9},"depth":1,"capability":"host.terminals.read","method":"terminals.snapshot","namespace":"example.runtime","params":{"contract":"host.terminals.v1"}}'
+IFS= read -r host_response
+id=$(printf '%s' "$request" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
+printf '{"type":"response","id":%s,"result":%s}\n' "$id" "$host_response"
+"#;
+        let (root, installed) = install_package_bytes(process_package_with(
+            script,
+            &[],
+            &[crate::extension_host_terminals::HOST_TERMINALS_READ_CAPABILITY],
+            &[],
+        ));
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = crate::app::App::new(
+            &crate::config::Config::default(),
+            crate::app::AppPolicy::TEST,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        let authorization = crate::extension_host_terminals::install_test_package_and_authorize(
+            &mut app,
+            &installed,
+            "echo",
+            "example.runtime",
+            9,
+        );
+        let factory =
+            super::super::RuntimeFactory::installed_process(&installed, "echo", "example.runtime")
+                .unwrap();
+        let canceled = Arc::new(AtomicBool::new(false));
+        let join = std::thread::spawn(move || {
+            let mut dispatcher =
+                super::super::ExtensionRuntimeDispatcher::start(&factory, 9, canceled.as_ref())
+                    .unwrap();
+            dispatcher.invoke_with_host_terminals(
+                "conformance.echo",
+                serde_json::json!({}),
+                9,
+                Instant::now() + Duration::from_millis(750),
+                canceled,
+                authorization,
+            )
+        });
+        let capture = super::super::take_host_terminals_actor_request(
+            &mut app,
+            crate::extension_host_terminals::HostTerminalsActorMethod::Capture,
+            "process terminal capture",
+        );
+        app.handle_extension_host_terminals_call(*capture);
+        app.marketplace_state.packages.revision += 1;
+        let validate = super::super::take_host_terminals_actor_request(
+            &mut app,
+            crate::extension_host_terminals::HostTerminalsActorMethod::Validate,
+            "process terminal final authorization",
+        );
+        app.handle_extension_host_terminals_call(*validate);
+        let response = join.join().unwrap().unwrap();
+        assert_eq!(response["error"]["code"], "stale_host_call_lease");
+        cleanup_package_root(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn installed_process_transact_preserves_json_null_and_delete_semantics() {
         let script = r#"#!/bin/sh
 printf '%s\n' '{"type":"hello","protocol":2,"service_id":"echo","requested_capabilities":[],"methods":["conformance.echo"]}'

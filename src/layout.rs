@@ -281,6 +281,11 @@ impl TileLayout {
         self.collections.values()
     }
 
+    #[cfg(test)]
+    pub(crate) fn replace_typed_root_for_test(&mut self, root: TypedNode) {
+        self.root = root;
+    }
+
     pub fn placement(&self, pane_id: PaneId) -> Option<PanePlacement> {
         if self.tiled_pane_ids().contains(&pane_id) {
             return Some(PanePlacement::Tiled);

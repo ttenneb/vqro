@@ -1725,6 +1725,7 @@ impl AppState {
             | AppEvent::ExtensionArtifactStaged(_)
             | AppEvent::ExtensionCatalogCapacityAvailable
             | AppEvent::ExtensionHostStateCall(_)
+            | AppEvent::ExtensionHostTerminalsCall(_)
             | AppEvent::ExtensionStatePersisted(_)
             | AppEvent::ExtensionServiceFinished(_)
             | AppEvent::HostDocumentFinished(_)

@@ -355,6 +355,48 @@ impl App {
         }
     }
 
+    /// Issues or supersedes the shared package/service invocation authority.
+    /// Future package lifecycle activation must own this call and revoke the same
+    /// authority on disable, replacement, or retirement; production does not yet call it.
+    #[allow(dead_code)]
+    pub(crate) fn issue_staged_host_invocation_authority(
+        &mut self,
+        package_id: &str,
+        service_id: &str,
+        service_generation: u64,
+        provider_generation: u64,
+        runtime_generation: u64,
+    ) -> std::sync::Arc<crate::extension_host_state::HostInvocationAuthority> {
+        let authority_key = (package_id.to_owned(), service_id.to_owned());
+        match self.host_invocation_authorities.entry(authority_key) {
+            std::collections::hash_map::Entry::Occupied(mut entry) => {
+                if entry.get().is_revoked() {
+                    let replacement = crate::extension_host_state::HostInvocationAuthority::new(
+                        service_generation,
+                        provider_generation,
+                        runtime_generation,
+                    );
+                    entry.insert(replacement.clone());
+                    replacement
+                } else {
+                    entry.get().supersede(
+                        service_generation,
+                        provider_generation,
+                        runtime_generation,
+                    );
+                    entry.get().clone()
+                }
+            }
+            std::collections::hash_map::Entry::Vacant(entry) => entry
+                .insert(crate::extension_host_state::HostInvocationAuthority::new(
+                    service_generation,
+                    provider_generation,
+                    runtime_generation,
+                ))
+                .clone(),
+        }
+    }
+
     /// Issues staged package-v1 authorization. No production catalog currently invokes this.
     #[allow(dead_code)] // Removed when package activation begins issuing these leases.
     pub(crate) fn stage_host_state_authorization(
@@ -398,37 +440,13 @@ impl App {
         }
         let catalog_revision = registry.revision;
         let package_revision = record.revision;
-        let authority_key = (
-            binding.package_id().to_owned(),
-            binding.service_id().to_owned(),
+        let authority = self.issue_staged_host_invocation_authority(
+            binding.package_id(),
+            binding.service_id(),
+            manager_generation,
+            provider_generation,
+            runtime_generation,
         );
-        let authority = match self.host_state_lease_authorities.entry(authority_key) {
-            std::collections::hash_map::Entry::Occupied(mut entry) => {
-                if entry.get().is_revoked() {
-                    let replacement = crate::extension_host_state::HostStateLeaseAuthority::new(
-                        manager_generation,
-                        provider_generation,
-                        runtime_generation,
-                    );
-                    entry.insert(replacement.clone());
-                    replacement
-                } else {
-                    entry.get().supersede(
-                        manager_generation,
-                        provider_generation,
-                        runtime_generation,
-                    );
-                    entry.get().clone()
-                }
-            }
-            std::collections::hash_map::Entry::Vacant(entry) => entry
-                .insert(crate::extension_host_state::HostStateLeaseAuthority::new(
-                    manager_generation,
-                    provider_generation,
-                    runtime_generation,
-                ))
-                .clone(),
-        };
         Ok(
             crate::extension_host_state::HostStateInvocationAuthorization {
                 package_id: binding.package_id().to_owned(),
@@ -450,14 +468,19 @@ impl App {
         )
     }
 
-    #[allow(dead_code)] // Used when staged providers are retired before production activation.
-    pub(crate) fn revoke_host_state_authorization(&mut self, package_id: &str, service_id: &str) {
+    #[allow(dead_code)] // Future lifecycle retirement hook; production activation remains disabled.
+    pub(crate) fn revoke_host_invocation_authority(&mut self, package_id: &str, service_id: &str) {
         if let Some(authority) = self
-            .host_state_lease_authorities
+            .host_invocation_authorities
             .remove(&(package_id.into(), service_id.into()))
         {
             authority.revoke();
         }
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn revoke_host_state_authorization(&mut self, package_id: &str, service_id: &str) {
+        self.revoke_host_invocation_authority(package_id, service_id);
     }
 
     pub(crate) fn handle_extension_host_state_call(
@@ -514,7 +537,7 @@ impl App {
                     && active.version == request.lease.artifact_version
             })
             && self
-                .host_state_lease_authorities
+                .host_invocation_authorities
                 .get(&(
                     request.lease.package_id.clone(),
                     request.lease.service_id.clone(),

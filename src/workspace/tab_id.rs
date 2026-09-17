@@ -9,7 +9,7 @@ pub(crate) const MAX_TAB_ID_BYTES: usize = TAB_ID_PREFIX.len() + TAB_ID_RANDOM_B
 ///
 /// This identity is independent from the generation-1 public
 /// `workspace:t<number>` handle, display order, and label.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, schemars::JsonSchema)]
 #[serde(transparent)]
 pub struct TabId(String);
 

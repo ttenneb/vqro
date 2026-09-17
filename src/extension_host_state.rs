@@ -105,14 +105,14 @@ impl From<crate::extension_state::ExtensionStateCommitV1> for HostStateCommitV1 
 }
 
 #[derive(Debug)]
-pub(crate) struct HostStateLeaseAuthority {
+pub(crate) struct HostInvocationAuthority {
     revoked: AtomicBool,
     manager_generation: AtomicU64,
     provider_generation: AtomicU64,
     runtime_generation: AtomicU64,
 }
 
-impl HostStateLeaseAuthority {
+impl HostInvocationAuthority {
     // Staged until production package activation begins issuing leases.
     #[allow(dead_code)]
     pub(crate) fn new(
@@ -154,16 +154,32 @@ impl HostStateLeaseAuthority {
         self.revoked.load(Ordering::Acquire)
     }
 
-    pub(crate) fn permits(&self, lease: &HostStateInvocationLease) -> bool {
+    pub(crate) fn permits_generations(
+        &self,
+        service_generation: u64,
+        provider_generation: u64,
+        runtime_generation: u64,
+    ) -> bool {
         !self.revoked.load(Ordering::Acquire)
-            && self.manager_generation.load(Ordering::Acquire) == lease.manager_generation
-            && self.provider_generation.load(Ordering::Acquire) == lease.provider_generation
-            && self.runtime_generation.load(Ordering::Acquire) == lease.runtime_generation
+            && self.manager_generation.load(Ordering::Acquire) == service_generation
+            && self.provider_generation.load(Ordering::Acquire) == provider_generation
+            && self.runtime_generation.load(Ordering::Acquire) == runtime_generation
+    }
+
+    pub(crate) fn permits(&self, lease: &HostStateInvocationLease) -> bool {
+        self.permits_generations(
+            lease.manager_generation,
+            lease.provider_generation,
+            lease.runtime_generation,
+        )
     }
 }
 
+/// Package-bound revocation authority shared by staged host-call contracts.
+pub(crate) type HostStateLeaseAuthority = HostInvocationAuthority;
+
 #[derive(Clone, Debug)]
-pub(crate) struct HostStateProviderBinding {
+pub(crate) struct HostProviderBinding {
     package_id: String,
     service_id: String,
     namespace: String,
@@ -171,7 +187,7 @@ pub(crate) struct HostStateProviderBinding {
     artifact_version: String,
 }
 
-impl HostStateProviderBinding {
+impl HostProviderBinding {
     // Staged until production package activation constructs provider bindings.
     #[allow(dead_code)]
     pub(crate) fn from_installed(
@@ -200,8 +216,7 @@ impl HostStateProviderBinding {
             || !manifest.namespaces.iter().any(|owned| owned == namespace)
         {
             return Err(
-                "host-state provider does not match the verified artifact, service, or namespace"
-                    .into(),
+                "host provider does not match the verified artifact, service, or namespace".into(),
             );
         }
         Ok(Self {
@@ -250,6 +265,9 @@ impl HostStateProviderBinding {
         }
     }
 }
+
+/// Backward-compatible name for the shared verified package/service/artifact binding.
+pub(crate) type HostStateProviderBinding = HostProviderBinding;
 
 #[derive(Clone, Debug)]
 pub(crate) struct HostStateInvocationAuthorization {

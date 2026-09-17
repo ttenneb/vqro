@@ -216,10 +216,10 @@ pub struct App {
     pub(crate) host_semantic_retry_scheduled: std::collections::HashSet<String>,
     pub(crate) host_document_confirmation_grants:
         HashMap<(String, String, u64, u64, String), api::HostDocumentConfirmationGrant>,
-    /// App-owned revocation authorities for staged package-v1 host-state providers.
-    pub(crate) host_state_lease_authorities: HashMap<
+    /// App-owned revocation authorities shared by staged package-v1 host-call providers.
+    pub(crate) host_invocation_authorities: HashMap<
         (String, String),
-        std::sync::Arc<crate::extension_host_state::HostStateLeaseAuthority>,
+        std::sync::Arc<crate::extension_host_state::HostInvocationAuthority>,
     >,
 }
 
@@ -949,7 +949,7 @@ impl App {
             host_semantic_retry_attempts: HashMap::new(),
             host_semantic_retry_scheduled: std::collections::HashSet::new(),
             host_document_confirmation_grants: HashMap::new(),
-            host_state_lease_authorities: HashMap::new(),
+            host_invocation_authorities: HashMap::new(),
         };
         app.configure_tab_bar_status(&config.ui.tab_bar_right, &config.ui.tab_bar_right_separator);
         app.configure_window_title(&config.ui.window_title);

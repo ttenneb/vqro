@@ -11,7 +11,7 @@ pub(crate) const MAX_TERMINAL_ID_BYTES: usize =
 /// A terminal may move between panes or survive a server handoff without
 /// changing this identity. Pane and layout identities must never be used as a
 /// substitute at public runtime boundaries.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, schemars::JsonSchema)]
 #[serde(transparent)]
 pub struct TerminalId(String);
 

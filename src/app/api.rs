@@ -8,6 +8,7 @@ pub(crate) use collections::HostDocumentConfirmationGrant;
 mod delegations;
 mod env;
 pub(crate) mod extension_state;
+mod extension_terminals;
 mod extensions;
 mod integrations;
 mod layouts;
@@ -143,6 +144,10 @@ impl App {
             }
             AppEvent::ExtensionHostStateCall(request) => {
                 self.handle_extension_host_state_call(*request);
+                return Vec::new();
+            }
+            AppEvent::ExtensionHostTerminalsCall(request) => {
+                self.handle_extension_host_terminals_call(*request);
                 return Vec::new();
             }
             AppEvent::ExtensionStatePersisted(result) => {

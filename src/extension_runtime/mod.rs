@@ -349,6 +349,11 @@ impl RuntimeFactory {
     }
 }
 
+enum HostInvocationAuthorization {
+    State(crate::extension_host_state::HostStateInvocationAuthorization),
+    Terminals(crate::extension_host_terminals::HostTerminalsInvocationAuthorization),
+}
+
 pub(crate) struct ExtensionRuntimeDispatcher {
     identity: RuntimeIdentityV1,
     grants: RuntimeGrants,
@@ -452,9 +457,49 @@ impl ExtensionRuntimeDispatcher {
         canceled: Arc<AtomicBool>,
         authorization: crate::extension_host_state::HostStateInvocationAuthorization,
     ) -> Result<serde_json::Value, RuntimeError> {
+        self.invoke_with_host_authorization(
+            method,
+            params,
+            expected_generation,
+            deadline,
+            canceled,
+            HostInvocationAuthorization::State(authorization),
+        )
+    }
+
+    /// Staged read-only package-v1 terminal snapshot entry point.
+    #[allow(dead_code)]
+    pub(crate) fn invoke_with_host_terminals(
+        &mut self,
+        method: &str,
+        params: serde_json::Value,
+        expected_generation: u64,
+        deadline: Instant,
+        canceled: Arc<AtomicBool>,
+        authorization: crate::extension_host_terminals::HostTerminalsInvocationAuthorization,
+    ) -> Result<serde_json::Value, RuntimeError> {
+        self.invoke_with_host_authorization(
+            method,
+            params,
+            expected_generation,
+            deadline,
+            canceled,
+            HostInvocationAuthorization::Terminals(authorization),
+        )
+    }
+
+    fn invoke_with_host_authorization(
+        &mut self,
+        method: &str,
+        params: serde_json::Value,
+        expected_generation: u64,
+        deadline: Instant,
+        canceled: Arc<AtomicBool>,
+        authorization: HostInvocationAuthorization,
+    ) -> Result<serde_json::Value, RuntimeError> {
         if !self.grants.installed_package {
             return Err(RuntimeError::Configuration(
-                "legacy and preflight runtimes cannot receive host-state leases".into(),
+                "legacy and preflight runtimes cannot receive package host-call leases".into(),
             ));
         }
         self.invoke_inner(
@@ -474,10 +519,7 @@ impl ExtensionRuntimeDispatcher {
         expected_generation: u64,
         deadline: Instant,
         canceled: &AtomicBool,
-        host_state: Option<(
-            crate::extension_host_state::HostStateInvocationAuthorization,
-            Arc<AtomicBool>,
-        )>,
+        host_authorization: Option<(HostInvocationAuthorization, Arc<AtomicBool>)>,
     ) -> Result<serde_json::Value, RuntimeError> {
         if expected_generation != self.identity.generation {
             return Err(RuntimeError::StaleGeneration {
@@ -522,27 +564,45 @@ impl ExtensionRuntimeDispatcher {
             deadline_ms = deadline.saturating_duration_since(Instant::now()).as_millis() as u64,
             "dispatching extension runtime request"
         );
-        let host_calls = if let Some((authorization, canceled)) = host_state {
-            let event_tx = authorization.event_tx.clone();
-            let lease = authorization.bind(
-                request.request_id.clone(),
-                self.identity.clone(),
-                deadline,
-                canceled,
-            );
-            Arc::new(RuntimeHostCallRouter::new(
-                crate::extension_host_state::HostStateCallHandler::new(
+        let host_calls = match host_authorization {
+            Some((HostInvocationAuthorization::State(authorization), canceled)) => {
+                let event_tx = authorization.event_tx.clone();
+                let lease = authorization.bind(
+                    request.request_id.clone(),
                     self.identity.clone(),
-                    self.grants.capabilities.clone(),
-                    lease,
-                    event_tx,
-                ),
-            ))
-        } else {
-            Arc::new(RuntimeHostCallRouter::new(DisabledHostCalls {
+                    deadline,
+                    canceled,
+                );
+                Arc::new(RuntimeHostCallRouter::new(
+                    crate::extension_host_state::HostStateCallHandler::new(
+                        self.identity.clone(),
+                        self.grants.capabilities.clone(),
+                        lease,
+                        event_tx,
+                    ),
+                ))
+            }
+            Some((HostInvocationAuthorization::Terminals(authorization), canceled)) => {
+                let event_tx = authorization.event_tx.clone();
+                let lease = authorization.bind(
+                    request.request_id.clone(),
+                    self.identity.clone(),
+                    deadline,
+                    canceled,
+                );
+                Arc::new(RuntimeHostCallRouter::new(
+                    crate::extension_host_terminals::HostTerminalsCallHandler::new(
+                        self.identity.clone(),
+                        self.grants.capabilities.clone(),
+                        lease,
+                        event_tx,
+                    ),
+                ))
+            }
+            None => Arc::new(RuntimeHostCallRouter::new(DisabledHostCalls {
                 identity: self.identity.clone(),
                 grants: self.grants.clone(),
-            }))
+            })),
         };
         let result = self
             .runtime
@@ -643,6 +703,38 @@ fn handle_app_events_until<T: std::fmt::Debug>(
             Err(tokio::sync::mpsc::error::TryRecvError::Empty) => std::thread::yield_now(),
             Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
                 fail_app_event_wait(context, handled, "app event channel disconnected", worker);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+fn take_host_terminals_actor_request(
+    app: &mut crate::app::App,
+    expected: crate::extension_host_terminals::HostTerminalsActorMethod,
+    context: &str,
+) -> Box<crate::extension_host_terminals::HostTerminalsActorRequest> {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let mut handled = 0;
+    loop {
+        assert!(Instant::now() < deadline, "timed out waiting for {context}");
+        match app.event_rx.try_recv() {
+            Ok(crate::events::AppEvent::ExtensionHostTerminalsCall(request))
+                if request.method == expected =>
+            {
+                return request;
+            }
+            Ok(event) => {
+                app.handle_internal_event(event);
+                handled += 1;
+                assert!(
+                    handled <= crate::app::APP_EVENT_CHANNEL_CAPACITY,
+                    "event limit exceeded waiting for {context}"
+                );
+            }
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty) => std::thread::yield_now(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                panic!("app event channel disconnected waiting for {context}");
             }
         }
     }
