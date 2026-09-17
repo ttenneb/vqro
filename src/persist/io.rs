@@ -87,6 +87,115 @@ fn resolve_write_target(path: &Path) -> std::io::Result<PathBuf> {
     Ok(current)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AtomicSessionSaveOutcome {
+    NotPublished,
+    PublicationUncertain,
+}
+
+#[derive(Debug)]
+pub(crate) struct AtomicSessionSaveError {
+    pub(crate) source: std::io::Error,
+    // Phase 1 has no production caller to inspect the publication outcome yet.
+    #[allow(dead_code)]
+    pub(crate) outcome: AtomicSessionSaveOutcome,
+}
+
+impl std::fmt::Display for AtomicSessionSaveError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.source.fmt(formatter)
+    }
+}
+
+/// Atomically publishes a session snapshot without changing current save behavior.
+///
+/// The resolved parent must already exist durably and be a trusted private directory governed by
+/// an exclusive persistence writer. Production integration additionally requires deterministic
+/// create, write, and cleanup fault injection plus coordinator fencing. Phase 1 stages this
+/// contract without a production caller.
+#[allow(dead_code)]
+pub(crate) fn save_session_atomically(
+    snapshot: &SessionSnapshot,
+) -> Result<(), AtomicSessionSaveError> {
+    save_session_atomically_to_path_with(
+        &session_path(),
+        snapshot,
+        std::fs::File::sync_all,
+        crate::platform::replace_file,
+        crate::platform::sync_containing_directory,
+    )
+}
+
+fn save_session_atomically_to_path_with<SyncTemporary, Replace, SyncDirectory>(
+    path: &Path,
+    snapshot: &SessionSnapshot,
+    sync_temporary: SyncTemporary,
+    replace: Replace,
+    sync_directory: SyncDirectory,
+) -> Result<(), AtomicSessionSaveError>
+where
+    SyncTemporary: FnOnce(&std::fs::File) -> std::io::Result<()>,
+    Replace: FnOnce(&Path, &Path) -> std::io::Result<()>,
+    SyncDirectory: FnOnce(&Path) -> std::io::Result<()>,
+{
+    let not_published = |source| AtomicSessionSaveError {
+        source,
+        outcome: AtomicSessionSaveOutcome::NotPublished,
+    };
+    let publication_uncertain = |source| AtomicSessionSaveError {
+        source,
+        outcome: AtomicSessionSaveOutcome::PublicationUncertain,
+    };
+
+    let target = crate::platform::resolve_write_target(path).map_err(not_published)?;
+    let parent = target.parent().ok_or_else(|| {
+        not_published(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "session path has no parent directory",
+        ))
+    })?;
+    let parent_metadata = std::fs::metadata(parent).map_err(not_published)?;
+    if !parent_metadata.is_dir() {
+        return Err(not_published(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "session parent path is not a directory",
+        )));
+    }
+
+    let mut json =
+        serde_json::to_vec_pretty(snapshot).map_err(|source| not_published(source.into()))?;
+    json.push(b'\n');
+    if json.len() as u64 > MAX_SESSION_SNAPSHOT_BYTES {
+        return Err(not_published(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "session file exceeds its size limit",
+        )));
+    }
+
+    let mut random = [0_u8; 16];
+    crate::platform::fill_secure_random(&mut random).map_err(not_published)?;
+    let suffix = random
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let temporary_path = target.with_extension(format!("json.atomic.tmp.{suffix}"));
+    let mut temporary =
+        crate::platform::create_private_state_file(&temporary_path).map_err(not_published)?;
+    let preparation = temporary
+        .write_all(&json)
+        .and_then(|()| sync_temporary(&temporary));
+    drop(temporary);
+    if let Err(source) = preparation {
+        // This pathname cleanup is safe only before replacement is invoked, under the documented
+        // trusted-private-parent and exclusive-writer precondition. After invocation, even an
+        // error may mean the source was moved and its old name was reused by another writer.
+        let _ = std::fs::remove_file(&temporary_path);
+        return Err(not_published(source));
+    }
+    replace(&temporary_path, &target).map_err(publication_uncertain)?;
+    sync_directory(&target).map_err(publication_uncertain)
+}
+
 pub(super) fn save_to_path(path: &Path, snapshot: &SessionSnapshot) -> std::io::Result<()> {
     save_json_to_path(path, snapshot, MAX_SESSION_SNAPSHOT_BYTES)
 }
@@ -629,6 +738,315 @@ mod tests {
             StartupSessionLoad::Rejected(_)
         ));
         std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    fn atomic_temporary_paths(path: &Path) -> Vec<PathBuf> {
+        let prefix = format!(
+            "{}.atomic.tmp.",
+            path.file_name().unwrap().to_string_lossy()
+        );
+        std::fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|candidate| {
+                candidate
+                    .file_name()
+                    .is_some_and(|name| name.to_string_lossy().starts_with(&prefix))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn atomic_session_save_requires_an_existing_parent() {
+        let path = temp_session_path("atomic-missing-parent");
+        assert!(!path.parent().unwrap().exists());
+
+        let error = save_session_atomically_to_path_with(
+            &path,
+            &empty_snapshot(),
+            std::fs::File::sync_all,
+            |_, _| panic!("replace must not run without an existing parent"),
+            |_| panic!("directory sync must not run without an existing parent"),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.outcome, AtomicSessionSaveOutcome::NotPublished);
+        assert!(!path.parent().unwrap().exists());
+    }
+
+    #[test]
+    fn atomic_session_save_reports_pre_replace_failure_as_not_published() {
+        let path = temp_session_path("atomic-pre-replace-failure");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"authoritative-old-bytes").unwrap();
+
+        let error = save_session_atomically_to_path_with(
+            &path,
+            &empty_snapshot(),
+            |_| Err(std::io::Error::other("injected temporary sync failure")),
+            |_, _| panic!("replace must not run after a temporary sync failure"),
+            |_| panic!("directory sync must not run before replacement"),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.outcome, AtomicSessionSaveOutcome::NotPublished);
+        assert_eq!(std::fs::read(&path).unwrap(), b"authoritative-old-bytes");
+        assert!(atomic_temporary_paths(&path).is_empty());
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn atomic_session_save_reports_replace_error_as_publication_uncertain() {
+        let path = temp_session_path("atomic-replace-failure");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"authoritative-old-bytes").unwrap();
+
+        let error = save_session_atomically_to_path_with(
+            &path,
+            &empty_snapshot(),
+            std::fs::File::sync_all,
+            |_, _| Err(std::io::Error::other("injected replace failure")),
+            |_| panic!("directory sync must not run after a replace error"),
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            error.outcome,
+            AtomicSessionSaveOutcome::PublicationUncertain
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), b"authoritative-old-bytes");
+        assert_eq!(atomic_temporary_paths(&path).len(), 1);
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn atomic_session_save_never_unlinks_the_old_temp_name_after_replace_starts() {
+        let path = temp_session_path("atomic-replace-moved-then-failed");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"authoritative-old-bytes").unwrap();
+        let mut snapshot = empty_snapshot();
+        snapshot.selected = 6;
+
+        let error = save_session_atomically_to_path_with(
+            &path,
+            &snapshot,
+            std::fs::File::sync_all,
+            |source, destination| {
+                crate::platform::replace_file(source, destination)?;
+                std::fs::write(source, b"replacement-path-sentinel")?;
+                Err(std::io::Error::other("injected late replace error"))
+            },
+            |_| panic!("directory sync must not run after a replace error"),
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            error.outcome,
+            AtomicSessionSaveOutcome::PublicationUncertain
+        );
+        let published =
+            super::super::snapshot::parse_snapshot(&std::fs::read_to_string(&path).unwrap())
+                .unwrap();
+        assert_eq!(published.selected, 6);
+        let temporary_paths = atomic_temporary_paths(&path);
+        assert_eq!(temporary_paths.len(), 1);
+        assert_eq!(
+            std::fs::read(&temporary_paths[0]).unwrap(),
+            b"replacement-path-sentinel"
+        );
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn atomic_session_save_reports_post_replace_sync_failure_as_uncertain() {
+        let path = temp_session_path("atomic-directory-sync-failure");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"authoritative-old-bytes").unwrap();
+        let mut snapshot = empty_snapshot();
+        snapshot.selected = 7;
+
+        let error = save_session_atomically_to_path_with(
+            &path,
+            &snapshot,
+            std::fs::File::sync_all,
+            crate::platform::replace_file,
+            |_| Err(std::io::Error::other("injected directory sync failure")),
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            error.outcome,
+            AtomicSessionSaveOutcome::PublicationUncertain
+        );
+        let published =
+            super::super::snapshot::parse_snapshot(&std::fs::read_to_string(&path).unwrap())
+                .unwrap();
+        assert_eq!(published.selected, 7);
+        assert!(atomic_temporary_paths(&path).is_empty());
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn atomic_session_save_succeeds_and_cleans_its_temporary_file() {
+        let path = temp_session_path("atomic-success");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"authoritative-old-bytes").unwrap();
+        let mut snapshot = empty_snapshot();
+        snapshot.selected = 9;
+
+        save_session_atomically_to_path_with(
+            &path,
+            &snapshot,
+            std::fs::File::sync_all,
+            crate::platform::replace_file,
+            crate::platform::sync_containing_directory,
+        )
+        .unwrap();
+
+        let bytes = std::fs::read(&path).unwrap();
+        assert!(bytes.ends_with(b"\n"));
+        let published =
+            super::super::snapshot::parse_snapshot(std::str::from_utf8(&bytes).unwrap()).unwrap();
+        assert_eq!(published.selected, 9);
+        assert!(atomic_temporary_paths(&path).is_empty());
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_session_save_preserves_existing_symlink() {
+        let target = temp_session_path("atomic-symlink-target");
+        let link = target.with_file_name("atomic-link.json");
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::fs::write(&target, b"authoritative-old-bytes").unwrap();
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let mut snapshot = empty_snapshot();
+        snapshot.selected = 11;
+
+        save_session_atomically_to_path_with(
+            &link,
+            &snapshot,
+            std::fs::File::sync_all,
+            crate::platform::replace_file,
+            crate::platform::sync_containing_directory,
+        )
+        .unwrap();
+
+        assert!(std::fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        let published =
+            super::super::snapshot::parse_snapshot(&std::fs::read_to_string(&target).unwrap())
+                .unwrap();
+        assert_eq!(published.selected, 11);
+        assert!(atomic_temporary_paths(&target).is_empty());
+        std::fs::remove_dir_all(target.parent().unwrap()).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_session_save_preserves_relative_and_dangling_symlinks() {
+        let directory = temp_session_path("atomic-relative-symlinks")
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        std::fs::create_dir_all(&directory).unwrap();
+        let relative_target = directory.join("relative-target.json");
+        let relative_link = directory.join("relative-link.json");
+        std::fs::write(&relative_target, b"old-relative-bytes").unwrap();
+        std::os::unix::fs::symlink("relative-target.json", &relative_link).unwrap();
+        let mut relative_snapshot = empty_snapshot();
+        relative_snapshot.selected = 12;
+
+        save_session_atomically_to_path_with(
+            &relative_link,
+            &relative_snapshot,
+            std::fs::File::sync_all,
+            crate::platform::replace_file,
+            crate::platform::sync_containing_directory,
+        )
+        .unwrap();
+
+        let dangling_target = directory.join("new-target.json");
+        let dangling_link = directory.join("dangling-link.json");
+        std::os::unix::fs::symlink("new-target.json", &dangling_link).unwrap();
+        let mut dangling_snapshot = empty_snapshot();
+        dangling_snapshot.selected = 13;
+        save_session_atomically_to_path_with(
+            &dangling_link,
+            &dangling_snapshot,
+            std::fs::File::sync_all,
+            crate::platform::replace_file,
+            crate::platform::sync_containing_directory,
+        )
+        .unwrap();
+
+        assert!(std::fs::symlink_metadata(&relative_link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert!(std::fs::symlink_metadata(&dangling_link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        let relative = super::super::snapshot::parse_snapshot(
+            &std::fs::read_to_string(&relative_target).unwrap(),
+        )
+        .unwrap();
+        let dangling = super::super::snapshot::parse_snapshot(
+            &std::fs::read_to_string(&dangling_target).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(relative.selected, 12);
+        assert_eq!(dangling.selected, 13);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_session_save_rejects_symlink_cycles_and_excessive_depth() {
+        let directory = temp_session_path("atomic-symlink-depth")
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        std::fs::create_dir_all(&directory).unwrap();
+        let cycle_a = directory.join("cycle-a.json");
+        let cycle_b = directory.join("cycle-b.json");
+        std::os::unix::fs::symlink("cycle-b.json", &cycle_a).unwrap();
+        std::os::unix::fs::symlink("cycle-a.json", &cycle_b).unwrap();
+
+        let cycle_error = save_session_atomically_to_path_with(
+            &cycle_a,
+            &empty_snapshot(),
+            std::fs::File::sync_all,
+            |_, _| panic!("replace must not run for a symlink cycle"),
+            |_| panic!("directory sync must not run for a symlink cycle"),
+        )
+        .unwrap_err();
+        assert_eq!(cycle_error.outcome, AtomicSessionSaveOutcome::NotPublished);
+
+        for index in 0..=40 {
+            let link = directory.join(format!("depth-{index}.json"));
+            let target = if index == 40 {
+                "depth-target.json".to_string()
+            } else {
+                format!("depth-{}.json", index + 1)
+            };
+            std::os::unix::fs::symlink(target, link).unwrap();
+        }
+        let depth_error = save_session_atomically_to_path_with(
+            &directory.join("depth-0.json"),
+            &empty_snapshot(),
+            std::fs::File::sync_all,
+            |_, _| panic!("replace must not run for excessive symlink depth"),
+            |_| panic!("directory sync must not run for excessive symlink depth"),
+        )
+        .unwrap_err();
+        assert_eq!(depth_error.outcome, AtomicSessionSaveOutcome::NotPublished);
+        assert!(!directory.join("depth-target.json").exists());
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
