@@ -314,7 +314,7 @@ impl AppState {
             .get_mut(ws_idx)
             .and_then(|ws| ws.tabs.get_mut(tab_idx))
         {
-            tab.layout.focus_pane(pane_id);
+            tab.focus_pane(pane_id);
             self.previous_pane_focus = previous;
             self.mark_session_dirty();
             return true;
@@ -892,7 +892,7 @@ impl AppState {
         else {
             return false;
         };
-        if tab.layout.swap_panes(source, target) {
+        if tab.swap_panes(source, target) {
             self.mark_session_dirty();
             true
         } else {
@@ -913,7 +913,7 @@ impl AppState {
                 .and_then(|i| self.workspaces.get_mut(i))
                 .and_then(|ws| ws.active_tab_mut())
             {
-                tab.layout.resize_focused(direction, 0.05, area);
+                tab.resize_focused(direction, 0.05, area);
                 self.mark_session_dirty();
             }
         }

@@ -1212,6 +1212,7 @@ impl Workspace {
             number: 1,
             root_pane: root_id,
             layout,
+            collection_compat: HashMap::new(),
             panes,
             runtimes: HashMap::new(),
             zoomed: false,
@@ -1269,6 +1270,7 @@ impl Workspace {
             number: self.next_public_tab_number,
             root_pane: root_id,
             layout,
+            collection_compat: HashMap::new(),
             panes,
             runtimes: HashMap::new(),
             zoomed: false,
@@ -1380,12 +1382,13 @@ impl Workspace {
                 "workspace {} tab {} layout panes must exactly match pane states",
                 self.id, tab_idx
             );
-            for collection in tab.layout.collections() {
+            tab.assert_collection_invariants_for_test();
+            for collection in tab.collections() {
                 assert!(
-                    collection_ids.insert(collection.id),
+                    collection_ids.insert(collection.id()),
                     "workspace {} collection {:?} appears in more than one tab",
                     self.id,
-                    collection.id
+                    collection.id()
                 );
                 let unique: std::collections::HashSet<_> =
                     collection.members().iter().copied().collect();

@@ -433,12 +433,14 @@ fn capture_tab(
             },
         );
     }
+    // Snapshot v4 remains the exact legacy shape. This joins the extracted
+    // neutral placement state with temporary Collections compatibility policy;
+    // it is legacy repair, not the completed M2 persistence migration.
     let mut collections: Vec<_> = tab
-        .layout
         .collections()
         .map(|collection| CollectionSnapshot {
-            id: collection.id,
-            label: collection.label.clone(),
+            id: collection.id(),
+            label: collection.label().map(str::to_owned),
             members: collection.members().iter().map(|id| id.raw()).collect(),
             selected: collection.selected().map(|id| id.raw()),
             archived: collection.archived_members().map(|id| id.raw()).collect(),
@@ -506,7 +508,7 @@ fn capture_pane_history(
 fn capture_layout_leaf(leaf: crate::layout::LayoutLeaf) -> LayoutLeafSnapshot {
     match leaf {
         crate::layout::LayoutLeaf::Pane(id) => LayoutLeafSnapshot::Pane(id.raw()),
-        crate::layout::LayoutLeaf::Collection(id) => LayoutLeafSnapshot::Collection(id),
+        crate::layout::LayoutLeaf::Collection(id) => LayoutLeafSnapshot::Collection(id.into()),
     }
 }
 
@@ -516,7 +518,7 @@ fn capture_typed_node(node: &crate::layout::TypedNode) -> LayoutSnapshot {
             LayoutSnapshot::Pane(id.raw())
         }
         crate::layout::TypedNode::Leaf(crate::layout::LayoutLeaf::Collection(id)) => {
-            LayoutSnapshot::Collection(*id)
+            LayoutSnapshot::Collection((*id).into())
         }
         crate::layout::TypedNode::Split {
             direction,
@@ -1383,10 +1385,18 @@ mod tests {
             .unwrap();
         assert!(state.workspaces[0].tabs[0]
             .layout
-            .focus_leaf(crate::layout::LayoutLeaf::Collection(collection)));
+            .focus_leaf(crate::layout::LayoutLeaf::Collection(collection.into())));
 
         let snapshot = capture_from_state(&state);
         let json = serde_json::to_string(&snapshot).expect("serialize");
+        let shape: serde_json::Value = serde_json::from_str(&json).expect("snapshot json");
+        assert_eq!(shape["version"], SNAPSHOT_VERSION);
+        assert!(shape["workspaces"][0]["tabs"][0]
+            .get("collections")
+            .is_some());
+        assert!(shape["workspaces"][0]["tabs"][0]
+            .get("containers")
+            .is_none());
         let decoded = parse_snapshot(&json).expect("deserialize");
         let tab = &decoded.workspaces[0].tabs[0];
         let saved = &tab.collections[0];
@@ -1404,6 +1414,55 @@ mod tests {
             LayoutSnapshot::Split { ref second, .. }
                 if matches!(second.as_ref(), LayoutSnapshot::Collection(id) if *id == collection)
         ));
+    }
+
+    #[test]
+    fn snapshot_v4_collection_json_matches_frozen_golden_shape() {
+        let id = crate::layout::CollectionId::from_raw(7_300_001).unwrap();
+        let snapshot = SessionSnapshot {
+            version: SNAPSHOT_VERSION,
+            workspaces: vec![WorkspaceSnapshot {
+                id: Some("workspace".into()),
+                custom_name: None,
+                identity_cwd: PathBuf::from("/tmp"),
+                checkout: None,
+                worktree_space: None,
+                public_pane_numbers: HashMap::new(),
+                next_public_pane_number: 0,
+                public_tab_numbers: Vec::new(),
+                next_public_tab_number: 0,
+                tabs: vec![TabSnapshot {
+                    custom_name: None,
+                    layout: LayoutSnapshot::Collection(id),
+                    collections: vec![CollectionSnapshot {
+                        id,
+                        label: Some("helpers".into()),
+                        members: vec![11, 12],
+                        selected: Some(12),
+                        archived: vec![11],
+                    }],
+                    panes: HashMap::new(),
+                    zoomed: false,
+                    focused: None,
+                    focused_leaf: Some(LayoutLeafSnapshot::Collection(id)),
+                    root_pane: None,
+                }],
+                active_tab: 0,
+            }],
+            repositories: Vec::new(),
+            space_order: Vec::new(),
+            active: Some(0),
+            selected: 0,
+            sidebar_width: None,
+            sidebar_section_split: None,
+            collapsed_space_keys: std::collections::HashSet::new(),
+            delegations: Vec::new(),
+        };
+
+        assert_eq!(
+            serde_json::to_string(&snapshot).unwrap(),
+            r#"{"version":4,"workspaces":[{"id":"workspace","custom_name":null,"identity_cwd":"/tmp","public_pane_numbers":{},"next_public_pane_number":0,"public_tab_numbers":[],"next_public_tab_number":0,"tabs":[{"custom_name":null,"layout":{"Collection":"collection_7300001"},"collections":[{"id":"collection_7300001","label":"helpers","members":[11,12],"selected":12,"archived":[11]}],"panes":{},"zoomed":false,"focused":null,"focused_leaf":{"type":"collection","id":"collection_7300001"},"root_pane":null}],"active_tab":0}],"repositories":[],"space_order":[],"active":0,"selected":0,"sidebar_width":null,"sidebar_section_split":null,"collapsed_space_keys":[],"delegations":[]}"#
+        );
     }
 
     #[test]

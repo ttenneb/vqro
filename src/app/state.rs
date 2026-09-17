@@ -1240,6 +1240,7 @@ impl AppState {
         let mut workspace_ids = std::collections::HashSet::new();
         let mut workspace_id_to_idx = std::collections::HashMap::new();
         let mut pane_ids = std::collections::HashSet::new();
+        let mut collection_ids = std::collections::HashSet::new();
         let mut attached_terminal_ids = std::collections::HashSet::new();
         for (ws_idx, ws) in self.workspaces.iter().enumerate() {
             assert!(
@@ -1252,6 +1253,13 @@ impl AppState {
             ws.assert_invariants_for_test();
 
             for tab in &ws.tabs {
+                for collection_id in tab.layout.collection_ids() {
+                    assert!(
+                        collection_ids.insert(collection_id),
+                        "collection {:?} appears in more than one workspace/tab",
+                        collection_id
+                    );
+                }
                 for (pane_id, pane) in &tab.panes {
                     assert!(
                         pane_ids.insert(*pane_id),

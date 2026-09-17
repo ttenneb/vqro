@@ -6,14 +6,16 @@ use ratatui::layout::Direction;
 use tokio::sync::{mpsc, Notify};
 use tracing::{error, warn};
 
+use crate::collection_compat::CollectionCompatibilityPolicy;
 use crate::detect::AgentState;
 use crate::events::AppEvent;
 #[cfg(test)]
 use crate::layout::Node;
-use crate::layout::{CollectionId, LayoutLeaf, PaneCollection, PaneId, TileLayout, TypedNode};
+use crate::layout::{CollectionId, LayoutLeaf, PaneId, TileLayout, TypedNode};
 use crate::pane::{PaneLaunchEnv, PaneState};
 use crate::render_signal::RenderSignal;
 use crate::terminal::{TerminalId, TerminalRuntime, TerminalState};
+use crate::terminal_container::{TerminalContainer, TerminalContainerId};
 use crate::workspace::Workspace;
 
 use super::snapshot::{
@@ -63,6 +65,11 @@ type RestoredTab = (
     HashMap<PaneId, u32>,
 );
 type RestoreFailures<T> = (T, usize);
+
+struct RecoveredTabLayout {
+    layout: TileLayout,
+    collection_policy: HashMap<TerminalContainerId, CollectionCompatibilityPolicy>,
+}
 
 /// Restore delegation provenance while remapping persisted pane IDs to fresh runtime IDs.
 pub fn restore_delegations(
@@ -174,6 +181,37 @@ pub(crate) fn validate_snapshot_admission(snapshot: &SessionSnapshot) -> Result<
     // repaired after pane identities/runtimes have been admitted so corrupt or
     // over-limit feature state cannot make otherwise valid terminals vanish.
     Ok(())
+}
+
+fn reserve_restored_collection_ids(snapshot: &SessionSnapshot) {
+    fn reserve_layout(layout: &LayoutSnapshot) {
+        match layout {
+            LayoutSnapshot::Pane(_) => {}
+            LayoutSnapshot::Collection(id) => {
+                let _ = CollectionId::from_raw(id.raw());
+            }
+            LayoutSnapshot::Split { first, second, .. } => {
+                reserve_layout(first);
+                reserve_layout(second);
+            }
+        }
+    }
+
+    for tab in snapshot
+        .workspaces
+        .iter()
+        .flat_map(|workspace| &workspace.tabs)
+    {
+        // Deserialization already reserves IDs, but restore also accepts
+        // programmatically assembled snapshots in tests and handoff paths.
+        reserve_layout(&tab.layout);
+        for collection in &tab.collections {
+            let _ = CollectionId::from_raw(collection.id.raw());
+        }
+        if let Some(LayoutLeafSnapshot::Collection(id)) = tab.focused_leaf {
+            let _ = CollectionId::from_raw(id.raw());
+        }
+    }
 }
 
 fn restored_tab_identity_count(tab: &super::snapshot::TabSnapshot) -> usize {
@@ -413,6 +451,8 @@ fn restore_with_imports_and_failures(
     let mut terminal_runtimes = HashMap::new();
     let mut resumed_agent_sessions = HashSet::new();
     let mut failed_imports = 0;
+    let mut restored_collection_ids = HashSet::new();
+    reserve_restored_collection_ids(snapshot);
     for (idx, ws_snap) in snapshot.workspaces.iter().enumerate() {
         let runtime_context = RestoreRuntimeContext {
             scrollback_limit_bytes,
@@ -430,6 +470,7 @@ fn restore_with_imports_and_failures(
             &runtime_context,
             &mut resumed_agent_sessions,
             imported_panes,
+            &mut restored_collection_ids,
         );
         failed_imports += workspace_failed_imports;
         if let Some((workspace, restored_terminals, restored_runtimes)) = restored {
@@ -452,6 +493,7 @@ fn restore_workspace(
     runtime_context: &RestoreRuntimeContext<'_>,
     resumed_agent_sessions: &mut HashSet<String>,
     imported_panes: &mut HashMap<u32, crate::handoff_runtime::ImportedHandoffRuntime>,
+    restored_collection_ids: &mut HashSet<TerminalContainerId>,
 ) -> RestoreFailures<Option<RestoredWorkspace>> {
     let mut tabs = Vec::new();
     let mut terminals = Vec::new();
@@ -507,6 +549,7 @@ fn restore_workspace(
             resumed_agent_sessions,
             imported_panes,
             &public_pane_ids_by_old_raw,
+            restored_collection_ids,
         );
         failed_imports += tab_failed_imports;
         let Some((mut tab, restored_terminals, restored_runtimes, reverse_id_map)) = restored_tab
@@ -596,6 +639,7 @@ fn restore_tab(
     resumed_agent_sessions: &mut HashSet<String>,
     imported_panes: &mut HashMap<u32, crate::handoff_runtime::ImportedHandoffRuntime>,
     public_pane_ids_by_old_raw: &HashMap<u32, String>,
+    restored_collection_ids: &mut HashSet<TerminalContainerId>,
 ) -> RestoreFailures<Option<RestoredTab>> {
     let (typed_node, id_map) = restore_typed_node_remapped(snap);
     let reverse_id_map: HashMap<PaneId, u32> = id_map
@@ -839,16 +883,18 @@ fn restore_tab(
         return (None, failed_imports);
     }
 
-    if panes.is_empty() {
-        warn!(tab = ?snap.custom_name, "no panes could be restored for tab, dropping it");
-        return (None, failed_imports);
-    }
     let surviving: HashSet<PaneId> = panes.keys().copied().collect();
-    let Some(layout) = recover_typed_layout(snap, typed_node, &id_map, &surviving) else {
+    let Some(recovered) = recover_typed_layout(
+        snap,
+        typed_node,
+        &id_map,
+        &surviving,
+        restored_collection_ids,
+    ) else {
         warn!(tab = ?snap.custom_name, "restored tab lost all panes while recovering collection placement");
         return (None, failed_imports);
     };
-    let pane_ids = layout.pane_ids();
+    let pane_ids = recovered.layout.pane_ids();
     let Some(root_pane) = resolve_restored_pane(snap.root_pane, &id_map, &surviving, &pane_ids)
     else {
         return (None, failed_imports);
@@ -856,18 +902,20 @@ fn restore_tab(
 
     (
         Some((
-            crate::workspace::Tab {
-                custom_name: snap.custom_name.clone(),
+            match crate::workspace::Tab::from_restored(
+                snap.custom_name.clone(),
                 number,
                 root_pane,
-                layout,
+                recovered.layout,
+                recovered.collection_policy,
                 panes,
-                #[cfg(test)]
-                runtimes: HashMap::new(),
-                zoomed: snap.zoomed,
-                events: runtime_context.events.clone(),
-                render_notify: runtime_context.render_notify.clone(),
-                render_dirty: runtime_context.render_dirty.clone(),
+                snap.zoomed,
+                runtime_context.events.clone(),
+                runtime_context.render_notify.clone(),
+                runtime_context.render_dirty.clone(),
+            ) {
+                Some(tab) => tab,
+                None => return (None, failed_imports),
             },
             terminals,
             terminal_runtimes,
@@ -1032,7 +1080,7 @@ fn restore_typed_node_remapped(snap: &TabSnapshot) -> (TypedNode, HashMap<u32, P
     fn remap(node: &LayoutSnapshot, ids: &HashMap<u32, PaneId>) -> TypedNode {
         match node {
             LayoutSnapshot::Pane(old) => TypedNode::Leaf(LayoutLeaf::Pane(ids[old])),
-            LayoutSnapshot::Collection(id) => TypedNode::Leaf(LayoutLeaf::Collection(*id)),
+            LayoutSnapshot::Collection(id) => TypedNode::Leaf(LayoutLeaf::Collection((*id).into())),
             LayoutSnapshot::Split {
                 direction,
                 ratio,
@@ -1057,20 +1105,49 @@ fn recover_typed_layout(
     node: TypedNode,
     id_map: &HashMap<u32, PaneId>,
     surviving: &HashSet<PaneId>,
-) -> Option<TileLayout> {
+    restored_collection_ids: &mut HashSet<TerminalContainerId>,
+) -> Option<RecoveredTabLayout> {
+    fn count_collection_leaves(node: &TypedNode, counts: &mut HashMap<TerminalContainerId, usize>) {
+        match node {
+            TypedNode::Leaf(LayoutLeaf::Pane(_)) => {}
+            TypedNode::Leaf(LayoutLeaf::Collection(id)) => {
+                *counts.entry(*id).or_default() += 1;
+            }
+            TypedNode::Split { first, second, .. } => {
+                count_collection_leaves(first, counts);
+                count_collection_leaves(second, counts);
+            }
+        }
+    }
+    let mut leaf_counts = HashMap::new();
+    count_collection_leaves(&node, &mut leaf_counts);
+    let valid_leaf_ids: HashSet<_> = leaf_counts
+        .into_iter()
+        .filter_map(|(id, count)| (count == 1).then_some(id))
+        .collect();
+
     let mut saved_records = snap.collections.iter().collect::<Vec<_>>();
     saved_records.sort_by_key(|record| record.id.raw());
     saved_records.dedup_by_key(|record| record.id);
-    saved_records.truncate(crate::admission::MAX_GROUPS_PER_TAB);
-    let records: HashMap<CollectionId, &CollectionSnapshot> = saved_records
+    let candidates: Vec<_> = saved_records
         .into_iter()
-        .map(|record| (record.id, record))
+        .filter_map(|record| {
+            let id = TerminalContainerId::from(record.id);
+            (valid_leaf_ids.contains(&id) && !restored_collection_ids.contains(&id))
+                .then_some((id, record))
+        })
+        .take(crate::admission::MAX_GROUPS_PER_TAB)
         .collect();
+    for (id, _) in &candidates {
+        restored_collection_ids.insert(*id);
+    }
+    let records: HashMap<TerminalContainerId, &CollectionSnapshot> =
+        candidates.into_iter().collect();
     fn prune(
         node: TypedNode,
         surviving: &HashSet<PaneId>,
-        records: &HashMap<CollectionId, &CollectionSnapshot>,
-        seen: &mut HashSet<CollectionId>,
+        records: &HashMap<TerminalContainerId, &CollectionSnapshot>,
+        seen: &mut HashSet<TerminalContainerId>,
     ) -> Option<TypedNode> {
         match node {
             TypedNode::Leaf(LayoutLeaf::Pane(id)) => surviving
@@ -1118,6 +1195,7 @@ fn recover_typed_layout(
         collect_tiled(node, &mut placed);
     }
     let mut collections = Vec::new();
+    let mut collection_policy = HashMap::new();
     let mut ids: Vec<_> = collection_ids.into_iter().collect();
     ids.sort_by_key(|id| id.raw());
     for id in ids {
@@ -1144,9 +1222,11 @@ fn recover_typed_layout(
             .filter_map(|old| id_map.get(old).copied())
             .filter(|pane| members.contains(pane))
             .collect();
-        if let Some(collection) =
-            PaneCollection::from_saved(id, saved.label.clone(), members, selected, archived)
-        {
+        if let Some(collection) = TerminalContainer::from_legacy(id, members, selected) {
+            collection_policy.insert(
+                id,
+                CollectionCompatibilityPolicy::from_legacy(saved.label.clone(), archived),
+            );
             collections.push(collection);
         }
     }
@@ -1173,7 +1253,7 @@ fn recover_typed_layout(
         .focused_leaf
         .and_then(|leaf| match leaf {
             LayoutLeafSnapshot::Pane(old) => id_map.get(&old).copied().map(LayoutLeaf::Pane),
-            LayoutLeafSnapshot::Collection(id) => Some(LayoutLeaf::Collection(id)),
+            LayoutLeafSnapshot::Collection(id) => Some(LayoutLeaf::Collection(id.into())),
         })
         .or_else(|| {
             snap.focused
@@ -1194,7 +1274,42 @@ fn recover_typed_layout(
     let focus = saved_focus
         .filter(|focus| leaves.contains(focus))
         .or_else(|| leaves.first().copied())?;
-    TileLayout::from_typed_saved(root, focus, collections)
+    let layout = TileLayout::from_typed_saved(root, focus, collections);
+    let exact_survivors = |layout: &TileLayout| {
+        let placed = layout.pane_ids();
+        let unique: HashSet<_> = placed.iter().copied().collect();
+        placed.len() == unique.len() && unique == *surviving
+    };
+    if let Some(layout) = layout.filter(exact_survivors) {
+        return Some(RecoveredTabLayout {
+            layout,
+            collection_policy,
+        });
+    }
+
+    // Semantic recovery must never discard an already restored runtime. If a
+    // repaired container projection is still inconsistent, dissolve all
+    // containers and place every survivor exactly once in raw-ID order.
+    let mut panes: Vec<_> = surviving.iter().copied().collect();
+    panes.sort_by_key(|pane| pane.raw());
+    let first = panes.first().copied()?;
+    let root =
+        panes
+            .into_iter()
+            .skip(1)
+            .fold(TypedNode::Leaf(LayoutLeaf::Pane(first)), |root, pane| {
+                TypedNode::Split {
+                    direction: Direction::Horizontal,
+                    ratio: 0.5,
+                    first: Box::new(root),
+                    second: Box::new(TypedNode::Leaf(LayoutLeaf::Pane(pane))),
+                }
+            });
+    let layout = TileLayout::from_typed_saved(root, LayoutLeaf::Pane(first), Vec::new())?;
+    exact_survivors(&layout).then_some(RecoveredTabLayout {
+        layout,
+        collection_policy: HashMap::new(),
+    })
 }
 
 /// Restore a layout tree, remapping every pane ID to a fresh globally unique one.
@@ -1567,27 +1682,29 @@ mod tests {
             focused_leaf: Some(LayoutLeafSnapshot::Collection(collection)),
             root_pane: Some(1),
         };
-        let typed = TypedNode::Split {
-            direction: Direction::Horizontal,
-            ratio: 0.5,
-            first: Box::new(TypedNode::Leaf(LayoutLeaf::Collection(collection))),
-            second: Box::new(TypedNode::Leaf(LayoutLeaf::Collection(collection))),
-        };
+        let typed = TypedNode::Leaf(LayoutLeaf::Collection(collection.into()));
 
-        let layout = recover_typed_layout(&snap, typed, &id_map, &surviving).unwrap();
-        let restored = layout
-            .collection(collection)
-            .expect("bounded collection survives");
+        let mut restored_ids = HashSet::new();
+        let recovered =
+            recover_typed_layout(&snap, typed, &id_map, &surviving, &mut restored_ids).unwrap();
+        let container_id = TerminalContainerId::from(collection);
+        let restored = recovered
+            .layout
+            .collection(container_id)
+            .expect("valid members retain the legacy container");
         assert_eq!(restored.members(), &[first, second]);
         assert_eq!(restored.selected(), Some(first));
-        assert!(restored.is_archived(second));
+        let policy = &recovered.collection_policy[&container_id];
+        assert_eq!(policy.label.as_deref(), Some("legacy"));
+        assert_eq!(policy.archived(), &HashSet::from([second]));
         assert_eq!(
-            layout.placement(unplaced),
+            recovered.layout.placement(unplaced),
             Some(crate::layout::PanePlacement::Tiled)
         );
         for pane in [first, second, unplaced] {
             assert_eq!(
-                layout
+                recovered
+                    .layout
                     .pane_ids()
                     .iter()
                     .filter(|candidate| **candidate == pane)
@@ -1595,6 +1712,190 @@ mod tests {
                 1
             );
         }
+    }
+
+    #[test]
+    fn orphan_record_does_not_claim_session_global_container_id() {
+        use super::super::snapshot::{CollectionSnapshot, LayoutSnapshot, TabSnapshot};
+
+        let id = CollectionId::from_raw(7_050_001).unwrap();
+        let pane = PaneId::from_raw(151);
+        let record = CollectionSnapshot {
+            id,
+            label: None,
+            members: vec![1],
+            selected: Some(1),
+            archived: Vec::new(),
+        };
+        let snapshot = |collections| TabSnapshot {
+            custom_name: None,
+            layout: LayoutSnapshot::Collection(id),
+            collections,
+            panes: HashMap::new(),
+            zoomed: false,
+            focused: Some(1),
+            focused_leaf: Some(LayoutLeafSnapshot::Collection(id)),
+            root_pane: Some(1),
+        };
+        let id_map = HashMap::from([(1, pane)]);
+        let surviving = HashSet::from([pane]);
+        let mut restored_ids = HashSet::new();
+
+        recover_typed_layout(
+            &snapshot(vec![record.clone()]),
+            TypedNode::Leaf(LayoutLeaf::Pane(pane)),
+            &id_map,
+            &surviving,
+            &mut restored_ids,
+        )
+        .unwrap();
+        let recovered = recover_typed_layout(
+            &snapshot(vec![record]),
+            TypedNode::Leaf(LayoutLeaf::Collection(id.into())),
+            &id_map,
+            &surviving,
+            &mut restored_ids,
+        )
+        .unwrap();
+
+        assert!(recovered.layout.collection(id.into()).is_some());
+    }
+
+    #[test]
+    fn over_limit_orphan_records_do_not_consume_container_capacity() {
+        use super::super::snapshot::{CollectionSnapshot, LayoutSnapshot, TabSnapshot};
+
+        let valid_id = CollectionId::from_raw(7_060_000).unwrap();
+        let pane = PaneId::from_raw(161);
+        let mut collections = (1..=crate::admission::MAX_GROUPS_PER_TAB)
+            .map(|raw| CollectionSnapshot {
+                id: CollectionId::from_raw(raw as u64).unwrap(),
+                label: None,
+                members: vec![1],
+                selected: Some(1),
+                archived: Vec::new(),
+            })
+            .collect::<Vec<_>>();
+        collections.push(CollectionSnapshot {
+            id: valid_id,
+            label: None,
+            members: vec![1],
+            selected: Some(1),
+            archived: Vec::new(),
+        });
+        let snap = TabSnapshot {
+            custom_name: None,
+            layout: LayoutSnapshot::Collection(valid_id),
+            collections,
+            panes: HashMap::new(),
+            zoomed: false,
+            focused: Some(1),
+            focused_leaf: Some(LayoutLeafSnapshot::Collection(valid_id)),
+            root_pane: Some(1),
+        };
+
+        let recovered = recover_typed_layout(
+            &snap,
+            TypedNode::Leaf(LayoutLeaf::Collection(valid_id.into())),
+            &HashMap::from([(1, pane)]),
+            &HashSet::from([pane]),
+            &mut HashSet::new(),
+        )
+        .unwrap();
+
+        assert!(recovered.layout.collection(valid_id.into()).is_some());
+    }
+
+    #[test]
+    fn session_global_duplicate_collection_ids_are_dissolved_after_first_placement() {
+        use super::super::snapshot::{CollectionSnapshot, LayoutSnapshot, TabSnapshot};
+
+        let id = CollectionId::from_raw(7_100_001).unwrap();
+        let make_tab = |old_pane| TabSnapshot {
+            custom_name: None,
+            layout: LayoutSnapshot::Collection(id),
+            collections: vec![CollectionSnapshot {
+                id,
+                label: Some("duplicate".into()),
+                members: vec![old_pane],
+                selected: Some(old_pane),
+                archived: Vec::new(),
+            }],
+            panes: HashMap::new(),
+            zoomed: false,
+            focused: Some(old_pane),
+            focused_leaf: Some(LayoutLeafSnapshot::Collection(id)),
+            root_pane: Some(old_pane),
+        };
+        let mut restored_ids = HashSet::new();
+        let first_pane = PaneId::from_raw(201);
+        let first = recover_typed_layout(
+            &make_tab(1),
+            TypedNode::Leaf(LayoutLeaf::Collection(id.into())),
+            &HashMap::from([(1, first_pane)]),
+            &HashSet::from([first_pane]),
+            &mut restored_ids,
+        )
+        .unwrap();
+        assert!(first.layout.collection(id.into()).is_some());
+
+        let second_pane = PaneId::from_raw(202);
+        let second = recover_typed_layout(
+            &make_tab(2),
+            TypedNode::Leaf(LayoutLeaf::Collection(id.into())),
+            &HashMap::from([(2, second_pane)]),
+            &HashSet::from([second_pane]),
+            &mut restored_ids,
+        )
+        .unwrap();
+        assert!(second.layout.collection(id.into()).is_none());
+        assert_eq!(second.layout.pane_ids(), vec![second_pane]);
+        assert_eq!(
+            second.layout.placement(second_pane),
+            Some(crate::layout::PanePlacement::Tiled)
+        );
+    }
+
+    #[test]
+    fn every_restored_runtime_survivor_is_placed_exactly_once_after_semantic_repair() {
+        use super::super::snapshot::{CollectionSnapshot, LayoutSnapshot, TabSnapshot};
+
+        let id = CollectionId::from_raw(7_200_001).unwrap();
+        let panes = [
+            PaneId::from_raw(301),
+            PaneId::from_raw(302),
+            PaneId::from_raw(303),
+        ];
+        let snap = TabSnapshot {
+            custom_name: None,
+            layout: LayoutSnapshot::Collection(id),
+            collections: vec![CollectionSnapshot {
+                id,
+                label: None,
+                members: vec![1, 1, 999],
+                selected: Some(999),
+                archived: vec![999],
+            }],
+            panes: HashMap::new(),
+            zoomed: false,
+            focused: None,
+            focused_leaf: Some(LayoutLeafSnapshot::Collection(id)),
+            root_pane: Some(1),
+        };
+        let recovered = recover_typed_layout(
+            &snap,
+            TypedNode::Leaf(LayoutLeaf::Collection(id.into())),
+            &HashMap::from([(1, panes[0]), (2, panes[1]), (3, panes[2])]),
+            &HashSet::from(panes),
+            &mut HashSet::new(),
+        )
+        .unwrap();
+        let placed = recovered.layout.pane_ids();
+        assert_eq!(placed.len(), panes.len());
+        assert_eq!(
+            placed.iter().copied().collect::<HashSet<_>>(),
+            HashSet::from(panes)
+        );
     }
 
     #[test]

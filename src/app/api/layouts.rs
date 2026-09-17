@@ -273,9 +273,7 @@ impl App {
         };
         {
             let tab = &mut self.state.workspaces[ws_idx].tabs[tab_idx];
-            tab.layout = layout;
-            tab.root_pane = first_pane;
-            tab.zoomed = false;
+            tab.replace_layout_without_collections(layout, first_pane);
             if let Some(label) = params.tab_label {
                 tab.set_custom_name(label);
             }
@@ -320,7 +318,7 @@ impl App {
             .workspaces
             .get_mut(ws_idx)
             .and_then(|ws| ws.tabs.get_mut(tab_idx))
-            .is_some_and(|tab| tab.layout.set_ratio_at(&params.path, params.ratio));
+            .is_some_and(|tab| tab.set_layout_split_ratio(&params.path, params.ratio));
         if !changed {
             return encode_error(id, "split_not_found", "split path not found");
         }

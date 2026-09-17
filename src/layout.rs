@@ -3,6 +3,7 @@
 use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
 
+use crate::terminal_container::{TerminalContainer, TerminalContainerId};
 use ratatui::{
     layout::{Direction, Rect},
     widgets::Borders,
@@ -13,7 +14,6 @@ pub struct PaneId(u32);
 
 /// Global atomic counter for unique PaneId generation across all workspaces.
 static NEXT_PANE_ID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
-static NEXT_COLLECTION_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 impl PaneId {
     /// Allocate a globally unique PaneId.
@@ -50,15 +50,10 @@ pub enum CollectionIdError {
 impl CollectionId {
     const SERIALIZED_PREFIX: &'static str = "collection_";
 
-    pub fn alloc() -> Result<Self, CollectionIdError> {
-        NEXT_COLLECTION_ID
-            .fetch_update(
-                std::sync::atomic::Ordering::Relaxed,
-                std::sync::atomic::Ordering::Relaxed,
-                |current| (current > 0 && current < u64::MAX).then_some(current + 1),
-            )
-            .map(Self)
-            .map_err(|_| CollectionIdError::Exhausted)
+    pub(crate) fn alloc() -> Result<Self, CollectionIdError> {
+        TerminalContainerId::alloc()
+            .map(Into::into)
+            .ok_or(CollectionIdError::Exhausted)
     }
 
     pub fn raw(self) -> u64 {
@@ -67,21 +62,9 @@ impl CollectionId {
 
     /// Reconstruct an ID from persisted state while reserving it from allocation.
     pub fn from_raw(id: u64) -> Result<Self, CollectionIdError> {
-        let id = Self::parse_raw(id)?;
-        let next = id.0.checked_add(1).ok_or(CollectionIdError::Invalid)?;
-        let mut current = NEXT_COLLECTION_ID.load(std::sync::atomic::Ordering::Relaxed);
-        while current <= id.0 {
-            match NEXT_COLLECTION_ID.compare_exchange_weak(
-                current,
-                next,
-                std::sync::atomic::Ordering::Relaxed,
-                std::sync::atomic::Ordering::Relaxed,
-            ) {
-                Ok(_) => break,
-                Err(observed) => current = observed,
-            }
-        }
-        Ok(id)
+        TerminalContainerId::from_persisted(id)
+            .map(Into::into)
+            .ok_or(CollectionIdError::Invalid)
     }
 
     /// Parse an untrusted public ID without changing allocator state.
@@ -98,6 +81,19 @@ impl CollectionId {
         (id > 0 && id < u64::MAX)
             .then_some(Self(id))
             .ok_or(CollectionIdError::Invalid)
+    }
+}
+
+impl From<TerminalContainerId> for CollectionId {
+    fn from(id: TerminalContainerId) -> Self {
+        Self(id.raw())
+    }
+}
+
+impl From<CollectionId> for TerminalContainerId {
+    fn from(id: CollectionId) -> Self {
+        // CollectionId construction already validates the raw value.
+        TerminalContainerId::from_validated(id.raw())
     }
 }
 
@@ -126,84 +122,17 @@ impl<'de> serde::Deserialize<'de> for CollectionId {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum LayoutLeaf {
     Pane(PaneId),
-    Collection(CollectionId),
+    Collection(TerminalContainerId),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PanePlacement {
     Tiled,
-    Collection(CollectionId),
+    Collection(TerminalContainerId),
 }
 
-/// Shared runtime organization for one collection leaf. Presentation details
-/// such as expansion and scroll position intentionally do not live here.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PaneCollection {
-    pub id: CollectionId,
-    pub label: Option<String>,
-    members: Vec<PaneId>,
-    archived: HashSet<PaneId>,
-    selected: Option<PaneId>,
-    /// Monotonic membership/archive revision used to bind destructive confirmations.
-    revision: u64,
-}
-
-impl PaneCollection {
-    fn empty(id: CollectionId, label: Option<String>) -> Self {
-        Self {
-            id,
-            label,
-            members: Vec::new(),
-            archived: HashSet::new(),
-            selected: None,
-            revision: 0,
-        }
-    }
-
-    pub fn members(&self) -> &[PaneId] {
-        &self.members
-    }
-
-    pub fn selected(&self) -> Option<PaneId> {
-        self.selected
-    }
-
-    pub fn is_archived(&self, pane_id: PaneId) -> bool {
-        self.archived.contains(&pane_id)
-    }
-
-    pub fn archived_members(&self) -> impl Iterator<Item = PaneId> + '_ {
-        self.members
-            .iter()
-            .copied()
-            .filter(|pane_id| self.archived.contains(pane_id))
-    }
-
-    pub(crate) fn from_saved(
-        id: CollectionId,
-        label: Option<String>,
-        members: Vec<PaneId>,
-        selected: Option<PaneId>,
-        archived: HashSet<PaneId>,
-    ) -> Option<Self> {
-        let unique: HashSet<_> = members.iter().copied().collect();
-        if unique.len() != members.len()
-            || !archived.is_subset(&unique)
-            || selected.is_some_and(|pane| !unique.contains(&pane))
-            || (selected.is_none() && !members.is_empty())
-        {
-            return None;
-        }
-        Some(Self {
-            id,
-            label,
-            members,
-            archived,
-            selected,
-            revision: 0,
-        })
-    }
-}
+// The neutral container is intentionally private. Its PaneId members are
+// legacy placement references, not stable identities for public host calls.
 
 /// Snapshot of a pane's position and focus state after layout.
 #[derive(Clone)]
@@ -275,7 +204,7 @@ pub struct TileLayout {
     focus: LayoutLeaf,
     legacy_focus: PaneId,
     legacy_root: Node,
-    collections: HashMap<CollectionId, PaneCollection>,
+    collections: HashMap<TerminalContainerId, TerminalContainer>,
     /// Pane focused before the current leaf/member. Targeted tree edits do not
     /// disturb this history, so closing a newly focused pane can return there.
     prev_focus: Option<PaneId>,
@@ -304,7 +233,7 @@ impl TileLayout {
             LayoutLeaf::Pane(pane_id) => pane_id,
             LayoutLeaf::Collection(collection_id) => self
                 .collection(collection_id)
-                .and_then(PaneCollection::selected)
+                .and_then(TerminalContainer::selected)
                 .or_else(|| self.pane_ids().into_iter().next())
                 .unwrap_or(self.legacy_focus),
         }
@@ -334,7 +263,7 @@ impl TileLayout {
         leaves
     }
 
-    pub fn collection_ids(&self) -> Vec<CollectionId> {
+    pub(crate) fn collection_ids(&self) -> Vec<TerminalContainerId> {
         self.leaves()
             .into_iter()
             .filter_map(|leaf| match leaf {
@@ -344,11 +273,11 @@ impl TileLayout {
             .collect()
     }
 
-    pub fn collection(&self, id: CollectionId) -> Option<&PaneCollection> {
+    pub(crate) fn collection(&self, id: TerminalContainerId) -> Option<&TerminalContainer> {
         self.collections.get(&id)
     }
 
-    pub fn collections(&self) -> impl Iterator<Item = &PaneCollection> {
+    pub(crate) fn collections(&self) -> impl Iterator<Item = &TerminalContainer> {
         self.collections.values()
     }
 
@@ -358,7 +287,7 @@ impl TileLayout {
         }
         self.collections.values().find_map(|collection| {
             collection
-                .members
+                .members()
                 .contains(&pane_id)
                 .then_some(PanePlacement::Collection(collection.id))
         })
@@ -458,14 +387,19 @@ impl TileLayout {
         true
     }
 
-    pub fn insert_collection_near(
+    pub(crate) fn can_insert_collection_near(&self, target: LayoutLeaf) -> bool {
+        self.leaves().contains(&target)
+    }
+
+    pub(crate) fn insert_collection_near(
         &mut self,
         target: LayoutLeaf,
-        collection_id: CollectionId,
+        collection_id: TerminalContainerId,
         direction: Direction,
         ratio: f32,
     ) -> bool {
-        if self.collections.contains_key(&collection_id) || !self.leaves().contains(&target) {
+        if self.collections.contains_key(&collection_id) || !self.can_insert_collection_near(target)
+        {
             return false;
         }
         let old = std::mem::replace(
@@ -480,7 +414,7 @@ impl TileLayout {
             valid_split_ratio(ratio),
         );
         self.collections
-            .insert(collection_id, PaneCollection::empty(collection_id, None));
+            .insert(collection_id, TerminalContainer::empty(collection_id));
         true
     }
 
@@ -498,7 +432,7 @@ impl TileLayout {
         true
     }
 
-    pub fn remove_collection(&mut self, collection_id: CollectionId) -> bool {
+    pub(crate) fn remove_collection(&mut self, collection_id: TerminalContainerId) -> bool {
         if self.leaf_count() <= 1
             || !self
                 .leaves()
@@ -513,57 +447,44 @@ impl TileLayout {
         true
     }
 
-    pub fn set_collection_label(&mut self, id: CollectionId, label: Option<String>) -> bool {
-        let Some(collection) = self.collections.get_mut(&id) else {
-            return false;
-        };
-        collection.label = label;
-        true
-    }
-
-    pub(crate) fn add_collection_member(&mut self, id: CollectionId, pane: PaneId) -> bool {
+    pub(crate) fn add_collection_member(&mut self, id: TerminalContainerId, pane: PaneId) -> bool {
         if self.placement(pane).is_some() {
             return false;
         }
         let Some(collection) = self.collections.get_mut(&id) else {
             return false;
         };
-        collection.members.push(pane);
-        collection.selected.get_or_insert(pane);
-        collection.revision = collection.revision.saturating_add(1);
+        collection.add(pane);
         self.refresh_legacy_root();
         true
     }
 
-    pub(crate) fn remove_collection_member(&mut self, id: CollectionId, pane: PaneId) -> bool {
+    pub(crate) fn remove_collection_member(
+        &mut self,
+        id: TerminalContainerId,
+        pane: PaneId,
+    ) -> bool {
         let Some(collection) = self.collections.get_mut(&id) else {
             return false;
         };
-        let Some(index) = collection.members.iter().position(|member| *member == pane) else {
+        if !collection.remove(pane) {
             return false;
-        };
-        collection.members.remove(index);
-        collection.archived.remove(&pane);
-        if collection.selected == Some(pane) {
-            collection.selected = collection
-                .members
-                .get(index)
-                .or_else(|| index.checked_sub(1).and_then(|i| collection.members.get(i)))
-                .copied();
         }
-        collection.revision = collection.revision.saturating_add(1);
         self.refresh_legacy_root();
         true
     }
 
-    pub(crate) fn select_collection_member(&mut self, id: CollectionId, pane: PaneId) -> bool {
+    pub(crate) fn select_collection_member(
+        &mut self,
+        id: TerminalContainerId,
+        pane: PaneId,
+    ) -> bool {
         let Some(collection) = self.collections.get_mut(&id) else {
             return false;
         };
-        if !collection.members.contains(&pane) {
+        if !collection.select(pane) {
             return false;
         }
-        collection.selected = Some(pane);
         if self.focus == LayoutLeaf::Collection(id) {
             self.legacy_focus = pane;
         }
@@ -571,48 +492,19 @@ impl TileLayout {
         true
     }
 
-    pub fn reorder_collection_member(
+    pub(crate) fn reorder_collection_member(
         &mut self,
-        id: CollectionId,
+        id: TerminalContainerId,
         pane: PaneId,
         index: usize,
     ) -> bool {
         let Some(collection) = self.collections.get_mut(&id) else {
             return false;
         };
-        let Some(current) = collection.members.iter().position(|member| *member == pane) else {
-            return false;
-        };
-        if index >= collection.members.len() {
+        if !collection.reorder(pane, index) {
             return false;
         }
-        let pane = collection.members.remove(current);
-        collection.members.insert(index, pane);
-        collection.revision = collection.revision.saturating_add(1);
         self.refresh_legacy_root();
-        true
-    }
-
-    pub(crate) fn set_member_archived(
-        &mut self,
-        id: CollectionId,
-        pane: PaneId,
-        archived: bool,
-    ) -> bool {
-        let Some(collection) = self.collections.get_mut(&id) else {
-            return false;
-        };
-        if !collection.members.contains(&pane) {
-            return false;
-        }
-        let changed = if archived {
-            collection.archived.insert(pane)
-        } else {
-            collection.archived.remove(&pane)
-        };
-        if changed {
-            collection.revision = collection.revision.saturating_add(1);
-        }
         true
     }
 
@@ -787,7 +679,7 @@ impl TileLayout {
     pub(crate) fn from_typed_saved(
         root: TypedNode,
         focus: LayoutLeaf,
-        collections: Vec<PaneCollection>,
+        collections: Vec<TerminalContainer>,
     ) -> Option<Self> {
         let mut leaves = Vec::new();
         typed_collect_leaves(&root, &mut leaves);
@@ -831,7 +723,7 @@ impl TileLayout {
             LayoutLeaf::Pane(id) => id,
             LayoutLeaf::Collection(id) => collection_map
                 .get(&id)
-                .and_then(PaneCollection::selected)
+                .and_then(TerminalContainer::selected)
                 .or_else(|| placed.iter().copied().min_by_key(|id| id.raw()))
                 .unwrap_or_else(|| PaneId::from_raw(0)),
         };
@@ -930,13 +822,13 @@ fn typed_from_legacy(node: &Node) -> TypedNode {
 
 fn legacy_projection(
     node: &TypedNode,
-    collections: &HashMap<CollectionId, PaneCollection>,
+    collections: &HashMap<TerminalContainerId, TerminalContainer>,
 ) -> Option<Node> {
     match node {
         TypedNode::Leaf(LayoutLeaf::Pane(id)) => Some(Node::Pane(*id)),
         TypedNode::Leaf(LayoutLeaf::Collection(collection_id)) => collections
             .get(collection_id)
-            .and_then(PaneCollection::selected)
+            .and_then(TerminalContainer::selected)
             .map(Node::Pane),
         TypedNode::Split {
             direction,
@@ -996,14 +888,14 @@ fn typed_collect_panes(
     node: &TypedNode,
     area: Rect,
     focus: LayoutLeaf,
-    collections: &HashMap<CollectionId, PaneCollection>,
+    collections: &HashMap<TerminalContainerId, TerminalContainer>,
     result: &mut Vec<PaneInfo>,
 ) {
     let pane = match node {
         TypedNode::Leaf(LayoutLeaf::Pane(id)) => Some((*id, focus == LayoutLeaf::Pane(*id))),
         TypedNode::Leaf(LayoutLeaf::Collection(id)) => collections
             .get(id)
-            .and_then(PaneCollection::selected)
+            .and_then(TerminalContainer::selected)
             .map(|pane_id| (pane_id, focus == LayoutLeaf::Collection(*id))),
         TypedNode::Split {
             direction,
@@ -1443,7 +1335,8 @@ mod tests {
     #[test]
     fn creating_collection_does_not_allocate_or_change_pane_ids() {
         let (mut layout, root) = TileLayout::new();
-        let collection = CollectionId::from_raw(9_000_001).expect("valid collection id");
+        let collection =
+            TerminalContainerId::from_persisted(9_000_001).expect("valid container id");
         let pane_ids_before = layout.pane_ids();
 
         assert!(layout.insert_collection_near(
@@ -1499,7 +1392,8 @@ mod tests {
     fn grouped_focus_and_enumeration_resolve_selected_member() {
         let (mut layout, root) = TileLayout::new();
         let child = layout.split_focused(Direction::Horizontal);
-        let collection = CollectionId::from_raw(9_200_001).expect("valid collection id");
+        let collection =
+            TerminalContainerId::from_persisted(9_200_001).expect("valid container id");
         assert!(layout.insert_collection_near(
             LayoutLeaf::Pane(root),
             collection,
@@ -1535,7 +1429,8 @@ mod tests {
     #[test]
     fn collection_only_legacy_root_projects_selected_member_without_stale_tiled_leaf() {
         let (mut layout, root) = TileLayout::new();
-        let collection = CollectionId::from_raw(9_300_001).expect("valid collection id");
+        let collection =
+            TerminalContainerId::from_persisted(9_300_001).expect("valid container id");
         assert!(layout.insert_collection_near(
             LayoutLeaf::Pane(root),
             collection,
@@ -1555,7 +1450,8 @@ mod tests {
     #[test]
     fn splitting_selected_collection_member_splits_the_collection_leaf() {
         let (mut layout, root) = TileLayout::new();
-        let collection = CollectionId::from_raw(9_350_001).expect("valid collection id");
+        let collection =
+            TerminalContainerId::from_persisted(9_350_001).expect("valid container id");
         assert!(layout.insert_collection_near(
             LayoutLeaf::Pane(root),
             collection,
@@ -1582,7 +1478,8 @@ mod tests {
     fn focus_pane_selects_requested_member_inside_focused_collection() {
         let (mut layout, root) = TileLayout::new();
         let second = layout.split_focused(Direction::Horizontal);
-        let collection = CollectionId::from_raw(9_400_001).expect("valid collection id");
+        let collection =
+            TerminalContainerId::from_persisted(9_400_001).expect("valid container id");
         assert!(layout.insert_collection_near(
             LayoutLeaf::Pane(root),
             collection,
@@ -1608,7 +1505,8 @@ mod tests {
     #[test]
     fn resizing_focused_collection_resizes_its_top_level_bsp_leaf() {
         let (mut layout, root) = TileLayout::new();
-        let collection = CollectionId::from_raw(9_500_001).expect("valid collection id");
+        let collection =
+            TerminalContainerId::from_persisted(9_500_001).expect("valid container id");
         assert!(layout.insert_collection_near(
             LayoutLeaf::Pane(root),
             collection,
@@ -1628,7 +1526,8 @@ mod tests {
     fn collection_selected_member_focus_and_resize_target_same_terminal() {
         let (mut layout, root) = TileLayout::new();
         let member = layout.split_focused(Direction::Vertical);
-        let collection = CollectionId::from_raw(9_600_001).expect("valid collection id");
+        let collection =
+            TerminalContainerId::from_persisted(9_600_001).expect("valid container id");
         assert!(layout.insert_collection_near(
             LayoutLeaf::Pane(root),
             collection,
@@ -1674,7 +1573,7 @@ mod tests {
             }
         };
         assert_unique(&layout);
-        let collection = CollectionId::from_raw(9_700_001).expect("collection id");
+        let collection = TerminalContainerId::from_persisted(9_700_001).expect("container id");
         assert!(layout.insert_collection_near(
             LayoutLeaf::Pane(root),
             collection,
@@ -1695,13 +1594,9 @@ mod tests {
         assert_unique(&layout);
         assert!(layout.select_collection_member(collection, second));
         assert_unique(&layout);
-        assert!(layout.set_member_archived(collection, second, true));
-        assert_unique(&layout);
         let group = layout.collection(collection).expect("collection");
         assert_eq!(group.members(), &[second, first]);
         assert_eq!(group.selected(), Some(second));
-        assert!(group.is_archived(second));
-        assert!(layout.set_member_archived(collection, second, false));
         assert_unique(&layout);
         assert!(layout.remove_collection_member(collection, second));
         assert!(layout.insert_pane_near(root, second, Direction::Horizontal, 0.5, true));

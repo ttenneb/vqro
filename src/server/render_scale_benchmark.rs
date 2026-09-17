@@ -150,7 +150,7 @@ fn active_panes(pane_count: usize) -> Vec<Workspace> {
 
     for index in 1..pane_count {
         let target = pane_ids[(index - 1) / 2];
-        workspace.tabs[0].layout.focus_pane(target);
+        workspace.tabs[0].focus_pane(target);
         let direction = if index % 2 == 0 {
             Direction::Vertical
         } else {

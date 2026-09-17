@@ -1240,7 +1240,7 @@ mod tests {
         app.workspaces[0].tabs[0].zoomed = true;
         assert!(app.workspaces[0].tabs[0]
             .layout
-            .focus_leaf(crate::layout::LayoutLeaf::Collection(collection)));
+            .focus_leaf(crate::layout::LayoutLeaf::Collection(collection.into())));
         let zoomed = compute_pane_infos(
             &app,
             &TerminalRuntimeRegistry::new(),

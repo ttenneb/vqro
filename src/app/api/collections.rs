@@ -1682,11 +1682,10 @@ impl App {
             })
         };
         let groups = tab
-            .layout
             .collections()
             .map(|collection| HostTerminalGroup {
-                group_id: collection_id_text(collection.id),
-                label: collection.label.clone(),
+                group_id: collection_id_text(collection.id()),
+                label: collection.label().map(str::to_owned),
                 selected_terminal_id: collection.selected().and_then(|pane_id| {
                     tab.panes
                         .get(&pane_id)
@@ -1759,8 +1758,8 @@ impl App {
             collection_id,
             workspace_id: self.public_workspace_id(ws_idx),
             tab_id: self.public_tab_id(ws_idx, tab_idx)?,
-            label: collection.label.clone(),
-            focused: tab.layout.focused_leaf() == LayoutLeaf::Collection(id),
+            label: collection.label().map(str::to_owned),
+            focused: tab.layout.focused_leaf() == LayoutLeaf::Collection(id.into()),
             selected_pane_id: selected.and_then(|pane| self.public_pane_id(ws_idx, pane)),
             members: collection
                 .members()
@@ -1792,7 +1791,7 @@ impl App {
                     continue;
                 }
                 for id in tab.layout.collection_ids() {
-                    if let Some(info) = self.collection_info(ws_idx, tab_idx, id) {
+                    if let Some(info) = self.collection_info(ws_idx, tab_idx, id.into()) {
                         collections.push(info);
                     }
                 }
@@ -1905,8 +1904,7 @@ impl App {
         };
         if params.focus {
             let _ = self.state.workspaces[ws_idx].tabs[tab_idx]
-                .layout
-                .focus_leaf(LayoutLeaf::Collection(collection_id));
+                .focus_layout_leaf(LayoutLeaf::Collection(collection_id.into()));
         }
         self.state.mark_session_dirty();
         let collection = self
@@ -1984,7 +1982,7 @@ impl App {
             |tab, collection, pane| {
                 tab.select_collection_member(collection, pane)?;
                 if params.focus {
-                    tab.layout.focus_leaf(LayoutLeaf::Collection(collection));
+                    tab.focus_layout_leaf(LayoutLeaf::Collection(collection.into()));
                 }
                 Ok(())
             },
@@ -2119,7 +2117,7 @@ impl App {
         if self.state.workspaces[ws_idx].tabs[tab_idx]
             .promote_collection_member_near(
                 pane_id,
-                collection_id,
+                collection_id.into(),
                 target,
                 direction(params.direction),
                 params.ratio.unwrap_or(0.5),
@@ -2133,13 +2131,11 @@ impl App {
             );
         }
         if !params.focus {
-            self.state.workspaces[ws_idx].tabs[tab_idx]
-                .layout
-                .focus_pane(target);
+            self.state.workspaces[ws_idx].tabs[tab_idx].focus_pane(target);
         }
         self.state.mark_session_dirty();
         let collection = self
-            .collection_info(ws_idx, tab_idx, collection_id)
+            .collection_info(ws_idx, tab_idx, collection_id.into())
             .expect("updated collection");
         self.emit_collection_event("member_promoted", collection.clone());
         responses::encode_success(request_id, ResponseResult::CollectionInfo { collection })
@@ -2378,7 +2374,8 @@ mod tests {
                 focus: true,
             },
         ));
-        let collection = app.state.workspaces[0].tabs[0].layout.collection_ids()[0];
+        let collection: CollectionId =
+            app.state.workspaces[0].tabs[0].layout.collection_ids()[0].into();
         let collection_id = collection_id_text(collection);
         states.push(normalized_collection(&app, collection, &aliases, "create"));
         for (action, pane_id) in [("add_first", &first_public), ("add_second", &second_public)] {

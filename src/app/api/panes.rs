@@ -772,7 +772,7 @@ impl App {
             .workspaces
             .get_mut(ws_idx)
             .and_then(|ws| ws.tabs.get_mut(tab_idx))
-            .is_some_and(|tab| tab.layout.resize_pane(pane_id, direction, amount, area));
+            .is_some_and(|tab| tab.resize_pane(pane_id, direction, amount, area));
         if changed {
             self.schedule_session_save();
         }
@@ -908,8 +908,8 @@ impl App {
                     .get_mut(ws_idx)
                     .and_then(|ws| ws.tabs.get_mut(tab_idx))
                 {
-                    changed = tab.layout.swap_panes(source_pane_id, target_pane_id);
-                    tab.layout.focus_pane(source_pane_id);
+                    changed = tab.swap_panes(source_pane_id, target_pane_id);
+                    tab.focus_pane(source_pane_id);
                     if changed {
                         self.state.switch_workspace_tab(ws_idx, tab_idx);
                         self.apply_bundled_extension_state();

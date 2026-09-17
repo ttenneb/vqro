@@ -656,7 +656,7 @@ impl App {
         }
         let tab = &mut ws.tabs[overlay.tab_idx];
         if tab.panes.contains_key(&overlay.previous_focus) {
-            tab.layout.focus_pane(overlay.previous_focus);
+            tab.focus_pane(overlay.previous_focus);
         }
         tab.zoomed = overlay.previous_zoomed;
 
