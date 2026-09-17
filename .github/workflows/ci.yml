@@ -190,7 +190,7 @@ jobs:
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           repository: ttenneb/vqro-extension-collections
-          ref: 178e99ac2e8da92d288339a0c4e5c7d76efd9f85
+          ref: b590657b23866e36b07e3bbbaed5554e1be5a4fc
           path: .candidate/collections
           persist-credentials: false
 

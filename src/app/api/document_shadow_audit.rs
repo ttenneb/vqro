@@ -20,11 +20,11 @@ use crate::host_document_v2::{
 use crate::quarantined_audit_cache::{AuditCacheKey, AuditTicket, QuarantinedAuditCache};
 use crate::workspace::TabId;
 
-pub(crate) const COLLECTIONS_COMMIT: &str = "178e99ac2e8da92d288339a0c4e5c7d76efd9f85";
+pub(crate) const COLLECTIONS_COMMIT: &str = "b590657b23866e36b07e3bbbaed5554e1be5a4fc";
 pub(crate) const COLLECTIONS_PACKAGE_SHA256: &str =
-    "42745bb5af54b0dced06cf0e92e8c95383e42641c105f6256249ede67af2c634";
+    "36230691235fe70ef21b06e1d94c98d9888bce68ed4587d3c979bf03f9d2980b";
 pub(crate) const COLLECTIONS_MANIFEST_SHA256: &str =
-    "73c6accc4e35f9030731973e84ee3b1cce252c1034ab99e78ca6425cf40e9295";
+    "4d270e2646cde5764260e5781eb837c7964078731fb5981578b1d08e80957034";
 pub(crate) const COLLECTIONS_REPOSITORY: &str =
     "https://github.com/ttenneb/vqro-extension-collections.git";
 const CURATED_CATALOG: &str = "collections-candidate-conformance";
@@ -346,6 +346,104 @@ impl<D: ShadowAuditDocument> DocumentShadowAuditCoordinator<D> {
             tab_id,
             runtime_generation,
             "composite-shadow",
+            deadline,
+            canceled,
+        )
+    }
+
+    #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
+    fn begin_collections_composite_for_test(
+        &mut self,
+        app: &mut App,
+        binding: &HostProviderBinding,
+        workspace_id: String,
+        tab_id: TabId,
+        service_generation: u64,
+        provider_generation: u64,
+        runtime_generation: u64,
+        scope_generation: u64,
+        requested_revision: u64,
+        deadline: Instant,
+        canceled: Arc<AtomicBool>,
+    ) -> Result<DocumentShadowAuditWork, String> {
+        if Instant::now() >= deadline || canceled.load(std::sync::atomic::Ordering::Acquire) {
+            return Err("shadow audit is canceled or expired".into());
+        }
+        if binding.package_id() != PACKAGE_ID
+            || binding.service_id() != SERVICE_ID
+            || binding.namespace() != NAMESPACE
+            || binding.artifact_sha256() != COLLECTIONS_PACKAGE_SHA256
+            || binding.artifact_version() != "0.0.0"
+        {
+            return Err("binding is not the exact Collections shadow candidate".into());
+        }
+        validate_candidate_record(app, runtime_generation)?;
+        let authorization = app.stage_host_read_authorization(
+            binding,
+            HostReadInvocationPurpose {
+                state_snapshot: true,
+                terminals: Some((workspace_id.clone(), tab_id.clone())),
+            },
+            service_generation,
+            provider_generation,
+            runtime_generation,
+        )?;
+        validate_authorization(app, &authorization, &workspace_id, &tab_id)?;
+        let expected_state = current_state_snapshot(app, &authorization)?;
+        let expected_terminals =
+            current_terminal_snapshot(app, &authorization, &workspace_id, &tab_id)?;
+        let mut dependencies = [
+            crate::host_document_v2::host_state_snapshot_dependency(
+                &expected_state.contract,
+                &expected_state.store_id,
+                expected_state.store_generation,
+                &expected_state.namespace,
+                expected_state.revision,
+            )
+            .map_err(|error| error.to_string())?,
+            terminal_snapshot_dependency(
+                tab_id.as_str(),
+                &expected_terminals.fingerprint_sha256,
+                expected_terminals.lease_fence.provider_generation,
+            )
+            .map_err(|error| error.to_string())?,
+        ];
+        dependencies.sort();
+        let fence = DocumentProducerFenceV2 {
+            package_id: PACKAGE_ID.into(),
+            service_id: SERVICE_ID.into(),
+            artifact_sha256: COLLECTIONS_PACKAGE_SHA256.into(),
+            runtime_generation,
+            provider_generation,
+            scope_generation,
+        };
+        let scope = DocumentScopeV2 {
+            contract: "host.tab.v1".into(),
+            scope_id: tab_id.to_string(),
+        };
+        let params = HostDocumentRenderParamsV2 {
+            contract: HOST_DOCUMENT_RENDER_CONTRACT_V2.into(),
+            producer: fence.clone(),
+            scope: scope.clone(),
+            requested_revision,
+        };
+        params.validate().map_err(|error| error.to_string())?;
+        self.install_pending(
+            authorization,
+            ReadExpectation::StateThenTerminals {
+                expected_state,
+                expected_terminals,
+                dependencies,
+            },
+            true,
+            fence,
+            scope,
+            params,
+            workspace_id,
+            tab_id,
+            runtime_generation,
+            "collections-composite-shadow",
             deadline,
             canceled,
         )
@@ -682,6 +780,39 @@ impl App {
     ) -> Result<DocumentShadowAuditWork, String> {
         let mut coordinator = std::mem::take(&mut self.document_shadow_audits);
         let result = coordinator.begin(
+            self,
+            binding,
+            workspace_id,
+            tab_id,
+            service_generation,
+            provider_generation,
+            runtime_generation,
+            scope_generation,
+            requested_revision,
+            deadline,
+            canceled,
+        );
+        self.document_shadow_audits = coordinator;
+        result
+    }
+
+    #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn begin_collections_composite_shadow_audit_for_test(
+        &mut self,
+        binding: &HostProviderBinding,
+        workspace_id: String,
+        tab_id: TabId,
+        service_generation: u64,
+        provider_generation: u64,
+        runtime_generation: u64,
+        scope_generation: u64,
+        requested_revision: u64,
+        deadline: Instant,
+        canceled: Arc<AtomicBool>,
+    ) -> Result<DocumentShadowAuditWork, String> {
+        let mut coordinator = std::mem::take(&mut self.document_shadow_audits);
+        let result = coordinator.begin_collections_composite_for_test(
             self,
             binding,
             workspace_id,

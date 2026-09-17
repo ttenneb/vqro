@@ -16,15 +16,15 @@ use crate::extension_package::{
     PackageRuntimeV1, PACKAGE_CHECKSUM_FILE, PACKAGE_MANIFEST_FILE,
 };
 
-const CANDIDATE_COMMIT: &str = "178e99ac2e8da92d288339a0c4e5c7d76efd9f85";
+const CANDIDATE_COMMIT: &str = "b590657b23866e36b07e3bbbaed5554e1be5a4fc";
 const CANDIDATE_REPOSITORY: &str = "https://github.com/ttenneb/vqro-extension-collections.git";
 const CANDIDATE_GITATTRIBUTES: &[u8] = b"* text=auto eol=lf\n";
 const CANDIDATE_PACKAGE_SHA256: &str =
-    "42745bb5af54b0dced06cf0e92e8c95383e42641c105f6256249ede67af2c634";
+    "36230691235fe70ef21b06e1d94c98d9888bce68ed4587d3c979bf03f9d2980b";
 const CANDIDATE_MANIFEST_SHA256: &str =
-    "73c6accc4e35f9030731973e84ee3b1cce252c1034ab99e78ca6425cf40e9295";
+    "4d270e2646cde5764260e5781eb837c7964078731fb5981578b1d08e80957034";
 const CANDIDATE_COMPONENT_SHA256: &str =
-    "44e48062488a7ed66a213d84e4f46b7e19cce1bf8b64c08ea83292cb757b49e0";
+    "819963c8aeee9d3c5c1ba05cc3b4f6fd73ace14b030ffd55fbd2e1ac95b0c1bc";
 const CONTRACT_DIGESTS: &[(&str, &str)] = &[
     (
         "contracts/vqro-extension-service/world.wit",
@@ -33,6 +33,10 @@ const CONTRACT_DIGESTS: &[(&str, &str)] = &[
     (
         "contracts/api/vqro-service-v1.schema.json",
         "3c2712d8b92b4908a40b92360e7fe089e914a88b1cb07640dc8d5c5d7129bdbc",
+    ),
+    (
+        "contracts/api/host-state-v1.schema.json",
+        "76f18212c69780c5100594598a3aa388ddf70e4d275461ca1cbab9b2418f77bd",
     ),
     (
         "contracts/api/host-terminals-v1.schema.json",
@@ -48,7 +52,7 @@ const CONTRACT_DIGESTS: &[(&str, &str)] = &[
     ),
     (
         "contracts/api/host-document-v2.md",
-        "cd7079f829f9af4b5e4e943c3f34ad77911f8dfc43fb65855e5a07c8c5aa55b1",
+        "50acbfdb201b1a56006f47a8c6a6cdb20761b0bd1d6d8c7b0dd65a0ddf5d3832",
     ),
     (
         "contracts/fixtures/host-document-v2/valid.json",
@@ -72,7 +76,7 @@ const CONTRACT_DIGESTS: &[(&str, &str)] = &[
     ),
     (
         "contracts/PROVENANCE.md",
-        "96aca18d936ea2ad44361d6eccd4fa9d331711bed1f75349fdf21b99606231f2",
+        "61bb9dab61ac377c971151fea67a7da5b26bd19e44a62aeac67b4317ddbca128",
     ),
 ];
 
@@ -126,7 +130,10 @@ fn collections_candidate_passes_authoritative_host_gate() {
     let service = &manifest.services[0];
     assert_eq!(service.id, "collections");
     assert_eq!(service.provides, ["host_document"]);
-    assert_eq!(service.capabilities, ["host.terminals.read"]);
+    assert_eq!(
+        service.capabilities,
+        ["host.state.read", "host.terminals.read"]
+    );
     assert_eq!(
         validated.descriptor.manifest_sha256,
         CANDIDATE_MANIFEST_SHA256
@@ -220,14 +227,270 @@ fn collections_candidate_passes_authoritative_host_gate() {
     cleanup(root);
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CandidateScenario {
+    Accept,
+    StateRaceAfterSnapshot,
+    TopologyRaceAfterCapture,
+    AuthorityRaceBeforeFinalize,
+    PersistenceBlockBeforeFinalize,
+}
+
+struct CandidateFixture {
+    collection_id: crate::layout::CollectionId,
+    container_id: String,
+    archived_terminal_id: crate::terminal::TerminalId,
+}
+
 fn run_authoritative_document_shadow(
     installed: &crate::extension_package::InstalledPackageV1,
     provenance: PackageProvenanceV1,
+) {
+    run_candidate_scenario(installed, provenance.clone(), CandidateScenario::Accept);
+    for scenario in [
+        CandidateScenario::StateRaceAfterSnapshot,
+        CandidateScenario::TopologyRaceAfterCapture,
+        CandidateScenario::AuthorityRaceBeforeFinalize,
+        CandidateScenario::PersistenceBlockBeforeFinalize,
+    ] {
+        run_candidate_scenario(installed, provenance.clone(), scenario);
+    }
+}
+
+fn run_candidate_scenario(
+    installed: &crate::extension_package::InstalledPackageV1,
+    provenance: PackageProvenanceV1,
+    scenario: CandidateScenario,
 ) {
     const SERVICE_GENERATION: u64 = 7;
     const PROVIDER_GENERATION: u64 = 9;
     const RUNTIME_GENERATION: u64 = 8;
 
+    let (mut app, binding, fixture) = staged_candidate_app(installed, provenance);
+    let workspace_id = app.state.workspaces[0].id.clone();
+    let tab_id = app.state.workspaces[0].tabs[0].id.clone();
+    let seeded_state = app.extension_state.clone();
+    let legacy_policy = app.state.workspaces[0].tabs[0]
+        .collection(fixture.collection_id)
+        .map(|collection| {
+            (
+                collection.label().map(str::to_owned),
+                collection.archived_members().collect::<Vec<_>>(),
+            )
+        })
+        .expect("candidate fixture collection exists");
+    assert_eq!(legacy_policy, (None, Vec::new()));
+    let legacy_document_namespaces = app
+        .host_document_services
+        .namespaces()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    let render_was_pending = app.render_dirty.is_pending();
+    let last_render_at = app.last_render_at;
+    let last_presentation_at = app.last_presentation_at;
+    let full_redraw_pending = app.full_redraw_pending;
+    let document_watermarks = app.host_document_request_watermarks.clone();
+    let mut document_retry_keys = app
+        .host_document_retry_snapshots
+        .keys()
+        .cloned()
+        .collect::<Vec<_>>();
+    document_retry_keys.sort();
+    assert!(app.extension_state_path.is_none());
+    assert!(!app.extension_state_persistence_blocked);
+    assert!(!app.extension_state_transaction_pending);
+    assert!(app.collections_shadow_documents.is_empty());
+
+    let canceled = Arc::new(AtomicBool::new(false));
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let work = app
+        .begin_collections_composite_shadow_audit_for_test(
+            &binding,
+            workspace_id.clone(),
+            tab_id.clone(),
+            SERVICE_GENERATION,
+            PROVIDER_GENERATION,
+            RUNTIME_GENERATION,
+            1,
+            1,
+            deadline,
+            Arc::clone(&canceled),
+        )
+        .expect("App must stage exact candidate composite authority and audit ticket");
+    let params: crate::host_document_v2::HostDocumentRenderParamsV2 =
+        serde_json::from_value(work.request.params.clone()).expect("decode host-authored params");
+    let attempt_id = work.attempt_id;
+    let observer = work.observer.clone();
+    let staged_authority = Arc::clone(&work.authorization.authority);
+    let factory = RuntimeFactory::installed(installed, "collections", "vqro.collections")
+        .expect("installed candidate must enter the runtime factory");
+    let worker = std::thread::spawn(move || {
+        let mut dispatcher =
+            ExtensionRuntimeDispatcher::start(&factory, RUNTIME_GENERATION, canceled.as_ref())
+                .expect("start exact candidate dispatcher");
+        let result = dispatcher.invoke_with_host_reads(
+            "host.document.render",
+            work.request.params,
+            RUNTIME_GENERATION,
+            work.deadline,
+            canceled,
+            work.authorization,
+        );
+        dispatcher.stop(RuntimeStopReason::Requested);
+        result
+    });
+
+    let actor_deadline = Instant::now() + Duration::from_secs(30);
+    let mut actor_requests = Vec::new();
+    while !worker.is_finished() {
+        assert!(Instant::now() < actor_deadline, "candidate worker stalled");
+        match app.event_rx.try_recv() {
+            Ok(event) => {
+                let actor = match &event {
+                    crate::events::AppEvent::ExtensionHostStateCall(_) => Some("state.snapshot"),
+                    crate::events::AppEvent::ExtensionHostTerminalsCall(request) => {
+                        Some(match &request.method {
+                            crate::extension_host_terminals::HostTerminalsActorMethod::Capture => {
+                                "terminals.capture"
+                            }
+                            crate::extension_host_terminals::HostTerminalsActorMethod::Validate => {
+                                "terminals.validate"
+                            }
+                        })
+                    }
+                    _ => None,
+                };
+                if let Some(actor) = actor {
+                    app.handle_internal_event(event);
+                    actor_requests.push(actor);
+                    if scenario == CandidateScenario::StateRaceAfterSnapshot
+                        && actor == "state.snapshot"
+                    {
+                        mutate_candidate_policy_state(&mut app, "raced label");
+                    }
+                    if scenario == CandidateScenario::TopologyRaceAfterCapture
+                        && actor == "terminals.capture"
+                    {
+                        mutate_candidate_topology(&mut app);
+                    }
+                }
+            }
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                panic!("App event channel disconnected during candidate invocation");
+            }
+        }
+    }
+    let result = worker.join().expect("candidate worker must not panic");
+    let value = result.expect("actual candidate invocation must return a document");
+    assert_eq!(
+        actor_requests,
+        ["state.snapshot", "terminals.capture", "terminals.validate"],
+        "the candidate must use exactly three ordered App actor requests"
+    );
+    let observed = observer
+        .exact_state_then_terminals()
+        .expect("candidate must make exactly state.snapshot then terminals.snapshot");
+    let returned: crate::host_document_v2::HostDocumentV2 = serde_json::from_value(value.clone())
+        .expect("candidate result must be canonical host.document.v2");
+    let state_before_finalization = app.extension_state.clone();
+
+    if scenario == CandidateScenario::Accept {
+        assert_candidate_document(&returned, &params, &observed, &fixture);
+    }
+    if scenario == CandidateScenario::AuthorityRaceBeforeFinalize {
+        app.revoke_host_invocation_authority("vqro.collections", "collections");
+    }
+    if scenario == CandidateScenario::PersistenceBlockBeforeFinalize {
+        app.extension_state_persistence_blocked = true;
+    }
+
+    let finalization = app.finalize_document_shadow_audit(attempt_id, Ok(value));
+    if scenario == CandidateScenario::Accept {
+        finalization.expect("final App turn must atomically accept the audited document");
+        assert_eq!(
+            app.document_shadow_cached_for_test(&params),
+            Some(&returned),
+            "only the exact audited document may enter quarantine"
+        );
+        assert_eq!(app.document_shadow_audits.pending_len(), 0);
+        assert_eq!(app.document_shadow_audits.cached_len(), 1);
+        assert_eq!(app.extension_state, seeded_state);
+    } else {
+        assert!(
+            finalization.is_err(),
+            "{scenario:?} must reject final acceptance"
+        );
+        assert_eq!(app.document_shadow_audits.pending_len(), 0);
+        assert_eq!(app.document_shadow_audits.cached_len(), 0);
+    }
+    assert_eq!(
+        app.extension_state, state_before_finalization,
+        "candidate finalization mutated durable state"
+    );
+    if scenario == CandidateScenario::AuthorityRaceBeforeFinalize {
+        assert!(!app
+            .host_invocation_authorities
+            .contains_key(&("vqro.collections".into(), "collections".into())));
+    } else {
+        assert!(app
+            .host_invocation_authorities
+            .get(&("vqro.collections".into(), "collections".into()))
+            .is_some_and(|authority| Arc::ptr_eq(authority, &staged_authority)));
+    }
+
+    let policy_after = app.state.workspaces[0].tabs[0]
+        .collection(fixture.collection_id)
+        .map(|collection| {
+            (
+                collection.label().map(str::to_owned),
+                collection.archived_members().collect::<Vec<_>>(),
+            )
+        })
+        .expect("candidate fixture collection remains present");
+    assert_eq!(
+        policy_after, legacy_policy,
+        "legacy collection policy changed"
+    );
+    assert_eq!(
+        app.host_document_services
+            .namespaces()
+            .map(str::to_owned)
+            .collect::<Vec<_>>(),
+        legacy_document_namespaces
+    );
+    assert!(!app.extension_state_transaction_pending);
+    assert!(app.collections_shadow_documents.is_empty());
+    assert_eq!(app.host_document_request_watermarks, document_watermarks);
+    let mut current_retry_keys = app
+        .host_document_retry_snapshots
+        .keys()
+        .cloned()
+        .collect::<Vec<_>>();
+    current_retry_keys.sort();
+    assert_eq!(current_retry_keys, document_retry_keys);
+    assert_eq!(app.render_dirty.is_pending(), render_was_pending);
+    assert_eq!(app.last_render_at, last_render_at);
+    assert_eq!(app.last_presentation_at, last_presentation_at);
+    assert_eq!(app.full_redraw_pending, full_redraw_pending);
+    assert!(app.extension_state_path.is_none());
+    assert_eq!(
+        app.extension_state_persistence_blocked,
+        scenario == CandidateScenario::PersistenceBlockBeforeFinalize
+    );
+}
+
+fn staged_candidate_app(
+    installed: &crate::extension_package::InstalledPackageV1,
+    provenance: PackageProvenanceV1,
+) -> (
+    crate::app::App,
+    crate::extension_host_state::HostProviderBinding,
+    CandidateFixture,
+) {
+    const RUNTIME_GENERATION: u64 = 8;
     let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
     let mut app = crate::app::App::new(
         &crate::config::Config::default(),
@@ -236,9 +499,35 @@ fn run_authoritative_document_shadow(
         api_rx,
         crate::api::EventHub::default(),
     );
-    app.state.workspaces = vec![crate::workspace::Workspace::test_new(
-        "collections-shadow-gate",
-    )];
+    let mut workspace = crate::workspace::Workspace::test_new("collections-shadow-gate");
+    let root = workspace.tabs[0].layout.pane_ids()[0];
+    let first_member = workspace.test_split(ratatui::layout::Direction::Vertical);
+    let second_member = workspace.test_split(ratatui::layout::Direction::Horizontal);
+    let collection_id = workspace.tabs[0]
+        .create_collection_near(
+            crate::layout::LayoutLeaf::Pane(root),
+            ratatui::layout::Direction::Vertical,
+            0.5,
+            None,
+        )
+        .expect("create neutral candidate collection");
+    workspace.tabs[0]
+        .collect_tiled_pane(first_member, collection_id)
+        .expect("collect first candidate terminal");
+    workspace.tabs[0]
+        .collect_tiled_pane(second_member, collection_id)
+        .expect("collect second candidate terminal");
+    workspace.tabs[0]
+        .select_collection_member(collection_id, second_member)
+        .expect("select second candidate terminal");
+    let archived_terminal_id = workspace.tabs[0]
+        .terminal_id(first_member)
+        .expect("first candidate member has terminal")
+        .clone();
+    let container_id = crate::terminal_container::format_terminal_container_id(
+        crate::terminal_container::TerminalContainerId::from(collection_id),
+    );
+    app.state.workspaces = vec![workspace];
     app.state.ensure_test_terminals();
     app.marketplace_state.packages.revision = 17;
     app.marketplace_state.packages.packages.insert(
@@ -261,137 +550,260 @@ fn run_authoritative_document_shadow(
             retained_data: false,
         },
     );
+    let store_generation = app.extension_state.store_generation;
+    app.extension_state
+        .transact(&crate::extension_state::ExtensionStateTransactionV1 {
+            contract: crate::extension_state::EXTENSION_STATE_CONTRACT_V1.into(),
+            namespace: "vqro.collections".into(),
+            expected_store_generation: store_generation,
+            expected_revision: 0,
+            idempotency_key: "seed-collections-policy".into(),
+            operations: vec![crate::extension_state::ExtensionStateOperationV1 {
+                key: container_id.clone(),
+                value: Some(serde_json::json!({
+                    "archived_terminal_ids": [archived_terminal_id.to_string()],
+                    "container_id": container_id,
+                    "label": "Helpers",
+                    "schema": "vqro.collections.policy",
+                    "schema_version": 1
+                })),
+            }],
+        })
+        .expect("seed canonical Collections policy directly in durable test state");
     let binding = crate::extension_host_state::HostProviderBinding::from_installed(
         installed,
         "collections",
         "vqro.collections",
     )
     .expect("installed candidate must create the exact provider binding");
-    let workspace_id = app.state.workspaces[0].id.clone();
-    let tab_id = app.state.workspaces[0].tabs[0].id.clone();
-    let terminal_id = app.state.workspaces[0].tabs[0]
-        .panes
-        .values()
-        .next()
-        .expect("gate tab has one pane")
-        .attached_terminal_id
+    (
+        app,
+        binding,
+        CandidateFixture {
+            collection_id,
+            container_id,
+            archived_terminal_id,
+        },
+    )
+}
+
+fn mutate_candidate_policy_state(app: &mut crate::app::App, label: &str) {
+    let snapshot = app.extension_state.snapshot("vqro.collections").unwrap();
+    let (key, mut value) = snapshot.values.into_iter().next().unwrap();
+    value["label"] = serde_json::Value::String(label.into());
+    app.extension_state
+        .transact(&crate::extension_state::ExtensionStateTransactionV1 {
+            contract: crate::extension_state::EXTENSION_STATE_CONTRACT_V1.into(),
+            namespace: "vqro.collections".into(),
+            expected_store_generation: snapshot.store_generation,
+            expected_revision: snapshot.revision,
+            idempotency_key: "race-collections-policy".into(),
+            operations: vec![crate::extension_state::ExtensionStateOperationV1 {
+                key,
+                value: Some(value),
+            }],
+        })
+        .unwrap();
+}
+
+fn mutate_candidate_topology(app: &mut crate::app::App) {
+    let pane = app.state.workspaces[0].test_split(ratatui::layout::Direction::Vertical);
+    let terminal = app.state.workspaces[0].tabs[0]
+        .terminal_id(pane)
+        .unwrap()
         .clone();
-    let legacy_state = app.extension_state.clone();
-    let legacy_document_namespaces = app
-        .host_document_services
-        .namespaces()
-        .map(str::to_owned)
-        .collect::<Vec<_>>();
-    assert!(!app.extension_state_transaction_pending);
-    assert!(app.collections_shadow_documents.is_empty());
+    app.state.terminals.insert(
+        terminal.clone(),
+        crate::terminal::TerminalState::new(terminal, "/".into()),
+    );
+}
 
-    let canceled = Arc::new(AtomicBool::new(false));
-    let deadline = Instant::now() + Duration::from_secs(5);
-    let work = app
-        .begin_document_shadow_audit(
-            &binding,
-            workspace_id,
-            tab_id,
-            SERVICE_GENERATION,
-            PROVIDER_GENERATION,
-            RUNTIME_GENERATION,
-            1,
-            1,
-            deadline,
-            Arc::clone(&canceled),
+fn assert_candidate_document(
+    returned: &crate::host_document_v2::HostDocumentV2,
+    params: &crate::host_document_v2::HostDocumentRenderParamsV2,
+    observed: &crate::extension_host_invocation::CompositeSnapshotObservation,
+    fixture: &CandidateFixture,
+) {
+    let mut dependencies = vec![
+        crate::host_document_v2::host_state_snapshot_dependency(
+            &observed.state.contract,
+            &observed.state.store_id,
+            observed.state.store_generation,
+            &observed.state.namespace,
+            observed.state.revision,
         )
-        .expect("App must atomically stage exact candidate authority and audit ticket");
-    let params: crate::host_document_v2::HostDocumentRenderParamsV2 =
-        serde_json::from_value(work.request.params.clone()).expect("decode host-authored params");
-    let attempt_id = work.attempt_id;
-    let observer = work.observer.clone();
-    let factory = RuntimeFactory::installed(installed, "collections", "vqro.collections")
-        .expect("installed candidate must enter the runtime factory");
-    let worker = std::thread::spawn(move || {
-        let mut dispatcher =
-            ExtensionRuntimeDispatcher::start(&factory, RUNTIME_GENERATION, canceled.as_ref())
-                .expect("start exact candidate dispatcher");
-        let result = dispatcher.invoke_with_host_reads(
-            "host.document.render",
-            work.request.params,
-            RUNTIME_GENERATION,
-            work.deadline,
-            canceled,
-            work.authorization,
-        );
-        dispatcher.stop(RuntimeStopReason::Requested);
-        result
-    });
-
-    let actor_deadline = Instant::now() + Duration::from_secs(5);
-    let mut actor_turns = 0_usize;
-    while !worker.is_finished() {
-        assert!(Instant::now() < actor_deadline, "candidate worker stalled");
-        match app.event_rx.try_recv() {
-            Ok(event) => {
-                let is_terminal_call = matches!(
-                    &event,
-                    crate::events::AppEvent::ExtensionHostTerminalsCall(_)
-                );
-                app.handle_internal_event(event);
-                actor_turns += usize::from(is_terminal_call);
+        .unwrap(),
+        crate::host_document_v2::terminal_snapshot_dependency(
+            observed.terminals.tab_id.as_str(),
+            &observed.terminals.fingerprint_sha256,
+            observed.terminals.lease_fence.provider_generation,
+        )
+        .unwrap(),
+    ];
+    dependencies.sort();
+    let mut roots = Vec::new();
+    let mut nodes = Vec::new();
+    let mut next_node = 0_usize;
+    for item in &observed.terminals.layout {
+        match item {
+            crate::extension_host_terminals::HostTerminalLayoutItemV1::Tiled { terminal_id } => {
+                let id = format!("node-{next_node:03}");
+                next_node += 1;
+                roots.push(id.clone());
+                nodes.push(crate::host_document_v2::DocumentNodeV2::TerminalSlot {
+                    id,
+                    accessibility: crate::host_document_v2::DocumentAccessibilityV2 {
+                        name: "Terminal".into(),
+                        description: None,
+                    },
+                    terminal_id: terminal_id.to_string(),
+                });
             }
-            Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
-                std::thread::sleep(Duration::from_millis(1));
-            }
-            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
-                panic!("App event channel disconnected during candidate invocation");
+            crate::extension_host_terminals::HostTerminalLayoutItemV1::Container {
+                container_id,
+                terminal_ids,
+                ..
+            } => {
+                assert_eq!(container_id, &fixture.container_id);
+                let group_id = format!("node-{next_node:03}");
+                next_node += 1;
+                roots.push(group_id.clone());
+                let mut children = Vec::new();
+                let label_id = format!("node-{next_node:03}");
+                next_node += 1;
+                children.push(label_id.clone());
+                let mut child_nodes = vec![crate::host_document_v2::DocumentNodeV2::Text {
+                    id: label_id,
+                    accessibility: crate::host_document_v2::DocumentAccessibilityV2 {
+                        name: "Collection label".into(),
+                        description: None,
+                    },
+                    text: "Helpers".into(),
+                }];
+                for terminal_id in terminal_ids {
+                    let id = format!("node-{next_node:03}");
+                    next_node += 1;
+                    children.push(id.clone());
+                    child_nodes.push(crate::host_document_v2::DocumentNodeV2::TerminalSlot {
+                        id,
+                        accessibility: crate::host_document_v2::DocumentAccessibilityV2 {
+                            name: if terminal_id == &fixture.archived_terminal_id {
+                                "Archived terminal".into()
+                            } else {
+                                "Terminal".into()
+                            },
+                            description: None,
+                        },
+                        terminal_id: terminal_id.to_string(),
+                    });
+                }
+                nodes.push(crate::host_document_v2::DocumentNodeV2::Group {
+                    id: group_id,
+                    accessibility: crate::host_document_v2::DocumentAccessibilityV2 {
+                        name: "Collection".into(),
+                        description: None,
+                    },
+                    children,
+                });
+                nodes.extend(child_nodes);
             }
         }
     }
-    let result = worker.join().expect("candidate worker must not panic");
-    assert_eq!(
-        actor_turns, 2,
-        "capture and validation must each use one App turn"
-    );
-    let observed = observer
-        .exactly_one()
-        .expect("candidate must make exactly one accepted terminal snapshot call");
-    let value = result.expect("actual candidate invocation must return a document");
-    let returned: crate::host_document_v2::HostDocumentV2 = serde_json::from_value(value.clone())
-        .expect("candidate result must be canonical host.document.v2");
-    assert_eq!(returned.roots, ["node-000"]);
-    assert_eq!(returned.nodes.len(), 1);
-    assert!(matches!(
-        &returned.nodes[0],
-        crate::host_document_v2::DocumentNodeV2::TerminalSlot { terminal_id: returned_id, .. }
-            if returned_id == terminal_id.as_str()
-    ));
-    assert_eq!(
-        returned.dependencies,
-        [crate::host_document_v2::terminal_snapshot_dependency(
-            observed.tab_id.as_str(),
-            &observed.fingerprint_sha256,
-            observed.lease_fence.provider_generation,
-        )
-        .expect("construct exact observed dependency")]
-    );
+    let expected = crate::host_document_v2::HostDocumentV2 {
+        contract: crate::host_document_v2::HOST_DOCUMENT_CONTRACT_V2.into(),
+        producer: params.producer.clone(),
+        scope: params.scope.clone(),
+        revision: params.requested_revision,
+        dependencies,
+        roots,
+        nodes,
+    };
+    assert_eq!(returned, &expected, "candidate document semantics changed");
 
-    app.finalize_document_shadow_audit(attempt_id, Ok(value))
-        .expect("final App turn must atomically accept the audited document");
-    assert_eq!(
-        app.document_shadow_cached_for_test(&params),
-        Some(&returned),
-        "only the exact audited document may enter quarantine"
-    );
-    assert_eq!(
-        app.extension_state, legacy_state,
-        "legacy state authority changed"
-    );
-    assert_eq!(
-        app.host_document_services
-            .namespaces()
-            .map(str::to_owned)
-            .collect::<Vec<_>>(),
-        legacy_document_namespaces
-    );
-    assert!(!app.extension_state_transaction_pending);
-    assert!(app.collections_shadow_documents.is_empty());
+    let group_index = returned
+        .nodes
+        .iter()
+        .position(|node| {
+            matches!(node,
+            crate::host_document_v2::DocumentNodeV2::Group { accessibility, .. }
+                if accessibility.name == "Collection")
+        })
+        .expect("candidate document contains collection group");
+    let crate::host_document_v2::DocumentNodeV2::Group { children, .. } =
+        &returned.nodes[group_index]
+    else {
+        unreachable!()
+    };
+    assert_eq!(children.len(), 3);
+    assert!(matches!(
+        &returned.nodes[group_index + 1],
+        crate::host_document_v2::DocumentNodeV2::Text { accessibility, text, .. }
+            if accessibility.name == "Collection label" && text == "Helpers"
+    ));
+    let member_nodes = children
+        .iter()
+        .skip(1)
+        .map(|id| {
+            returned
+                .nodes
+                .iter()
+                .find(|node| match node {
+                    crate::host_document_v2::DocumentNodeV2::Group { id: node_id, .. }
+                    | crate::host_document_v2::DocumentNodeV2::Text { id: node_id, .. }
+                    | crate::host_document_v2::DocumentNodeV2::TerminalSlot {
+                        id: node_id, ..
+                    } => node_id == id,
+                })
+                .expect("group child node exists")
+        })
+        .collect::<Vec<_>>();
+    assert!(member_nodes.iter().any(|node| matches!(node,
+        crate::host_document_v2::DocumentNodeV2::TerminalSlot { accessibility, terminal_id, .. }
+            if terminal_id == fixture.archived_terminal_id.as_str()
+                && accessibility.name == "Archived terminal")));
+    assert!(member_nodes.iter().any(|node| matches!(node,
+        crate::host_document_v2::DocumentNodeV2::TerminalSlot { accessibility, terminal_id, .. }
+            if terminal_id != fixture.archived_terminal_id.as_str()
+                && accessibility.name == "Terminal")));
+    let projected_terminals = returned
+        .nodes
+        .iter()
+        .filter_map(|node| match node {
+            crate::host_document_v2::DocumentNodeV2::TerminalSlot { terminal_id, .. } => {
+                Some(terminal_id.clone())
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let expected_terminals = observed
+        .terminals
+        .layout
+        .iter()
+        .flat_map(|item| match item {
+            crate::extension_host_terminals::HostTerminalLayoutItemV1::Tiled { terminal_id } => {
+                vec![terminal_id.to_string()]
+            }
+            crate::extension_host_terminals::HostTerminalLayoutItemV1::Container {
+                container_id,
+                terminal_ids,
+                ..
+            } => {
+                assert_eq!(container_id, &fixture.container_id);
+                terminal_ids.iter().map(ToString::to_string).collect()
+            }
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(projected_terminals, expected_terminals);
+    let encoded = serde_json::to_string(returned).unwrap();
+    for forbidden in [
+        "pane_id",
+        "geometry",
+        "selected_terminal_id",
+        "action",
+        "effect",
+    ] {
+        assert!(!encoded.contains(forbidden), "candidate leaked {forbidden}");
+    }
 }
 
 fn assert_candidate_checkout(checkout: &Path) {
