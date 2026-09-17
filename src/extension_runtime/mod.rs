@@ -6,6 +6,9 @@
 pub(crate) mod component;
 pub(crate) mod process;
 
+#[cfg(test)]
+mod collections_package_conformance;
+
 use std::collections::BTreeSet;
 use std::sync::{atomic::AtomicBool, Arc};
 use std::time::{Duration, Instant};

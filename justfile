@@ -19,6 +19,10 @@ maintenance-test:
 test-one filter:
     cargo nextest run --locked "{{filter}}" --status-level fail --final-status-level fail --failure-output final --success-output never
 
+# Build and exercise the exact provisional Collections package through host package-v1 and Wasmtime.
+collections-package-conformance:
+    cargo nextest run --locked 'collections_candidate_passes_authoritative_host_gate' --run-ignored ignored-only --status-level fail --final-status-level fail --failure-output final --success-output never
+
 # Enforce deterministic UI hot-path architecture boundaries
 ui-hot-path-architecture-test:
     {{python}} -m unittest scripts.test_ui_hot_path_architecture
