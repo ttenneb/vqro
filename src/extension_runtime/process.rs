@@ -1170,8 +1170,27 @@ printf '{"type":"response","id":%s,"result":%s}\n' "$id" "$host_response"
                 authorization,
             )
         });
-        let event = app.event_rx.blocking_recv().unwrap();
-        app.handle_internal_event(event);
+        let join = super::super::handle_app_events_until(
+            &mut app,
+            "process host-state snapshot",
+            join,
+            |event| {
+                matches!(
+                    event,
+                    crate::events::AppEvent::ExtensionHostStateCall(request)
+                        if request.lease.outer_request_id == "1"
+                            && request.lease.identity.package_id == "example.runtime"
+                            && request.lease.identity.namespace == "example.runtime"
+                            && request.lease.identity.service_id == "echo"
+                            && request.lease.identity.generation == 9
+                            && request.lease.namespace == "example.runtime"
+                            && matches!(
+                                &request.method,
+                                crate::extension_host_state::HostStateActorMethod::Snapshot
+                            )
+                )
+            },
+        );
         let response = join.join().unwrap().unwrap();
         assert_eq!(response["result"]["contract"], "host.state.v1");
         assert_eq!(response["result"]["namespace"], "example.runtime");
@@ -1222,7 +1241,7 @@ done
             super::super::RuntimeFactory::installed_process(&installed, "echo", "example.runtime")
                 .unwrap();
         let canceled = Arc::new(AtomicBool::new(false));
-        let join = std::thread::spawn(move || {
+        let mut join = std::thread::spawn(move || {
             let mut dispatcher =
                 super::super::ExtensionRuntimeDispatcher::start(&factory, 19, canceled.as_ref())
                     .unwrap();
@@ -1249,8 +1268,35 @@ done
             (set, delete)
         });
         for expected_revision in [1, 2] {
-            let event = app.event_rx.blocking_recv().unwrap();
-            app.handle_internal_event(event);
+            join = super::super::handle_app_events_until(
+                &mut app,
+                "process host-state transaction",
+                join,
+                |event| {
+                    matches!(
+                        event,
+                        crate::events::AppEvent::ExtensionHostStateCall(request)
+                            if request.lease.outer_request_id
+                                == if expected_revision == 1 { "1" } else { "2" }
+                                && request.lease.identity.package_id == "example.runtime"
+                                && request.lease.identity.namespace == "example.runtime"
+                                && request.lease.identity.service_id == "echo"
+                                && request.lease.identity.generation == 19
+                                && request.lease.namespace == "example.runtime"
+                                && matches!(
+                                    &request.method,
+                                    crate::extension_host_state::HostStateActorMethod::Transact(transaction)
+                                        if transaction.expected_revision == expected_revision - 1
+                                            && transaction.idempotency_key
+                                                == if expected_revision == 1 {
+                                                    "set-null"
+                                                } else {
+                                                    "delete-null"
+                                                }
+                                )
+                    )
+                },
+            );
             assert_eq!(
                 app.extension_state
                     .snapshot("example.runtime")

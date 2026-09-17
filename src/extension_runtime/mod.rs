@@ -615,6 +615,57 @@ impl Drop for ExtensionRuntimeDispatcher {
     }
 }
 
+#[cfg(test)]
+fn handle_app_events_until<T: std::fmt::Debug>(
+    app: &mut crate::app::App,
+    context: &str,
+    worker: std::thread::JoinHandle<T>,
+    mut is_completion: impl FnMut(&crate::events::AppEvent) -> bool,
+) -> std::thread::JoinHandle<T> {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let mut handled = 0;
+    loop {
+        if Instant::now() >= deadline {
+            fail_app_event_wait(context, handled, "timed out", worker);
+        }
+        match app.event_rx.try_recv() {
+            Ok(event) => {
+                let completed = is_completion(&event);
+                app.handle_internal_event(event);
+                handled += 1;
+                if handled > crate::app::APP_EVENT_CHANNEL_CAPACITY {
+                    fail_app_event_wait(context, handled, "event limit exceeded", worker);
+                }
+                if completed {
+                    return worker;
+                }
+            }
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty) => std::thread::yield_now(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                fail_app_event_wait(context, handled, "app event channel disconnected", worker);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+fn fail_app_event_wait<T: std::fmt::Debug>(
+    context: &str,
+    handled: usize,
+    reason: &str,
+    worker: std::thread::JoinHandle<T>,
+) -> ! {
+    if worker.is_finished() {
+        panic!(
+            "{reason} waiting for {context} after handling {handled} app events; worker result: {:?}",
+            worker.join()
+        );
+    }
+    panic!(
+        "{reason} waiting for {context} after handling {handled} app events; worker is still running"
+    );
+}
+
 struct DisabledHostCalls {
     identity: RuntimeIdentityV1,
     grants: RuntimeGrants,

@@ -1408,6 +1408,27 @@ mod tests {
             "example.component",
             26,
         );
+        let decoy_lease = authorization.bind(
+            "wrong-request".into(),
+            super::super::RuntimeIdentityV1 {
+                package_id: "example.component".into(),
+                namespace: "example.component".into(),
+                service_id: "echo".into(),
+                generation: 26,
+            },
+            Instant::now() + Duration::from_secs(2),
+            Arc::new(AtomicBool::new(false)),
+        );
+        let (decoy_respond_to, decoy_response) = std::sync::mpsc::sync_channel(1);
+        app.event_tx
+            .try_send(crate::events::AppEvent::ExtensionHostStateCall(Box::new(
+                crate::extension_host_state::HostStateActorRequest {
+                    lease: decoy_lease,
+                    method: crate::extension_host_state::HostStateActorMethod::Snapshot,
+                    respond_to: decoy_respond_to,
+                },
+            )))
+            .unwrap();
         let factory =
             super::super::RuntimeFactory::installed(&installed, "echo", "example.component")
                 .unwrap();
@@ -1425,8 +1446,28 @@ mod tests {
                 authorization,
             )
         });
-        let event = app.event_rx.blocking_recv().unwrap();
-        app.handle_internal_event(event);
+        let join = super::super::handle_app_events_until(
+            &mut app,
+            "component host-state snapshot",
+            join,
+            |event| {
+                matches!(
+                    event,
+                    crate::events::AppEvent::ExtensionHostStateCall(request)
+                        if request.lease.outer_request_id == "1"
+                            && request.lease.identity.package_id == "example.component"
+                            && request.lease.identity.namespace == "example.component"
+                            && request.lease.identity.service_id == "echo"
+                            && request.lease.identity.generation == 26
+                            && request.lease.namespace == "example.component"
+                            && matches!(
+                                &request.method,
+                                crate::extension_host_state::HostStateActorMethod::Snapshot
+                            )
+                )
+            },
+        );
+        assert!(decoy_response.try_recv().unwrap().is_ok());
         let response = join.join().unwrap().unwrap();
         assert_eq!(response["result"]["contract"], "host.state.v1");
         assert_eq!(response["result"]["namespace"], "example.component");
@@ -1488,8 +1529,11 @@ mod tests {
         let factory =
             super::super::RuntimeFactory::installed(&installed, "echo", "example.component")
                 .unwrap();
+        app.event_tx
+            .try_send(crate::events::AppEvent::ExtensionCatalogCapacityAvailable)
+            .unwrap();
         let canceled = Arc::new(AtomicBool::new(false));
-        let join = std::thread::spawn(move || {
+        let mut join = std::thread::spawn(move || {
             let mut dispatcher =
                 super::super::ExtensionRuntimeDispatcher::start(&factory, 26, canceled.as_ref())
                     .unwrap();
@@ -1516,8 +1560,35 @@ mod tests {
             (set, delete)
         });
         for expected_revision in [1, 2] {
-            let event = app.event_rx.blocking_recv().unwrap();
-            app.handle_internal_event(event);
+            join = super::super::handle_app_events_until(
+                &mut app,
+                "component host-state transaction",
+                join,
+                |event| {
+                    matches!(
+                        event,
+                        crate::events::AppEvent::ExtensionHostStateCall(request)
+                            if request.lease.outer_request_id
+                                == if expected_revision == 1 { "1" } else { "2" }
+                                && request.lease.identity.package_id == "example.component"
+                                && request.lease.identity.namespace == "example.component"
+                                && request.lease.identity.service_id == "echo"
+                                && request.lease.identity.generation == 26
+                                && request.lease.namespace == "example.component"
+                                && matches!(
+                                    &request.method,
+                                    crate::extension_host_state::HostStateActorMethod::Transact(transaction)
+                                        if transaction.expected_revision == expected_revision - 1
+                                            && transaction.idempotency_key
+                                                == if expected_revision == 1 {
+                                                    "set-null"
+                                                } else {
+                                                    "delete-null"
+                                                }
+                                )
+                    )
+                },
+            );
             assert_eq!(
                 app.extension_state
                     .snapshot("example.component")
