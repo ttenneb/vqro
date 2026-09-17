@@ -319,11 +319,15 @@ pub(crate) use unix_common::{
 
 mod client_state;
 mod package_fs;
+mod persistence_lock;
 pub(crate) use client_state::{
     create_private_state_file, durable_replace_file, replace_file, resolve_write_target,
     sync_containing_directory, sync_parent_directory,
 };
 pub(crate) use package_fs::{read_bounded_regular_nofollow, SecurePackageStaging};
+pub(crate) use persistence_lock::{
+    try_lock_persistence, PersistenceLockError, PersistenceLockGuard,
+};
 
 #[cfg(not(unix))]
 pub(crate) fn begin_cli_output() {}

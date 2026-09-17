@@ -1,6 +1,19 @@
 use std::path::PathBuf;
 use std::process::Command;
 
+#[derive(Debug)]
+pub(crate) struct PlatformPersistenceLock;
+
+#[allow(dead_code)] // Used when the staged persistence coordinator is wired into production.
+pub(crate) fn try_lock_platform_persistence(
+    _path: &std::path::Path,
+) -> Result<PlatformPersistenceLock, super::PersistenceLockError> {
+    Err(super::PersistenceLockError::Io(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "persistence ownership locks are unavailable on this platform",
+    )))
+}
+
 pub(crate) fn local_listener_accept_error_is_resource_exhaustion(_error: &std::io::Error) -> bool {
     false
 }

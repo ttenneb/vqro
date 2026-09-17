@@ -1,5 +1,69 @@
 use std::path::{Path, PathBuf};
 
+#[derive(Debug)]
+pub(crate) struct PlatformPersistenceLock {
+    _file: std::fs::File,
+}
+
+#[allow(dead_code)] // Used when the staged persistence coordinator is wired into production.
+/// Locks a stable file in a trusted private parent. This cooperative Unix lock cannot stop a
+/// same-user actor with parent write access from replacing the pathname; Vqro never unlinks or
+/// renames it.
+pub(crate) fn try_lock_platform_persistence(
+    path: &Path,
+) -> Result<PlatformPersistenceLock, super::PersistenceLockError> {
+    use std::os::fd::AsRawFd as _;
+    use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _, PermissionsExt as _};
+
+    let open = |create_new| {
+        let mut options = std::fs::OpenOptions::new();
+        options
+            .read(true)
+            .write(true)
+            .create_new(create_new)
+            .mode(0o600)
+            .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW);
+        options.open(path)
+    };
+    let file = match open(true) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            open(false).map_err(super::PersistenceLockError::Io)?
+        }
+        Err(error) => return Err(super::PersistenceLockError::Io(error)),
+    };
+    let metadata = file.metadata().map_err(super::PersistenceLockError::Io)?;
+    if !metadata.is_file() {
+        return Err(super::PersistenceLockError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "persistence ownership path is not a regular file",
+        )));
+    }
+    let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+    if result != 0 {
+        let error = std::io::Error::last_os_error();
+        let code = error.raw_os_error();
+        if code == Some(libc::EWOULDBLOCK) || code == Some(libc::EAGAIN) {
+            return Err(super::PersistenceLockError::Busy);
+        }
+        return Err(super::PersistenceLockError::Io(error));
+    }
+    // Ownership and permissions are validated or repaired only after this open file description
+    // owns the lock. Re-read metadata so a pre-lock observation cannot hide a mode change.
+    let metadata = file.metadata().map_err(super::PersistenceLockError::Io)?;
+    if metadata.uid() != unsafe { libc::geteuid() } {
+        return Err(super::PersistenceLockError::Io(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "persistence ownership file belongs to another user",
+        )));
+    }
+    if metadata.mode() & 0o777 != 0o600 {
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))
+            .map_err(super::PersistenceLockError::Io)?;
+    }
+    Ok(PlatformPersistenceLock { _file: file })
+}
+
 pub(crate) fn local_listener_accept_error_is_resource_exhaustion(error: &std::io::Error) -> bool {
     error
         .raw_os_error()

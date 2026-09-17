@@ -15,6 +15,105 @@ use std::{
 
 mod clipboard_image;
 
+#[derive(Debug)]
+pub(crate) struct PlatformPersistenceLock {
+    _handle: OwnedHandle,
+}
+
+#[allow(dead_code)] // Used when the staged persistence coordinator is wired into production.
+pub(crate) fn try_lock_platform_persistence(
+    path: &std::path::Path,
+) -> Result<PlatformPersistenceLock, super::PersistenceLockError> {
+    use std::os::windows::ffi::OsStrExt as _;
+    use windows_sys::Win32::{
+        Foundation::{ERROR_LOCK_VIOLATION, ERROR_SHARING_VIOLATION, GENERIC_READ, GENERIC_WRITE},
+        Storage::FileSystem::{
+            CreateFileW, GetFileInformationByHandle, GetFileType, LockFileEx,
+            BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL,
+            FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ,
+            FILE_SHARE_WRITE, FILE_TYPE_DISK, LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY,
+            OPEN_ALWAYS,
+        },
+        System::IO::OVERLAPPED,
+    };
+
+    let mut path = path.as_os_str().encode_wide().collect::<Vec<_>>();
+    if path.contains(&0) {
+        return Err(super::PersistenceLockError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "persistence ownership path contains an interior NUL",
+        )));
+    }
+    path.push(0);
+    let raw = unsafe {
+        CreateFileW(
+            path.as_ptr(),
+            GENERIC_READ | GENERIC_WRITE,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            std::ptr::null(),
+            OPEN_ALWAYS,
+            FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT,
+            std::ptr::null_mut(),
+        )
+    };
+    if raw == INVALID_HANDLE_VALUE {
+        let error = std::io::Error::last_os_error();
+        return if matches!(
+            error.raw_os_error().map(|code| code as u32),
+            Some(ERROR_SHARING_VIOLATION)
+        ) {
+            Err(super::PersistenceLockError::Busy)
+        } else {
+            Err(super::PersistenceLockError::Io(error))
+        };
+    }
+    let handle = unsafe { OwnedHandle::from_raw_handle(raw) };
+    if unsafe { GetFileType(handle.as_raw_handle()) } != FILE_TYPE_DISK {
+        return Err(super::PersistenceLockError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "persistence ownership path is not a disk file",
+        )));
+    }
+    let mut information = MaybeUninit::<BY_HANDLE_FILE_INFORMATION>::zeroed();
+    if unsafe { GetFileInformationByHandle(handle.as_raw_handle(), information.as_mut_ptr()) } == 0
+    {
+        return Err(super::PersistenceLockError::Io(
+            std::io::Error::last_os_error(),
+        ));
+    }
+    let information = unsafe { information.assume_init() };
+    if information.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT) != 0
+    {
+        return Err(super::PersistenceLockError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "persistence ownership path is not a regular non-reparse file",
+        )));
+    }
+    let mut overlapped = MaybeUninit::<OVERLAPPED>::zeroed();
+    let locked = unsafe {
+        LockFileEx(
+            handle.as_raw_handle(),
+            LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY,
+            0,
+            u32::MAX,
+            u32::MAX,
+            overlapped.as_mut_ptr(),
+        )
+    };
+    if locked == 0 {
+        let error = std::io::Error::last_os_error();
+        return if matches!(
+            error.raw_os_error().map(|code| code as u32),
+            Some(ERROR_LOCK_VIOLATION) | Some(ERROR_SHARING_VIOLATION)
+        ) {
+            Err(super::PersistenceLockError::Busy)
+        } else {
+            Err(super::PersistenceLockError::Io(error))
+        };
+    }
+    Ok(PlatformPersistenceLock { _handle: handle })
+}
+
 pub(crate) fn local_listener_accept_error_is_resource_exhaustion(error: &std::io::Error) -> bool {
     error.raw_os_error() == Some(10024) // WSAEMFILE
 }

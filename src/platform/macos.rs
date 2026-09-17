@@ -21,8 +21,8 @@ pub(crate) use super::unix_common::{
     remote_bridge_endpoint_path, remote_private_temp_base, remote_reattach_argument,
     remote_reattach_program, remote_ssh_config_paths, set_default_plugin_pane_pwd,
     shutdown_client_stream, status_commands_supported, terminate_extension_service_process_group,
-    wait_client_stream_readable, write_client_stream, ClientStreamReader,
-    ExtensionServiceContainment, StatusCommandGuard,
+    try_lock_platform_persistence, wait_client_stream_readable, write_client_stream,
+    ClientStreamReader, ExtensionServiceContainment, PlatformPersistenceLock, StatusCommandGuard,
 };
 
 const PROC_PGRP_ONLY: u32 = 2;
