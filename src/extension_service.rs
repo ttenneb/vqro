@@ -2403,15 +2403,15 @@ impl ExtensionServiceSupervisor {
         })
     }
 
-    // M1b package lifecycle entry point; activation wiring follows after review.
+    // Package runtime entry point; feature activation remains gated after M1.
     #[allow(dead_code)]
-    pub fn from_installed_process(
+    pub fn from_installed_service(
         installed: &crate::extension_package::InstalledPackageV1,
         service_id: &str,
         priority: i32,
     ) -> Result<Self, ExtensionServiceError> {
         let runtime_factory =
-            crate::extension_runtime::RuntimeFactory::installed_process(installed, service_id)?;
+            crate::extension_runtime::RuntimeFactory::installed(installed, service_id)?;
         Ok(Self {
             spec: ExtensionServiceSpec {
                 id: format!("{}.{}", installed.package_id, service_id),
@@ -2420,6 +2420,9 @@ impl ExtensionServiceSupervisor {
                 priority,
                 granted_capabilities: match &runtime_factory {
                     crate::extension_runtime::RuntimeFactory::Process(factory) => {
+                        factory.grants().legacy
+                    }
+                    crate::extension_runtime::RuntimeFactory::Component(factory) => {
                         factory.grants().legacy
                     }
                 },
@@ -2432,16 +2435,24 @@ impl ExtensionServiceSupervisor {
         })
     }
 
-    // M1b package lifecycle entry point; activation wiring follows after review.
+    // Compile, instantiate, negotiate, and retire without granting feature authority.
     #[allow(dead_code)]
+    pub fn preflight_installed_service(
+        installed: &crate::extension_package::InstalledPackageV1,
+        service_id: &str,
+    ) -> Result<(), ExtensionServiceError> {
+        let mut supervisor = Self::from_installed_service(installed, service_id, 0)?;
+        supervisor.start()?;
+        supervisor.stop();
+        Ok(())
+    }
+
+    #[cfg(test)]
     pub fn preflight_installed_process(
         installed: &crate::extension_package::InstalledPackageV1,
         service_id: &str,
     ) -> Result<(), ExtensionServiceError> {
-        let mut supervisor = Self::from_installed_process(installed, service_id, 0)?;
-        supervisor.start()?;
-        supervisor.stop();
-        Ok(())
+        Self::preflight_installed_service(installed, service_id)
     }
 
     pub fn start(&mut self) -> Result<(), ExtensionServiceError> {
@@ -2796,6 +2807,21 @@ impl ExtensionServiceSupervisor {
     fn record_success(&mut self) {
         self.failures = 0;
         self.status = ExtensionServiceStatus::Running;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn lifecycle_for_test(&self) -> (ExtensionServiceStatus, u32, u64) {
+        (self.status.clone(), self.failures, self.runtime_generation)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn expire_backoff_for_test(&mut self) {
+        if let ExtensionServiceStatus::Backoff { failures, .. } = self.status {
+            self.status = ExtensionServiceStatus::Backoff {
+                failures,
+                retry_at: Instant::now(),
+            };
+        }
     }
 
     fn record_failure(&mut self, error: &ExtensionServiceError) {

@@ -490,7 +490,7 @@ pub fn validate_manifest(manifest: &PackageManifestV2) -> Result<(), String> {
         match &service.runtime {
             PackageRuntimeV1::Component { component, world } => {
                 validate_runtime_path(component, false)?;
-                if !component.ends_with(".wasm") || !world.starts_with("vqro:extension/service@") {
+                if !component.ends_with(".wasm") || world != "vqro:extension/service@1.0.0" {
                     return Err("component runtime has an invalid payload or world".into());
                 }
                 if !runtime_paths.insert(component.to_ascii_lowercase()) {

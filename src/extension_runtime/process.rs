@@ -8,9 +8,9 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 
 use super::{
-    ExtensionRuntime, NegotiatedRuntimeDescriptor, RuntimeError, RuntimeGrants,
-    RuntimeHostCallHandler, RuntimeHostCallV1, RuntimeIdentityV1, RuntimeRequestV1,
-    RuntimeStopReason, HANDSHAKE_TIMEOUT, MAX_HOST_CALLS_PER_INVOCATION, MAX_RUNTIME_FRAME_BYTES,
+    ExtensionRuntime, NegotiatedRuntimeDescriptor, RuntimeError, RuntimeGrants, RuntimeHostCallV1,
+    RuntimeIdentityV1, RuntimeRequestV1, RuntimeStopReason, SharedRuntimeHostCalls,
+    HANDSHAKE_TIMEOUT, MAX_HOST_CALLS_PER_INVOCATION, MAX_RUNTIME_FRAME_BYTES,
     MAX_RUNTIME_QUEUE_DEPTH,
 };
 use RuntimeError as ExtensionServiceError;
@@ -237,7 +237,9 @@ impl ProcessRuntimeFactory {
     }
 }
 
-fn legacy_capability(value: &str) -> Option<crate::api::schema::ExtensionServiceCapability> {
+pub(crate) fn legacy_capability(
+    value: &str,
+) -> Option<crate::api::schema::ExtensionServiceCapability> {
     use crate::api::schema::ExtensionServiceCapability;
     match value {
         "view_contribution" => Some(ExtensionServiceCapability::ViewContribution),
@@ -526,7 +528,7 @@ impl ExtensionRuntime for ProcessRuntime {
         request: &RuntimeRequestV1,
         deadline: Instant,
         canceled: &AtomicBool,
-        host_calls: &mut dyn RuntimeHostCallHandler,
+        host_calls: &SharedRuntimeHostCalls,
     ) -> Result<serde_json::Value, ExtensionServiceError> {
         if request.identity != self.descriptor.identity {
             return Err(ExtensionServiceError::StaleGeneration {
@@ -584,7 +586,14 @@ impl ExtensionRuntime for ProcessRuntime {
                             "service exceeded the host-call bound".into(),
                         ));
                     }
-                    let response = host_calls.handle_host_call(call);
+                    let response = host_calls
+                        .lock()
+                        .map_err(|_| {
+                            ExtensionServiceError::Protocol(
+                                "runtime host-call router is unavailable".into(),
+                            )
+                        })?
+                        .handle(call);
                     self.send_json(&response)?;
                 }
             }
@@ -937,12 +946,13 @@ mod tests {
     #[test]
     fn installed_process_passes_shared_conformance_vectors_with_sanitized_launch() {
         let script = r#"#!/bin/sh
-printf '%s\n' '{"type":"hello","protocol":2,"service_id":"echo","requested_capabilities":[],"methods":["conformance.echo","conformance.environment"]}'
+printf '%s\n' '{"type":"hello","protocol":2,"service_id":"echo","requested_capabilities":[],"methods":["conformance.echo","conformance.document","conformance.environment"]}'
 IFS= read -r welcome
 while IFS= read -r request; do
   id=$(printf '%s' "$request" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
   case "$request" in
     *conformance.environment*) printf '{"type":"response","id":%s,"result":{"path":"%s","home":"%s","package":"%s","cwd":"%s"}}\n' "$id" "${PATH-unset}" "${HOME-unset}" "$VQRO_EXTENSION_PACKAGE_ID" "$PWD" ;;
+    *conformance.document*) printf '{"type":"response","id":%s,"result":{"document_id":"fixture","nodes":[]}}\n' "$id" ;;
     *'"params":[]'*) printf '{"type":"response","id":%s,"result":[]}\n' "$id" ;;
     *) printf '{"type":"response","id":%s,"result":{"text":"vqro","count":2}}\n' "$id" ;;
   esac
@@ -953,10 +963,21 @@ done
             &installed, "echo",
         )
         .unwrap();
-        let factory = super::super::RuntimeFactory::installed_process(&installed, "echo").unwrap();
+        let factory = super::super::RuntimeFactory::installed(&installed, "echo").unwrap();
+        assert!(matches!(factory, super::super::RuntimeFactory::Process(_)));
         let canceled = AtomicBool::new(false);
         let mut dispatcher =
             super::super::ExtensionRuntimeDispatcher::start(&factory, 7, &canceled).unwrap();
+        assert!(matches!(
+            dispatcher.invoke(
+                "conformance.echo",
+                serde_json::json!({"oversized": "x".repeat(MAX_RUNTIME_FRAME_BYTES)}),
+                7,
+                Instant::now() + Duration::from_millis(750),
+                &canceled,
+            ),
+            Err(ExtensionServiceError::Protocol(message)) if message.contains("frame limit")
+        ));
         for vector in super::super::shared_conformance_vectors() {
             let result = dispatcher
                 .invoke(

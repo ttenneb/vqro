@@ -1,18 +1,19 @@
 //! Runtime-neutral extension dispatch and lifecycle contracts.
 //!
-//! Process protocol 2 is the only executable backend in M1b. Component execution
-//! is intentionally absent; future backends must implement the same interface and
-//! conformance vectors rather than bypassing this dispatcher.
+//! Process protocol 2 and WASI Preview 2 components implement one dispatcher,
+//! identity, capability, cancellation, deadline, and lifecycle contract.
 
+pub(crate) mod component;
 pub(crate) mod process;
 
 use std::collections::BTreeSet;
-use std::sync::atomic::AtomicBool;
+use std::sync::{atomic::AtomicBool, Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+pub(crate) use component::ComponentRuntimeFactory;
 pub(crate) use process::ProcessRuntimeFactory;
 
 pub const EXTENSION_SERVICE_CONTRACT_V1: &str = "vqro.service.v1";
@@ -29,6 +30,9 @@ pub(crate) enum RuntimeError {
     Configuration(String),
     Io(std::io::Error),
     Protocol(String),
+    Trap(String),
+    ResourceLimit(String),
+    FuelExhausted,
     Unsupported(String),
     QueueFull(String),
     StaleGeneration { expected: u64, actual: u64 },
@@ -46,6 +50,9 @@ impl RuntimeError {
             self,
             Self::Io(_)
                 | Self::Protocol(_)
+                | Self::Trap(_)
+                | Self::ResourceLimit(_)
+                | Self::FuelExhausted
                 | Self::QueueFull(_)
                 | Self::Timeout
                 | Self::Canceled
@@ -65,6 +72,9 @@ impl RuntimeError {
             Self::Configuration(_) => "configuration",
             Self::Io(_) => "io",
             Self::Protocol(_) => "protocol",
+            Self::Trap(_) => "trap",
+            Self::ResourceLimit(_) => "resource_limit",
+            Self::FuelExhausted => "fuel_exhausted",
             Self::Unsupported(_) => "unsupported",
             Self::QueueFull(_) => "queue_full",
             Self::StaleGeneration { .. } => "stale_generation",
@@ -83,10 +93,13 @@ impl std::fmt::Display for RuntimeError {
         match self {
             Self::Configuration(message)
             | Self::Protocol(message)
+            | Self::Trap(message)
+            | Self::ResourceLimit(message)
             | Self::Unsupported(message)
             | Self::QueueFull(message)
             | Self::Remote(message) => formatter.write_str(message),
             Self::Io(error) => write!(formatter, "{error}"),
+            Self::FuelExhausted => formatter.write_str("extension component exhausted fuel"),
             Self::Timeout => formatter.write_str("extension service timed out"),
             Self::Canceled => formatter.write_str("extension service request was canceled"),
             Self::Exited => formatter.write_str("extension service exited"),
@@ -191,9 +204,27 @@ pub enum RuntimeStopReason {
     Drop,
 }
 
-pub(crate) trait RuntimeHostCallHandler {
+pub(crate) trait RuntimeHostCallHandler: Send {
     fn handle_host_call(&mut self, call: RuntimeHostCallV1) -> RuntimeHostCallResponseV1;
 }
+
+pub(crate) struct RuntimeHostCallRouter {
+    handler: Box<dyn RuntimeHostCallHandler>,
+}
+
+impl RuntimeHostCallRouter {
+    fn new(handler: impl RuntimeHostCallHandler + 'static) -> Self {
+        Self {
+            handler: Box::new(handler),
+        }
+    }
+
+    pub(crate) fn handle(&mut self, call: RuntimeHostCallV1) -> RuntimeHostCallResponseV1 {
+        self.handler.handle_host_call(call)
+    }
+}
+
+pub(crate) type SharedRuntimeHostCalls = Arc<Mutex<RuntimeHostCallRouter>>;
 
 pub(crate) trait ExtensionRuntime: Send {
     fn descriptor(&self) -> &NegotiatedRuntimeDescriptor;
@@ -203,7 +234,7 @@ pub(crate) trait ExtensionRuntime: Send {
         request: &RuntimeRequestV1,
         deadline: Instant,
         canceled: &AtomicBool,
-        host_calls: &mut dyn RuntimeHostCallHandler,
+        host_calls: &SharedRuntimeHostCalls,
     ) -> Result<serde_json::Value, RuntimeError>;
 
     // The envelope is frozen in M1b; event methods remain disabled until M2.
@@ -213,7 +244,7 @@ pub(crate) trait ExtensionRuntime: Send {
         _event: &RuntimeEventV1,
         _deadline: Instant,
         _canceled: &AtomicBool,
-        _host_calls: &mut dyn RuntimeHostCallHandler,
+        _host_calls: &SharedRuntimeHostCalls,
     ) -> Result<(), RuntimeError> {
         Err(RuntimeError::Unsupported(
             "runtime events are not enabled before M2".into(),
@@ -226,6 +257,7 @@ pub(crate) trait ExtensionRuntime: Send {
 #[derive(Clone, Debug)]
 pub(crate) enum RuntimeFactory {
     Process(ProcessRuntimeFactory),
+    Component(ComponentRuntimeFactory),
 }
 
 impl RuntimeFactory {
@@ -243,24 +275,52 @@ impl RuntimeFactory {
         ))
     }
 
-    // Called by the package activation layer after M1b review.
-    #[allow(dead_code)]
+    pub(crate) fn installed(
+        installed: &crate::extension_package::InstalledPackageV1,
+        service_id: &str,
+    ) -> Result<Self, RuntimeError> {
+        let archive = std::path::Path::new(&installed.immutable_root).join("package.vqrox");
+        let package = crate::extension_package::validate_package_file(
+            &archive,
+            Some(&installed.package_sha256),
+        )
+        .map_err(RuntimeError::Configuration)?;
+        let service = package
+            .descriptor
+            .manifest
+            .services
+            .iter()
+            .find(|service| service.id == service_id)
+            .ok_or_else(|| RuntimeError::Configuration("package service is not declared".into()))?;
+        match &service.runtime {
+            crate::extension_package::PackageRuntimeV1::Process { .. } => {
+                ProcessRuntimeFactory::installed(installed, service_id).map(Self::Process)
+            }
+            crate::extension_package::PackageRuntimeV1::Component { .. } => {
+                ComponentRuntimeFactory::installed(installed, service_id).map(Self::Component)
+            }
+        }
+    }
+
+    #[cfg(test)]
     pub(crate) fn installed_process(
         installed: &crate::extension_package::InstalledPackageV1,
         service_id: &str,
     ) -> Result<Self, RuntimeError> {
-        process::ProcessRuntimeFactory::installed(installed, service_id).map(Self::Process)
+        ProcessRuntimeFactory::installed(installed, service_id).map(Self::Process)
     }
 
     fn identity(&self, generation: u64) -> RuntimeIdentityV1 {
         match self {
             Self::Process(factory) => factory.identity(generation),
+            Self::Component(factory) => factory.identity(generation),
         }
     }
 
     fn grants(&self) -> RuntimeGrants {
         match self {
             Self::Process(factory) => factory.grants(),
+            Self::Component(factory) => factory.grants(),
         }
     }
 
@@ -271,6 +331,9 @@ impl RuntimeFactory {
     ) -> Result<Box<dyn ExtensionRuntime>, RuntimeError> {
         match self {
             Self::Process(factory) => factory
+                .start(generation, canceled)
+                .map(|runtime| Box::new(runtime) as Box<dyn ExtensionRuntime>),
+            Self::Component(factory) => factory
                 .start(generation, canceled)
                 .map(|runtime| Box::new(runtime) as Box<dyn ExtensionRuntime>),
         }
@@ -314,6 +377,7 @@ impl ExtensionRuntimeDispatcher {
                 "runtime negotiated a different identity or generation".into(),
             ));
         }
+        validate_granted_methods(&runtime.descriptor().methods, &grants.legacy)?;
         tracing::info!(
             package_id = %identity.package_id,
             namespace = %identity.namespace,
@@ -400,13 +464,21 @@ impl ExtensionRuntimeDispatcher {
             deadline_ms = deadline.saturating_duration_since(Instant::now()).as_millis() as u64,
             "dispatching extension runtime request"
         );
-        let mut host_calls = DisabledHostCalls {
+        let host_calls = Arc::new(Mutex::new(RuntimeHostCallRouter::new(DisabledHostCalls {
             identity: self.identity.clone(),
             grants: self.grants.clone(),
-        };
+        })));
         let result = self
             .runtime
-            .invoke(&request, deadline, canceled, &mut host_calls);
+            .invoke(&request, deadline, canceled, &host_calls);
+        if result.as_ref().is_err_and(|error| error.requires_restart()) {
+            let reason = match &result {
+                Err(RuntimeError::Canceled) => RuntimeStopReason::Canceled,
+                Err(RuntimeError::Timeout) => RuntimeStopReason::Deadline,
+                _ => RuntimeStopReason::Protocol,
+            };
+            self.runtime.stop(reason);
+        }
         if let Err(error) = &result {
             tracing::warn!(
                 package_id = %self.identity.package_id,
@@ -435,6 +507,30 @@ impl ExtensionRuntimeDispatcher {
     pub(crate) fn stop(&mut self, reason: RuntimeStopReason) {
         self.runtime.stop(reason);
     }
+}
+
+fn validate_granted_methods(
+    methods: &BTreeSet<String>,
+    granted: &[crate::api::schema::ExtensionServiceCapability],
+) -> Result<(), RuntimeError> {
+    use crate::api::schema::ExtensionServiceCapability;
+    let requires_view = granted.contains(&ExtensionServiceCapability::ViewContribution);
+    let requires_document = granted.contains(&ExtensionServiceCapability::HostDocument);
+    let requires_action =
+        requires_view && granted.contains(&ExtensionServiceCapability::TerminalInterrupt);
+    let requires_choices = granted.contains(&ExtensionServiceCapability::ActionChoices);
+    if (requires_view && !methods.contains("view.render"))
+        || (requires_document && !methods.contains("host.document.render"))
+        || (requires_action && !methods.contains("view.action"))
+        || (requires_choices
+            && (!methods.contains(crate::action_choices::ACTION_CHOICES_LIST_METHOD_V1)
+                || !methods.contains(crate::action_choices::ACTION_CHOICE_INVOKE_METHOD_V1)))
+    {
+        return Err(RuntimeError::Protocol(
+            "runtime does not support the methods required by its grants".into(),
+        ));
+    }
+    Ok(())
 }
 
 impl Drop for ExtensionRuntimeDispatcher {
@@ -517,6 +613,12 @@ pub fn shared_conformance_vectors() -> Vec<RuntimeConformanceVector> {
             method: "conformance.echo",
             params: serde_json::json!([]),
             expected: serde_json::json!([]),
+        },
+        RuntimeConformanceVector {
+            name: "document_projection",
+            method: "conformance.document",
+            params: serde_json::json!({"scope": "fixture"}),
+            expected: serde_json::json!({"document_id": "fixture", "nodes": []}),
         },
     ]
 }
