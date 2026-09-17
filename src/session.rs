@@ -192,6 +192,11 @@ fn strip_imported_runtime_identity(snapshot: &mut serde_json::Value) {
             continue;
         };
         for tab in tabs {
+            if let Some(tab) = tab.as_object_mut() {
+                // Imports retain generation-1 public numbering but create new
+                // logical tabs and terminals in the destination session.
+                tab.remove("id");
+            }
             let Some(panes) = tab.get_mut("panes").and_then(|value| value.as_object_mut()) else {
                 continue;
             };
@@ -818,7 +823,7 @@ mod tests {
             &std::fs::read(vqro_root.join("sessions/from-default/session.json")).unwrap(),
         )
         .unwrap();
-        assert_eq!(imported_snapshot.version, 5);
+        assert_eq!(imported_snapshot.version, 6);
         assert!(imported_snapshot.workspaces.is_empty());
         let named =
             import_herdr_session_from_roots(&herdr_root, &vqro_root, Some("source"), "from-named")
@@ -841,6 +846,8 @@ mod tests {
         let mut snapshot = serde_json::json!({
             "workspaces": [{
                 "tabs": [{
+                    "id": "tab_00000000000000000000000000000001",
+                    "number": 7,
                     "panes": {
                         "1": {
                             "terminal_id": "term_00000000000000000000000000000001",
@@ -858,7 +865,10 @@ mod tests {
 
         strip_imported_runtime_identity(&mut snapshot);
 
-        let pane = &snapshot["workspaces"][0]["tabs"][0]["panes"]["1"];
+        let tab = &snapshot["workspaces"][0]["tabs"][0];
+        assert!(tab.get("id").is_none());
+        assert_eq!(tab["number"], 7);
+        let pane = &tab["panes"]["1"];
         assert!(pane.get("terminal_id").is_none());
         assert!(pane.get("agent_name").is_none());
         assert!(pane.get("managed_agent_kind").is_none());

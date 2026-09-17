@@ -120,6 +120,8 @@ pub struct App {
     #[cfg(test)]
     terminal_id_candidates:
         std::collections::VecDeque<std::io::Result<crate::terminal::TerminalId>>,
+    #[cfg(test)]
+    tab_id_candidates: std::collections::VecDeque<std::io::Result<crate::workspace::TabId>>,
     pub event_tx: mpsc::Sender<AppEvent>,
     pub(crate) event_rx: mpsc::Receiver<AppEvent>,
     pub(crate) api_rx: tokio::sync::mpsc::UnboundedReceiver<crate::api::ApiRequestMessage>,
@@ -431,12 +433,50 @@ impl App {
         })
     }
 
+    pub(crate) fn allocate_tab_id(&mut self) -> std::io::Result<crate::workspace::TabId> {
+        self.allocate_tab_ids(1).map(|mut ids| ids.remove(0))
+    }
+
+    pub(crate) fn allocate_tab_ids(
+        &mut self,
+        count: usize,
+    ) -> std::io::Result<Vec<crate::workspace::TabId>> {
+        let mut occupied = self
+            .state
+            .workspaces
+            .iter()
+            .flat_map(|workspace| &workspace.tabs)
+            .map(|tab| tab.id.clone())
+            .collect::<std::collections::HashSet<_>>();
+        let mut allocated = Vec::with_capacity(count);
+        for _ in 0..count {
+            let id = crate::workspace::TabId::alloc_unique_with(&occupied, || {
+                #[cfg(test)]
+                if let Some(candidate) = self.tab_id_candidates.pop_front() {
+                    return candidate;
+                }
+                crate::workspace::TabId::alloc()
+            })?;
+            occupied.insert(id.clone());
+            allocated.push(id);
+        }
+        Ok(allocated)
+    }
+
     #[cfg(test)]
     pub(crate) fn inject_terminal_id_candidates_for_test(
         &mut self,
         candidates: impl IntoIterator<Item = std::io::Result<crate::terminal::TerminalId>>,
     ) {
         self.terminal_id_candidates.extend(candidates);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn inject_tab_id_candidates_for_test(
+        &mut self,
+        candidates: impl IntoIterator<Item = std::io::Result<crate::workspace::TabId>>,
+    ) {
+        self.tab_id_candidates.extend(candidates);
     }
 
     pub(crate) fn admit_new_panes(
@@ -826,6 +866,8 @@ impl App {
             terminal_runtimes: restored_terminal_runtimes,
             #[cfg(test)]
             terminal_id_candidates: std::collections::VecDeque::new(),
+            #[cfg(test)]
+            tab_id_candidates: std::collections::VecDeque::new(),
             event_tx,
             event_rx,
             last_git_remote_status_refresh: Instant::now() - GIT_REMOTE_STATUS_REFRESH_INTERVAL,
@@ -3610,6 +3652,7 @@ mod tests {
                 public_tab_numbers: vec![1],
                 next_public_tab_number: 2,
                 tabs: vec![TabSnapshot {
+                    id: None,
                     custom_name: None,
                     layout: LayoutSnapshot::Pane(77),
                     collections: Vec::new(),

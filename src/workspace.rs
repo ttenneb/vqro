@@ -18,9 +18,14 @@ use crate::terminal::{TerminalId, TerminalRuntime, TerminalRuntimeRegistry, Term
 mod aggregate;
 mod git;
 mod tab;
+mod tab_id;
 
 use self::git::git_status_cache_key_for_space;
-pub(crate) use self::{git::git_status_snapshot_for_cwd_with_demand, tab::MovedPane};
+pub(crate) use self::{
+    git::git_status_snapshot_for_cwd_with_demand,
+    tab::MovedPane,
+    tab_id::{TabId, MAX_TAB_ID_BYTES},
+};
 pub use self::{
     git::{
         derive_label_from_cwd, fallback_label_from_cwd, git_branch, git_space_metadata,
@@ -104,6 +109,10 @@ impl WorkspaceGitStatusSnapshot {
 
 static NEXT_WORKSPACE_ID: AtomicU64 = AtomicU64::new(1);
 const PUBLIC_ID_ALPHABET: &[u8; 32] = b"123456789ABCDEFGHJKMNPQRSTVWXYZ0";
+
+fn public_tab_number_exhausted() -> std::io::Error {
+    std::io::Error::other("public tab-number space is exhausted")
+}
 
 pub(crate) fn generate_workspace_id() -> String {
     let counter = NEXT_WORKSPACE_ID.fetch_add(1, Ordering::Relaxed);
@@ -237,6 +246,7 @@ impl Workspace {
     }
 
     pub(crate) fn from_existing_pane(
+        tab_id: TabId,
         label: Option<String>,
         tab_label: Option<String>,
         identity_cwd: PathBuf,
@@ -247,7 +257,15 @@ impl Workspace {
     ) -> Self {
         let id = generate_workspace_id();
         let root_pane = moved.pane_id;
-        let tab = Tab::from_existing_pane(1, tab_label, moved, events, render_notify, render_dirty);
+        let tab = Tab::from_existing_pane(
+            tab_id,
+            1,
+            tab_label,
+            moved,
+            events,
+            render_notify,
+            render_dirty,
+        );
         let mut public_pane_numbers = HashMap::new();
         public_pane_numbers.insert(root_pane, 1);
         let (cached_git_space, cached_auto_label, cached_git_status_key) =
@@ -276,7 +294,11 @@ impl Workspace {
         }
     }
 
+    // Workspace construction keeps explicit PTY/render dependencies so state
+    // and runtime ownership remain separated.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
+        tab_id: TabId,
         terminal_id: TerminalId,
         initial_cwd: PathBuf,
         rows: u16,
@@ -290,6 +312,7 @@ impl Workspace {
         render_dirty: Arc<RenderSignal>,
     ) -> std::io::Result<(Self, TerminalState, TerminalRuntime)> {
         Self::new_with_tab(
+            tab_id,
             terminal_id,
             initial_cwd,
             rows,
@@ -308,6 +331,7 @@ impl Workspace {
 
     #[allow(clippy::too_many_arguments)]
     pub fn new_with_extra_env(
+        tab_id: TabId,
         terminal_id: TerminalId,
         initial_cwd: PathBuf,
         rows: u16,
@@ -323,6 +347,7 @@ impl Workspace {
     ) -> std::io::Result<(Self, TerminalState, TerminalRuntime)> {
         if extra_env.is_empty() {
             return Self::new(
+                tab_id,
                 terminal_id,
                 initial_cwd,
                 rows,
@@ -337,6 +362,7 @@ impl Workspace {
             );
         }
         Self::new_with_tab(
+            tab_id,
             terminal_id,
             initial_cwd,
             rows,
@@ -355,6 +381,7 @@ impl Workspace {
 
     #[allow(clippy::too_many_arguments)]
     fn new_with_tab(
+        tab_id: TabId,
         terminal_id: TerminalId,
         initial_cwd: PathBuf,
         rows: u16,
@@ -377,6 +404,7 @@ impl Workspace {
         );
         let (tab, terminal, runtime) = if let Some(argv) = argv {
             Tab::new_argv_command(
+                tab_id,
                 1,
                 terminal_id,
                 initial_cwd.clone(),
@@ -393,6 +421,7 @@ impl Workspace {
             )?
         } else {
             Tab::new(
+                tab_id,
                 1,
                 terminal_id,
                 initial_cwd.clone(),
@@ -478,6 +507,7 @@ impl Workspace {
 
     pub fn create_tab(
         &mut self,
+        tab_id: TabId,
         terminal_id: TerminalId,
         rows: u16,
         cols: u16,
@@ -496,6 +526,7 @@ impl Workspace {
             host_terminal_theme,
             host_terminal_appearance,
             shell_config,
+            tab_id,
             terminal_id,
             None,
             extra_env,
@@ -504,6 +535,7 @@ impl Workspace {
 
     pub fn create_tab_argv_command(
         &mut self,
+        tab_id: TabId,
         terminal_id: TerminalId,
         rows: u16,
         cols: u16,
@@ -522,12 +554,39 @@ impl Workspace {
             host_terminal_theme,
             host_terminal_appearance,
             crate::pane::PaneShellConfig::new("", crate::config::ShellModeConfig::NonLogin),
+            tab_id,
             terminal_id,
             Some(argv),
             extra_env,
         )
     }
 
+    pub(crate) fn ensure_public_tab_numbers_available(&self, count: usize) -> std::io::Result<()> {
+        if count == 0 {
+            return Ok(());
+        }
+        let after = self
+            .next_public_tab_number
+            .checked_add(count)
+            .ok_or_else(public_tab_number_exhausted)?;
+        if self.next_public_tab_number == 0 || after == usize::MAX {
+            return Err(public_tab_number_exhausted());
+        }
+        Ok(())
+    }
+
+    fn next_public_tab_number_checked(&self) -> std::io::Result<(usize, usize)> {
+        self.ensure_public_tab_numbers_available(1)?;
+        let following = self
+            .next_public_tab_number
+            .checked_add(1)
+            .ok_or_else(public_tab_number_exhausted)?;
+        Ok((self.next_public_tab_number, following))
+    }
+
+    // Tab construction keeps explicit PTY/render dependencies so identity is
+    // allocated by App before any runtime or topology side effect.
+    #[allow(clippy::too_many_arguments)]
     fn create_tab_with_runtime(
         &mut self,
         rows: u16,
@@ -537,12 +596,12 @@ impl Workspace {
         host_terminal_theme: crate::terminal_theme::TerminalTheme,
         host_terminal_appearance: Option<crate::terminal_theme::HostAppearance>,
         shell_config: crate::pane::PaneShellConfig<'_>,
+        tab_id: TabId,
         terminal_id: TerminalId,
         argv: Option<&[String]>,
         extra_env: Vec<(String, String)>,
     ) -> std::io::Result<(usize, TerminalState, TerminalRuntime)> {
-        let number = self.next_public_tab_number;
-        self.next_public_tab_number += 1;
+        let (number, following_number) = self.next_public_tab_number_checked()?;
         let pane_number = self.next_public_pane_number;
         let launch_env = self.launch_env_for_new_pane(number, pane_number, extra_env);
         let events = self
@@ -560,6 +619,7 @@ impl Workspace {
 
         let (tab, terminal, runtime) = if let Some(argv) = argv {
             Tab::new_argv_command(
+                tab_id,
                 number,
                 terminal_id,
                 cwd,
@@ -576,6 +636,7 @@ impl Workspace {
             )?
         } else {
             Tab::new(
+                tab_id,
                 number,
                 terminal_id,
                 cwd,
@@ -591,6 +652,7 @@ impl Workspace {
                 render_dirty,
             )?
         };
+        self.next_public_tab_number = following_number;
         self.register_new_pane_with_number(tab.root_pane, pane_number);
         self.tabs.push(tab);
         Ok((self.tabs.len() - 1, terminal, runtime))
@@ -978,14 +1040,62 @@ impl Workspace {
 
     pub(crate) fn create_tab_from_existing_pane(
         &mut self,
+        tab_id: TabId,
+        moved: MovedPane,
+        label: Option<String>,
+        fallback_events: mpsc::Sender<AppEvent>,
+        fallback_render_notify: Arc<Notify>,
+        fallback_render_dirty: Arc<RenderSignal>,
+    ) -> Result<usize, (std::io::Error, TabId, MovedPane)> {
+        let (number, following_number) = match self.next_public_tab_number_checked() {
+            Ok(numbers) => numbers,
+            Err(error) => return Err((error, tab_id, moved)),
+        };
+        let tab_idx = self.insert_tab_from_existing_pane(
+            tab_id,
+            number,
+            moved,
+            label,
+            fallback_events,
+            fallback_render_notify,
+            fallback_render_dirty,
+        );
+        self.next_public_tab_number = following_number;
+        Ok(tab_idx)
+    }
+
+    pub(crate) fn restore_tab_from_existing_pane(
+        &mut self,
+        tab_id: TabId,
+        number: usize,
         moved: MovedPane,
         label: Option<String>,
         fallback_events: mpsc::Sender<AppEvent>,
         fallback_render_notify: Arc<Notify>,
         fallback_render_dirty: Arc<RenderSignal>,
     ) -> usize {
-        let number = self.next_public_tab_number;
-        self.next_public_tab_number += 1;
+        self.insert_tab_from_existing_pane(
+            tab_id,
+            number,
+            moved,
+            label,
+            fallback_events,
+            fallback_render_notify,
+            fallback_render_dirty,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn insert_tab_from_existing_pane(
+        &mut self,
+        tab_id: TabId,
+        number: usize,
+        moved: MovedPane,
+        label: Option<String>,
+        fallback_events: mpsc::Sender<AppEvent>,
+        fallback_render_notify: Arc<Notify>,
+        fallback_render_dirty: Arc<RenderSignal>,
+    ) -> usize {
         let pane_id = moved.pane_id;
         let (events, render_notify, render_dirty) = self
             .active_tab()
@@ -1001,8 +1111,15 @@ impl Workspace {
                 fallback_render_notify,
                 fallback_render_dirty,
             ));
-        let tab =
-            Tab::from_existing_pane(number, label, moved, events, render_notify, render_dirty);
+        let tab = Tab::from_existing_pane(
+            tab_id,
+            number,
+            label,
+            moved,
+            events,
+            render_notify,
+            render_dirty,
+        );
         if !self.public_pane_numbers.contains_key(&pane_id) {
             self.register_new_pane_with_number(pane_id, self.next_public_pane_number);
         }
@@ -1236,6 +1353,7 @@ impl Workspace {
         let mut panes = HashMap::new();
         panes.insert(root_id, PaneState::new(terminal_id));
         let tab = Tab {
+            id: TabId::alloc().expect("test tab identity"),
             custom_name: None,
             number: 1,
             root_pane: root_id,
@@ -1298,9 +1416,13 @@ impl Workspace {
             root_id,
             PaneState::new(TerminalId::alloc().expect("test terminal identity")),
         );
+        let (number, following_number) = self
+            .next_public_tab_number_checked()
+            .expect("test public tab number");
         let tab = Tab {
+            id: TabId::alloc().expect("test tab identity"),
             custom_name: name.map(str::to_string),
-            number: self.next_public_tab_number,
+            number,
             root_pane: root_id,
             layout,
             collection_compat: HashMap::new(),
@@ -1311,7 +1433,7 @@ impl Workspace {
             render_notify,
             render_dirty,
         };
-        self.next_public_tab_number += 1;
+        self.next_public_tab_number = following_number;
         self.register_new_pane(root_id);
         self.tabs.push(tab);
         self.tabs.len() - 1
@@ -1603,6 +1725,97 @@ mod tests {
         let fourth_root = ws.tabs[fourth_tab].root_pane;
         assert_eq!(ws.public_tab_number_for_pane(fourth_root), Some(4));
         ws.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn pty_tab_creation_rejects_reserved_number_boundary_before_topology() {
+        let mut workspace = Workspace::test_new("boundary");
+        workspace.next_public_tab_number = usize::MAX - 1;
+        let tabs_before = workspace.tabs.len();
+        let panes_before = PaneId::next_for_test();
+
+        let error = match workspace.create_tab(
+            TabId::alloc().unwrap(),
+            TerminalId::alloc().unwrap(),
+            24,
+            80,
+            std::env::temp_dir(),
+            0,
+            crate::terminal_theme::TerminalTheme::default(),
+            None,
+            crate::pane::PaneShellConfig::new("/bin/sh", crate::config::ShellModeConfig::NonLogin),
+            Vec::new(),
+        ) {
+            Ok(_) => panic!("reserved public tab number unexpectedly created a PTY tab"),
+            Err(error) => error,
+        };
+
+        assert_eq!(error.to_string(), "public tab-number space is exhausted");
+        assert_eq!(workspace.tabs.len(), tabs_before);
+        assert_eq!(workspace.next_public_tab_number, usize::MAX - 1);
+        assert_eq!(PaneId::next_for_test(), panes_before);
+        workspace.next_public_tab_number = usize::MAX;
+        assert_eq!(
+            workspace
+                .ensure_public_tab_numbers_available(1)
+                .unwrap_err()
+                .to_string(),
+            "public tab-number space is exhausted"
+        );
+    }
+
+    #[test]
+    fn moved_pane_tab_creation_rejects_reserved_number_boundary_without_mutation() {
+        let mut source = Workspace::test_new("source");
+        let source_pane = source.tabs[0].root_pane;
+        let moved = source
+            .take_pane_for_move(source_pane)
+            .expect("source pane")
+            .moved;
+        let moved_pane_id = moved.pane_id;
+        let mut target = Workspace::test_new("target");
+        target.next_public_tab_number = usize::MAX - 1;
+        let tabs_before = target.tabs.len();
+        let events = target.tabs[0].events.clone();
+        let render_notify = target.tabs[0].render_notify.clone();
+        let render_dirty = target.tabs[0].render_dirty.clone();
+
+        let (error, _tab_id, returned) = match target.create_tab_from_existing_pane(
+            TabId::alloc().unwrap(),
+            moved,
+            None,
+            events,
+            render_notify,
+            render_dirty,
+        ) {
+            Ok(_) => panic!("reserved public tab number unexpectedly created a moved-pane tab"),
+            Err(error) => error,
+        };
+
+        assert_eq!(error.to_string(), "public tab-number space is exhausted");
+        assert_eq!(returned.pane_id, moved_pane_id);
+        assert_eq!(target.tabs.len(), tabs_before);
+        assert_eq!(target.next_public_tab_number, usize::MAX - 1);
+    }
+
+    #[test]
+    fn opaque_tab_identity_and_generation_one_number_survive_rename_and_reorder() {
+        let mut ws = Workspace::test_new("test");
+        let second = ws.test_add_tab(Some("before"));
+        let stable_id = ws.tabs[second].id.clone();
+        let stable_number = ws.tabs[second].number;
+        let stable_public_id = public_tab_id_for_number(&ws.id, stable_number);
+
+        ws.tabs[second].custom_name = Some("after".into());
+        assert!(ws.move_tab(second, 0));
+
+        assert_eq!(ws.tabs[0].id, stable_id);
+        assert_eq!(ws.tabs[0].number, stable_number);
+        assert_eq!(
+            public_tab_id_for_number(&ws.id, ws.tabs[0].number),
+            stable_public_id
+        );
+        assert_ne!(stable_id.as_str(), stable_public_id);
     }
 
     #[test]

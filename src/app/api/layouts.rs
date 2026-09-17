@@ -83,6 +83,9 @@ impl App {
         if let Some(target) = replace_target.filter(|_| !transient_capacity_available) {
             return self.handle_in_place_layout_replacement(id, params, target);
         }
+        if let Err(error) = self.state.workspaces[ws_idx].ensure_public_tab_numbers_available(1) {
+            return encode_error(id, "layout_apply_failed", error.to_string());
+        }
 
         let replacement_label = params.tab_label.clone().or_else(|| {
             let (_, tab_idx) = replace_target?;
@@ -118,6 +121,10 @@ impl App {
             Err(message) => return encode_error(id, "invalid_layout", message),
         };
 
+        let tab_id = match self.allocate_tab_id() {
+            Ok(tab_id) => tab_id,
+            Err(error) => return encode_error(id, "layout_apply_failed", error.to_string()),
+        };
         let terminal_id = match self.allocate_terminal_id() {
             Ok(id) => id,
             Err(error) => return encode_error(id, "layout_apply_failed", error.to_string()),
@@ -128,6 +135,7 @@ impl App {
             };
             if let Some(argv) = command.as_deref() {
                 ws.create_tab_argv_command(
+                    tab_id,
                     terminal_id,
                     rows,
                     cols,
@@ -140,6 +148,7 @@ impl App {
                 )
             } else {
                 ws.create_tab(
+                    tab_id,
                     terminal_id,
                     rows,
                     cols,

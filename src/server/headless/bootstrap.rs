@@ -153,6 +153,9 @@ fn run_handoff_import_server(socket_path: &Path, token: &str) -> io::Result<()> 
             &received.manifest.deferred_panes,
             &mut imports,
         )?;
+        // Sync the admitted v6 bytes before asking the source to relinquish
+        // ownership. The staging name is not authoritative until commit.
+        let staged_snapshot = crate::persist::stage_handoff_snapshot(&received.manifest.snapshot)?;
         crate::server::handoff::report_restored(&mut received.stream)?;
         if std::env::var("VQRO_TEST_HANDOFF_IMPORT_FAIL").as_deref() == Ok("after_restored") {
             return Err(io::Error::other(
@@ -182,7 +185,7 @@ fn run_handoff_import_server(socket_path: &Path, token: &str) -> io::Result<()> 
                 "test durable handoff publication failure after commit",
             ));
         }
-        crate::persist::publish_handoff_snapshot(&received.manifest.snapshot)?;
+        staged_snapshot.publish()?;
         app.mark_handoff_snapshot_durable();
         if std::env::var("VQRO_TEST_HANDOFF_IMPORT_FAIL").as_deref()
             == Ok("after_publish_before_ready")

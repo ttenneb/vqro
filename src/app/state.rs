@@ -1277,6 +1277,19 @@ impl AppState {
                     "empty app state must not keep pane-targeted toast"
                 );
             }
+            for repository in &self.repositories {
+                assert!(
+                    repository.checkout_workspace_ids.is_empty()
+                        && repository.last_focused_workspace_id.is_none(),
+                    "empty app state must not keep repository workspace references"
+                );
+            }
+            assert!(
+                self.space_order
+                    .iter()
+                    .all(|space| matches!(space, crate::repository::SpaceRef::Repository(_))),
+                "empty app state must not keep standalone workspace references"
+            );
             return;
         }
 
@@ -1298,6 +1311,7 @@ impl AppState {
 
         let mut workspace_ids = std::collections::HashSet::new();
         let mut workspace_id_to_idx = std::collections::HashMap::new();
+        let mut tab_ids = std::collections::HashSet::new();
         let mut pane_ids = std::collections::HashSet::new();
         let mut collection_ids = std::collections::HashSet::new();
         let mut attached_terminal_ids = std::collections::HashSet::new();
@@ -1308,10 +1322,32 @@ impl AppState {
                 ws.id,
                 ws_idx
             );
+            let workspace_number = crate::workspace::public_workspace_number(&ws.id)
+                .unwrap_or_else(|| panic!("workspace {} has noncanonical identity", ws.id));
+            assert!(workspace_number > 0, "workspace identity w0 is reserved");
+            assert_eq!(
+                ws.id,
+                format!(
+                    "w{}",
+                    crate::workspace::encode_public_number(workspace_number)
+                ),
+                "workspace {} has noncanonical identity",
+                ws.id
+            );
             workspace_id_to_idx.insert(ws.id.clone(), ws_idx);
             ws.assert_invariants_for_test();
 
             for tab in &ws.tabs {
+                assert!(
+                    crate::workspace::TabId::parse(tab.id.as_str()).is_ok(),
+                    "tab {} has noncanonical identity",
+                    tab.id
+                );
+                assert!(
+                    tab_ids.insert(tab.id.clone()),
+                    "duplicate tab identity {}",
+                    tab.id
+                );
                 for collection_id in tab.layout.collection_ids() {
                     assert!(
                         collection_ids.insert(collection_id),
@@ -1337,6 +1373,34 @@ impl AppState {
                         pane.attached_terminal_id
                     );
                 }
+            }
+        }
+
+        for repository in &self.repositories {
+            for workspace_id in &repository.checkout_workspace_ids {
+                assert!(
+                    workspace_ids.contains(workspace_id),
+                    "repository {} references missing checkout workspace {}",
+                    repository.id,
+                    workspace_id
+                );
+            }
+            if let Some(workspace_id) = &repository.last_focused_workspace_id {
+                assert!(
+                    workspace_ids.contains(workspace_id),
+                    "repository {} references missing focused workspace {}",
+                    repository.id,
+                    workspace_id
+                );
+            }
+        }
+        for space in &self.space_order {
+            if let crate::repository::SpaceRef::StandaloneWorkspace(workspace_id) = space {
+                assert!(
+                    workspace_ids.contains(workspace_id),
+                    "space order references missing standalone workspace {}",
+                    workspace_id
+                );
             }
         }
 
@@ -1450,6 +1514,20 @@ mod tests {
         state.workspaces = vec![ws];
 
         assert!(state.pane_exposes_host_cursor(0, pane_id));
+    }
+
+    #[test]
+    #[should_panic(expected = "duplicate tab identity")]
+    fn pure_identity_invariants_reject_duplicate_tab_identity() {
+        let mut state = AppState::test_new();
+        let mut workspace = crate::workspace::Workspace::test_new("test");
+        let second = workspace.test_add_tab(None);
+        workspace.tabs[second].id = workspace.tabs[0].id.clone();
+        state.workspaces = vec![workspace];
+        state.active = Some(0);
+        state.selected = 0;
+        state.ensure_test_terminals();
+        state.assert_invariants_for_test();
     }
 
     #[test]

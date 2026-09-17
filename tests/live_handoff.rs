@@ -2288,7 +2288,7 @@ fn run_legacy_v1_source_harness(commit: bool) {
         serde_json::json!({
             "version": 4,
             "workspaces": [{
-                "id": "legacy-w1",
+                "id": "w1",
                 "custom_name": "legacy",
                 "identity_cwd": "/tmp",
                 "public_pane_numbers": {"1": 1},
@@ -2383,7 +2383,7 @@ fn run_legacy_v1_source_harness(commit: bool) {
         wait_for_api(&api_socket, Duration::from_secs(10));
         let published: serde_json::Value =
             serde_json::from_slice(&fs::read(&session_path).unwrap()).unwrap();
-        assert_eq!(published["version"], 5);
+        assert_eq!(published["version"], 6);
         assert!(published["workspaces"].as_array().unwrap().is_empty());
         let _ = request(
             &api_socket,
@@ -2448,9 +2448,9 @@ while not line.endswith(b"\n"):
         raise RuntimeError("source closed before manifest")
     line += chunk
 manifest = json.loads(line)
-if manifest.get("version") != 2:
-    raise RuntimeError(f"expected handoff v2, got {manifest.get('version')}")
-connection.sendall(b"unsupported handoff version 2\n")
+if manifest.get("version") != 3:
+    raise RuntimeError(f"expected handoff v3, got {manifest.get('version')}")
+connection.sendall(b"unsupported handoff version 3\n")
 "#,
         )
         .unwrap();
@@ -2538,7 +2538,7 @@ connection.sendall(b"unsupported handoff version 2\n")
 }
 
 #[test]
-fn live_handoff_v2_to_v1_rejection_rolls_back_source_and_preserves_pty() {
+fn live_handoff_v3_to_v1_rejection_rolls_back_source_and_preserves_pty() {
     live_handoff_import_failure_rolls_back_old_server_at("v1-only");
 }
 
@@ -2548,7 +2548,7 @@ fn legacy_v1_source_precommit_rollback_preserves_v4_and_source_pty() {
 }
 
 #[test]
-fn legacy_v1_source_commit_publishes_v5_before_target_exposure() {
+fn legacy_v1_source_commit_publishes_v6_before_target_exposure() {
     run_legacy_v1_source_harness(true);
 }
 

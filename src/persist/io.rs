@@ -16,6 +16,51 @@ fn session_history_path() -> PathBuf {
     crate::session::data_dir().join("session-history.json")
 }
 
+const HANDOFF_STAGE_MARKER: &str = ".handoff-stage.";
+
+fn cleanup_stale_handoff_stages(target: &Path) -> std::io::Result<()> {
+    let target = resolve_write_target(target)?;
+    let Some(parent) = target.parent() else {
+        return Ok(());
+    };
+    let Some(file_name) = target.file_name().and_then(|name| name.to_str()) else {
+        return Ok(());
+    };
+    let prefix = format!("{file_name}{HANDOFF_STAGE_MARKER}");
+    let entries = match std::fs::read_dir(parent) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    let mut removed = false;
+    for entry in entries {
+        let entry = entry?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        let Some(suffix) = name.strip_prefix(&prefix) else {
+            continue;
+        };
+        if suffix.len() != 32
+            || !suffix
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            continue;
+        }
+        let metadata = std::fs::symlink_metadata(entry.path())?;
+        if metadata.file_type().is_file() {
+            std::fs::remove_file(entry.path())?;
+            removed = true;
+        }
+    }
+    if removed {
+        crate::platform::sync_parent_directory(parent)?;
+    }
+    Ok(())
+}
+
 // Follow symlinks manually so a write through a (possibly dangling) symlink
 // lands on the target. `fs::canonicalize` requires the target to exist, which
 // excludes the dangling-symlink case stow users hit on the very first save.
@@ -106,6 +151,7 @@ pub(super) fn clear_path(path: &Path) -> std::io::Result<()> {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn publish_handoff_snapshot_to_path(
     path: &Path,
     snapshot: &SessionSnapshot,
@@ -113,8 +159,64 @@ pub(crate) fn publish_handoff_snapshot_to_path(
     save_to_path(path, snapshot)
 }
 
-pub(crate) fn publish_handoff_snapshot(snapshot: &SessionSnapshot) -> std::io::Result<()> {
-    publish_handoff_snapshot_to_path(&session_path(), snapshot)
+/// A synced same-directory handoff snapshot that is not authoritative until
+/// ownership commits. Dropping it before commit removes the staging artifact.
+#[cfg(unix)]
+pub(crate) struct StagedHandoffSnapshot {
+    path: PathBuf,
+    target: PathBuf,
+    published: bool,
+}
+
+#[cfg(unix)]
+impl StagedHandoffSnapshot {
+    pub(crate) fn publish(mut self) -> std::io::Result<()> {
+        crate::platform::durable_replace_file(&self.path, &self.target)?;
+        self.published = true;
+        Ok(())
+    }
+}
+
+#[cfg(unix)]
+impl Drop for StagedHandoffSnapshot {
+    fn drop(&mut self) {
+        if !self.published && std::fs::remove_file(&self.path).is_ok() {
+            let _ = crate::platform::sync_containing_directory(&self.path);
+        }
+    }
+}
+
+#[cfg(unix)]
+pub(crate) fn stage_handoff_snapshot(
+    snapshot: &SessionSnapshot,
+) -> std::io::Result<StagedHandoffSnapshot> {
+    stage_handoff_snapshot_to_path(&session_path(), snapshot)
+}
+
+#[cfg(unix)]
+fn stage_handoff_snapshot_to_path(
+    target: &Path,
+    snapshot: &SessionSnapshot,
+) -> std::io::Result<StagedHandoffSnapshot> {
+    cleanup_stale_handoff_stages(target)?;
+    let target = resolve_write_target(target)?;
+    let mut random = [0_u8; 16];
+    crate::platform::fill_secure_random(&mut random)?;
+    let suffix = random
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let file_name = target
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| std::io::Error::other("handoff snapshot path has no UTF-8 file name"))?;
+    let path = target.with_file_name(format!("{file_name}{HANDOFF_STAGE_MARKER}{suffix}"));
+    save_to_path(&path, snapshot)?;
+    Ok(StagedHandoffSnapshot {
+        path,
+        target,
+        published: false,
+    })
 }
 
 pub fn save(snapshot: &SessionSnapshot, history: Option<&SessionHistorySnapshot>) {
@@ -179,6 +281,9 @@ fn read_bounded_text(path: &Path, maximum: u64) -> std::io::Result<String> {
 }
 
 fn load_for_startup_from_path(path: &Path) -> StartupSessionLoad {
+    if let Err(error) = cleanup_stale_handoff_stages(path) {
+        warn!(%error, "failed to clean stale handoff snapshot stages");
+    }
     if !path.exists() {
         return StartupSessionLoad::Missing;
     }
@@ -318,7 +423,10 @@ mod tests {
 
         let newer = temp_session_path("newer-load");
         std::fs::create_dir_all(newer.parent().unwrap()).unwrap();
-        let newer_bytes = format!("{{\"version\":{}}}", SNAPSHOT_VERSION + 1);
+        let newer_bytes = format!(
+            "{{\"version\":{},\"future_identity\":{{\"must\":\"survive\"}}}}",
+            SNAPSHOT_VERSION + 1
+        );
         std::fs::write(&newer, &newer_bytes).unwrap();
         assert!(matches!(
             load_for_startup_from_path(&newer),
@@ -383,7 +491,7 @@ mod tests {
 
     fn history_snapshot(secret: &str) -> SessionHistorySnapshot {
         SessionHistorySnapshot {
-            version: SNAPSHOT_VERSION,
+            version: super::super::snapshot::HISTORY_SNAPSHOT_VERSION,
             workspaces: vec![WorkspaceHistorySnapshot {
                 tabs: vec![TabHistorySnapshot {
                     panes: std::collections::HashMap::from([(
@@ -404,7 +512,7 @@ mod tests {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(
             &path,
-            br#"{"version":4,"workspaces":[{"id":"w1","identity_cwd":"/tmp","tabs":[{"layout":{"Pane":1},"panes":{"1":{"cwd":"/tmp"}},"zoomed":false}]}]}"#,
+            br#"{"version":5,"workspaces":[{"id":"w1","identity_cwd":"/tmp","tabs":[{"layout":{"Pane":1},"panes":{"1":{"cwd":"/tmp"}},"zoomed":false}]}]}"#,
         )
         .unwrap();
 
@@ -415,10 +523,98 @@ mod tests {
         let published: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         assert_eq!(published["version"], SNAPSHOT_VERSION);
+        let tab_id = published["workspaces"][0]["tabs"][0]["id"]
+            .as_str()
+            .expect("published tab identity");
+        assert!(crate::workspace::TabId::parse(tab_id).is_ok());
         let terminal_id = published["workspaces"][0]["tabs"][0]["panes"]["1"]["terminal_id"]
             .as_str()
             .expect("published terminal identity");
         assert!(crate::terminal::TerminalId::parse(terminal_id).is_ok());
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn handoff_staging_is_durable_but_not_authoritative_until_publish() {
+        let path = temp_session_path("handoff-stage");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let old = b"authoritative-old-bytes";
+        std::fs::write(&path, old).unwrap();
+        let staged = stage_handoff_snapshot_to_path(&path, &empty_snapshot()).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), old);
+
+        staged.publish().unwrap();
+        let published = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            super::super::snapshot::parse_snapshot(&published)
+                .unwrap()
+                .version,
+            SNAPSHOT_VERSION
+        );
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dropped_handoff_stage_preserves_authoritative_bytes() {
+        let path = temp_session_path("handoff-stage-drop");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let old = b"authoritative-old-bytes";
+        std::fs::write(&path, old).unwrap();
+        let staged = stage_handoff_snapshot_to_path(&path, &empty_snapshot()).unwrap();
+        let staged_path = staged.path.clone();
+        drop(staged);
+        assert_eq!(std::fs::read(&path).unwrap(), old);
+        assert!(!staged_path.exists());
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn creating_a_stage_cleans_a_leaked_predecessor() {
+        let path = temp_session_path("handoff-stage-replace-stale");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        save_to_path(&path, &empty_snapshot()).unwrap();
+        let first = stage_handoff_snapshot_to_path(&path, &empty_snapshot()).unwrap();
+        let leaked = first.path.clone();
+        std::mem::forget(first);
+
+        let replacement = stage_handoff_snapshot_to_path(&path, &empty_snapshot()).unwrap();
+        assert!(!leaked.exists());
+        assert!(replacement.path.exists());
+        drop(replacement);
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn startup_cleans_only_exact_stale_handoff_stage_files() {
+        let path = temp_session_path("handoff-stage-crash-cleanup");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        save_to_path(&path, &empty_snapshot()).unwrap();
+        let staged = stage_handoff_snapshot_to_path(&path, &empty_snapshot()).unwrap();
+        let leaked_stage = staged.path.clone();
+        std::mem::forget(staged); // simulate SIGKILL: Drop cannot clean the stage
+        let unrelated = path.with_file_name("session.json.handoff-stage.not-ours");
+        let authoritative_like = path.with_file_name("session.json.backup");
+        let symlink_stage =
+            path.with_file_name("session.json.handoff-stage.00000000000000000000000000000000");
+        std::fs::write(&unrelated, b"keep").unwrap();
+        std::fs::write(&authoritative_like, b"keep").unwrap();
+        std::os::unix::fs::symlink(&path, &symlink_stage).unwrap();
+
+        assert!(matches!(
+            load_for_startup_from_path(&path),
+            StartupSessionLoad::Loaded(_)
+        ));
+        assert!(!leaked_stage.exists());
+        assert!(unrelated.exists());
+        assert!(authoritative_like.exists());
+        assert!(std::fs::symlink_metadata(&symlink_stage)
+            .unwrap()
+            .file_type()
+            .is_symlink());
         std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 

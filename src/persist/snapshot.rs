@@ -10,7 +10,7 @@ use crate::terminal::TerminalRuntimeRegistry;
 use crate::workspace::Workspace;
 
 /// Current structural session snapshot format version.
-pub(super) const SNAPSHOT_VERSION: u32 = 5;
+pub(crate) const SNAPSHOT_VERSION: u32 = 6;
 /// Pane history has no terminal-identity fields and remains wire-compatible at v4.
 pub(super) const HISTORY_SNAPSHOT_VERSION: u32 = 4;
 pub(super) const MAX_SESSION_SNAPSHOT_BYTES: u64 = 16 * 1024 * 1024;
@@ -63,7 +63,7 @@ pub struct TabHistorySnapshot {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct WorkspaceSnapshot {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_raw_workspace_id")]
     pub id: Option<String>,
     #[serde(default)]
     pub custom_name: Option<String>,
@@ -100,6 +100,9 @@ struct LegacyWorkspaceSnapshot {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct TabSnapshot {
+    /// Added in snapshot v6. Older and malformed values are normalized before restore.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<RawTabId>,
     #[serde(default)]
     pub custom_name: Option<String>,
     pub layout: LayoutSnapshot,
@@ -150,6 +153,67 @@ impl RawTerminalId {
     fn from_validated(id: &crate::terminal::TerminalId) -> Self {
         Self(Some(id.as_str().to_owned()))
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RawTabId(Option<String>);
+
+impl RawTabId {
+    fn validated(&self) -> Option<crate::workspace::TabId> {
+        self.0
+            .as_deref()
+            .and_then(|raw| crate::workspace::TabId::parse(raw).ok())
+    }
+
+    fn from_validated(id: &crate::workspace::TabId) -> Self {
+        Self(Some(id.as_str().to_owned()))
+    }
+}
+
+impl Serialize for RawTabId {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        self.0.serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for RawTabId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = serde_json::Value::deserialize(deserializer)?;
+        let candidate = match raw {
+            serde_json::Value::String(value)
+                if value.len() <= crate::workspace::MAX_TAB_ID_BYTES =>
+            {
+                Some(value)
+            }
+            _ => None,
+        };
+        Ok(Self(candidate))
+    }
+}
+
+const MAX_WORKSPACE_ID_BYTES: usize = 32;
+
+fn deserialize_raw_workspace_id<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = serde_json::Value::deserialize(deserializer)?;
+    Ok(match raw {
+        serde_json::Value::String(value) if value.len() <= MAX_WORKSPACE_ID_BYTES => Some(value),
+        _ => None,
+    })
+}
+
+fn canonical_workspace_id(raw: &str) -> bool {
+    crate::workspace::public_workspace_number(raw).is_some_and(|number| {
+        number > 0 && raw == format!("w{}", crate::workspace::encode_public_number(number))
+    })
 }
 
 impl Serialize for RawTerminalId {
@@ -254,6 +318,7 @@ impl From<LegacyWorkspaceSnapshot> for WorkspaceSnapshot {
     fn from(snap: LegacyWorkspaceSnapshot) -> Self {
         let identity_cwd = legacy_identity_cwd(&snap);
         let tab = TabSnapshot {
+            id: None,
             custom_name: None,
             layout: snap.layout,
             collections: Vec::new(),
@@ -311,10 +376,17 @@ fn migrate_snapshot(raw: RawSessionSnapshot) -> Result<(SessionSnapshot, bool), 
         .into_iter()
         .map(migrate_workspace)
         .collect::<Result<Vec<_>, _>>()?;
-    let (repositories, space_order) = if raw.repositories.is_empty() || raw.space_order.is_empty() {
-        crate::repository::migrate_workspace_projection(&workspaces)
+    let (migrated_repositories, migrated_space_order) =
+        crate::repository::migrate_workspace_projection(&workspaces);
+    let repositories = if raw.repositories.is_empty() {
+        migrated_repositories
     } else {
-        (raw.repositories, raw.space_order)
+        raw.repositories
+    };
+    let space_order = if raw.space_order.is_empty() {
+        migrated_space_order
+    } else {
+        raw.space_order
     };
     let mut snapshot = SessionSnapshot {
         version: original_version,
@@ -333,28 +405,56 @@ fn migrate_snapshot(raw: RawSessionSnapshot) -> Result<(SessionSnapshot, bool), 
     Ok((snapshot, normalized || original_version != SNAPSHOT_VERSION))
 }
 
-/// Validate persisted terminal IDs without trusting their raw JSON strings.
-///
-/// Pass one deterministically keeps the first valid unique identity in
-/// workspace/tab/pane order. Pass two fills every rejected or legacy slot with
-/// a fresh session-unique identity. No PTY is constructed until this completes.
+/// Normalize all persisted session identities before any PTY, runtime, or
+/// handoff lease is constructed. Structural vector order decides duplicate
+/// survivors; pane maps are visited by sorted pane ID.
 pub(crate) fn normalize_terminal_identities(
     snapshot: &mut SessionSnapshot,
-    regenerate_all: bool,
+    regenerate_tab_and_terminal_ids: bool,
 ) -> Result<bool, String> {
-    normalize_terminal_identities_with(snapshot, regenerate_all, crate::terminal::TerminalId::alloc)
+    normalize_identity_changes(snapshot, regenerate_tab_and_terminal_ids)
+        .map(|changes| changes.changed)
 }
 
-fn normalize_terminal_identities_with<F>(
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct IdentityNormalization {
+    pub changed: bool,
+    pub schema_version_changed: bool,
+    pub internal_identities_changed: bool,
+    /// A generation-1 workspace handle changed. Handoff cannot repair this
+    /// because an already-running PTY may contain the original public handle.
+    pub public_identities_changed: bool,
+    pub projections_changed: bool,
+    pub structural_state_changed: bool,
+}
+
+pub(crate) fn normalize_identity_changes(
     snapshot: &mut SessionSnapshot,
-    regenerate_all: bool,
-    mut generate: F,
-) -> Result<bool, String>
+    regenerate_tab_and_terminal_ids: bool,
+) -> Result<IdentityNormalization, String> {
+    normalize_identities_with(
+        snapshot,
+        regenerate_tab_and_terminal_ids,
+        crate::workspace::TabId::alloc,
+        crate::terminal::TerminalId::alloc,
+    )
+}
+
+fn normalize_identities_with<T, U>(
+    snapshot: &mut SessionSnapshot,
+    regenerate_tab_and_terminal_ids: bool,
+    mut generate_tab: T,
+    mut generate_terminal: U,
+) -> Result<IdentityNormalization, String>
 where
-    F: FnMut() -> std::io::Result<crate::terminal::TerminalId>,
+    T: FnMut() -> std::io::Result<crate::workspace::TabId>,
+    U: FnMut() -> std::io::Result<crate::terminal::TerminalId>,
 {
-    let mut changed = snapshot.version != SNAPSHOT_VERSION;
-    let mut occupied = std::collections::HashSet::new();
+    let schema_version_changed = snapshot.version != SNAPSHOT_VERSION;
+    let mut changed = schema_version_changed;
+    let mut internal_identities_changed = false;
+    let mut public_identities_changed = false;
+    let mut structural_state_changed = false;
 
     fn collect_layout_panes(layout: &LayoutSnapshot, panes: &mut Vec<u32>) {
         match layout {
@@ -366,6 +466,7 @@ where
             }
         }
     }
+
     for workspace in &mut snapshot.workspaces {
         for tab in &mut workspace.tabs {
             let mut layout_panes = Vec::new();
@@ -376,11 +477,272 @@ where
                 if let std::collections::hash_map::Entry::Vacant(entry) = tab.panes.entry(pane_id) {
                     entry.insert(PaneSnapshot::legacy_layout_only());
                     changed = true;
+                    structural_state_changed = true;
                 }
             }
         }
     }
 
+    // Reserve every valid unique workspace handle before assigning the lowest
+    // unused canonical handle to malformed and duplicate entries.
+    let mut occupied_workspaces = std::collections::HashSet::new();
+    let mut old_workspace_ids = Vec::with_capacity(snapshot.workspaces.len());
+    let mut workspace_rewrites = std::collections::HashMap::new();
+    for workspace in &mut snapshot.workspaces {
+        let old = workspace.id.clone();
+        let accepted = old
+            .as_deref()
+            .filter(|id| canonical_workspace_id(id))
+            .filter(|id| occupied_workspaces.insert((*id).to_owned()));
+        if let Some(id) = accepted {
+            workspace_rewrites
+                .entry(id.to_owned())
+                .or_insert_with(|| id.to_owned());
+        } else {
+            workspace.id = None;
+            changed = true;
+            public_identities_changed = true;
+        }
+        old_workspace_ids.push(old);
+    }
+    let mut next_workspace_number = 1usize;
+    for (index, workspace) in snapshot.workspaces.iter_mut().enumerate() {
+        if workspace.id.is_some() {
+            continue;
+        }
+        let allocated = loop {
+            let candidate = format!(
+                "w{}",
+                crate::workspace::encode_public_number(next_workspace_number),
+            );
+            next_workspace_number = next_workspace_number
+                .checked_add(1)
+                .ok_or_else(|| "workspace identity space is exhausted".to_string())?;
+            if occupied_workspaces.insert(candidate.clone()) {
+                break candidate;
+            }
+        };
+        if let Some(old) = old_workspace_ids[index].as_ref() {
+            // Duplicate references intentionally remain bound to the first
+            // structural survivor through `or_insert`.
+            workspace_rewrites
+                .entry(old.clone())
+                .or_insert_with(|| allocated.clone());
+        }
+        workspace.id = Some(allocated);
+    }
+
+    // Generation-1 tab handles are persisted separately from opaque TabId.
+    // Keep the first positive unique number in structural order, reserve all
+    // such survivors, then fill rejected/missing slots with the lowest unused
+    // positive numbers. A high historical next value is never reduced.
+    for workspace in &mut snapshot.workspaces {
+        let original_numbers = workspace.public_tab_numbers.clone();
+        let original_next = workspace.next_public_tab_number;
+        let mut occupied_numbers = std::collections::HashSet::new();
+        let mut normalized_numbers = Vec::with_capacity(workspace.tabs.len());
+        for tab_idx in 0..workspace.tabs.len() {
+            let accepted = original_numbers
+                .get(tab_idx)
+                .copied()
+                .filter(|number| *number > 0)
+                .filter(|number| occupied_numbers.insert(*number));
+            normalized_numbers.push(accepted);
+        }
+        let mut next_candidate = 1usize;
+        for number in &mut normalized_numbers {
+            if number.is_some() {
+                continue;
+            }
+            while occupied_numbers.contains(&next_candidate) {
+                next_candidate = next_candidate
+                    .checked_add(1)
+                    .ok_or_else(|| "public tab-number space is exhausted".to_string())?;
+            }
+            *number = Some(next_candidate);
+            occupied_numbers.insert(next_candidate);
+        }
+        let public_tab_numbers = normalized_numbers
+            .into_iter()
+            .map(|number| {
+                number.ok_or_else(|| "public tab-number normalization failed".to_string())
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let minimum_next = public_tab_numbers
+            .iter()
+            .copied()
+            .max()
+            .unwrap_or(0)
+            .checked_add(1)
+            .ok_or_else(|| "public tab-number space is exhausted".to_string())?;
+        let next_public_tab_number = original_next.max(minimum_next).max(1);
+        if next_public_tab_number == usize::MAX {
+            return Err("public tab-number space is exhausted".to_string());
+        }
+        if public_tab_numbers != original_numbers || next_public_tab_number != original_next {
+            workspace.public_tab_numbers = public_tab_numbers;
+            workspace.next_public_tab_number = next_public_tab_number;
+            changed = true;
+            public_identities_changed = true;
+        }
+    }
+
+    // Rebuild projections from workspace provenance after identity repair.
+    // This is what makes every repaired duplicate reachable at runtime rather
+    // than merely assigning it an ID that no Space references.
+    let old_repositories = snapshot.repositories.clone();
+    let old_space_order = snapshot.space_order.clone();
+    let repository_ids = snapshot
+        .repositories
+        .iter()
+        .map(|repository| repository.id.clone())
+        .collect::<std::collections::HashSet<_>>();
+    if repository_ids.len() != snapshot.repositories.len() {
+        return Err("snapshot contains duplicate repository identities".to_string());
+    }
+    let workspace_memberships = snapshot
+        .workspaces
+        .iter()
+        .map(|workspace| {
+            workspace
+                .checkout
+                .as_ref()
+                .map(|checkout| checkout.repository_id.clone())
+                .or_else(|| {
+                    workspace.worktree_space.as_ref().map(|space| {
+                        crate::repository::stable_repository_id(std::path::Path::new(&space.key))
+                    })
+                })
+        })
+        .collect::<Vec<_>>();
+    for repository_id in workspace_memberships.iter().flatten() {
+        if !repository_ids.contains(repository_id) {
+            return Err(format!(
+                "workspace checkout references missing repository {repository_id}"
+            ));
+        }
+    }
+
+    for repository in &mut snapshot.repositories {
+        if let Some(workspace_id) = &mut repository.last_focused_workspace_id {
+            if let Some(replacement) = workspace_rewrites.get(workspace_id) {
+                workspace_id.clone_from(replacement);
+            }
+        }
+        repository.checkout_workspace_ids.clear();
+    }
+    for (workspace, membership) in snapshot.workspaces.iter().zip(&workspace_memberships) {
+        let Some(repository_id) = membership else {
+            continue;
+        };
+        let workspace_id = workspace
+            .id
+            .as_ref()
+            .ok_or_else(|| "normalized workspace identity disappeared".to_string())?;
+        let repository = snapshot
+            .repositories
+            .iter_mut()
+            .find(|repository| &repository.id == repository_id)
+            .ok_or_else(|| format!("workspace repository {repository_id} disappeared"))?;
+        repository.checkout_workspace_ids.push(workspace_id.clone());
+    }
+    for repository in &mut snapshot.repositories {
+        if repository
+            .last_focused_workspace_id
+            .as_ref()
+            .is_some_and(|workspace_id| !repository.checkout_workspace_ids.contains(workspace_id))
+        {
+            repository.last_focused_workspace_id = None;
+        }
+        if repository.last_focused_workspace_id.is_none() {
+            repository.last_focused_workspace_id =
+                repository.checkout_workspace_ids.first().cloned();
+        }
+    }
+
+    for space in &mut snapshot.space_order {
+        if let crate::repository::SpaceRef::StandaloneWorkspace(workspace_id) = space {
+            if let Some(replacement) = workspace_rewrites.get(workspace_id) {
+                workspace_id.clone_from(replacement);
+            }
+        }
+    }
+    let standalone_ids = snapshot
+        .workspaces
+        .iter()
+        .zip(&workspace_memberships)
+        .filter_map(|(workspace, membership)| membership.is_none().then_some(workspace.id.clone()))
+        .flatten()
+        .collect::<std::collections::HashSet<_>>();
+    let mut seen_spaces = std::collections::HashSet::new();
+    snapshot.space_order.retain(|space| {
+        let (valid, key) = match space {
+            crate::repository::SpaceRef::Repository(repository_id) => (
+                repository_ids.contains(repository_id),
+                format!("repository:{repository_id}"),
+            ),
+            crate::repository::SpaceRef::StandaloneWorkspace(workspace_id) => (
+                standalone_ids.contains(workspace_id),
+                format!("workspace:{workspace_id}"),
+            ),
+        };
+        valid && seen_spaces.insert(key)
+    });
+    for (workspace, membership) in snapshot.workspaces.iter().zip(&workspace_memberships) {
+        let space = if let Some(repository_id) = membership {
+            crate::repository::SpaceRef::Repository(repository_id.clone())
+        } else {
+            crate::repository::SpaceRef::StandaloneWorkspace(
+                workspace
+                    .id
+                    .clone()
+                    .ok_or_else(|| "normalized workspace identity disappeared".to_string())?,
+            )
+        };
+        let key = match &space {
+            crate::repository::SpaceRef::Repository(repository_id) => {
+                format!("repository:{repository_id}")
+            }
+            crate::repository::SpaceRef::StandaloneWorkspace(workspace_id) => {
+                format!("workspace:{workspace_id}")
+            }
+        };
+        if seen_spaces.insert(key) {
+            snapshot.space_order.push(space);
+        }
+    }
+    let projections_changed =
+        snapshot.repositories != old_repositories || snapshot.space_order != old_space_order;
+    changed |= projections_changed;
+
+    let mut occupied_tabs = std::collections::HashSet::new();
+    for workspace in &mut snapshot.workspaces {
+        for tab in &mut workspace.tabs {
+            let accepted = (!regenerate_tab_and_terminal_ids)
+                .then(|| tab.id.as_ref().and_then(RawTabId::validated))
+                .flatten()
+                .filter(|id| occupied_tabs.insert(id.clone()));
+            if accepted.is_none() {
+                tab.id = None;
+                changed = true;
+                internal_identities_changed = true;
+            }
+        }
+    }
+    for workspace in &mut snapshot.workspaces {
+        for tab in &mut workspace.tabs {
+            if tab.id.is_some() {
+                continue;
+            }
+            let allocated =
+                crate::workspace::TabId::alloc_unique_with(&occupied_tabs, &mut generate_tab)
+                    .map_err(|error| format!("allocate tab identity: {error}"))?;
+            occupied_tabs.insert(allocated.clone());
+            tab.id = Some(RawTabId::from_validated(&allocated));
+        }
+    }
+
+    let mut occupied_terminals = std::collections::HashSet::new();
     for workspace in &mut snapshot.workspaces {
         for tab in &mut workspace.tabs {
             let mut pane_ids = tab.panes.keys().copied().collect::<Vec<_>>();
@@ -390,18 +752,18 @@ where
                     .panes
                     .get_mut(&pane_id)
                     .ok_or_else(|| "pane disappeared during identity normalization".to_string())?;
-                let accepted = (!regenerate_all)
+                let accepted = (!regenerate_tab_and_terminal_ids)
                     .then(|| pane.terminal_id.as_ref().and_then(RawTerminalId::validated))
                     .flatten()
-                    .filter(|id| occupied.insert(id.clone()));
+                    .filter(|id| occupied_terminals.insert(id.clone()));
                 if accepted.is_none() {
-                    changed |= pane.terminal_id.is_some();
                     pane.terminal_id = None;
+                    changed = true;
+                    internal_identities_changed = true;
                 }
             }
         }
     }
-
     for workspace in &mut snapshot.workspaces {
         for tab in &mut workspace.tabs {
             let mut pane_ids = tab.panes.keys().copied().collect::<Vec<_>>();
@@ -414,17 +776,32 @@ where
                 if pane.terminal_id.is_some() {
                     continue;
                 }
-                let allocated =
-                    crate::terminal::TerminalId::alloc_unique_with(&occupied, &mut generate)
-                        .map_err(|error| format!("allocate terminal identity: {error}"))?;
-                occupied.insert(allocated.clone());
+                let allocated = crate::terminal::TerminalId::alloc_unique_with(
+                    &occupied_terminals,
+                    &mut generate_terminal,
+                )
+                .map_err(|error| format!("allocate terminal identity: {error}"))?;
+                occupied_terminals.insert(allocated.clone());
                 pane.terminal_id = Some(RawTerminalId::from_validated(&allocated));
-                changed = true;
             }
         }
     }
     snapshot.version = SNAPSHOT_VERSION;
-    Ok(changed)
+    Ok(IdentityNormalization {
+        changed,
+        schema_version_changed,
+        internal_identities_changed,
+        public_identities_changed,
+        projections_changed,
+        structural_state_changed,
+    })
+}
+
+pub(crate) fn tab_id_for_snapshot(tab: &TabSnapshot) -> Result<crate::workspace::TabId, String> {
+    tab.id
+        .as_ref()
+        .and_then(RawTabId::validated)
+        .ok_or_else(|| "snapshot tab has no validated tab identity".to_string())
 }
 
 pub(crate) fn terminal_id_for_pane_snapshot(
@@ -630,6 +1007,7 @@ fn capture_tab(
         .collect();
     collections.sort_by_key(|collection| collection.id.raw());
     TabSnapshot {
+        id: Some(RawTabId::from_validated(&tab.id)),
         custom_name: tab.custom_name.clone(),
         layout: capture_typed_node(tab.layout.typed_root()),
         collections,
@@ -1006,7 +1384,7 @@ mod tests {
             space_order: Vec::new(),
             delegations: Vec::new(),
             workspaces: vec![WorkspaceSnapshot {
-                id: Some("wproj".to_string()),
+                id: Some("w1".to_string()),
                 custom_name: Some("pi-mono".to_string()),
                 identity_cwd: PathBuf::from("/home/can/Projects/herdr"),
                 checkout: None,
@@ -1016,6 +1394,7 @@ mod tests {
                 public_tab_numbers: vec![1],
                 next_public_tab_number: 2,
                 tabs: vec![TabSnapshot {
+                    id: None,
                     collections: Vec::new(),
                     focused_leaf: None,
                     custom_name: Some("api".to_string()),
@@ -1044,7 +1423,7 @@ mod tests {
         let restored = parse_snapshot(&json).unwrap();
 
         assert_eq!(restored.workspaces.len(), 1);
-        assert_eq!(restored.workspaces[0].id.as_deref(), Some("wproj"));
+        assert_eq!(restored.workspaces[0].id.as_deref(), Some("w1"));
         assert_eq!(
             restored.workspaces[0].custom_name.as_deref(),
             Some("pi-mono")
@@ -1534,7 +1913,7 @@ mod tests {
     }
 
     #[test]
-    fn v4_to_v5_normalization_is_two_pass_and_round_trip_stable() {
+    fn v4_to_v6_normalization_is_two_pass_and_round_trip_stable() {
         let json = r#"{
             "version":4,
             "workspaces":[{
@@ -1550,6 +1929,7 @@ mod tests {
         let (snapshot, changed) = parse_snapshot_with_status(json).unwrap();
         assert!(changed);
         assert_eq!(snapshot.version, SNAPSHOT_VERSION);
+        let tab_id = tab_id_for_snapshot(&snapshot.workspaces[0].tabs[0]).unwrap();
         let first =
             terminal_id_for_pane_snapshot(&snapshot.workspaces[0].tabs[0].panes[&1]).unwrap();
         let second =
@@ -1559,6 +1939,10 @@ mod tests {
         let encoded = serde_json::to_string(&snapshot).unwrap();
         let (round_trip, changed) = parse_snapshot_with_status(&encoded).unwrap();
         assert!(!changed);
+        assert_eq!(
+            tab_id_for_snapshot(&round_trip.workspaces[0].tabs[0]).unwrap(),
+            tab_id
+        );
         assert_eq!(
             terminal_id_for_pane_snapshot(&round_trip.workspaces[0].tabs[0].panes[&1]).unwrap(),
             first
@@ -1620,6 +2004,234 @@ mod tests {
     }
 
     #[test]
+    fn identity_normalization_repairs_all_families_in_structural_order_and_rewrites_references() {
+        let tab_a = "tab_00000000000000000000000000000001";
+        let tab_b = "tab_00000000000000000000000000000002";
+        let terminal_a = "term_00000000000000000000000000000001";
+        let terminal_b = "term_00000000000000000000000000000002";
+        let json = serde_json::json!({
+            "version": 5,
+            "workspaces": [
+                {"id":"w1","identity_cwd":"/a","checkout":{"repository_id":"repo_1","checkout_path":"/a","kind":"primary"},"tabs":[{"id":tab_a,"layout":{"Pane":1},"panes":{"1":{"terminal_id":terminal_a,"cwd":"/a"}},"zoomed":false}]},
+                {"id":"w1","identity_cwd":"/b","checkout":{"repository_id":"repo_1","checkout_path":"/b","kind":"linked"},"tabs":[{"id":tab_a,"layout":{"Pane":2},"panes":{"2":{"terminal_id":terminal_a,"cwd":"/b"}},"zoomed":false}]},
+                {"id":"w2","identity_cwd":"/c","checkout":{"repository_id":"repo_1","checkout_path":"/c","kind":"linked"},"tabs":[{"id":tab_b,"layout":{"Pane":3},"panes":{"3":{"terminal_id":terminal_b,"cwd":"/c"}},"zoomed":false}]},
+                {"id":"malformed","identity_cwd":"/d","checkout":{"repository_id":"repo_1","checkout_path":"/d","kind":"linked"},"tabs":[]}
+            ],
+            "repositories": [{
+                "id":"repo_1","git_common_dir":"/repo/.git","label":"repo",
+                "checkout_workspace_ids":["w1","w1","malformed"],
+                "last_focused_workspace_id":"malformed"
+            }],
+            "space_order": [
+                {"kind":"repository","id":"repo_1"},
+                {"kind":"repository","id":"repo_1"},
+                {"kind":"standalone_workspace","id":"w1"},
+                {"kind":"standalone_workspace","id":"malformed"}
+            ]
+        });
+
+        let (snapshot, changed) = parse_snapshot_with_status(&json.to_string()).unwrap();
+        assert!(changed);
+        assert_eq!(snapshot.version, SNAPSHOT_VERSION);
+        assert_eq!(snapshot.workspaces[0].id.as_deref(), Some("w1"));
+        assert_eq!(snapshot.workspaces[1].id.as_deref(), Some("w3"));
+        assert_eq!(snapshot.workspaces[2].id.as_deref(), Some("w2"));
+        assert_eq!(snapshot.workspaces[3].id.as_deref(), Some("w4"));
+        assert_eq!(
+            snapshot.repositories[0].checkout_workspace_ids,
+            ["w1", "w3", "w2", "w4"]
+        );
+        assert_eq!(
+            snapshot.repositories[0]
+                .last_focused_workspace_id
+                .as_deref(),
+            Some("w4")
+        );
+        assert_eq!(
+            snapshot.space_order,
+            [crate::repository::SpaceRef::Repository("repo_1".into())]
+        );
+
+        assert_eq!(
+            tab_id_for_snapshot(&snapshot.workspaces[0].tabs[0])
+                .unwrap()
+                .as_str(),
+            tab_a
+        );
+        assert_eq!(
+            tab_id_for_snapshot(&snapshot.workspaces[2].tabs[0])
+                .unwrap()
+                .as_str(),
+            tab_b
+        );
+        let tab_ids = snapshot
+            .workspaces
+            .iter()
+            .flat_map(|workspace| &workspace.tabs)
+            .map(|tab| tab_id_for_snapshot(tab).unwrap())
+            .collect::<std::collections::HashSet<_>>();
+        assert_eq!(tab_ids.len(), 3);
+        let terminal_ids = snapshot
+            .workspaces
+            .iter()
+            .flat_map(|workspace| &workspace.tabs)
+            .flat_map(|tab| tab.panes.values())
+            .map(|pane| terminal_id_for_pane_snapshot(pane).unwrap())
+            .collect::<std::collections::HashSet<_>>();
+        assert_eq!(terminal_ids.len(), 3);
+
+        let persisted = serde_json::to_string(&snapshot).unwrap();
+        let restored = parse_snapshot(&persisted).unwrap();
+        assert_eq!(restored.repositories, snapshot.repositories);
+        assert_eq!(restored.space_order, snapshot.space_order);
+    }
+
+    #[test]
+    fn public_tab_numbers_are_repaired_deterministically_and_v6_is_idempotent() {
+        let tabs = (1..=4)
+            .map(|number| {
+                serde_json::json!({
+                    "id": format!("tab_{number:032x}"),
+                    "layout": {"Pane": number},
+                    "panes": {
+                        number.to_string(): {
+                            "terminal_id": format!("term_{number:032x}"),
+                            "cwd": "/tmp"
+                        }
+                    },
+                    "zoomed": false
+                })
+            })
+            .collect::<Vec<_>>();
+        let json = serde_json::json!({
+            "version": 6,
+            "workspaces": [{
+                "id":"w1",
+                "identity_cwd":"/tmp",
+                "public_tab_numbers":[7, 0, 7],
+                "next_public_tab_number":2,
+                "tabs":tabs
+            }],
+            "repositories":[],
+            "space_order":[{"kind":"standalone_workspace","id":"w1"}],
+            "selected":0
+        });
+
+        let (snapshot, changed) = parse_snapshot_with_status(&json.to_string()).unwrap();
+        assert!(changed);
+        assert_eq!(snapshot.workspaces[0].public_tab_numbers, [7, 1, 2, 3]);
+        assert_eq!(snapshot.workspaces[0].next_public_tab_number, 8);
+        let public_ids = snapshot.workspaces[0]
+            .public_tab_numbers
+            .iter()
+            .map(|number| crate::workspace::public_tab_id_for_number("w1", *number))
+            .collect::<std::collections::HashSet<_>>();
+        assert_eq!(public_ids.len(), 4);
+
+        let persisted = serde_json::to_string(&snapshot).unwrap();
+        let (round_trip, changed) = parse_snapshot_with_status(&persisted).unwrap();
+        assert!(!changed);
+        assert_eq!(
+            round_trip.workspaces[0].public_tab_numbers,
+            snapshot.workspaces[0].public_tab_numbers
+        );
+        assert_eq!(
+            round_trip.workspaces[0].next_public_tab_number,
+            snapshot.workspaces[0].next_public_tab_number
+        );
+    }
+
+    #[test]
+    fn v6_reserved_public_tab_boundary_round_trips_without_rewrite() {
+        let json = serde_json::json!({
+            "version": 6,
+            "workspaces": [{
+                "id":"w1",
+                "identity_cwd":"/tmp",
+                "public_tab_numbers":[1],
+                "next_public_tab_number": usize::MAX - 1,
+                "tabs":[{
+                    "id":"tab_00000000000000000000000000000001",
+                    "layout":{"Pane":1},
+                    "panes":{"1":{"terminal_id":"term_00000000000000000000000000000001","cwd":"/tmp"}},
+                    "zoomed":false
+                }]
+            }],
+            "space_order":[{"kind":"standalone_workspace","id":"w1"}],
+            "selected":0
+        });
+        let (snapshot, changed) = parse_snapshot_with_status(&json.to_string()).unwrap();
+        assert!(!changed);
+        assert_eq!(
+            snapshot.workspaces[0].next_public_tab_number,
+            usize::MAX - 1
+        );
+        let persisted = serde_json::to_string(&snapshot).unwrap();
+        let (_, changed) = parse_snapshot_with_status(&persisted).unwrap();
+        assert!(!changed);
+    }
+
+    #[test]
+    fn tab_identity_allocation_failure_rejects_normalization_before_admission() {
+        let mut snapshot: SessionSnapshot = serde_json::from_value(serde_json::json!({
+            "version": 5,
+            "selected": 0,
+            "workspaces": [{
+                "id":"w1",
+                "identity_cwd":"/tmp",
+                "tabs":[{"layout":{"Pane":1},"panes":{"1":{"cwd":"/tmp"}},"zoomed":false}]
+            }]
+        }))
+        .unwrap();
+        let error = normalize_identities_with(
+            &mut snapshot,
+            false,
+            || Err(std::io::Error::other("injected tab entropy failure")),
+            crate::terminal::TerminalId::alloc,
+        )
+        .unwrap_err();
+        assert!(error.contains("injected tab entropy failure"));
+        assert_eq!(snapshot.version, 5);
+    }
+
+    #[test]
+    fn malformed_tab_and_workspace_json_shapes_are_bounded_and_repaired() {
+        let oversized_tab = "x".repeat(crate::workspace::MAX_TAB_ID_BYTES + 1);
+        let oversized_workspace = "x".repeat(MAX_WORKSPACE_ID_BYTES + 1);
+        for (tab_id, workspace_id) in [
+            (
+                serde_json::Value::String(oversized_tab),
+                serde_json::json!(42),
+            ),
+            (
+                serde_json::json!({"bad": true}),
+                serde_json::Value::String(oversized_workspace),
+            ),
+            (serde_json::Value::Null, serde_json::Value::Null),
+        ] {
+            let json = serde_json::json!({
+                "version": 6,
+                "workspaces": [{
+                    "id": workspace_id,
+                    "identity_cwd":"/tmp",
+                    "tabs":[{"id":tab_id,"layout":{"Pane":1},"panes":{"1":{"cwd":"/tmp"}},"zoomed":false}]
+                }]
+            });
+            let (snapshot, changed) = parse_snapshot_with_status(&json.to_string()).unwrap();
+            assert!(changed);
+            let workspace_id = snapshot.workspaces[0].id.as_deref().unwrap();
+            assert!(canonical_workspace_id(workspace_id));
+            assert_eq!(
+                snapshot.space_order,
+                [crate::repository::SpaceRef::StandaloneWorkspace(
+                    workspace_id.into()
+                )]
+            );
+            tab_id_for_snapshot(&snapshot.workspaces[0].tabs[0]).unwrap();
+        }
+    }
+
+    #[test]
     fn identity_normalization_is_independent_of_hashmap_insertion_order() {
         fn normalize(json: &str) -> Vec<(u32, String)> {
             let mut snapshot: SessionSnapshot = serde_json::from_str(json).unwrap();
@@ -1631,9 +2243,15 @@ mod tests {
             let mut generated = generated
                 .into_iter()
                 .map(|raw| crate::terminal::TerminalId::parse(raw).unwrap());
-            normalize_terminal_identities_with(&mut snapshot, false, || {
-                Ok(generated.next().unwrap())
-            })
+            let mut generated_tabs = ["tab_00000000000000000000000000000011"]
+                .into_iter()
+                .map(|raw| crate::workspace::TabId::parse(raw).unwrap());
+            normalize_identities_with(
+                &mut snapshot,
+                false,
+                || Ok(generated_tabs.next().unwrap()),
+                || Ok(generated.next().unwrap()),
+            )
             .unwrap();
             let mut ids = snapshot.workspaces[0].tabs[0]
                 .panes
@@ -1756,6 +2374,7 @@ mod tests {
                 public_tab_numbers: Vec::new(),
                 next_public_tab_number: 0,
                 tabs: vec![TabSnapshot {
+                    id: None,
                     custom_name: None,
                     layout: LayoutSnapshot::Collection(id),
                     collections: vec![CollectionSnapshot {
@@ -1835,6 +2454,7 @@ mod tests {
                 public_tab_numbers: Vec::new(),
                 next_public_tab_number: 0,
                 tabs: vec![TabSnapshot {
+                    id: None,
                     collections: Vec::new(),
                     focused_leaf: None,
                     custom_name: None,

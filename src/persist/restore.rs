@@ -182,16 +182,52 @@ pub(crate) fn validate_snapshot_pane_admission(snapshot: &SessionSnapshot) -> Re
 
 pub(crate) fn validate_snapshot_admission(snapshot: &SessionSnapshot) -> Result<(), String> {
     validate_snapshot_pane_admission(snapshot)?;
+    let mut workspace_ids = HashSet::new();
+    let mut tab_ids = HashSet::new();
     let mut terminal_ids = HashSet::new();
-    for pane in snapshot
-        .workspaces
-        .iter()
-        .flat_map(|workspace| &workspace.tabs)
-        .flat_map(|tab| tab.panes.values())
-    {
-        let terminal_id = super::snapshot::terminal_id_for_pane_snapshot(pane)?;
-        if !terminal_ids.insert(terminal_id) {
-            return Err("snapshot contains duplicate terminal identities".into());
+    for workspace in &snapshot.workspaces {
+        let workspace_id = workspace
+            .id
+            .as_deref()
+            .ok_or_else(|| "snapshot workspace has no identity".to_string())?;
+        let workspace_number = crate::workspace::public_workspace_number(workspace_id)
+            .filter(|number| *number > 0)
+            .ok_or_else(|| "snapshot workspace identity is invalid".to_string())?;
+        if workspace_id
+            != format!(
+                "w{}",
+                crate::workspace::encode_public_number(workspace_number)
+            )
+            || !workspace_ids.insert(workspace_id)
+        {
+            return Err("snapshot contains noncanonical or duplicate workspace identities".into());
+        }
+        if workspace.public_tab_numbers.len() != workspace.tabs.len() {
+            return Err("snapshot public tab-number projection is incomplete".into());
+        }
+        let mut public_tab_numbers = HashSet::new();
+        for number in &workspace.public_tab_numbers {
+            if *number == 0 || !public_tab_numbers.insert(*number) {
+                return Err("snapshot contains invalid or duplicate public tab numbers".into());
+            }
+        }
+        let maximum_tab_number = public_tab_numbers.iter().copied().max().unwrap_or(0);
+        if workspace.next_public_tab_number <= maximum_tab_number
+            || workspace.next_public_tab_number == 0
+        {
+            return Err("snapshot next public tab number is reusable or invalid".into());
+        }
+        for tab in &workspace.tabs {
+            let tab_id = super::snapshot::tab_id_for_snapshot(tab)?;
+            if !tab_ids.insert(tab_id) {
+                return Err("snapshot contains duplicate tab identities".into());
+            }
+            for pane in tab.panes.values() {
+                let terminal_id = super::snapshot::terminal_id_for_pane_snapshot(pane)?;
+                if !terminal_ids.insert(terminal_id) {
+                    return Err("snapshot contains duplicate terminal identities".into());
+                }
+            }
         }
     }
     // Collection and relationship records are semantic projections. They are
@@ -562,7 +598,11 @@ fn restore_workspace(
     let mut failed_imports = 0;
 
     for (idx, tab_snap) in snap.tabs.iter().enumerate() {
-        let tab_number = snap.public_tab_numbers.get(idx).copied().unwrap_or(idx + 1);
+        let tab_number = snap
+            .public_tab_numbers
+            .get(idx)
+            .copied()
+            .unwrap_or_else(|| idx.saturating_add(1));
         let (restored_tab, tab_failed_imports) = restore_tab(
             tab_snap,
             history.and_then(|history| history.tabs.get(idx)),
@@ -584,7 +624,9 @@ fn restore_workspace(
         if let Some(public_tab_number) = snap.public_tab_numbers.get(idx).copied() {
             tab.number = public_tab_number;
         }
-        next_public_tab_number = next_public_tab_number.max(tab.number + 1);
+        if let Some(following_number) = tab.number.checked_add(1) {
+            next_public_tab_number = next_public_tab_number.max(following_number);
+        }
         for pane_id in tab.layout.pane_ids() {
             let public_number = public_pane_numbers_by_old_raw
                 .get(
@@ -666,6 +708,13 @@ fn restore_tab(
     public_pane_ids_by_old_raw: &HashMap<u32, String>,
     restored_collection_ids: &mut HashSet<TerminalContainerId>,
 ) -> RestoreFailures<Option<RestoredTab>> {
+    let tab_id = match super::snapshot::tab_id_for_snapshot(snap) {
+        Ok(id) => id,
+        Err(error) => {
+            error!(%error, "restored tab identity is invalid");
+            return (None, 0);
+        }
+    };
     let (typed_node, id_map) = restore_typed_node_remapped(snap);
     let reverse_id_map: HashMap<PaneId, u32> = id_map
         .iter()
@@ -943,6 +992,7 @@ fn restore_tab(
     (
         Some((
             match crate::workspace::Tab::from_restored(
+                tab_id,
                 snap.custom_name.clone(),
                 number,
                 root_pane,
@@ -1647,6 +1697,7 @@ mod tests {
                 public_tab_numbers: vec![1],
                 next_public_tab_number: 2,
                 tabs: vec![TabSnapshot {
+                    id: None,
                     custom_name: None,
                     layout: LayoutSnapshot::Collection(collection),
                     collections,
@@ -1716,6 +1767,7 @@ mod tests {
             });
         }
         let snap = TabSnapshot {
+            id: None,
             custom_name: None,
             layout: LayoutSnapshot::Collection(collection),
             collections,
@@ -1771,6 +1823,7 @@ mod tests {
             archived: Vec::new(),
         };
         let snapshot = |collections| TabSnapshot {
+            id: None,
             custom_name: None,
             layout: LayoutSnapshot::Collection(id),
             collections,
@@ -1827,6 +1880,7 @@ mod tests {
             archived: Vec::new(),
         });
         let snap = TabSnapshot {
+            id: None,
             custom_name: None,
             layout: LayoutSnapshot::Collection(valid_id),
             collections,
@@ -1855,6 +1909,7 @@ mod tests {
 
         let id = CollectionId::from_raw(7_100_001).unwrap();
         let make_tab = |old_pane| TabSnapshot {
+            id: None,
             custom_name: None,
             layout: LayoutSnapshot::Collection(id),
             collections: vec![CollectionSnapshot {
@@ -1910,6 +1965,7 @@ mod tests {
             PaneId::from_raw(303),
         ];
         let snap = TabSnapshot {
+            id: None,
             custom_name: None,
             layout: LayoutSnapshot::Collection(id),
             collections: vec![CollectionSnapshot {
@@ -1979,6 +2035,7 @@ mod tests {
                 public_tab_numbers: vec![1],
                 next_public_tab_number: 2,
                 tabs: vec![TabSnapshot {
+                    id: None,
                     custom_name: None,
                     layout,
                     collections: Vec::new(),
@@ -2097,6 +2154,7 @@ mod tests {
                 public_tab_numbers: Vec::new(),
                 next_public_tab_number: 0,
                 tabs: vec![TabSnapshot {
+                    id: None,
                     collections: Vec::new(),
                     focused_leaf: None,
                     custom_name: None,
@@ -2185,6 +2243,7 @@ mod tests {
                 public_tab_numbers: vec![5],
                 next_public_tab_number: 6,
                 tabs: vec![TabSnapshot {
+                    id: None,
                     collections: Vec::new(),
                     focused_leaf: None,
                     custom_name: None,
@@ -2233,6 +2292,8 @@ mod tests {
             collapsed_space_keys: Default::default(),
         };
         super::super::snapshot::normalize_terminal_identities(&mut snapshot, false).unwrap();
+        let expected_tab_id =
+            super::super::snapshot::tab_id_for_snapshot(&snapshot.workspaces[0].tabs[0]).unwrap();
         let expected = snapshot.workspaces[0].tabs[0]
             .panes
             .iter()
@@ -2265,6 +2326,7 @@ mod tests {
         public_numbers.sort_unstable();
         assert_eq!(public_numbers, vec![1, 3]);
         assert_eq!(workspace.next_public_pane_number, 4);
+        assert_eq!(workspace.tabs[0].id, expected_tab_id);
         assert_eq!(workspace.tabs[0].number, 5);
         assert_eq!(workspace.next_public_tab_number, 6);
         for (old_pane, public_number) in [(10, 1), (20, 3)] {
@@ -2281,7 +2343,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cold_restore_with_gapped_public_tab_numbers_drops_unmanaged_agent_name() {
+    async fn cold_restore_uses_persisted_repaired_public_tab_numbers() {
         let cwd = std::env::current_dir().unwrap();
         let pane_snap = |id: &str| {
             (
@@ -2311,7 +2373,7 @@ mod tests {
             }),
             launch_argv: None,
         };
-        let snapshot = SessionSnapshot {
+        let mut snapshot = SessionSnapshot {
             delegations: Vec::new(),
             version: super::super::snapshot::SNAPSHOT_VERSION,
             repositories: Vec::new(),
@@ -2324,10 +2386,11 @@ mod tests {
                 worktree_space: None,
                 public_pane_numbers: HashMap::from([(10, 1), (11, 2), (12, 3), (13, 4)]),
                 next_public_pane_number: 5,
-                public_tab_numbers: vec![1, 3, 4, 5],
-                next_public_tab_number: 6,
+                public_tab_numbers: vec![7, 0, 7],
+                next_public_tab_number: 2,
                 tabs: vec![
                     TabSnapshot {
+                        id: None,
                         collections: Vec::new(),
                         focused_leaf: None,
                         custom_name: None,
@@ -2338,6 +2401,7 @@ mod tests {
                         root_pane: Some(10),
                     },
                     TabSnapshot {
+                        id: None,
                         collections: Vec::new(),
                         focused_leaf: None,
                         custom_name: None,
@@ -2348,6 +2412,7 @@ mod tests {
                         root_pane: Some(11),
                     },
                     TabSnapshot {
+                        id: None,
                         collections: Vec::new(),
                         focused_leaf: None,
                         custom_name: None,
@@ -2358,6 +2423,7 @@ mod tests {
                         root_pane: Some(12),
                     },
                     TabSnapshot {
+                        id: None,
                         collections: Vec::new(),
                         focused_leaf: None,
                         custom_name: None,
@@ -2376,6 +2442,11 @@ mod tests {
             sidebar_section_split: None,
             collapsed_space_keys: Default::default(),
         };
+        super::super::snapshot::normalize_terminal_identities(&mut snapshot, false).unwrap();
+        let persisted_numbers = snapshot.workspaces[0].public_tab_numbers.clone();
+        let persisted_next = snapshot.workspaces[0].next_public_tab_number;
+        assert_eq!(persisted_numbers, [7, 1, 2, 3]);
+        assert_eq!(persisted_next, 8);
         let (events, _event_rx) = mpsc::channel(4);
 
         let (workspaces, terminals, _runtimes) = restore(
@@ -2395,7 +2466,16 @@ mod tests {
 
         let workspace = workspaces.first().expect("workspace should restore");
         assert_eq!(workspace.active_tab, 3);
-        assert_eq!(workspace.tabs[3].number, 5);
+        assert_eq!(
+            workspace
+                .tabs
+                .iter()
+                .map(|tab| tab.number)
+                .collect::<Vec<_>>(),
+            persisted_numbers
+        );
+        assert_eq!(workspace.next_public_tab_number, persisted_next);
+        assert_eq!(workspace.tabs[3].number, 3);
         let agent_pane = workspace.tabs[3].root_pane;
         let terminal_id = &workspace.tabs[3].panes[&agent_pane].attached_terminal_id;
         assert!(terminals[terminal_id].agent_name.is_none());
@@ -2420,6 +2500,7 @@ mod tests {
             public_tab_numbers: Vec::new(),
             next_public_tab_number: 0,
             tabs: vec![TabSnapshot {
+                id: None,
                 collections: Vec::new(),
                 focused_leaf: None,
                 custom_name: None,
@@ -2465,6 +2546,7 @@ mod tests {
                 public_tab_numbers: Vec::new(),
                 next_public_tab_number: 0,
                 tabs: vec![TabSnapshot {
+                    id: None,
                     collections: Vec::new(),
                     focused_leaf: None,
                     custom_name: None,
@@ -2685,6 +2767,7 @@ mod tests {
                 public_tab_numbers: Vec::new(),
                 next_public_tab_number: 0,
                 tabs: vec![TabSnapshot {
+                    id: None,
                     collections: Vec::new(),
                     focused_leaf: None,
                     custom_name: None,

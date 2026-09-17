@@ -51,7 +51,11 @@ pub(crate) fn sync_parent_directory(path: &Path) -> std::io::Result<()> {
 
 #[cfg(windows)]
 pub(crate) fn sync_parent_directory(_path: &Path) -> std::io::Result<()> {
-    // replace_file uses MOVEFILE_WRITE_THROUGH on Windows.
+    // Windows has no independently testable directory-entry flush in this
+    // implementation. Durability relies on replace_file's
+    // MoveFileExW(MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH). Keep
+    // this explicit: Unix fsync-style guarantees are stronger and a future
+    // Windows primitive belongs in platform/windows.rs.
     Ok(())
 }
 
@@ -101,4 +105,16 @@ pub(crate) fn durable_replace_file(source: &Path, destination: &Path) -> std::io
         let _ = sync_containing_directory(destination);
     }
     Ok(())
+}
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    #[test]
+    fn parent_directory_sync_contract_is_explicitly_movefile_only() {
+        // This deliberately succeeds for a nonexistent directory: the Windows
+        // contract has no independent directory flush and relies on the
+        // WRITE_THROUGH replacement exercised by Windows integration builds.
+        super::sync_parent_directory(std::path::Path::new(r"Z:\does-not-exist"))
+            .expect("Windows parent sync is intentionally a no-op");
+    }
 }

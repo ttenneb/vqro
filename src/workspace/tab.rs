@@ -83,6 +83,7 @@ enum SplitCommand<'a> {
 }
 
 pub struct Tab {
+    pub(crate) id: super::TabId,
     pub custom_name: Option<String>,
     pub number: usize,
     /// Identity source for this tab's pane tree.
@@ -103,6 +104,7 @@ impl Tab {
     // Tab construction threads pane runtime geometry, host context, and render hooks.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
+        id: super::TabId,
         number: usize,
         terminal_id: TerminalId,
         initial_cwd: PathBuf,
@@ -118,6 +120,7 @@ impl Tab {
         render_dirty: Arc<RenderSignal>,
     ) -> std::io::Result<(Self, TerminalState, TerminalRuntime)> {
         Self::new_with_runtime(
+            id,
             number,
             initial_cwd,
             rows,
@@ -138,6 +141,7 @@ impl Tab {
     // Command tab construction mirrors the shell tab runtime arguments.
     #[allow(clippy::too_many_arguments)]
     pub fn new_argv_command(
+        id: super::TabId,
         number: usize,
         terminal_id: TerminalId,
         initial_cwd: PathBuf,
@@ -153,6 +157,7 @@ impl Tab {
         render_dirty: Arc<RenderSignal>,
     ) -> std::io::Result<(Self, TerminalState, TerminalRuntime)> {
         Self::new_with_runtime(
+            id,
             number,
             initial_cwd,
             rows,
@@ -172,6 +177,7 @@ impl Tab {
 
     #[allow(clippy::too_many_arguments)]
     fn new_with_runtime(
+        id: super::TabId,
         number: usize,
         initial_cwd: PathBuf,
         rows: u16,
@@ -232,6 +238,7 @@ impl Tab {
 
         Ok((
             Self {
+                id,
                 custom_name: None,
                 number,
                 root_pane: root_id,
@@ -369,6 +376,7 @@ impl Tab {
 
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn from_restored(
+        id: super::TabId,
         custom_name: Option<String>,
         number: usize,
         root_pane: PaneId,
@@ -403,6 +411,7 @@ impl Tab {
             }
         }
         Some(Self {
+            id,
             custom_name,
             number,
             root_pane,
@@ -856,6 +865,7 @@ impl Tab {
     }
 
     pub(crate) fn from_existing_pane(
+        id: super::TabId,
         number: usize,
         custom_name: Option<String>,
         moved: MovedPane,
@@ -867,6 +877,7 @@ impl Tab {
         let pane_id = moved.pane_id;
         panes.insert(pane_id, moved.pane_state);
         Self {
+            id,
             custom_name,
             number,
             root_pane: pane_id,

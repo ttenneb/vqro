@@ -17,7 +17,9 @@ use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
 #[cfg(unix)]
-const HANDOFF_VERSION: u32 = 2;
+const HANDOFF_VERSION: u32 = 3;
+#[cfg(unix)]
+const TERMINAL_ID_HANDOFF_VERSION: u32 = 2;
 #[cfg(unix)]
 const LEGACY_HANDOFF_VERSION: u32 = 1;
 #[cfg(unix)]
@@ -246,20 +248,148 @@ pub(crate) fn wait_owned_ack(stream: &mut UnixStream) {
 }
 
 #[cfg(unix)]
-fn validate_and_normalize_manifest(manifest: &mut HandoffManifest) -> io::Result<()> {
-    if manifest.version != LEGACY_HANDOFF_VERSION && manifest.version != HANDOFF_VERSION {
+fn validate_handoff_public_identities(manifest: &HandoffManifest) -> io::Result<()> {
+    let mut workspace_ids = std::collections::HashSet::new();
+    for workspace in &manifest.snapshot.workspaces {
+        let workspace_id = workspace.id.as_deref().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "handoff workspace is missing its generation-1 identity",
+            )
+        })?;
+        let number = crate::workspace::public_workspace_number(workspace_id)
+            .filter(|number| *number > 0)
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "handoff workspace identity is invalid",
+                )
+            })?;
+        let canonical = format!("w{}", crate::workspace::encode_public_number(number));
+        if workspace_id != canonical || !workspace_ids.insert(workspace_id) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "handoff workspace identities are noncanonical or duplicate",
+            ));
+        }
+
+        if workspace.public_tab_numbers.len() != workspace.tabs.len() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "handoff public tab-number projection is incomplete",
+            ));
+        }
+        let mut tab_numbers = std::collections::HashSet::new();
+        for number in &workspace.public_tab_numbers {
+            if *number == 0 || !tab_numbers.insert(*number) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "handoff public tab numbers are invalid or duplicate",
+                ));
+            }
+        }
+        if tab_numbers
+            .iter()
+            .max()
+            .is_some_and(|maximum| workspace.next_public_tab_number <= *maximum)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "handoff next public tab number would reuse an existing identity",
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn validate_handoff_version_numbers(handoff_version: u32, snapshot_version: u32) -> io::Result<()> {
+    if handoff_version != LEGACY_HANDOFF_VERSION
+        && handoff_version != TERMINAL_ID_HANDOFF_VERSION
+        && handoff_version != HANDOFF_VERSION
+    {
         return Err(io::Error::other(format!(
-            "unsupported handoff version {}",
-            manifest.version
+            "unsupported handoff version {handoff_version}"
         )));
     }
-
-    let normalized = crate::persist::normalize_terminal_identities(&mut manifest.snapshot, false)
-        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-    if manifest.version == HANDOFF_VERSION && normalized {
+    if snapshot_version > crate::persist::SNAPSHOT_VERSION {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            "handoff v2 snapshot was not terminal-identity normalized",
+            format!(
+                "handoff snapshot version {snapshot_version} is newer than supported {}",
+                crate::persist::SNAPSHOT_VERSION
+            ),
+        ));
+    }
+    let compatible = match handoff_version {
+        LEGACY_HANDOFF_VERSION => snapshot_version <= 4,
+        TERMINAL_ID_HANDOFF_VERSION => snapshot_version == 5,
+        HANDOFF_VERSION => snapshot_version == crate::persist::SNAPSHOT_VERSION,
+        _ => false,
+    };
+    if !compatible {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("handoff v{handoff_version} cannot carry snapshot v{snapshot_version}"),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn validate_handoff_version_matrix(manifest: &HandoffManifest) -> io::Result<()> {
+    validate_handoff_version_numbers(manifest.version, manifest.snapshot.version)
+}
+
+#[cfg(unix)]
+fn preflight_handoff_json_versions(raw: &str) -> io::Result<()> {
+    let envelope: serde_json::Value = serde_json::from_str(raw).map_err(io::Error::other)?;
+    let handoff_version = envelope
+        .get("version")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|version| u32::try_from(version).ok())
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid handoff version"))?;
+    let snapshot_version = envelope
+        .get("snapshot")
+        .and_then(|snapshot| snapshot.get("version"))
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|version| u32::try_from(version).ok())
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "invalid handoff snapshot version",
+            )
+        })?;
+    validate_handoff_version_numbers(handoff_version, snapshot_version)
+}
+
+#[cfg(unix)]
+fn validate_and_normalize_manifest(manifest: &mut HandoffManifest) -> io::Result<()> {
+    // Reject unknown/future data and impossible mixed-version envelopes before
+    // permissive migration can discard fields or rewrite identities.
+    validate_handoff_version_matrix(manifest)?;
+    validate_handoff_public_identities(manifest)?;
+
+    let changes = crate::persist::normalize_identity_changes(&mut manifest.snapshot, false)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    if manifest.version != HANDOFF_VERSION && changes.public_identities_changed {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "legacy handoff would rewrite a generation-1 public identity",
+        ));
+    }
+    debug_assert!(
+        !changes.changed
+            || changes.schema_version_changed
+            || changes.internal_identities_changed
+            || changes.public_identities_changed
+            || changes.projections_changed
+            || changes.structural_state_changed
+    );
+    if manifest.version == HANDOFF_VERSION && changes.changed {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "handoff v3 snapshot was not identity-normalized",
         ));
     }
     crate::persist::validate_snapshot_admission(&manifest.snapshot).map_err(|error| {
@@ -310,7 +440,7 @@ fn validate_and_normalize_manifest(manifest: &mut HandoffManifest) -> io::Result
         let raw = runtime.terminal_id.as_deref().ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::InvalidData,
-                "handoff v2 runtime is missing terminal identity",
+                "handoff v2+ runtime is missing terminal identity",
             )
         })?;
         if raw.len() > crate::terminal::MAX_TERMINAL_ID_BYTES {
@@ -391,6 +521,9 @@ pub(crate) fn receive(socket_path: &Path, token: &str) -> io::Result<ReceivedHan
     stream.flush()?;
 
     let manifest_line = read_line_unbuffered(&mut stream)?;
+    // Inspect only the two version numbers first. Future snapshot fields must
+    // never enter a permissive typed DTO before rejection.
+    preflight_handoff_json_versions(&manifest_line)?;
     let mut manifest: HandoffManifest =
         serde_json::from_str(&manifest_line).map_err(io::Error::other)?;
     validate_and_normalize_manifest(&mut manifest)?;
@@ -719,6 +852,7 @@ mod tests {
                 public_tab_numbers: vec![1],
                 next_public_tab_number: 2,
                 tabs: vec![crate::persist::TabSnapshot {
+                    id: None,
                     custom_name: None,
                     layout: crate::persist::LayoutSnapshot::Pane(1),
                     collections: Vec::new(),
@@ -739,7 +873,7 @@ mod tests {
             sidebar_section_split: None,
             collapsed_space_keys: Default::default(),
         };
-        crate::persist::normalize_terminal_identities(&mut snapshot, false).unwrap();
+        crate::persist::normalize_identity_changes(&mut snapshot, false).unwrap();
         snapshot
     }
 
@@ -771,7 +905,7 @@ mod tests {
         .expect("legacy v1 fixture should retain its original wire shape");
 
         validate_and_normalize_manifest(&mut manifest).unwrap();
-        assert_eq!(manifest.snapshot.version, 5);
+        assert_eq!(manifest.snapshot.version, 6);
         let snapshot_id = crate::persist::terminal_id_for_pane_snapshot(
             &manifest.snapshot.workspaces[0].tabs[0].panes[&1],
         )
@@ -800,7 +934,7 @@ mod tests {
     }
 
     #[test]
-    fn handoff_v2_rejects_duplicate_or_non_bijective_runtime_entries() {
+    fn handoff_v3_rejects_duplicate_or_non_bijective_runtime_entries() {
         let snapshot = one_pane_snapshot();
         let terminal_id = crate::persist::terminal_id_for_pane_snapshot(
             &snapshot.workspaces[0].tabs[0].panes[&1],
@@ -828,7 +962,7 @@ mod tests {
     }
 
     #[test]
-    fn handoff_v2_accepts_explicit_deferred_resume_without_an_fd() {
+    fn handoff_v3_accepts_explicit_deferred_resume_without_an_fd() {
         let mut snapshot = one_pane_snapshot();
         snapshot.workspaces[0].tabs[0]
             .panes
@@ -853,6 +987,13 @@ mod tests {
         };
         validate_and_normalize_manifest(&mut manifest).unwrap();
 
+        snapshot.version = 4;
+        snapshot.workspaces[0].tabs[0].id = None;
+        snapshot.workspaces[0].tabs[0]
+            .panes
+            .get_mut(&1)
+            .unwrap()
+            .terminal_id = None;
         let mut legacy = HandoffManifest {
             version: LEGACY_HANDOFF_VERSION,
             source_version: "legacy".into(),
@@ -866,6 +1007,190 @@ mod tests {
         };
         validate_and_normalize_manifest(&mut legacy).unwrap();
         assert_eq!(legacy.deferred_panes, vec![1]);
+    }
+
+    #[test]
+    fn handoff_v2_is_normalized_while_v3_requires_canonical_v6_identity() {
+        let mut snapshot = one_pane_snapshot();
+        let terminal_id = crate::persist::terminal_id_for_pane_snapshot(
+            &snapshot.workspaces[0].tabs[0].panes[&1],
+        )
+        .unwrap();
+        snapshot.version = 5;
+        snapshot.workspaces[0].tabs[0].id = None;
+        let mut v2 = HandoffManifest {
+            version: TERMINAL_ID_HANDOFF_VERSION,
+            source_version: "v2".into(),
+            source_protocol: crate::protocol::PROTOCOL_VERSION,
+            expected_version: None,
+            expected_protocol: None,
+            snapshot: snapshot.clone(),
+            panes: vec![runtime_for(1, Some(terminal_id.to_string()))],
+            deferred_panes: Vec::new(),
+            api_window_title: None,
+        };
+        validate_and_normalize_manifest(&mut v2).unwrap();
+        assert_eq!(v2.snapshot.version, 6);
+
+        let mut v3 = HandoffManifest {
+            version: HANDOFF_VERSION,
+            source_version: "v3".into(),
+            source_protocol: crate::protocol::PROTOCOL_VERSION,
+            expected_version: None,
+            expected_protocol: None,
+            snapshot,
+            panes: vec![runtime_for(1, Some(terminal_id.to_string()))],
+            deferred_panes: Vec::new(),
+            api_window_title: None,
+        };
+        assert!(validate_and_normalize_manifest(&mut v3).is_err());
+    }
+
+    #[test]
+    fn mixed_handoff_snapshot_versions_are_rejected_before_normalization() {
+        for (handoff_version, snapshot_version) in [(1, 5), (2, 4), (2, 6), (3, 5)] {
+            let mut snapshot = one_pane_snapshot();
+            snapshot.version = snapshot_version;
+            let terminal_id = crate::persist::terminal_id_for_pane_snapshot(
+                &snapshot.workspaces[0].tabs[0].panes[&1],
+            )
+            .unwrap();
+            let mut manifest = HandoffManifest {
+                version: handoff_version,
+                source_version: "mixed".into(),
+                source_protocol: crate::protocol::PROTOCOL_VERSION,
+                expected_version: None,
+                expected_protocol: None,
+                snapshot,
+                panes: vec![runtime_for(1, Some(terminal_id.to_string()))],
+                deferred_panes: Vec::new(),
+                api_window_title: None,
+            };
+            let before = serde_json::to_vec(&manifest.snapshot).unwrap();
+            assert!(validate_and_normalize_manifest(&mut manifest).is_err());
+            assert_eq!(serde_json::to_vec(&manifest.snapshot).unwrap(), before);
+        }
+    }
+
+    #[test]
+    fn future_snapshot_is_rejected_unchanged_before_fd_admission() {
+        let mut snapshot = one_pane_snapshot();
+        snapshot.version = crate::persist::SNAPSHOT_VERSION + 1;
+        let terminal_id = crate::persist::terminal_id_for_pane_snapshot(
+            &snapshot.workspaces[0].tabs[0].panes[&1],
+        )
+        .unwrap();
+        let mut manifest = HandoffManifest {
+            version: HANDOFF_VERSION,
+            source_version: "future".into(),
+            source_protocol: crate::protocol::PROTOCOL_VERSION,
+            expected_version: None,
+            expected_protocol: None,
+            snapshot,
+            panes: vec![runtime_for(1, Some(terminal_id.to_string()))],
+            deferred_panes: Vec::new(),
+            api_window_title: None,
+        };
+        let before = serde_json::to_vec(&manifest.snapshot).unwrap();
+        let error = validate_and_normalize_manifest(&mut manifest).unwrap_err();
+        assert!(error.to_string().contains("newer than supported"));
+        assert_eq!(serde_json::to_vec(&manifest.snapshot).unwrap(), before);
+    }
+
+    #[test]
+    fn raw_future_handoff_is_rejected_before_typed_snapshot_decode() {
+        let raw = r#"{"version":3,"snapshot":{"version":7,"future_identity":{"must":"survive"}}}"#;
+        let preserved = raw.as_bytes().to_vec();
+        let error = preflight_handoff_json_versions(raw).unwrap_err();
+        assert!(error.to_string().contains("newer than supported"));
+        assert_eq!(raw.as_bytes(), preserved);
+    }
+
+    #[test]
+    fn receive_rejects_future_snapshot_before_validation_or_fd_transfer() {
+        let path = std::env::temp_dir().join(format!(
+            "vqro-future-handoff-{}-{}.sock",
+            std::process::id(),
+            crate::layout::PaneId::next_for_test()
+        ));
+        let listener = UnixListener::bind(&path).unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            assert_eq!(read_line_unbuffered(&mut stream).unwrap(), "future-token\n");
+            stream
+                .write_all(
+                    b"{\"version\":3,\"snapshot\":{\"version\":7,\"future_identity\":{\"must\":\"survive\"}}}\n",
+                )
+                .unwrap();
+            stream.flush().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(1)))
+                .unwrap();
+            let mut response = String::new();
+            let _ = stream.read_to_string(&mut response);
+            response
+        });
+
+        let error = match receive(&path, "future-token") {
+            Ok(_) => panic!("future handoff unexpectedly reached FD admission"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("newer than supported"));
+        assert!(server.join().unwrap().is_empty());
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn legacy_handoff_rejects_public_identity_repairs_but_accepts_internal_ids() {
+        let mut valid = one_pane_snapshot();
+        let terminal_id =
+            crate::persist::terminal_id_for_pane_snapshot(&valid.workspaces[0].tabs[0].panes[&1])
+                .unwrap();
+        valid.version = 5;
+        valid.workspaces[0].tabs[0].id = None;
+        let mut internal_only = HandoffManifest {
+            version: TERMINAL_ID_HANDOFF_VERSION,
+            source_version: "v2".into(),
+            source_protocol: crate::protocol::PROTOCOL_VERSION,
+            expected_version: None,
+            expected_protocol: None,
+            snapshot: valid.clone(),
+            panes: vec![runtime_for(1, Some(terminal_id.to_string()))],
+            deferred_panes: Vec::new(),
+            api_window_title: None,
+        };
+        validate_and_normalize_manifest(&mut internal_only).unwrap();
+
+        let mut duplicate_workspace = valid.clone();
+        duplicate_workspace
+            .workspaces
+            .push(duplicate_workspace.workspaces[0].clone());
+        let mut invalid_workspace = HandoffManifest {
+            snapshot: duplicate_workspace,
+            ..internal_only
+        };
+        let invalid_workspace_before = serde_json::to_vec(&invalid_workspace.snapshot).unwrap();
+        assert!(validate_and_normalize_manifest(&mut invalid_workspace).is_err());
+        assert_eq!(
+            serde_json::to_vec(&invalid_workspace.snapshot).unwrap(),
+            invalid_workspace_before
+        );
+
+        let mut duplicate_tab_number = valid;
+        let duplicate_tab = duplicate_tab_number.workspaces[0].tabs[0].clone();
+        duplicate_tab_number.workspaces[0].tabs.push(duplicate_tab);
+        duplicate_tab_number.workspaces[0].public_tab_numbers = vec![1, 1];
+        let mut invalid_tab = HandoffManifest {
+            snapshot: duplicate_tab_number,
+            panes: vec![runtime_for(1, Some(terminal_id.to_string()))],
+            ..invalid_workspace
+        };
+        let invalid_tab_before = serde_json::to_vec(&invalid_tab.snapshot).unwrap();
+        assert!(validate_and_normalize_manifest(&mut invalid_tab).is_err());
+        assert_eq!(
+            serde_json::to_vec(&invalid_tab.snapshot).unwrap(),
+            invalid_tab_before
+        );
     }
 
     #[cfg(target_os = "linux")]

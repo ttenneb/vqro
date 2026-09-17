@@ -2219,6 +2219,25 @@ impl App {
                     }
                 }
                 CollectionCloseDisposition::PromoteMembers => {
+                    if let Err(error) = self.state.workspaces[ws_idx]
+                        .ensure_public_tab_numbers_available(members.len())
+                    {
+                        return responses::encode_error(
+                            request_id,
+                            "collection_close_failed",
+                            error.to_string(),
+                        );
+                    }
+                    let tab_ids = match self.allocate_tab_ids(members.len()) {
+                        Ok(ids) => ids,
+                        Err(error) => {
+                            return responses::encode_error(
+                                request_id,
+                                "collection_close_failed",
+                                error.to_string(),
+                            );
+                        }
+                    };
                     let (events, render_notify, render_dirty) = {
                         let tab = &self.state.workspaces[ws_idx].tabs[tab_idx];
                         (
@@ -2228,7 +2247,7 @@ impl App {
                         )
                     };
                     let mut created = Vec::with_capacity(members.len());
-                    for pane_id in members {
+                    for (pane_id, tab_id) in members.into_iter().zip(tab_ids) {
                         let Some(taken) = self.state.workspaces[ws_idx].take_pane_for_move(pane_id)
                         else {
                             return responses::encode_error(
@@ -2237,13 +2256,24 @@ impl App {
                                 "collection member could not be detached",
                             );
                         };
-                        let tab_idx = self.state.workspaces[ws_idx].create_tab_from_existing_pane(
-                            taken.moved,
-                            None,
-                            events.clone(),
-                            render_notify.clone(),
-                            render_dirty.clone(),
-                        );
+                        let tab_idx = match self.state.workspaces[ws_idx]
+                            .create_tab_from_existing_pane(
+                                tab_id,
+                                taken.moved,
+                                None,
+                                events.clone(),
+                                render_notify.clone(),
+                                render_dirty.clone(),
+                            ) {
+                            Ok(tab_idx) => tab_idx,
+                            Err((error, _tab_id, _moved)) => {
+                                return responses::encode_error(
+                                    request_id,
+                                    "collection_close_failed",
+                                    error.to_string(),
+                                );
+                            }
+                        };
                         created.push(tab_idx);
                     }
                     if let Some((remaining_ws, remaining_tab)) = self.find_collection(collection_id)

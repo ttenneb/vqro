@@ -204,6 +204,9 @@ impl App {
         if let Err(error) = self.admit_new_panes(Some(ws_idx), None, 1) {
             return encode_error(id, "resource_limit", error.to_string());
         }
+        if let Err(error) = self.state.workspaces[ws_idx].ensure_public_tab_numbers_available(1) {
+            return encode_error(id, "plugin_pane_open_failed", error.to_string());
+        }
         let cwd = self.plugin_pane_cwd(plugin, params.cwd);
         let context = self.plugin_context_for_workspace(ws_idx, "plugin-pane");
         let extra_env =
@@ -212,6 +215,10 @@ impl App {
                 Err((code, message)) => return encode_error(id, &code, message),
             };
         let (rows, cols) = self.state.estimate_pane_size();
+        let tab_id = match self.allocate_tab_id() {
+            Ok(tab_id) => tab_id,
+            Err(error) => return encode_error(id, "plugin_pane_open_failed", error.to_string()),
+        };
         let terminal_id = match self.allocate_terminal_id() {
             Ok(id) => id,
             Err(error) => return encode_error(id, "plugin_pane_open_failed", error.to_string()),
@@ -220,6 +227,7 @@ impl App {
             return encode_error(id, "workspace_not_found", "workspace not found");
         };
         let (tab_idx, terminal, runtime) = match ws.create_tab_argv_command(
+            tab_id,
             terminal_id,
             rows.max(4),
             cols.max(10),
