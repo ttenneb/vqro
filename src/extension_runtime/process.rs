@@ -536,6 +536,7 @@ impl ExtensionRuntime for ProcessRuntime {
         deadline: Instant,
         canceled: &AtomicBool,
         host_calls: &SharedRuntimeHostCalls,
+        response_limit: usize,
     ) -> Result<serde_json::Value, ExtensionServiceError> {
         if request.identity != self.descriptor.identity {
             return Err(ExtensionServiceError::StaleGeneration {
@@ -558,6 +559,13 @@ impl ExtensionRuntime for ProcessRuntime {
         })?;
         loop {
             let frame = self.recv_frame_cancellable(deadline, canceled)?;
+            // This conservative wire bound is checked before deserializing an envelope or
+            // allocating its JSON result. The result bytes are a strict subset of the frame.
+            if frame.len() > response_limit {
+                return Err(ExtensionServiceError::Protocol(
+                    "process response exceeds the method response limit".into(),
+                ));
+            }
             let envelope: ProcessInboundEnvelope =
                 serde_json::from_slice(&frame).map_err(|error| {
                     ExtensionServiceError::Protocol(format!("invalid service response: {error}"))
@@ -1052,6 +1060,17 @@ done
             std::fs::canonicalize(environment["cwd"].as_str().unwrap()).unwrap(),
             std::fs::canonicalize(&installed.immutable_root).unwrap()
         );
+        assert!(matches!(
+            dispatcher.invoke_with_response_limit_for_test(
+                "conformance.echo",
+                serde_json::json!({}),
+                7,
+                Instant::now() + Duration::from_millis(750),
+                &canceled,
+                8,
+            ),
+            Err(ExtensionServiceError::Protocol(message)) if message.contains("method response limit")
+        ));
         dispatcher.stop(RuntimeStopReason::Requested);
         cleanup_package_root(root);
     }

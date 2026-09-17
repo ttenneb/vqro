@@ -24,6 +24,8 @@ COMPOSITE_HOST_READ_REFERENCE = re.compile(
     r"stage_host_read_authorization|invoke_with_host_reads)\b"
 )
 COMPOSITE_HOST_READ_MODULE = PROJECT_ROOT / "src" / "extension_host_invocation.rs"
+DOCUMENT_SHADOW_AUDIT_SOURCE = PROJECT_ROOT / "src" / "app" / "api" / "document_shadow_audit.rs"
+COLLECTIONS_CONFORMANCE_SOURCE = PROJECT_ROOT / "src" / "extension_runtime" / "collections_package_conformance.rs"
 COMPOSITE_HOST_READ_APP_MODULE = (
     PROJECT_ROOT / "src" / "app" / "api" / "extension_invocation.rs"
 )
@@ -34,6 +36,8 @@ COMPOSITE_HOST_READ_BOUNDARY_SOURCES = frozenset(
         PROJECT_ROOT / "src" / "extension_runtime" / "mod.rs",
         COMPOSITE_HOST_READ_MODULE,
         COMPOSITE_HOST_READ_APP_MODULE,
+        PROJECT_ROOT / "src" / "app" / "api" / "document_shadow_audit.rs",
+        COLLECTIONS_CONFORMANCE_SOURCE,
     }
 )
 DOCUMENT_V2_SOURCES = (
@@ -52,9 +56,12 @@ CRATE_ROOT_ALIAS = re.compile(
 DOCUMENT_V2_REFERENCE = re.compile(
     r"\b(?:host_document_v2|quarantined_audit_cache|HostDocumentV2|DocumentNodeV2|"
     r"DocumentProducerFenceV2|DocumentScopeV2|DocumentDependencyV2|"
-    r"QuarantinedAuditCache|AuditCacheKey|AuditTicket)\b"
+    r"QuarantinedAuditCache|AuditCacheKey|AuditTicket|document_shadow_audit|"
+    r"DocumentShadowAuditCoordinator)\b"
 )
-DOCUMENT_V2_INTERNAL_PATHS = frozenset(DOCUMENT_V2_SOURCES)
+DOCUMENT_V2_INTERNAL_PATHS = frozenset(
+    (*DOCUMENT_V2_SOURCES, DOCUMENT_SHADOW_AUDIT_SOURCE, COLLECTIONS_CONFORMANCE_SOURCE)
+)
 DOCUMENT_V2_DECLARATION_SOURCE = PROJECT_ROOT / "src" / "main.rs"
 DOCUMENT_V2_SCHEMA_SOURCE = PROJECT_ROOT / "src" / "extension_spec.rs"
 DOCUMENT_V2_ALLOWED_PATH_ROOTS = {
@@ -151,7 +158,7 @@ RECOVERY_FORBIDDEN_REFERENCES = (
     ("ExtensionRuntimeDispatcher", re.compile(r"\bExtensionRuntimeDispatcher\b")),
     ("ExtensionServiceSupervisor", re.compile(r"\bExtensionServiceSupervisor\b")),
 )
-TEST_MODULE = re.compile(r"(?m)^#\[cfg\(test\)\]\s*\nmod\s+\w+\s*\{")
+CFG_ATTRIBUTE_START = re.compile(r"#(!?)\[\s*cfg\s*\(")
 INPUT_STATE_CALL = re.compile(r"(?:\.|::)input_state\b")
 KEYBOARD_STATE_ANSI_CALL = re.compile(
     r"(?:\.|::)(?:keyboard_state_ansi|kitty_keyboard_state_ansi)\b"
@@ -254,27 +261,109 @@ def mask_comments_and_literals(source: str) -> str:
     return "".join(chars)
 
 
+def _cfg_attributes(code: str):
+    for match in CFG_ATTRIBUTE_START.finditer(code):
+        depth = 1
+        index = match.end()
+        while index < len(code) and depth:
+            if code[index] == "(": depth += 1
+            elif code[index] == ")": depth -= 1
+            index += 1
+        if depth or index >= len(code) or code[index] != "]":
+            continue
+        yield match, index + 1, code[match.end():index - 1]
+
+
+def _cfg_possible_without_test(expression: str) -> set[bool]:
+    tokens = re.findall(r"[A-Za-z_][A-Za-z0-9_]*|[(),]", expression)
+    position = 0
+
+    def parse() -> set[bool]:
+        nonlocal position
+        if position >= len(tokens):
+            return {False, True}
+        name = tokens[position]
+        position += 1
+        if position >= len(tokens) or tokens[position] != "(":
+            return {False} if name == "test" else {False, True}
+        position += 1
+        args = []
+        while position < len(tokens) and tokens[position] != ")":
+            args.append(parse())
+            if position < len(tokens) and tokens[position] == ",":
+                position += 1
+        if position < len(tokens):
+            position += 1
+        if name == "all":
+            values = {True}
+            for arg in args:
+                values = {left and right for left in values for right in arg}
+            return values
+        if name == "any":
+            values = {False}
+            for arg in args:
+                values = {left or right for left in values for right in arg}
+            return values
+        if name == "not" and len(args) == 1:
+            return {not value for value in args[0]}
+        return {False, True}
+
+    return parse()
+
+
 def production_code(source: str) -> str:
+    """Mask comments/literals and every item or field directly guarded by cfg(test).
+
+    This intentionally handles semicolon modules, block items, struct fields, and enum
+    variants rather than recognizing only the narrow `mod tests {}` spelling.
+    """
     code = mask_comments_and_literals(source)
     chars = list(code)
+    attributes = list(_cfg_attributes(code))
+    if any(match.group(1) == "!" and True not in _cfg_possible_without_test(expr)
+           for match, _end, expr in attributes):
+        blank_non_newlines(chars, 0, len(code))
+        return "".join(chars)
     search_from = 0
-
-    while test_module := TEST_MODULE.search(code, search_from):
-        depth = 0
-        end = test_module.end() - 1
+    while True:
+        attribute = next((item for item in _cfg_attributes(code)
+                          if item[0].start() >= search_from
+                          and item[0].group(1) != "!"
+                          and True not in _cfg_possible_without_test(item[2])), None)
+        if attribute is None:
+            break
+        match, attribute_end, _expression = attribute
+        index = attribute_end
+        while index < len(code) and code[index].isspace():
+            index += 1
+        paren = bracket = angle = 0
+        end = index
         while end < len(code):
-            if code[end] == "{":
-                depth += 1
-            elif code[end] == "}":
-                depth -= 1
-                if depth == 0:
+            char = code[end]
+            if char == "(": paren += 1
+            elif char == ")": paren = max(0, paren - 1)
+            elif char == "[": bracket += 1
+            elif char == "]": bracket = max(0, bracket - 1)
+            elif char == "<" and paren == bracket == 0: angle += 1
+            elif char == ">" and paren == bracket == 0: angle = max(0, angle - 1)
+            elif char == "{" and paren == bracket == angle == 0:
+                depth = 1
+                end += 1
+                while end < len(code) and depth:
+                    if code[end] == "{": depth += 1
+                    elif code[end] == "}": depth -= 1
                     end += 1
-                    break
+                while end < len(code) and code[end].isspace() and code[end] != "\n":
+                    end += 1
+                if end < len(code) and code[end] in ";,": end += 1
+                break
+            elif char in ";," and paren == bracket == angle == 0:
+                end += 1
+                break
             end += 1
-        blank_non_newlines(chars, test_module.start(), end)
+        blank_non_newlines(chars, match.start(), end)
         code = "".join(chars)
         search_from = end
-
     return code
 
 
@@ -466,6 +555,55 @@ class UiHotPathArchitectureTests(unittest.TestCase):
                 document_v2_dependency_violations(path.read_text(encoding="utf-8"), path)
             )
         self.assertEqual(violations, [])
+
+    def test_document_shadow_audit_is_test_only_and_finalizer_is_synchronous(self) -> None:
+        app_api = (PROJECT_ROOT / "src" / "app" / "api.rs").read_text(encoding="utf-8")
+        self.assertRegex(app_api, r"#\[cfg\(test\)\]\s*pub\(crate\) mod document_shadow_audit;")
+        runtime = (PROJECT_ROOT / "src" / "extension_runtime" / "mod.rs").read_text(encoding="utf-8")
+        self.assertRegex(runtime, r"#\[cfg\(test\)\]\s*mod collections_package_conformance;")
+        source = DOCUMENT_SHADOW_AUDIT_SOURCE.read_text(encoding="utf-8")
+        body = rust_function_body(source, "finalize")
+        for forbidden in (".await", "spawn(", "std::fs", "Command::", "invoke(", "callback"):
+            self.assertNotIn(forbidden, body)
+
+    def test_production_code_masks_all_cfg_test_item_shapes(self) -> None:
+        source = """
+#[cfg(test)]
+mod named;
+struct S {
+    #[cfg(test)]
+    field: Pair<String, String>,
+    live: usize,
+}
+#[cfg(all(test, unix))]
+fn helper() { forbidden::call(); }
+#[cfg(any(test))]
+fn equivalent() { also_forbidden::call(); }
+#[cfg(any(test, unix))]
+fn not_test_only() { remains::call(); }
+fn live() { allowed::call(); }
+"""
+        code = production_code(source)
+        self.assertNotIn("named", code)
+        self.assertNotIn("field", code)
+        self.assertNotIn("forbidden", code)
+        self.assertNotIn("also_forbidden", code)
+        self.assertIn("remains::call", code)
+        self.assertIn("allowed::call", code)
+        self.assertNotIn("hidden", production_code("#![cfg(test)]\nfn hidden() {}"))
+        self.assertNotIn(
+            "hidden", production_code("#![cfg(all(test, unix))]\nfn hidden() {}")
+        )
+
+    def test_document_shadow_scanner_rejects_aliases_and_reexports(self) -> None:
+        synthetic = PROJECT_ROOT / "src" / "synthetic_shadow.rs"
+        for source in (
+            "pub use crate::app::api::document_shadow_audit as audit;",
+            "use crate::app::api as hidden; fn leak() { hidden::document_shadow_audit::leak(); }",
+            "pub use crate::host_document_v2::HostDocumentV2 as ShadowValue;",
+        ):
+            with self.subTest(source=source):
+                self.assertTrue(document_v2_wiring_violations_for_sources([(synthetic, source)]))
 
     def test_document_v2_has_no_runtime_wiring_anywhere_in_src(self) -> None:
         violations = document_v2_wiring_violations(ALL_SRC_SOURCES)

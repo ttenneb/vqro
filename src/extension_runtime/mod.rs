@@ -24,6 +24,9 @@ pub(crate) use process::ProcessRuntimeFactory;
 
 pub const EXTENSION_SERVICE_CONTRACT_V1: &str = "vqro.service.v1";
 pub const MAX_RUNTIME_FRAME_BYTES: usize = crate::extension_contract::MAX_EXTENSION_FRAME_BYTES;
+/// Maximum encoded result admitted for the structural host-document render method.
+/// Kept runtime-local so the production dispatcher does not activate document-v2 wiring.
+const MAX_HOST_DOCUMENT_RENDER_RESPONSE_BYTES: usize = 128 * 1024;
 pub const MAX_RUNTIME_QUEUE_DEPTH: usize = 8;
 pub const MAX_OUTSTANDING_HOST_CALLS: usize = 1;
 pub const MAX_HOST_CALLS_PER_INVOCATION: usize = 8;
@@ -363,6 +366,7 @@ pub(crate) trait ExtensionRuntime: Send {
         deadline: Instant,
         canceled: &AtomicBool,
         host_calls: &SharedRuntimeHostCalls,
+        response_limit: usize,
     ) -> Result<serde_json::Value, RuntimeError>;
 
     // The envelope is frozen in M1b; event methods remain disabled until M2.
@@ -568,6 +572,7 @@ impl ExtensionRuntimeDispatcher {
             deadline,
             canceled,
             None,
+            response_limit_for_method(method),
         )
     }
 
@@ -656,6 +661,28 @@ impl ExtensionRuntimeDispatcher {
             deadline,
             canceled.as_ref(),
             Some((authorization, canceled.clone())),
+            response_limit_for_method(method),
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn invoke_with_response_limit_for_test(
+        &mut self,
+        method: &str,
+        params: serde_json::Value,
+        expected_generation: u64,
+        deadline: Instant,
+        canceled: &AtomicBool,
+        response_limit: usize,
+    ) -> Result<serde_json::Value, RuntimeError> {
+        self.invoke_inner(
+            method,
+            params,
+            expected_generation,
+            deadline,
+            canceled,
+            None,
+            response_limit,
         )
     }
 
@@ -667,7 +694,9 @@ impl ExtensionRuntimeDispatcher {
         deadline: Instant,
         canceled: &AtomicBool,
         host_authorization: Option<(HostInvocationAuthorization, Arc<AtomicBool>)>,
+        response_limit: usize,
     ) -> Result<serde_json::Value, RuntimeError> {
+        let response_limit = response_limit.min(MAX_RUNTIME_FRAME_BYTES);
         if expected_generation != self.identity.generation {
             return Err(RuntimeError::StaleGeneration {
                 expected: self.identity.generation,
@@ -824,9 +853,9 @@ impl ExtensionRuntimeDispatcher {
                 ))
             }
         };
-        let mut result = self
-            .runtime
-            .invoke(&request, deadline, canceled, &host_calls);
+        let mut result =
+            self.runtime
+                .invoke(&request, deadline, canceled, &host_calls, response_limit);
         if host_calls.call_limit_exceeded() {
             result = Err(RuntimeError::Protocol(
                 "service exceeded the host-call bound".into(),
@@ -867,6 +896,14 @@ impl ExtensionRuntimeDispatcher {
 
     pub(crate) fn stop(&mut self, reason: RuntimeStopReason) {
         self.runtime.stop(reason);
+    }
+}
+
+fn response_limit_for_method(method: &str) -> usize {
+    if method == "host.document.render" {
+        MAX_HOST_DOCUMENT_RENDER_RESPONSE_BYTES
+    } else {
+        MAX_RUNTIME_FRAME_BYTES
     }
 }
 
@@ -1143,6 +1180,18 @@ mod tests {
                 error: None,
             }
         }
+    }
+
+    #[test]
+    fn document_render_uses_contract_response_limit() {
+        assert_eq!(
+            response_limit_for_method("host.document.render"),
+            crate::host_document_v2::MAX_DOCUMENT_V2_BYTES
+        );
+        assert_eq!(
+            response_limit_for_method("conformance.echo"),
+            MAX_RUNTIME_FRAME_BYTES
+        );
     }
 
     #[test]

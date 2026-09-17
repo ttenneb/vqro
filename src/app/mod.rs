@@ -221,6 +221,10 @@ pub struct App {
         (String, String),
         std::sync::Arc<crate::extension_host_state::HostInvocationAuthority>,
     >,
+    #[cfg(test)]
+    pub(crate) document_shadow_audits: api::document_shadow_audit::DocumentShadowAuditCoordinator<
+        crate::host_document_v2::HostDocumentV2,
+    >,
 }
 
 pub(crate) const APP_EVENT_CHANNEL_CAPACITY: usize = 256;
@@ -950,6 +954,8 @@ impl App {
             host_semantic_retry_scheduled: std::collections::HashSet::new(),
             host_document_confirmation_grants: HashMap::new(),
             host_invocation_authorities: HashMap::new(),
+            #[cfg(test)]
+            document_shadow_audits: Default::default(),
         };
         app.configure_tab_bar_status(&config.ui.tab_bar_right, &config.ui.tab_bar_right_separator);
         app.configure_window_title(&config.ui.window_title);

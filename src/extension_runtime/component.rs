@@ -360,6 +360,7 @@ impl ExtensionRuntime for ComponentRuntime {
         deadline: Instant,
         canceled: &AtomicBool,
         host_calls: &SharedRuntimeHostCalls,
+        response_limit: usize,
     ) -> Result<serde_json::Value, RuntimeError> {
         if self.retired {
             return Err(RuntimeError::Exited);
@@ -390,9 +391,9 @@ impl ExtensionRuntime for ComponentRuntime {
                 error.code, error.message
             ))
         })?;
-        if response.len() > MAX_RUNTIME_FRAME_BYTES {
+        if response.len() > response_limit {
             return Err(RuntimeError::Protocol(
-                "component response exceeds the frame limit".into(),
+                "component response exceeds the method response limit".into(),
             ));
         }
         decode_canonical_json(&response, "component response")
@@ -1111,6 +1112,17 @@ mod tests {
                 .unwrap();
             assert_eq!(response, vector.expected, "{}", vector.name);
         }
+        assert!(matches!(
+            dispatcher.invoke_with_response_limit_for_test(
+                "conformance.echo",
+                serde_json::json!({}),
+                21,
+                Instant::now() + Duration::from_millis(750),
+                &canceled,
+                8,
+            ),
+            Err(RuntimeError::Protocol(message)) if message.contains("method response limit")
+        ));
         dispatcher.stop(RuntimeStopReason::Requested);
         cleanup(root);
     }
@@ -1316,6 +1328,7 @@ mod tests {
                 Instant::now() + Duration::from_millis(750),
                 &canceled,
                 &host_calls,
+                MAX_RUNTIME_FRAME_BYTES,
             ),
             Err(RuntimeError::FuelExhausted)
         ));
@@ -1326,6 +1339,7 @@ mod tests {
                 Instant::now() + Duration::from_millis(750),
                 &canceled,
                 &host_calls,
+                MAX_RUNTIME_FRAME_BYTES,
             ),
             Err(RuntimeError::Exited)
         ));
