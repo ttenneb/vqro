@@ -23,6 +23,7 @@ impl App {
         if purpose.state_snapshot && self.extension_state_persistence_blocked {
             return Err("durable extension state authority is unavailable".into());
         }
+        let observes_state_then_terminals = purpose.state_snapshot && purpose.terminals.is_some();
 
         let state_capability = crate::extension_host_state::HOST_STATE_READ_CAPABILITY;
         let terminals_capability = crate::extension_host_terminals::HOST_TERMINALS_READ_CAPABILITY;
@@ -157,8 +158,11 @@ impl App {
                 terminals,
                 allowed_methods,
                 authority,
-                terminal_observations:
-                    crate::extension_host_invocation::TrustedTerminalSnapshotObservations::default(),
+                terminal_observations: if observes_state_then_terminals {
+                    crate::extension_host_invocation::TrustedTerminalSnapshotObservations::state_then_terminals()
+                } else {
+                    crate::extension_host_invocation::TrustedTerminalSnapshotObservations::default()
+                },
             },
         )
     }

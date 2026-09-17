@@ -163,9 +163,19 @@ impl HostReadInvocationAuthorization {
     }
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct CompositeSnapshotObservation {
+    pub(crate) state: crate::extension_host_state::HostStateSnapshotV1,
+    pub(crate) terminals: crate::extension_host_terminals::HostTerminalsSnapshotV1,
+}
+
 #[derive(Debug, Default)]
 struct TerminalObservationState {
-    snapshots: Vec<crate::extension_host_terminals::HostTerminalsSnapshotV1>,
+    expect_state_then_terminals: bool,
+    trace: Vec<String>,
+    state_snapshot: Option<crate::extension_host_state::HostStateSnapshotV1>,
+    terminal_snapshot: Option<crate::extension_host_terminals::HostTerminalsSnapshotV1>,
+    terminal_count: usize,
     invalid: Option<String>,
 }
 
@@ -181,31 +191,134 @@ pub(crate) enum TerminalObservationError {
     Invalid(String),
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum CompositeObservationError {
+    Invalid(String),
+}
+
 impl crate::extension_runtime::RuntimeHostCallObserver for TrustedTerminalSnapshotObservations {
     fn observe_accepted(&self, method: &str, response: &RuntimeHostCallResponseV1) {
-        if method != crate::extension_host_terminals::HOST_TERMINALS_SNAPSHOT_METHOD
-            || response.error.is_some()
-        {
+        let mut state = self.state.lock().expect("host-read observation lock");
+        if !state.expect_state_then_terminals {
+            if method != crate::extension_host_terminals::HOST_TERMINALS_SNAPSHOT_METHOD
+                || response.error.is_some()
+            {
+                return;
+            }
+            let validation = response
+                .result
+                .clone()
+                .ok_or_else(|| "accepted terminal response has no result".to_string())
+                .and_then(crate::extension_host_terminals::validate_snapshot_value);
+            match validation {
+                Ok(snapshot) => {
+                    state.trace.push(method.into());
+                    state.terminal_count += 1;
+                    state.terminal_snapshot = Some(snapshot);
+                }
+                Err(error) => {
+                    if state.invalid.is_none() {
+                        state.invalid = Some(error);
+                    }
+                }
+            }
             return;
         }
-        let validation = response
+
+        if state.trace.len() < 3 {
+            state.trace.push(method.into());
+        }
+        if response.error.is_some() {
+            if state.invalid.is_none() {
+                state.invalid = Some(format!("{method} returned an error"));
+            }
+            return;
+        }
+        let result = response
             .result
             .clone()
-            .ok_or_else(|| "accepted terminal response has no result".to_string())
-            .and_then(crate::extension_host_terminals::validate_snapshot_value);
-        let mut state = self.state.lock().expect("terminal observation lock");
-        match validation {
-            Ok(snapshot) => state.snapshots.push(snapshot),
-            Err(error) => {
-                if state.invalid.is_none() {
-                    state.invalid = Some(error);
-                }
+            .ok_or_else(|| format!("{method} response has no result"));
+        match method {
+            crate::extension_host_state::HOST_STATE_SNAPSHOT_METHOD => {
+                let validation = result.and_then(validate_state_snapshot_value);
+                match validation {
+                    Ok(snapshot) if state.state_snapshot.is_none() => {
+                        state.state_snapshot = Some(snapshot)
+                    }
+                    Ok(_) => {
+                        state
+                            .invalid
+                            .get_or_insert_with(|| "duplicate state snapshot".into());
+                    }
+                    Err(error) => {
+                        state.invalid.get_or_insert(error);
+                    }
+                };
+            }
+            crate::extension_host_terminals::HOST_TERMINALS_SNAPSHOT_METHOD => {
+                let validation =
+                    result.and_then(crate::extension_host_terminals::validate_snapshot_value);
+                match validation {
+                    Ok(snapshot) if state.terminal_snapshot.is_none() => {
+                        state.terminal_count += 1;
+                        state.terminal_snapshot = Some(snapshot)
+                    }
+                    Ok(_) => {
+                        state.terminal_count += 1;
+                        state
+                            .invalid
+                            .get_or_insert_with(|| "duplicate terminal snapshot".into());
+                    }
+                    Err(error) => {
+                        state.invalid.get_or_insert(error);
+                    }
+                };
+            }
+            _ => {
+                state
+                    .invalid
+                    .get_or_insert_with(|| format!("unrelated observed method {method}"));
             }
         }
     }
 }
 
+fn validate_state_snapshot_value(
+    value: serde_json::Value,
+) -> Result<crate::extension_host_state::HostStateSnapshotV1, String> {
+    let snapshot: crate::extension_host_state::HostStateSnapshotV1 =
+        serde_json::from_value(value.clone())
+            .map_err(|error| format!("invalid host.state.v1 snapshot: {error}"))?;
+    if snapshot.contract != crate::extension_host_state::HOST_STATE_CONTRACT_V1
+        || snapshot.store_generation == 0
+        || !valid_state_store_id(&snapshot.store_id)
+        || !crate::extension_state::valid_namespace(&snapshot.namespace)
+    {
+        return Err("invalid host.state.v1 snapshot identity".into());
+    }
+    if serde_json::to_value(&snapshot).map_err(|error| error.to_string())? != value {
+        return Err("host.state.v1 snapshot is not canonical".into());
+    }
+    Ok(snapshot)
+}
+
+fn valid_state_store_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-' | b':'))
+}
+
 impl TrustedTerminalSnapshotObservations {
+    pub(crate) fn state_then_terminals() -> Self {
+        Self {
+            state: Arc::new(std::sync::Mutex::new(TerminalObservationState {
+                expect_state_then_terminals: true,
+                ..TerminalObservationState::default()
+            })),
+        }
+    }
     pub(crate) fn exactly_one(
         &self,
     ) -> Result<crate::extension_host_terminals::HostTerminalsSnapshotV1, TerminalObservationError>
@@ -214,11 +327,44 @@ impl TrustedTerminalSnapshotObservations {
         if let Some(error) = &state.invalid {
             return Err(TerminalObservationError::Invalid(error.clone()));
         }
-        match state.snapshots.as_slice() {
-            [] => Err(TerminalObservationError::Zero),
-            [snapshot] => Ok(snapshot.clone()),
-            many => Err(TerminalObservationError::Multiple(many.len())),
+        match (&state.terminal_snapshot, state.terminal_count) {
+            (None, _) => Err(TerminalObservationError::Zero),
+            (Some(snapshot), 1) => Ok(snapshot.clone()),
+            (Some(_), count) => Err(TerminalObservationError::Multiple(count)),
         }
+    }
+
+    pub(crate) fn exact_state_then_terminals(
+        &self,
+    ) -> Result<CompositeSnapshotObservation, CompositeObservationError> {
+        let state = self.state.lock().expect("host-read observation lock");
+        if !state.expect_state_then_terminals {
+            return Err(CompositeObservationError::Invalid(
+                "composite observation expectation is absent".into(),
+            ));
+        }
+        if let Some(error) = &state.invalid {
+            return Err(CompositeObservationError::Invalid(error.clone()));
+        }
+        if state.trace
+            != [
+                crate::extension_host_state::HOST_STATE_SNAPSHOT_METHOD,
+                crate::extension_host_terminals::HOST_TERMINALS_SNAPSHOT_METHOD,
+            ]
+        {
+            return Err(CompositeObservationError::Invalid(format!(
+                "expected exact state.snapshot then terminals.snapshot trace, observed {:?}",
+                state.trace
+            )));
+        }
+        Ok(CompositeSnapshotObservation {
+            state: state.state_snapshot.clone().ok_or_else(|| {
+                CompositeObservationError::Invalid("state snapshot is absent".into())
+            })?,
+            terminals: state.terminal_snapshot.clone().ok_or_else(|| {
+                CompositeObservationError::Invalid("terminal snapshot is absent".into())
+            })?,
+        })
     }
 }
 
@@ -586,6 +732,112 @@ mod tests {
                 observations.exactly_one(),
                 Err(TerminalObservationError::Invalid(_))
             ));
+        }
+    }
+
+    fn state_snapshot_value() -> serde_json::Value {
+        serde_json::json!({
+            "contract": "host.state.v1",
+            "store_id": "session:0123456789abcdef",
+            "store_generation": 1,
+            "namespace": "example.extension",
+            "revision": 0,
+            "sequence": 0,
+            "values": {"full": {"nested": true}}
+        })
+    }
+
+    fn composite_observations() -> TrustedTerminalSnapshotObservations {
+        TrustedTerminalSnapshotObservations::state_then_terminals()
+    }
+
+    fn observe_value(
+        observations: &TrustedTerminalSnapshotObservations,
+        method: &str,
+        value: serde_json::Value,
+    ) {
+        crate::extension_runtime::RuntimeHostCallObserver::observe_accepted(
+            observations,
+            method,
+            &accepted_response(value),
+        );
+    }
+
+    #[test]
+    fn composite_observation_requires_exact_successful_a_then_b_trace() {
+        let observations = composite_observations();
+        let state_value = state_snapshot_value();
+        let terminal_value = serde_json::to_value(valid_snapshot()).unwrap();
+        observe_value(
+            &observations,
+            crate::extension_host_state::HOST_STATE_SNAPSHOT_METHOD,
+            state_value.clone(),
+        );
+        observe_value(
+            &observations,
+            crate::extension_host_terminals::HOST_TERMINALS_SNAPSHOT_METHOD,
+            terminal_value.clone(),
+        );
+        let observed = observations.exact_state_then_terminals().unwrap();
+        assert_eq!(
+            serde_json::to_value(observed.state).unwrap(),
+            state_value,
+            "the complete state snapshot is retained"
+        );
+        assert_eq!(
+            serde_json::to_value(observed.terminals).unwrap(),
+            terminal_value
+        );
+
+        for methods in [
+            vec!["terminals.snapshot", "state.snapshot"],
+            vec!["state.snapshot"],
+            vec!["state.snapshot", "terminals.snapshot", "state.snapshot"],
+            vec!["state.snapshot", "state.snapshot", "terminals.snapshot"],
+            vec!["state.snapshot", "unrelated.read", "terminals.snapshot"],
+        ] {
+            let observations = composite_observations();
+            for method in methods {
+                let value = if method == crate::extension_host_state::HOST_STATE_SNAPSHOT_METHOD {
+                    state_snapshot_value()
+                } else {
+                    serde_json::to_value(valid_snapshot()).unwrap()
+                };
+                observe_value(&observations, method, value);
+            }
+            assert!(observations.exact_state_then_terminals().is_err());
+        }
+    }
+
+    #[test]
+    fn composite_observation_records_failed_and_malformed_successes() {
+        let observations = composite_observations();
+        let mut failed = accepted_response(state_snapshot_value());
+        failed.result = None;
+        failed.error = Some(crate::extension_runtime::RuntimeErrorBodyV1 {
+            code: "state_failed".into(),
+            message: "failed".into(),
+        });
+        crate::extension_runtime::RuntimeHostCallObserver::observe_accepted(
+            &observations,
+            crate::extension_host_state::HOST_STATE_SNAPSHOT_METHOD,
+            &failed,
+        );
+        assert!(observations.exact_state_then_terminals().is_err());
+
+        for (method, value) in [
+            (
+                crate::extension_host_state::HOST_STATE_SNAPSHOT_METHOD,
+                serde_json::json!({"contract": "host.state.v1"}),
+            ),
+            (
+                crate::extension_host_terminals::HOST_TERMINALS_SNAPSHOT_METHOD,
+                serde_json::json!({"contract": "host.terminals.v1"}),
+            ),
+        ] {
+            let observations = composite_observations();
+            observe_value(&observations, method, value);
+            assert!(observations.exact_state_then_terminals().is_err());
         }
     }
 

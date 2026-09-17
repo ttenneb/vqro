@@ -76,17 +76,88 @@ pub(crate) struct DocumentShadowAuditWork {
     pub(crate) deadline: Instant,
 }
 
+#[derive(Clone)]
+enum ReadExpectation {
+    TerminalsOnly {
+        expected: crate::extension_host_terminals::HostTerminalsSnapshotV1,
+        dependency: DocumentDependencyV2,
+    },
+    StateThenTerminals {
+        expected_state: crate::extension_host_state::HostStateSnapshotV1,
+        expected_terminals: crate::extension_host_terminals::HostTerminalsSnapshotV1,
+        dependencies: [DocumentDependencyV2; 2],
+    },
+}
+
 struct PendingAudit {
     key: AuditCacheKey,
     ticket: AuditTicket,
     authorization: HostReadInvocationAuthorization,
-    expected_snapshot: crate::extension_host_terminals::HostTerminalsSnapshotV1,
-    expected_dependency: DocumentDependencyV2,
+    read_expectation: ReadExpectation,
+    validate_collections_candidate: bool,
     params: HostDocumentRenderParamsV2,
     workspace_id: String,
     tab_id: TabId,
     deadline: Instant,
     canceled: Arc<AtomicBool>,
+}
+
+impl ReadExpectation {
+    fn dependencies(&self) -> &[DocumentDependencyV2] {
+        match self {
+            Self::TerminalsOnly { dependency, .. } => std::slice::from_ref(dependency),
+            Self::StateThenTerminals { dependencies, .. } => dependencies,
+        }
+    }
+}
+
+enum CurrentReadValues {
+    TerminalsOnly(crate::extension_host_terminals::HostTerminalsSnapshotV1),
+    StateThenTerminals {
+        state: crate::extension_host_state::HostStateSnapshotV1,
+        terminals: crate::extension_host_terminals::HostTerminalsSnapshotV1,
+    },
+}
+
+fn finalize_read_expectation(
+    expectation: &ReadExpectation,
+    observations: &TrustedTerminalSnapshotObservations,
+    current: CurrentReadValues,
+) -> Result<crate::extension_host_terminals::HostTerminalsSnapshotV1, String> {
+    match (expectation, current) {
+        (
+            ReadExpectation::TerminalsOnly { expected, .. },
+            CurrentReadValues::TerminalsOnly(current),
+        ) => {
+            let observed = observations
+                .exactly_one()
+                .map_err(|error| format!("shadow terminal observation rejected: {error:?}"))?;
+            if &observed != expected || current != *expected {
+                return Err("observed, captured, and current terminal snapshots differ".into());
+            }
+            Ok(current)
+        }
+        (
+            ReadExpectation::StateThenTerminals {
+                expected_state,
+                expected_terminals,
+                ..
+            },
+            CurrentReadValues::StateThenTerminals { state, terminals },
+        ) => {
+            let observed = observations
+                .exact_state_then_terminals()
+                .map_err(|error| format!("shadow composite observation rejected: {error:?}"))?;
+            if observed.state != *expected_state || state != *expected_state {
+                return Err("observed, captured, and current state snapshots differ".into());
+            }
+            if observed.terminals != *expected_terminals || terminals != *expected_terminals {
+                return Err("observed, captured, and current terminal snapshots differ".into());
+            }
+            Ok(terminals)
+        }
+        _ => Err("shadow current reads do not match the staged expectation".into()),
+    }
 }
 
 pub(crate) struct DocumentShadowAuditCoordinator<D> {
@@ -163,35 +234,150 @@ impl<D: ShadowAuditDocument> DocumentShadowAuditCoordinator<D> {
             requested_revision,
         };
         params.validate().map_err(|error| error.to_string())?;
-        let attempt_id = self
-            .next_attempt_id
-            .checked_add(1)
-            .ok_or_else(|| "shadow attempt sequence exhausted".to_string())?;
-        let expected_snapshot = current_snapshot(app, &authorization, &workspace_id, &tab_id)?;
+        let expected_snapshot =
+            current_terminal_snapshot(app, &authorization, &workspace_id, &tab_id)?;
         let expected_dependency = terminal_snapshot_dependency(
             &tab_id.to_string(),
             &expected_snapshot.fingerprint_sha256,
             provider_generation,
         )
         .map_err(|error| error.to_string())?;
+        let read_expectation = ReadExpectation::TerminalsOnly {
+            expected: expected_snapshot,
+            dependency: expected_dependency,
+        };
+        self.install_pending(
+            authorization,
+            read_expectation,
+            true,
+            fence,
+            scope,
+            params,
+            workspace_id,
+            tab_id,
+            runtime_generation,
+            "collections-shadow",
+            deadline,
+            canceled,
+        )
+    }
+
+    #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
+    fn begin_composite_for_test(
+        &mut self,
+        app: &mut App,
+        binding: &HostProviderBinding,
+        workspace_id: String,
+        tab_id: TabId,
+        service_generation: u64,
+        provider_generation: u64,
+        runtime_generation: u64,
+        scope_generation: u64,
+        requested_revision: u64,
+        deadline: Instant,
+        canceled: Arc<AtomicBool>,
+    ) -> Result<DocumentShadowAuditWork, String> {
+        if Instant::now() >= deadline || canceled.load(std::sync::atomic::Ordering::Acquire) {
+            return Err("shadow audit is canceled or expired".into());
+        }
+        let authorization = app.stage_host_read_authorization(
+            binding,
+            HostReadInvocationPurpose {
+                state_snapshot: true,
+                terminals: Some((workspace_id.clone(), tab_id.clone())),
+            },
+            service_generation,
+            provider_generation,
+            runtime_generation,
+        )?;
+        validate_authorization(app, &authorization, &workspace_id, &tab_id)?;
+        let expected_state = current_state_snapshot(app, &authorization)?;
+        let expected_terminals =
+            current_terminal_snapshot(app, &authorization, &workspace_id, &tab_id)?;
+        let mut dependencies = [
+            crate::host_document_v2::host_state_snapshot_dependency(
+                &expected_state.contract,
+                &expected_state.store_id,
+                expected_state.store_generation,
+                &expected_state.namespace,
+                expected_state.revision,
+            )
+            .map_err(|error| error.to_string())?,
+            terminal_snapshot_dependency(
+                tab_id.as_str(),
+                &expected_terminals.fingerprint_sha256,
+                expected_terminals.lease_fence.provider_generation,
+            )
+            .map_err(|error| error.to_string())?,
+        ];
+        dependencies.sort();
+        let fence = DocumentProducerFenceV2 {
+            package_id: authorization.package_id.clone(),
+            service_id: authorization.service_id.clone(),
+            artifact_sha256: authorization.artifact_sha256.clone(),
+            runtime_generation,
+            provider_generation,
+            scope_generation,
+        };
+        let scope = DocumentScopeV2 {
+            contract: "host.tab.v1".into(),
+            scope_id: tab_id.to_string(),
+        };
+        let params = HostDocumentRenderParamsV2 {
+            contract: HOST_DOCUMENT_RENDER_CONTRACT_V2.into(),
+            producer: fence.clone(),
+            scope: scope.clone(),
+            requested_revision,
+        };
+        params.validate().map_err(|error| error.to_string())?;
+        self.install_pending(
+            authorization,
+            ReadExpectation::StateThenTerminals {
+                expected_state,
+                expected_terminals,
+                dependencies,
+            },
+            false,
+            fence,
+            scope,
+            params,
+            workspace_id,
+            tab_id,
+            runtime_generation,
+            "composite-shadow",
+            deadline,
+            canceled,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn install_pending(
+        &mut self,
+        authorization: HostReadInvocationAuthorization,
+        read_expectation: ReadExpectation,
+        validate_collections_candidate: bool,
+        fence: DocumentProducerFenceV2,
+        scope: DocumentScopeV2,
+        params: HostDocumentRenderParamsV2,
+        workspace_id: String,
+        tab_id: TabId,
+        runtime_generation: u64,
+        request_prefix: &str,
+        deadline: Instant,
+        canceled: Arc<AtomicBool>,
+    ) -> Result<DocumentShadowAuditWork, String> {
+        if Instant::now() >= deadline || canceled.load(std::sync::atomic::Ordering::Acquire) {
+            return Err("shadow audit is canceled or expired".into());
+        }
+        let attempt_id = self
+            .next_attempt_id
+            .checked_add(1)
+            .ok_or_else(|| "shadow attempt sequence exhausted".to_string())?;
         let key = AuditCacheKey {
             producer: fence.producer(),
             scope,
         };
-        let observer = authorization.terminal_observations();
-        let request = RuntimeRequestV1 {
-            contract: crate::extension_runtime::EXTENSION_SERVICE_CONTRACT_V1.into(),
-            request_id: format!("collections-shadow-{attempt_id}"),
-            identity: crate::extension_runtime::RuntimeIdentityV1 {
-                package_id: PACKAGE_ID.into(),
-                namespace: NAMESPACE.into(),
-                service_id: SERVICE_ID.into(),
-                generation: runtime_generation,
-            },
-            method: METHOD.into(),
-            params: serde_json::to_value(&params).map_err(|error| error.to_string())?,
-        };
-
         let older_attempt = self
             .pending
             .iter()
@@ -209,12 +395,25 @@ impl<D: ShadowAuditDocument> DocumentShadowAuditCoordinator<D> {
             let _ = self.cache.fail(older.ticket);
         }
         self.cache
-            .update_authority(key.clone(), fence, vec![expected_dependency.clone()])
+            .update_authority(key.clone(), fence, read_expectation.dependencies().to_vec())
             .map_err(|error| format!("cannot install shadow authority: {error:?}"))?;
         let ticket = self
             .cache
             .begin_audit(&key)
             .map_err(|error| format!("cannot issue shadow ticket: {error:?}"))?;
+        let observer = authorization.terminal_observations();
+        let request = RuntimeRequestV1 {
+            contract: crate::extension_runtime::EXTENSION_SERVICE_CONTRACT_V1.into(),
+            request_id: format!("{request_prefix}-{attempt_id}"),
+            identity: crate::extension_runtime::RuntimeIdentityV1 {
+                package_id: authorization.package_id.clone(),
+                namespace: authorization.namespace.clone(),
+                service_id: authorization.service_id.clone(),
+                generation: runtime_generation,
+            },
+            method: METHOD.into(),
+            params: serde_json::to_value(&params).map_err(|error| error.to_string())?,
+        };
         self.next_attempt_id = attempt_id;
         self.pending.insert(
             attempt_id,
@@ -222,8 +421,8 @@ impl<D: ShadowAuditDocument> DocumentShadowAuditCoordinator<D> {
                 key,
                 ticket,
                 authorization: authorization.clone(),
-                expected_snapshot,
-                expected_dependency,
+                read_expectation,
+                validate_collections_candidate,
                 params,
                 workspace_id,
                 tab_id,
@@ -277,27 +476,43 @@ impl<D: ShadowAuditDocument> DocumentShadowAuditCoordinator<D> {
         if now >= pending.deadline {
             return Err("shadow audit deadline expired".into());
         }
+        if matches!(
+            &pending.read_expectation,
+            ReadExpectation::StateThenTerminals { .. }
+        ) && app.extension_state_persistence_blocked
+        {
+            return Err("durable extension state authority is unavailable".into());
+        }
         let value = result.map_err(|error| format!("shadow runtime failed: {error}"))?;
-        validate_candidate_record(app, pending.params.producer.runtime_generation)?;
+        if pending.validate_collections_candidate {
+            validate_candidate_record(app, pending.params.producer.runtime_generation)?;
+        }
         validate_authorization(
             app,
             &pending.authorization,
             &pending.workspace_id,
             &pending.tab_id,
         )?;
-        let observed = pending
-            .observer()
-            .exactly_one()
-            .map_err(|error| format!("shadow terminal observation rejected: {error:?}"))?;
-        let current = current_snapshot(
+        let current_terminals = current_terminal_snapshot(
             app,
             &pending.authorization,
             &pending.workspace_id,
             &pending.tab_id,
         )?;
-        if observed != pending.expected_snapshot || current != pending.expected_snapshot {
-            return Err("observed, captured, and current terminal snapshots differ".into());
-        }
+        let current_reads = match &pending.read_expectation {
+            ReadExpectation::TerminalsOnly { .. } => {
+                CurrentReadValues::TerminalsOnly(current_terminals)
+            }
+            ReadExpectation::StateThenTerminals { .. } => CurrentReadValues::StateThenTerminals {
+                state: current_state_snapshot(app, &pending.authorization)?,
+                terminals: current_terminals,
+            },
+        };
+        let current = finalize_read_expectation(
+            &pending.read_expectation,
+            &pending.observer(),
+            current_reads,
+        )?;
         let document: D = serde_json::from_value(value)
             .map_err(|error| format!("malformed shadow document: {error}"))?;
         let terminals = current
@@ -317,7 +532,7 @@ impl<D: ShadowAuditDocument> DocumentShadowAuditCoordinator<D> {
         if document.producer() != &pending.params.producer
             || document.scope() != &pending.params.scope
             || document.revision() != pending.params.requested_revision
-            || document.dependencies() != [pending.expected_dependency.clone()]
+            || document.dependencies() != pending.read_expectation.dependencies()
         {
             return Err("shadow document did not echo host-authored authority exactly".into());
         }
@@ -395,18 +610,50 @@ fn validate_authorization(
         .marketplace_state
         .packages
         .packages
-        .get(PACKAGE_ID)
-        .ok_or("candidate package is not registered")?;
+        .get(&authorization.package_id)
+        .ok_or("authorized package is not registered")?;
+    let active = record
+        .active
+        .as_ref()
+        .ok_or("authorized package has no active artifact")?;
+    let current_authority = app
+        .host_invocation_authorities
+        .get(&(
+            authorization.package_id.clone(),
+            authorization.service_id.clone(),
+        ))
+        .is_some_and(|authority| Arc::ptr_eq(authority, &authorization.authority));
+    let state_matches = authorization.state.as_ref().is_none_or(|state| {
+        state.package_id == authorization.package_id
+            && state.service_id == authorization.service_id
+            && state.namespace == authorization.namespace
+            && state.artifact_sha256 == authorization.artifact_sha256
+            && state.artifact_version == authorization.artifact_version
+            && state.catalog_revision == authorization.catalog_generation
+            && state.package_revision == authorization.package_generation
+            && state.manager_generation == authorization.service_generation
+            && state.provider_generation == authorization.provider_generation
+            && state.scope_id == state.store_id
+            && state.scope_revision == authorization.package_generation
+            && Arc::ptr_eq(&state.authority, &authorization.authority)
+    });
     if app.marketplace_state.packages.revision != authorization.catalog_generation
         || record.revision != authorization.package_generation
-        || authorization.package_id != PACKAGE_ID
-        || authorization.service_id != SERVICE_ID
-        || authorization.namespace != NAMESPACE
-        || authorization.artifact_sha256 != COLLECTIONS_PACKAGE_SHA256
+        || record.package_id != authorization.package_id
+        || record.status != crate::extension_package::PackageLifecycleStatusV1::Enabled
+        || !record
+            .namespaces
+            .iter()
+            .any(|namespace| namespace == &authorization.namespace)
+        || active.package_sha256 != authorization.artifact_sha256
+        || active.version != authorization.artifact_version
+        || active.runtime_generation != authorization.runtime_generation
         || authorization.artifact_generation != authorization.runtime_generation
         || terminals.workspace_id != workspace_id
         || &terminals.tab_id != tab_id
         || !Arc::ptr_eq(&authorization.authority, &terminals.authority)
+        || !state_matches
+        || !current_authority
         || !authorization.authority.permits_generations(
             authorization.service_generation,
             authorization.provider_generation,
@@ -473,7 +720,7 @@ impl App {
     }
 }
 
-fn current_snapshot(
+fn current_terminal_snapshot(
     app: &App,
     authorization: &HostReadInvocationAuthorization,
     workspace_id: &str,
@@ -481,7 +728,10 @@ fn current_snapshot(
 ) -> Result<crate::extension_host_terminals::HostTerminalsSnapshotV1, String> {
     let current_authority = app
         .host_invocation_authorities
-        .get(&(PACKAGE_ID.into(), SERVICE_ID.into()))
+        .get(&(
+            authorization.package_id.clone(),
+            authorization.service_id.clone(),
+        ))
         .is_some_and(|authority| Arc::ptr_eq(authority, &authorization.authority));
     if !current_authority {
         return Err("shadow authority pointer was superseded".into());
@@ -510,6 +760,26 @@ fn current_snapshot(
         terminals.fence.clone(),
     )
     .map_err(|error| error.message)
+}
+
+fn current_state_snapshot(
+    app: &App,
+    authorization: &HostReadInvocationAuthorization,
+) -> Result<crate::extension_host_state::HostStateSnapshotV1, String> {
+    let state = authorization
+        .state
+        .as_ref()
+        .ok_or("state authorization is absent")?;
+    if state.namespace != authorization.namespace
+        || state.store_id != app.extension_state.store_id
+        || state.store_generation != app.extension_state.store_generation
+    {
+        return Err("state authorization store or namespace changed".into());
+    }
+    app.extension_state
+        .snapshot(&state.namespace)
+        .map(Into::into)
+        .map_err(|error| format!("cannot capture current state snapshot: {error:?}"))
 }
 
 #[cfg(test)]
@@ -575,6 +845,40 @@ mod tests {
         (app, binding)
     }
 
+    fn staged_composite_app() -> (App, HostProviderBinding) {
+        let (mut app, _) = staged_app();
+        app.marketplace_state.packages.packages.insert(
+            "example.document".into(),
+            crate::extension_package::PackageLifecycleRecordV1 {
+                package_id: "example.document".into(),
+                source: crate::extension_package::PackageProvenanceV1::File {
+                    package_sha256: "b".repeat(64),
+                },
+                previous_source: None,
+                namespaces: vec!["example.document".into()],
+                revision: 17,
+                status: crate::extension_package::PackageLifecycleStatusV1::Enabled,
+                active: Some(crate::extension_package::PackageArtifactPointerV1 {
+                    package_sha256: "b".repeat(64),
+                    version: "1.2.3".into(),
+                    runtime_generation: RUNTIME_GENERATION,
+                }),
+                previous: None,
+                activation_error: None,
+                pending_activation: None,
+                retained_data: false,
+            },
+        );
+        let binding = HostProviderBinding::test_new(
+            "example.document",
+            "reader",
+            "example.document",
+            "b".repeat(64),
+            "1.2.3",
+        );
+        (app, binding)
+    }
+
     fn begin(
         app: &mut App,
         binding: &HostProviderBinding,
@@ -591,6 +895,46 @@ mod tests {
             RUNTIME_GENERATION,
             61,
             1,
+            Instant::now() + Duration::from_secs(30),
+            canceled,
+        )
+        .unwrap()
+    }
+
+    fn try_begin_composite(
+        app: &mut App,
+        binding: &HostProviderBinding,
+        deadline: Instant,
+        canceled: Arc<AtomicBool>,
+    ) -> Result<DocumentShadowAuditWork, String> {
+        let workspace_id = app.state.workspaces[0].id.clone();
+        let tab_id = app.state.workspaces[0].tabs[0].id.clone();
+        let mut coordinator = std::mem::take(&mut app.document_shadow_audits);
+        let result = coordinator.begin_composite_for_test(
+            app,
+            binding,
+            workspace_id,
+            tab_id,
+            SERVICE_GENERATION,
+            PROVIDER_GENERATION,
+            RUNTIME_GENERATION,
+            61,
+            1,
+            deadline,
+            canceled,
+        );
+        app.document_shadow_audits = coordinator;
+        result
+    }
+
+    fn begin_composite(
+        app: &mut App,
+        binding: &HostProviderBinding,
+        canceled: Arc<AtomicBool>,
+    ) -> DocumentShadowAuditWork {
+        try_begin_composite(
+            app,
+            binding,
             Instant::now() + Duration::from_secs(30),
             canceled,
         )
@@ -684,6 +1028,124 @@ mod tests {
             nodes,
         })
         .unwrap()
+    }
+
+    fn successful_observation(
+        work: &DocumentShadowAuditWork,
+        result: serde_json::Value,
+    ) -> crate::extension_runtime::RuntimeHostCallResponseV1 {
+        crate::extension_runtime::RuntimeHostCallResponseV1 {
+            kind: "host_response".into(),
+            call_id: "observed".into(),
+            identity: work.request.identity.clone(),
+            result: Some(result),
+            error: None,
+        }
+    }
+
+    fn observe_composite_state(
+        app: &App,
+        work: &DocumentShadowAuditWork,
+    ) -> crate::extension_host_state::HostStateSnapshotV1 {
+        let state = current_state_snapshot(app, &work.authorization).unwrap();
+        work.observer.observe_accepted(
+            crate::extension_host_state::HOST_STATE_SNAPSHOT_METHOD,
+            &successful_observation(work, serde_json::to_value(&state).unwrap()),
+        );
+        state
+    }
+
+    fn observe_composite_terminals(
+        app: &App,
+        work: &DocumentShadowAuditWork,
+    ) -> crate::extension_host_terminals::HostTerminalsSnapshotV1 {
+        let terminals = current_terminal_snapshot(
+            app,
+            &work.authorization,
+            &app.state.workspaces[0].id,
+            &app.state.workspaces[0].tabs[0].id,
+        )
+        .unwrap();
+        work.observer.observe_accepted(
+            crate::extension_host_terminals::HOST_TERMINALS_SNAPSHOT_METHOD,
+            &successful_observation(work, serde_json::to_value(&terminals).unwrap()),
+        );
+        terminals
+    }
+
+    fn composite_document(
+        work: &DocumentShadowAuditWork,
+        state: &crate::extension_host_state::HostStateSnapshotV1,
+        terminals: &crate::extension_host_terminals::HostTerminalsSnapshotV1,
+    ) -> serde_json::Value {
+        let params: HostDocumentRenderParamsV2 =
+            serde_json::from_value(work.request.params.clone()).unwrap();
+        let terminal_ids = terminals
+            .layout
+            .iter()
+            .flat_map(|item| match item {
+                crate::extension_host_terminals::HostTerminalLayoutItemV1::Tiled {
+                    terminal_id,
+                } => vec![terminal_id.clone()],
+                crate::extension_host_terminals::HostTerminalLayoutItemV1::Container {
+                    terminal_ids,
+                    ..
+                } => terminal_ids.clone(),
+            })
+            .collect::<Vec<_>>();
+        let roots = (0..terminal_ids.len())
+            .map(|index| format!("slot-{index}"))
+            .collect::<Vec<_>>();
+        let nodes = terminal_ids
+            .into_iter()
+            .enumerate()
+            .map(
+                |(index, terminal_id)| crate::host_document_v2::DocumentNodeV2::TerminalSlot {
+                    id: format!("slot-{index}"),
+                    accessibility: crate::host_document_v2::DocumentAccessibilityV2 {
+                        name: format!("Terminal {index}"),
+                        description: None,
+                    },
+                    terminal_id: terminal_id.to_string(),
+                },
+            )
+            .collect();
+        let mut dependencies = vec![
+            crate::host_document_v2::host_state_snapshot_dependency(
+                &state.contract,
+                &state.store_id,
+                state.store_generation,
+                &state.namespace,
+                state.revision,
+            )
+            .unwrap(),
+            terminal_snapshot_dependency(
+                terminals.tab_id.as_str(),
+                &terminals.fingerprint_sha256,
+                terminals.lease_fence.provider_generation,
+            )
+            .unwrap(),
+        ];
+        dependencies.sort();
+        serde_json::to_value(HostDocumentV2 {
+            contract: crate::host_document_v2::HOST_DOCUMENT_CONTRACT_V2.into(),
+            producer: params.producer,
+            scope: params.scope,
+            revision: params.requested_revision,
+            dependencies,
+            roots,
+            nodes,
+        })
+        .unwrap()
+    }
+
+    fn observe_composite_and_document(
+        app: &App,
+        work: &DocumentShadowAuditWork,
+    ) -> serde_json::Value {
+        let state = observe_composite_state(app, work);
+        let terminals = observe_composite_terminals(app, work);
+        composite_document(work, &state, &terminals)
     }
 
     #[test]
@@ -953,6 +1415,285 @@ mod tests {
     }
 
     #[test]
+    fn synthetic_composite_audit_accepts_exact_state_then_terminals_once() {
+        let (mut app, binding) = staged_composite_app();
+        let work = begin_composite(&mut app, &binding, Arc::new(AtomicBool::new(false)));
+        let value = observe_composite_and_document(&app, &work);
+        app.finalize_document_shadow_audit(work.attempt_id, Ok(value.clone()))
+            .unwrap();
+        assert_eq!(app.document_shadow_audits.cached_len(), 1);
+        assert!(app
+            .finalize_document_shadow_audit(work.attempt_id, Ok(value))
+            .unwrap_err()
+            .contains("replayed"));
+    }
+
+    fn mutate_composite_namespace(app: &mut App, key: &str) {
+        let snapshot = app.extension_state.snapshot("example.document").unwrap();
+        app.extension_state
+            .transact(&crate::extension_state::ExtensionStateTransactionV1 {
+                contract: crate::extension_state::EXTENSION_STATE_CONTRACT_V1.into(),
+                namespace: "example.document".into(),
+                expected_store_generation: snapshot.store_generation,
+                expected_revision: snapshot.revision,
+                idempotency_key: format!("mutation-{key}"),
+                operations: vec![crate::extension_state::ExtensionStateOperationV1 {
+                    key: key.into(),
+                    value: Some(serde_json::json!(key)),
+                }],
+            })
+            .unwrap();
+    }
+
+    fn mutate_terminal_layout(app: &mut App) {
+        let pane = app.state.workspaces[0].test_split(ratatui::layout::Direction::Vertical);
+        let terminal = app.state.workspaces[0].tabs[0]
+            .terminal_id(pane)
+            .unwrap()
+            .clone();
+        app.state.terminals.insert(
+            terminal.clone(),
+            crate::terminal::TerminalState::new(terminal, "/".into()),
+        );
+    }
+
+    #[test]
+    fn synthetic_composite_rejects_state_races_and_whole_value_mismatch() {
+        let (mut app, binding) = staged_composite_app();
+        let work = begin_composite(&mut app, &binding, Arc::new(AtomicBool::new(false)));
+        mutate_composite_namespace(&mut app, "before-observation");
+        let value = observe_composite_and_document(&app, &work);
+        assert!(app
+            .finalize_document_shadow_audit(work.attempt_id, Ok(value))
+            .unwrap_err()
+            .contains("state snapshots differ"));
+
+        let (mut app, binding) = staged_composite_app();
+        let work = begin_composite(&mut app, &binding, Arc::new(AtomicBool::new(false)));
+        let value = observe_composite_and_document(&app, &work);
+        mutate_composite_namespace(&mut app, "after-observation");
+        assert!(app
+            .finalize_document_shadow_audit(work.attempt_id, Ok(value))
+            .unwrap_err()
+            .contains("state snapshots differ"));
+
+        let (mut app, binding) = staged_composite_app();
+        let work = begin_composite(&mut app, &binding, Arc::new(AtomicBool::new(false)));
+        let value = observe_composite_and_document(&app, &work);
+        let ReadExpectation::StateThenTerminals { expected_state, .. } = &mut app
+            .document_shadow_audits
+            .pending
+            .get_mut(&work.attempt_id)
+            .unwrap()
+            .read_expectation
+        else {
+            panic!("composite expectation")
+        };
+        expected_state
+            .values
+            .insert("forged".into(), serde_json::json!(true));
+        assert!(app
+            .finalize_document_shadow_audit(work.attempt_id, Ok(value))
+            .unwrap_err()
+            .contains("state snapshots differ"));
+    }
+
+    #[test]
+    fn synthetic_composite_rejects_state_change_between_a_and_b() {
+        let (mut app, binding) = staged_composite_app();
+        let work = begin_composite(&mut app, &binding, Arc::new(AtomicBool::new(false)));
+        let state = observe_composite_state(&app, &work);
+        mutate_composite_namespace(&mut app, "between-a-b");
+        let terminals = observe_composite_terminals(&app, &work);
+        let value = composite_document(&work, &state, &terminals);
+        assert!(app
+            .finalize_document_shadow_audit(work.attempt_id, Ok(value))
+            .unwrap_err()
+            .contains("state snapshots differ"));
+    }
+
+    #[test]
+    fn synthetic_composite_rejects_terminal_races_around_a_and_b() {
+        let (mut app, binding) = staged_composite_app();
+        let work = begin_composite(&mut app, &binding, Arc::new(AtomicBool::new(false)));
+        mutate_terminal_layout(&mut app);
+        let state = observe_composite_state(&app, &work);
+        let terminals = observe_composite_terminals(&app, &work);
+        let value = composite_document(&work, &state, &terminals);
+        assert!(app
+            .finalize_document_shadow_audit(work.attempt_id, Ok(value))
+            .unwrap_err()
+            .contains("terminal snapshots differ"));
+
+        let (mut app, binding) = staged_composite_app();
+        let work = begin_composite(&mut app, &binding, Arc::new(AtomicBool::new(false)));
+        let state = observe_composite_state(&app, &work);
+        mutate_terminal_layout(&mut app);
+        let terminals = observe_composite_terminals(&app, &work);
+        let value = composite_document(&work, &state, &terminals);
+        assert!(app
+            .finalize_document_shadow_audit(work.attempt_id, Ok(value))
+            .unwrap_err()
+            .contains("terminal snapshots differ"));
+
+        let (mut app, binding) = staged_composite_app();
+        let work = begin_composite(&mut app, &binding, Arc::new(AtomicBool::new(false)));
+        let state = observe_composite_state(&app, &work);
+        let terminals = observe_composite_terminals(&app, &work);
+        let value = composite_document(&work, &state, &terminals);
+        mutate_terminal_layout(&mut app);
+        assert!(app
+            .finalize_document_shadow_audit(work.attempt_id, Ok(value))
+            .unwrap_err()
+            .contains("terminal snapshots differ"));
+    }
+
+    #[test]
+    fn synthetic_composite_rejects_persistence_block_after_observation() {
+        let (mut app, binding) = staged_composite_app();
+        let work = begin_composite(&mut app, &binding, Arc::new(AtomicBool::new(false)));
+        let value = observe_composite_and_document(&app, &work);
+        app.extension_state_persistence_blocked = true;
+        assert!(app
+            .finalize_document_shadow_audit(work.attempt_id, Ok(value))
+            .unwrap_err()
+            .contains("durable extension state authority is unavailable"));
+    }
+
+    fn assert_composite_authority_race_rejected(mutate: impl FnOnce(&mut App)) {
+        let (mut app, binding) = staged_composite_app();
+        let work = begin_composite(&mut app, &binding, Arc::new(AtomicBool::new(false)));
+        let value = observe_composite_and_document(&app, &work);
+        mutate(&mut app);
+        assert!(app
+            .finalize_document_shadow_audit(work.attempt_id, Ok(value))
+            .is_err());
+    }
+
+    #[test]
+    fn synthetic_composite_rejects_dependency_and_authority_races() {
+        let (mut app, binding) = staged_composite_app();
+        let work = begin_composite(&mut app, &binding, Arc::new(AtomicBool::new(false)));
+        let mut value = observe_composite_and_document(&app, &work);
+        value["dependencies"].as_array_mut().unwrap().reverse();
+        assert!(app
+            .finalize_document_shadow_audit(work.attempt_id, Ok(value))
+            .is_err());
+
+        assert_composite_authority_race_rejected(|app| {
+            app.marketplace_state.packages.revision += 1;
+        });
+        assert_composite_authority_race_rejected(|app| {
+            app.marketplace_state
+                .packages
+                .packages
+                .get_mut("example.document")
+                .unwrap()
+                .revision += 1;
+        });
+        assert_composite_authority_race_rejected(|app| {
+            app.marketplace_state
+                .packages
+                .packages
+                .get_mut("example.document")
+                .unwrap()
+                .namespaces
+                .clear();
+        });
+        assert_composite_authority_race_rejected(|app| {
+            app.marketplace_state
+                .packages
+                .packages
+                .get_mut("example.document")
+                .unwrap()
+                .active
+                .as_mut()
+                .unwrap()
+                .package_sha256 = "c".repeat(64);
+        });
+        assert_composite_authority_race_rejected(|app| {
+            app.marketplace_state
+                .packages
+                .packages
+                .get_mut("example.document")
+                .unwrap()
+                .active
+                .as_mut()
+                .unwrap()
+                .runtime_generation += 1;
+        });
+        assert_composite_authority_race_rejected(|app| {
+            app.revoke_host_invocation_authority("example.document", "reader");
+        });
+        assert_composite_authority_race_rejected(|app| {
+            app.extension_state.store_generation += 1;
+        });
+    }
+
+    #[test]
+    fn synthetic_composite_begin_rejects_immediate_stop_and_supersedes_same_key() {
+        let (mut app, binding) = staged_composite_app();
+        let canceled = Arc::new(AtomicBool::new(true));
+        assert!(try_begin_composite(
+            &mut app,
+            &binding,
+            Instant::now() + Duration::from_secs(30),
+            canceled,
+        )
+        .err()
+        .unwrap()
+        .contains("canceled or expired"));
+        assert_eq!(app.document_shadow_audits.pending_len(), 0);
+        assert!(try_begin_composite(
+            &mut app,
+            &binding,
+            Instant::now() - Duration::from_millis(1),
+            Arc::new(AtomicBool::new(false)),
+        )
+        .err()
+        .unwrap()
+        .contains("canceled or expired"));
+        assert_eq!(app.document_shadow_audits.pending_len(), 0);
+
+        let first = begin_composite(&mut app, &binding, Arc::new(AtomicBool::new(false)));
+        let second = begin_composite(&mut app, &binding, Arc::new(AtomicBool::new(false)));
+        assert_eq!(app.document_shadow_audits.pending_len(), 1);
+        assert!(app
+            .finalize_document_shadow_audit(first.attempt_id, Ok(serde_json::Value::Null))
+            .unwrap_err()
+            .contains("stale"));
+        let value = observe_composite_and_document(&app, &second);
+        app.finalize_document_shadow_audit(second.attempt_id, Ok(value))
+            .unwrap();
+    }
+
+    #[test]
+    fn synthetic_composite_rejects_cancellation_and_deadline() {
+        let (mut app, binding) = staged_composite_app();
+        let canceled = Arc::new(AtomicBool::new(false));
+        let work = begin_composite(&mut app, &binding, Arc::clone(&canceled));
+        let value = observe_composite_and_document(&app, &work);
+        canceled.store(true, Ordering::Release);
+        assert!(app
+            .finalize_document_shadow_audit(work.attempt_id, Ok(value))
+            .unwrap_err()
+            .contains("canceled"));
+
+        let (mut app, binding) = staged_composite_app();
+        let work = begin_composite(&mut app, &binding, Arc::new(AtomicBool::new(false)));
+        let value = observe_composite_and_document(&app, &work);
+        app.document_shadow_audits
+            .pending
+            .get_mut(&work.attempt_id)
+            .unwrap()
+            .deadline = Instant::now() - Duration::from_millis(1);
+        assert!(app
+            .finalize_document_shadow_audit(work.attempt_id, Ok(value))
+            .unwrap_err()
+            .contains("deadline"));
+    }
+
+    #[test]
     fn topology_value_currentness_and_authority_races_are_honest() {
         let (mut app, binding) = staged_app();
         let work = begin(&mut app, &binding, Arc::new(AtomicBool::new(false)));
@@ -986,7 +1727,7 @@ mod tests {
         );
         assert!(!app.state.workspaces[0].close_pane(added_pane));
         app.state.terminals.remove(&added_terminal);
-        let returned_to_a = current_snapshot(
+        let returned_to_a = current_terminal_snapshot(
             &app,
             &work.authorization,
             &app.state.workspaces[0].id,

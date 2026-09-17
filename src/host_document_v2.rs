@@ -7,6 +7,7 @@ use std::collections::{HashMap, HashSet};
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::terminal::TerminalId;
 
@@ -16,6 +17,8 @@ pub const HOST_DOCUMENT_RENDER_CONTRACT_V2: &str = "host.document.render.v2";
 pub const HOST_DOCUMENT_RENDER_SCHEMA_ID_V2: &str =
     "https://vqro.dev/schema/host-document-render/v2";
 pub const HOST_TERMINALS_DEPENDENCY_CONTRACT_V1: &str = "host.terminals.v1";
+pub const HOST_STATE_DEPENDENCY_CONTRACT_V1: &str = "host.state.v1";
+const HOST_STATE_DEPENDENCY_DOMAIN_V1: &[u8] = b"vqro.host.state.document-dependency.v1\0";
 pub const MAX_DOCUMENT_V2_BYTES: usize = 128 * 1024;
 pub const MAX_DOCUMENT_RENDER_V2_BYTES: usize = 2 * 1024;
 pub const MAX_DOCUMENT_V2_NODES: usize = 512;
@@ -254,6 +257,53 @@ impl HostDocumentRenderParamsV2 {
         }
         Ok(())
     }
+}
+
+/// Constructs the normative dependency for one complete `host.state.v1` snapshot.
+///
+/// Namespace revision zero maps to dependency revision one. The tuple intentionally excludes
+/// sequence and values: composite finalization compares the complete observed snapshot with the
+/// complete current snapshot before accepting a document.
+pub fn host_state_snapshot_dependency(
+    contract: &str,
+    store_id: &str,
+    store_generation: u64,
+    namespace: &str,
+    namespace_revision: u64,
+) -> Result<DocumentDependencyV2, HostDocumentV2Error> {
+    if contract != HOST_STATE_DEPENDENCY_CONTRACT_V1
+        || !valid_state_identifier(store_id, false)
+        || !valid_state_identifier(namespace, true)
+        || store_generation == 0
+    {
+        return invalid("invalid host state dependency snapshot identity");
+    }
+    let revision = namespace_revision
+        .checked_add(1)
+        .ok_or_else(|| HostDocumentV2Error("state dependency revision is exhausted".into()))?;
+    let mut digest = Sha256::new();
+    digest.update(HOST_STATE_DEPENDENCY_DOMAIN_V1);
+    for value in [store_id, namespace] {
+        digest.update((value.len() as u64).to_be_bytes());
+        digest.update(value.as_bytes());
+    }
+    let scope_id = format!("state_{:x}", digest.finalize());
+    validate_opaque_id(&scope_id, "state dependency scope id")?;
+    Ok(DocumentDependencyV2 {
+        contract: HOST_STATE_DEPENDENCY_CONTRACT_V1.into(),
+        scope_id,
+        revision,
+        generation: store_generation,
+    })
+}
+
+fn valid_state_identifier(value: &str, require_dot: bool) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && (!require_dot || value.contains('.'))
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-' | b':'))
 }
 
 /// Constructs the sole normative terminal-snapshot dependency representation.
@@ -624,6 +674,106 @@ mod tests {
         assert!(
             HostDocumentRenderParamsV2::validate_json(&serde_json::to_vec(&zero).unwrap()).is_err()
         );
+    }
+
+    fn state_snapshot() -> crate::extension_host_state::HostStateSnapshotV1 {
+        crate::extension_host_state::HostStateSnapshotV1 {
+            contract: crate::extension_host_state::HOST_STATE_CONTRACT_V1.into(),
+            store_id: "session:0123456789abcdef".into(),
+            store_generation: 7,
+            namespace: "example.extension".into(),
+            revision: 0,
+            sequence: 19,
+            values: std::collections::BTreeMap::from([(
+                "policy".into(),
+                serde_json::json!({"enabled": true}),
+            )]),
+        }
+    }
+
+    fn state_dependency(
+        snapshot: &crate::extension_host_state::HostStateSnapshotV1,
+    ) -> Result<DocumentDependencyV2, HostDocumentV2Error> {
+        host_state_snapshot_dependency(
+            &snapshot.contract,
+            &snapshot.store_id,
+            snapshot.store_generation,
+            &snapshot.namespace,
+            snapshot.revision,
+        )
+    }
+
+    #[test]
+    fn state_dependency_convention_has_pinned_domain_and_field_mapping() {
+        let snapshot = state_snapshot();
+        let dependency = state_dependency(&snapshot).unwrap();
+        assert_eq!(dependency.contract, "host.state.v1");
+        assert_eq!(
+            dependency.scope_id,
+            "state_883cb7c92faf86d48599f968d153ec1e1a02336da1db8e622eddb8e3c1fd1f97"
+        );
+        assert_eq!(dependency.revision, 1);
+        assert_eq!(dependency.generation, 7);
+
+        let mut changed = snapshot.clone();
+        changed.store_id.push('x');
+        assert_ne!(
+            state_dependency(&snapshot).unwrap().scope_id,
+            state_dependency(&changed).unwrap().scope_id
+        );
+        changed = snapshot.clone();
+        changed.namespace = "other.extension".into();
+        assert_ne!(
+            state_dependency(&snapshot).unwrap().scope_id,
+            state_dependency(&changed).unwrap().scope_id
+        );
+        let mut alternate_boundaries = snapshot.clone();
+        alternate_boundaries.store_id = "session:0123456789abcdefe".into();
+        alternate_boundaries.namespace = "xample.extension".into();
+        assert_ne!(
+            state_dependency(&snapshot).unwrap().scope_id,
+            state_dependency(&alternate_boundaries).unwrap().scope_id,
+            "length prefixes bind the store/namespace boundary"
+        );
+        changed = snapshot.clone();
+        changed.store_generation = 8;
+        assert_eq!(state_dependency(&changed).unwrap().generation, 8);
+        changed = snapshot.clone();
+        changed.revision = 8;
+        assert_eq!(state_dependency(&changed).unwrap().revision, 9);
+        changed = snapshot.clone();
+        changed.sequence += 1;
+        changed.values.insert("other".into(), serde_json::json!(1));
+        assert_eq!(
+            state_dependency(&snapshot).unwrap(),
+            state_dependency(&changed).unwrap(),
+            "sequence and values are protected by final value revalidation, not the tuple"
+        );
+    }
+
+    #[test]
+    fn state_dependency_rejects_invalid_identity_generation_and_revision() {
+        let mut snapshot = state_snapshot();
+        snapshot.contract = "host.state.v2".into();
+        assert!(state_dependency(&snapshot).is_err());
+        snapshot = state_snapshot();
+        snapshot.store_id = "bad store".into();
+        assert!(state_dependency(&snapshot).is_err());
+        snapshot = state_snapshot();
+        snapshot.namespace = "not_namespaced".into();
+        assert!(state_dependency(&snapshot).is_err());
+        snapshot = state_snapshot();
+        snapshot.store_id = "x".repeat(129);
+        assert!(state_dependency(&snapshot).is_err());
+        snapshot = state_snapshot();
+        snapshot.namespace = format!("x.{}", "y".repeat(127));
+        assert!(state_dependency(&snapshot).is_err());
+        snapshot = state_snapshot();
+        snapshot.store_generation = 0;
+        assert!(state_dependency(&snapshot).is_err());
+        snapshot = state_snapshot();
+        snapshot.revision = u64::MAX;
+        assert!(state_dependency(&snapshot).is_err());
     }
 
     #[test]

@@ -72,12 +72,14 @@ DOCUMENT_V2_ALLOWED_PATH_ROOTS = {
             "HashMap",
             "HashSet",
             "Self",
+            "Sha256",
             "TerminalId",
             "TerminalScopePolicy",
             "char",
             "schemars",
             "serde",
             "serde_json",
+            "sha2",
             "std",
         }
     ),
@@ -95,6 +97,7 @@ DOCUMENT_V2_ALLOWED_PATH_ROOTS = {
 DOCUMENT_V2_ALLOWED_IMPORTS = {
     PROJECT_ROOT / "src" / "host_document_v2.rs": (
         "use crate::terminal::TerminalId;",
+        "use sha2::{Digest, Sha256};",
     ),
     PROJECT_ROOT / "src" / "quarantined_audit_cache.rs": (
         "use crate::host_document_v2::CappedSerializationError;",
