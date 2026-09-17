@@ -9,6 +9,7 @@ pub const EXTENSION_SERVICE_CONTRACT_V1: &str = "vqro.extension-service.v1";
 pub const EXTENSION_SERVICE_SCHEMA_ID_V1: &str = "https://vqro.dev/schema/extension-service/v1";
 pub const RUNTIME_SERVICE_SCHEMA_ID_V1: &str = "https://vqro.dev/schema/service/v1";
 pub const HOST_STATE_SCHEMA_ID_V1: &str = "https://vqro.dev/schema/host-state/v1";
+pub const HOST_DOCUMENT_SCHEMA_ID_V2: &str = crate::host_document_v2::HOST_DOCUMENT_SCHEMA_ID_V2;
 pub const EXTENSION_BUNDLE_SCHEMA_ID_V1: &str = "https://vqro.dev/schema/extensions/v1";
 pub const PACKAGE_SCHEMA_ID_V1: &str = crate::extension_package::PACKAGE_SCHEMA_ID_V1;
 pub const EXTENSION_MANIFEST_SCHEMA_ID_V2: &str = crate::extension_package::MANIFEST_SCHEMA_ID_V2;
@@ -84,6 +85,143 @@ pub fn host_state_schema_document() -> serde_json::Value {
         });
     }
     document
+}
+
+pub fn host_document_v2_schema_document() -> serde_json::Value {
+    let mut schema = serde_json::to_value(schemars::schema_for!(
+        crate::host_document_v2::HostDocumentV2
+    ))
+    .expect("generated host.document.v2 schema serializes");
+    let object = schema
+        .as_object_mut()
+        .expect("generated host.document.v2 schema is an object");
+    object.insert(
+        "$id".into(),
+        serde_json::Value::String(HOST_DOCUMENT_SCHEMA_ID_V2.into()),
+    );
+    object.insert(
+        "title".into(),
+        serde_json::Value::String("canonical host document v2".into()),
+    );
+    object.insert(
+        "contract".into(),
+        serde_json::Value::String(crate::host_document_v2::HOST_DOCUMENT_CONTRACT_V2.into()),
+    );
+    object.insert(
+        "validation_authority".into(),
+        serde_json::json!({
+            "json_schema": "structural and per-field constraints",
+            "rust_validator": "normative for encoded/aggregate budgets, sorted dependencies, graph invariants, and terminal scope coverage",
+        }),
+    );
+    object.insert(
+        "limits".into(),
+        serde_json::json!({
+            "max_encoded_bytes": crate::host_document_v2::MAX_DOCUMENT_V2_BYTES,
+            "max_nodes": crate::host_document_v2::MAX_DOCUMENT_V2_NODES,
+            "max_depth": crate::host_document_v2::MAX_DOCUMENT_V2_DEPTH,
+            "max_dependencies": crate::host_document_v2::MAX_DOCUMENT_V2_DEPENDENCIES,
+            "max_text_chars": crate::host_document_v2::MAX_DOCUMENT_V2_TEXT_CHARS,
+            "max_total_text_chars": crate::host_document_v2::MAX_DOCUMENT_V2_TOTAL_TEXT_CHARS,
+            "max_accessible_name_chars": crate::host_document_v2::MAX_DOCUMENT_V2_ACCESSIBLE_NAME_CHARS,
+            "max_accessible_description_chars": crate::host_document_v2::MAX_DOCUMENT_V2_ACCESSIBLE_DESCRIPTION_CHARS,
+            "actions": 0,
+            "effects": 0,
+        }),
+    );
+    schema["properties"]["contract"] = serde_json::json!({
+        "const": crate::host_document_v2::HOST_DOCUMENT_CONTRACT_V2,
+        "type": "string",
+    });
+    schema["properties"]["revision"]["minimum"] = serde_json::json!(1);
+    schema["properties"]["revision"]["maximum"] = serde_json::json!(u64::MAX);
+    schema["properties"]["dependencies"]["maxItems"] =
+        serde_json::json!(crate::host_document_v2::MAX_DOCUMENT_V2_DEPENDENCIES);
+    schema["properties"]["dependencies"]["uniqueItems"] = serde_json::json!(true);
+    schema["properties"]["roots"]["maxItems"] =
+        serde_json::json!(crate::host_document_v2::MAX_DOCUMENT_V2_NODES);
+    schema["properties"]["roots"]["uniqueItems"] = serde_json::json!(true);
+    schema["properties"]["nodes"]["maxItems"] =
+        serde_json::json!(crate::host_document_v2::MAX_DOCUMENT_V2_NODES);
+
+    let opaque_id = serde_json::json!({
+        "maxLength": crate::host_document_v2::MAX_DOCUMENT_V2_IDENTIFIER_BYTES,
+        "minLength": 1,
+        "pattern": "^[A-Za-z0-9._:/-]+$",
+        "type": "string",
+    });
+    let contract_name = serde_json::json!({
+        "maxLength": crate::host_document_v2::MAX_DOCUMENT_V2_IDENTIFIER_BYTES,
+        "pattern": "^[a-z0-9-]+(?:\\.[a-z0-9-]+)+$",
+        "type": "string",
+    });
+    let accessible_name = serde_json::json!({
+        "maxLength": crate::host_document_v2::MAX_DOCUMENT_V2_ACCESSIBLE_NAME_CHARS,
+        "minLength": 1,
+        "pattern": r"^[^\u0000-\u001F\u007F-\u009F]*$",
+        "type": "string",
+    });
+    let accessible_description = serde_json::json!({
+        "maxLength": crate::host_document_v2::MAX_DOCUMENT_V2_ACCESSIBLE_DESCRIPTION_CHARS,
+        "pattern": r"^[^\u0000-\u001F\u007F-\u009F]*$",
+        "type": ["string", "null"],
+    });
+    schema["$defs"]["DocumentAccessibilityV2"]["properties"]["name"] = accessible_name;
+    schema["$defs"]["DocumentAccessibilityV2"]["properties"]["description"] =
+        accessible_description;
+
+    for field in [
+        "runtime_generation",
+        "provider_generation",
+        "scope_generation",
+    ] {
+        schema["$defs"]["DocumentProducerFenceV2"]["properties"][field]["minimum"] =
+            serde_json::json!(1);
+        schema["$defs"]["DocumentProducerFenceV2"]["properties"][field]["maximum"] =
+            serde_json::json!(u64::MAX);
+    }
+    schema["$defs"]["DocumentProducerFenceV2"]["properties"]["package_id"] = contract_name.clone();
+    schema["$defs"]["DocumentProducerFenceV2"]["properties"]["service_id"] = opaque_id.clone();
+    schema["$defs"]["DocumentProducerFenceV2"]["properties"]["artifact_sha256"] = serde_json::json!({
+        "maxLength": 64,
+        "minLength": 64,
+        "pattern": "^[0-9a-f]{64}$",
+        "type": "string"
+    });
+    schema["$defs"]["DocumentScopeV2"]["properties"]["contract"] = contract_name.clone();
+    schema["$defs"]["DocumentScopeV2"]["properties"]["scope_id"] = opaque_id.clone();
+    schema["$defs"]["DocumentDependencyV2"]["properties"]["contract"] = contract_name;
+    schema["$defs"]["DocumentDependencyV2"]["properties"]["scope_id"] = opaque_id.clone();
+    for field in ["revision", "generation"] {
+        schema["$defs"]["DocumentDependencyV2"]["properties"][field]["minimum"] =
+            serde_json::json!(1);
+        schema["$defs"]["DocumentDependencyV2"]["properties"][field]["maximum"] =
+            serde_json::json!(u64::MAX);
+    }
+
+    schema["properties"]["roots"]["items"] = opaque_id.clone();
+    let variants = schema["$defs"]["DocumentNodeV2"]["oneOf"]
+        .as_array_mut()
+        .expect("host.document.v2 node variants are an array");
+    for variant in variants.iter_mut() {
+        variant["properties"]["id"] = opaque_id.clone();
+    }
+    variants[0]["properties"]["children"]["items"] = opaque_id.clone();
+    variants[0]["properties"]["children"]["maxItems"] =
+        serde_json::json!(crate::host_document_v2::MAX_DOCUMENT_V2_NODES);
+    variants[0]["properties"]["children"]["uniqueItems"] = serde_json::json!(true);
+    variants[1]["properties"]["text"] = serde_json::json!({
+        "maxLength": crate::host_document_v2::MAX_DOCUMENT_V2_TEXT_CHARS,
+        "pattern": r"^[^\u0000-\u001F\u007F-\u009F]*$",
+        "type": "string",
+    });
+    variants[2]["properties"]["terminal_id"] = serde_json::json!({
+        "maxLength": crate::terminal::MAX_TERMINAL_ID_BYTES,
+        "minLength": crate::terminal::MAX_TERMINAL_ID_BYTES,
+        "pattern": "^term_[0-9a-f]{32}$",
+        "type": "string"
+    });
+    schema
 }
 
 pub fn package_schema_document() -> serde_json::Value {
@@ -237,6 +375,10 @@ pub fn host_state_schema_json() -> &'static str {
     include_str!("../docs/next/api/host-state-v1.schema.json")
 }
 
+pub fn host_document_v2_schema_json() -> &'static str {
+    include_str!("../docs/next/api/host-document-v2.schema.json")
+}
+
 pub fn service_schema_json() -> &'static str {
     include_str!("../docs/next/api/vqro-extension-service.schema.json")
 }
@@ -327,11 +469,123 @@ mod tests {
     }
 
     #[test]
+    fn host_document_v2_schema_covers_expressible_validator_constraints() {
+        let schema = host_document_v2_schema_document();
+        assert_eq!(
+            schema["properties"]["contract"]["const"],
+            crate::host_document_v2::HOST_DOCUMENT_CONTRACT_V2
+        );
+        assert_eq!(schema["additionalProperties"], false);
+        assert_eq!(
+            schema["properties"]["revision"]["maximum"],
+            serde_json::json!(u64::MAX)
+        );
+        assert_eq!(
+            schema["properties"]["nodes"]["maxItems"],
+            crate::host_document_v2::MAX_DOCUMENT_V2_NODES
+        );
+        let opaque_pattern = "^[A-Za-z0-9._:/-]+$";
+        let contract_pattern = "^[a-z0-9-]+(?:\\.[a-z0-9-]+)+$";
+        assert_eq!(
+            schema["properties"]["roots"]["items"]["pattern"],
+            opaque_pattern
+        );
+        assert_eq!(
+            schema["$defs"]["DocumentProducerFenceV2"]["properties"]["package_id"]["pattern"],
+            contract_pattern
+        );
+        assert_eq!(
+            schema["$defs"]["DocumentProducerFenceV2"]["properties"]["service_id"]["pattern"],
+            opaque_pattern
+        );
+        assert_eq!(
+            schema["$defs"]["DocumentProducerFenceV2"]["properties"]["artifact_sha256"]["pattern"],
+            "^[0-9a-f]{64}$"
+        );
+        assert_eq!(
+            schema["$defs"]["DocumentScopeV2"]["properties"]["contract"]["pattern"],
+            contract_pattern
+        );
+        assert_eq!(
+            schema["$defs"]["DocumentScopeV2"]["properties"]["scope_id"]["pattern"],
+            opaque_pattern
+        );
+        assert_eq!(
+            schema["$defs"]["DocumentDependencyV2"]["properties"]["contract"]["pattern"],
+            contract_pattern
+        );
+        assert_eq!(
+            schema["$defs"]["DocumentDependencyV2"]["properties"]["scope_id"]["pattern"],
+            opaque_pattern
+        );
+        assert_eq!(
+            schema["$defs"]["DocumentNodeV2"]["oneOf"][0]["properties"]["children"]["items"]
+                ["pattern"],
+            opaque_pattern
+        );
+        for variant in schema["$defs"]["DocumentNodeV2"]["oneOf"]
+            .as_array()
+            .unwrap()
+        {
+            assert_eq!(variant["properties"]["id"]["pattern"], opaque_pattern);
+        }
+        assert_eq!(
+            schema["$defs"]["DocumentNodeV2"]["oneOf"][2]["properties"]["terminal_id"]["pattern"],
+            "^term_[0-9a-f]{32}$"
+        );
+        for field in [
+            "runtime_generation",
+            "provider_generation",
+            "scope_generation",
+        ] {
+            assert_eq!(
+                schema["$defs"]["DocumentProducerFenceV2"]["properties"][field]["maximum"],
+                serde_json::json!(u64::MAX)
+            );
+        }
+        for field in ["revision", "generation"] {
+            assert_eq!(
+                schema["$defs"]["DocumentDependencyV2"]["properties"][field]["maximum"],
+                serde_json::json!(u64::MAX)
+            );
+        }
+    }
+
+    #[test]
+    fn golden_fixtures_observe_the_structural_schema_boundary() {
+        let fixture = |name: &str| {
+            let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("docs/next/api/host-document-v2.fixtures")
+                .join(name);
+            std::fs::read(path).unwrap()
+        };
+        serde_json::from_slice::<crate::host_document_v2::HostDocumentV2>(&fixture("valid.json"))
+            .unwrap();
+        for invalid in ["invalid-unknown-field.json", "invalid-action.json"] {
+            assert!(
+                serde_json::from_slice::<crate::host_document_v2::HostDocumentV2>(&fixture(
+                    invalid
+                ))
+                .is_err()
+            );
+        }
+        // Reachability is deliberately validator-normative, not structural JSON Schema.
+        serde_json::from_slice::<crate::host_document_v2::HostDocumentV2>(&fixture(
+            "invalid-unreachable.json",
+        ))
+        .unwrap();
+    }
+
+    #[test]
     fn generated_package_and_manifest_v2_schema_artifacts_are_current() {
         for (relative, document) in [
             (
                 "docs/next/api/host-state-v1.schema.json",
                 host_state_schema_document(),
+            ),
+            (
+                "docs/next/api/host-document-v2.schema.json",
+                host_document_v2_schema_document(),
             ),
             (
                 "docs/next/api/vqro-service-v1.schema.json",
@@ -433,7 +687,11 @@ mod tests {
 
     #[test]
     fn standalone_schema_references_resolve() {
-        for schema in [manifest_schema_document(), service_schema_document()] {
+        for schema in [
+            manifest_schema_document(),
+            service_schema_document(),
+            host_document_v2_schema_document(),
+        ] {
             assert_refs_resolve_against(&schema, &schema);
         }
         let bundle = extension_schema_document();

@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import re
 import unittest
+from collections import Counter
 from pathlib import Path
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+ALL_SRC_SOURCES = tuple(sorted((PROJECT_ROOT / "src").rglob("*.rs")))
 HOT_PATH_SOURCES = (
     PROJECT_ROOT / "src" / "ui.rs",
     *sorted((PROJECT_ROOT / "src" / "ui").rglob("*.rs")),
@@ -17,6 +19,103 @@ APP_SERVER_SOURCES = (
 )
 RECOVERY_MODEL_SOURCE = PROJECT_ROOT / "src" / "client" / "shell" / "recovery_browser.rs"
 EXTENSION_STATE_ACTOR_SOURCE = PROJECT_ROOT / "src" / "app" / "api" / "extension_state.rs"
+DOCUMENT_V2_SOURCES = (
+    PROJECT_ROOT / "src" / "host_document_v2.rs",
+    PROJECT_ROOT / "src" / "quarantined_audit_cache.rs",
+)
+DOCUMENT_V2_PATH_ROOT = re.compile(
+    r"(?<![A-Za-z0-9_:])(?:::)?\b(?!use\b)([A-Za-z_][A-Za-z0-9_]*)\s*::(?!\s*<)"
+)
+LOCAL_ROOT_IMPORT = re.compile(r"\buse\s+(?:crate|super|self)\b")
+CRATE_ROOT_ALIAS = re.compile(
+    r"\bextern\s+crate\s+self\s+as\s+[A-Za-z_][A-Za-z0-9_]*"
+    r"|\buse\s+crate\s+as\s+[A-Za-z_][A-Za-z0-9_]*"
+    r"|\buse\s+crate\s*::\s*\{\s*self\s+as\s+[A-Za-z_][A-Za-z0-9_]*"
+)
+DOCUMENT_V2_REFERENCE = re.compile(
+    r"\b(?:host_document_v2|quarantined_audit_cache|HostDocumentV2|DocumentNodeV2|"
+    r"DocumentProducerFenceV2|DocumentScopeV2|DocumentDependencyV2|"
+    r"QuarantinedAuditCache|AuditCacheKey|AuditTicket)\b"
+)
+DOCUMENT_V2_INTERNAL_PATHS = frozenset(DOCUMENT_V2_SOURCES)
+DOCUMENT_V2_DECLARATION_SOURCE = PROJECT_ROOT / "src" / "main.rs"
+DOCUMENT_V2_SCHEMA_SOURCE = PROJECT_ROOT / "src" / "extension_spec.rs"
+DOCUMENT_V2_ALLOWED_PATH_ROOTS = {
+    PROJECT_ROOT / "src" / "host_document_v2.rs": frozenset(
+        {
+            "CappedSerializationError",
+            "DocumentNodeV2",
+            "HashMap",
+            "HashSet",
+            "Self",
+            "TerminalId",
+            "TerminalScopePolicy",
+            "char",
+            "schemars",
+            "serde",
+            "serde_json",
+            "std",
+        }
+    ),
+    PROJECT_ROOT / "src" / "quarantined_audit_cache.rs": frozenset(
+        {
+            "AuditCacheError",
+            "BTreeMap",
+            "CappedSerializationError",
+            "Self",
+            "serde",
+            "std",
+        }
+    ),
+}
+DOCUMENT_V2_ALLOWED_IMPORTS = {
+    PROJECT_ROOT / "src" / "host_document_v2.rs": (
+        "use crate::terminal::TerminalId;",
+    ),
+    PROJECT_ROOT / "src" / "quarantined_audit_cache.rs": (
+        "use crate::host_document_v2::CappedSerializationError;",
+        "use crate::host_document_v2::DocumentDependencyV2;",
+        "use crate::host_document_v2::DocumentProducerFenceV2;",
+        "use crate::host_document_v2::DocumentProducerV2;",
+        "use crate::host_document_v2::DocumentScopeV2;",
+        "use crate::host_document_v2::serialized_len_capped;",
+        "use crate::host_document_v2::validate_dependencies;",
+        "use crate::host_document_v2::validate_producer_fence;",
+        "use crate::host_document_v2::validate_scope;",
+    ),
+}
+DOCUMENT_V2_ALLOWED_DECLARATION_LINES = Counter(
+    {
+        "pub mod host_document_v2;": 1,
+        "pub mod quarantined_audit_cache;": 1,
+    }
+)
+# These are compared after comments and string literals have been masked.
+DOCUMENT_V2_ALLOWED_SCHEMA_LINES = Counter(
+    [
+        "pub const HOST_DOCUMENT_SCHEMA_ID_V2: &str = crate::host_document_v2::HOST_DOCUMENT_SCHEMA_ID_V2;",
+        "crate::host_document_v2::HostDocumentV2",
+        "serde_json::Value::String(crate::host_document_v2::HOST_DOCUMENT_CONTRACT_V2.into()),",
+        ": crate::host_document_v2::MAX_DOCUMENT_V2_BYTES,",
+        ": crate::host_document_v2::MAX_DOCUMENT_V2_NODES,",
+        ": crate::host_document_v2::MAX_DOCUMENT_V2_DEPTH,",
+        ": crate::host_document_v2::MAX_DOCUMENT_V2_DEPENDENCIES,",
+        ": crate::host_document_v2::MAX_DOCUMENT_V2_TEXT_CHARS,",
+        ": crate::host_document_v2::MAX_DOCUMENT_V2_TEXT_CHARS,",
+        ": crate::host_document_v2::MAX_DOCUMENT_V2_TOTAL_TEXT_CHARS,",
+        ": crate::host_document_v2::MAX_DOCUMENT_V2_ACCESSIBLE_NAME_CHARS,",
+        ": crate::host_document_v2::MAX_DOCUMENT_V2_ACCESSIBLE_NAME_CHARS,",
+        ": crate::host_document_v2::MAX_DOCUMENT_V2_ACCESSIBLE_DESCRIPTION_CHARS,",
+        ": crate::host_document_v2::MAX_DOCUMENT_V2_ACCESSIBLE_DESCRIPTION_CHARS,",
+        ": crate::host_document_v2::HOST_DOCUMENT_CONTRACT_V2,",
+        "serde_json::json!(crate::host_document_v2::MAX_DOCUMENT_V2_DEPENDENCIES);",
+        "serde_json::json!(crate::host_document_v2::MAX_DOCUMENT_V2_NODES);",
+        "serde_json::json!(crate::host_document_v2::MAX_DOCUMENT_V2_NODES);",
+        "serde_json::json!(crate::host_document_v2::MAX_DOCUMENT_V2_NODES);",
+        ": crate::host_document_v2::MAX_DOCUMENT_V2_IDENTIFIER_BYTES,",
+        ": crate::host_document_v2::MAX_DOCUMENT_V2_IDENTIFIER_BYTES,",
+    ]
+)
 RECOVERY_FORBIDDEN_REFERENCES = (
     ("agents", re.compile(r"\.agents\b")),
     ("collections", re.compile(r"\.collections\b")),
@@ -170,6 +269,134 @@ def find_violations(paths, rules) -> list[str]:
     return violations
 
 
+def _reference_lines(code: str) -> Counter[str]:
+    return Counter(
+        line.strip()
+        for line in code.splitlines()
+        if DOCUMENT_V2_REFERENCE.search(line)
+    )
+
+
+def _counter_mismatches(
+    path: Path, actual: Counter[str], expected: Counter[str], description: str
+) -> list[str]:
+    violations: list[str] = []
+    for line, count in (actual - expected).items():
+        violations.extend(f"{path.name}: {description}: {line}" for _ in range(count))
+    for line, count in (expected - actual).items():
+        violations.extend(
+            f"{path.name}: missing expected {description}: {line}" for _ in range(count)
+        )
+    return violations
+
+
+def document_v2_wiring_violations_for_sources(
+    sources: list[tuple[Path, str]],
+) -> list[str]:
+    violations: list[str] = []
+    for path, source in sources:
+        if path in DOCUMENT_V2_INTERNAL_PATHS:
+            continue
+        code = production_code(source)
+        actual = _reference_lines(code)
+        if path == DOCUMENT_V2_DECLARATION_SOURCE:
+            violations.extend(
+                _counter_mismatches(
+                    path,
+                    actual,
+                    DOCUMENT_V2_ALLOWED_DECLARATION_LINES,
+                    "document-v2 declaration",
+                )
+            )
+            continue
+        if path == DOCUMENT_V2_SCHEMA_SOURCE:
+            violations.extend(
+                _counter_mismatches(
+                    path,
+                    actual,
+                    DOCUMENT_V2_ALLOWED_SCHEMA_LINES,
+                    "document-v2 schema reference",
+                )
+            )
+            continue
+        for line, count in actual.items():
+            violations.extend(
+                f"{path.name}: document-v2 runtime wiring: {line}" for _ in range(count)
+            )
+    return violations
+
+
+def document_v2_wiring_violations(paths) -> list[str]:
+    return document_v2_wiring_violations_for_sources(
+        [(path, path.read_text(encoding="utf-8")) for path in paths]
+    )
+
+
+def crate_root_alias_violations_for_sources(
+    sources: list[tuple[Path, str]],
+) -> list[str]:
+    violations: list[str] = []
+    for path, source in sources:
+        code = mask_comments_and_literals(source)
+        for match in CRATE_ROOT_ALIAS.finditer(code):
+            line_number = code.count("\n", 0, match.start()) + 1
+            violations.append(f"{path.name}:{line_number}: crate-root alias declaration")
+    return violations
+
+
+def crate_root_alias_violations(paths) -> list[str]:
+    return crate_root_alias_violations_for_sources(
+        [(path, path.read_text(encoding="utf-8")) for path in paths]
+    )
+
+
+def document_v2_isolation_violations_for_sources(
+    sources: list[tuple[Path, str]],
+) -> list[str]:
+    violations = crate_root_alias_violations_for_sources(sources)
+    for path, source in sources:
+        if path in DOCUMENT_V2_INTERNAL_PATHS:
+            violations.extend(document_v2_dependency_violations(source, path))
+    return violations
+
+
+def document_v2_dependency_violations(source: str, path: Path) -> list[str]:
+    code = production_code(source)
+    violations: list[str] = []
+    chars = list(code)
+    for allowed in DOCUMENT_V2_ALLOWED_IMPORTS.get(path, ()):
+        starts = [
+            match.start()
+            for match in re.finditer(re.escape(allowed), code)
+        ]
+        if len(starts) != 1:
+            violations.append(
+                f"{path.name}: expected exactly one whitelisted import: {allowed}"
+            )
+            if not starts:
+                continue
+        blank_non_newlines(chars, starts[0], starts[0] + len(allowed))
+    code = "".join(chars)
+    allowed_roots = DOCUMENT_V2_ALLOWED_PATH_ROOTS.get(path, frozenset())
+    for match in DOCUMENT_V2_PATH_ROOT.finditer(code):
+        root = match.group(1)
+        if root in allowed_roots:
+            continue
+        line_number = code.count("\n", 0, match.start()) + 1
+        line = code.splitlines()[line_number - 1].strip()
+        violations.append(
+            f"{path.name}:{line_number}: non-whitelisted path root {root}: {line}"
+        )
+    for pattern, description in (
+        (LOCAL_ROOT_IMPORT, "non-whitelisted local-root import"),
+        (re.compile(r"\bextern\s+crate\b"), "extern-crate dependency"),
+    ):
+        for match in pattern.finditer(code):
+            line_number = code.count("\n", 0, match.start()) + 1
+            violations.append(f"{path.name}:{line_number}: {description}")
+    return violations
+
+
 def rust_function_body(source: str, function_name: str) -> str:
     code = production_code(source)
     match = re.search(rf"\bfn\s+{re.escape(function_name)}\s*\(", code)
@@ -190,6 +417,113 @@ def rust_function_body(source: str, function_name: str) -> str:
 
 
 class UiHotPathArchitectureTests(unittest.TestCase):
+    def test_no_crate_root_alias_declarations_anywhere_in_src(self) -> None:
+        self.assertEqual(crate_root_alias_violations(ALL_SRC_SOURCES), [])
+
+    def test_crate_root_alias_scanner_rejects_equivalent_forms(self) -> None:
+        synthetic = PROJECT_ROOT / "src" / "synthetic_alias.rs"
+        for source in (
+            "extern crate self as root;",
+            "use crate as root;",
+            "pub(crate) use crate as root;",
+            "use crate::{self as root};",
+        ):
+            with self.subTest(source=source):
+                self.assertTrue(
+                    crate_root_alias_violations_for_sources([(synthetic, source)])
+                )
+
+    def test_document_v2_modules_have_only_approved_roots_and_imports(self) -> None:
+        violations: list[str] = []
+        for path in DOCUMENT_V2_SOURCES:
+            violations.extend(
+                document_v2_dependency_violations(path.read_text(encoding="utf-8"), path)
+            )
+        self.assertEqual(violations, [])
+
+    def test_document_v2_has_no_runtime_wiring_anywhere_in_src(self) -> None:
+        violations = document_v2_wiring_violations(ALL_SRC_SOURCES)
+        self.assertEqual(
+            violations,
+            [],
+            "Only module declarations, schema generation, and the isolated modules may "
+            "reference document-v2/cache symbols:\n" + "\n".join(violations),
+        )
+
+    def test_document_v2_dependency_scanner_denies_indirection(self) -> None:
+        contract_path, cache_path = DOCUMENT_V2_SOURCES
+        cases = (
+            (contract_path, "use crate::{terminal::TerminalId};"),
+            (contract_path, "use super::terminal::TerminalId;"),
+            (contract_path, "use crate as root;"),
+            (contract_path, "use crate::terminal::TerminalId as StableTerminalId;"),
+            (contract_path, "pub use crate::terminal::TerminalId;"),
+            (contract_path, "extern crate self as root;"),
+            (
+                cache_path,
+                "use crate::host_document_v2::{DocumentScopeV2 as Scope};",
+            ),
+            (cache_path, "use self::private_alias::DocumentScopeV2;"),
+            (contract_path, "use arbitrary_root::TerminalId;"),
+            (contract_path, "use ::arbitrary_root::TerminalId;"),
+        )
+        for path, addition in cases:
+            with self.subTest(path=path.name, addition=addition):
+                source = path.read_text(encoding="utf-8") + "\n" + addition + "\n"
+                self.assertTrue(document_v2_dependency_violations(source, path))
+
+    def test_document_v2_dependency_scanner_rejects_compiling_cross_file_alias(self) -> None:
+        contract_path = DOCUMENT_V2_SOURCES[0]
+        sources = [
+            (
+                DOCUMENT_V2_DECLARATION_SOURCE,
+                DOCUMENT_V2_DECLARATION_SOURCE.read_text(encoding="utf-8")
+                + "\npub(crate) use terminal as t;\n",
+            ),
+            (
+                contract_path,
+                contract_path.read_text(encoding="utf-8")
+                + "\nuse t::TerminalId;\n",
+            ),
+        ]
+        violations = document_v2_isolation_violations_for_sources(sources)
+        self.assertTrue(any("path root t" in violation for violation in violations))
+
+    def test_document_v2_dependency_scanner_allows_approved_external_roots(self) -> None:
+        contract_path = DOCUMENT_V2_SOURCES[0]
+        base = contract_path.read_text(encoding="utf-8")
+        controls = (
+            "use ::std::mem;",
+            "use ::serde_json::Value;",
+            "fn control() { let _ = ::std::mem::size_of::<u8>(); }",
+            "fn control() { let _ = ::serde_json::Value::Null; }",
+            "fn control() { let _ = std::mem::size_of::<u8>(); }",
+            "fn control() { let _ = serde_json::Value::Null; }",
+        )
+        for control in controls:
+            with self.subTest(control=control):
+                source = base + "\n" + control + "\n"
+                self.assertEqual(
+                    document_v2_dependency_violations(source, contract_path), []
+                )
+
+    def test_document_v2_activation_scanner_denies_extension_spec_additions(self) -> None:
+        source = DOCUMENT_V2_SCHEMA_SOURCE.read_text(encoding="utf-8")
+        additions = (
+            "fn activate(_: crate::host_document_v2::HostDocumentV2) {}",
+            "use crate::{host_document_v2 as producer_docs};",
+            "use super::host_document_v2::HostDocumentV2;",
+            "use crate as root; use root::host_document_v2::HostDocumentV2;",
+            "use crate::host_document_v2::HostDocumentV2 as RuntimeDocument;",
+            "use crate::quarantined_audit_cache::QuarantinedAuditCache;",
+        )
+        for addition in additions:
+            with self.subTest(addition=addition):
+                violations = document_v2_wiring_violations_for_sources(
+                    [(DOCUMENT_V2_SCHEMA_SOURCE, source + "\n" + addition + "\n")]
+                )
+                self.assertTrue(violations)
+
     def test_extension_state_actor_handler_never_invokes_extension_runtime(self) -> None:
         body = rust_function_body(
             EXTENSION_STATE_ACTOR_SOURCE.read_text(encoding="utf-8"),

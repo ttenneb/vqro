@@ -1,0 +1,53 @@
+{
+  "contract": "host.document.v2",
+  "producer": {
+    "package_id": "example.document",
+    "service_id": "navigation",
+    "artifact_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "runtime_generation": 4,
+    "provider_generation": 7,
+    "scope_generation": 9
+  },
+  "scope": {
+    "contract": "host.session.v1",
+    "scope_id": "session_alpha"
+  },
+  "revision": 3,
+  "dependencies": [
+    {
+      "contract": "host.scope.v1",
+      "scope_id": "session_alpha",
+      "revision": 12,
+      "generation": 9
+    }
+  ],
+  "roots": ["root"],
+  "nodes": [
+    {
+      "kind": "group",
+      "id": "root",
+      "accessibility": {
+        "name": "Active terminals",
+        "description": "Terminals in the current producer scope"
+      },
+      "children": ["summary", "terminal-slot-1"]
+    },
+    {
+      "kind": "text",
+      "id": "summary",
+      "accessibility": {
+        "name": "Summary"
+      },
+      "text": "One terminal"
+    },
+    {
+      "kind": "terminal_slot",
+      "id": "terminal-slot-1",
+      "accessibility": {
+        "name": "Build terminal",
+        "description": "Terminal selected by the producer"
+      },
+      "terminal_id": "term_00000000000000000000000000000001"
+    }
+  ]
+}
