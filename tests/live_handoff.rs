@@ -3,7 +3,7 @@
 pub mod support;
 
 use std::fs;
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::os::fd::AsRawFd;
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -2003,11 +2003,214 @@ fn live_handoff_bad_expected_protocol_rolls_back_old_server() {
     cleanup_test_base(&base);
 }
 
-fn read_handoff_line(stream: &UnixStream) -> String {
-    let mut reader = BufReader::new(stream.try_clone().unwrap());
-    let mut line = String::new();
-    reader.read_line(&mut line).unwrap();
-    line.trim_end().to_string()
+struct HandoffLineReader {
+    stream: UnixStream,
+    buffered: Vec<u8>,
+    timeout: Duration,
+}
+
+impl HandoffLineReader {
+    fn new(stream: &UnixStream, timeout: Duration) -> io::Result<Self> {
+        Ok(Self {
+            stream: stream.try_clone()?,
+            buffered: Vec::new(),
+            timeout,
+        })
+    }
+
+    fn read_line(&mut self) -> io::Result<String> {
+        let deadline = Instant::now() + self.timeout;
+        loop {
+            if let Some(newline) = self.buffered.iter().position(|byte| *byte == b'\n') {
+                let bytes: Vec<_> = self.buffered.drain(..=newline).collect();
+                let line = String::from_utf8(bytes).map_err(|err| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("handoff peer sent a non-UTF-8 line: {err}"),
+                    )
+                })?;
+                return Ok(line.trim_end().to_string());
+            }
+
+            let now = Instant::now();
+            if now >= deadline {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    format!(
+                        "timed out after {:?} waiting for a handoff line ({} partial bytes)",
+                        self.timeout,
+                        self.buffered.len()
+                    ),
+                ));
+            }
+            let remaining = deadline.saturating_duration_since(now);
+            let timeout_ms = remaining
+                .as_millis()
+                .saturating_add(u128::from(remaining.subsec_nanos() % 1_000_000 != 0))
+                .min(i32::MAX as u128) as i32;
+            let mut poll_fd = libc::pollfd {
+                fd: self.stream.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            let ready = unsafe { libc::poll(&mut poll_fd, 1, timeout_ms) };
+            if ready == 0 {
+                continue;
+            }
+            if ready < 0 {
+                let err = io::Error::last_os_error();
+                if err.kind() == io::ErrorKind::Interrupted {
+                    continue;
+                }
+                return Err(io::Error::new(
+                    err.kind(),
+                    format!("polling the handoff socket failed: {err}"),
+                ));
+            }
+            if poll_fd.revents & libc::POLLNVAL != 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "handoff socket became invalid while reading a line",
+                ));
+            }
+
+            let mut chunk = [0_u8; 1024];
+            match self.stream.read(&mut chunk) {
+                Ok(0) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::UnexpectedEof,
+                        format!(
+                            "handoff peer closed before completing a line ({} partial bytes)",
+                            self.buffered.len()
+                        ),
+                    ));
+                }
+                Ok(read) => self.buffered.extend_from_slice(&chunk[..read]),
+                Err(err)
+                    if matches!(
+                        err.kind(),
+                        io::ErrorKind::Interrupted | io::ErrorKind::WouldBlock
+                    ) => {}
+                Err(err) => {
+                    return Err(io::Error::new(
+                        err.kind(),
+                        format!("reading from the handoff socket failed: {err}"),
+                    ));
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn handoff_line_reader_preserves_partial_and_complete_buffered_lines() {
+    let (reader_stream, mut writer_stream) = UnixStream::pair().unwrap();
+    reader_stream.set_nonblocking(true).unwrap();
+    writer_stream.write_all(b"tial\nnext\n").unwrap();
+
+    let mut reader = HandoffLineReader::new(&reader_stream, Duration::from_secs(1)).unwrap();
+    reader.buffered.extend_from_slice(b"par");
+    assert_eq!(reader.read_line().unwrap(), "partial");
+    assert_eq!(reader.read_line().unwrap(), "next");
+
+    reader.buffered.extend_from_slice(b"first\nsecond\n");
+    assert_eq!(reader.read_line().unwrap(), "first");
+    assert_eq!(reader.read_line().unwrap(), "second");
+}
+
+fn set_fd_nonblocking(fd: std::os::fd::RawFd) -> io::Result<()> {
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+fn read_until_contains(
+    reader: &mut impl Read,
+    needle: &[u8],
+    timeout: Duration,
+) -> io::Result<Vec<u8>> {
+    assert!(!needle.is_empty());
+    let deadline = Instant::now() + timeout;
+    let mut output = Vec::new();
+    let mut chunk = [0_u8; 1024];
+    loop {
+        if output.windows(needle.len()).any(|window| window == needle) {
+            return Ok(output);
+        }
+        if Instant::now() >= deadline {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!(
+                    "timed out after {timeout:?} waiting for {:?} in PTY output ({} bytes read)",
+                    String::from_utf8_lossy(needle),
+                    output.len()
+                ),
+            ));
+        }
+
+        match reader.read(&mut chunk) {
+            Ok(0) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    format!(
+                        "PTY closed before {:?} appeared ({} bytes read)",
+                        String::from_utf8_lossy(needle),
+                        output.len()
+                    ),
+                ));
+            }
+            Ok(read) => output.extend_from_slice(&chunk[..read]),
+            Err(err) if err.kind() == io::ErrorKind::Interrupted => {}
+            Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                thread::sleep(remaining.min(Duration::from_millis(10)));
+            }
+            Err(err) => {
+                return Err(io::Error::new(
+                    err.kind(),
+                    format!("reading rollback PTY output failed: {err}"),
+                ));
+            }
+        }
+    }
+}
+
+#[test]
+fn read_until_contains_retries_nonblocking_errors_and_preserves_output() {
+    struct RetryReader {
+        step: usize,
+    }
+
+    impl Read for RetryReader {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            self.step += 1;
+            match self.step {
+                1 => {
+                    buffer[..7].copy_from_slice(b"legacy-");
+                    Ok(7)
+                }
+                2 => Err(io::Error::from(io::ErrorKind::WouldBlock)),
+                3 => Err(io::Error::from(io::ErrorKind::Interrupted)),
+                _ => {
+                    buffer[..11].copy_from_slice(b"rollback-ok");
+                    Ok(11)
+                }
+            }
+        }
+    }
+
+    let output = read_until_contains(
+        &mut RetryReader { step: 0 },
+        b"legacy-rollback-ok",
+        Duration::from_secs(1),
+    )
+    .unwrap();
+    assert_eq!(output, b"legacy-rollback-ok");
 }
 
 fn send_legacy_handoff_fd(stream: &UnixStream, fd: std::os::fd::RawFd) {
@@ -2151,19 +2354,17 @@ fn run_legacy_v1_source_harness(commit: bool) {
         .spawn()
         .unwrap();
     let (mut stream, _) = listener.accept().unwrap();
-    stream
-        .set_read_timeout(Some(Duration::from_secs(30)))
-        .unwrap();
-    assert_eq!(read_handoff_line(&stream), token);
+    let mut handoff_reader = HandoffLineReader::new(&stream, Duration::from_secs(30)).unwrap();
+    assert_eq!(handoff_reader.read_line().unwrap(), token);
     serde_json::to_writer(&mut stream, &manifest).unwrap();
     stream.write_all(b"\n").unwrap();
     stream.flush().unwrap();
-    assert_eq!(read_handoff_line(&stream), "validated");
+    assert_eq!(handoff_reader.read_line().unwrap(), "validated");
     if !commit {
         send_legacy_handoff_fd(&stream, master_fd);
     }
-    assert_eq!(read_handoff_line(&stream), "restored");
-    assert_eq!(read_handoff_line(&stream), "ready");
+    assert_eq!(handoff_reader.read_line().unwrap(), "restored");
+    assert_eq!(handoff_reader.read_line().unwrap(), "ready");
     assert!(
         !api_socket.exists(),
         "legacy ready must not expose target API"
@@ -2176,7 +2377,7 @@ fn run_legacy_v1_source_harness(commit: bool) {
         drop(source_reader);
         drop(source_writer);
         drop(pair.master);
-        assert_eq!(read_handoff_line(&stream), "owned");
+        assert_eq!(handoff_reader.read_line().unwrap(), "owned");
         wait_for_api(&api_socket, Duration::from_secs(10));
         let published: serde_json::Value =
             serde_json::from_slice(&fs::read(&session_path).unwrap()).unwrap();
@@ -2187,6 +2388,7 @@ fn run_legacy_v1_source_harness(commit: bool) {
             serde_json::json!({"id":"legacy:stop","method":"server.stop","params":{}}),
         );
     } else {
+        drop(handoff_reader);
         drop(stream);
         assert!(support::wait_until(
             Duration::from_secs(5),
@@ -2197,24 +2399,13 @@ fn run_legacy_v1_source_harness(commit: bool) {
             .write_all(b"echo legacy-rollback-ok\n")
             .unwrap();
         source_writer.flush().unwrap();
-        let (found_tx, found_rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            let mut output = Vec::new();
-            let mut chunk = [0_u8; 1024];
-            loop {
-                match source_reader.read(&mut chunk) {
-                    Ok(0) | Err(_) => break,
-                    Ok(read) => {
-                        output.extend_from_slice(&chunk[..read]);
-                        if String::from_utf8_lossy(&output).contains("legacy-rollback-ok") {
-                            let _ = found_tx.send(());
-                            break;
-                        }
-                    }
-                }
-            }
-        });
-        found_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        set_fd_nonblocking(master_fd).unwrap();
+        read_until_contains(
+            &mut source_reader,
+            b"legacy-rollback-ok",
+            Duration::from_secs(5),
+        )
+        .unwrap();
         assert_eq!(fs::read(&session_path).unwrap(), legacy_bytes);
     }
 
