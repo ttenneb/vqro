@@ -1,10 +1,9 @@
-//! Private neutral placement state for terminals that share one layout leaf.
+//! Neutral placement state for terminals that share one layout leaf.
 //!
-//! Members are pane identities only because the current persisted session format
-//! attaches one terminal to one pane. They are an internal migration aid and are
-//! explicitly not stable persisted terminal identities or suitable for public
-//! extension host calls. A later M2 gate must introduce stable terminal identity
-//! before exposing container contracts outside the host.
+//! The canonical textual container identity is exposed by the public `host.terminals.v1`
+//! snapshot contract. Container members remain pane-backed private state because the current
+//! persisted session format attaches one terminal to one pane; pane identities are not stable
+//! terminal references and must not cross public extension host boundaries.
 
 use std::collections::HashSet;
 
@@ -13,8 +12,37 @@ use crate::layout::PaneId;
 static NEXT_TERMINAL_CONTAINER_ID: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(1);
 
+const TERMINAL_CONTAINER_ID_PREFIX: &str = "container_";
+pub(crate) const TERMINAL_CONTAINER_ID_TEXT_BYTES: usize = TERMINAL_CONTAINER_ID_PREFIX.len() + 16;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct TerminalContainerId(u64);
+
+pub(crate) fn format_terminal_container_id(id: TerminalContainerId) -> String {
+    format!("{TERMINAL_CONTAINER_ID_PREFIX}{:016x}", id.raw())
+}
+
+/// Parses only the frozen public wire shape without allocating or advancing the ID allocator.
+///
+/// Compatibility validation intentionally accepts the reserved all-zero and all-ones encodings
+/// that the original `host.terminals.v1` syntax validator accepted. New internal authorities must
+/// use `parse_terminal_container_id_text` instead.
+pub(crate) fn parse_terminal_container_wire_text(value: &str) -> Option<u64> {
+    let encoded = value.strip_prefix(TERMINAL_CONTAINER_ID_PREFIX)?;
+    if value.len() != TERMINAL_CONTAINER_ID_TEXT_BYTES
+        || !encoded
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return None;
+    }
+    u64::from_str_radix(encoded, 16).ok()
+}
+
+/// Parses a canonical textual identity and rejects values reserved outside the valid ID domain.
+pub(crate) fn parse_terminal_container_id_text(value: &str) -> Option<TerminalContainerId> {
+    TerminalContainerId::parse(parse_terminal_container_wire_text(value)?)
+}
 
 impl TerminalContainerId {
     pub(crate) fn alloc() -> Option<Self> {
@@ -147,6 +175,35 @@ impl TerminalContainer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn canonical_text_identity_round_trips_without_advancing_allocation() {
+        let id = TerminalContainerId::parse(42).unwrap();
+        let encoded = format_terminal_container_id(id);
+        assert_eq!(encoded, "container_000000000000002a");
+        assert_eq!(parse_terminal_container_wire_text(&encoded), Some(42));
+        assert_eq!(parse_terminal_container_id_text(&encoded), Some(id));
+        for invalid in [
+            "container_2a",
+            "container_000000000000002A",
+            "collection_000000000000002a",
+            "container_00000000000000001",
+        ] {
+            assert_eq!(parse_terminal_container_wire_text(invalid), None);
+            assert_eq!(parse_terminal_container_id_text(invalid), None);
+        }
+    }
+
+    #[test]
+    fn wire_shape_retains_reserved_values_but_valid_identity_parser_rejects_them() {
+        for (encoded, raw) in [
+            ("container_0000000000000000", 0),
+            ("container_ffffffffffffffff", u64::MAX),
+        ] {
+            assert_eq!(parse_terminal_container_wire_text(encoded), Some(raw));
+            assert_eq!(parse_terminal_container_id_text(encoded), None);
+        }
+    }
 
     #[test]
     fn terminal_container_selection_is_none_only_when_empty() {

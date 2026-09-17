@@ -24,7 +24,8 @@ pub const HOST_TERMINALS_READ_CAPABILITY: &str = "host.terminals.read";
 pub const HOST_TERMINALS_SNAPSHOT_METHOD: &str = "terminals.snapshot";
 pub const MAX_HOST_TERMINALS_RESPONSE_BYTES: usize = 64 * 1024;
 pub(crate) const MAX_HOST_TERMINALS_WORKSPACE_ID_BYTES: usize = 32;
-pub(crate) const HOST_CONTAINER_ID_BYTES: usize = "container_".len() + 16;
+pub(crate) const HOST_CONTAINER_ID_BYTES: usize =
+    crate::terminal_container::TERMINAL_CONTAINER_ID_TEXT_BYTES;
 const ACTOR_WAIT_POLL: Duration = Duration::from_millis(10);
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -468,13 +469,8 @@ fn validate_snapshot(snapshot: &HostTerminalsSnapshotV1) -> Result<(), String> {
                 terminal_ids,
                 selected_terminal_id,
             } => {
-                let Some(hex) = container_id.strip_prefix("container_") else {
-                    return Err("invalid terminal snapshot container id".into());
-                };
-                if container_id.len() != HOST_CONTAINER_ID_BYTES
-                    || !hex
-                        .bytes()
-                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+                if crate::terminal_container::parse_terminal_container_wire_text(container_id)
+                    .is_none()
                     || !containers.insert(container_id)
                 {
                     return Err("invalid or duplicate terminal snapshot container id".into());
@@ -617,7 +613,9 @@ pub(crate) fn build_snapshot(
                     return Err(malformed_error("container selection is not a member"));
                 }
                 layout.push(HostTerminalLayoutItemV1::Container {
-                    container_id: format!("container_{:016x}", container_id.raw()),
+                    container_id: crate::terminal_container::format_terminal_container_id(
+                        container_id,
+                    ),
                     terminal_ids,
                     selected_terminal_id,
                 });
@@ -793,6 +791,31 @@ mod tests {
             HostTerminalLayoutItemV1::Container { terminal_ids, selected_terminal_id, .. }
                 if terminal_ids.len() == 1 && selected_terminal_id.as_ref() == terminal_ids.first()
         )));
+    }
+
+    #[test]
+    fn frozen_wire_shape_accepts_reserved_container_encodings() {
+        let (mut workspace, terminals) = fixture();
+        let target = workspace.tabs[0].layout.leaves()[0];
+        workspace.tabs[0]
+            .create_collection_near(target, Direction::Vertical, 0.5, None)
+            .unwrap();
+        let base = build_snapshot(&workspace, &workspace.tabs[0], &terminals, fence()).unwrap();
+
+        for reserved in ["container_0000000000000000", "container_ffffffffffffffff"] {
+            let mut snapshot = base.clone();
+            let container_id = snapshot
+                .layout
+                .iter_mut()
+                .find_map(|item| match item {
+                    HostTerminalLayoutItemV1::Container { container_id, .. } => Some(container_id),
+                    HostTerminalLayoutItemV1::Tiled { .. } => None,
+                })
+                .expect("container item");
+            *container_id = reserved.into();
+            snapshot.fingerprint_sha256 = snapshot_fingerprint(&snapshot).unwrap();
+            assert!(validate_snapshot(&snapshot).is_ok());
+        }
     }
 
     #[test]
