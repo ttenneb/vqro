@@ -2046,7 +2046,9 @@ impl HandoffLineReader {
             let remaining = deadline.saturating_duration_since(now);
             let timeout_ms = remaining
                 .as_millis()
-                .saturating_add(u128::from(remaining.subsec_nanos() % 1_000_000 != 0))
+                .saturating_add(u128::from(
+                    !remaining.subsec_nanos().is_multiple_of(1_000_000),
+                ))
                 .min(i32::MAX as u128) as i32;
             let mut poll_fd = libc::pollfd {
                 fd: self.stream.as_raw_fd(),
