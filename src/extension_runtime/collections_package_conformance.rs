@@ -16,7 +16,7 @@ use crate::extension_package::{
     PackageRuntimeV1, PACKAGE_CHECKSUM_FILE, PACKAGE_MANIFEST_FILE,
 };
 
-const CANDIDATE_COMMIT: &str = "32b489994443e4bca96ecd844769344d225d3bc4";
+const CANDIDATE_COMMIT: &str = "178e99ac2e8da92d288339a0c4e5c7d76efd9f85";
 const CANDIDATE_REPOSITORY: &str = "https://github.com/ttenneb/vqro-extension-collections.git";
 const CANDIDATE_GITATTRIBUTES: &[u8] = b"* text=auto eol=lf\n";
 const CANDIDATE_PACKAGE_SHA256: &str =

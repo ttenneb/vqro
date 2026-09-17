@@ -20,7 +20,7 @@ use crate::host_document_v2::{
 use crate::quarantined_audit_cache::{AuditCacheKey, AuditTicket, QuarantinedAuditCache};
 use crate::workspace::TabId;
 
-pub(crate) const COLLECTIONS_COMMIT: &str = "32b489994443e4bca96ecd844769344d225d3bc4";
+pub(crate) const COLLECTIONS_COMMIT: &str = "178e99ac2e8da92d288339a0c4e5c7d76efd9f85";
 pub(crate) const COLLECTIONS_PACKAGE_SHA256: &str =
     "42745bb5af54b0dced06cf0e92e8c95383e42641c105f6256249ede67af2c634";
 pub(crate) const COLLECTIONS_MANIFEST_SHA256: &str =

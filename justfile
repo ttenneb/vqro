@@ -19,7 +19,7 @@ maintenance-test:
 test-one filter:
     cargo nextest run --locked "{{filter}}" --status-level fail --final-status-level fail --failure-output final --success-output never
 
-# Build, verify, install, execute, and structurally audit exact Collections commit 32b48999.
+# Build, verify, install, execute, and structurally audit exact Collections commit 178e99ac.
 # Requires a clean checkout at VQRO_COLLECTIONS_CHECKOUT; no production catalog is changed.
 collections-package-conformance:
     cargo nextest run --locked 'collections_candidate_passes_authoritative_host_gate' --run-ignored ignored-only --status-level fail --final-status-level fail --failure-output final --success-output never
