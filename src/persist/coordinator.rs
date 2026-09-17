@@ -160,6 +160,142 @@ enum Boundary {
     JournalRemoved,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FsSite {
+    JournalPresence,
+    SessionStage,
+    ExtensionStateStage,
+    JournalTemporary(JournalPhase),
+    JournalTemporaryCleanup(JournalPhase),
+    SessionTarget,
+    ExtensionStateTarget,
+    Journal,
+    AbortSessionStage,
+    AbortExtensionStateStage,
+    AbortCleanupParent,
+    RecoverySessionStageCleanup,
+    RecoveryExtensionStateStageCleanup,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FsOperation {
+    Create(FsSite),
+    Write(FsSite),
+    FileSync(FsSite),
+    Replace(FsSite),
+    Remove(FsSite),
+    ParentSync(FsSite),
+    Metadata(FsSite),
+    Read(FsSite),
+    Checksum(FsSite),
+}
+
+/// Complete filesystem boundary for checkpoint publication and recovery.
+///
+/// The real implementation is a direct adapter over the operations previously used here. The
+/// semantic operation identifiers exist only to make the test implementation deterministic.
+trait CoordinatorFs {
+    fn create_private(
+        &mut self,
+        operation: FsOperation,
+        path: &Path,
+    ) -> std::io::Result<std::fs::File>;
+    fn write_all(
+        &mut self,
+        operation: FsOperation,
+        file: &mut std::fs::File,
+        bytes: &[u8],
+    ) -> std::io::Result<()>;
+    fn sync_file(&mut self, operation: FsOperation, file: &std::fs::File) -> std::io::Result<()>;
+    fn replace(
+        &mut self,
+        operation: FsOperation,
+        source: &Path,
+        destination: &Path,
+    ) -> std::io::Result<()>;
+    fn remove(&mut self, operation: FsOperation, path: &Path) -> std::io::Result<()>;
+    fn sync_parent(&mut self, operation: FsOperation, parent: &Path) -> std::io::Result<()>;
+    fn metadata(
+        &mut self,
+        operation: FsOperation,
+        path: &Path,
+    ) -> std::io::Result<std::fs::Metadata>;
+    fn read_bounded(
+        &mut self,
+        operation: FsOperation,
+        path: &Path,
+        maximum: u64,
+    ) -> std::io::Result<Vec<u8>>;
+    fn checksum(&mut self, operation: FsOperation, path: &Path) -> std::io::Result<String>;
+}
+
+struct RealCoordinatorFs;
+
+impl CoordinatorFs for RealCoordinatorFs {
+    fn create_private(
+        &mut self,
+        _operation: FsOperation,
+        path: &Path,
+    ) -> std::io::Result<std::fs::File> {
+        crate::platform::create_private_state_file(path)
+    }
+
+    fn write_all(
+        &mut self,
+        _operation: FsOperation,
+        file: &mut std::fs::File,
+        bytes: &[u8],
+    ) -> std::io::Result<()> {
+        file.write_all(bytes)
+    }
+
+    fn sync_file(&mut self, _operation: FsOperation, file: &std::fs::File) -> std::io::Result<()> {
+        file.sync_all()
+    }
+
+    fn replace(
+        &mut self,
+        _operation: FsOperation,
+        source: &Path,
+        destination: &Path,
+    ) -> std::io::Result<()> {
+        crate::platform::replace_file(source, destination)
+    }
+
+    fn remove(&mut self, _operation: FsOperation, path: &Path) -> std::io::Result<()> {
+        std::fs::remove_file(path)
+    }
+
+    fn sync_parent(&mut self, _operation: FsOperation, parent: &Path) -> std::io::Result<()> {
+        crate::platform::sync_parent_directory(parent)
+    }
+
+    fn metadata(
+        &mut self,
+        _operation: FsOperation,
+        path: &Path,
+    ) -> std::io::Result<std::fs::Metadata> {
+        std::fs::symlink_metadata(path)
+    }
+
+    fn read_bounded(
+        &mut self,
+        _operation: FsOperation,
+        path: &Path,
+        maximum: u64,
+    ) -> std::io::Result<Vec<u8>> {
+        let mut bytes = Vec::new();
+        std::fs::File::open(path)?
+            .take(maximum.saturating_add(1))
+            .read_to_end(&mut bytes)?;
+        Ok(bytes)
+    }
+
+    fn checksum(&mut self, _operation: FsOperation, path: &Path) -> std::io::Result<String> {
+        crate::checksum::file_sha256(path)
+    }
+}
+
 // Process-local serialization complements the path-bound cross-process ownership guard.
 fn exclusive_writer() -> Result<MutexGuard<'static, ()>, PersistenceError> {
     PERSISTENCE_WRITER.lock().map_err(|_| PersistenceError {
@@ -187,14 +323,35 @@ fn persist_checkpoint_with<F>(
     paths: &PersistencePaths,
     session: &SessionSnapshot,
     extension_state: &DurableExtensionStateV1,
+    boundary: F,
+) -> Result<(), PersistenceError>
+where
+    F: FnMut(Boundary) -> std::io::Result<()>,
+{
+    persist_checkpoint_with_fs(
+        ownership,
+        paths,
+        session,
+        extension_state,
+        boundary,
+        &mut RealCoordinatorFs,
+    )
+}
+
+fn persist_checkpoint_with_fs<F, Fs: CoordinatorFs>(
+    ownership: &PersistenceOwnership,
+    paths: &PersistencePaths,
+    session: &SessionSnapshot,
+    extension_state: &DurableExtensionStateV1,
     mut boundary: F,
+    fs: &mut Fs,
 ) -> Result<(), PersistenceError>
 where
     F: FnMut(Boundary) -> std::io::Result<()>,
 {
     let _writer = exclusive_writer()?;
     let paths = ownership.verify(paths)?;
-    if path_entry_exists(&paths.journal).map_err(not_published)? {
+    if path_entry_exists(fs, FsSite::JournalPresence, &paths.journal).map_err(not_published)? {
         return Err(not_published(std::io::Error::new(
             std::io::ErrorKind::AlreadyExists,
             "a persistence recovery journal already exists",
@@ -222,9 +379,16 @@ where
     let extension_stage = stage_path(&paths.extension_state).map_err(not_published)?;
     let mut publication_started = false;
     let result: Result<(), PersistenceError> = (|| {
-        write_private_synced(&session_stage, &session_bytes).map_err(not_published)?;
+        write_private_synced(fs, FsSite::SessionStage, &session_stage, &session_bytes)
+            .map_err(not_published)?;
         boundary(Boundary::SessionStaged).map_err(not_published)?;
-        write_private_synced(&extension_stage, &extension_bytes).map_err(not_published)?;
+        write_private_synced(
+            fs,
+            FsSite::ExtensionStateStage,
+            &extension_stage,
+            &extension_bytes,
+        )
+        .map_err(not_published)?;
         boundary(Boundary::ExtensionStateStaged).map_err(not_published)?;
 
         let mut journal = RollForwardJournalV1 {
@@ -240,7 +404,7 @@ where
             )
             .map_err(not_published)?,
         };
-        publish_journal(&paths, &journal).map_err(|error| {
+        publish_journal(fs, &paths, &journal).map_err(|error| {
             if error.replacement_attempted {
                 recovery_required(error.source)
             } else {
@@ -250,21 +414,36 @@ where
         boundary(Boundary::JournalPrepared).map_err(not_published)?;
 
         journal.phase = JournalPhase::ReplacingSession;
-        publish_journal(&paths, &journal).map_err(|error| recovery_required(error.source))?;
+        publish_journal(fs, &paths, &journal).map_err(|error| recovery_required(error.source))?;
         publication_started = true;
         boundary(Boundary::SessionIntent).map_err(recovery_required)?;
-        replace_and_sync(&session_stage, &paths.session).map_err(recovery_required)?;
+        replace_and_sync(
+            fs,
+            FsSite::SessionTarget,
+            &session_stage,
+            &paths.session,
+            &paths.parent,
+        )
+        .map_err(recovery_required)?;
         boundary(Boundary::SessionReplaced).map_err(recovery_required)?;
 
         journal.phase = JournalPhase::ReplacingExtensionState;
-        publish_journal(&paths, &journal).map_err(|error| recovery_required(error.source))?;
+        publish_journal(fs, &paths, &journal).map_err(|error| recovery_required(error.source))?;
         boundary(Boundary::ExtensionStateIntent).map_err(recovery_required)?;
-        replace_and_sync(&extension_stage, &paths.extension_state).map_err(recovery_required)?;
+        replace_and_sync(
+            fs,
+            FsSite::ExtensionStateTarget,
+            &extension_stage,
+            &paths.extension_state,
+            &paths.parent,
+        )
+        .map_err(recovery_required)?;
         boundary(Boundary::ExtensionStateReplaced).map_err(recovery_required)?;
 
-        verify_target(&journal.session).map_err(recovery_required)?;
-        verify_target(&journal.extension_state).map_err(recovery_required)?;
-        remove_journal(&paths.journal).map_err(recovery_required)?;
+        verify_target(fs, FsSite::SessionTarget, &journal.session).map_err(recovery_required)?;
+        verify_target(fs, FsSite::ExtensionStateTarget, &journal.extension_state)
+            .map_err(recovery_required)?;
+        remove_journal(fs, &paths.journal, &paths.parent).map_err(recovery_required)?;
         boundary(Boundary::JournalRemoved).map_err(recovery_required)?;
         Ok(())
     })();
@@ -277,7 +456,7 @@ where
         // A prepared journal commits the transaction to roll-forward, even before replacement.
         // Check this before cleanup: its stages are now recovery evidence, not scratch files. An
         // unreadable presence check is also publication-uncertain and must retain both stages.
-        match path_entry_exists(&paths.journal) {
+        match path_entry_exists(fs, FsSite::JournalPresence, &paths.journal) {
             Ok(true) => {
                 return result.map_err(|error| PersistenceError {
                     source: error.source,
@@ -287,9 +466,12 @@ where
             Err(source) => return Err(recovery_required(source)),
             Ok(false) => {}
         }
-        let _ = remove_owned_regular_file(&session_stage);
-        let _ = remove_owned_regular_file(&extension_stage);
-        let _ = crate::platform::sync_parent_directory(&paths.parent);
+        let _ = remove_owned_regular_file(fs, FsSite::AbortSessionStage, &session_stage);
+        let _ = remove_owned_regular_file(fs, FsSite::AbortExtensionStateStage, &extension_stage);
+        let _ = fs.sync_parent(
+            FsOperation::ParentSync(FsSite::AbortCleanupParent),
+            &paths.parent,
+        );
     }
     result
 }
@@ -303,30 +485,53 @@ pub(crate) fn recover_checkpoint_at_startup(
     ownership: &PersistenceOwnership,
     paths: &PersistencePaths,
 ) -> Result<StartupRecovery, PersistenceError> {
+    recover_checkpoint_with_fs(ownership, paths, &mut RealCoordinatorFs)
+}
+
+fn recover_checkpoint_with_fs<Fs: CoordinatorFs>(
+    ownership: &PersistenceOwnership,
+    paths: &PersistencePaths,
+    fs: &mut Fs,
+) -> Result<StartupRecovery, PersistenceError> {
     let _writer = exclusive_writer()?;
     let paths = ownership.verify(paths)?;
-    if !path_entry_exists(&paths.journal).map_err(recovery_required)? {
+    if !path_entry_exists(fs, FsSite::JournalPresence, &paths.journal).map_err(recovery_required)? {
         return Ok(StartupRecovery::NoJournal);
     }
-    let mut journal = read_journal(&paths).map_err(recovery_required)?;
+    let mut journal = read_journal(fs, &paths).map_err(recovery_required)?;
     validate_journal(&paths, &journal).map_err(recovery_required)?;
 
     if journal.phase == JournalPhase::Prepared {
         journal.phase = JournalPhase::ReplacingSession;
-        publish_journal(&paths, &journal).map_err(|error| recovery_required(error.source))?;
+        publish_journal(fs, &paths, &journal).map_err(|error| recovery_required(error.source))?;
     }
 
     // Never trust phase progression as proof of either replacement. A stale, corrupted, or
     // manually advanced phase must still establish both exact target digests before deletion.
-    ensure_replaced(&journal.session).map_err(recovery_required)?;
+    ensure_replaced(
+        fs,
+        FsSite::SessionTarget,
+        FsSite::RecoverySessionStageCleanup,
+        &paths.parent,
+        &journal.session,
+    )
+    .map_err(recovery_required)?;
     if journal.phase != JournalPhase::ReplacingExtensionState {
         journal.phase = JournalPhase::ReplacingExtensionState;
-        publish_journal(&paths, &journal).map_err(|error| recovery_required(error.source))?;
+        publish_journal(fs, &paths, &journal).map_err(|error| recovery_required(error.source))?;
     }
-    ensure_replaced(&journal.extension_state).map_err(recovery_required)?;
-    verify_target(&journal.session).map_err(recovery_required)?;
-    verify_target(&journal.extension_state).map_err(recovery_required)?;
-    remove_journal(&paths.journal).map_err(recovery_required)?;
+    ensure_replaced(
+        fs,
+        FsSite::ExtensionStateTarget,
+        FsSite::RecoveryExtensionStateStageCleanup,
+        &paths.parent,
+        &journal.extension_state,
+    )
+    .map_err(recovery_required)?;
+    verify_target(fs, FsSite::SessionTarget, &journal.session).map_err(recovery_required)?;
+    verify_target(fs, FsSite::ExtensionStateTarget, &journal.extension_state)
+        .map_err(recovery_required)?;
+    remove_journal(fs, &paths.journal, &paths.parent).map_err(recovery_required)?;
     Ok(StartupRecovery::Recovered)
 }
 
@@ -526,10 +731,15 @@ fn secure_suffix() -> std::io::Result<String> {
     Ok(random.iter().map(|byte| format!("{byte:02x}")).collect())
 }
 
-fn write_private_synced(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    let mut file = crate::platform::create_private_state_file(path)?;
-    file.write_all(bytes)?;
-    file.sync_all()
+fn write_private_synced<Fs: CoordinatorFs>(
+    fs: &mut Fs,
+    site: FsSite,
+    path: &Path,
+    bytes: &[u8],
+) -> std::io::Result<()> {
+    let mut file = fs.create_private(FsOperation::Create(site), path)?;
+    fs.write_all(FsOperation::Write(site), &mut file, bytes)?;
+    fs.sync_file(FsOperation::FileSync(site), &file)
 }
 
 fn journal_file(target: &Path, stage: &Path, bytes: &[u8]) -> std::io::Result<JournalFile> {
@@ -552,21 +762,11 @@ fn bytes_sha256(bytes: &[u8]) -> String {
     digest.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
-fn publish_journal(
+fn publish_journal<Fs: CoordinatorFs>(
+    fs: &mut Fs,
     paths: &ResolvedPaths,
     journal: &RollForwardJournalV1,
 ) -> Result<(), JournalPublishError> {
-    publish_journal_with(paths, journal, crate::platform::replace_file)
-}
-
-fn publish_journal_with<Replace>(
-    paths: &ResolvedPaths,
-    journal: &RollForwardJournalV1,
-    replace: Replace,
-) -> Result<(), JournalPublishError>
-where
-    Replace: FnOnce(&Path, &Path) -> std::io::Result<()>,
-{
     let before_replacement = |source| JournalPublishError {
         source,
         replacement_attempted: false,
@@ -588,38 +788,62 @@ where
         "{name}{JOURNAL_TEMP_MARKER}{}",
         secure_suffix().map_err(before_replacement)?
     ));
-    if let Err(source) = write_private_synced(&temporary, &bytes) {
+    let site = FsSite::JournalTemporary(journal.phase);
+    if let Err(source) = write_private_synced(fs, site, &temporary, &bytes) {
         // Replacement was certainly not attempted, so this process still owns the temporary
         // pathname and may safely clean it. After the call below, pathname cleanup is forbidden:
         // even an error can mean replacement occurred and another writer reused the old name.
-        let _ = remove_owned_regular_file(&temporary);
-        let _ = crate::platform::sync_parent_directory(&paths.parent);
+        let cleanup_site = FsSite::JournalTemporaryCleanup(journal.phase);
+        let _ = remove_owned_regular_file(fs, cleanup_site, &temporary);
+        let _ = fs.sync_parent(FsOperation::ParentSync(cleanup_site), &paths.parent);
         return Err(before_replacement(source));
     }
-    replace(&temporary, &paths.journal).map_err(after_replacement)?;
-    crate::platform::sync_parent_directory(&paths.parent).map_err(after_replacement)
+    // Any error after entering replacement is publication-uncertain, including an injected error
+    // before the real backend mutates the pathname.
+    fs.replace(FsOperation::Replace(site), &temporary, &paths.journal)
+        .map_err(after_replacement)?;
+    fs.sync_parent(FsOperation::ParentSync(site), &paths.parent)
+        .map_err(after_replacement)
 }
 
-fn replace_and_sync(stage: &Path, target: &Path) -> std::io::Result<()> {
-    crate::platform::replace_file(stage, target)?;
-    crate::platform::sync_containing_directory(target)
+fn replace_and_sync<Fs: CoordinatorFs>(
+    fs: &mut Fs,
+    site: FsSite,
+    stage: &Path,
+    target: &Path,
+    parent: &Path,
+) -> std::io::Result<()> {
+    fs.replace(FsOperation::Replace(site), stage, target)?;
+    fs.sync_parent(FsOperation::ParentSync(site), parent)
 }
 
-fn remove_journal(journal: &Path) -> std::io::Result<()> {
-    std::fs::remove_file(journal)?;
-    crate::platform::sync_containing_directory(journal)
+fn remove_journal<Fs: CoordinatorFs>(
+    fs: &mut Fs,
+    journal: &Path,
+    parent: &Path,
+) -> std::io::Result<()> {
+    fs.remove(FsOperation::Remove(FsSite::Journal), journal)?;
+    fs.sync_parent(FsOperation::ParentSync(FsSite::Journal), parent)
 }
 
-fn path_entry_exists(path: &Path) -> std::io::Result<bool> {
-    match std::fs::symlink_metadata(path) {
+fn path_entry_exists<Fs: CoordinatorFs>(
+    fs: &mut Fs,
+    site: FsSite,
+    path: &Path,
+) -> std::io::Result<bool> {
+    match fs.metadata(FsOperation::Metadata(site), path) {
         Ok(_) => Ok(true),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
         Err(error) => Err(error),
     }
 }
 
-fn remove_owned_regular_file(path: &Path) -> std::io::Result<bool> {
-    let metadata = match std::fs::symlink_metadata(path) {
+fn remove_owned_regular_file<Fs: CoordinatorFs>(
+    fs: &mut Fs,
+    site: FsSite,
+    path: &Path,
+) -> std::io::Result<bool> {
+    let metadata = match fs.metadata(FsOperation::Metadata(site), path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
         Err(error) => return Err(error),
@@ -630,22 +854,26 @@ fn remove_owned_regular_file(path: &Path) -> std::io::Result<bool> {
             "owned persistence temporary is not a regular file",
         ));
     }
-    std::fs::remove_file(path)?;
+    fs.remove(FsOperation::Remove(site), path)?;
     Ok(true)
 }
 
-fn read_journal(paths: &ResolvedPaths) -> std::io::Result<RollForwardJournalV1> {
-    let metadata = std::fs::symlink_metadata(&paths.journal)?;
+fn read_journal<Fs: CoordinatorFs>(
+    fs: &mut Fs,
+    paths: &ResolvedPaths,
+) -> std::io::Result<RollForwardJournalV1> {
+    let metadata = fs.metadata(FsOperation::Metadata(FsSite::Journal), &paths.journal)?;
     if !metadata.file_type().is_file() || metadata.len() > MAX_JOURNAL_BYTES {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             "persistence journal is not a bounded regular file",
         ));
     }
-    let mut bytes = Vec::new();
-    std::fs::File::open(&paths.journal)?
-        .take(MAX_JOURNAL_BYTES.saturating_add(1))
-        .read_to_end(&mut bytes)?;
+    let bytes = fs.read_bounded(
+        FsOperation::Read(FsSite::Journal),
+        &paths.journal,
+        MAX_JOURNAL_BYTES,
+    )?;
     if bytes.len() as u64 > MAX_JOURNAL_BYTES {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
@@ -718,44 +946,60 @@ fn validate_journal_file(
     Ok(())
 }
 
-fn ensure_replaced(file: &JournalFile) -> std::io::Result<()> {
+fn ensure_replaced<Fs: CoordinatorFs>(
+    fs: &mut Fs,
+    target_site: FsSite,
+    cleanup_site: FsSite,
+    parent: &Path,
+    file: &JournalFile,
+) -> std::io::Result<()> {
     let target = Path::new(&file.target_path);
     let stage = Path::new(&file.stage_path);
-    if file_matches(target, file)? {
-        cleanup_matching_owned_stage(stage, file)?;
+    if file_matches(fs, target_site, target, file)? {
+        cleanup_matching_owned_stage(fs, cleanup_site, parent, stage, file)?;
         return Ok(());
     }
-    if !file_matches(stage, file)? {
+    if !file_matches(fs, cleanup_site, stage, file)? {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             "neither target nor stage matches the journal digest",
         ));
     }
-    replace_and_sync(stage, target)?;
-    verify_target(file)
+    replace_and_sync(fs, target_site, stage, target, parent)?;
+    verify_target(fs, target_site, file)
 }
 
-fn cleanup_matching_owned_stage(stage: &Path, expected: &JournalFile) -> std::io::Result<()> {
-    let metadata = match std::fs::symlink_metadata(stage) {
+fn cleanup_matching_owned_stage<Fs: CoordinatorFs>(
+    fs: &mut Fs,
+    site: FsSite,
+    parent: &Path,
+    stage: &Path,
+    expected: &JournalFile,
+) -> std::io::Result<()> {
+    let metadata = match fs.metadata(FsOperation::Metadata(site), stage) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(error) => return Err(error),
     };
     if !metadata.file_type().is_file()
         || metadata.len() != expected.length
-        || crate::checksum::file_sha256(stage)? != expected.sha256
+        || fs.checksum(FsOperation::Checksum(site), stage)? != expected.sha256
     {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             "journal-bound stage does not match the already-published target",
         ));
     }
-    std::fs::remove_file(stage)?;
-    crate::platform::sync_containing_directory(stage)
+    fs.remove(FsOperation::Remove(site), stage)?;
+    fs.sync_parent(FsOperation::ParentSync(site), parent)
 }
 
-fn verify_target(file: &JournalFile) -> std::io::Result<()> {
-    if file_matches(Path::new(&file.target_path), file)? {
+fn verify_target<Fs: CoordinatorFs>(
+    fs: &mut Fs,
+    site: FsSite,
+    file: &JournalFile,
+) -> std::io::Result<()> {
+    if file_matches(fs, site, Path::new(&file.target_path), file)? {
         Ok(())
     } else {
         Err(std::io::Error::new(
@@ -765,8 +1009,13 @@ fn verify_target(file: &JournalFile) -> std::io::Result<()> {
     }
 }
 
-fn file_matches(path: &Path, expected: &JournalFile) -> std::io::Result<bool> {
-    let metadata = match std::fs::symlink_metadata(path) {
+fn file_matches<Fs: CoordinatorFs>(
+    fs: &mut Fs,
+    site: FsSite,
+    path: &Path,
+    expected: &JournalFile,
+) -> std::io::Result<bool> {
+    let metadata = match fs.metadata(FsOperation::Metadata(site), path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
         Err(error) => return Err(error),
@@ -774,7 +1023,7 @@ fn file_matches(path: &Path, expected: &JournalFile) -> std::io::Result<bool> {
     if !metadata.file_type().is_file() || metadata.len() != expected.length {
         return Ok(false);
     }
-    Ok(crate::checksum::file_sha256(path)? == expected.sha256)
+    Ok(fs.checksum(FsOperation::Checksum(site), path)? == expected.sha256)
 }
 
 #[cfg(test)]
@@ -783,6 +1032,251 @@ mod tests {
     use serde::ser::SerializeSeq;
     use std::collections::BTreeSet;
     use std::sync::Barrier;
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum FaultMode {
+        Before,
+        After,
+        PartialWrite(usize),
+        AfterReplaceReuseSource(&'static [u8]),
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    struct AttemptToken {
+        operation: FsOperation,
+        occurrence: usize,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum AttemptEdge {
+        Before,
+        After,
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    struct FaultRequest {
+        token: AttemptToken,
+        mode: FaultMode,
+        reached: bool,
+    }
+
+    struct FaultFs {
+        real: RealCoordinatorFs,
+        requests: Vec<FaultRequest>,
+        attempts: Vec<AttemptToken>,
+        trace: Vec<(AttemptToken, AttemptEdge)>,
+        reused_sources: Vec<PathBuf>,
+    }
+
+    impl FaultFs {
+        fn new(requests: impl IntoIterator<Item = (FsOperation, usize, FaultMode)>) -> Self {
+            Self {
+                real: RealCoordinatorFs,
+                requests: requests
+                    .into_iter()
+                    .map(|(operation, occurrence, mode)| FaultRequest {
+                        token: AttemptToken {
+                            operation,
+                            occurrence,
+                        },
+                        mode,
+                        reached: false,
+                    })
+                    .collect(),
+                attempts: Vec::new(),
+                trace: Vec::new(),
+                reused_sources: Vec::new(),
+            }
+        }
+
+        fn begin(&mut self, operation: FsOperation) -> (AttemptToken, Option<FaultMode>) {
+            let occurrence = self
+                .attempts
+                .iter()
+                .filter(|attempt| attempt.operation == operation)
+                .count()
+                + 1;
+            let token = AttemptToken {
+                operation,
+                occurrence,
+            };
+            self.attempts.push(token);
+            self.trace.push((token, AttemptEdge::Before));
+            let mode = self.requests.iter_mut().find_map(|request| {
+                (request.token == token).then(|| {
+                    request.reached = true;
+                    request.mode
+                })
+            });
+            (token, mode)
+        }
+
+        fn injected(token: AttemptToken) -> std::io::Error {
+            std::io::Error::other(format!("injected filesystem fault at {token:?}"))
+        }
+
+        fn before(mode: Option<FaultMode>, token: AttemptToken) -> std::io::Result<()> {
+            if mode == Some(FaultMode::Before) {
+                Err(Self::injected(token))
+            } else {
+                Ok(())
+            }
+        }
+
+        fn after<T>(
+            &mut self,
+            mode: Option<FaultMode>,
+            token: AttemptToken,
+            value: T,
+        ) -> std::io::Result<T> {
+            self.trace.push((token, AttemptEdge::After));
+            if matches!(
+                mode,
+                Some(FaultMode::After | FaultMode::AfterReplaceReuseSource(_))
+            ) {
+                Err(Self::injected(token))
+            } else {
+                Ok(value)
+            }
+        }
+
+        fn assert_all_reached(&self) {
+            for request in &self.requests {
+                assert!(request.reached, "fault was not reached: {request:?}");
+                assert!(
+                    self.trace.contains(&(request.token, AttemptEdge::Before)),
+                    "fault attempt has no before edge: {request:?}"
+                );
+                if matches!(
+                    request.mode,
+                    FaultMode::After | FaultMode::AfterReplaceReuseSource(_)
+                ) {
+                    assert!(
+                        self.trace.contains(&(request.token, AttemptEdge::After)),
+                        "fail-after did not reuse its before-edge token: {request:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    impl CoordinatorFs for FaultFs {
+        fn create_private(
+            &mut self,
+            operation: FsOperation,
+            path: &Path,
+        ) -> std::io::Result<std::fs::File> {
+            let (token, mode) = self.begin(operation);
+            Self::before(mode, token)?;
+            let file = self.real.create_private(operation, path)?;
+            self.after(mode, token, file)
+        }
+
+        fn write_all(
+            &mut self,
+            operation: FsOperation,
+            file: &mut std::fs::File,
+            bytes: &[u8],
+        ) -> std::io::Result<()> {
+            let (token, mode) = self.begin(operation);
+            Self::before(mode, token)?;
+            if let Some(FaultMode::PartialWrite(length)) = mode {
+                self.real
+                    .write_all(operation, file, &bytes[..length.min(bytes.len())])?;
+                return Err(Self::injected(token));
+            }
+            self.real.write_all(operation, file, bytes)?;
+            self.after(mode, token, ())
+        }
+
+        fn sync_file(
+            &mut self,
+            operation: FsOperation,
+            file: &std::fs::File,
+        ) -> std::io::Result<()> {
+            let (token, mode) = self.begin(operation);
+            Self::before(mode, token)?;
+            self.real.sync_file(operation, file)?;
+            self.after(mode, token, ())
+        }
+
+        fn replace(
+            &mut self,
+            operation: FsOperation,
+            source: &Path,
+            destination: &Path,
+        ) -> std::io::Result<()> {
+            let (token, mode) = self.begin(operation);
+            Self::before(mode, token)?;
+            self.real.replace(operation, source, destination)?;
+            if let Some(FaultMode::AfterReplaceReuseSource(bytes)) = mode {
+                let mut reused = self.real.create_private(operation, source)?;
+                self.real.write_all(operation, &mut reused, bytes)?;
+                self.real.sync_file(operation, &reused)?;
+                self.reused_sources.push(source.to_path_buf());
+            }
+            self.after(mode, token, ())
+        }
+
+        fn remove(&mut self, operation: FsOperation, path: &Path) -> std::io::Result<()> {
+            let (token, mode) = self.begin(operation);
+            Self::before(mode, token)?;
+            self.real.remove(operation, path)?;
+            self.after(mode, token, ())
+        }
+
+        fn sync_parent(&mut self, operation: FsOperation, parent: &Path) -> std::io::Result<()> {
+            let (token, mode) = self.begin(operation);
+            Self::before(mode, token)?;
+            self.real.sync_parent(operation, parent)?;
+            self.after(mode, token, ())
+        }
+
+        fn metadata(
+            &mut self,
+            operation: FsOperation,
+            path: &Path,
+        ) -> std::io::Result<std::fs::Metadata> {
+            let (token, mode) = self.begin(operation);
+            Self::before(mode, token)?;
+            let metadata = self.real.metadata(operation, path)?;
+            self.after(mode, token, metadata)
+        }
+
+        fn read_bounded(
+            &mut self,
+            operation: FsOperation,
+            path: &Path,
+            maximum: u64,
+        ) -> std::io::Result<Vec<u8>> {
+            let (token, mode) = self.begin(operation);
+            Self::before(mode, token)?;
+            let bytes = self.real.read_bounded(operation, path, maximum)?;
+            self.after(mode, token, bytes)
+        }
+
+        fn checksum(&mut self, operation: FsOperation, path: &Path) -> std::io::Result<String> {
+            let (token, mode) = self.begin(operation);
+            Self::before(mode, token)?;
+            let checksum = self.real.checksum(operation, path)?;
+            self.after(mode, token, checksum)
+        }
+    }
+
+    fn read_journal_real(paths: &ResolvedPaths) -> std::io::Result<RollForwardJournalV1> {
+        read_journal(&mut RealCoordinatorFs, paths)
+    }
+
+    fn publish_journal_real(
+        paths: &ResolvedPaths,
+        journal: &RollForwardJournalV1,
+    ) -> Result<(), JournalPublishError> {
+        publish_journal(&mut RealCoordinatorFs, paths, journal)
+    }
+
+    fn verify_target_real(site: FsSite, file: &JournalFile) -> std::io::Result<()> {
+        verify_target(&mut RealCoordinatorFs, site, file)
+    }
 
     struct RepeatedStrings(usize);
 
@@ -924,32 +1418,532 @@ mod tests {
         }
     }
 
-    #[test]
-    fn uncertain_journal_replacement_never_cleans_a_reused_source_path() {
-        let (directory, paths, ownership, session, state) = fixture();
-        let _ = persist_checkpoint_with(&ownership, &paths, &session, &state, |boundary| {
+    fn leave_prepared_checkpoint(
+        ownership: &PersistenceOwnership,
+        paths: &PersistencePaths,
+        session: &SessionSnapshot,
+        state: &DurableExtensionStateV1,
+    ) -> RollForwardJournalV1 {
+        let error = persist_checkpoint_with(ownership, paths, session, state, |boundary| {
             (boundary != Boundary::JournalPrepared)
                 .then_some(())
-                .ok_or_else(|| std::io::Error::other("crash"))
-        });
-        let resolved = resolve_paths(&paths).unwrap();
-        let mut journal = read_journal(&resolved).unwrap();
-        journal.phase = JournalPhase::ReplacingSession;
-        let mut reused = None;
-        let error = publish_journal_with(&resolved, &journal, |source, destination| {
-            crate::platform::replace_file(source, destination)?;
-            std::fs::write(source, b"reused-after-replacement")?;
-            reused = Some(source.to_path_buf());
-            Err(std::io::Error::other("uncertain replacement result"))
+                .ok_or_else(|| std::io::Error::other("stop after prepared journal"))
         })
         .unwrap_err();
+        assert_eq!(error.outcome, PersistenceOutcome::RecoveryRequired);
+        read_journal_real(&resolve_paths(paths).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn injected_create_faults_before_journal_durability_are_not_published() {
+        for (site, mode) in [
+            (FsSite::SessionStage, FaultMode::Before),
+            (FsSite::SessionStage, FaultMode::After),
+            (FsSite::ExtensionStateStage, FaultMode::Before),
+            (
+                FsSite::JournalTemporary(JournalPhase::Prepared),
+                FaultMode::Before,
+            ),
+        ] {
+            let (directory, paths, ownership, session, state) = fixture();
+            let mut fs = FaultFs::new([(FsOperation::Create(site), 1, mode)]);
+            let error = persist_checkpoint_with_fs(
+                &ownership,
+                &paths,
+                &session,
+                &state,
+                |_| Ok(()),
+                &mut fs,
+            )
+            .unwrap_err();
+            assert_eq!(error.outcome, PersistenceOutcome::NotPublished);
+            fs.assert_all_reached();
+            assert!(!paths.journal.try_exists().unwrap());
+            assert!(!paths.session.try_exists().unwrap());
+            assert!(!paths.extension_state.try_exists().unwrap());
+            drop(ownership);
+            std::fs::remove_dir_all(directory).unwrap();
+        }
+        for phase in [
+            JournalPhase::ReplacingSession,
+            JournalPhase::ReplacingExtensionState,
+        ] {
+            let (directory, paths, ownership, session, state) = fixture();
+            let operation = FsOperation::Create(FsSite::JournalTemporary(phase));
+            let mut fs = FaultFs::new([(operation, 1, FaultMode::Before)]);
+            let error = persist_checkpoint_with_fs(
+                &ownership,
+                &paths,
+                &session,
+                &state,
+                |_| Ok(()),
+                &mut fs,
+            )
+            .unwrap_err();
+            assert_eq!(error.outcome, PersistenceOutcome::RecoveryRequired);
+            fs.assert_all_reached();
+            assert_eq!(
+                recover_checkpoint_at_startup(&ownership, &paths).unwrap(),
+                StartupRecovery::Recovered
+            );
+            drop(ownership);
+            std::fs::remove_dir_all(directory).unwrap();
+        }
+    }
+
+    #[test]
+    fn injected_write_faults_include_partial_writes_and_clean_owned_files() {
+        for (site, mode) in [
+            (FsSite::SessionStage, FaultMode::Before),
+            (FsSite::SessionStage, FaultMode::After),
+            (FsSite::ExtensionStateStage, FaultMode::PartialWrite(7)),
+            (
+                FsSite::JournalTemporary(JournalPhase::Prepared),
+                FaultMode::PartialWrite(11),
+            ),
+        ] {
+            let (directory, paths, ownership, session, state) = fixture();
+            let mut fs = FaultFs::new([(FsOperation::Write(site), 1, mode)]);
+            let error = persist_checkpoint_with_fs(
+                &ownership,
+                &paths,
+                &session,
+                &state,
+                |_| Ok(()),
+                &mut fs,
+            )
+            .unwrap_err();
+            assert_eq!(error.outcome, PersistenceOutcome::NotPublished);
+            fs.assert_all_reached();
+            assert!(!paths.journal.try_exists().unwrap());
+            let lock = resolve_paths(&paths).unwrap().ownership;
+            assert_eq!(
+                std::fs::read_dir(&directory)
+                    .unwrap()
+                    .map(|entry| entry.unwrap().path())
+                    .collect::<Vec<_>>(),
+                vec![lock]
+            );
+            drop(ownership);
+            std::fs::remove_dir_all(directory).unwrap();
+        }
+        for phase in [
+            JournalPhase::ReplacingSession,
+            JournalPhase::ReplacingExtensionState,
+        ] {
+            let (directory, paths, ownership, session, state) = fixture();
+            let operation = FsOperation::Write(FsSite::JournalTemporary(phase));
+            let mut fs = FaultFs::new([(operation, 1, FaultMode::PartialWrite(9))]);
+            let error = persist_checkpoint_with_fs(
+                &ownership,
+                &paths,
+                &session,
+                &state,
+                |_| Ok(()),
+                &mut fs,
+            )
+            .unwrap_err();
+            assert_eq!(error.outcome, PersistenceOutcome::RecoveryRequired);
+            fs.assert_all_reached();
+            assert_eq!(
+                recover_checkpoint_at_startup(&ownership, &paths).unwrap(),
+                StartupRecovery::Recovered
+            );
+            drop(ownership);
+            std::fs::remove_dir_all(directory).unwrap();
+        }
+    }
+
+    #[test]
+    fn injected_file_sync_faults_before_journal_durability_are_not_published() {
+        for site in [
+            FsSite::SessionStage,
+            FsSite::ExtensionStateStage,
+            FsSite::JournalTemporary(JournalPhase::Prepared),
+        ] {
+            let (directory, paths, ownership, session, state) = fixture();
+            let mut fs = FaultFs::new([(FsOperation::FileSync(site), 1, FaultMode::After)]);
+            let error = persist_checkpoint_with_fs(
+                &ownership,
+                &paths,
+                &session,
+                &state,
+                |_| Ok(()),
+                &mut fs,
+            )
+            .unwrap_err();
+            assert_eq!(error.outcome, PersistenceOutcome::NotPublished);
+            fs.assert_all_reached();
+            assert!(!paths.journal.try_exists().unwrap());
+            drop(ownership);
+            std::fs::remove_dir_all(directory).unwrap();
+        }
+        for phase in [
+            JournalPhase::ReplacingSession,
+            JournalPhase::ReplacingExtensionState,
+        ] {
+            let (directory, paths, ownership, session, state) = fixture();
+            let operation = FsOperation::FileSync(FsSite::JournalTemporary(phase));
+            let mut fs = FaultFs::new([(operation, 1, FaultMode::After)]);
+            let error = persist_checkpoint_with_fs(
+                &ownership,
+                &paths,
+                &session,
+                &state,
+                |_| Ok(()),
+                &mut fs,
+            )
+            .unwrap_err();
+            assert_eq!(error.outcome, PersistenceOutcome::RecoveryRequired);
+            fs.assert_all_reached();
+            assert_eq!(
+                recover_checkpoint_at_startup(&ownership, &paths).unwrap(),
+                StartupRecovery::Recovered
+            );
+            drop(ownership);
+            std::fs::remove_dir_all(directory).unwrap();
+        }
+    }
+
+    #[test]
+    fn logical_replace_start_is_always_recovery_uncertain() {
+        for mode in [FaultMode::Before, FaultMode::After] {
+            let (directory, paths, ownership, session, state) = fixture();
+            let operation = FsOperation::Replace(FsSite::JournalTemporary(JournalPhase::Prepared));
+            let mut fs = FaultFs::new([(operation, 1, mode)]);
+            let error = persist_checkpoint_with_fs(
+                &ownership,
+                &paths,
+                &session,
+                &state,
+                |_| Ok(()),
+                &mut fs,
+            )
+            .unwrap_err();
+            assert_eq!(error.outcome, PersistenceOutcome::RecoveryRequired);
+            fs.assert_all_reached();
+            let recovery = recover_checkpoint_at_startup(&ownership, &paths).unwrap();
+            assert_eq!(
+                recovery,
+                if mode == FaultMode::Before {
+                    StartupRecovery::NoJournal
+                } else {
+                    StartupRecovery::Recovered
+                }
+            );
+            drop(ownership);
+            std::fs::remove_dir_all(directory).unwrap();
+        }
+
+        for phase in [
+            JournalPhase::ReplacingSession,
+            JournalPhase::ReplacingExtensionState,
+        ] {
+            for mode in [FaultMode::Before, FaultMode::After] {
+                let (directory, paths, ownership, session, state) = fixture();
+                let operation = FsOperation::Replace(FsSite::JournalTemporary(phase));
+                let mut fs = FaultFs::new([(operation, 1, mode)]);
+                let error = persist_checkpoint_with_fs(
+                    &ownership,
+                    &paths,
+                    &session,
+                    &state,
+                    |_| Ok(()),
+                    &mut fs,
+                )
+                .unwrap_err();
+                assert_eq!(error.outcome, PersistenceOutcome::RecoveryRequired);
+                fs.assert_all_reached();
+                assert_eq!(
+                    recover_checkpoint_at_startup(&ownership, &paths).unwrap(),
+                    StartupRecovery::Recovered
+                );
+                drop(ownership);
+                std::fs::remove_dir_all(directory).unwrap();
+            }
+        }
+
+        for (site, mode) in [
+            (FsSite::SessionTarget, FaultMode::Before),
+            (FsSite::SessionTarget, FaultMode::After),
+            (FsSite::ExtensionStateTarget, FaultMode::Before),
+            (FsSite::ExtensionStateTarget, FaultMode::After),
+        ] {
+            let (directory, paths, ownership, session, state) = fixture();
+            let mut fs = FaultFs::new([(FsOperation::Replace(site), 1, mode)]);
+            let error = persist_checkpoint_with_fs(
+                &ownership,
+                &paths,
+                &session,
+                &state,
+                |_| Ok(()),
+                &mut fs,
+            )
+            .unwrap_err();
+            assert_eq!(error.outcome, PersistenceOutcome::RecoveryRequired);
+            fs.assert_all_reached();
+            assert_eq!(
+                recover_checkpoint_at_startup(&ownership, &paths).unwrap(),
+                StartupRecovery::Recovered
+            );
+            drop(ownership);
+            std::fs::remove_dir_all(directory).unwrap();
+        }
+    }
+
+    #[test]
+    fn parent_sync_faults_recover_before_and_after_target_publication() {
+        let operations = [
+            FsOperation::ParentSync(FsSite::JournalTemporary(JournalPhase::Prepared)),
+            FsOperation::ParentSync(FsSite::JournalTemporary(JournalPhase::ReplacingSession)),
+            FsOperation::ParentSync(FsSite::JournalTemporary(
+                JournalPhase::ReplacingExtensionState,
+            )),
+            FsOperation::ParentSync(FsSite::SessionTarget),
+            FsOperation::ParentSync(FsSite::ExtensionStateTarget),
+            FsOperation::ParentSync(FsSite::Journal),
+        ];
+        for operation in operations {
+            let (directory, paths, ownership, session, state) = fixture();
+            let mut fs = FaultFs::new([(operation, 1, FaultMode::After)]);
+            let error = persist_checkpoint_with_fs(
+                &ownership,
+                &paths,
+                &session,
+                &state,
+                |_| Ok(()),
+                &mut fs,
+            )
+            .unwrap_err();
+            assert_eq!(error.outcome, PersistenceOutcome::RecoveryRequired);
+            fs.assert_all_reached();
+            let recovery = recover_checkpoint_at_startup(&ownership, &paths).unwrap();
+            if operation == FsOperation::ParentSync(FsSite::Journal) {
+                assert_eq!(recovery, StartupRecovery::NoJournal);
+            } else {
+                assert_eq!(recovery, StartupRecovery::Recovered);
+            }
+            assert!(paths.session.is_file());
+            assert!(paths.extension_state.is_file());
+            drop(ownership);
+            std::fs::remove_dir_all(directory).unwrap();
+        }
+    }
+
+    #[test]
+    fn cleanup_removal_uncertainty_is_safe_and_recovery_is_idempotent() {
+        let (directory, paths, ownership, session, state) = fixture();
+        let mut fs = FaultFs::new([
+            (
+                FsOperation::Create(FsSite::ExtensionStateStage),
+                1,
+                FaultMode::Before,
+            ),
+            (
+                FsOperation::Remove(FsSite::AbortSessionStage),
+                1,
+                FaultMode::Before,
+            ),
+            (
+                FsOperation::ParentSync(FsSite::AbortCleanupParent),
+                1,
+                FaultMode::Before,
+            ),
+        ]);
+        let error =
+            persist_checkpoint_with_fs(&ownership, &paths, &session, &state, |_| Ok(()), &mut fs)
+                .unwrap_err();
+        assert_eq!(error.outcome, PersistenceOutcome::NotPublished);
+        fs.assert_all_reached();
+        assert!(std::fs::read_dir(&directory)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .any(|path| path.to_string_lossy().contains(STAGE_MARKER)));
+        persist_checkpoint(&ownership, &paths, &session, &state).unwrap();
+        assert_eq!(
+            recover_checkpoint_at_startup(&ownership, &paths).unwrap(),
+            StartupRecovery::NoJournal
+        );
+        drop(ownership);
+        std::fs::remove_dir_all(directory).unwrap();
+
+        for mode in [FaultMode::Before, FaultMode::After] {
+            let (directory, paths, ownership, session, state) = fixture();
+            let temporary = FsSite::JournalTemporary(JournalPhase::Prepared);
+            let cleanup = FsSite::JournalTemporaryCleanup(JournalPhase::Prepared);
+            let mut fs = FaultFs::new([
+                (FsOperation::Write(temporary), 1, FaultMode::PartialWrite(5)),
+                (FsOperation::Remove(cleanup), 1, mode),
+                (FsOperation::ParentSync(cleanup), 1, FaultMode::Before),
+            ]);
+            let error = persist_checkpoint_with_fs(
+                &ownership,
+                &paths,
+                &session,
+                &state,
+                |_| Ok(()),
+                &mut fs,
+            )
+            .unwrap_err();
+            assert_eq!(error.outcome, PersistenceOutcome::NotPublished);
+            fs.assert_all_reached();
+            assert!(!paths.journal.exists());
+            drop(ownership);
+            std::fs::remove_dir_all(directory).unwrap();
+        }
+
+        for mode in [FaultMode::Before, FaultMode::After] {
+            let (directory, paths, ownership, session, state) = fixture();
+            let mut fs = FaultFs::new([(FsOperation::Remove(FsSite::Journal), 1, mode)]);
+            let error = persist_checkpoint_with_fs(
+                &ownership,
+                &paths,
+                &session,
+                &state,
+                |_| Ok(()),
+                &mut fs,
+            )
+            .unwrap_err();
+            assert_eq!(error.outcome, PersistenceOutcome::RecoveryRequired);
+            fs.assert_all_reached();
+            assert_eq!(
+                recover_checkpoint_at_startup(&ownership, &paths).unwrap(),
+                if mode == FaultMode::Before {
+                    StartupRecovery::Recovered
+                } else {
+                    StartupRecovery::NoJournal
+                }
+            );
+            assert!(paths.session.is_file());
+            assert!(paths.extension_state.is_file());
+            drop(ownership);
+            std::fs::remove_dir_all(directory).unwrap();
+        }
+
+        for (operation, mode) in [
+            (
+                FsOperation::Remove(FsSite::RecoverySessionStageCleanup),
+                FaultMode::Before,
+            ),
+            (
+                FsOperation::Remove(FsSite::RecoverySessionStageCleanup),
+                FaultMode::After,
+            ),
+            (
+                FsOperation::ParentSync(FsSite::RecoverySessionStageCleanup),
+                FaultMode::After,
+            ),
+        ] {
+            let (directory, paths, ownership, session, state) = fixture();
+            let journal = leave_prepared_checkpoint(&ownership, &paths, &session, &state);
+            std::fs::copy(&journal.session.stage_path, &journal.session.target_path).unwrap();
+            let mut fs = FaultFs::new([(operation, 1, mode)]);
+            let error = recover_checkpoint_with_fs(&ownership, &paths, &mut fs).unwrap_err();
+            assert_eq!(error.outcome, PersistenceOutcome::RecoveryRequired);
+            fs.assert_all_reached();
+            assert_eq!(
+                recover_checkpoint_at_startup(&ownership, &paths).unwrap(),
+                StartupRecovery::Recovered
+            );
+            assert_eq!(
+                recover_checkpoint_at_startup(&ownership, &paths).unwrap(),
+                StartupRecovery::NoJournal
+            );
+            drop(ownership);
+            std::fs::remove_dir_all(directory).unwrap();
+        }
+    }
+
+    #[test]
+    fn unreadable_journal_presence_during_abort_retains_stages_and_requires_recovery() {
+        let (directory, paths, ownership, session, state) = fixture();
+        let mut fs = FaultFs::new([
+            (
+                FsOperation::Create(FsSite::ExtensionStateStage),
+                1,
+                FaultMode::Before,
+            ),
+            (
+                FsOperation::Metadata(FsSite::JournalPresence),
+                2,
+                FaultMode::Before,
+            ),
+        ]);
+        let error =
+            persist_checkpoint_with_fs(&ownership, &paths, &session, &state, |_| Ok(()), &mut fs)
+                .unwrap_err();
+        assert_eq!(error.outcome, PersistenceOutcome::RecoveryRequired);
+        fs.assert_all_reached();
+        assert!(std::fs::read_dir(&directory)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .any(|path| path.to_string_lossy().contains(STAGE_MARKER)));
+        assert_eq!(
+            recover_checkpoint_at_startup(&ownership, &paths).unwrap(),
+            StartupRecovery::NoJournal
+        );
+        drop(ownership);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn recovery_metadata_read_and_checksum_faults_retain_evidence_for_retry() {
+        for operation in [
+            FsOperation::Metadata(FsSite::Journal),
+            FsOperation::Read(FsSite::Journal),
+            FsOperation::Metadata(FsSite::SessionTarget),
+            FsOperation::Checksum(FsSite::RecoverySessionStageCleanup),
+        ] {
+            let (directory, paths, ownership, session, state) = fixture();
+            leave_prepared_checkpoint(&ownership, &paths, &session, &state);
+            let mut fs = FaultFs::new([(operation, 1, FaultMode::Before)]);
+            let error = recover_checkpoint_with_fs(&ownership, &paths, &mut fs).unwrap_err();
+            assert_eq!(error.outcome, PersistenceOutcome::RecoveryRequired);
+            fs.assert_all_reached();
+            assert!(paths.journal.is_file());
+            assert_eq!(
+                recover_checkpoint_at_startup(&ownership, &paths).unwrap(),
+                StartupRecovery::Recovered
+            );
+            assert_eq!(
+                recover_checkpoint_at_startup(&ownership, &paths).unwrap(),
+                StartupRecovery::NoJournal
+            );
+            drop(ownership);
+            std::fs::remove_dir_all(directory).unwrap();
+        }
+    }
+
+    #[test]
+    fn uncertain_journal_replacement_never_cleans_a_reused_source_path() {
+        const SENTINEL: &[u8] = b"reused-after-journal-replacement";
+
+        let (directory, paths, ownership, session, state) = fixture();
+        let mut journal = leave_prepared_checkpoint(&ownership, &paths, &session, &state);
+        let resolved = resolve_paths(&paths).unwrap();
+        journal.phase = JournalPhase::ReplacingSession;
+        let operation = FsOperation::Replace(FsSite::JournalTemporary(journal.phase));
+        let mut fs = FaultFs::new([(operation, 1, FaultMode::AfterReplaceReuseSource(SENTINEL))]);
+        let error = publish_journal(&mut fs, &resolved, &journal).unwrap_err();
 
         assert!(error.replacement_attempted);
-        let reused = reused.unwrap();
-        assert_eq!(std::fs::read(&reused).unwrap(), b"reused-after-replacement");
+        fs.assert_all_reached();
+        let reused = fs.reused_sources.as_slice();
+        assert_eq!(reused.len(), 1);
+        assert_eq!(std::fs::read(&reused[0]).unwrap(), SENTINEL);
         assert_eq!(
-            read_journal(&resolved).unwrap().phase,
+            read_journal_real(&resolved).unwrap().phase,
             JournalPhase::ReplacingSession
+        );
+
+        assert_eq!(
+            recover_checkpoint_at_startup(&ownership, &paths).unwrap(),
+            StartupRecovery::Recovered
+        );
+        assert_eq!(
+            std::fs::read(&reused[0]).unwrap(),
+            SENTINEL,
+            "recovery must not clean or alter a pathname reused after uncertain replacement"
         );
         drop(ownership);
         std::fs::remove_dir_all(directory).unwrap();
@@ -973,7 +1967,7 @@ mod tests {
                 .ok_or_else(|| std::io::Error::other("crash"))
         });
         let resolved = resolve_paths(&paths).unwrap();
-        let original = read_journal(&resolved).unwrap();
+        let original = read_journal_real(&resolved).unwrap();
         let cases = [
             {
                 let mut value = original.clone();
@@ -993,7 +1987,7 @@ mod tests {
             },
         ];
         for value in cases {
-            publish_journal(&resolved, &value).unwrap();
+            publish_journal_real(&resolved, &value).unwrap();
             let error = recover_checkpoint_at_startup(&ownership, &paths).unwrap_err();
             assert_eq!(error.outcome, PersistenceOutcome::RecoveryRequired);
         }
@@ -1010,16 +2004,16 @@ mod tests {
                 .ok_or_else(|| std::io::Error::other("crash"))
         });
         let resolved = resolve_paths(&paths).unwrap();
-        let mut journal = read_journal(&resolved).unwrap();
+        let mut journal = read_journal_real(&resolved).unwrap();
         journal.phase = JournalPhase::ReplacingExtensionState;
-        publish_journal(&resolved, &journal).unwrap();
+        publish_journal_real(&resolved, &journal).unwrap();
 
         assert_eq!(
             recover_checkpoint_at_startup(&ownership, &paths).unwrap(),
             StartupRecovery::Recovered
         );
-        verify_target(&journal.session).unwrap();
-        verify_target(&journal.extension_state).unwrap();
+        verify_target_real(FsSite::SessionTarget, &journal.session).unwrap();
+        verify_target_real(FsSite::ExtensionStateTarget, &journal.extension_state).unwrap();
         drop(ownership);
         std::fs::remove_dir_all(directory).unwrap();
     }
@@ -1034,7 +2028,7 @@ mod tests {
                     .ok_or_else(|| std::io::Error::other("crash"))
             });
             let resolved = resolve_paths(&paths).unwrap();
-            let journal = read_journal(&resolved).unwrap();
+            let journal = read_journal_real(&resolved).unwrap();
             assert_eq!(journal.phase, JournalPhase::ReplacingExtensionState);
             match replacement {
                 Some(bytes) => std::fs::write(&paths.session, bytes).unwrap(),
@@ -1059,7 +2053,7 @@ mod tests {
                 .ok_or_else(|| std::io::Error::other("crash"))
         });
         let resolved = resolve_paths(&paths).unwrap();
-        let journal = read_journal(&resolved).unwrap();
+        let journal = read_journal_real(&resolved).unwrap();
         std::fs::copy(&journal.session.stage_path, &journal.session.target_path).unwrap();
         std::fs::copy(
             &journal.extension_state.stage_path,
@@ -1071,8 +2065,8 @@ mod tests {
             recover_checkpoint_at_startup(&ownership, &paths).unwrap(),
             StartupRecovery::Recovered
         );
-        verify_target(&journal.session).unwrap();
-        verify_target(&journal.extension_state).unwrap();
+        verify_target_real(FsSite::SessionTarget, &journal.session).unwrap();
+        verify_target_real(FsSite::ExtensionStateTarget, &journal.extension_state).unwrap();
         assert!(!Path::new(&journal.session.stage_path).try_exists().unwrap());
         assert!(!Path::new(&journal.extension_state.stage_path)
             .try_exists()
