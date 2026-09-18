@@ -546,7 +546,15 @@ impl App {
         let mut checkpoint_recovery_blocked = false;
         let mut loaded_snapshot = None;
         let mut loaded_history = None;
-        if policy.restore_session || policy.persist_session {
+        let mut recover_collections_checkpoint = policy.restore_session || policy.persist_session;
+        #[cfg(unix)]
+        {
+            // The source server still owns persistence while the replacement imports handoff
+            // state. Recovery ran in the source process; acquiring ownership here would race the
+            // intentional handoff fence and abort the replacement.
+            recover_collections_checkpoint &= policy != AppPolicy::HANDOFF_REPLACEMENT;
+        }
+        if recover_collections_checkpoint {
             if let Err(error) = crate::persist::recover_collections_checkpoint() {
                 session_persistence_blocked = true;
                 checkpoint_recovery_blocked = true;

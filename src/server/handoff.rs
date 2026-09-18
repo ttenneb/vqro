@@ -324,7 +324,10 @@ fn validate_handoff_version_numbers(handoff_version: u32, snapshot_version: u32)
     let compatible = match handoff_version {
         LEGACY_HANDOFF_VERSION => snapshot_version <= 4,
         TERMINAL_ID_HANDOFF_VERSION => snapshot_version == 5,
-        HANDOFF_VERSION => snapshot_version == crate::persist::SNAPSHOT_VERSION,
+        HANDOFF_VERSION => {
+            snapshot_version == crate::persist::LEGACY_SNAPSHOT_WRITER_VERSION
+                || snapshot_version == crate::persist::SNAPSHOT_VERSION
+        }
         _ => false,
     };
     if !compatible {
