@@ -1,8 +1,9 @@
 //! Staged `host.state.v1` infrastructure for package-v1 runtime conformance.
 //!
-//! This module is not a generally available package activation surface. It binds an
-//! installed package invocation to the App actor's existing `DurableExtensionStateV1`
-//! authority. Legacy services and package preflight continue to use disabled host calls.
+//! This module is not a generally available package-service capability. It binds an
+//! explicitly authorized installed-package invocation to the App actor's existing
+//! `DurableExtensionStateV1` authority. Ordinary package calls, legacy services, and
+//! package preflight continue to use disabled host calls.
 
 use std::collections::BTreeSet;
 use std::sync::{
@@ -113,7 +114,7 @@ pub(crate) struct HostInvocationAuthority {
 }
 
 impl HostInvocationAuthority {
-    // Staged until production package activation begins issuing leases.
+    // Staged until ordinary production package services can receive explicit leases.
     #[allow(dead_code)]
     pub(crate) fn new(
         manager_generation: u64,
@@ -128,7 +129,7 @@ impl HostInvocationAuthority {
         })
     }
 
-    // Staged until production package activation owns provider retirement.
+    // Staged until the production package-provider catalog owns retirement.
     #[allow(dead_code)]
     pub(crate) fn revoke(&self) {
         self.revoked.store(true, Ordering::Release);
@@ -190,7 +191,7 @@ pub(crate) struct HostProviderBinding {
 }
 
 impl HostProviderBinding {
-    // Staged until production package activation constructs provider bindings.
+    // Staged until the production package-provider catalog constructs bindings.
     #[allow(dead_code)]
     pub(crate) fn from_installed(
         installed: &crate::extension_package::InstalledPackageV1,

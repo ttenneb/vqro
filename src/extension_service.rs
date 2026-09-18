@@ -2403,7 +2403,7 @@ impl ExtensionServiceSupervisor {
         })
     }
 
-    // Package runtime entry point; feature activation remains gated after M1.
+    // Package runtime entry point; capability leases and provider admission remain separate.
     #[allow(dead_code)]
     pub fn from_installed_service(
         installed: &crate::extension_package::InstalledPackageV1,
@@ -2436,7 +2436,7 @@ impl ExtensionServiceSupervisor {
         })
     }
 
-    // Compile, instantiate, negotiate, and retire without granting feature authority.
+    // Compile, instantiate, negotiate, and retire without granting a capability lease or provider authority.
     #[allow(dead_code)]
     pub fn preflight_installed_service(
         installed: &crate::extension_package::InstalledPackageV1,
@@ -2606,7 +2606,7 @@ impl ExtensionServiceSupervisor {
 
     /// Blocking provider I/O. Call only from a bounded extension worker, never the App actor or
     /// render path.
-    // Staged public service method; the marketplace integration will wire its bounded scheduler.
+    // Staged service method; ordinary package services do not yet have a production scheduler for it.
     #[allow(dead_code)]
     pub fn list_action_choices_cancellable(
         &mut self,
@@ -2671,7 +2671,7 @@ impl ExtensionServiceSupervisor {
     }
 
     /// Blocking provider I/O. Invocation carries only the validated choice identity.
-    // Staged public service method; the marketplace integration will wire its bounded scheduler.
+    // Staged service method; ordinary package services do not yet have a production scheduler for it.
     #[allow(dead_code)]
     pub fn invoke_action_choice_cancellable(
         &mut self,

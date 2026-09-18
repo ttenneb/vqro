@@ -96,7 +96,7 @@ pub(crate) enum AtomicSessionSaveOutcome {
 #[derive(Debug)]
 pub(crate) struct AtomicSessionSaveError {
     pub(crate) source: std::io::Error,
-    // Phase 1 has no production caller to inspect the publication outcome yet.
+    // No production persistence coordinator inspects the publication outcome yet.
     #[allow(dead_code)]
     pub(crate) outcome: AtomicSessionSaveOutcome,
 }
@@ -111,8 +111,8 @@ impl std::fmt::Display for AtomicSessionSaveError {
 ///
 /// The resolved parent must already exist durably and be a trusted private directory governed by
 /// an exclusive persistence writer. Production integration additionally requires deterministic
-/// create, write, and cleanup fault injection plus coordinator fencing. Phase 1 stages this
-/// contract without a production caller.
+/// create, write, and cleanup fault injection plus coordinator fencing. This contract remains
+/// staged without a production caller.
 #[allow(dead_code)]
 pub(crate) fn save_session_atomically(
     snapshot: &SessionSnapshot,

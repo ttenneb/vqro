@@ -1,6 +1,6 @@
 # `vqro.package.v1`
 
-Status: M1a package/lifecycle foundation. Package runtimes do not receive feature authority until the runtime-neutral dispatcher is implemented.
+Status: package/lifecycle contract with a production exact-Git component journey and verified runtime instantiation. Installed component services do not yet receive production host-call leases, provider admission, visible publication, or feature authority. File/link source contracts remain lower-level foundations rather than the arbitrary-Git user journey. See the [extension platform status](extension-platform-status.md) for the capability matrix.
 
 ## Package archive
 
@@ -58,6 +58,6 @@ Installed file artifacts live under a SHA-256-derived immutable directory and re
 
 The package registry records source, claims, revision, status, active and previous artifact pointers, runtime generation, retained-data state, and deterministic load order. Existing marketplace entries are exposed only through a named legacy compatibility projection; their `Bundled` and `AgentIntegration` tags are not package-v1 runtime selectors.
 
-The activation journal has `prepared`, `artifact_committed`, and `registry_committed` phases plus an idempotent operation ID, expected registry and package revisions, previous pointer, and candidate pointer. Journal writes are bounded, atomic, and durable. Recovery can commit an already-retained candidate, keep an already-committed candidate, roll back an uncommitted candidate, or stop on conflicting state. M1a does not spawn or preflight a runtime; process supervision and component execution are M1b/M1c work.
+The activation journal has `prepared`, `artifact_committed`, and `registry_committed` phases plus an idempotent operation ID, expected registry and package revisions, previous pointer, and candidate pointer. Journal writes are bounded, atomic, and durable. Recovery can commit an already-retained candidate, keep an already-committed candidate, roll back an uncommitted candidate, or stop on conflicting state. The current package lifecycle verifies, instantiates, negotiates, and retains enabled component services, including restoration after restart. Runtime instantiation is not a capability lease or provider admission: these services cannot yet read production host state, publish a client-visible document, or become feature authority.
 
 Disabling or removing a package retains namespaced data. Explicit data deletion remains separately confirmed and journaled. Native process packages will remain trusted same-user code, not sandboxes.

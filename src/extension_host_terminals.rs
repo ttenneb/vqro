@@ -1,6 +1,6 @@
 //! Staged read-only `host.terminals.v1` package host-call contract.
 //!
-//! Production package activation does not issue this module's invocation leases.
+//! Ordinary production package-service invocations do not issue this module's leases.
 //! Legacy services and package preflight therefore continue to receive disabled host calls.
 
 use std::collections::{BTreeSet, HashSet};

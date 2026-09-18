@@ -19,7 +19,7 @@ const MAX_ARCHIVED_TERMINALS: usize = crate::admission::MAX_GROUP_MEMBERS;
 const MAX_NEUTRAL_TERMINALS: usize = crate::admission::MAX_GROUP_MEMBERS;
 const MEMBERSHIP_ARCHIVE_INVALIDATION_DOMAIN: &[u8] = b"vqro.collections.membership-archive.v1\0";
 
-// Phase 0 intentionally stages these crate-private types before production wiring exists.
+// Crate-private policy types staged before a production package-authority path exists.
 #[cfg_attr(not(test), allow(dead_code))]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct CollectionsPolicyRecordV1 {
@@ -91,7 +91,7 @@ struct PolicyValueOwned {
     archived_terminal_ids: Vec<TerminalId>,
 }
 
-// The associated methods are staged for later authority wiring and deliberately unused today.
+// These methods remain unused until the package-owned policy authority is wired.
 #[cfg_attr(not(test), allow(dead_code))]
 impl CollectionsPolicyRecordV1 {
     pub(crate) fn new(
@@ -165,7 +165,7 @@ impl CollectionsPolicyRecordV1 {
     }
 }
 
-// Staged Phase 0 codec entry points; no generic state caller is connected yet.
+// Staged codec entry points; no production package-state caller is connected yet.
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn policy_key(container_id: TerminalContainerId) -> String {
     crate::terminal_container::format_terminal_container_id(container_id)

@@ -3,9 +3,15 @@ title: Extension service protocol
 description: Versioned stdio framing and conformance rules for vqro extensions.
 ---
 
-The supported service contract is `vqro.extension-service.v1`, implemented by
-host protocol `2`. Its generated schema is
-`docs/next/api/vqro-extension-service.schema.json`.
+This page documents the legacy manifest-v1 process-service contract,
+`vqro.extension-service.v1`, implemented by host protocol `2`. Its generated
+schema is `docs/next/api/vqro-extension-service.schema.json`.
+
+Manifest-v2 component packages use the separate runtime-neutral
+`vqro.service.v1` contract and the checked-in WIT world. Their verified runtime
+can be instantiated in production, but host-call leases, document-v2 provider
+admission, visible publication, and feature authority remain staged. See
+[Extension platform status](/docs/extension-platform-status/).
 
 ## Transport and lifecycle
 
@@ -29,10 +35,12 @@ are protocol failures.
 
 ## Supported methods
 
-The stable authoring surface includes `view.render`, `view.action`,
-`host.document.render`, and `host.document.action`. Third-party host documents
-may currently consume only `terminal_groups`; repository Spaces, relationships,
-and attributed agent activity are restricted first-party sources.
+The stable legacy process-service authoring surface includes `view.render`,
+`view.action`, `host.document.render`, and `host.document.action`. Third-party
+host documents may currently consume only `terminal_groups`; repository Spaces,
+relationships, and attributed agent activity are restricted bundled-provider
+sources. These method names do not activate the staged document-v2 or component
+package contribution path.
 
 Dynamic action choices, terminal resources, and acknowledgement contracts are
 foundation or experimental surfaces until a later specification marks them

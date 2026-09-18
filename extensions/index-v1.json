@@ -9,7 +9,7 @@
       "manifest_sha256": "bc28c51e8056c092502a5fe89da7a063b071e40b60faedbff5d25922f18329f5",
       "name": "Collections",
       "summary": "Group related terminal panes into focused agent collections.",
-      "details": "The first-party Collections provider renders and controls collection membership through the public host document contract.",
+      "details": "The bundled Collections compatibility provider projects host-owned Collections behavior through the public process-service document contract while external package authority is staged.",
       "version": "1.0.0",
       "categories": [
         "Workflow",

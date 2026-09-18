@@ -67,7 +67,7 @@ enum ProcessSource {
         command: Vec<String>,
         cwd: PathBuf,
     },
-    // Constructed by package activation after the M1b review gate.
+    // Constructed only for verified installed packages that explicitly select a process payload.
     #[allow(dead_code)]
     Installed {
         archive: PathBuf,
@@ -114,7 +114,7 @@ impl ProcessRuntimeFactory {
         }
     }
 
-    // Constructed by package activation after the M1b review gate.
+    // Constructed only for verified installed packages that explicitly select a process payload.
     #[allow(dead_code)]
     pub(crate) fn installed(
         installed: &crate::extension_package::InstalledPackageV1,
@@ -166,6 +166,8 @@ impl ProcessRuntimeFactory {
             crate::extension_package::resolve_runtime(&package.descriptor, service_id, target)
                 .map_err(ExtensionServiceError::Configuration)?;
         if resolved.kind != "process" {
+            // Historical error text is retained for compatibility; component execution is
+            // production-capable through the component runtime factory, not this process factory.
             return Err(ExtensionServiceError::Unsupported(
                 "component execution is deferred to M1c".into(),
             ));

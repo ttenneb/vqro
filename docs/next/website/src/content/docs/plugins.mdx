@@ -3,23 +3,34 @@ title: Plugins
 description: Author vqro extensions with versioned manifests and supervised services.
 ---
 
-vqro extensions are shareable executable workflow packages. An extension can
-be a script or binary in any language. vqro owns PTYs, terminal identity,
-layout, focus, input, accessibility, validation, supervision, and host effects.
-The extension owns its implementation and publishes bounded declarative data.
+Vqro currently has two distinct extension models:
 
-A package uses `vqro-extension.toml`. The public manifest contract is
-`vqro.extension-manifest.v1`; supervised services use
-`vqro.extension-service.v1`; host documents use `host.document.v1`. Generated
-schemas are published under `docs/next/api/`. The legacy `herdr-plugin.toml` and
-`min_herdr_version` spellings remain read-only compatibility aliases, but new
-packages should use `vqro-extension.toml` and `min_vqro_version`.
+- **Legacy executable plugins** use manifest v1. Their actions, hooks, panes, and
+  protocol-2 services run as trusted same-user processes and may be scripts or
+  binaries in any language.
+- **Component extension packages** use manifest v2 inside deterministic
+  `.vqrox` archives. Git-installed executable packages run as WebAssembly
+  Component Model components under Wasmtime with only the checked-in Vqro WIT
+  world linked, run no repository build commands, and cannot request the native
+  process backend.
 
-The additive manifest-v2 and deterministic `.vqrox` package foundation is
-specified in `docs/next/api/vqro-package-v1.md`.
-It does not replace manifest v1 or grant runtime authority yet. Local files are
-installed into immutable content-addressed storage; developer-directory links
-require explicit trust and remain visibly mutable.
+Vqro owns PTYs, terminal identity, layout, focus, input, accessibility,
+validation, supervision, and host effects. Extensions publish bounded
+contributions rather than receiving PTY handles or renderer internals.
+
+Legacy plugins use `vqro-extension.toml` with contract
+`vqro.extension-manifest.v1`; supervised process services use
+`vqro.extension-service.v1`; production host documents use `host.document.v1`.
+The `herdr-plugin.toml` and `min_herdr_version` spellings remain read-only
+compatibility aliases.
+
+The additive manifest-v2 and deterministic `.vqrox` package contracts are
+specified in `docs/next/api/vqro-package-v1.md`. Their package lifecycle and
+restricted component runtime are implemented, but installed components do not
+yet receive production host-call leases, provider admission, visible document
+publication, or feature authority. See [Extension platform status](/docs/extension-platform-status/).
+Local package files are installed into immutable content-addressed storage;
+developer-directory links require explicit trust and remain visibly mutable.
 
 Validate the same parser and limits used by the host before publishing:
 
@@ -44,22 +55,25 @@ the manifest.
 
 ## Trust and security
 
-A plugin is ordinary code that runs on your machine. Its build and runtime
-commands run as your user, inherit your environment, and can call the full Herdr
-CLI. Treat a plugin like any extension you add to an editor, shell, or coding
-agent.
+A legacy executable plugin is ordinary code that runs on your machine. Its build
+and runtime commands run as your user, inherit the documented plugin
+environment, and can call the full Herdr CLI. Treat it like any extension you
+add to an editor, shell, or coding agent. Process supervision and descendant
+containment are lifecycle controls, not an OS sandbox.
 
-Install or link plugins only from authors and repositories you trust. Before
-installing or linking one, skim the `vqro-extension.toml` manifest and the scripts
-or binaries it runs. `vqro plugin install` shows a preview of the source and
-the commands it will run in interactive terminals, so you can review before
-confirming. Use `--yes` for
-sources you already trust, and pin `--ref` when you want a specific revision.
+Install or link legacy plugins only from authors and repositories you trust.
+Before installing one, inspect the manifest and the scripts or binaries it runs.
+`vqro plugin install` shows the source and commands it will execute, so you can
+review them before confirmation. Use `--yes` only for sources you already trust,
+and pin `--ref` when you need a specific revision.
 
-Herdr validates the manifest and keeps each plugin's config and state in its own
-directory, but it does not review or sandbox plugin code. Third-party plugins
-come from their authors, not Herdr; you are responsible for deciding whether to
-run them.
+Component extension packages have a different trust model. The arbitrary-Git
+package journey accepts only an exact commit containing a deterministic
+`.vqrox`, executes no repository build command, rejects native process services,
+and links no ambient WASI filesystem, network, process, environment, clock, or
+socket interfaces. Curated status does not add capabilities. A component still
+crosses a security boundary implemented by Vqro and Wasmtime; review its source,
+requested capabilities, revision, and digests before installation.
 
 ## Manifest
 
@@ -275,14 +289,16 @@ colors, accessibility, admission, and rendering. Rendering uses the last
 validated cached document rather than making per-frame service calls.
 
 The bundled `vqro.collections`, `vqro.spaces`, `vqro.delegation`, and
-`vqro.agent-status` providers use this same public service and document protocol.
-Their shipped `extensions/first-party/*/vqro-extension.toml` declarations are
-parsed by the production manifest types and drive runtime service identity,
-source, priority, and capabilities. At launch, the host replaces only the
-manifest's `vqro` executable token with its exact current executable, so preview,
-update-handoff, and side-by-side installations cannot accidentally spawn a
-different installed version. They are enabled by default and can be disabled
-independently:
+`vqro.agent-status` compatibility providers use this same public process-service
+and document protocol, but their implementations remain compiled into Vqro and
+their manifests self-spawn the current Vqro binary. They are migration oracles,
+not independently built component extensions. Their shipped
+`extensions/first-party/*/vqro-extension.toml` declarations are parsed by the
+production manifest types and drive runtime service identity, source, priority,
+and capabilities. At launch, the host replaces only the manifest's `vqro`
+executable token with its exact current executable, so preview, update-handoff,
+and side-by-side installations cannot accidentally spawn a different installed
+version. They are enabled by default and can be disabled independently:
 
 ```toml
 [extensions]
@@ -305,9 +321,10 @@ terminal-group source. The namespaces `vqro.collections`, `vqro.spaces`,
 
 ### Experimental and foundation contracts
 
-The following contracts are available for first-party development and
-conformance experiments, but are not part of the stable third-party authoring
-surface yet.
+The following contracts are available for development and conformance
+experiments, but are not part of the stable third-party authoring surface yet.
+Contract presence in source or a generated schema does not imply a production
+capability lease, provider admission, or client-visible publication.
 
 Supervised services can also request the additive `action_choices` capability.
 Dynamic choices use only the fixed `host.action.choices.v1` and
@@ -471,14 +488,15 @@ formats that do not need shared host transactions.
 
 ## Marketplace
 
-The current community [marketplace](/plugins/) remains a legacy compatibility
-surface: it indexes public GitHub repositories tagged with `herdr-plugin` that
-contain `herdr-plugin.toml`. Native `vqro-extension.toml` discovery and verified
-installation are intentionally deferred to the marketplace lifecycle work; this
-contract change does not modify or pre-advertise that branch.
+The community [marketplace](/plugins/) remains a legacy compatibility surface:
+it indexes public GitHub repositories tagged with `herdr-plugin` that contain
+`herdr-plugin.toml`. The Vqro Extensions marketplace is separate. It uses a
+checked-in curated index and can inspect and install deterministic `.vqrox`
+component packages from exact Git commits without running repository build
+commands.
 
 For legacy listing, add the GitHub topic `herdr-plugin` and place compatibility
 manifests at the root or in subdirectories of the repository's default branch.
 One repository card can contain multiple separately installable plugins. The
 index refreshes every 30 minutes. See
-[Marketplace](/docs/marketplace/) for how discovery works.
+[Marketplace](/docs/marketplace/) for both discovery paths.

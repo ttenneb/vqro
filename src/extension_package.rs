@@ -1,8 +1,9 @@
 //! Package-v1 artifacts, provenance, registry state, and activation journals.
 //!
 //! This module is additive. Manifest-v1 and the legacy curated marketplace stay
-//! active through explicit compatibility projections until package runtimes are
-//! admitted by the M1b dispatcher.
+//! active through explicit compatibility projections. Package-v1 components can
+//! be instantiated by the runtime dispatcher, but production capability leases,
+//! provider admission, visible publication, and feature authority remain separate.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};

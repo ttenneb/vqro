@@ -498,10 +498,12 @@ A source mismatch leaves the active view unchanged. Set and clear responses use
 
 ## Plugin APIs
 
-The plugin API is an early interface for executable workflow tools. A plugin is
-a package with a `herdr-plugin.toml` manifest. The manifest declares startup
-hooks, shareable actions, event hooks, terminal pane entrypoints, and link
-handlers. Startup hooks run once after restore when the API is ready.
+The plugin API is the compatibility interface for legacy manifest-v1 executable
+workflow tools. A plugin uses `vqro-extension.toml`; `herdr-plugin.toml` remains
+a compatibility alias. Its commands and services run as trusted same-user code,
+not in the component-package sandbox. The manifest declares startup hooks,
+shareable actions, event hooks, terminal pane entrypoints, and link handlers.
+Startup hooks run once after restore when the API is ready.
 Actions and panes are manifest-only; runtime action registration and runtime
 argv pane creation are not part of v1.
 

@@ -1,8 +1,8 @@
 //! Staged package-bound composite read invocation context.
 //!
-//! This is internal runtime infrastructure only. Production package activation does not issue
-//! these contexts. A context may expose the two public read methods that have landed so far, but
-//! never state mutation.
+//! This is internal runtime infrastructure only. Ordinary production package-service invocations
+//! do not issue these contexts. A context may expose the two staged read methods that have landed
+//! so far, but never state mutation.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{atomic::AtomicBool, Arc};

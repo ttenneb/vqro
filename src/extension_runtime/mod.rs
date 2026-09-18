@@ -159,7 +159,7 @@ pub struct RuntimeRequestV1 {
     pub params: serde_json::Value,
 }
 
-// Reserved by the runtime-neutral contract for event delivery after M1b.
+// Reserved by the runtime-neutral contract; production event delivery is not enabled.
 #[allow(dead_code)]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct RuntimeEventV1 {
@@ -370,7 +370,7 @@ pub(crate) trait ExtensionRuntime: Send {
         response_limit: usize,
     ) -> Result<serde_json::Value, RuntimeError>;
 
-    // The envelope is frozen in M1b; event methods remain disabled until M2.
+    // The envelope is defined, but production runtime event delivery remains disabled.
     #[allow(dead_code)]
     fn deliver(
         &mut self,
@@ -579,9 +579,9 @@ impl ExtensionRuntimeDispatcher {
         )
     }
 
-    /// Staged package-v1 entry point used by host-state conformance. Package activation
-    /// does not call this until a later milestone explicitly wires it into the catalog.
-    #[allow(dead_code)] // Removed when production package activation issues state leases.
+    /// Staged package-v1 entry point used by host-state conformance. Ordinary package
+    /// service invocations do not call it until production state leases are admitted.
+    #[allow(dead_code)] // Removed when ordinary package services can receive state leases.
     pub(crate) fn invoke_with_host_state(
         &mut self,
         method: &str,
@@ -1108,6 +1108,8 @@ impl RuntimeHostCallHandler for DisabledHostCalls {
                 message: "host call capability was not granted".into(),
             }
         } else {
+            // The historical code/message is externally observable and retained unchanged.
+            // "M2" here means production neutral host-call lease/admission remains unavailable.
             RuntimeErrorBodyV1 {
                 code: "unsupported_before_m2".into(),
                 message: "neutral host-call methods are disabled until M2".into(),
@@ -1133,7 +1135,7 @@ impl RuntimeHostCallHandler for DisabledHostCalls {
     }
 }
 
-// Shared process/component vectors; the component backend will consume the same values in M1c.
+// Shared process/component conformance vectors for the runtime-neutral dispatcher.
 #[allow(dead_code)]
 #[derive(Clone, Debug, PartialEq)]
 pub struct RuntimeConformanceVector {

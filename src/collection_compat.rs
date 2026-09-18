@@ -1,9 +1,10 @@
 //! Temporary compatibility policy for the legacy Collections feature.
 //!
 //! This state is deliberately separate from the neutral terminal-container
-//! primitive. It remains the legacy oracle during M2/M3 and must be deleted at
-//! the M4 gate once external Collections is the sole policy writer and current
-//! clients no longer depend on Collection-specific behavior.
+//! primitive. It remains the legacy oracle until package-owned policy is the
+//! sole reader and writer for APIs, persistence, restore, documents, and
+//! compatibility projections. Delete it only after the tracked Collections
+//! authority-transition gates are satisfied.
 
 use std::collections::HashSet;
 

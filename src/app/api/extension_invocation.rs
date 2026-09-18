@@ -3,8 +3,8 @@ use std::collections::BTreeMap;
 use crate::app::App;
 
 impl App {
-    /// Atomically stages one package-bound read context. Production package activation does not
-    /// call this method; callers must explicitly select the bounded read purpose.
+    /// Atomically stages one package-bound read context. Ordinary production package-service
+    /// invocations do not call this method; callers must explicitly select the bounded purpose.
     #[allow(dead_code)]
     pub(crate) fn stage_host_read_authorization(
         &mut self,

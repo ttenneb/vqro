@@ -121,7 +121,7 @@ pub(crate) struct VerifiedExtensionArtifact {
     pub path: String,
 }
 
-// M1a compatibility projection is consumed by the package API in M1b; keep it
+// The legacy compatibility projection is consumed by the package API; keep it
 // additive without routing current first-party activation through it yet.
 #[allow(dead_code)]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -462,7 +462,7 @@ impl MarketplaceStateFile {
         Ok(())
     }
 
-    // M1a compatibility adapter; current marketplace responses remain frozen.
+    // Compatibility adapter preserving current marketplace response shapes.
     #[allow(dead_code)]
     pub(crate) fn package_lifecycle_views<'a>(
         &'a self,
@@ -487,7 +487,7 @@ impl MarketplaceStateFile {
         views
     }
 
-    // M1a registration primitive; runtime activation is deliberately deferred.
+    // Registry primitive only; capability leases and provider admission are separate.
     #[allow(dead_code)]
     pub(crate) fn register_package_v1(
         &mut self,

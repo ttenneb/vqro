@@ -994,7 +994,7 @@ fn capture_tab(
     }
     // Snapshot v4 remains the exact legacy shape. This joins the extracted
     // neutral placement state with temporary Collections compatibility policy;
-    // it is legacy repair, not the completed M2 persistence migration.
+    // it is legacy repair, not package-authoritative Collections persistence.
     let mut collections: Vec<_> = tab
         .collections()
         .map(|collection| CollectionSnapshot {

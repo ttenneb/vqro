@@ -1,0 +1,28 @@
+---
+title: Extension platform status
+description: Distinguish legacy executable plugins from sandboxed component packages and their current capabilities.
+---
+
+Vqro currently has two extension models with different trust and capability boundaries.
+
+| Capability | Legacy executable plugin | Component extension package |
+| --- | --- | --- |
+| Manifest | v1 | v2 in deterministic `.vqrox` |
+| Runtime | Trusted same-user process | WebAssembly Component Model component executed by Wasmtime with only the Vqro WIT world linked |
+| Repository build commands | Legacy Git install may run confirmed commands | Never run by package installation |
+| Git-installed native process | Supported by the legacy plugin path | Rejected |
+| Runtime start and supervision | Available | Available |
+| Production host document | `host.document.v1` for admitted protocol-2 services | Not yet available |
+| Production state/terminal host calls | Not supplied by the package dispatcher | Conformance only; ordinary package calls receive no lease |
+| Client-visible component contribution | Not applicable | Not yet available |
+| Collections policy authority | Bundled host compatibility provider | External package remains conformance-only |
+
+A component package that installs and starts successfully has crossed the verified artifact and runtime boundaries. That does not yet mean it can read host state, own a provider slot, publish client-visible output, or become feature authority.
+
+## Security distinction
+
+Legacy executable plugins run with the operating-system access of the Vqro user. Process supervision and descendant containment stop managed processes, but do not sandbox their filesystem or network access.
+
+Git-installed component packages use exact commits and deterministic archives. Vqro executes no repository build command, rejects native process services, and links no ambient WASI filesystem, network, process, environment, clock, or socket interfaces. Curated status does not add capabilities.
+
+See [Plugins](/docs/plugins/) for legacy authoring and security guidance. See [Marketplace](/docs/marketplace/) for the component package installation journey.
