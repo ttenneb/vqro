@@ -1,0 +1,18 @@
+{
+  "contract": "collections_authority.v1",
+  "phase": "package",
+  "authority_epoch": 2,
+  "package": {
+    "package_id": "vqro.collections",
+    "service_id": "collections",
+    "package_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "component_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "profile_contract": "vqro.collections.document-profile.v1"
+  },
+  "state": {
+    "store_generation": 3,
+    "namespace_revision": 8
+  },
+  "migration_id": "collections-cutover:01HX7N0B9R",
+  "minimum_reader_version": 7
+}

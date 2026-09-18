@@ -1,0 +1,17 @@
+{
+  "contract": "vqro.collections.production-pin.v1",
+  "package_id": "vqro.collections",
+  "service_id": "collections",
+  "source_url": "https://github.com/ttenneb/vqro-extension-collections.git",
+  "source_commit": "f3f4d2f8ce1dce8c319bf4c4d0e7224850afa868",
+  "package_path": "dist/vqro-collections.vqrox",
+  "package_sha256": "067726c3ab83b44485a28926a1fd485a9ab05d1bd807382e6388fb5457299676",
+  "manifest_sha256": "34751e197b31206ed2834a6243cd5ae27ecb8e1b44a57bb6594d55f724209385",
+  "component_sha256": "a7f4c30b3d01298249a516f6d7f1d813e638c1383eff6435e70e72d6c55b65f7",
+  "world": "vqro:extension/service@1.0.0",
+  "capabilities": [
+    "host.state.read",
+    "host.terminals.read"
+  ],
+  "profile_contract": "vqro.collections.document-profile.v1"
+}

@@ -1,0 +1,95 @@
+{
+  "actions": [],
+  "contract": "host.document.v1",
+  "generation": 5,
+  "items": [
+    {
+      "action_ids": [],
+      "flags": {
+        "attention": false,
+        "disabled": false,
+        "expanded": true,
+        "selected": false
+      },
+      "id": "collection:container_000000000000002a",
+      "label": "Helpers",
+      "role": "group"
+    },
+    {
+      "action_ids": [],
+      "flags": {
+        "attention": false,
+        "disabled": false,
+        "expanded": false,
+        "selected": false
+      },
+      "id": "text:container_000000000000002a:summary",
+      "label": "One active terminal, one archived terminal",
+      "parent_id": "collection:container_000000000000002a",
+      "role": "status"
+    },
+    {
+      "action_ids": [],
+      "flags": {
+        "attention": false,
+        "disabled": false,
+        "expanded": false,
+        "selected": true
+      },
+      "id": "terminal:term_11111111111111111111111111111111",
+      "label": "Build",
+      "parent_id": "collection:container_000000000000002a",
+      "role": "terminal",
+      "terminal": {
+        "placement": {
+          "pane_id": "pane_1",
+          "tab_id": "tab_11111111111111111111111111111111",
+          "workspace_id": "w1"
+        },
+        "terminal_id": "term_11111111111111111111111111111111"
+      }
+    },
+    {
+      "action_ids": [],
+      "flags": {
+        "attention": false,
+        "disabled": false,
+        "expanded": true,
+        "selected": false
+      },
+      "id": "archive:container_000000000000002a",
+      "label": "Archive",
+      "parent_id": "collection:container_000000000000002a",
+      "role": "section"
+    },
+    {
+      "action_ids": [],
+      "flags": {
+        "attention": false,
+        "disabled": false,
+        "expanded": false,
+        "selected": false
+      },
+      "id": "terminal:term_22222222222222222222222222222222",
+      "label": "Old build",
+      "parent_id": "archive:container_000000000000002a",
+      "role": "terminal",
+      "terminal": {
+        "placement": {
+          "pane_id": "pane_2",
+          "tab_id": "tab_11111111111111111111111111111111",
+          "workspace_id": "w1"
+        },
+        "terminal_id": "term_22222222222222222222222222222222"
+      }
+    }
+  ],
+  "namespace": "vqro.collections",
+  "required_capabilities": [],
+  "revision": 7,
+  "surface": "navigation",
+  "target": {
+    "kind": "tab",
+    "tab_id": "tab_11111111111111111111111111111111"
+  }
+}

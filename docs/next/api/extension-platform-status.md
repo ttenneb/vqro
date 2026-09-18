@@ -36,7 +36,8 @@ Use these lifecycle terms precisely:
 | `host.document.render.v2` invocation and audit | Not part of the legacy surface | Test-only semantic/conformance gate |
 | Document-v2 provider admission | Unavailable | Unavailable |
 | Document-v2 client-visible publication | Unavailable | Unavailable |
-| Document-bound package actions/effect plans | Unavailable | Not yet defined as a production contract |
+| Collections document profile/projections | Unavailable | R0 schema, validator, and fixtures only; no registered service method or publication path |
+| Document-bound package actions/effect plans | Unavailable | Collections-specific R0 schemas and validators only; no ticket issuer or commit path |
 | Collections policy authority | Bundled host implementation | Unavailable; external package is conformance-only |
 | Stable component author SDK | Unavailable | Unavailable |
 
@@ -49,6 +50,8 @@ The `availability` strings in the frozen `host-state-v1` and `host-terminals-v1`
 The checked-in `vqro.collections` manifest is a legacy bundled compatibility provider. It starts the current Vqro binary with `_extension-service collections`; the Collections policy implementation, compatibility API, persistence projection, and current client behavior remain host-owned.
 
 The separately pinned external Collections component proves package verification, component execution, bounded host-call routing, exact state/terminal observations, and document-v2 semantic auditing in an ignored conformance test. It is not the production catalog owner and does not affect the visible document or persistence authority.
+
+The [Collections v1 R0 contracts](vqro-collections-v1.md) now freeze the profile, compatibility projections, typed actions, one-state-CAS plan, durable authority shape, snapshot reader floor, and operation baseline. They are dormant contracts: a separate exact-Git artifact record is pinned for future explicit installation, but no host read lease, provider admission, ticket issuer, state commit path, visible publication, or authority transition is installed.
 
 See the accepted [Collections package authority transition](../architecture/collections-authority-transition.md) for the implementation boundaries.
 

@@ -1,0 +1,76 @@
+{
+  "$defs": {
+    "CollectionsStateCasV1": {
+      "additionalProperties": false,
+      "description": "Exactly one opaque write or delete in the package's host-bound namespace.",
+      "properties": {
+        "key": {
+          "maxLength": 26,
+          "minLength": 26,
+          "pattern": "^container_[0-9a-f]{16}$",
+          "type": "string"
+        },
+        "value": true
+      },
+      "required": [
+        "key"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "https://vqro.dev/schema/collections/effect-plan/v1",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "contract": "vqro.collections.effect-plan.v1",
+  "limits": {
+    "max_state_value_bytes": 32768,
+    "state_operations": 1
+  },
+  "properties": {
+    "contract": {
+      "const": "vqro.collections.effect-plan.v1",
+      "type": "string"
+    },
+    "expected_namespace_revision": {
+      "format": "uint64",
+      "maximum": 18446744073709551615,
+      "minimum": 0,
+      "type": "integer"
+    },
+    "expected_store_generation": {
+      "format": "uint64",
+      "maximum": 18446744073709551615,
+      "minimum": 1,
+      "type": "integer"
+    },
+    "idempotency_key": {
+      "maxLength": 256,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9._:/-]+$",
+      "type": "string"
+    },
+    "state": {
+      "$ref": "#/$defs/CollectionsStateCasV1"
+    },
+    "ticket": {
+      "maxLength": 256,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9._:/-]+$",
+      "type": "string"
+    }
+  },
+  "required": [
+    "contract",
+    "ticket",
+    "idempotency_key",
+    "expected_store_generation",
+    "expected_namespace_revision",
+    "state"
+  ],
+  "title": "vqro Collections effect plan v1",
+  "type": "object",
+  "validation_authority": {
+    "json_schema": "structural and per-field constraints",
+    "rust_validator": "normative for one-shot ticket, idempotency, CAS, subject-key binding, and value byte bounds"
+  }
+}

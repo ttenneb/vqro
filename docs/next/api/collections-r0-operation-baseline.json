@@ -1,0 +1,120 @@
+{
+  "contract": "vqro.collections.operation-baseline.v1",
+  "runtime_revision": "99fede25",
+  "measurement": "deterministic ownership and dispatch counts",
+  "scenarios": [
+    {
+      "id": "one-service-one-pane-one-client",
+      "enabled_services": 1,
+      "changed_scopes": 1,
+      "panes": 1,
+      "clients": 1,
+      "composed_frames": 60,
+      "counts": {
+        "component_factories": 1,
+        "wasmtime_engines": 1,
+        "compiled_components": 1,
+        "active_stores": 1,
+        "active_instances": 1,
+        "provider_invocations": 1,
+        "extension_calls_during_frame_composition": 0,
+        "cached_projection_fanout": 1
+      }
+    },
+    {
+      "id": "one-service-fifteen-panes-three-clients",
+      "enabled_services": 1,
+      "changed_scopes": 1,
+      "panes": 15,
+      "clients": 3,
+      "composed_frames": 60,
+      "counts": {
+        "component_factories": 1,
+        "wasmtime_engines": 1,
+        "compiled_components": 1,
+        "active_stores": 1,
+        "active_instances": 1,
+        "provider_invocations": 1,
+        "extension_calls_during_frame_composition": 0,
+        "cached_projection_fanout": 3
+      }
+    },
+    {
+      "id": "fifteen-services-fifteen-scopes-one-client",
+      "enabled_services": 15,
+      "changed_scopes": 15,
+      "panes": 15,
+      "clients": 1,
+      "composed_frames": 60,
+      "counts": {
+        "component_factories": 15,
+        "wasmtime_engines": 15,
+        "compiled_components": 15,
+        "active_stores": 15,
+        "active_instances": 15,
+        "provider_invocations": 15,
+        "extension_calls_during_frame_composition": 0,
+        "cached_projection_fanout": 1
+      }
+    },
+    {
+      "id": "fifteen-services-fifteen-scopes-three-clients",
+      "enabled_services": 15,
+      "changed_scopes": 15,
+      "panes": 15,
+      "clients": 3,
+      "composed_frames": 60,
+      "counts": {
+        "component_factories": 15,
+        "wasmtime_engines": 15,
+        "compiled_components": 15,
+        "active_stores": 15,
+        "active_instances": 15,
+        "provider_invocations": 15,
+        "extension_calls_during_frame_composition": 0,
+        "cached_projection_fanout": 3
+      }
+    },
+    {
+      "id": "fifteen-services-one-scope-invalidated",
+      "enabled_services": 15,
+      "changed_scopes": 1,
+      "panes": 15,
+      "clients": 3,
+      "composed_frames": 60,
+      "counts": {
+        "component_factories": 15,
+        "wasmtime_engines": 15,
+        "compiled_components": 15,
+        "active_stores": 15,
+        "active_instances": 15,
+        "provider_invocations": 1,
+        "extension_calls_during_frame_composition": 0,
+        "cached_projection_fanout": 3
+      }
+    },
+    {
+      "id": "one-hundred-service-cold-capacity",
+      "enabled_services": 100,
+      "changed_scopes": 0,
+      "panes": 0,
+      "clients": 0,
+      "composed_frames": 0,
+      "counts": {
+        "component_factories": 100,
+        "wasmtime_engines": 100,
+        "compiled_components": 100,
+        "active_stores": 0,
+        "active_instances": 0,
+        "provider_invocations": 0,
+        "extension_calls_during_frame_composition": 0,
+        "cached_projection_fanout": 0
+      }
+    }
+  ],
+  "bounded_completion_cases": {
+    "stale_result_publications": 0,
+    "canceled_result_publications": 0,
+    "maximum_completion_attempts_per_ticket": 1
+  }
+}

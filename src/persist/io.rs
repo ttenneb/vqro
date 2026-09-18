@@ -530,17 +530,23 @@ mod tests {
         ));
         assert_eq!(std::fs::read(&malformed).unwrap(), b"not json");
 
+        let rejection: serde_json::Value = serde_json::from_slice(include_bytes!(
+            "../../docs/next/api/vqro-collections-v1.fixtures/old-reader-rejection-v7.json"
+        ))
+        .unwrap();
+        assert_eq!(rejection["snapshot_version"], SNAPSHOT_VERSION + 1);
+        assert_eq!(rejection["reader_snapshot_version"], SNAPSHOT_VERSION);
         let newer = temp_session_path("newer-load");
         std::fs::create_dir_all(newer.parent().unwrap()).unwrap();
         let newer_bytes = format!(
             "{{\"version\":{},\"future_identity\":{{\"must\":\"survive\"}}}}",
-            SNAPSHOT_VERSION + 1
+            rejection["snapshot_version"]
         );
         std::fs::write(&newer, &newer_bytes).unwrap();
-        assert!(matches!(
-            load_for_startup_from_path(&newer),
-            StartupSessionLoad::Rejected(_)
-        ));
+        let StartupSessionLoad::Rejected(error) = load_for_startup_from_path(&newer) else {
+            panic!("version-6 reader accepted the package-authority snapshot version")
+        };
+        assert!(error.contains(rejection["expected_error"].as_str().unwrap()));
         assert_eq!(std::fs::read_to_string(&newer).unwrap(), newer_bytes);
 
         let unreadable = temp_session_path("unreadable-load");

@@ -1,0 +1,129 @@
+{
+  "$defs": {
+    "CollectionsAuthorityPackageV1": {
+      "additionalProperties": false,
+      "properties": {
+        "component_sha256": {
+          "maxLength": 64,
+          "minLength": 64,
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "package_id": {
+          "const": "vqro.collections",
+          "type": "string"
+        },
+        "package_sha256": {
+          "maxLength": 64,
+          "minLength": 64,
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "profile_contract": {
+          "const": "vqro.collections.document-profile.v1",
+          "type": "string"
+        },
+        "service_id": {
+          "const": "collections",
+          "type": "string"
+        }
+      },
+      "required": [
+        "package_id",
+        "service_id",
+        "package_sha256",
+        "component_sha256",
+        "profile_contract"
+      ],
+      "type": "object"
+    },
+    "CollectionsAuthorityPhaseV1": {
+      "enum": [
+        "legacy",
+        "package"
+      ],
+      "type": "string"
+    },
+    "CollectionsAuthorityStateV1": {
+      "additionalProperties": false,
+      "properties": {
+        "namespace_revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "store_generation": {
+          "format": "uint64",
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "store_generation",
+        "namespace_revision"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "https://vqro.dev/schema/collections/authority/v1",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "contract": "collections_authority.v1",
+  "properties": {
+    "authority_epoch": {
+      "format": "uint64",
+      "minimum": 1,
+      "type": "integer"
+    },
+    "contract": {
+      "const": "collections_authority.v1",
+      "type": "string"
+    },
+    "migration_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "minimum_reader_version": {
+      "const": 7,
+      "type": "integer"
+    },
+    "package": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/CollectionsAuthorityPackageV1"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "phase": {
+      "$ref": "#/$defs/CollectionsAuthorityPhaseV1"
+    },
+    "state": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/CollectionsAuthorityStateV1"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  },
+  "required": [
+    "contract",
+    "phase",
+    "authority_epoch",
+    "minimum_reader_version"
+  ],
+  "title": "Vqro Collections durable authority record v1",
+  "type": "object",
+  "validation_authority": {
+    "json_schema": "structural and canonical field forms",
+    "rust_validator": "normative for phase-specific optional fields and package binding",
+    "snapshot_version": 7
+  }
+}

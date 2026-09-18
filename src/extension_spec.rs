@@ -13,6 +13,17 @@ pub const HOST_DOCUMENT_SCHEMA_ID_V2: &str = crate::host_document_v2::HOST_DOCUM
 pub const HOST_DOCUMENT_RENDER_SCHEMA_ID_V2: &str =
     crate::host_document_v2::HOST_DOCUMENT_RENDER_SCHEMA_ID_V2;
 pub const HOST_TERMINALS_SCHEMA_ID_V1: &str = "https://vqro.dev/schema/host-terminals/v1";
+pub const COLLECTIONS_DOCUMENT_PROFILE_SCHEMA_ID_V1: &str =
+    "https://vqro.dev/schema/collections/document-profile/v1";
+pub const COLLECTIONS_ACTIONS_SCHEMA_ID_V1: &str = "https://vqro.dev/schema/collections/actions/v1";
+pub const COLLECTIONS_ACTION_INVOCATION_SCHEMA_ID_V1: &str =
+    "https://vqro.dev/schema/collections/action-invocation/v1";
+pub const COLLECTIONS_EFFECT_PLAN_SCHEMA_ID_V1: &str =
+    "https://vqro.dev/schema/collections/effect-plan/v1";
+pub const COLLECTIONS_PRODUCTION_PIN_SCHEMA_ID_V1: &str =
+    "https://vqro.dev/schema/collections/production-pin/v1";
+pub const COLLECTIONS_AUTHORITY_SCHEMA_ID_V1: &str =
+    "https://vqro.dev/schema/collections/authority/v1";
 pub const EXTENSION_BUNDLE_SCHEMA_ID_V1: &str = "https://vqro.dev/schema/extensions/v1";
 pub const PACKAGE_SCHEMA_ID_V1: &str = crate::extension_package::PACKAGE_SCHEMA_ID_V1;
 pub const EXTENSION_MANIFEST_SCHEMA_ID_V2: &str = crate::extension_package::MANIFEST_SCHEMA_ID_V2;
@@ -304,6 +315,279 @@ pub fn host_document_render_v2_schema_document() -> serde_json::Value {
     schema
 }
 
+pub fn collections_production_pin_schema_document() -> serde_json::Value {
+    let mut schema =
+        collections_schema::<crate::collections_extension_contract::CollectionsProductionPinV1>(
+            COLLECTIONS_PRODUCTION_PIN_SCHEMA_ID_V1,
+            "vqro Collections production pin v1",
+            crate::collections_extension_contract::COLLECTIONS_PRODUCTION_PIN_CONTRACT_V1,
+        );
+    schema["properties"]["package_id"]["const"] =
+        serde_json::json!(crate::collections_extension_contract::COLLECTIONS_PACKAGE_ID);
+    schema["properties"]["service_id"]["const"] = serde_json::json!("collections");
+    schema["properties"]["source_url"] = serde_json::json!({
+        "format": "uri",
+        "pattern": "^https://[^@]+$",
+        "type": "string",
+    });
+    schema["properties"]["source_commit"] = lower_hex_schema(40);
+    for field in ["package_sha256", "manifest_sha256", "component_sha256"] {
+        schema["properties"][field] = lower_hex_schema(64);
+    }
+    schema["properties"]["package_path"] = serde_json::json!({
+        "pattern": r"^[A-Za-z0-9._/-]+\.vqrox$",
+        "type": "string",
+    });
+    schema["properties"]["world"]["const"] = serde_json::json!("vqro:extension/service@1.0.0");
+    schema["properties"]["capabilities"] = serde_json::json!({
+        "const": ["host.state.read", "host.terminals.read"],
+        "type": "array",
+    });
+    schema["properties"]["profile_contract"]["const"] = serde_json::json!(
+        crate::collections_extension_contract::COLLECTIONS_DOCUMENT_PROFILE_CONTRACT_V1
+    );
+    schema["validation_authority"] = serde_json::json!({
+        "json_schema": "structural and canonical field forms",
+        "rust_validator": "normative for credential-free source URLs, relative package paths, exact capabilities, and digest syntax",
+    });
+    schema
+}
+
+pub fn collections_authority_schema_document() -> serde_json::Value {
+    let mut schema =
+        collections_schema::<crate::collections_extension_contract::CollectionsAuthorityV1>(
+            COLLECTIONS_AUTHORITY_SCHEMA_ID_V1,
+            "Vqro Collections durable authority record v1",
+            crate::collections_extension_contract::COLLECTIONS_AUTHORITY_CONTRACT_V1,
+        );
+    schema["properties"]["authority_epoch"]["minimum"] = serde_json::json!(1);
+    schema["properties"]["minimum_reader_version"] = serde_json::json!({
+        "const": crate::collections_extension_contract::COLLECTIONS_PACKAGE_AUTHORITY_MINIMUM_READER_VERSION,
+        "type": "integer",
+    });
+    schema["$defs"]["CollectionsAuthorityPackageV1"]["properties"]["package_id"]["const"] =
+        serde_json::json!(crate::collections_extension_contract::COLLECTIONS_PACKAGE_ID);
+    schema["$defs"]["CollectionsAuthorityPackageV1"]["properties"]["service_id"]["const"] =
+        serde_json::json!("collections");
+    for field in ["package_sha256", "component_sha256"] {
+        schema["$defs"]["CollectionsAuthorityPackageV1"]["properties"][field] =
+            lower_hex_schema(64);
+    }
+    schema["$defs"]["CollectionsAuthorityPackageV1"]["properties"]["profile_contract"]["const"] = serde_json::json!(
+        crate::collections_extension_contract::COLLECTIONS_DOCUMENT_PROFILE_CONTRACT_V1
+    );
+    schema["$defs"]["CollectionsAuthorityStateV1"]["properties"]["store_generation"]["minimum"] =
+        serde_json::json!(1);
+    schema["validation_authority"] = serde_json::json!({
+        "json_schema": "structural and canonical field forms",
+        "rust_validator": "normative for phase-specific optional fields and package binding",
+        "snapshot_version": crate::collections_extension_contract::COLLECTIONS_PACKAGE_AUTHORITY_SNAPSHOT_VERSION,
+    });
+    schema
+}
+
+pub fn collections_document_profile_schema_document() -> serde_json::Value {
+    let mut schema =
+        collections_schema::<crate::collections_extension_contract::CollectionsDocumentProfileV1>(
+            COLLECTIONS_DOCUMENT_PROFILE_SCHEMA_ID_V1,
+            "vqro Collections document profile v1",
+            crate::collections_extension_contract::COLLECTIONS_DOCUMENT_PROFILE_CONTRACT_V1,
+        );
+    schema["properties"]["document"] = serde_json::json!({
+        "$ref": HOST_DOCUMENT_SCHEMA_ID_V2,
+    });
+    schema["properties"]["collections"]["maxItems"] =
+        serde_json::json!(crate::host_document_v2::MAX_DOCUMENT_V2_NODES);
+    let collection_definition = schema["$defs"]["CollectionsDocumentCollectionV1"].take();
+    schema["$defs"] = serde_json::json!({
+        "CollectionsDocumentCollectionV1": collection_definition,
+    });
+    schema["$defs"]["CollectionsDocumentCollectionV1"]["properties"]["container_id"] =
+        container_id_schema();
+    schema["$defs"]["CollectionsDocumentCollectionV1"]["properties"]["label"] =
+        collections_text_schema(
+            crate::collections_extension_contract::MAX_COLLECTIONS_LABEL_BYTES,
+            false,
+        );
+    schema["$defs"]["CollectionsDocumentCollectionV1"]["properties"]["label"]["type"] =
+        serde_json::json!(["string", "null"]);
+    schema["validation_authority"] = serde_json::json!({
+        "json_schema": "structural and per-field constraints",
+        "rust_validator": "normative for exact topology coverage, canonical node ids, archive shape, ordering, and synchronized compatibility projection",
+    });
+    schema
+}
+
+pub fn collections_actions_schema_document() -> serde_json::Value {
+    let mut schema = collections_schema::<
+        crate::collections_extension_contract::CollectionsActionDeclarationsV1,
+    >(
+        COLLECTIONS_ACTIONS_SCHEMA_ID_V1,
+        "vqro Collections action declarations v1",
+        crate::collections_extension_contract::COLLECTIONS_ACTIONS_CONTRACT_V1,
+    );
+    schema["properties"]["document_revision"]["minimum"] = serde_json::json!(1);
+    schema["properties"]["revision"]["minimum"] = serde_json::json!(1);
+    schema["properties"]["actions"]["maxItems"] =
+        serde_json::json!(crate::collections_extension_contract::MAX_COLLECTIONS_ACTIONS);
+    for field in ["id", "subject_node_id"] {
+        schema["$defs"]["CollectionsActionDeclarationV1"]["properties"][field] =
+            collections_identifier_schema();
+    }
+    schema["$defs"]["CollectionsActionDeclarationV1"]["properties"]["label"] =
+        collections_text_schema(
+            crate::collections_extension_contract::MAX_COLLECTIONS_ACTION_LABEL_BYTES,
+            true,
+        );
+    schema["validation_authority"] = serde_json::json!({
+        "json_schema": "structural and per-field constraints",
+        "rust_validator": "normative for unique ids, typed subjects, and profile/document revision binding",
+    });
+    schema
+}
+
+pub fn collections_action_invocation_schema_document() -> serde_json::Value {
+    let mut schema =
+        collections_schema::<crate::collections_extension_contract::CollectionsActionInvocationV1>(
+            COLLECTIONS_ACTION_INVOCATION_SCHEMA_ID_V1,
+            "vqro Collections action invocation v1",
+            crate::collections_extension_contract::COLLECTIONS_ACTION_INVOCATION_CONTRACT_V1,
+        );
+    for field in ["ticket", "idempotency_key", "action_id"] {
+        schema["properties"][field] = collections_identifier_schema();
+    }
+    for field in [
+        "document_revision",
+        "actions_revision",
+        "expected_store_generation",
+    ] {
+        schema["properties"][field]["minimum"] = serde_json::json!(1);
+        schema["properties"][field]["maximum"] = serde_json::json!(u64::MAX);
+    }
+    schema["properties"]["expected_namespace_revision"]["maximum"] = serde_json::json!(u64::MAX);
+    let input_variants = schema["$defs"]["CollectionsActionInputV1"]["oneOf"]
+        .as_array_mut()
+        .expect("Collections action input variants are an array");
+    input_variants[0]["properties"]["container_id"] = container_id_schema();
+    input_variants[0]["properties"]["label"] = collections_text_schema(
+        crate::collections_extension_contract::MAX_COLLECTIONS_LABEL_BYTES,
+        false,
+    );
+    input_variants[0]["properties"]["label"]["type"] = serde_json::json!(["string", "null"]);
+    input_variants[1]["properties"]["container_id"] = container_id_schema();
+    input_variants[1]["properties"]["terminal_id"] = terminal_id_schema();
+    let dependency_variants = schema["$defs"]["CollectionsActionDependencyV1"]["oneOf"]
+        .as_array_mut()
+        .expect("Collections action dependency variants are an array");
+    dependency_variants[0]["properties"]["container_id"] = container_id_schema();
+    dependency_variants[1]["properties"]["container_id"] = container_id_schema();
+    dependency_variants[1]["properties"]["terminal_id"] = terminal_id_schema();
+    dependency_variants[1]["properties"]["terminal_snapshot_fingerprint_sha256"] = serde_json::json!({
+        "maxLength": 64,
+        "minLength": 64,
+        "pattern": "^[0-9a-f]{64}$",
+        "type": "string",
+    });
+    dependency_variants[1]["properties"]["provider_generation"]["minimum"] = serde_json::json!(1);
+    dependency_variants[1]["properties"]["provider_generation"]["maximum"] =
+        serde_json::json!(u64::MAX);
+    schema["validation_authority"] = serde_json::json!({
+        "json_schema": "structural and per-field constraints",
+        "rust_validator": "normative for canonical identities, label byte/control bounds, declaration matching, and revision fences",
+    });
+    schema
+}
+
+pub fn collections_effect_plan_schema_document() -> serde_json::Value {
+    let mut schema =
+        collections_schema::<crate::collections_extension_contract::CollectionsEffectPlanV1>(
+            COLLECTIONS_EFFECT_PLAN_SCHEMA_ID_V1,
+            "vqro Collections effect plan v1",
+            crate::collections_extension_contract::COLLECTIONS_EFFECT_PLAN_CONTRACT_V1,
+        );
+    for field in ["ticket", "idempotency_key"] {
+        schema["properties"][field] = collections_identifier_schema();
+    }
+    schema["properties"]["expected_store_generation"]["minimum"] = serde_json::json!(1);
+    schema["properties"]["expected_store_generation"]["maximum"] = serde_json::json!(u64::MAX);
+    schema["properties"]["expected_namespace_revision"]["maximum"] = serde_json::json!(u64::MAX);
+    schema["$defs"]["CollectionsStateCasV1"]["properties"]["key"] = container_id_schema();
+    schema["limits"] = serde_json::json!({
+        "state_operations": 1,
+        "max_state_value_bytes": crate::extension_state::MAX_STATE_VALUE_BYTES,
+    });
+    schema["validation_authority"] = serde_json::json!({
+        "json_schema": "structural and per-field constraints",
+        "rust_validator": "normative for one-shot ticket, idempotency, CAS, subject-key binding, and value byte bounds",
+    });
+    schema
+}
+
+fn collections_schema<T: schemars::JsonSchema>(
+    id: &str,
+    title: &str,
+    contract: &str,
+) -> serde_json::Value {
+    let mut schema = serde_json::to_value(schemars::schema_for!(T))
+        .expect("generated Collections schema serializes");
+    schema["$id"] = serde_json::Value::String(id.into());
+    schema["title"] = serde_json::Value::String(title.into());
+    schema["contract"] = serde_json::Value::String(contract.into());
+    schema["properties"]["contract"] = serde_json::json!({
+        "const": contract,
+        "type": "string",
+    });
+    schema
+}
+
+fn collections_identifier_schema() -> serde_json::Value {
+    serde_json::json!({
+        "maxLength": crate::collections_extension_contract::MAX_COLLECTIONS_IDENTIFIER_BYTES,
+        "minLength": 1,
+        "pattern": "^[A-Za-z0-9._:/-]+$",
+        "type": "string",
+    })
+}
+
+fn collections_text_schema(max_length: usize, nonempty: bool) -> serde_json::Value {
+    let mut schema = serde_json::json!({
+        "maxLength": max_length,
+        "pattern": r"^[^\u0000-\u001F\u007F-\u009F]*$",
+        "type": "string",
+    });
+    if nonempty {
+        schema["minLength"] = serde_json::json!(1);
+    }
+    schema
+}
+
+fn lower_hex_schema(length: usize) -> serde_json::Value {
+    serde_json::json!({
+        "maxLength": length,
+        "minLength": length,
+        "pattern": format!("^[0-9a-f]{{{length}}}$"),
+        "type": "string",
+    })
+}
+
+fn terminal_id_schema() -> serde_json::Value {
+    serde_json::json!({
+        "maxLength": crate::terminal::MAX_TERMINAL_ID_BYTES,
+        "minLength": crate::terminal::MAX_TERMINAL_ID_BYTES,
+        "pattern": "^term_[0-9a-f]{32}$",
+        "type": "string",
+    })
+}
+
+fn container_id_schema() -> serde_json::Value {
+    serde_json::json!({
+        "maxLength": crate::extension_host_terminals::HOST_CONTAINER_ID_BYTES,
+        "minLength": crate::extension_host_terminals::HOST_CONTAINER_ID_BYTES,
+        "pattern": "^container_[0-9a-f]{16}$",
+        "type": "string",
+    })
+}
+
 pub fn host_terminals_schema_document() -> serde_json::Value {
     let mut document = serde_json::json!({
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -556,6 +840,30 @@ pub fn host_document_render_v2_schema_json() -> &'static str {
 
 pub fn host_terminals_schema_json() -> &'static str {
     include_str!("../docs/next/api/host-terminals-v1.schema.json")
+}
+
+pub fn collections_production_pin_schema_json() -> &'static str {
+    include_str!("../docs/next/api/vqro-collections-production-pin-v1.schema.json")
+}
+
+pub fn collections_authority_schema_json() -> &'static str {
+    include_str!("../docs/next/api/collections-authority-v1.schema.json")
+}
+
+pub fn collections_document_profile_schema_json() -> &'static str {
+    include_str!("../docs/next/api/vqro-collections-document-profile-v1.schema.json")
+}
+
+pub fn collections_actions_schema_json() -> &'static str {
+    include_str!("../docs/next/api/vqro-collections-actions-v1.schema.json")
+}
+
+pub fn collections_action_invocation_schema_json() -> &'static str {
+    include_str!("../docs/next/api/vqro-collections-action-invocation-v1.schema.json")
+}
+
+pub fn collections_effect_plan_schema_json() -> &'static str {
+    include_str!("../docs/next/api/vqro-collections-effect-plan-v1.schema.json")
 }
 
 pub fn service_schema_json() -> &'static str {
@@ -873,6 +1181,30 @@ mod tests {
             (
                 "docs/next/api/host-terminals-v1.schema.json",
                 host_terminals_schema_document(),
+            ),
+            (
+                "docs/next/api/vqro-collections-production-pin-v1.schema.json",
+                collections_production_pin_schema_document(),
+            ),
+            (
+                "docs/next/api/collections-authority-v1.schema.json",
+                collections_authority_schema_document(),
+            ),
+            (
+                "docs/next/api/vqro-collections-document-profile-v1.schema.json",
+                collections_document_profile_schema_document(),
+            ),
+            (
+                "docs/next/api/vqro-collections-actions-v1.schema.json",
+                collections_actions_schema_document(),
+            ),
+            (
+                "docs/next/api/vqro-collections-action-invocation-v1.schema.json",
+                collections_action_invocation_schema_document(),
+            ),
+            (
+                "docs/next/api/vqro-collections-effect-plan-v1.schema.json",
+                collections_effect_plan_schema_document(),
             ),
             (
                 "docs/next/api/vqro-service-v1.schema.json",

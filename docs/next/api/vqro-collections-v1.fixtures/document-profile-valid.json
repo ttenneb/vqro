@@ -1,0 +1,86 @@
+{
+  "contract": "vqro.collections.document-profile.v1",
+  "document": {
+    "contract": "host.document.v2",
+    "producer": {
+      "package_id": "vqro.collections",
+      "service_id": "collections",
+      "artifact_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "runtime_generation": 3,
+      "provider_generation": 5,
+      "scope_generation": 11
+    },
+    "scope": {
+      "contract": "host.tab.v1",
+      "scope_id": "tab_11111111111111111111111111111111"
+    },
+    "revision": 7,
+    "dependencies": [
+      {
+        "contract": "host.state.v1",
+        "scope_id": "state_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "revision": 4,
+        "generation": 2
+      },
+      {
+        "contract": "host.terminals.v1",
+        "scope_id": "tab_11111111111111111111111111111111/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "revision": 1,
+        "generation": 5
+      }
+    ],
+    "roots": ["collection:container_000000000000002a"],
+    "nodes": [
+      {
+        "kind": "group",
+        "id": "collection:container_000000000000002a",
+        "accessibility": {
+          "name": "Helpers"
+        },
+        "children": [
+          "text:container_000000000000002a:summary",
+          "terminal:term_11111111111111111111111111111111",
+          "archive:container_000000000000002a"
+        ]
+      },
+      {
+        "kind": "text",
+        "id": "text:container_000000000000002a:summary",
+        "accessibility": {
+          "name": "Collection status"
+        },
+        "text": "One active terminal, one archived terminal"
+      },
+      {
+        "kind": "terminal_slot",
+        "id": "terminal:term_11111111111111111111111111111111",
+        "accessibility": {
+          "name": "Build"
+        },
+        "terminal_id": "term_11111111111111111111111111111111"
+      },
+      {
+        "kind": "group",
+        "id": "archive:container_000000000000002a",
+        "accessibility": {
+          "name": "Archive"
+        },
+        "children": ["terminal:term_22222222222222222222222222222222"]
+      },
+      {
+        "kind": "terminal_slot",
+        "id": "terminal:term_22222222222222222222222222222222",
+        "accessibility": {
+          "name": "Old build"
+        },
+        "terminal_id": "term_22222222222222222222222222222222"
+      }
+    ]
+  },
+  "collections": [
+    {
+      "container_id": "container_000000000000002a",
+      "label": "Helpers"
+    }
+  ]
+}

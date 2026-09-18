@@ -65,7 +65,7 @@ A user who has not installed Collections keeps the bundled provider before cutov
 
 The profile is audited against the v2 forest, exact neutral terminal/container dependency, and exact package-state revision dependency without exposing policy values in the host.
 
-The profile requires one root group per live neutral container. Root order equals neutral container order. A root ID canonically embeds its container ID and its accessible name carries the label. Active terminal slots appear in neutral member order. Archived terminal slots appear under one canonical archive subgroup in neutral member order. Every live member appears exactly once. Text nodes may not carry hidden policy. The host validates shape, references, topology coverage, and dependency freshness; the package decides archive membership.
+The profile requires one root group per live neutral container. Root order equals neutral container order. A root ID canonically embeds its container ID; its accessible name carries the effective rendered label, while the profile sidecar preserves the exact optional generation-1 label (`null`, empty, or nonempty). Active terminal slots appear in neutral member order. Archived terminal slots appear under one canonical archive subgroup in neutral member order. Every live member appears exactly once. Text nodes may not carry hidden policy. The host validates shape, references, topology coverage, and dependency freshness; the package decides archive membership.
 
 The read-only v2-to-v1 projection is deterministic:
 
@@ -78,7 +78,7 @@ The read-only v2-to-v1 projection is deterministic:
 The generation-1 Collections structure projection combines neutral host facts with the audited profile:
 
 - ID, workspace, tab, focus, selected member, membership, and index come from neutral state;
-- label comes from the canonical root;
+- exact optional label comes from the profile sidecar and agrees with the canonical root's effective rendered label;
 - `archived` is true exactly for slots under the canonical archive subgroup;
 - projection revision advances when document revision, neutral dependency, provider generation, or availability changes.
 

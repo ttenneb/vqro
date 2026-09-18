@@ -25,6 +25,7 @@ mod client;
 mod collection_compat;
 mod collection_mirror;
 mod collection_policy;
+pub mod collections_extension_contract;
 mod config;
 mod copy_mode;
 mod delegation;

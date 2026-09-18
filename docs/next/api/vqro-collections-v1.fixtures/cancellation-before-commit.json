@@ -1,0 +1,18 @@
+{
+  "case": "cancellation-before-commit",
+  "invocation_fixture": "invocation-set-label-valid.json",
+  "sequence": [
+    "issue_ticket",
+    "dispatch_package",
+    "cancel_caller",
+    "revoke_ticket",
+    "receive_late_effect_plan"
+  ],
+  "expected": {
+    "effect_plan_accepted": false,
+    "state_transactions": 0,
+    "session_image_replacements": 0,
+    "ticket_status": "revoked",
+    "visible_projection_changes": 0
+  }
+}
