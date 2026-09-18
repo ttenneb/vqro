@@ -6,12 +6,12 @@ use ratatui::layout::Direction;
 use tokio::sync::{mpsc, Notify};
 use tracing::{error, warn};
 
-use crate::collection_compat::CollectionCompatibilityPolicy;
 use crate::detect::AgentState;
 use crate::events::AppEvent;
 #[cfg(test)]
 use crate::layout::Node;
 use crate::layout::{CollectionId, LayoutLeaf, PaneId, TileLayout, TypedNode};
+use crate::legacy_collection_snapshot::LegacyCollectionSnapshot;
 use crate::pane::{PaneLaunchEnv, PaneState};
 use crate::render_signal::RenderSignal;
 use crate::terminal::{TerminalId, TerminalRuntime, TerminalState};
@@ -68,7 +68,7 @@ type RestoreFailures<T> = (T, usize);
 
 struct RecoveredTabLayout {
     layout: TileLayout,
-    collection_policy: HashMap<TerminalContainerId, CollectionCompatibilityPolicy>,
+    legacy_collection_snapshots: HashMap<TerminalContainerId, LegacyCollectionSnapshot>,
 }
 
 /// Restore delegation provenance while remapping persisted pane IDs to fresh runtime IDs.
@@ -997,7 +997,7 @@ fn restore_tab(
                 number,
                 root_pane,
                 recovered.layout,
-                recovered.collection_policy,
+                recovered.legacy_collection_snapshots,
                 panes,
                 snap.zoomed,
                 runtime_context.events.clone(),
@@ -1285,7 +1285,7 @@ fn recover_typed_layout(
         collect_tiled(node, &mut placed);
     }
     let mut collections = Vec::new();
-    let mut collection_policy = HashMap::new();
+    let mut legacy_collection_snapshots = HashMap::new();
     let mut ids: Vec<_> = collection_ids.into_iter().collect();
     ids.sort_by_key(|id| id.raw());
     for id in ids {
@@ -1313,9 +1313,9 @@ fn recover_typed_layout(
             .filter(|pane| members.contains(pane))
             .collect();
         if let Some(collection) = TerminalContainer::from_legacy(id, members, selected) {
-            collection_policy.insert(
+            legacy_collection_snapshots.insert(
                 id,
-                CollectionCompatibilityPolicy::from_legacy(saved.label.clone(), archived),
+                LegacyCollectionSnapshot::from_legacy(saved.label.clone(), archived),
             );
             collections.push(collection);
         }
@@ -1373,7 +1373,7 @@ fn recover_typed_layout(
     if let Some(layout) = layout.filter(exact_survivors) {
         return Some(RecoveredTabLayout {
             layout,
-            collection_policy,
+            legacy_collection_snapshots,
         });
     }
 
@@ -1398,7 +1398,7 @@ fn recover_typed_layout(
     let layout = TileLayout::from_typed_saved(root, LayoutLeaf::Pane(first), Vec::new())?;
     exact_survivors(&layout).then_some(RecoveredTabLayout {
         layout,
-        collection_policy: HashMap::new(),
+        legacy_collection_snapshots: HashMap::new(),
     })
 }
 
@@ -1790,7 +1790,7 @@ mod tests {
             .expect("valid members retain the legacy container");
         assert_eq!(restored.members(), &[first, second]);
         assert_eq!(restored.selected(), Some(first));
-        let policy = &recovered.collection_policy[&container_id];
+        let policy = &recovered.legacy_collection_snapshots[&container_id];
         assert_eq!(policy.label.as_deref(), Some("legacy"));
         assert_eq!(policy.archived(), &HashSet::from([second]));
         assert_eq!(

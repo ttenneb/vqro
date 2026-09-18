@@ -378,6 +378,9 @@ impl MarketplaceStateFile {
     }
 
     pub(crate) fn normalize(&mut self, index: &CuratedIndex) {
+        // R4 retired the self-spawning Collections marketplace entry. Package state and policy
+        // live in the package-v1 registry/store; this legacy catalog row carried no policy data.
+        self.entries.remove("ttenneb/vqro-extension-collections");
         let known = index
             .extensions
             .iter()
@@ -451,8 +454,8 @@ impl MarketplaceStateFile {
             }
         }
         if let Some(namespace) = self.entries.values().find_map(|state| {
-            let owner = package_namespaces.get(&state.data_id)?;
-            (!self.collections_transition_overlap_is_exact(&state.data_id, owner))
+            package_namespaces
+                .contains_key(&state.data_id)
                 .then_some(state.data_id.as_str())
         }) {
             return Err(format!(
@@ -460,45 +463,6 @@ impl MarketplaceStateFile {
             ));
         }
         Ok(())
-    }
-
-    fn collections_transition_overlap_is_exact(&self, namespace: &str, owner: &str) -> bool {
-        use crate::extension_package::PackageProvenanceV1;
-
-        if namespace != crate::collections_extension_contract::COLLECTIONS_NAMESPACE
-            || owner != crate::collections_extension_contract::COLLECTIONS_PACKAGE_ID
-        {
-            return false;
-        }
-        let Ok(pin) = crate::collections_extension_contract::embedded_collections_production_pin()
-        else {
-            return false;
-        };
-        let Some(record) = self.packages.packages.get(owner) else {
-            return false;
-        };
-        let exact_source = matches!(
-            &record.source,
-            PackageProvenanceV1::Git {
-                url,
-                source_commit,
-                package_path,
-                package_id,
-                package_sha256,
-                manifest_sha256,
-                ..
-            } if url == &pin.source_url
-                && source_commit == &pin.source_commit
-                && package_path == &pin.package_path
-                && package_id == &pin.package_id
-                && package_sha256 == &pin.package_sha256
-                && manifest_sha256 == &pin.manifest_sha256
-        );
-        exact_source
-            && record
-                .active
-                .as_ref()
-                .is_some_and(|active| active.package_sha256 == pin.package_sha256)
     }
 
     // Compatibility adapter preserving current marketplace response shapes.
@@ -621,32 +585,6 @@ impl MarketplaceStateFile {
         state.enabled = enabled;
         if enabled {
             state.activation_error = None;
-        }
-        Ok(())
-    }
-
-    pub(crate) fn set_repository_override(
-        &mut self,
-        repository: &str,
-        repository_id: String,
-        enabled: Option<bool>,
-    ) -> Result<(), String> {
-        let repository_id = repository_id.trim();
-        if repository_id.is_empty() || repository_id.len() > 2_048 {
-            return Err("repository id must contain 1 to 2048 bytes".into());
-        }
-        let repository_id = repository_id.to_owned();
-        let state = self
-            .entries
-            .get_mut(repository)
-            .ok_or_else(|| format!("unknown extension repository '{repository}'"))?;
-        match enabled {
-            Some(enabled) => {
-                state.repository_overrides.insert(repository_id, enabled);
-            }
-            None => {
-                state.repository_overrides.remove(&repository_id);
-            }
         }
         Ok(())
     }
@@ -1118,7 +1056,6 @@ mod tests {
         assert_eq!(
             defaults,
             [
-                "Collections",
                 "Spaces",
                 "Delegation",
                 "Agent Status",
@@ -1128,9 +1065,7 @@ mod tests {
             ]
         );
         assert!(index.search("session", Some("Agents")).len() >= 3);
-        assert!(index.search("collection", None)[0]
-            .categories
-            .contains(&"Workflow".to_string()));
+        assert!(!index.search("repository", Some("Workflow")).is_empty());
     }
 
     #[test]
@@ -1163,12 +1098,6 @@ mod tests {
 
         let index = CuratedIndex::bundled().unwrap();
         let expected = [
-            (
-                "vqro.collections",
-                "f1a585cc65b73c871f490d4977905a0d208816a2",
-                "eabc2167a5e1d2a2f3fc786482c7c0ed7862588de082d2b6e09b1a9f6124c766",
-                "bc28c51e8056c092502a5fe89da7a063b071e40b60faedbff5d25922f18329f5",
-            ),
             (
                 "vqro.spaces",
                 "5a8b9b9b6329fbaec68d100e88d20bc6aad0a6ca",
@@ -1216,11 +1145,6 @@ mod tests {
 
         for (id, manifest) in [
             (
-                "vqro.collections",
-                include_bytes!("../extensions/first-party/collections/vqro-extension.toml")
-                    .as_slice(),
-            ),
-            (
                 "vqro.spaces",
                 include_bytes!("../extensions/first-party/spaces/vqro-extension.toml").as_slice(),
             ),
@@ -1242,40 +1166,7 @@ mod tests {
     }
 
     #[test]
-    fn curated_package_provenance_must_exactly_match_the_bundled_index() {
-        let index = CuratedIndex::bundled().unwrap();
-        let trusted = index.package_v1_trust()["vqro.collections"].clone();
-        let record = crate::extension_package::PackageLifecycleRecordV1 {
-            package_id: "vqro.collections".into(),
-            source: trusted.clone(),
-            previous_source: None,
-            namespaces: vec!["vqro.collections".into()],
-            revision: 1,
-            status: crate::extension_package::PackageLifecycleStatusV1::Disabled,
-            active: None,
-            previous: None,
-            activation_error: None,
-            pending_activation: None,
-            retained_data: true,
-        };
-        let mut state = MarketplaceStateFile::defaults(&index);
-        state
-            .register_package_v1(&index, record.clone(), 0)
-            .unwrap();
-
-        let mut forged = record;
-        let crate::extension_package::PackageProvenanceV1::Curated { repository, .. } =
-            &mut forged.source
-        else {
-            panic!("test provenance is curated");
-        };
-        *repository = "attacker/forged".into();
-        let mut rejected = MarketplaceStateFile::defaults(&index);
-        assert!(rejected.register_package_v1(&index, forged, 0).is_err());
-    }
-
-    #[test]
-    fn exact_collections_pin_may_overlap_only_its_legacy_transition_namespace() {
+    fn retired_collections_catalog_row_is_removed_before_package_validation() {
         let index = CuratedIndex::bundled().unwrap();
         let pin =
             crate::collections_extension_contract::embedded_collections_production_pin().unwrap();
@@ -1305,6 +1196,15 @@ mod tests {
             retained_data: true,
         };
         let mut state = MarketplaceStateFile::defaults(&index);
+        let mut retired = state.entries.values().next().unwrap().clone();
+        retired.data_id = crate::collections_extension_contract::COLLECTIONS_NAMESPACE.into();
+        state
+            .entries
+            .insert("ttenneb/vqro-extension-collections".into(), retired);
+        state.normalize(&index);
+        assert!(!state
+            .entries
+            .contains_key("ttenneb/vqro-extension-collections"));
         state.register_package_v1(&index, record, 0).unwrap();
         state.validate_data_ids(&index).unwrap();
     }
@@ -1442,44 +1342,6 @@ mod tests {
     }
 
     #[test]
-    fn removal_retains_overrides_and_reinstall_enables_immediately() {
-        let index = CuratedIndex::bundled().unwrap();
-        let extension = index.extension("vqro.collections").unwrap();
-        let mut state = MarketplaceStateFile::defaults(&index);
-        state
-            .set_repository_override(&extension.repository, "repo_1".into(), Some(false))
-            .unwrap();
-        state.remove(&extension.repository).unwrap();
-        assert!(!state.enabled_for_repository(&extension.repository, Some("repo_1")));
-        assert_eq!(
-            state.entries[&extension.repository]
-                .repository_overrides
-                .get("repo_1"),
-            Some(&false)
-        );
-        state.install(extension);
-        assert!(state.entries[&extension.repository].enabled);
-        assert!(!state.enabled_for_repository(&extension.repository, Some("repo_1")));
-    }
-
-    #[test]
-    fn data_deletion_clears_retained_repository_configuration() {
-        let index = CuratedIndex::bundled().unwrap();
-        let extension = index.extension("vqro.collections").unwrap();
-        let mut state = MarketplaceStateFile::defaults(&index);
-        state
-            .set_repository_override(&extension.repository, "repo_1".into(), Some(false))
-            .unwrap();
-        state.remove(&extension.repository).unwrap();
-
-        state.clear_retained_data(&extension.repository).unwrap();
-
-        assert!(state.entries[&extension.repository]
-            .repository_overrides
-            .is_empty());
-    }
-
-    #[test]
     fn globally_disabled_bundled_provider_is_unavailable_to_runtime_catalogs() {
         let index = CuratedIndex::bundled().unwrap();
         let extension = index.extension("vqro.delegation").unwrap();
@@ -1487,51 +1349,6 @@ mod tests {
         state.set_enabled(&extension.repository, false).unwrap();
 
         assert!(unavailable_bundled_providers(&index, &state).contains("vqro.delegation"));
-    }
-
-    #[test]
-    fn repository_override_changes_effective_bundled_runtime_state() {
-        let index = CuratedIndex::bundled().unwrap();
-        let mut state = MarketplaceStateFile::defaults(&index);
-        let collections = index
-            .extensions
-            .iter()
-            .find(|extension| extension.name == "Collections")
-            .unwrap();
-        state
-            .set_repository_override(
-                &collections.repository,
-                "https://github.com/example/project".into(),
-                Some(false),
-            )
-            .unwrap();
-
-        assert!(state.enabled_for_repository(&collections.repository, None));
-        assert!(!state.enabled_for_repository(
-            &collections.repository,
-            Some("https://github.com/example/project")
-        ));
-    }
-
-    #[test]
-    fn repository_override_identity_migration_preserves_explicit_state() {
-        let index = CuratedIndex::bundled().unwrap();
-        let extension = index.extension("vqro.collections").unwrap();
-        let mut state = MarketplaceStateFile::defaults(&index);
-        state
-            .set_repository_override(&extension.repository, "local-id".into(), Some(false))
-            .unwrap();
-
-        assert!(state.migrate_repository_override("local-id", "https://github.com/example/project"));
-        assert_eq!(
-            state.entries[&extension.repository]
-                .repository_overrides
-                .get("https://github.com/example/project"),
-            Some(&false)
-        );
-        assert!(!state.entries[&extension.repository]
-            .repository_overrides
-            .contains_key("local-id"));
     }
 
     #[test]

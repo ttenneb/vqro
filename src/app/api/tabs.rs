@@ -615,7 +615,10 @@ mod tests {
 
         let success: SuccessResponse = serde_json::from_str(&response).unwrap();
         assert!(matches!(success.result, ResponseResult::TabCreated { .. }));
-        assert_eq!(app.host_documents().len(), 2);
+        assert!(app.host_documents().iter().all(|document| {
+            document.document.namespace
+                != crate::collections_extension_contract::COLLECTIONS_NAMESPACE
+        }));
         let created = &app.state.workspaces[0].tabs[1];
         let created_terminal_id = created.terminal_id(created.root_pane).unwrap();
         let created_cwd = &app.state.terminals.get(created_terminal_id).unwrap().cwd;

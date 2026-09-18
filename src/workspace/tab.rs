@@ -5,11 +5,11 @@ use std::sync::Arc;
 use ratatui::layout::Direction;
 use tokio::sync::{mpsc, Notify};
 
-use crate::collection_compat::CollectionCompatibilityPolicy;
 use crate::events::AppEvent;
 #[cfg(test)]
 use crate::layout::TypedNode;
 use crate::layout::{CollectionId, LayoutLeaf, Node, PaneId, PanePlacement, TileLayout};
+use crate::legacy_collection_snapshot::LegacyCollectionSnapshot;
 use crate::pane::{PaneLaunchEnv, PaneState};
 use crate::render_signal::RenderSignal;
 use crate::terminal::{TerminalId, TerminalRuntime, TerminalRuntimeRegistry, TerminalState};
@@ -30,7 +30,7 @@ pub struct NewPane {
 
 pub(crate) struct PaneCollection<'a> {
     container: &'a crate::terminal_container::TerminalContainer,
-    policy: &'a CollectionCompatibilityPolicy,
+    legacy_snapshot: Option<&'a LegacyCollectionSnapshot>,
 }
 
 impl PaneCollection<'_> {
@@ -38,8 +38,9 @@ impl PaneCollection<'_> {
         self.container.id.into()
     }
 
-    pub(crate) fn label(&self) -> Option<&str> {
-        self.policy.label.as_deref()
+    pub(crate) fn legacy_label(&self) -> Option<&str> {
+        self.legacy_snapshot
+            .and_then(|snapshot| snapshot.label.as_deref())
     }
 
     pub(crate) fn members(&self) -> &[PaneId] {
@@ -50,12 +51,17 @@ impl PaneCollection<'_> {
         self.container.selected()
     }
 
-    pub(crate) fn is_archived(&self, pane_id: PaneId) -> bool {
-        self.policy.is_archived(pane_id)
+    pub(crate) fn legacy_is_archived(&self, pane_id: PaneId) -> bool {
+        self.legacy_snapshot
+            .is_some_and(|snapshot| snapshot.is_archived(pane_id))
     }
 
-    pub(crate) fn archived_members(&self) -> impl Iterator<Item = PaneId> + '_ {
-        self.policy.archived_members(self.container.members())
+    pub(crate) fn legacy_archived_members(&self) -> impl Iterator<Item = PaneId> + '_ {
+        self.container
+            .members()
+            .iter()
+            .copied()
+            .filter(|pane| self.legacy_is_archived(*pane))
     }
 }
 
@@ -89,7 +95,7 @@ pub struct Tab {
     /// Identity source for this tab's pane tree.
     pub root_pane: PaneId,
     pub layout: TileLayout,
-    pub(super) collection_compat: HashMap<TerminalContainerId, CollectionCompatibilityPolicy>,
+    pub(super) legacy_collection_snapshots: HashMap<TerminalContainerId, LegacyCollectionSnapshot>,
     /// Pane viewport state — always present, testable without PTYs.
     pub panes: HashMap<PaneId, PaneState>,
     #[cfg(test)]
@@ -243,7 +249,7 @@ impl Tab {
                 number,
                 root_pane: root_id,
                 layout,
-                collection_compat: HashMap::new(),
+                legacy_collection_snapshots: HashMap::new(),
                 panes,
                 #[cfg(test)]
                 runtimes: HashMap::new(),
@@ -268,7 +274,7 @@ impl Tab {
         let container_id = TerminalContainerId::from(collection_id);
         Some(PaneCollection {
             container: self.layout.collection(container_id)?,
-            policy: self.collection_compat.get(&container_id)?,
+            legacy_snapshot: self.legacy_collection_snapshots.get(&container_id),
         })
     }
 
@@ -282,17 +288,17 @@ impl Tab {
     #[cfg(test)]
     pub(super) fn assert_collection_invariants_for_test(&self) {
         let layout_ids: HashSet<_> = self.layout.collection_ids().into_iter().collect();
-        let policy_ids: HashSet<_> = self.collection_compat.keys().copied().collect();
-        assert_eq!(
-            layout_ids, policy_ids,
-            "container leaves and compatibility policy must have a one-to-one identity mapping"
+        let policy_ids: HashSet<_> = self.legacy_collection_snapshots.keys().copied().collect();
+        assert!(
+            policy_ids.is_subset(&layout_ids),
+            "legacy snapshots may refer only to live neutral containers"
         );
         for container_id in layout_ids {
             let container = self
                 .layout
                 .collection(container_id)
                 .expect("layout ID must resolve to a container");
-            let policy = &self.collection_compat[&container_id];
+            let policy = self.legacy_collection_snapshots.get(&container_id);
             let members: HashSet<_> = container.members().iter().copied().collect();
             assert_eq!(members.len(), container.members().len());
             assert_eq!(
@@ -304,7 +310,7 @@ impl Tab {
                 .selected()
                 .is_none_or(|pane| members.contains(&pane)));
             assert!(
-                policy.archived().is_subset(&members),
+                policy.is_none_or(|snapshot| snapshot.archived().is_subset(&members)),
                 "raw archived state must be a subset of container members"
             );
         }
@@ -369,7 +375,7 @@ impl Tab {
         root_pane: PaneId,
     ) {
         self.layout = layout;
-        self.collection_compat.clear();
+        self.legacy_collection_snapshots.clear();
         self.root_pane = root_pane;
         self.zoomed = false;
     }
@@ -381,7 +387,7 @@ impl Tab {
         number: usize,
         root_pane: PaneId,
         layout: TileLayout,
-        policies: HashMap<TerminalContainerId, CollectionCompatibilityPolicy>,
+        policies: HashMap<TerminalContainerId, LegacyCollectionSnapshot>,
         panes: HashMap<PaneId, PaneState>,
         zoomed: bool,
         events: mpsc::Sender<AppEvent>,
@@ -416,7 +422,7 @@ impl Tab {
             number,
             root_pane,
             layout,
-            collection_compat: policies,
+            legacy_collection_snapshots: policies,
             panes,
             #[cfg(test)]
             runtimes: HashMap::new(),
@@ -427,6 +433,7 @@ impl Tab {
         })
     }
 
+    #[cfg(test)]
     pub fn create_collection_near(
         &mut self,
         target: LayoutLeaf,
@@ -434,9 +441,15 @@ impl Tab {
         ratio: f32,
         label: Option<String>,
     ) -> Result<CollectionId, CollectionMutationError> {
-        self.create_collection_near_with_allocator(target, direction, ratio, label, || {
-            CollectionId::alloc()
-        })
+        let collection_id =
+            CollectionId::alloc().map_err(|_| CollectionMutationError::LayoutMutationFailed)?;
+        let created =
+            self.create_collection_near_reserved(target, direction, ratio, collection_id)?;
+        self.legacy_collection_snapshots.insert(
+            TerminalContainerId::from(created),
+            LegacyCollectionSnapshot::from_legacy(label, HashSet::new()),
+        );
+        Ok(created)
     }
 
     pub(crate) fn create_collection_near_reserved(
@@ -446,39 +459,16 @@ impl Tab {
         ratio: f32,
         collection_id: CollectionId,
     ) -> Result<CollectionId, CollectionMutationError> {
-        self.create_collection_near_with_allocator(target, direction, ratio, None, || {
-            Ok(collection_id)
-        })
-    }
-
-    fn create_collection_near_with_allocator<F>(
-        &mut self,
-        target: LayoutLeaf,
-        direction: Direction,
-        ratio: f32,
-        label: Option<String>,
-        allocate: F,
-    ) -> Result<CollectionId, CollectionMutationError>
-    where
-        F: FnOnce() -> Result<CollectionId, crate::layout::CollectionIdError>,
-    {
-        // Preflight before allocation so invalid placement cannot consume IDs.
+        // Preflight before publishing the caller-reserved identity.
         if !self.layout.can_insert_collection_near(target) {
             return Err(CollectionMutationError::LayoutMutationFailed);
         }
-        let collection_id =
-            allocate().map_err(|_| CollectionMutationError::LayoutMutationFailed)?;
         let container_id = TerminalContainerId::from(collection_id);
         let mut layout = self.layout.clone();
-        let mut policies = self.collection_compat.clone();
         if !layout.insert_collection_near(target, container_id, direction, ratio) {
             return Err(CollectionMutationError::LayoutMutationFailed);
         }
-        policies.insert(
-            container_id,
-            CollectionCompatibilityPolicy::from_legacy(label, HashSet::new()),
-        );
-        self.commit_collection_state(layout, policies);
+        self.layout = layout;
         self.zoomed = false;
         Ok(collection_id)
     }
@@ -499,12 +489,11 @@ impl Tab {
             return Err(CollectionMutationError::LastLayoutLeaf);
         }
         let mut layout = self.layout.clone();
-        let mut policies = self.collection_compat.clone();
         if !layout.remove_collection(container_id) {
             return Err(CollectionMutationError::LayoutMutationFailed);
         }
-        policies.remove(&container_id);
-        self.commit_collection_state(layout, policies);
+        self.legacy_collection_snapshots.remove(&container_id);
+        self.layout = layout;
         self.zoomed = false;
         Ok(())
     }
@@ -528,17 +517,12 @@ impl Tab {
             return Err(CollectionMutationError::LastLayoutLeaf);
         }
         let mut layout = self.layout.clone();
-        let mut policies = self.collection_compat.clone();
         if !layout.remove_tiled_pane_for_collection(pane_id)
             || !layout.add_collection_member(container_id, pane_id)
         {
             return Err(CollectionMutationError::LayoutMutationFailed);
         }
-        policies
-            .get_mut(&container_id)
-            .ok_or(CollectionMutationError::CollectionNotFound)?
-            .bump_revision();
-        self.commit_collection_state(layout, policies);
+        self.layout = layout;
         self.zoomed = false;
         Ok(())
     }
@@ -559,17 +543,12 @@ impl Tab {
             return Err(CollectionMutationError::TargetNotTiled);
         }
         let mut layout = self.layout.clone();
-        let mut policies = self.collection_compat.clone();
         if !layout.remove_collection_member(container_id, pane_id)
             || !layout.insert_pane_near(target_pane_id, pane_id, direction, ratio, true)
         {
             return Err(CollectionMutationError::LayoutMutationFailed);
         }
-        policies
-            .get_mut(&container_id)
-            .ok_or(CollectionMutationError::CollectionNotFound)?
-            .remove_member(pane_id);
-        self.commit_collection_state(layout, policies);
+        self.layout = layout;
         self.zoomed = false;
         Ok(())
     }
@@ -584,7 +563,7 @@ impl Tab {
         if !layout.select_collection_member(container_id, pane_id) {
             return Err(CollectionMutationError::PaneNotMember);
         }
-        self.commit_collection_state(layout, self.collection_compat.clone());
+        self.layout = layout;
         Ok(())
     }
 
@@ -595,19 +574,15 @@ impl Tab {
         index: usize,
     ) -> Result<(), CollectionMutationError> {
         let mut layout = self.layout.clone();
-        let mut policies = self.collection_compat.clone();
         let container_id = TerminalContainerId::from(collection_id);
         if !layout.reorder_collection_member(container_id, pane_id, index) {
             return Err(CollectionMutationError::PaneNotMember);
         }
-        policies
-            .get_mut(&container_id)
-            .ok_or(CollectionMutationError::CollectionNotFound)?
-            .bump_revision();
-        self.commit_collection_state(layout, policies);
+        self.layout = layout;
         Ok(())
     }
 
+    #[cfg(test)]
     pub fn set_collection_member_archived(
         &mut self,
         collection_id: CollectionId,
@@ -615,7 +590,7 @@ impl Tab {
         archived: bool,
     ) -> Result<(), CollectionMutationError> {
         let layout = self.layout.clone();
-        let mut policies = self.collection_compat.clone();
+        let mut policies = self.legacy_collection_snapshots.clone();
         let container_id = TerminalContainerId::from(collection_id);
         let Some(collection) = layout.collection(container_id) else {
             return Err(CollectionMutationError::CollectionNotFound);
@@ -631,13 +606,14 @@ impl Tab {
         Ok(())
     }
 
+    #[cfg(test)]
     fn commit_collection_state(
         &mut self,
         layout: TileLayout,
-        policies: HashMap<TerminalContainerId, CollectionCompatibilityPolicy>,
+        policies: HashMap<TerminalContainerId, LegacyCollectionSnapshot>,
     ) {
         self.layout = layout;
-        self.collection_compat = policies;
+        self.legacy_collection_snapshots = policies;
     }
 
     pub fn is_auto_named(&self) -> bool {
@@ -853,7 +829,7 @@ impl Tab {
             layout.focus_pane(new_id);
         }
         self.panes.insert(new_id, PaneState::new(terminal_id));
-        self.commit_collection_state(layout, self.collection_compat.clone());
+        self.layout = layout;
         self.zoomed = false;
         Ok(NewPane {
             pane_id: new_id,
@@ -894,7 +870,7 @@ impl Tab {
             number,
             root_pane: pane_id,
             layout: TileLayout::from_saved(Node::Pane(pane_id), pane_id),
-            collection_compat: HashMap::new(),
+            legacy_collection_snapshots: HashMap::new(),
             panes,
             #[cfg(test)]
             runtimes: HashMap::new(),
@@ -912,8 +888,7 @@ impl Tab {
 
         if self.layout.pane_count() > 1 {
             let next_root = self.promoted_root_if_needed(pane_id);
-            let (layout, policies) = self.remove_layout_pane_candidate(pane_id)?;
-            self.commit_collection_state(layout, policies);
+            self.layout = self.remove_layout_pane_candidate(pane_id)?;
             if let Some(next_root) = next_root {
                 self.root_pane = next_root;
             }
@@ -941,7 +916,7 @@ impl Tab {
         }
         let pane_id = moved.pane_id;
         self.panes.insert(pane_id, moved.pane_state);
-        self.commit_collection_state(layout, self.collection_compat.clone());
+        self.layout = layout;
         self.zoomed = false;
         Ok(pane_id)
     }
@@ -953,10 +928,10 @@ impl Tab {
 
         let next_root = self.promoted_root_if_needed(pane_id);
 
-        let (layout, policies) = self.remove_layout_pane_candidate(pane_id)?;
+        let layout = self.remove_layout_pane_candidate(pane_id)?;
         let pane = self.panes.remove(&pane_id)?;
         let terminal_id = pane.attached_terminal_id;
-        self.commit_collection_state(layout, policies);
+        self.layout = layout;
         self.zoomed = false;
         if let Some(next_root) = next_root {
             self.root_pane = next_root;
@@ -964,23 +939,10 @@ impl Tab {
         Some((pane_id, terminal_id))
     }
 
-    fn remove_layout_pane_candidate(
-        &self,
-        pane_id: PaneId,
-    ) -> Option<(
-        TileLayout,
-        HashMap<TerminalContainerId, CollectionCompatibilityPolicy>,
-    )> {
-        let placement = self.layout.placement(pane_id)?;
+    fn remove_layout_pane_candidate(&self, pane_id: PaneId) -> Option<TileLayout> {
+        self.layout.placement(pane_id)?;
         let mut layout = self.layout.clone();
-        let mut policies = self.collection_compat.clone();
-        if !layout.close_pane(pane_id) {
-            return None;
-        }
-        if let PanePlacement::Collection(collection_id) = placement {
-            policies.get_mut(&collection_id)?.remove_member(pane_id);
-        }
-        Some((layout, policies))
+        layout.close_pane(pane_id).then_some(layout)
     }
 
     fn promoted_root_if_needed(&self, closing: PaneId) -> Option<PaneId> {
@@ -1030,66 +992,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn collection_create_preflights_before_id_allocation() {
-        let mut workspace = crate::workspace::Workspace::test_new("preflight");
-        let allocations = std::sync::atomic::AtomicUsize::new(0);
-        let result = workspace.tabs[0].create_collection_near_with_allocator(
-            LayoutLeaf::Pane(PaneId::from_raw(u32::MAX)),
-            Direction::Horizontal,
-            0.5,
-            None,
-            || {
-                allocations.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                CollectionId::from_raw(8_700_001)
-            },
-        );
-        assert_eq!(result, Err(CollectionMutationError::LayoutMutationFailed));
-        assert_eq!(allocations.load(std::sync::atomic::Ordering::Relaxed), 0);
-    }
-
-    #[test]
-    fn compatibility_invalidation_semantics_survive_private_extraction() {
-        let mut workspace = crate::workspace::Workspace::test_new("revision");
-        let root = workspace.tabs[0].root_pane;
-        let member = workspace.test_split(Direction::Horizontal);
-        let collection = workspace.tabs[0]
-            .create_collection_near(
-                LayoutLeaf::Pane(root),
-                Direction::Vertical,
-                0.5,
-                Some("legacy".into()),
-            )
-            .unwrap();
-        let container_id = TerminalContainerId::from(collection);
-        assert_eq!(
-            workspace.tabs[0].collection_compat[&container_id].revision(),
-            0
-        );
-        workspace.tabs[0]
-            .collect_tiled_pane(member, collection)
-            .unwrap();
-        assert_eq!(
-            workspace.tabs[0].collection_compat[&container_id].revision(),
-            1
-        );
-        workspace.tabs[0]
-            .select_collection_member(collection, member)
-            .unwrap();
-        assert_eq!(
-            workspace.tabs[0].collection_compat[&container_id].revision(),
-            1
-        );
-        workspace.tabs[0]
-            .set_collection_member_archived(collection, member, true)
-            .unwrap();
-        assert_eq!(
-            workspace.tabs[0].collection_compat[&container_id].revision(),
-            2
-        );
-        assert_eq!(workspace.tabs[0].layout.pane_ids().len(), 2);
-    }
-
-    #[test]
     #[should_panic(expected = "raw archived state must be a subset")]
     fn runtime_invariant_checks_raw_archive_state_without_filtering() {
         let mut workspace = crate::workspace::Workspace::test_new("raw-archive-invariant");
@@ -1104,7 +1006,7 @@ mod tests {
             .unwrap();
         let container_id = TerminalContainerId::from(collection);
         workspace.tabs[0]
-            .collection_compat
+            .legacy_collection_snapshots
             .get_mut(&container_id)
             .expect("compatibility policy")
             .set_archived(root, true);
@@ -1142,7 +1044,7 @@ mod tests {
         .unwrap();
         workspace.tabs[0].replace_layout_without_collections(replacement, root);
 
-        assert!(workspace.tabs[0].collection_compat.is_empty());
+        assert!(workspace.tabs[0].legacy_collection_snapshots.is_empty());
         assert_eq!(workspace.tabs[0].layout.pane_ids(), vec![root, member]);
         workspace.assert_invariants_for_test();
     }

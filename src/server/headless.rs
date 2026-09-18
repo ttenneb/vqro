@@ -3724,7 +3724,7 @@ impl HeadlessServer {
             == crate::collections_extension_contract::CollectionsAuthorityPhaseV1::Package
         {
             match msg.request.method.clone() {
-                api::schema::Method::CollectionCreate(params) if params.label.is_some() => {
+                api::schema::Method::CollectionCreate(params) => {
                     return changed
                         | self.app.defer_collections_labeled_create(
                             msg.request.id,

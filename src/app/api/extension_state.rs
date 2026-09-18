@@ -582,7 +582,7 @@ impl App {
                 Some(&self.extension_state)
             }
             crate::extension_host_invocation::HostStateReadSource::CollectionsShadow => {
-                Some(self.collections_shadow_overlay.state())
+                Some(self.collections_import_overlay.state())
             }
         };
         let ownership_current = !request.lease.outer_request_id.is_empty()

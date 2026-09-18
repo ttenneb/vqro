@@ -1358,7 +1358,7 @@ impl Workspace {
             number: 1,
             root_pane: root_id,
             layout,
-            collection_compat: HashMap::new(),
+            legacy_collection_snapshots: HashMap::new(),
             panes,
             runtimes: HashMap::new(),
             zoomed: false,
@@ -1425,7 +1425,7 @@ impl Workspace {
             number,
             root_pane: root_id,
             layout,
-            collection_compat: HashMap::new(),
+            legacy_collection_snapshots: HashMap::new(),
             panes,
             runtimes: HashMap::new(),
             zoomed: false,
@@ -1556,7 +1556,7 @@ impl Workspace {
                     .selected()
                     .is_none_or(|pane| unique.contains(&pane)));
                 assert!(collection
-                    .archived_members()
+                    .legacy_archived_members()
                     .all(|pane| unique.contains(&pane)));
             }
 

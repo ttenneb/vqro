@@ -2230,37 +2230,6 @@ impl App {
         let area = self.state.view.terminal_area;
         let focused = tab.layout.focused();
         let focused_pane_id = self.public_pane_id(ws_idx, focused)?;
-        if !self.bundled_extension_enabled("collections", Some(ws_idx)) {
-            let pane_ids = tab.layout.pane_ids();
-            let count = u16::try_from(pane_ids.len()).unwrap_or(u16::MAX).max(1);
-            let base_height = area.height / count;
-            let remainder = area.height % count;
-            let mut y = area.y;
-            let panes = pane_ids
-                .into_iter()
-                .enumerate()
-                .filter_map(|(index, pane_id)| {
-                    let extra = u16::from(u16::try_from(index).ok()? < remainder);
-                    let height = base_height.saturating_add(extra);
-                    let rect = ratatui::layout::Rect::new(area.x, y, area.width, height);
-                    y = y.saturating_add(height);
-                    Some(PaneLayoutPane {
-                        pane_id: self.public_pane_id(ws_idx, pane_id)?,
-                        focused: pane_id == focused,
-                        rect: rect.into(),
-                    })
-                })
-                .collect();
-            return Some(PaneLayoutSnapshot {
-                workspace_id: self.public_workspace_id(ws_idx),
-                tab_id: self.public_tab_id(ws_idx, tab_idx)?,
-                zoomed: false,
-                area: area.into(),
-                focused_pane_id,
-                panes,
-                splits: Vec::new(),
-            });
-        }
         let panes = crate::ui::apply_pane_chrome(
             tab.layout.panes(area),
             self.state.pane_borders,
@@ -2481,7 +2450,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pane_split_refreshes_host_document_projection() {
+    async fn pane_split_does_not_publish_a_host_collections_fallback() {
         let (mut app, public_pane_id) = app_with_test_workspace();
         app.state.default_shell = exiting_test_command().into();
         let response = app.handle_pane_split(
@@ -2499,9 +2468,10 @@ mod tests {
         );
         let response: SuccessResponse = serde_json::from_str(&response).unwrap();
         assert!(matches!(response.result, ResponseResult::PaneInfo { .. }));
-        let documents = app.host_documents();
-        assert_eq!(documents.len(), 1);
-        assert_eq!(documents[0].document.items.len(), 2);
+        assert!(app.host_documents().iter().all(|document| {
+            document.document.namespace
+                != crate::collections_extension_contract::COLLECTIONS_NAMESPACE
+        }));
         shutdown_test_runtimes(&mut app);
     }
 
@@ -3182,7 +3152,10 @@ mod tests {
         let pane_id = app.state.workspaces[0].tabs[0].root_pane;
         let public_pane_id = app.public_pane_id(0, pane_id).unwrap();
         app.refresh_collection_documents();
-        assert!(!app.host_documents().is_empty());
+        assert!(app.host_documents().iter().all(|document| {
+            document.document.namespace
+                != crate::collections_extension_contract::COLLECTIONS_NAMESPACE
+        }));
 
         let response = app.handle_pane_close(
             "req".into(),
@@ -3194,7 +3167,7 @@ mod tests {
         let success: SuccessResponse = serde_json::from_str(&response).unwrap();
         assert_eq!(success.id, "req");
         assert!(app.state.workspaces.is_empty());
-        assert!(app.collections_shadow_documents.is_empty());
+        assert!(app.host_document_caches.is_empty());
         assert!(app.host_documents().is_empty());
     }
 
@@ -3563,7 +3536,10 @@ mod tests {
             Some(&source_terminal)
         );
         assert!(app.next_host_document_revision > revision_before_move);
-        assert_eq!(app.host_documents().len(), 1);
+        assert!(app.host_documents().iter().all(|document| {
+            document.document.namespace
+                != crate::collections_extension_contract::COLLECTIONS_NAMESPACE
+        }));
 
         let tabs_before = app.state.workspaces[0].tabs.len();
         let rejected = app.handle_pane_move(

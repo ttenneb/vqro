@@ -1,18 +1,19 @@
 # Collections package authority transition
 
-Status: accepted architecture decision; implementation incomplete.
+Status: implemented through R4; R5 measurement and R6 public-SDK work remain independent follow-ups.
 
 This document defines the production boundary for making the independently built `vqro.collections` component package the sole Collections policy and document authority. Its durable boundaries remain tracked here. Temporary owners, dates, branch names, and test receipts belong in local execution ledgers rather than this decision.
 
 ## Current state
 
-Vqro currently has:
+Vqro now has:
 
-1. neutral terminal containers owned by the host;
-2. host-owned Collections policy, persistence, APIs, and client behavior;
-3. an external Collections component exercised only through package conformance and semantic-audit gates.
+1. neutral terminal containers and durable PTYs owned by the host;
+2. one exact-Git, sandboxed `vqro.collections` package as the sole Collections policy, document, state, and typed-action authority;
+3. snapshot-v7 atomic authority/state persistence and fail-closed recovery;
+4. generation-1 compatibility documents and structures projected only from a current audited package profile.
 
-The bundled `vqro.collections` service uses public protocol shapes but executes code compiled into Vqro. It is a migration oracle, not independent extension authority.
+R4 removed the bundled `vqro.collections` service, its self-spawning manifest/catalog row, host-rendered fallback, mutable compatibility-policy writer, and normal package-policy decoder. Pre-package snapshots retain only a read-only legacy label/archive snapshot consumed by the one-way cutover importer. Without the exact package, every `collection.*` method is unavailable while generic workspace/tab/pane and PTY access remains usable.
 
 ## Authority boundary
 
@@ -57,7 +58,7 @@ The production pin is distinct from the external conformance-test pin. Its catal
 
 The MVP is exact-Git opt-in. Installation and each update require explicit digest-bound confirmation. Vqro fetches only the exact commit and deterministic archive, executes no repository build command, and retains the previous verified artifact for package rollback. Curated status grants no authority. Default/offline package bundling is deferred.
 
-A user who has not installed Collections keeps the bundled provider before cutover. After legacy deletion, Collections is unavailable while generic terminal access remains.
+A user who has not installed Collections has no Collections provider: every `collection.*` method is unavailable while generic terminal access remains. Installing the exact production pin audits each live scope and performs the one-way atomic cutover.
 
 ## Collections document profile and client projection
 
@@ -128,7 +129,7 @@ Provider execution is per changed scope, not per frame or attached client. Per-s
 
 ## Shadow and atomic authority cutover
 
-Shadow work never owns `vqro.collections`. The host importer builds a non-authoritative package-state overlay from current legacy policy. If legacy policy changes, the overlay is rebuilt or refreshed before the next accepted shadow result. It may be discarded after a crash and reconstructed; it is never a durable policy source or visible writer.
+Before cutover, import work never owns `vqro.collections`. The host builds a non-authoritative package-state overlay from the read-only pre-package snapshot, audits the package against it, and discards the overlay immediately after authority publication. It is never a durable policy source, visible writer, or post-cutover fallback.
 
 Session metadata gains `collections_authority.v1` with phase `legacy` or `package`, authority epoch, exact package/service/artifact/profile binding, state generation/revision, migration ID, and minimum snapshot reader version.
 

@@ -108,10 +108,7 @@ impl App {
         }
 
         let mut expected_scopes = BTreeSet::new();
-        for (workspace_index, workspace) in self.state.workspaces.iter().enumerate() {
-            if !self.bundled_extension_enabled("collections", Some(workspace_index)) {
-                continue;
-            }
+        for workspace in &self.state.workspaces {
             for tab in &workspace.tabs {
                 expected_scopes.insert(tab.id.to_string());
             }
@@ -180,11 +177,11 @@ impl App {
             .ok_or("Collections authority epoch exhausted")?;
         let next_state = super::collections_candidate::build_collections_import_state(
             &self.extension_state,
-            self.collections_shadow_overlay.imported_values(),
+            self.collections_import_overlay.imported_values(),
             migration_epoch,
         )?;
         let candidate_snapshot = self
-            .collections_shadow_overlay
+            .collections_import_overlay
             .state()
             .snapshot(COLLECTIONS_NAMESPACE)
             .map_err(|error| format!("cannot inspect audited candidate state: {error:?}"))?;
@@ -231,6 +228,7 @@ impl App {
         // in-memory namespace, policy, document, or action authority changes.
         self.extension_state = next_state;
         self.collections_authority = authority;
+        self.collections_import_overlay.clear();
         self.extension_state_transaction_pending = false;
         self.state.session_dirty = false;
         self.session_save_deadline = None;
@@ -325,10 +323,7 @@ impl App {
                 COLLECTIONS_NAMESPACE.to_string(),
                 compatibility_scope_id.clone(),
             );
-            let cache = self
-                .collections_shadow_documents
-                .entry(key.clone())
-                .or_default();
+            let cache = self.host_document_caches.entry(key.clone()).or_default();
             cache.disable();
             if cache
                 .publish_for_namespace(
@@ -725,7 +720,7 @@ impl App {
         if self.collections_authority.phase != CollectionsAuthorityPhaseV1::Package
             || self.collections_mutations_blocked
         {
-            return self.collections_authority.phase == CollectionsAuthorityPhaseV1::Legacy;
+            return false;
         }
         let Some(package) = self.collections_authority.package.as_ref() else {
             return false;
@@ -741,7 +736,6 @@ impl App {
                 .workspaces
                 .iter()
                 .enumerate()
-                .filter(|(index, _)| self.bundled_extension_enabled("collections", Some(*index)))
                 .flat_map(|(workspace_index, workspace)| {
                     workspace
                         .tabs
@@ -772,7 +766,7 @@ impl App {
             );
             let _ = pending.respond_to.send(response);
         }
-        for ((namespace, _), cache) in &mut self.collections_shadow_documents {
+        for ((namespace, _), cache) in &mut self.host_document_caches {
             if namespace == COLLECTIONS_NAMESPACE {
                 cache.disable();
             }
@@ -956,6 +950,21 @@ mod tests {
             Some("w1:p2")
         );
         assert_eq!(projection.collections[0].members[0].pane_id, "w1:p2");
+    }
+
+    #[test]
+    fn legacy_snapshot_without_package_has_no_collections_authority_or_document() {
+        let mut app = test_app();
+        let collections = app.handle_api_request(Request {
+            id: "collections".into(),
+            method: Method::CollectionList(CollectionListParams::default()),
+        });
+        assert!(collections.contains("collections_authority_unavailable"));
+        app.refresh_collection_documents();
+        assert!(app
+            .host_documents()
+            .iter()
+            .all(|entry| { entry.document.namespace != COLLECTIONS_NAMESPACE }));
     }
 
     #[test]

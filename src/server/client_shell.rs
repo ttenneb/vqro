@@ -154,30 +154,29 @@ pub(super) fn structure_projection(
             })
             .collect();
     }
-    let collections = app
-        .collection_infos(None, None)
-        .into_iter()
-        .filter(|collection| {
-            app.parse_workspace_id(&collection.workspace_id)
-                .is_some_and(|ws_idx| app.bundled_extension_enabled("collections", Some(ws_idx)))
-        })
-        .map(|collection| protocol::endpoint::ClientShellCollection {
-            collection_id: collection.collection_id,
-            workspace_id: collection.workspace_id,
-            tab_id: collection.tab_id,
-            label: collection.label,
-            selected_pane_id: collection.selected_pane_id,
-            members: collection
-                .members
-                .into_iter()
-                .map(|member| protocol::endpoint::ClientShellCollectionMember {
-                    pane_id: member.pane_id,
-                    index: member.index,
-                    archived: member.archived,
-                })
-                .collect(),
-        })
-        .collect();
+    let collections = if app.collections_package_runtime_available() {
+        app.collection_infos(None, None)
+    } else {
+        Vec::new()
+    }
+    .into_iter()
+    .map(|collection| protocol::endpoint::ClientShellCollection {
+        collection_id: collection.collection_id,
+        workspace_id: collection.workspace_id,
+        tab_id: collection.tab_id,
+        label: collection.label,
+        selected_pane_id: collection.selected_pane_id,
+        members: collection
+            .members
+            .into_iter()
+            .map(|member| protocol::endpoint::ClientShellCollectionMember {
+                pane_id: member.pane_id,
+                index: member.index,
+                archived: member.archived,
+            })
+            .collect(),
+    })
+    .collect();
     let delegations = app
         .delegation_tree()
         .into_iter()
@@ -924,16 +923,9 @@ mod tests {
         assert!(projected.agents.is_empty());
         assert!(projected.agent_order.is_empty());
         let structure = structure_projection(&app, "boot", 1);
-        assert_eq!(structure.collections.len(), 1);
-        assert_eq!(structure.collections[0].members.len(), 1);
-
-        app.configured_disabled_extensions
-            .insert("vqro.collections".into());
-        app.apply_bundled_extension_state();
-        let fallback = app.session_snapshot_v1_compat();
-        assert_eq!(fallback.layouts[0].panes.len(), 2);
-        let fallback_structure = structure_projection(&app, "boot", 2);
-        assert!(fallback_structure.collections.is_empty());
+        assert!(structure.collections.is_empty());
+        let generic = app.session_snapshot_v1_compat();
+        assert_eq!(generic.layouts[0].panes.len(), 2);
     }
 
     #[test]

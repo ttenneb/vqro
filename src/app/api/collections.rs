@@ -76,8 +76,12 @@ impl App {
     }
 
     pub(crate) fn refresh_collection_documents(&mut self) {
-        if let Err(error) = self.rebuild_collections_shadow_overlay() {
-            tracing::warn!(%error, "Collections candidate shadow import failed");
+        if self.collections_authority.phase
+            == crate::collections_extension_contract::CollectionsAuthorityPhaseV1::Legacy
+        {
+            if let Err(error) = self.rebuild_collections_import_overlay() {
+                tracing::warn!(%error, "Collections pre-cutover import failed");
+            }
         }
         let mut live_tab_ids = std::collections::HashSet::from([
             crate::first_party::spaces::SESSION_SCOPE_ID.to_string(),
@@ -91,7 +95,7 @@ impl App {
         }
         self.host_document_services.retain_scopes(&live_tab_ids);
         let retired_documents = self
-            .collections_shadow_documents
+            .host_document_caches
             .iter()
             .filter(|((_, scope_id), _)| !live_tab_ids.contains(scope_id))
             .filter_map(|((_, scope_id), cache)| {
@@ -104,7 +108,7 @@ impl App {
                 ))
             })
             .collect::<Vec<_>>();
-        self.collections_shadow_documents
+        self.host_document_caches
             .retain(|(_, scope_id), _| live_tab_ids.contains(scope_id));
         for (namespace, scope_id, generation, revision) in retired_documents {
             self.emit_host_document_updated(namespace, scope_id, generation, revision, false);
@@ -166,7 +170,7 @@ impl App {
 
     fn refresh_collection_document(&mut self, ws_idx: usize, tab_idx: usize) {
         let revision = self.next_host_document_revision();
-        let mut namespaces = self
+        let namespaces = self
             .host_document_services
             .namespaces()
             .filter(|namespace| {
@@ -175,19 +179,13 @@ impl App {
             })
             .map(str::to_owned)
             .collect::<Vec<_>>();
-        if !namespaces
-            .iter()
-            .any(|namespace| namespace == crate::first_party::collections::NAMESPACE)
-        {
-            namespaces.push(crate::first_party::collections::NAMESPACE.into());
-        }
         for namespace in namespaces {
             let generation = self
                 .host_document_services
                 .generation(&namespace)
                 .unwrap_or(1);
             let Ok(snapshot) =
-                self.collections_shadow_snapshot(ws_idx, tab_idx, generation, revision)
+                self.legacy_terminal_groups_snapshot(ws_idx, tab_idx, generation, revision)
             else {
                 continue;
             };
@@ -202,18 +200,11 @@ impl App {
                 (generation, revision),
             );
             let request_key = (namespace.clone(), scope_id.clone());
-            if namespace == crate::first_party::collections::NAMESPACE
-                && !self.bundled_extension_enabled("collections", Some(ws_idx))
-            {
-                self.collections_shadow_documents.remove(&request_key);
-                self.host_document_request_watermarks.remove(&request_key);
-                continue;
-            }
             let cache = self
-                .collections_shadow_documents
+                .host_document_caches
                 .entry(request_key.clone())
                 .or_default();
-            if namespace == crate::first_party::collections::NAMESPACE
+            if namespace == crate::collections_extension_contract::COLLECTIONS_NAMESPACE
                 && self.collections_authority.phase
                     == crate::collections_extension_contract::CollectionsAuthorityPhaseV1::Package
             {
@@ -222,9 +213,6 @@ impl App {
                 continue;
             }
             cache.disable();
-            if namespace == crate::first_party::collections::NAMESPACE {
-                let _ = cache.install_fallback(&snapshot);
-            }
             if let Err(error) = self
                 .host_document_services
                 .request(&namespace, snapshot.clone())
@@ -232,11 +220,7 @@ impl App {
                 if error.contains("global document render queue is full") {
                     self.defer_host_document_render(request_key.clone(), snapshot.clone());
                 }
-                if namespace == crate::first_party::collections::NAMESPACE {
-                    tracing::warn!(%error, "Collections provider unavailable; using generic fallback");
-                } else {
-                    tracing::warn!(%namespace, %error, "host document provider unavailable");
-                }
+                tracing::warn!(%namespace, %error, "host document provider unavailable");
             } else {
                 self.host_document_retry_snapshots.remove(&request_key);
             }
@@ -249,7 +233,6 @@ impl App {
                     .map(|tab| (workspace.id.clone(), tab.id.clone()))
             })
         {
-            // Candidate results are quarantined and cannot affect the legacy-visible document.
             if let Err(error) = self.schedule_collections_candidate(workspace_id, tab_id, revision)
             {
                 tracing::debug!(%error, "Collections candidate audit was not scheduled");
@@ -382,7 +365,7 @@ impl App {
                     self.host_document_retry_order.push_back(key);
                     return;
                 }
-                Err(_) if key.0 == crate::first_party::collections::NAMESPACE => {
+                Err(_) if key.0 == crate::collections_extension_contract::COLLECTIONS_NAMESPACE => {
                     if let DeferredHostDocumentSnapshot::TerminalGroups(snapshot) = snapshot {
                         self.schedule_host_document_render_retry(key, snapshot);
                     }
@@ -433,7 +416,7 @@ impl App {
         let namespace = crate::first_party::spaces::NAMESPACE;
         let scope_id = crate::first_party::spaces::SESSION_SCOPE_ID.to_string();
         if !self.bundled_extension_enabled("spaces", None) {
-            self.collections_shadow_documents
+            self.host_document_caches
                 .remove(&(namespace.into(), scope_id.clone()));
             self.host_document_request_watermarks
                 .remove(&(namespace.into(), scope_id));
@@ -441,7 +424,7 @@ impl App {
             return;
         }
         let Some(generation) = self.host_document_services.generation(namespace) else {
-            self.collections_shadow_documents
+            self.host_document_caches
                 .remove(&(namespace.into(), scope_id.clone()));
             self.host_document_request_watermarks
                 .remove(&(namespace.into(), scope_id));
@@ -639,7 +622,7 @@ impl App {
         let namespace = crate::first_party::delegation::NAMESPACE;
         let scope_id = crate::first_party::spaces::SESSION_SCOPE_ID.to_string();
         let Some(generation) = self.host_document_services.generation(namespace) else {
-            self.collections_shadow_documents
+            self.host_document_caches
                 .remove(&(namespace.into(), scope_id.clone()));
             self.host_document_request_watermarks
                 .remove(&(namespace.into(), scope_id));
@@ -687,7 +670,7 @@ impl App {
         if snapshot.relationships.len() > crate::extension_contract::MAX_DOCUMENT_ITEMS
             || snapshot.validate().is_err()
         {
-            self.collections_shadow_documents.remove(&key);
+            self.host_document_caches.remove(&key);
             self.host_document_request_watermarks.remove(&key);
             self.host_document_retry_snapshots.remove(&key);
             self.host_relationships_last_desired = None;
@@ -735,7 +718,7 @@ impl App {
         let namespace = crate::first_party::agent_status::NAMESPACE;
         let scope_id = crate::first_party::spaces::SESSION_SCOPE_ID.to_string();
         let Some(generation) = self.host_document_services.generation(namespace) else {
-            self.collections_shadow_documents
+            self.host_document_caches
                 .remove(&(namespace.into(), scope_id.clone()));
             self.host_document_request_watermarks
                 .remove(&(namespace.into(), scope_id));
@@ -804,7 +787,7 @@ impl App {
         };
         let key = (namespace.to_string(), scope_id.clone());
         if snapshot.validate().is_err() {
-            self.collections_shadow_documents.remove(&key);
+            self.host_document_caches.remove(&key);
             self.host_document_request_watermarks.remove(&key);
             self.host_document_retry_snapshots.remove(&key);
             self.host_agent_activity_last_desired = None;
@@ -855,11 +838,11 @@ impl App {
         revision: u64,
     ) {
         let was_available = self
-            .collections_shadow_documents
+            .host_document_caches
             .get(key)
             .and_then(|cache| cache.current())
             .is_some();
-        if let Some(cache) = self.collections_shadow_documents.get_mut(key) {
+        if let Some(cache) = self.host_document_caches.get_mut(key) {
             cache.disable();
         }
         if was_available {
@@ -918,7 +901,7 @@ impl App {
                 Ok(document) => {
                     self.complete_host_semantic_retry(&result.namespace);
                     let _ = self
-                        .collections_shadow_documents
+                        .host_document_caches
                         .entry(key)
                         .or_default()
                         .publish_for_namespace(
@@ -938,7 +921,7 @@ impl App {
         }
         if current
             && self
-                .collections_shadow_documents
+                .host_document_caches
                 .get(&(result.namespace.clone(), result.snapshot.scope_id.clone()))
                 .and_then(|cache| cache.current())
                 .is_some_and(|document| {
@@ -983,7 +966,7 @@ impl App {
                 Ok(document) => {
                     self.complete_host_semantic_retry(&result.namespace);
                     let _ = self
-                        .collections_shadow_documents
+                        .host_document_caches
                         .entry(key)
                         .or_default()
                         .publish_for_namespace(
@@ -1003,7 +986,7 @@ impl App {
         }
         if current
             && self
-                .collections_shadow_documents
+                .host_document_caches
                 .get(&(result.namespace.clone(), result.snapshot.scope_id.clone()))
                 .and_then(|cache| cache.current())
                 .is_some_and(|document| {
@@ -1050,7 +1033,7 @@ impl App {
                         self.host_spaces_retry_epoch.saturating_add(1).max(1);
                     self.host_spaces_retry_attempt = 0;
                     self.host_spaces_retry_scheduled = false;
-                    let cache = self.collections_shadow_documents.entry(key).or_default();
+                    let cache = self.host_document_caches.entry(key).or_default();
                     let _ = cache.publish_for_namespace(
                         &result.namespace,
                         result.snapshot.generation,
@@ -1068,7 +1051,7 @@ impl App {
         }
         if current
             && self
-                .collections_shadow_documents
+                .host_document_caches
                 .get(&(result.namespace.clone(), result.snapshot.scope_id.clone()))
                 .and_then(|cache| cache.current())
                 .is_some_and(|document| {
@@ -1237,12 +1220,9 @@ impl App {
             self.host_document_retry_order
                 .retain(|queued| queued != &request_key);
         }
-        let retry_snapshot = (result.namespace == crate::first_party::collections::NAMESPACE
-            && result.result.is_err())
-        .then(|| (request_key.clone(), result.snapshot.clone()));
         let available = {
             let cache = self
-                .collections_shadow_documents
+                .host_document_caches
                 .entry((result.namespace.clone(), result.snapshot.scope_id.clone()))
                 .or_default();
             if cache.current().is_some_and(|current| {
@@ -1276,12 +1256,7 @@ impl App {
             });
             if let Err(error) = published {
                 cache.disable();
-                if result.namespace == crate::first_party::collections::NAMESPACE {
-                    tracing::warn!(%error, "Collections provider result rejected; using generic fallback");
-                    let _ = cache.install_fallback(&result.snapshot);
-                } else {
-                    tracing::warn!(namespace = %result.namespace, %error, "host document provider result rejected");
-                }
+                tracing::warn!(namespace = %result.namespace, %error, "host document provider result rejected");
             }
             cache.current().is_some()
         };
@@ -1292,8 +1267,7 @@ impl App {
             result.snapshot.revision,
             available,
         );
-        retry_snapshot
-            .is_some_and(|(key, snapshot)| self.schedule_host_document_render_retry(key, snapshot))
+        false
     }
 
     pub(super) fn authorize_host_document_action(
@@ -1301,10 +1275,10 @@ impl App {
         params: &crate::api::schema::HostDocumentActionParams,
     ) -> Result<AuthorizedHostDocumentAction, String> {
         let cache = self
-            .collections_shadow_documents
+            .host_document_caches
             .get(&(params.namespace.clone(), params.scope_id.clone()))
             .or_else(|| {
-                self.collections_shadow_documents
+                self.host_document_caches
                     .iter()
                     .find(|((_, scope_id), cache)| {
                         scope_id == &params.scope_id
@@ -1346,7 +1320,7 @@ impl App {
             })
             .ok_or_else(|| "host document scope no longer exists".to_string())?;
         let snapshot = self
-            .collections_shadow_snapshot(ws_idx, tab_idx, params.generation, params.revision)
+            .legacy_terminal_groups_snapshot(ws_idx, tab_idx, params.generation, params.revision)
             .map_err(|error| error.to_string())?;
         let Some(action) = document
             .actions
@@ -1562,7 +1536,7 @@ impl App {
                 live_tab_ids.contains(scope_id) && grant.expires_at > now
             });
         let mut candidates = self
-            .collections_shadow_documents
+            .host_document_caches
             .iter()
             .filter(|((_, scope_id), cache)| {
                 live_tab_ids.contains(scope_id) && cache.current().is_some()
@@ -1658,7 +1632,7 @@ impl App {
         documents
     }
 
-    pub(super) fn collections_shadow_snapshot(
+    pub(super) fn legacy_terminal_groups_snapshot(
         &self,
         ws_idx: usize,
         tab_idx: usize,
@@ -1710,7 +1684,7 @@ impl App {
             .collections()
             .map(|collection| HostTerminalGroup {
                 group_id: collection_id_text(collection.id()),
-                label: collection.label().map(str::to_owned),
+                label: collection.legacy_label().map(str::to_owned),
                 selected_terminal_id: collection.selected().and_then(|pane_id| {
                     tab.panes
                         .get(&pane_id)
@@ -1719,7 +1693,7 @@ impl App {
                 members: collection
                     .members()
                     .iter()
-                    .filter_map(|pane_id| member(*pane_id, collection.is_archived(*pane_id)))
+                    .filter_map(|pane_id| member(*pane_id, collection.legacy_is_archived(*pane_id)))
                     .collect(),
             })
             .collect();
@@ -1741,7 +1715,7 @@ impl App {
     }
 
     #[cfg(test)]
-    pub(crate) fn collections_shadow_document(
+    pub(crate) fn legacy_collections_fixture_document(
         &self,
         ws_idx: usize,
         tab_idx: usize,
@@ -1751,8 +1725,9 @@ impl App {
         crate::extension_contract::HostDocumentV1,
         crate::extension_contract::HostDocumentError,
     > {
-        let snapshot = self.collections_shadow_snapshot(ws_idx, tab_idx, generation, revision)?;
-        crate::first_party::collections::project(&snapshot)
+        let snapshot =
+            self.legacy_terminal_groups_snapshot(ws_idx, tab_idx, generation, revision)?;
+        crate::first_party::collections_legacy_fixture::project(&snapshot)
     }
 
     pub(super) fn find_collection(&self, id: CollectionId) -> Option<(usize, usize)> {
@@ -1778,7 +1753,6 @@ impl App {
         let tab = ws.tabs.get(tab_idx)?;
         let collection = tab.collection(id)?;
         let collection_id = collection_id_text(id);
-        let selected = collection.selected();
         let tab_id = self.public_tab_id(ws_idx, tab_idx)?;
         let package_projection = (self.collections_authority.phase
             == crate::collections_extension_contract::CollectionsAuthorityPhaseV1::Package)
@@ -1789,26 +1763,20 @@ impl App {
                     .collections
                     .iter()
                     .find(|projected| projected.collection_id == collection_id)
-            });
+            })?;
         let projected_member = |pane_id: &str| {
-            package_projection.and_then(|projected| {
-                projected
-                    .members
-                    .iter()
-                    .find(|member| member.pane_id == pane_id)
-            })
+            package_projection
+                .members
+                .iter()
+                .find(|member| member.pane_id == pane_id)
         };
         Some(CollectionInfo {
             collection_id,
             workspace_id: self.public_workspace_id(ws_idx),
             tab_id,
-            label: package_projection
-                .map(|projected| projected.label.clone())
-                .unwrap_or_else(|| collection.label().map(str::to_owned)),
+            label: package_projection.label.clone(),
             focused: tab.layout.focused_leaf() == LayoutLeaf::Collection(id.into()),
-            selected_pane_id: package_projection
-                .and_then(|projected| projected.selected_pane_id.clone())
-                .or_else(|| selected.and_then(|pane| self.public_pane_id(ws_idx, pane))),
+            selected_pane_id: package_projection.selected_pane_id.clone(),
             members: collection
                 .members()
                 .iter()
@@ -1816,14 +1784,9 @@ impl App {
                 .filter_map(|(index, pane)| {
                     let pane_id = self.public_pane_id(ws_idx, *pane)?;
                     Some(CollectionMemberInfo {
-                        archived: projected_member(&pane_id).map_or_else(
-                            || collection.is_archived(*pane),
-                            |member| member.archived,
-                        ),
-                        selected: package_projection.is_none() && selected == Some(*pane)
-                            || package_projection.is_some_and(|projected| {
-                                projected.selected_pane_id.as_deref() == Some(pane_id.as_str())
-                            }),
+                        archived: projected_member(&pane_id).is_some_and(|member| member.archived),
+                        selected: package_projection.selected_pane_id.as_deref()
+                            == Some(pane_id.as_str()),
                         pane_id,
                         index,
                     })
@@ -1877,16 +1840,7 @@ impl App {
                 "workspace or tab was not found",
             );
         }
-        let collections = self
-            .collection_infos(workspace_filter, tab_filter)
-            .into_iter()
-            .filter(|collection| {
-                self.parse_workspace_id(&collection.workspace_id)
-                    .is_some_and(|ws_idx| {
-                        self.bundled_extension_enabled("collections", Some(ws_idx))
-                    })
-            })
-            .collect();
+        let collections = self.collection_infos(workspace_filter, tab_filter);
         responses::encode_success(request_id, ResponseResult::CollectionList { collections })
     }
 
@@ -1901,13 +1855,6 @@ impl App {
         let Some((ws_idx, tab_idx)) = self.find_collection(id) else {
             return responses::encode_error(request_id, "not_found", "collection was not found");
         };
-        if !self.bundled_extension_enabled("collections", Some(ws_idx)) {
-            return responses::encode_error(
-                request_id,
-                "extension_disabled",
-                "Collections is disabled for this repository",
-            );
-        }
         responses::encode_success(
             request_id,
             ResponseResult::CollectionInfo {
@@ -1921,62 +1868,13 @@ impl App {
     pub(crate) fn handle_collection_create(
         &mut self,
         request_id: String,
-        params: CollectionCreateParams,
+        _params: CollectionCreateParams,
     ) -> String {
-        if self.collections_authority.phase
-            == crate::collections_extension_contract::CollectionsAuthorityPhaseV1::Package
-            && params.label.is_some()
-        {
-            return responses::encode_error(
-                request_id,
-                "collections_atomic_create_required",
-                "labeled creation requires the package-authority reservation coordinator",
-            );
-        }
-        let Some((ws_idx, pane_id)) = self.parse_current_public_pane_id(&params.target_pane_id)
-        else {
-            return responses::encode_error(request_id, "not_found", "target pane was not found");
-        };
-        if !self.bundled_extension_enabled("collections", Some(ws_idx)) {
-            return responses::encode_error(
-                request_id,
-                "extension_disabled",
-                "Collections is disabled for this repository",
-            );
-        }
-        let Some(tab_idx) = self.state.workspaces[ws_idx].find_tab_index_for_pane(pane_id) else {
-            return responses::encode_error(request_id, "not_found", "target tab was not found");
-        };
-        let group_count = self.state.workspaces[ws_idx].tabs[tab_idx]
-            .layout
-            .collections()
-            .count();
-        if let Err(error) = crate::admission::group(group_count) {
-            return responses::encode_error(request_id, "resource_limit", error.to_string());
-        }
-        let created = self.state.workspaces[ws_idx].tabs[tab_idx].create_collection_near(
-            LayoutLeaf::Pane(pane_id),
-            direction(params.direction),
-            params.ratio.unwrap_or(0.5),
-            params.label,
-        );
-        let Ok(collection_id) = created else {
-            return responses::encode_error(
-                request_id,
-                "invalid_placement",
-                "collection could not be created at that target",
-            );
-        };
-        if params.focus {
-            let _ = self.state.workspaces[ws_idx].tabs[tab_idx]
-                .focus_layout_leaf(LayoutLeaf::Collection(collection_id.into()));
-        }
-        self.state.mark_session_dirty();
-        let collection = self
-            .collection_info(ws_idx, tab_idx, collection_id)
-            .expect("created collection");
-        self.emit_collection_event("created", collection.clone());
-        responses::encode_success(request_id, ResponseResult::CollectionInfo { collection })
+        responses::encode_error(
+            request_id,
+            "collections_atomic_create_required",
+            "creation requires the package-authority reservation coordinator",
+        )
     }
 
     pub(crate) fn handle_collection_add(
@@ -1990,13 +1888,6 @@ impl App {
         let Some((ws_idx, tab_idx)) = self.find_collection(collection_id) else {
             return responses::encode_error(request_id, "not_found", "collection was not found");
         };
-        if !self.bundled_extension_enabled("collections", Some(ws_idx)) {
-            return responses::encode_error(
-                request_id,
-                "extension_disabled",
-                "Collections is disabled for this repository",
-            );
-        }
         let Some((pane_ws_idx, pane_id)) = self.parse_current_public_pane_id(&params.pane_id)
         else {
             return responses::encode_error(request_id, "not_found", "pane was not found");
@@ -2070,14 +1961,13 @@ impl App {
     pub(crate) fn handle_collection_archive(
         &mut self,
         request_id: String,
-        params: CollectionMemberTarget,
-        archived: bool,
+        _params: CollectionMemberTarget,
+        _archived: bool,
     ) -> String {
-        self.mutate_collection_member(
+        responses::encode_error(
             request_id,
-            &params.collection_id,
-            &params.pane_id,
-            |tab, collection, pane| tab.set_collection_member_archived(collection, pane, archived),
+            "collections_action_required",
+            "archive policy changes require an authoritative package action",
         )
     }
 
@@ -2101,13 +1991,6 @@ impl App {
         let Some((ws_idx, tab_idx)) = self.find_collection(collection_id) else {
             return responses::encode_error(request_id, "not_found", "collection was not found");
         };
-        if !self.bundled_extension_enabled("collections", Some(ws_idx)) {
-            return responses::encode_error(
-                request_id,
-                "extension_disabled",
-                "Collections is disabled for this repository",
-            );
-        }
         let Some((pane_ws_idx, pane_id)) = self.parse_current_public_pane_id(pane_raw) else {
             return responses::encode_error(request_id, "not_found", "pane was not found");
         };
@@ -2141,13 +2024,6 @@ impl App {
         let Some((ws_idx, pane_id)) = self.parse_current_public_pane_id(&params.pane_id) else {
             return responses::encode_error(request_id, "not_found", "pane was not found");
         };
-        if !self.bundled_extension_enabled("collections", Some(ws_idx)) {
-            return responses::encode_error(
-                request_id,
-                "extension_disabled",
-                "Collections is disabled for this repository",
-            );
-        }
         let Some((target_ws_idx, target)) =
             self.parse_current_public_pane_id(&params.target_pane_id)
         else {
@@ -2217,13 +2093,6 @@ impl App {
         let Some((ws_idx, tab_idx)) = self.find_collection(collection_id) else {
             return responses::encode_error(request_id, "not_found", "collection was not found");
         };
-        if !self.bundled_extension_enabled("collections", Some(ws_idx)) {
-            return responses::encode_error(
-                request_id,
-                "extension_disabled",
-                "Collections is disabled for this repository",
-            );
-        }
         let members = self.state.workspaces[ws_idx].tabs[tab_idx]
             .collection(collection_id)
             .expect("located collection")
@@ -2370,7 +2239,6 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::schema::{Method, Request, SplitDirection};
 
     fn handle_current_result(
         app: &mut App,
@@ -2418,356 +2286,6 @@ mod tests {
         (app, collection, member)
     }
 
-    fn normalize_collection_ids(
-        value: &mut serde_json::Value,
-        collection_id: &str,
-        workspace_id: &str,
-        tab_id: &str,
-        pane_aliases: &std::collections::HashMap<String, &'static str>,
-    ) {
-        match value {
-            serde_json::Value::Array(values) => {
-                for value in values {
-                    normalize_collection_ids(
-                        value,
-                        collection_id,
-                        workspace_id,
-                        tab_id,
-                        pane_aliases,
-                    );
-                }
-            }
-            serde_json::Value::Object(fields) => {
-                for (key, value) in fields {
-                    if let Some(raw) = value.as_str() {
-                        let alias = match key.as_str() {
-                            "collection_id" if raw == collection_id => Some("collection"),
-                            "workspace_id" if raw == workspace_id => Some("workspace"),
-                            "tab_id" if raw == tab_id => Some("tab"),
-                            "pane_id" | "selected_pane_id" | "focused_pane_id" => {
-                                pane_aliases.get(raw).copied()
-                            }
-                            _ => None,
-                        };
-                        if let Some(alias) = alias {
-                            *value = serde_json::Value::String(alias.into());
-                            continue;
-                        }
-                    }
-                    normalize_collection_ids(
-                        value,
-                        collection_id,
-                        workspace_id,
-                        tab_id,
-                        pane_aliases,
-                    );
-                }
-            }
-            _ => {}
-        }
-    }
-
-    fn normalized_collection(
-        info: &CollectionInfo,
-        collection_id: &str,
-        workspace_id: &str,
-        tab_id: &str,
-        pane_aliases: &std::collections::HashMap<String, &'static str>,
-    ) -> serde_json::Value {
-        assert_eq!(info.collection_id, collection_id);
-        assert_eq!(info.workspace_id, workspace_id);
-        assert_eq!(info.tab_id, tab_id);
-        let mut value = serde_json::to_value(info).expect("serialize collection info");
-        normalize_collection_ids(
-            &mut value,
-            collection_id,
-            workspace_id,
-            tab_id,
-            pane_aliases,
-        );
-        value
-    }
-
-    fn normalized_collection_state(
-        app: &App,
-        collection: CollectionId,
-        collection_id: &str,
-        workspace_id: &str,
-        tab_id: &str,
-        pane_aliases: &std::collections::HashMap<String, &'static str>,
-    ) -> Option<serde_json::Value> {
-        app.collection_info(0, 0, collection).map(|info| {
-            normalized_collection(&info, collection_id, workspace_id, tab_id, pane_aliases)
-        })
-    }
-
-    fn normalized_collection_response(
-        response: String,
-        request_id: &str,
-        collection_id: &str,
-        workspace_id: &str,
-        tab_id: &str,
-        pane_aliases: &std::collections::HashMap<String, &'static str>,
-    ) -> serde_json::Value {
-        let mut response: serde_json::Value =
-            serde_json::from_str(&response).expect("parse raw collection response");
-        let response_id = response
-            .get_mut("id")
-            .expect("response request ID must be present");
-        assert_eq!(response_id.as_str(), Some(request_id));
-        *response_id = serde_json::Value::String("request".into());
-        normalize_collection_ids(
-            &mut response,
-            collection_id,
-            workspace_id,
-            tab_id,
-            pane_aliases,
-        );
-        response
-    }
-
-    fn assert_every_pane_has_one_placement(app: &App) {
-        for workspace in &app.state.workspaces {
-            for tab in &workspace.tabs {
-                let placed = tab.layout.pane_ids();
-                assert_eq!(placed.len(), tab.panes.len());
-                for pane in tab.panes.keys() {
-                    assert_eq!(
-                        placed.iter().filter(|candidate| *candidate == pane).count(),
-                        1,
-                        "pane {pane:?} must have exactly one placement"
-                    );
-                    assert!(tab.layout.placement(*pane).is_some());
-                }
-            }
-        }
-    }
-
-    fn run_collection_mutation_parity_sequence() -> (Vec<serde_json::Value>, Vec<serde_json::Value>)
-    {
-        let mut app = app_with_workspace();
-        let root = app.state.workspaces[0].tabs[0].root_pane;
-        let first = app.state.workspaces[0].test_split(ratatui::layout::Direction::Horizontal);
-        let second = app.state.workspaces[0].test_split(ratatui::layout::Direction::Vertical);
-        app.state.ensure_test_terminals();
-        let root_public = app.public_pane_id(0, root).unwrap();
-        let first_public = app.public_pane_id(0, first).unwrap();
-        let second_public = app.public_pane_id(0, second).unwrap();
-        let aliases = std::collections::HashMap::from([
-            (root_public.clone(), "root"),
-            (first_public.clone(), "first"),
-            (second_public.clone(), "second"),
-        ]);
-        let workspace_id = app.public_workspace_id(0);
-        let tab_id = app.public_tab_id(0, 0).unwrap();
-        let event_start = app.event_hub.current_sequence();
-        let mut transitions = Vec::new();
-
-        let response = app.handle_collection_create(
-            "create".into(),
-            CollectionCreateParams {
-                target_pane_id: root_public.clone(),
-                direction: SplitDirection::Right,
-                ratio: Some(0.5),
-                label: Some("helpers".into()),
-                focus: true,
-            },
-        );
-        let collection: CollectionId =
-            app.state.workspaces[0].tabs[0].layout.collection_ids()[0].into();
-        let collection_id = collection_id_text(collection);
-        assert_every_pane_has_one_placement(&app);
-        transitions.push(serde_json::json!({
-            "operation": "create",
-            "response": normalized_collection_response(
-                response, "create", &collection_id, &workspace_id, &tab_id, &aliases,
-            ),
-            "state": normalized_collection_state(
-                &app, collection, &collection_id, &workspace_id, &tab_id, &aliases,
-            ),
-        }));
-        for (operation, pane_id) in [("add_first", &first_public), ("add_second", &second_public)] {
-            let response = app.handle_collection_add(
-                operation.into(),
-                CollectionAddParams {
-                    collection_id: collection_id.clone(),
-                    pane_id: pane_id.clone(),
-                },
-            );
-            assert_every_pane_has_one_placement(&app);
-            transitions.push(serde_json::json!({
-                "operation": operation,
-                "response": normalized_collection_response(
-                    response, operation, &collection_id, &workspace_id, &tab_id, &aliases,
-                ),
-                "state": normalized_collection_state(
-                    &app, collection, &collection_id, &workspace_id, &tab_id, &aliases,
-                ),
-            }));
-        }
-        let state_before_rejected_add = app.collection_info(0, 0, collection);
-        let event_sequence_before_rejected_add = app.event_hub.current_sequence();
-        let response = app.handle_collection_add(
-            "add_first_again".into(),
-            CollectionAddParams {
-                collection_id: collection_id.clone(),
-                pane_id: first_public.clone(),
-            },
-        );
-        assert_eq!(
-            app.collection_info(0, 0, collection),
-            state_before_rejected_add
-        );
-        assert_eq!(
-            app.event_hub.current_sequence(),
-            event_sequence_before_rejected_add
-        );
-        assert_every_pane_has_one_placement(&app);
-        transitions.push(serde_json::json!({
-            "operation": "add_first_again",
-            "response": normalized_collection_response(
-                response, "add_first_again", &collection_id, &workspace_id, &tab_id, &aliases,
-            ),
-            "state": normalized_collection_state(
-                &app, collection, &collection_id, &workspace_id, &tab_id, &aliases,
-            ),
-        }));
-        let response = app.handle_collection_select(
-            "select".into(),
-            CollectionSelectParams {
-                collection_id: collection_id.clone(),
-                pane_id: second_public.clone(),
-                focus: true,
-            },
-        );
-        assert_every_pane_has_one_placement(&app);
-        transitions.push(serde_json::json!({
-            "operation": "select_second",
-            "response": normalized_collection_response(
-                response, "select", &collection_id, &workspace_id, &tab_id, &aliases,
-            ),
-            "state": normalized_collection_state(
-                &app, collection, &collection_id, &workspace_id, &tab_id, &aliases,
-            ),
-        }));
-        let response = app.handle_collection_reorder(
-            "reorder".into(),
-            CollectionReorderParams {
-                collection_id: collection_id.clone(),
-                pane_id: second_public.clone(),
-                index: 0,
-            },
-        );
-        assert_every_pane_has_one_placement(&app);
-        transitions.push(serde_json::json!({
-            "operation": "reorder_second",
-            "response": normalized_collection_response(
-                response, "reorder", &collection_id, &workspace_id, &tab_id, &aliases,
-            ),
-            "state": normalized_collection_state(
-                &app, collection, &collection_id, &workspace_id, &tab_id, &aliases,
-            ),
-        }));
-        for (operation, archived) in [("archive_first", true), ("restore_first", false)] {
-            let response = app.handle_collection_archive(
-                operation.into(),
-                CollectionMemberTarget {
-                    collection_id: collection_id.clone(),
-                    pane_id: first_public.clone(),
-                },
-                archived,
-            );
-            assert_every_pane_has_one_placement(&app);
-            transitions.push(serde_json::json!({
-                "operation": operation,
-                "response": normalized_collection_response(
-                    response, operation, &collection_id, &workspace_id, &tab_id, &aliases,
-                ),
-                "state": normalized_collection_state(
-                    &app, collection, &collection_id, &workspace_id, &tab_id, &aliases,
-                ),
-            }));
-        }
-        let response = app.handle_collection_promote(
-            "promote".into(),
-            CollectionPromoteParams {
-                pane_id: second_public,
-                target_pane_id: root_public,
-                direction: SplitDirection::Right,
-                ratio: Some(0.5),
-                focus: false,
-            },
-        );
-        assert_every_pane_has_one_placement(&app);
-        transitions.push(serde_json::json!({
-            "operation": "promote_second",
-            "response": normalized_collection_response(
-                response, "promote", &collection_id, &workspace_id, &tab_id, &aliases,
-            ),
-            "state": normalized_collection_state(
-                &app, collection, &collection_id, &workspace_id, &tab_id, &aliases,
-            ),
-        }));
-        let response = app.handle_collection_close(
-            "close".into(),
-            CollectionCloseParams {
-                collection_id: collection_id.clone(),
-                disposition: Some(CollectionCloseDisposition::CascadeClose),
-            },
-        );
-        assert_every_pane_has_one_placement(&app);
-        transitions.push(serde_json::json!({
-            "operation": "close",
-            "response": normalized_collection_response(
-                response, "close", &collection_id, &workspace_id, &tab_id, &aliases,
-            ),
-            "state": normalized_collection_state(
-                &app, collection, &collection_id, &workspace_id, &tab_id, &aliases,
-            ),
-        }));
-        let events = app
-            .event_hub
-            .events_after(event_start)
-            .iter()
-            .map(|(sequence, event)| {
-                let mut event = serde_json::to_value(event).expect("serialize event envelope");
-                normalize_collection_ids(
-                    &mut event,
-                    &collection_id,
-                    &workspace_id,
-                    &tab_id,
-                    &aliases,
-                );
-                serde_json::json!({
-                    "sequence": sequence - event_start,
-                    "envelope": event,
-                })
-            })
-            .collect();
-        (transitions, events)
-    }
-
-    #[test]
-    fn collection_mutation_parity_fixture_covers_create_add_select_reorder_archive_restore_promote_close(
-    ) {
-        let (actual, _events) = run_collection_mutation_parity_sequence();
-        let expected: serde_json::Value = serde_json::from_str(include_str!(
-            "../../../tests/fixtures/collections-mutation-parity-v1.json"
-        ))
-        .unwrap();
-        assert_eq!(serde_json::json!(actual), expected["transitions"]);
-    }
-
-    #[test]
-    fn collection_events_have_exact_kind_payload_order_and_revision() {
-        let (_transitions, actual) = run_collection_mutation_parity_sequence();
-        let expected: serde_json::Value = serde_json::from_str(include_str!(
-            "../../../tests/fixtures/collections-mutation-parity-v1.json"
-        ))
-        .unwrap();
-        assert_eq!(serde_json::json!(actual), expected["events"]);
-    }
-
     #[test]
     fn collection_shadow_uses_stable_terminal_identity_and_generic_contracts() {
         let (app, collection, member) = app_with_nonempty_collection();
@@ -2775,11 +2293,11 @@ mod tests {
             .attached_terminal_id
             .to_string();
 
-        let document = app.collections_shadow_document(0, 0, 4, 9).unwrap();
+        let document = app.legacy_collections_fixture_document(0, 0, 4, 9).unwrap();
 
         assert_eq!(
             document.namespace,
-            crate::first_party::collections::NAMESPACE
+            crate::collections_extension_contract::COLLECTIONS_NAMESPACE
         );
         assert_eq!(document.generation, 4);
         assert_eq!(document.revision, 9);
@@ -2904,71 +2422,20 @@ mod tests {
     }
 
     #[test]
-    fn failed_collections_render_schedules_delayed_recovery() {
-        let mut app = app_with_workspace();
-        app.host_document_services =
-            crate::extension_service::HostDocumentServiceCatalog::with_test_provider(
-                crate::first_party::collections::NAMESPACE,
-                7,
-            );
-        let snapshot = app.collections_shadow_snapshot(0, 0, 7, 1).unwrap();
-        let key = (
-            crate::first_party::collections::NAMESPACE.to_string(),
-            snapshot.scope_id.clone(),
-        );
-        let retry = (key.0.clone(), key.1.clone(), 7, 1);
-        handle_current_result(
-            &mut app,
-            crate::extension_service::HostDocumentAsyncResult {
-                _render_slot: None,
-                namespace: key.0.clone(),
-                provider_priority: 100,
-                snapshot: snapshot.clone(),
-                result: Err("provider crashed".into()),
-                grants: std::collections::HashSet::new(),
-            },
-        );
-
-        assert!(app.host_document_retry_snapshots.contains_key(&key));
-        assert!(app.host_document_retry_scheduled.contains(&retry));
-        assert_eq!(app.host_document_retry_attempts.get(&retry), Some(&1));
-        assert!(app
-            .host_documents()
-            .iter()
-            .any(|entry| entry.document.namespace == "host.fallback"));
-
-        handle_current_result(
-            &mut app,
-            crate::extension_service::HostDocumentAsyncResult {
-                _render_slot: None,
-                namespace: key.0,
-                provider_priority: 100,
-                result: crate::first_party::collections::project(&snapshot)
-                    .map_err(|error| error.to_string()),
-                snapshot,
-                grants: std::collections::HashSet::from([
-                    crate::extension_contract::HostCapability::FocusTerminal,
-                ]),
-            },
-        );
-        assert!(app
-            .host_documents()
-            .iter()
-            .any(|entry| entry.document.namespace == crate::first_party::collections::NAMESPACE));
-        assert!(!app.host_document_retry_scheduled.contains(&retry));
-    }
-
-    #[test]
     fn third_party_document_is_projected_and_authorizes_its_declared_action() {
         let mut app = app_with_workspace();
         let namespace = "example.collections";
         app.host_document_services =
             crate::extension_service::HostDocumentServiceCatalog::with_test_providers(&[
                 (namespace, 9),
-                (crate::first_party::collections::NAMESPACE, 10),
+                (
+                    crate::collections_extension_contract::COLLECTIONS_NAMESPACE,
+                    10,
+                ),
             ]);
-        let snapshot = app.collections_shadow_snapshot(0, 0, 9, 1).unwrap();
-        let mut document = crate::first_party::collections::project(&snapshot).unwrap();
+        let snapshot = app.legacy_terminal_groups_snapshot(0, 0, 9, 1).unwrap();
+        let mut document =
+            crate::first_party::collections_legacy_fixture::project(&snapshot).unwrap();
         document.namespace = namespace.into();
         let action_id = document.actions[0].id.clone();
         let scope_id = snapshot.scope_id.clone();
@@ -2985,13 +2452,14 @@ mod tests {
                 ]),
             },
         );
-        let builtin_snapshot = app.collections_shadow_snapshot(0, 0, 10, 1).unwrap();
-        let builtin_document = crate::first_party::collections::project(&builtin_snapshot).unwrap();
+        let builtin_snapshot = app.legacy_terminal_groups_snapshot(0, 0, 10, 1).unwrap();
+        let builtin_document =
+            crate::first_party::collections_legacy_fixture::project(&builtin_snapshot).unwrap();
         handle_current_result(
             &mut app,
             crate::extension_service::HostDocumentAsyncResult {
                 _render_slot: None,
-                namespace: crate::first_party::collections::NAMESPACE.into(),
+                namespace: crate::collections_extension_contract::COLLECTIONS_NAMESPACE.into(),
                 provider_priority: 100,
                 snapshot: builtin_snapshot,
                 result: Ok(builtin_document),
@@ -3023,17 +2491,17 @@ mod tests {
         let mut app = app_with_workspace();
         app.host_document_services =
             crate::extension_service::HostDocumentServiceCatalog::with_test_provider(
-                crate::first_party::collections::NAMESPACE,
+                crate::collections_extension_contract::COLLECTIONS_NAMESPACE,
                 9,
             );
-        let snapshot = app.collections_shadow_snapshot(0, 0, 9, 1).unwrap();
+        let snapshot = app.legacy_terminal_groups_snapshot(0, 0, 9, 1).unwrap();
         let scope_id = snapshot.scope_id.clone();
-        let document = crate::first_party::collections::project(&snapshot).unwrap();
+        let document = crate::first_party::collections_legacy_fixture::project(&snapshot).unwrap();
         handle_current_result(
             &mut app,
             crate::extension_service::HostDocumentAsyncResult {
                 _render_slot: None,
-                namespace: crate::first_party::collections::NAMESPACE.into(),
+                namespace: crate::collections_extension_contract::COLLECTIONS_NAMESPACE.into(),
                 provider_priority: 100,
                 snapshot,
                 result: Ok(document),
@@ -3046,7 +2514,9 @@ mod tests {
         let response = app.handle_host_document_list(
             "documents".into(),
             crate::api::schema::HostDocumentListParams {
-                namespace: Some(crate::first_party::collections::NAMESPACE.into()),
+                namespace: Some(
+                    crate::collections_extension_contract::COLLECTIONS_NAMESPACE.into(),
+                ),
                 scope_id: Some(scope_id.clone()),
             },
         );
@@ -3059,7 +2529,7 @@ mod tests {
         assert_eq!(documents.len(), 1);
         assert_eq!(
             documents[0].document.namespace,
-            crate::first_party::collections::NAMESPACE
+            crate::collections_extension_contract::COLLECTIONS_NAMESPACE
         );
         assert!(app.event_hub.events_after(0).iter().any(|(_, event)| {
             matches!(
@@ -3068,12 +2538,15 @@ mod tests {
                     namespace,
                     available: true,
                     ..
-                } if namespace == crate::first_party::collections::NAMESPACE
+                } if namespace == crate::collections_extension_contract::COLLECTIONS_NAMESPACE
             )
         }));
         let sequence = app.event_hub.current_sequence();
         app.disable_host_document_projection(
-            &(crate::first_party::collections::NAMESPACE.into(), scope_id),
+            &(
+                crate::collections_extension_contract::COLLECTIONS_NAMESPACE.into(),
+                scope_id,
+            ),
             9,
             2,
         );
@@ -3099,8 +2572,9 @@ mod tests {
         let namespace = "example.interrupt";
         app.host_document_services =
             crate::extension_service::HostDocumentServiceCatalog::with_test_provider(namespace, 8);
-        let snapshot = app.collections_shadow_snapshot(0, 0, 8, 2).unwrap();
-        let mut document = crate::first_party::collections::project(&snapshot).unwrap();
+        let snapshot = app.legacy_terminal_groups_snapshot(0, 0, 8, 2).unwrap();
+        let mut document =
+            crate::first_party::collections_legacy_fixture::project(&snapshot).unwrap();
         document.namespace = namespace.into();
         let terminal_id = document.items[0]
             .terminal
@@ -3204,35 +2678,6 @@ mod tests {
     }
 
     #[test]
-    fn host_fallback_namespace_action_remains_authorized() {
-        let mut app = app_with_workspace();
-        app.refresh_collection_documents();
-        let entry = app
-            .host_documents()
-            .into_iter()
-            .find(|entry| entry.document.namespace == "host.fallback")
-            .expect("disabled test worker installs host fallback");
-        let document = entry.document;
-        let action = document.actions.first().unwrap();
-        assert!(matches!(
-            app.authorize_host_document_action(&crate::api::schema::HostDocumentActionParams {
-                namespace: document.namespace.clone(),
-                scope_id: match &document.target {
-                    crate::extension_contract::HostTarget::Tab { tab_id } => tab_id.clone(),
-                    _ => panic!("tab fallback"),
-                },
-                generation: document.generation,
-                revision: document.revision,
-                action_id: action.id.clone(),
-                confirmed: false,
-                confirmation_token: None,
-            })
-            .unwrap(),
-            AuthorizedHostDocumentAction::Focus(_)
-        ));
-    }
-
-    #[test]
     fn provider_owned_action_is_fenced_and_correlated_to_its_catalog_generation() {
         let mut app = app_with_workspace();
         let namespace = "example.actions";
@@ -3240,8 +2685,9 @@ mod tests {
             crate::extension_service::HostDocumentServiceCatalog::with_test_action_sink(
                 namespace, 12,
             );
-        let snapshot = app.collections_shadow_snapshot(0, 0, 12, 4).unwrap();
-        let mut document = crate::first_party::collections::project(&snapshot).unwrap();
+        let snapshot = app.legacy_terminal_groups_snapshot(0, 0, 12, 4).unwrap();
+        let mut document =
+            crate::first_party::collections_legacy_fixture::project(&snapshot).unwrap();
         document.namespace = namespace.into();
         document.required_capabilities.clear();
         document.actions[0].operation =
@@ -3307,22 +2753,6 @@ mod tests {
     }
 
     #[test]
-    fn pane_focus_refreshes_document_revision_and_selection() {
-        let (mut app, _collection, member) = app_with_nonempty_collection();
-        let root = app.state.workspaces[0].tabs[0].root_pane;
-        app.state.focus_pane_in_workspace(0, root);
-        app.refresh_collection_documents();
-        let before = app.host_documents()[0].document.revision;
-        let pane_id = app.public_pane_id(0, member).unwrap();
-        let response =
-            app.handle_pane_focus("focus".into(), crate::api::schema::PaneTarget { pane_id });
-        let _: crate::api::schema::SuccessResponse = serde_json::from_str(&response).unwrap();
-        let document = &app.host_documents()[0].document;
-        assert!(document.revision > before);
-        assert_eq!(app.state.workspaces[0].focused_pane_id(), Some(member));
-    }
-
-    #[test]
     fn stalled_provider_action_does_not_block_unrelated_host_api_work() {
         let mut app = app_with_workspace();
         let namespace = "example.slow-actions";
@@ -3333,14 +2763,15 @@ mod tests {
                 app.event_tx.clone(),
                 std::time::Duration::from_millis(200),
             );
-        let snapshot = app.collections_shadow_snapshot(0, 0, 12, 4).unwrap();
+        let snapshot = app.legacy_terminal_groups_snapshot(0, 0, 12, 4).unwrap();
         app.host_document_services.set_desired_revision_for_test(
             namespace,
             snapshot.scope_id.clone(),
             snapshot.generation,
             snapshot.revision,
         );
-        let mut document = crate::first_party::collections::project(&snapshot).unwrap();
+        let mut document =
+            crate::first_party::collections_legacy_fixture::project(&snapshot).unwrap();
         document.namespace = namespace.into();
         document.required_capabilities.clear();
         document.actions[0].operation =
@@ -3399,40 +2830,13 @@ mod tests {
     }
 
     #[test]
-    fn pane_rename_refreshes_document_and_removed_target_is_retired() {
-        let mut app = app_with_workspace();
-        let pane_id = app
-            .public_pane_id(0, app.state.workspaces[0].focused_pane_id().unwrap())
-            .unwrap();
-        let response = app.handle_pane_rename(
-            "rename".into(),
-            crate::api::schema::PaneRenameParams {
-                pane_id,
-                label: Some("renamed terminal".into()),
-            },
-        );
-        assert!(serde_json::from_str::<crate::api::schema::SuccessResponse>(&response).is_ok());
-        let documents = app.host_documents();
-        assert_eq!(documents.len(), 1);
-        assert!(documents[0]
-            .document
-            .items
-            .iter()
-            .any(|item| item.label == "renamed terminal"));
-        app.state.workspaces[0].tabs.clear();
-        app.refresh_collection_documents();
-        assert!(app.collections_shadow_documents.is_empty());
-        assert!(app.host_documents().is_empty());
-    }
-
-    #[test]
     fn documents_for_removed_targets_are_retired_from_projection() {
         let mut app = app_with_workspace();
-        let namespace = crate::first_party::collections::NAMESPACE;
+        let namespace = crate::collections_extension_contract::COLLECTIONS_NAMESPACE;
         app.host_document_services =
             crate::extension_service::HostDocumentServiceCatalog::with_test_provider(namespace, 4);
-        let snapshot = app.collections_shadow_snapshot(0, 0, 4, 1).unwrap();
-        let document = crate::first_party::collections::project(&snapshot).unwrap();
+        let snapshot = app.legacy_terminal_groups_snapshot(0, 0, 4, 1).unwrap();
+        let document = crate::first_party::collections_legacy_fixture::project(&snapshot).unwrap();
         let late_snapshot = snapshot.clone();
         let late_document = document.clone();
         handle_current_result(
@@ -3463,44 +2867,13 @@ mod tests {
                 crate::extension_contract::HostCapability::FocusTerminal,
             ]),
         });
-        assert!(app.collections_shadow_documents.is_empty());
-    }
-
-    #[test]
-    fn provider_cannot_choose_result_revision_or_scope() {
-        let mut app = app_with_workspace();
-        let namespace = crate::first_party::collections::NAMESPACE;
-        app.host_document_services =
-            crate::extension_service::HostDocumentServiceCatalog::with_test_provider(namespace, 7);
-        let snapshot = app.collections_shadow_snapshot(0, 0, 7, 1).unwrap();
-        let mut document = crate::first_party::collections::project(&snapshot).unwrap();
-        document.revision = 99;
-        document.target = crate::extension_contract::HostTarget::Tab {
-            tab_id: "other-tab".into(),
-        };
-        handle_current_result(
-            &mut app,
-            crate::extension_service::HostDocumentAsyncResult {
-                _render_slot: None,
-                namespace: namespace.into(),
-                provider_priority: 100,
-                snapshot,
-                result: Ok(document),
-                grants: std::collections::HashSet::from([
-                    crate::extension_contract::HostCapability::FocusTerminal,
-                ]),
-            },
-        );
-        let documents = app.host_documents();
-        assert_eq!(documents.len(), 1);
-        assert_eq!(documents[0].document.namespace, "host.fallback");
-        assert_eq!(documents[0].document.revision, 1);
+        assert!(app.host_document_caches.is_empty());
     }
 
     #[test]
     fn saturated_new_scope_is_retried_when_a_global_render_slot_releases() {
         let mut app = app_with_workspace();
-        let namespace = crate::first_party::collections::NAMESPACE;
+        let namespace = crate::collections_extension_contract::COLLECTIONS_NAMESPACE;
         app.host_document_services = crate::extension_service::HostDocumentServiceCatalog::
             with_test_saturated_render_provider(namespace, 7);
         app.refresh_collection_documents();
@@ -3523,7 +2896,7 @@ mod tests {
     #[test]
     fn shared_render_retry_queue_wakes_spaces_after_terminal_group_release() {
         let mut app = app_with_workspace();
-        let collections = crate::first_party::collections::NAMESPACE;
+        let collections = crate::collections_extension_contract::COLLECTIONS_NAMESPACE;
         let spaces = crate::first_party::spaces::NAMESPACE;
         app.host_document_services =
             crate::extension_service::HostDocumentServiceCatalog::with_test_saturated_render_providers(&[
@@ -3873,7 +3246,7 @@ mod tests {
         }
         app.refresh_relationships_document();
         assert!(app.host_relationships_last_desired.is_none());
-        assert!(!app.collections_shadow_documents.contains_key(&(
+        assert!(!app.host_document_caches.contains_key(&(
             namespace.into(),
             crate::first_party::spaces::SESSION_SCOPE_ID.into()
         )));
@@ -3906,7 +3279,7 @@ mod tests {
                 actions: Vec::new(),
                 required_capabilities: Vec::new(),
             };
-            let mut cache = crate::first_party::collections::ShadowDocumentCache::default();
+            let mut cache = crate::host_document_cache::HostDocumentCache::default();
             cache
                 .publish_for_namespace(
                     &namespace,
@@ -3916,7 +3289,7 @@ mod tests {
                     document,
                 )
                 .unwrap();
-            app.collections_shadow_documents.insert(
+            app.host_document_caches.insert(
                 (
                     namespace,
                     crate::first_party::spaces::SESSION_SCOPE_ID.into(),
@@ -3949,10 +3322,10 @@ mod tests {
     #[test]
     fn retired_provider_action_completion_is_final_fenced_on_actor() {
         let mut app = app_with_workspace();
-        let namespace = crate::first_party::collections::NAMESPACE;
+        let namespace = crate::collections_extension_contract::COLLECTIONS_NAMESPACE;
         app.host_document_services =
             crate::extension_service::HostDocumentServiceCatalog::with_test_provider(namespace, 7);
-        let snapshot = app.collections_shadow_snapshot(0, 0, 7, 3).unwrap();
+        let snapshot = app.legacy_terminal_groups_snapshot(0, 0, 7, 3).unwrap();
         app.host_document_request_watermarks.insert(
             (namespace.into(), snapshot.scope_id.clone()),
             (snapshot.generation, snapshot.revision),
@@ -3980,16 +3353,17 @@ mod tests {
     #[test]
     fn rejected_newest_request_watermark_blocks_older_completion() {
         let mut app = app_with_workspace();
-        let namespace = crate::first_party::collections::NAMESPACE;
+        let namespace = crate::collections_extension_contract::COLLECTIONS_NAMESPACE;
         app.host_document_services =
             crate::extension_service::HostDocumentServiceCatalog::with_test_provider(namespace, 7);
-        let newest = app.collections_shadow_snapshot(0, 0, 7, 2).unwrap();
+        let newest = app.legacy_terminal_groups_snapshot(0, 0, 7, 2).unwrap();
         app.host_document_request_watermarks.insert(
             (namespace.into(), newest.scope_id.clone()),
             (newest.generation, newest.revision),
         );
-        let older = app.collections_shadow_snapshot(0, 0, 7, 1).unwrap();
-        let older_document = crate::first_party::collections::project(&older).unwrap();
+        let older = app.legacy_terminal_groups_snapshot(0, 0, 7, 1).unwrap();
+        let older_document =
+            crate::first_party::collections_legacy_fixture::project(&older).unwrap();
         app.handle_host_document_result(crate::extension_service::HostDocumentAsyncResult {
             _render_slot: None,
             namespace: namespace.into(),
@@ -4011,11 +3385,12 @@ mod tests {
     #[test]
     fn stale_async_document_completion_cannot_replace_newer_publication() {
         let mut app = app_with_workspace();
-        let namespace = crate::first_party::collections::NAMESPACE;
+        let namespace = crate::collections_extension_contract::COLLECTIONS_NAMESPACE;
         app.host_document_services =
             crate::extension_service::HostDocumentServiceCatalog::with_test_provider(namespace, 7);
-        let newer_snapshot = app.collections_shadow_snapshot(0, 0, 7, 2).unwrap();
-        let newer_document = crate::first_party::collections::project(&newer_snapshot).unwrap();
+        let newer_snapshot = app.legacy_terminal_groups_snapshot(0, 0, 7, 2).unwrap();
+        let newer_document =
+            crate::first_party::collections_legacy_fixture::project(&newer_snapshot).unwrap();
         handle_current_result(
             &mut app,
             crate::extension_service::HostDocumentAsyncResult {
@@ -4029,7 +3404,7 @@ mod tests {
                 ]),
             },
         );
-        let stale_snapshot = app.collections_shadow_snapshot(0, 0, 7, 1).unwrap();
+        let stale_snapshot = app.legacy_terminal_groups_snapshot(0, 0, 7, 1).unwrap();
         app.handle_host_document_result(crate::extension_service::HostDocumentAsyncResult {
             _render_slot: None,
             namespace: namespace.into(),
@@ -4041,42 +3416,5 @@ mod tests {
         let documents = app.host_documents();
         assert_eq!(documents.len(), 1);
         assert_eq!(documents[0].document.revision, 2);
-    }
-
-    #[test]
-    fn collection_create_and_list_use_stable_ids() {
-        let mut app = app_with_workspace();
-        let root = app.state.workspaces[0].tabs[0].root_pane;
-        let pane_id = app.public_pane_id(0, root).expect("public pane id");
-        let response = app.handle_api_request(Request {
-            id: "create".into(),
-            method: Method::CollectionCreate(CollectionCreateParams {
-                target_pane_id: pane_id,
-                direction: SplitDirection::Right,
-                ratio: Some(0.4),
-                label: Some("helpers".into()),
-                focus: true,
-            }),
-        });
-        let created: crate::api::schema::SuccessResponse =
-            serde_json::from_str(&response).expect("response");
-        let ResponseResult::CollectionInfo { collection } = created.result else {
-            panic!("collection response")
-        };
-        assert!(collection.collection_id.starts_with("collection_"));
-        assert_eq!(collection.label.as_deref(), Some("helpers"));
-        assert!(collection.focused);
-
-        let listed = app.handle_api_request(Request {
-            id: "list".into(),
-            method: Method::CollectionList(CollectionListParams::default()),
-        });
-        let listed: crate::api::schema::SuccessResponse =
-            serde_json::from_str(&listed).expect("response");
-        let ResponseResult::CollectionList { collections } = listed.result else {
-            panic!("list response")
-        };
-        assert_eq!(collections.len(), 1);
-        assert_eq!(collections[0].collection_id, collection.collection_id);
     }
 }

@@ -127,12 +127,9 @@ mod tests {
         assert_eq!(pane.agent_status, crate::api::schema::AgentStatus::Working);
         assert_eq!(pane.revision, 1);
         assert!(app.next_host_document_revision > 1);
-        assert!(app.host_documents().iter().any(|document| {
-            document
-                .document
-                .items
-                .iter()
-                .any(|item| item.label == "⠋ 修复🙂标题")
+        assert!(app.host_documents().iter().all(|document| {
+            document.document.namespace
+                != crate::collections_extension_contract::COLLECTIONS_NAMESPACE
         }));
         let agent = app.collect_agent_infos().pop().unwrap();
         assert_eq!(agent.terminal_title.as_deref(), Some("⠋ 修复🙂标题"));

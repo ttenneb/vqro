@@ -509,14 +509,10 @@ mod tests {
             success.result,
             ResponseResult::WorkspaceCreated { .. }
         ));
-        assert_eq!(
-            app.host_documents().len(),
-            app.state
-                .workspaces
-                .iter()
-                .map(|workspace| workspace.tabs.len())
-                .sum::<usize>()
-        );
+        assert!(app.host_documents().iter().all(|document| {
+            document.document.namespace
+                != crate::collections_extension_contract::COLLECTIONS_NAMESPACE
+        }));
         let created_cwd = &app.state.workspaces[1].identity_cwd;
         assert_eq!(
             crate::worktree::canonical_or_original(created_cwd),

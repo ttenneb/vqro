@@ -199,8 +199,8 @@ pub struct App {
     pub(crate) marketplace_state: crate::extensions::MarketplaceStateFile,
     pub(crate) configured_disabled_extensions: std::collections::BTreeSet<String>,
     pub(crate) disabled_extensions: std::collections::BTreeSet<String>,
-    pub(crate) collections_shadow_documents:
-        HashMap<(String, String), crate::first_party::collections::ShadowDocumentCache>,
+    pub(crate) host_document_caches:
+        HashMap<(String, String), crate::host_document_cache::HostDocumentCache>,
     pub(crate) next_host_document_revision: u64,
     pub(crate) next_host_spaces_document_revision: u64,
     pub(crate) next_host_relationships_document_revision: u64,
@@ -230,7 +230,7 @@ pub struct App {
         std::sync::Arc<crate::extension_host_state::HostInvocationAuthority>,
     >,
     /// Rebuildable, nonpersistent import of legacy Collections policy for candidate reads.
-    pub(crate) collections_shadow_overlay: api::collections_candidate::CollectionsShadowOverlay,
+    pub(crate) collections_import_overlay: api::collections_candidate::CollectionsImportOverlay,
     /// Audited candidate profiles. Legacy authority quarantines these from presentation.
     pub(crate) collections_candidate_audits:
         api::collections_candidate::CollectionsCandidateCoordinator,
@@ -980,7 +980,7 @@ impl App {
             marketplace_state,
             configured_disabled_extensions: config.extensions.disabled.clone(),
             disabled_extensions,
-            collections_shadow_documents: HashMap::new(),
+            host_document_caches: HashMap::new(),
             next_host_document_revision: 1,
             next_host_spaces_document_revision: 1,
             next_host_relationships_document_revision: 1,
@@ -1001,7 +1001,7 @@ impl App {
             host_semantic_retry_scheduled: std::collections::HashSet::new(),
             host_document_confirmation_grants: HashMap::new(),
             host_invocation_authorities: HashMap::new(),
-            collections_shadow_overlay: Default::default(),
+            collections_import_overlay: Default::default(),
             collections_candidate_audits: Default::default(),
             collections_package_projections: Default::default(),
             collections_pending_actions: Default::default(),

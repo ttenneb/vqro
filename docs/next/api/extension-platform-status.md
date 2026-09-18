@@ -38,22 +38,22 @@ Use these lifecycle terms precisely:
 | Document-v2 client-visible publication | Unavailable | Production through cached generation-1 compatibility projections for Collections |
 | Collections document profile/projections | Unavailable | Package-authoritative after cutover; profile and both compatibility projections publish from one audited topology |
 | Document-bound package actions/effect plans | Unavailable | Production typed `set_label` and `set_archived` plans with host tickets, validation, state CAS, and atomic checkpointing |
-| Collections policy authority | Legacy only before cutover | Exact pinned package after snapshot-v7 atomic cutover; fail-closed if unavailable or replaced |
+| Collections policy authority | Unavailable; the compiled provider was removed in R4 | Exact pinned package after snapshot-v7 atomic cutover; fail-closed if absent, unavailable, or replaced |
 | Stable component author SDK | Unavailable | Unavailable |
 
 Starting an ordinary component service proves verified runtime and lifecycle behavior but grants no host reads. The exact pinned Collections package is the sole exception: before cutover its bounded workers receive revocable state/terminal reads only for quarantined audit; after the atomic snapshot-v7 cutover the same exact package supplies cached profiles and typed action plans. The host still executes effects, owns PTYs, validates tickets and dependencies, performs state CAS, and coordinates durable publication.
 
-The `availability` strings in the frozen `host-state-v1` and `host-terminals-v1` schema snapshots still say that “production package activation is not enabled.” Those exact R0 bytes remain pinned by the external package and predate read admission. They still correctly deny general package access and all direct write authority; this live status document records the exact-pin R1–R3 exception and Collections package authority.
+The `availability` strings in the frozen `host-state-v1` and `host-terminals-v1` schema snapshots still say that “production package activation is not enabled.” Those exact R0 bytes remain pinned by the external package and predate read admission. They still correctly deny general package access and all direct write authority; this live status document records the exact-pin Collections exception and package authority.
 
 ## Collections authority today
 
-Legacy-authoritative sessions continue using the checked-in compatibility provider and writing snapshot version 6 until the user installs the exact production pin and every scope completes package profile/action audit. R3 admission is open: the host then persists package state plus snapshot-v7 authority through the two-image journal and publishes package document, namespace, policy, state, and typed-action authority in one App turn without a dual-writer interval.
+There is no compiled Collections provider or automatic fallback. A restored pre-package snapshot exposes no Collections API or document; its read-only legacy label/archive fields exist only so the exact production package can perform the one-way import. Once every live scope completes package profile/action audit, the host persists package state plus snapshot-v7 authority through the two-image journal and publishes package document, namespace, policy, state, and typed-action authority in one App turn without a dual-writer interval.
 
-After cutover, cached package profiles produce both `HostDocumentV1` and generation-1 `ClientShellCollection` output. Labeled creation reserves an unpublished container identity, validates a provisional package profile and `set_label` declaration/plan, checkpoints topology plus package state, and publishes only after durable success. Archive/restore use the package `set_archived` plan through the same state-CAS/checkpoint boundary. Generic writes to `vqro.collections` are rejected.
+After cutover, cached package profiles produce both `HostDocumentV1` and generation-1 `ClientShellCollection` output. Every create reserves an unpublished container identity, validates a provisional package profile and `set_label` declaration/plan (including `null` labels), checkpoints topology plus package state, and publishes only after durable success. Archive/restore use the package `set_archived` plan through the same state-CAS/checkpoint boundary. Generic writes to `vqro.collections` are rejected.
 
 Restart recovery validates the authority/state fence before mutation. Package disablement, digest replacement, retirement, timeout, or stale completion clears package projections and rejects every `collection.*` method with `collections_authority_unavailable`; generic workspace, tab, pane, and PTY access remains available. Recovery requires the exact retained artifact or an explicit lifecycle rollback to it—there is no compiled fallback after cutover.
 
-The [Collections v1 R0 contracts](vqro-collections-v1.md) freeze the profile, compatibility projections, typed actions, one-state-CAS plan, durable authority shape, snapshot reader floor, and operation baseline. R1–R2 remain the non-publishing pre-cutover audit phases; R3 is the admitted atomic authority transition.
+The [Collections v1 R0 contracts](vqro-collections-v1.md) freeze the profile, compatibility projections, typed actions, one-state-CAS plan, durable authority shape, snapshot reader floor, and operation baseline. R1–R3 define the audited transition; R4 removed the legacy authority and fallback paths.
 
 See the accepted [Collections package authority transition](../architecture/collections-authority-transition.md) for the implementation boundaries.
 
@@ -61,7 +61,7 @@ See the accepted [Collections package authority transition](../architecture/coll
 
 - Endpoint generation 1 and its named codecs remain frozen.
 - `host.document.v2` remains action-free. Actions and effect plans require separately named contracts.
-- `vqro.collections` cannot have simultaneous bundled and package provider owners.
+- `vqro.collections` has no bundled provider owner; only the exact package may publish it.
 - Real PTYs remain host-owned and recoverable without any extension provider.
 - Disabling or removing a package retains its namespaced state unless the user separately confirms data deletion.
 - Native process containment is lifecycle containment, not an OS sandbox.

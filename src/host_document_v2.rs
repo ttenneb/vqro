@@ -226,6 +226,7 @@ impl std::error::Error for HostDocumentV2Error {}
 
 impl HostDocumentRenderParamsV2 {
     /// Strictly decodes host-created request parameters. Unknown fields are denied.
+    #[allow(dead_code)]
     pub fn validate_json(encoded: &[u8]) -> Result<Self, HostDocumentV2Error> {
         if encoded.len() > MAX_DOCUMENT_RENDER_V2_BYTES {
             return invalid("render request exceeds the 2 KiB encoded limit");

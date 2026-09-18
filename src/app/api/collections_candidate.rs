@@ -73,16 +73,16 @@ struct PendingCandidate {
     canceled: Arc<AtomicBool>,
 }
 
-pub(crate) struct CollectionsShadowOverlay {
+pub(crate) struct CollectionsImportOverlay {
     state: crate::extension_state::DurableExtensionStateV1,
     imported_values: BTreeMap<String, serde_json::Value>,
 }
 
-impl Default for CollectionsShadowOverlay {
+impl Default for CollectionsImportOverlay {
     fn default() -> Self {
         Self {
             state: crate::extension_state::DurableExtensionStateV1::new(
-                "collections_shadow_overlay".into(),
+                "collections_import_overlay".into(),
                 1,
             )
             .expect("static Collections shadow store identity is valid"),
@@ -91,13 +91,17 @@ impl Default for CollectionsShadowOverlay {
     }
 }
 
-impl CollectionsShadowOverlay {
+impl CollectionsImportOverlay {
     pub(crate) fn state(&self) -> &crate::extension_state::DurableExtensionStateV1 {
         &self.state
     }
 
     pub(crate) fn imported_values(&self) -> &BTreeMap<String, serde_json::Value> {
         &self.imported_values
+    }
+
+    pub(crate) fn clear(&mut self) {
+        *self = Self::default();
     }
 
     fn rebuild(
@@ -655,7 +659,7 @@ pub(super) fn build_collections_import_state(
 }
 
 impl App {
-    pub(crate) fn rebuild_collections_shadow_overlay(&mut self) -> Result<bool, String> {
+    pub(crate) fn rebuild_collections_import_overlay(&mut self) -> Result<bool, String> {
         let mut values = BTreeMap::new();
         for workspace in &self.state.workspaces {
             for tab in &workspace.tabs {
@@ -664,7 +668,7 @@ impl App {
                         crate::terminal_container::TerminalContainerId::from(collection.id()),
                     );
                     let mut archived_terminal_ids = collection
-                        .archived_members()
+                        .legacy_archived_members()
                         .map(|pane_id| {
                             tab.terminal_id(pane_id)
                                 .map(ToString::to_string)
@@ -688,7 +692,7 @@ impl App {
                         ),
                         ("schema_version".into(), serde_json::Value::from(1)),
                     ]);
-                    if let Some(label) = collection.label() {
+                    if let Some(label) = collection.legacy_label() {
                         record.insert("label".into(), serde_json::Value::String(label.into()));
                     }
                     if values
@@ -707,7 +711,7 @@ impl App {
             .authority_epoch
             .checked_add(1)
             .ok_or("Collections authority epoch exhausted")?;
-        self.collections_shadow_overlay
+        self.collections_import_overlay
             .rebuild(&self.extension_state, migration_epoch, values)
     }
 
@@ -994,7 +998,7 @@ pub(super) fn current_state_snapshot(
         .ok_or("state authorization is absent")?;
     let source = match state.source {
         crate::extension_host_invocation::HostStateReadSource::CollectionsShadow => {
-            app.collections_shadow_overlay.state()
+            app.collections_import_overlay.state()
         }
         crate::extension_host_invocation::HostStateReadSource::Durable => &app.extension_state,
         crate::extension_host_invocation::HostStateReadSource::None => {
@@ -1124,9 +1128,9 @@ mod tests {
         app.state.workspaces = vec![workspace];
         app.state.ensure_test_terminals();
 
-        assert!(app.rebuild_collections_shadow_overlay().unwrap());
+        assert!(app.rebuild_collections_import_overlay().unwrap());
         let first = app
-            .collections_shadow_overlay
+            .collections_import_overlay
             .state()
             .snapshot(crate::collections_extension_contract::COLLECTIONS_NAMESPACE)
             .unwrap();
@@ -1135,18 +1139,18 @@ mod tests {
         assert_eq!(policy["archived_terminal_ids"], serde_json::json!([]));
         assert_eq!(app.extension_state, durable_before);
 
-        assert!(!app.rebuild_collections_shadow_overlay().unwrap());
+        assert!(!app.rebuild_collections_import_overlay().unwrap());
         assert_eq!(
-            app.collections_shadow_overlay.state().store_generation,
+            app.collections_import_overlay.state().store_generation,
             first.store_generation
         );
 
         app.state.workspaces[0].tabs[0]
             .set_collection_member_archived(collection_id, member, true)
             .unwrap();
-        assert!(app.rebuild_collections_shadow_overlay().unwrap());
+        assert!(app.rebuild_collections_import_overlay().unwrap());
         let second = app
-            .collections_shadow_overlay
+            .collections_import_overlay
             .state()
             .snapshot(crate::collections_extension_contract::COLLECTIONS_NAMESPACE)
             .unwrap();
@@ -1158,7 +1162,7 @@ mod tests {
         );
         assert_eq!(app.extension_state, durable_before);
 
-        let fresh = CollectionsShadowOverlay::default();
+        let fresh = CollectionsImportOverlay::default();
         assert!(fresh
             .state()
             .snapshot(crate::collections_extension_contract::COLLECTIONS_NAMESPACE)

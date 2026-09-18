@@ -242,7 +242,7 @@ fn limit_host_document_specs(
     crate::api::schema::HostDocumentSourceKind,
 )> {
     specs.retain(|(namespace, _, _, _)| {
-        namespace != crate::first_party::collections::NAMESPACE
+        namespace != crate::collections_extension_contract::COLLECTIONS_NAMESPACE
             && namespace != crate::first_party::spaces::NAMESPACE
             && namespace != crate::first_party::delegation::NAMESPACE
             && namespace != crate::first_party::agent_status::NAMESPACE
@@ -664,7 +664,7 @@ impl HostDocumentServiceCatalog {
             .map(|(namespace, _, _, _)| (namespace, next_service_generation()))
             .collect::<std::collections::BTreeMap<_, _>>();
         for namespace in [
-            crate::first_party::collections::NAMESPACE,
+            crate::collections_extension_contract::COLLECTIONS_NAMESPACE,
             crate::first_party::spaces::NAMESPACE,
             crate::first_party::delegation::NAMESPACE,
             crate::first_party::agent_status::NAMESPACE,
@@ -3918,7 +3918,10 @@ sleep 2
             )
         };
         let mut specs = vec![
-            make(100, crate::first_party::collections::NAMESPACE),
+            make(
+                100,
+                crate::collections_extension_contract::COLLECTIONS_NAMESPACE,
+            ),
             make(101, "host.fallback"),
         ];
         specs.extend((0..20).map(|index| make(index, "duplicate.namespace")));
@@ -3930,7 +3933,8 @@ sleep 2
         );
         assert_eq!(limited[0].0, "duplicate.namespace");
         assert!(limited.iter().all(|(namespace, _, _, _)| {
-            namespace != crate::first_party::collections::NAMESPACE && namespace != "host.fallback"
+            namespace != crate::collections_extension_contract::COLLECTIONS_NAMESPACE
+                && namespace != "host.fallback"
         }));
         assert_eq!(
             limited

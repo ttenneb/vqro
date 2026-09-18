@@ -128,8 +128,7 @@ impl App {
         params: crate::api::schema::CollectionCreateParams,
         respond_to: std::sync::mpsc::Sender<String>,
     ) -> Result<(), String> {
-        if params.label.is_none()
-            || !self.collections_package_runtime_available()
+        if !self.collections_package_runtime_available()
             || self.collections_mutations_blocked
             || self.extension_state_transaction_pending
         {
@@ -138,9 +137,6 @@ impl App {
         let (workspace_index, pane_id) = self
             .parse_current_public_pane_id(&params.target_pane_id)
             .ok_or("target pane was not found")?;
-        if !self.bundled_extension_enabled("collections", Some(workspace_index)) {
-            return Err("Collections is disabled for this repository".into());
-        }
         let tab_index = self.state.workspaces[workspace_index]
             .find_tab_index_for_pane(pane_id)
             .ok_or("target tab was not found")?;

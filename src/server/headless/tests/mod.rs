@@ -792,13 +792,10 @@ async fn native_endpoint_lane_dispatches_methods_outside_the_frozen_bridge() {
     assert_eq!(chunk.boot_id, boot_id);
     assert_eq!(chunk.request_id, "native:1");
     assert!(chunk.final_chunk);
-    let response: api::schema::SuccessResponse =
+    let response: api::schema::ErrorResponse =
         serde_json::from_slice(&chunk.decode_data().unwrap()).unwrap();
     assert_eq!(response.id, "native:1");
-    assert!(matches!(
-        response.result,
-        api::schema::ResponseResult::CollectionList { .. }
-    ));
+    assert_eq!(response.error.code, "collections_authority_unavailable");
     shutdown_test_runtimes(&mut server);
 }
 
@@ -962,7 +959,7 @@ async fn host_documents_control_is_sent_only_when_negotiated() {
                     if kind == crate::protocol::endpoint::HOST_DOCUMENTS_KIND
             )
         });
-        assert_eq!(sent_host_documents, negotiated);
+        assert!(!sent_host_documents);
         if !negotiated {
             assert!(server.clients[&client_id].shell_host_documents.is_empty());
         }

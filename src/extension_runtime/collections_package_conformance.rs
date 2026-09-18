@@ -146,7 +146,7 @@ fn collections_candidate_passes_authoritative_host_gate() {
     assert_eq!(app.extension_state, state_before);
     assert_eq!(
         app.host_document_services
-            .source(crate::first_party::collections::NAMESPACE),
+            .source(crate::collections_extension_contract::COLLECTIONS_NAMESPACE),
         Some(crate::api::schema::HostDocumentSourceKind::TerminalGroups),
         "candidate admission must not publish package authority"
     );
@@ -156,7 +156,7 @@ fn collections_candidate_passes_authoritative_host_gate() {
         "shadow import leaked into durable state"
     );
     let overlay = app
-        .collections_shadow_overlay
+        .collections_import_overlay
         .state()
         .snapshot("vqro.collections")
         .unwrap();
@@ -199,7 +199,7 @@ fn assert_shadow_action_plans(
         .expect("audited action declarations exist")
         .clone();
     let state = app
-        .collections_shadow_overlay
+        .collections_import_overlay
         .state()
         .snapshot("vqro.collections")
         .expect("shadow state snapshot");

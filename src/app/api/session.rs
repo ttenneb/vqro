@@ -102,18 +102,8 @@ impl App {
             } else {
                 self.collect_agent_infos()
             },
-            collections: if include_structure
-                && !self.disabled_extensions.contains("vqro.collections")
-            {
+            collections: if include_structure && self.collections_package_runtime_available() {
                 self.collection_infos(None, None)
-                    .into_iter()
-                    .filter(|collection| {
-                        self.parse_workspace_id(&collection.workspace_id)
-                            .is_some_and(|ws_idx| {
-                                self.bundled_extension_enabled("collections", Some(ws_idx))
-                            })
-                    })
-                    .collect()
             } else {
                 Vec::new()
             },
@@ -192,7 +182,7 @@ mod tests {
     }
 
     #[test]
-    fn session_snapshot_projects_collections_and_delegation_preorder() {
+    fn session_snapshot_hides_unavailable_collections_and_projects_delegation_preorder() {
         let mut app = app_with_two_tabs();
         let root = app.state.workspaces[0].tabs[0].root_pane;
         let member = app.state.workspaces[0].test_split(ratatui::layout::Direction::Horizontal);
@@ -217,13 +207,9 @@ mod tests {
             .create(Some(member), Some(root_delegation), Some("review".into()))
             .expect("create child delegation");
 
-        let member_public_id = app.public_pane_id(0, member).expect("public member ID");
         let snapshot = app.session_snapshot();
 
-        assert_eq!(snapshot.collections.len(), 1);
-        assert_eq!(snapshot.collections[0].label.as_deref(), Some("reviewers"));
-        assert_eq!(snapshot.collections[0].members.len(), 1);
-        assert_eq!(snapshot.collections[0].members[0].pane_id, member_public_id);
+        assert!(snapshot.collections.is_empty());
         assert_eq!(snapshot.delegations.len(), 2);
         assert_eq!(snapshot.delegations[0].depth, 0);
         assert_eq!(snapshot.delegations[1].depth, 1);
@@ -235,56 +221,6 @@ mod tests {
         let endpoint_v1_source = app.session_snapshot_v1_compat();
         assert!(endpoint_v1_source.collections.is_empty());
         assert!(endpoint_v1_source.delegations.is_empty());
-    }
-
-    #[test]
-    fn session_snapshot_honors_repository_scoped_collections_override() {
-        let mut app = app_with_two_tabs();
-        let root = app.state.workspaces[0].tabs[0].root_pane;
-        let member = app.state.workspaces[0].test_split(ratatui::layout::Direction::Horizontal);
-        let collection = app.state.workspaces[0].tabs[0]
-            .create_collection_near(
-                LayoutLeaf::Pane(root),
-                ratatui::layout::Direction::Vertical,
-                0.5,
-                Some("scoped".into()),
-            )
-            .unwrap();
-        app.state.workspaces[0].tabs[0]
-            .collect_tiled_pane(member, collection)
-            .unwrap();
-        let repository_root =
-            std::env::temp_dir().join(format!("vqro-snapshot-override-{}", std::process::id()));
-        let common_dir = repository_root.join(".git");
-        std::fs::create_dir_all(&common_dir).unwrap();
-        std::fs::write(
-            common_dir.join("vqro-extension-repository-identity"),
-            "repo-scoped\n",
-        )
-        .unwrap();
-        app.state.workspaces[0].identity_cwd = repository_root.clone();
-        app.state.workspaces[0].cached_git_space = Some(crate::workspace::GitSpaceMetadata {
-            key: common_dir.display().to_string(),
-            checkout_key: repository_root.display().to_string(),
-            repo_name: "scoped".into(),
-            repo_root: repository_root.clone(),
-            is_linked_worktree: false,
-        });
-        app.state.reconcile_repositories();
-        assert_eq!(app.session_snapshot().collections.len(), 1);
-
-        let repository_id = app.state.repositories[0].id.clone();
-        app.marketplace_state
-            .set_repository_override(
-                "ttenneb/vqro-extension-collections",
-                repository_id,
-                Some(false),
-            )
-            .unwrap();
-
-        assert!(app.session_snapshot().collections.is_empty());
-        assert!(app.session_snapshot_v1_compat().collections.is_empty());
-        std::fs::remove_dir_all(repository_root).unwrap();
     }
 
     #[test]

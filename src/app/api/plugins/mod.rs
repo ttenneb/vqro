@@ -69,7 +69,7 @@ impl App {
         self.host_document_services = host_document_services;
         self.extension_catalog_rebuilt = true;
         let retired_documents = self
-            .collections_shadow_documents
+            .host_document_caches
             .iter()
             .filter_map(|((_, scope_id), cache)| {
                 let document = cache.current()?;
@@ -81,7 +81,7 @@ impl App {
                 ))
             })
             .collect::<Vec<_>>();
-        self.collections_shadow_documents.clear();
+        self.host_document_caches.clear();
         for (namespace, scope_id, generation, revision) in retired_documents {
             self.event_hub.push(crate::api::schema::EventEnvelope {
                 event: crate::api::schema::EventKind::HostDocumentUpdated,
@@ -1821,7 +1821,7 @@ capabilities = ["host_document", "focus_terminal"]
             None
         );
         assert!(app
-            .collections_shadow_documents
+            .host_document_caches
             .keys()
             .all(|(namespace, _)| namespace != "example.documents"));
         assert!(app.host_document_confirmation_grants.is_empty());

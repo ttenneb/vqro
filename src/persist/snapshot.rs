@@ -1111,10 +1111,13 @@ fn capture_tab(
         .collections()
         .map(|collection| CollectionSnapshot {
             id: collection.id(),
-            label: collection.label().map(str::to_owned),
+            label: collection.legacy_label().map(str::to_owned),
             members: collection.members().iter().map(|id| id.raw()).collect(),
             selected: collection.selected().map(|id| id.raw()),
-            archived: collection.archived_members().map(|id| id.raw()).collect(),
+            archived: collection
+                .legacy_archived_members()
+                .map(|id| id.raw())
+                .collect(),
         })
         .collect();
     collections.sort_by_key(|collection| collection.id.raw());

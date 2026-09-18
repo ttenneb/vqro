@@ -86,8 +86,8 @@ impl App {
                 self.extension_state.store_generation,
             )),
             crate::extension_host_invocation::HostStateReadSource::CollectionsShadow => Some((
-                self.collections_shadow_overlay.state().store_id.clone(),
-                self.collections_shadow_overlay.state().store_generation,
+                self.collections_import_overlay.state().store_id.clone(),
+                self.collections_import_overlay.state().store_generation,
             )),
         };
         let event_tx = self.event_tx.clone();

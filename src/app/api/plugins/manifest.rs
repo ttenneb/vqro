@@ -856,7 +856,6 @@ pub(crate) struct BundledDocumentServiceDeclaration {
 pub(crate) fn bundled_document_service_declarations(
 ) -> Result<Vec<BundledDocumentServiceDeclaration>, String> {
     let manifests = [
-        include_str!("../../../../extensions/first-party/collections/vqro-extension.toml"),
         include_str!("../../../../extensions/first-party/spaces/vqro-extension.toml"),
         include_str!("../../../../extensions/first-party/delegation/vqro-extension.toml"),
         include_str!("../../../../extensions/first-party/agent-status/vqro-extension.toml"),
@@ -932,22 +931,12 @@ mod contract_tests {
     #[test]
     fn bundled_first_party_packages_match_the_runtime_service_contract() {
         let declarations = bundled_document_service_declarations().unwrap();
-        assert_eq!(declarations.len(), 4);
+        assert_eq!(declarations.len(), 3);
         assert!(declarations.iter().all(|declaration| {
             declaration.namespace.starts_with("vqro.") && declaration.service.priority == 100
         }));
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("extensions/first-party");
         for (directory, namespace, source, entrypoint, capabilities) in [
-            (
-                "collections",
-                "vqro.collections",
-                HostDocumentSourceKind::TerminalGroups,
-                "collections",
-                vec![
-                    ExtensionServiceCapability::HostDocument,
-                    ExtensionServiceCapability::FocusTerminal,
-                ],
-            ),
             (
                 "spaces",
                 "vqro.spaces",

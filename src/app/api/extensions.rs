@@ -87,10 +87,7 @@ impl App {
                 .active_artifact
                 .as_ref()
                 .is_some_and(crate::extension_artifact::retained),
-            repository_override_supported: matches!(
-                &extension.package,
-                ExtensionPackage::Bundled { provider } if provider == "collections"
-            ),
+            repository_override_supported: false,
             load_order: self
                 .marketplace_state
                 .load_order
@@ -2267,56 +2264,12 @@ impl App {
     pub(super) fn handle_extension_repository_override_set(
         &mut self,
         id: String,
-        params: ExtensionRepositoryOverrideParams,
+        _params: ExtensionRepositoryOverrideParams,
     ) -> String {
-        let _state_lock = match self.lock_extension_state_for_mutation() {
-            Ok(lock) => lock,
-            Err(error) => return encode_error(id, "extension_state_lock_failed", error),
-        };
-        let extension = match self.curated_extension(&params.repository) {
-            Ok(extension) => extension,
-            Err(code) => return encode_error(id, code, "extension is not in the curated index"),
-        };
-        if !matches!(
-            &extension.package,
-            ExtensionPackage::Bundled { provider } if provider == "collections"
-        ) {
-            return encode_error(
-                id,
-                "extension_repository_override_unsupported",
-                "this extension has no repository-scoped runtime contribution",
-            );
-        }
-        let repository_identity_is_current = self.state.repositories.iter().any(|repository| {
-            self.repository_identity(repository).as_ref() == Some(&params.repository_id)
-        });
-        if !repository_identity_is_current {
-            return encode_error(
-                id,
-                "extension_repository_not_found",
-                "repository identity is not part of this session",
-            );
-        }
-        let previous = self.marketplace_state.clone();
-        if let Err(error) = self.marketplace_state.set_repository_override(
-            &extension.repository,
-            params.repository_id,
-            params.enabled,
-        ) {
-            return encode_error(id, "extension_state_invalid", error);
-        }
-        self.apply_bundled_extension_state();
-        if let Err(error) = self.save_extension_state(_state_lock.as_ref()) {
-            self.marketplace_state = previous;
-            self.apply_bundled_extension_state();
-            return encode_error(id, "extension_state_save_failed", error);
-        }
-        self.refresh_collection_documents();
-        encode_success(
+        encode_error(
             id,
-            ResponseResult::ExtensionChanged {
-                extension: self.extension_info(&extension),
-            },
+            "extension_repository_override_unsupported",
+            "component packages do not use legacy repository-scoped overrides",
         )
     }
 
@@ -2502,7 +2455,6 @@ mod tests {
         assert_eq!(
             installed,
             [
-                "Collections",
                 "Spaces",
                 "Delegation",
                 "Agent Status",
@@ -2520,13 +2472,7 @@ mod tests {
             .filter(|extension| {
                 matches!(
                     extension.name.as_str(),
-                    "Collections"
-                        | "Spaces"
-                        | "Delegation"
-                        | "Agent Status"
-                        | "Pi"
-                        | "Claude Code"
-                        | "Codex"
+                    "Spaces" | "Delegation" | "Agent Status" | "Pi" | "Claude Code" | "Codex"
                 )
             })
             .collect::<Vec<_>>();
@@ -2654,7 +2600,7 @@ mod tests {
         let native = Request {
             id: "install-native".into(),
             method: Method::ExtensionInstall(ExtensionConfirmedParams {
-                repository: "ttenneb/vqro-extension-collections".into(),
+                repository: "ttenneb/vqro-extension-spaces".into(),
                 confirmed: true,
             }),
         };
@@ -2676,7 +2622,7 @@ mod tests {
         app.extension_state
             .transact(&crate::extension_state::ExtensionStateTransactionV1 {
                 contract: crate::extension_state::EXTENSION_STATE_CONTRACT_V1.into(),
-                namespace: "vqro.collections".into(),
+                namespace: "vqro.spaces".into(),
                 expected_store_generation: 1,
                 expected_revision: 0,
                 idempotency_key: "seed-delete-test".into(),
@@ -2689,20 +2635,20 @@ mod tests {
         let _ = result(&app.handle_api_request(Request {
             id: "remove".into(),
             method: Method::ExtensionRemove(ExtensionConfirmedParams {
-                repository: "ttenneb/vqro-extension-collections".into(),
+                repository: "ttenneb/vqro-extension-spaces".into(),
                 confirmed: true,
             }),
         }));
         let _ = result(&app.handle_api_request(Request {
             id: "delete".into(),
             method: Method::ExtensionDataDelete(ExtensionConfirmedParams {
-                repository: "ttenneb/vqro-extension-collections".into(),
+                repository: "ttenneb/vqro-extension-spaces".into(),
                 confirmed: true,
             }),
         }));
         assert!(app
             .extension_state
-            .snapshot("vqro.collections")
+            .snapshot("vqro.spaces")
             .unwrap()
             .values
             .is_empty());
@@ -2738,11 +2684,11 @@ mod tests {
         let _ = result(&app.handle_api_request(Request {
             id: "remove".into(),
             method: Method::ExtensionRemove(ExtensionConfirmedParams {
-                repository: "ttenneb/vqro-extension-collections".into(),
+                repository: "ttenneb/vqro-extension-spaces".into(),
                 confirmed: true,
             }),
         }));
-        let data_id = app.marketplace_state.entries["ttenneb/vqro-extension-collections"]
+        let data_id = app.marketplace_state.entries["ttenneb/vqro-extension-spaces"]
             .data_id
             .clone();
         let config_marker = crate::plugin_paths::plugin_config_dir(&data_id).join("marker");
@@ -2762,7 +2708,7 @@ mod tests {
         let response: serde_json::Value = serde_json::from_str(&app.handle_api_request(Request {
             id: "delete".into(),
             method: Method::ExtensionDataDelete(ExtensionConfirmedParams {
-                repository: "ttenneb/vqro-extension-collections".into(),
+                repository: "ttenneb/vqro-extension-spaces".into(),
                 confirmed: true,
             }),
         }))
@@ -2935,7 +2881,7 @@ mod tests {
     #[test]
     fn bundled_removal_requires_confirmation_and_is_reinstallable() {
         let mut app = test_app();
-        let repository = "ttenneb/vqro-extension-collections".to_string();
+        let repository = "ttenneb/vqro-extension-spaces".to_string();
         let rejected: serde_json::Value = serde_json::from_str(&app.handle_api_request(Request {
             id: "remove".into(),
             method: Method::ExtensionRemove(ExtensionConfirmedParams {
@@ -2963,7 +2909,7 @@ mod tests {
                 }
             }
         ));
-        assert!(app.disabled_extensions.contains("vqro.collections"));
+        assert!(app.disabled_extensions.contains("vqro.spaces"));
 
         let installed = app.handle_api_request(Request {
             id: "install".into(),
@@ -2982,7 +2928,7 @@ mod tests {
                 }
             }
         ));
-        assert!(!app.disabled_extensions.contains("vqro.collections"));
+        assert!(!app.disabled_extensions.contains("vqro.spaces"));
     }
 
     #[tokio::test]
