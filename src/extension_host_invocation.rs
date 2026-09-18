@@ -13,9 +13,17 @@ use crate::extension_runtime::{
     RuntimeIdentityV1,
 };
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum HostStateReadSource {
+    #[default]
+    None,
+    Durable,
+    CollectionsShadow,
+}
+
 #[derive(Clone, Debug, Default)]
 pub(crate) struct HostReadInvocationPurpose {
-    pub(crate) state_snapshot: bool,
+    pub(crate) state: HostStateReadSource,
     pub(crate) terminals: Option<(String, crate::workspace::TabId)>,
 }
 
@@ -67,7 +75,8 @@ impl HostReadInvocationAuthorization {
             );
         }
         let state_matches = self.state.as_ref().is_none_or(|state| {
-            state.package_id == self.package_id
+            state.source != HostStateReadSource::None
+                && state.package_id == self.package_id
                 && state.service_id == self.service_id
                 && state.namespace == self.namespace
                 && state.artifact_sha256 == self.artifact_sha256
@@ -76,6 +85,7 @@ impl HostReadInvocationAuthorization {
                 && state.package_revision == self.package_generation
                 && state.manager_generation == self.service_generation
                 && state.provider_generation == self.provider_generation
+                && state.artifact_generation == self.artifact_generation
                 && Arc::ptr_eq(&state.authority, &self.authority)
         });
         let terminals_match = self.terminals.as_ref().is_none_or(|terminals| {
@@ -97,7 +107,8 @@ impl HostReadInvocationAuthorization {
             || identity.service_id != self.service_id
             || identity.namespace != self.namespace
             || identity.generation != self.runtime_generation
-            || self.artifact_generation != self.runtime_generation
+            || self.artifact_generation == 0
+            || self.runtime_generation == 0
             || self.service_generation == 0
             || self.provider_generation == 0
             || self.catalog_generation == 0
@@ -184,6 +195,7 @@ pub(crate) struct TrustedTerminalSnapshotObservations {
     state: Arc<std::sync::Mutex<TerminalObservationState>>,
 }
 
+#[allow(dead_code)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum TerminalObservationError {
     Zero,
@@ -319,6 +331,7 @@ impl TrustedTerminalSnapshotObservations {
             })),
         }
     }
+    #[allow(dead_code)]
     pub(crate) fn exactly_one(
         &self,
     ) -> Result<crate::extension_host_terminals::HostTerminalsSnapshotV1, TerminalObservationError>
@@ -849,7 +862,7 @@ mod tests {
             .stage_host_read_authorization(
                 &binding,
                 HostReadInvocationPurpose {
-                    state_snapshot: true,
+                    state: crate::extension_host_invocation::HostStateReadSource::Durable,
                     terminals: Some(("missing".into(), tab_id)),
                 },
                 3,
@@ -868,7 +881,7 @@ mod tests {
             .stage_host_read_authorization(
                 &binding,
                 HostReadInvocationPurpose {
-                    state_snapshot: true,
+                    state: crate::extension_host_invocation::HostStateReadSource::Durable,
                     terminals: None,
                 },
                 3,
@@ -915,7 +928,7 @@ mod tests {
             .stage_host_read_authorization(
                 &binding,
                 HostReadInvocationPurpose {
-                    state_snapshot: true,
+                    state: crate::extension_host_invocation::HostStateReadSource::Durable,
                     terminals: Some((workspace_id, tab_id)),
                 },
                 3,

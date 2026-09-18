@@ -220,7 +220,6 @@ pub(crate) trait RuntimeHostCallHandler: Send + Sync {
     fn handle_host_call(&self, call: RuntimeHostCallV1) -> RuntimeHostCallResponseV1;
 }
 
-#[cfg(test)]
 pub(crate) trait RuntimeHostCallObserver: Send + Sync {
     /// Receives only responses whose envelope has passed the router's exact validation.
     fn observe_accepted(&self, method: &str, response: &RuntimeHostCallResponseV1);
@@ -234,7 +233,6 @@ pub(crate) struct RuntimeHostCallRouter {
     total_calls: AtomicUsize,
     call_limit_exceeded: AtomicBool,
     handler: Box<dyn RuntimeHostCallHandler>,
-    #[cfg(test)]
     observer: Option<Box<dyn RuntimeHostCallObserver>>,
 }
 
@@ -253,12 +251,10 @@ impl RuntimeHostCallRouter {
             total_calls: AtomicUsize::new(0),
             call_limit_exceeded: AtomicBool::new(false),
             handler: Box::new(handler),
-            #[cfg(test)]
             observer: None,
         }
     }
 
-    #[cfg(test)]
     pub(crate) fn with_observer(
         mut self,
         observer: impl RuntimeHostCallObserver + 'static,
@@ -325,7 +321,6 @@ impl RuntimeHostCallRouter {
         let _guard = OutstandingGuard(&self.outstanding);
         let expected_call_id = call.call_id.clone();
         let expected_identity = call.identity.clone();
-        #[cfg(test)]
         let accepted_method = call.method.clone();
         let response = self.handler.handle_host_call(call);
         if response.kind != "host_response"
@@ -344,7 +339,6 @@ impl RuntimeHostCallRouter {
                 }),
             };
         }
-        #[cfg(test)]
         if let Some(observer) = &self.observer {
             observer.observe_accepted(&accepted_method, &response);
         }
@@ -480,7 +474,6 @@ impl RuntimeFactory {
 }
 
 enum HostInvocationAuthorization {
-    #[cfg(test)]
     Composite(Box<crate::extension_host_invocation::HostReadInvocationAuthorization>),
     /// Temporary write-capable conformance path. Composite package invocations are read-only.
     LegacyState(Box<crate::extension_host_state::HostStateInvocationAuthorization>),
@@ -601,8 +594,7 @@ impl ExtensionRuntimeDispatcher {
         )
     }
 
-    /// Test-only package-v1 composite read entry point.
-    #[cfg(test)]
+    /// Package-v1 composite read entry point. The App must issue a revocable, exact binding.
     pub(crate) fn invoke_with_host_reads(
         &mut self,
         method: &str,
@@ -744,7 +736,6 @@ impl ExtensionRuntimeDispatcher {
             "dispatching extension runtime request"
         );
         let host_calls = match host_authorization {
-            #[cfg(test)]
             Some((HostInvocationAuthorization::Composite(authorization), canceled)) => {
                 let observer = authorization.terminal_observations();
                 let bound = authorization.bind(
@@ -903,7 +894,12 @@ impl ExtensionRuntimeDispatcher {
 }
 
 fn response_limit_for_method(method: &str) -> usize {
-    if method == "host.document.render" {
+    if matches!(
+        method,
+        "host.document.render"
+            | crate::collections_extension_contract::COLLECTIONS_PROFILE_RENDER_METHOD_V1
+            | crate::collections_extension_contract::COLLECTIONS_ACTIONS_LIST_METHOD_V1
+    ) {
         MAX_HOST_DOCUMENT_RENDER_RESPONSE_BYTES
     } else {
         MAX_RUNTIME_FRAME_BYTES
@@ -920,8 +916,14 @@ fn validate_granted_methods(
     let requires_action =
         requires_view && granted.contains(&ExtensionServiceCapability::TerminalInterrupt);
     let requires_choices = granted.contains(&ExtensionServiceCapability::ActionChoices);
+    let supports_document = methods.contains("host.document.render")
+        || (methods
+            .contains(crate::collections_extension_contract::COLLECTIONS_PROFILE_RENDER_METHOD_V1)
+            && methods.contains(
+                crate::collections_extension_contract::COLLECTIONS_ACTIONS_LIST_METHOD_V1,
+            ));
     if (requires_view && !methods.contains("view.render"))
-        || (requires_document && !methods.contains("host.document.render"))
+        || (requires_document && !supports_document)
         || (requires_action && !methods.contains("view.action"))
         || (requires_choices
             && (!methods.contains(crate::action_choices::ACTION_CHOICES_LIST_METHOD_V1)

@@ -73,6 +73,7 @@ pub(crate) struct DocumentShadowAuditWork {
     pub(crate) request: RuntimeRequestV1,
     pub(crate) observer: TrustedTerminalSnapshotObservations,
     pub(crate) attempt_id: u64,
+    #[allow(dead_code)]
     pub(crate) deadline: Instant,
 }
 
@@ -207,7 +208,7 @@ impl<D: ShadowAuditDocument> DocumentShadowAuditCoordinator<D> {
         let authorization = app.stage_host_read_authorization(
             binding,
             HostReadInvocationPurpose {
-                state_snapshot: false,
+                state: crate::extension_host_invocation::HostStateReadSource::None,
                 terminals: Some((workspace_id.clone(), tab_id.clone())),
             },
             service_generation,
@@ -284,7 +285,7 @@ impl<D: ShadowAuditDocument> DocumentShadowAuditCoordinator<D> {
         let authorization = app.stage_host_read_authorization(
             binding,
             HostReadInvocationPurpose {
-                state_snapshot: true,
+                state: crate::extension_host_invocation::HostStateReadSource::Durable,
                 terminals: Some((workspace_id.clone(), tab_id.clone())),
             },
             service_generation,
@@ -352,7 +353,7 @@ impl<D: ShadowAuditDocument> DocumentShadowAuditCoordinator<D> {
     }
 
     #[cfg(test)]
-    #[allow(clippy::too_many_arguments)]
+    #[allow(dead_code, clippy::too_many_arguments)]
     fn begin_collections_composite_for_test(
         &mut self,
         app: &mut App,
@@ -382,7 +383,7 @@ impl<D: ShadowAuditDocument> DocumentShadowAuditCoordinator<D> {
         let authorization = app.stage_host_read_authorization(
             binding,
             HostReadInvocationPurpose {
-                state_snapshot: true,
+                state: crate::extension_host_invocation::HostStateReadSource::Durable,
                 terminals: Some((workspace_id.clone(), tab_id.clone())),
             },
             service_generation,
@@ -731,6 +732,7 @@ fn validate_authorization(
             && state.package_revision == authorization.package_generation
             && state.manager_generation == authorization.service_generation
             && state.provider_generation == authorization.provider_generation
+            && state.artifact_generation == authorization.artifact_generation
             && state.scope_id == state.store_id
             && state.scope_revision == authorization.package_generation
             && Arc::ptr_eq(&state.authority, &authorization.authority)
@@ -797,7 +799,7 @@ impl App {
     }
 
     #[cfg(test)]
-    #[allow(clippy::too_many_arguments)]
+    #[allow(dead_code, clippy::too_many_arguments)]
     pub(crate) fn begin_collections_composite_shadow_audit_for_test(
         &mut self,
         binding: &HostProviderBinding,
@@ -840,6 +842,7 @@ impl App {
         result
     }
 
+    #[allow(dead_code)]
     pub(crate) fn document_shadow_cached_for_test(
         &self,
         params: &HostDocumentRenderParamsV2,

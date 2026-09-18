@@ -440,6 +440,7 @@ impl App {
         }
         let catalog_revision = registry.revision;
         let package_revision = record.revision;
+        let artifact_generation = active.runtime_generation;
         let authority = self.issue_staged_host_invocation_authority(
             binding.package_id(),
             binding.service_id(),
@@ -449,6 +450,7 @@ impl App {
         );
         Ok(
             crate::extension_host_state::HostStateInvocationAuthorization {
+                source: crate::extension_host_invocation::HostStateReadSource::Durable,
                 package_id: binding.package_id().to_owned(),
                 service_id: binding.service_id().to_owned(),
                 namespace: binding.namespace().to_owned(),
@@ -458,6 +460,7 @@ impl App {
                 package_revision,
                 manager_generation,
                 provider_generation,
+                artifact_generation,
                 scope_id: self.extension_state.store_id.clone(),
                 scope_revision: package_revision,
                 store_id: self.extension_state.store_id.clone(),
@@ -537,13 +540,22 @@ impl App {
             );
             return;
         };
+        let state_store = match request.lease.source {
+            crate::extension_host_invocation::HostStateReadSource::None => None,
+            crate::extension_host_invocation::HostStateReadSource::Durable => {
+                Some(&self.extension_state)
+            }
+            crate::extension_host_invocation::HostStateReadSource::CollectionsShadow => {
+                Some(self.collections_shadow_overlay.state())
+            }
+        };
         let ownership_current = !request.lease.outer_request_id.is_empty()
             && registry.revision == request.lease.catalog_revision
             && record.revision == request.lease.package_revision
             && request.lease.scope_revision == record.revision
             && record.status == crate::extension_package::PackageLifecycleStatusV1::Enabled
             && record.active.as_ref().is_some_and(|active| {
-                active.runtime_generation == request.lease.runtime_generation
+                active.runtime_generation == request.lease.artifact_generation
                     && active.package_sha256 == request.lease.artifact_sha256
                     && active.version == request.lease.artifact_version
             })
@@ -560,9 +572,11 @@ impl App {
                 .namespaces
                 .iter()
                 .any(|namespace| namespace == &request.lease.namespace)
-            && request.lease.scope_id == self.extension_state.store_id
-            && request.lease.store_id == self.extension_state.store_id
-            && request.lease.store_generation == self.extension_state.store_generation;
+            && state_store.is_some_and(|state| {
+                request.lease.scope_id == state.store_id
+                    && request.lease.store_id == state.store_id
+                    && request.lease.store_generation == state.store_generation
+            });
         if !ownership_current {
             send_error(
                 "stale_host_call_lease",
@@ -579,8 +593,8 @@ impl App {
         }
         match request.method {
             crate::extension_host_state::HostStateActorMethod::Snapshot => {
-                let result = self
-                    .extension_state
+                let result = state_store
+                    .expect("current host-state lease selected a store")
                     .snapshot(&request.lease.namespace)
                     .map(crate::extension_host_state::HostStateSnapshotV1::from)
                     .map_err(|error| crate::extension_host_state::state_error(&error))
@@ -595,6 +609,15 @@ impl App {
                 let _ = request.respond_to.try_send(result);
             }
             crate::extension_host_state::HostStateActorMethod::Transact(transaction) => {
+                if request.lease.source
+                    != crate::extension_host_invocation::HostStateReadSource::Durable
+                {
+                    send_error(
+                        "capability_denied",
+                        "non-authoritative shadow state is read-only".into(),
+                    );
+                    return;
+                }
                 if self.extension_state_transaction_pending {
                     send_error(
                         "host_call_busy",

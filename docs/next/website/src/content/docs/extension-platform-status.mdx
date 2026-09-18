@@ -13,11 +13,11 @@ Vqro currently has two extension models with different trust and capability boun
 | Git-installed native process | Supported by the legacy plugin path | Rejected |
 | Runtime start and supervision | Available | Available |
 | Production host document | `host.document.v1` for admitted protocol-2 services | Not yet available |
-| Production state/terminal host calls | Not supplied by the package dispatcher | Conformance only; ordinary package calls receive no lease |
+| Production state/terminal host calls | Not supplied by the package dispatcher | Revocable read leases only for the exact pinned Collections shadow candidate; ordinary packages receive none |
 | Client-visible component contribution | Not applicable | Not yet available |
-| Collections policy authority | Bundled host compatibility provider | External package remains conformance-only |
+| Collections policy authority | Bundled host compatibility provider | External package runs non-authoritative profile/action shadow audits only |
 
-A component package that installs and starts successfully has crossed the verified artifact and runtime boundaries. That does not yet mean it can read host state, own a provider slot, publish client-visible output, or become feature authority.
+A component package that installs and starts successfully has crossed the verified artifact and runtime boundaries. Ordinary packages still cannot read host state. The exact pinned Collections candidate is narrowly admitted to bounded, read-only, non-publishing shadow audits; it cannot own a visible provider slot, commit state, or become feature authority.
 
 ## Security distinction
 

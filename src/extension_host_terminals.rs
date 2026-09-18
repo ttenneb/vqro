@@ -400,7 +400,6 @@ pub(crate) fn snapshot_fingerprint(snapshot: &HostTerminalsSnapshotV1) -> Result
     Ok(format!("{:x}", Sha256::digest(&canonical)))
 }
 
-#[cfg(test)]
 pub(crate) fn validate_snapshot_value(
     value: serde_json::Value,
 ) -> Result<HostTerminalsSnapshotV1, String> {

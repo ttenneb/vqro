@@ -1365,7 +1365,7 @@ printf '{"type":"response","id":%s,"result":{"terminals":%s,"state":%s}}\n' "$id
             .stage_host_read_authorization(
                 &binding,
                 crate::extension_host_invocation::HostReadInvocationPurpose {
-                    state_snapshot: true,
+                    state: crate::extension_host_invocation::HostStateReadSource::Durable,
                     terminals: Some((workspace_id, tab_id)),
                 },
                 5,

@@ -735,9 +735,15 @@ pub fn validate_namespace_claims(
                     return Err(format!("curated provenance does not authorize {namespace}"));
                 }
             }
-            PackageProvenanceV1::File { .. } | PackageProvenanceV1::Git { .. }
-                if namespace.starts_with("vqro.") =>
+            PackageProvenanceV1::Git { .. }
+                if namespace.starts_with("vqro.")
+                    && !trusted_first_party_git_namespace(provenance, manifest, namespace) =>
             {
+                return Err(
+                    "Git package cannot claim vqro.* without an exact production pin".into(),
+                );
+            }
+            PackageProvenanceV1::File { .. } if namespace.starts_with("vqro.") => {
                 return Err(
                     "untrusted packages cannot claim vqro.* without a trusted approval".into(),
                 );
@@ -751,6 +757,41 @@ pub fn validate_namespace_claims(
         }
     }
     Ok(())
+}
+
+fn trusted_first_party_git_namespace(
+    provenance: &PackageProvenanceV1,
+    manifest: &PackageManifestV2,
+    namespace: &str,
+) -> bool {
+    let Ok(pin) =
+        serde_json::from_str::<crate::collections_extension_contract::CollectionsProductionPinV1>(
+            include_str!("../extensions/first-party/collections/production-pin-v1.json"),
+        )
+    else {
+        return false;
+    };
+    if pin.validate().is_err() {
+        return false;
+    }
+    matches!(provenance,
+        PackageProvenanceV1::Git {
+            url,
+            source_commit,
+            package_path,
+            package_id,
+            version: _,
+            package_sha256,
+            manifest_sha256,
+        } if namespace == pin.package_id
+            && manifest.id == pin.package_id
+            && manifest.namespaces == [pin.package_id.as_str()]
+            && url == &pin.source_url
+            && source_commit == &pin.source_commit
+            && package_path == &pin.package_path
+            && package_id == &pin.package_id
+            && package_sha256 == &pin.package_sha256
+            && manifest_sha256 == &pin.manifest_sha256)
 }
 
 pub fn install_local_file(

@@ -1013,12 +1013,6 @@ impl App {
                 return encode_error(result.id, "extension_package_install_failed", error)
             }
         };
-        let candidate_services = match Self::start_installed_package_services(&installed) {
-            Ok(services) => services,
-            Err(error) => {
-                return encode_error(result.id, "extension_package_activation_failed", error)
-            }
-        };
         let generation = match self
             .marketplace_state
             .packages
@@ -1037,6 +1031,13 @@ impl App {
                 }
             },
             None => 1,
+        };
+        let candidate_services = match self.start_installed_package_services(&installed, generation)
+        {
+            Ok(services) => services,
+            Err(error) => {
+                return encode_error(result.id, "extension_package_activation_failed", error)
+            }
         };
         let pointer = PackageArtifactPointerV1 {
             package_sha256: inspection.package.package_sha256,
@@ -1376,32 +1377,15 @@ impl App {
     }
 
     fn start_installed_package_services(
+        &self,
         installed: &crate::extension_package::InstalledPackageV1,
-    ) -> Result<Vec<crate::extension_service::ExtensionServiceSupervisor>, String> {
-        let package = crate::extension_package::validate_package_file(
-            &std::path::Path::new(&installed.immutable_root).join("package.vqrox"),
-            Some(&installed.package_sha256),
-        )?;
-        let namespace = package
-            .descriptor
-            .manifest
-            .namespaces
-            .first()
-            .map_or(package.descriptor.manifest.id.as_str(), String::as_str);
-        let mut supervisors = Vec::new();
-        for service in &package.descriptor.manifest.services {
-            let mut supervisor =
-                crate::extension_service::ExtensionServiceSupervisor::from_installed_service(
-                    installed,
-                    &service.id,
-                    namespace,
-                    0,
-                )
-                .map_err(|error| error.to_string())?;
-            supervisor.start().map_err(|error| error.to_string())?;
-            supervisors.push(supervisor);
-        }
-        Ok(supervisors)
+        artifact_generation: u64,
+    ) -> Result<crate::extension_candidate::PackageCandidateSlot, String> {
+        crate::extension_candidate::PackageCandidateSlot::spawn(
+            installed.clone(),
+            artifact_generation,
+            self.event_tx.clone(),
+        )
     }
 
     fn installed_package_from_record(
@@ -1471,7 +1455,7 @@ impl App {
                     .ok_or_else(|| "enabled package has no active artifact".to_string())?;
                 let installed =
                     self.installed_package_from_record(&package_id, pointer, &record.source)?;
-                Self::start_installed_package_services(&installed)
+                self.start_installed_package_services(&installed, pointer.runtime_generation)
             })();
             match result {
                 Ok(supervisors) => {
@@ -1488,6 +1472,89 @@ impl App {
     fn retire_extension_package_runtime(&mut self, package_id: &str) {
         self.extension_package_services.remove(package_id);
         self.revoke_host_invocation_authority_for_package(package_id);
+    }
+
+    pub(crate) fn handle_extension_package_candidate_ready(
+        &mut self,
+        result: crate::extension_candidate::PackageCandidateBootstrapResult,
+    ) {
+        let current = self
+            .marketplace_state
+            .packages
+            .packages
+            .get(&result.package_id)
+            .filter(|record| {
+                record.status == crate::extension_package::PackageLifecycleStatusV1::Enabled
+            })
+            .and_then(|record| record.active.as_ref())
+            .is_some_and(|active| {
+                active.package_sha256 == result.artifact_sha256
+                    && active.runtime_generation == result.artifact_generation
+            });
+        let accepted = current
+            && self
+                .extension_package_services
+                .get(&result.package_id)
+                .is_some_and(|slot| slot.accepts(&result));
+        if !accepted {
+            return;
+        }
+        let mut became_ready = false;
+        match result.result {
+            Ok(candidate) => {
+                if let Some(slot) = self.extension_package_services.get_mut(&result.package_id) {
+                    slot.install_ready(candidate);
+                    became_ready = true;
+                    tracing::info!(
+                        package_id = %result.package_id,
+                        artifact_generation = result.artifact_generation,
+                        "non-publishing package candidate is ready"
+                    );
+                }
+            }
+            Err(error) => {
+                self.revoke_host_invocation_authority_for_package(&result.package_id);
+                tracing::warn!(
+                    package_id = %result.package_id,
+                    artifact_generation = result.artifact_generation,
+                    %error,
+                    "package candidate bootstrap failed"
+                );
+            }
+        }
+        if became_ready
+            && result.package_id == crate::collections_extension_contract::COLLECTIONS_PACKAGE_ID
+        {
+            self.refresh_collection_documents();
+        }
+    }
+
+    pub(crate) fn handle_extension_package_candidate_finished(
+        &mut self,
+        result: crate::extension_candidate::PackageCandidateInvocationResult,
+    ) {
+        let current = self
+            .marketplace_state
+            .packages
+            .packages
+            .get(&result.package_id)
+            .and_then(|record| record.active.as_ref())
+            .is_some_and(|active| {
+                active.package_sha256 == result.artifact_sha256
+                    && active.runtime_generation == result.artifact_generation
+            });
+        if !current {
+            return;
+        }
+        if let Err(error) = self.finalize_collections_candidate(result.attempt_id, result.result) {
+            tracing::debug!(
+                package_id = %result.package_id,
+                service_id = %result.service_id,
+                runtime_generation = result.runtime_generation,
+                %error,
+                "package candidate result was rejected"
+            );
+        }
     }
 
     fn installed_git_package_info(
@@ -1629,7 +1696,7 @@ impl App {
                 Ok(installed) => installed,
                 Err(error) => return encode_error(id, "extension_package_invalid", error),
             };
-            match Self::start_installed_package_services(&installed) {
+            match self.start_installed_package_services(&installed, pointer.runtime_generation) {
                 Ok(services) => Some(services),
                 Err(error) => {
                     return encode_error(id, "extension_package_activation_failed", error)
@@ -1782,7 +1849,7 @@ impl App {
                         return encode_error(id, "extension_package_rollback_failed", error)
                     }
                 };
-            match Self::start_installed_package_services(&installed) {
+            match self.start_installed_package_services(&installed, pointer.runtime_generation) {
                 Ok(services) => services,
                 Err(error) => {
                     return encode_error(id, "extension_package_activation_failed", error)

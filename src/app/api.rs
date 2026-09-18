@@ -5,11 +5,11 @@ mod agents;
 mod collections;
 pub(crate) use collections::DeferredHostDocumentSnapshot;
 pub(crate) use collections::HostDocumentConfirmationGrant;
+pub(crate) mod collections_candidate;
 mod delegations;
 #[cfg(test)]
 pub(crate) mod document_shadow_audit;
 mod env;
-#[cfg(test)]
 mod extension_invocation;
 pub(crate) mod extension_state;
 mod extension_terminals;
@@ -142,6 +142,14 @@ impl App {
             }
             AppEvent::ExtensionGitPackageFinished(result) => {
                 self.handle_extension_git_package_finished(*result);
+                return Vec::new();
+            }
+            AppEvent::ExtensionPackageCandidateReady(result) => {
+                self.handle_extension_package_candidate_ready(*result);
+                return Vec::new();
+            }
+            AppEvent::ExtensionPackageCandidateFinished(result) => {
+                self.handle_extension_package_candidate_finished(*result);
                 return Vec::new();
             }
             AppEvent::ExtensionCatalogCapacityAvailable => {

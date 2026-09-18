@@ -225,6 +225,11 @@ impl<V> QuarantinedAuditCache<V> {
         self.entries.get(key).map(|entry| &entry.value)
     }
 
+    #[cfg(test)]
+    pub(crate) fn first_value(&self) -> Option<&V> {
+        self.entries.values().next().map(|entry| &entry.value)
+    }
+
     pub fn len(&self) -> usize {
         self.entries.len()
     }

@@ -76,6 +76,9 @@ impl App {
     }
 
     pub(crate) fn refresh_collection_documents(&mut self) {
+        if let Err(error) = self.rebuild_collections_shadow_overlay() {
+            tracing::warn!(%error, "Collections candidate shadow import failed");
+        }
         let mut live_tab_ids = std::collections::HashSet::from([
             crate::first_party::spaces::SESSION_SCOPE_ID.to_string(),
         ]);
@@ -229,6 +232,17 @@ impl App {
             } else {
                 self.host_document_retry_snapshots.remove(&request_key);
             }
+        }
+        if let Some((workspace_id, tab_id)) =
+            self.state.workspaces.get(ws_idx).and_then(|workspace| {
+                workspace
+                    .tabs
+                    .get(tab_idx)
+                    .map(|tab| (workspace.id.clone(), tab.id.clone()))
+            })
+        {
+            // Candidate results are quarantined and cannot affect the legacy-visible document.
+            let _ = self.schedule_collections_candidate(workspace_id, tab_id, revision);
         }
     }
 

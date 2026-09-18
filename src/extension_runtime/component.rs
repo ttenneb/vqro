@@ -1544,7 +1544,7 @@ mod tests {
             .stage_host_read_authorization(
                 &binding,
                 crate::extension_host_invocation::HostReadInvocationPurpose {
-                    state_snapshot: true,
+                    state: crate::extension_host_invocation::HostStateReadSource::Durable,
                     terminals: Some((workspace_id, tab_id)),
                 },
                 5,

@@ -2404,13 +2404,27 @@ impl ExtensionServiceSupervisor {
     }
 
     // Package runtime entry point; capability leases and provider admission remain separate.
-    #[allow(dead_code)]
     pub fn from_installed_service(
         installed: &crate::extension_package::InstalledPackageV1,
         service_id: &str,
         namespace: &str,
         priority: i32,
     ) -> Result<Self, ExtensionServiceError> {
+        Self::from_installed_service_at_generation(installed, service_id, namespace, priority, 1)
+    }
+
+    pub(crate) fn from_installed_service_at_generation(
+        installed: &crate::extension_package::InstalledPackageV1,
+        service_id: &str,
+        namespace: &str,
+        priority: i32,
+        first_runtime_generation: u64,
+    ) -> Result<Self, ExtensionServiceError> {
+        let runtime_generation = first_runtime_generation.checked_sub(1).ok_or_else(|| {
+            ExtensionServiceError::Configuration(
+                "initial package runtime generation must be nonzero".into(),
+            )
+        })?;
         let runtime_factory =
             crate::extension_runtime::RuntimeFactory::installed(installed, service_id, namespace)?;
         Ok(Self {
@@ -2432,7 +2446,7 @@ impl ExtensionServiceSupervisor {
             runtime: None,
             status: ExtensionServiceStatus::Stopped,
             failures: 0,
-            runtime_generation: 0,
+            runtime_generation,
         })
     }
 
@@ -2540,6 +2554,42 @@ impl ExtensionServiceSupervisor {
                 })?;
                 Ok(view)
             });
+        self.finish_request(result)
+    }
+
+    pub(crate) fn invoke_package_read_candidate(
+        &mut self,
+        method: &str,
+        params: serde_json::Value,
+        deadline: Instant,
+        canceled: Arc<AtomicBool>,
+        authorization: crate::extension_host_invocation::HostReadInvocationAuthorization,
+    ) -> Result<serde_json::Value, ExtensionServiceError> {
+        if canceled.load(Ordering::Acquire) {
+            return Err(ExtensionServiceError::Canceled);
+        }
+        if !matches!(self.status, ExtensionServiceStatus::Running) {
+            return Err(ExtensionServiceError::Configuration(
+                "package candidate runtime is not running".into(),
+            ));
+        }
+        let runtime = self
+            .runtime
+            .as_mut()
+            .ok_or_else(|| ExtensionServiceError::Configuration("service is not running".into()))?;
+        if !runtime.methods().contains(method) {
+            return Err(ExtensionServiceError::Protocol(
+                "package candidate did not advertise the requested method".into(),
+            ));
+        }
+        let result = runtime.invoke_with_host_reads(
+            method,
+            params,
+            self.runtime_generation,
+            deadline,
+            canceled,
+            authorization,
+        );
         self.finish_request(result)
     }
 

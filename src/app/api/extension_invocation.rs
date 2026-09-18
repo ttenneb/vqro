@@ -17,17 +17,21 @@ impl App {
         if service_generation == 0 || provider_generation == 0 || runtime_generation == 0 {
             return Err("composite host-read generations must be nonzero".into());
         }
-        if !purpose.state_snapshot && purpose.terminals.is_none() {
+        let state_requested =
+            purpose.state != crate::extension_host_invocation::HostStateReadSource::None;
+        if !state_requested && purpose.terminals.is_none() {
             return Err("composite host-read purpose must select at least one method".into());
         }
-        if purpose.state_snapshot && self.extension_state_persistence_blocked {
+        if purpose.state == crate::extension_host_invocation::HostStateReadSource::Durable
+            && self.extension_state_persistence_blocked
+        {
             return Err("durable extension state authority is unavailable".into());
         }
-        let observes_state_then_terminals = purpose.state_snapshot && purpose.terminals.is_some();
+        let observes_state_then_terminals = state_requested && purpose.terminals.is_some();
 
         let state_capability = crate::extension_host_state::HOST_STATE_READ_CAPABILITY;
         let terminals_capability = crate::extension_host_terminals::HOST_TERMINALS_READ_CAPABILITY;
-        if (purpose.state_snapshot && !binding.capabilities().contains(state_capability))
+        if (state_requested && !binding.capabilities().contains(state_capability))
             || (purpose.terminals.is_some()
                 && !binding.capabilities().contains(terminals_capability))
         {
@@ -53,7 +57,6 @@ impl App {
                 .namespaces
                 .iter()
                 .any(|owned| owned == binding.namespace())
-            || active.runtime_generation != runtime_generation
             || active.package_sha256 != binding.artifact_sha256()
             || active.version != binding.artifact_version()
         {
@@ -76,8 +79,17 @@ impl App {
         let catalog_generation = registry.revision;
         let package_generation = record.revision;
         let artifact_generation = active.runtime_generation;
-        let state_store_id = self.extension_state.store_id.clone();
-        let state_store_generation = self.extension_state.store_generation;
+        let state_store = match purpose.state {
+            crate::extension_host_invocation::HostStateReadSource::None => None,
+            crate::extension_host_invocation::HostStateReadSource::Durable => Some((
+                self.extension_state.store_id.clone(),
+                self.extension_state.store_generation,
+            )),
+            crate::extension_host_invocation::HostStateReadSource::CollectionsShadow => Some((
+                self.collections_shadow_overlay.state().store_id.clone(),
+                self.collections_shadow_overlay.state().store_generation,
+            )),
+        };
         let event_tx = self.event_tx.clone();
         let authority = self.issue_staged_host_invocation_authority(
             binding.package_id(),
@@ -87,8 +99,9 @@ impl App {
             runtime_generation,
         );
 
-        let state = purpose.state_snapshot.then(|| {
+        let state = state_store.map(|(state_store_id, state_store_generation)| {
             crate::extension_host_state::HostStateInvocationAuthorization {
+                source: purpose.state,
                 package_id: binding.package_id().to_owned(),
                 service_id: binding.service_id().to_owned(),
                 namespace: binding.namespace().to_owned(),
@@ -98,6 +111,7 @@ impl App {
                 package_revision: package_generation,
                 manager_generation: service_generation,
                 provider_generation,
+                artifact_generation,
                 scope_id: state_store_id.clone(),
                 scope_revision: package_generation,
                 store_id: state_store_id,

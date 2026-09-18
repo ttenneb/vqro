@@ -186,7 +186,6 @@ pub(crate) struct HostProviderBinding {
     namespace: String,
     artifact_sha256: String,
     artifact_version: String,
-    #[cfg(test)]
     capabilities: BTreeSet<String>,
 }
 
@@ -228,7 +227,6 @@ impl HostProviderBinding {
             namespace: namespace.into(),
             artifact_sha256: installed.package_sha256.clone(),
             artifact_version: installed.version.clone(),
-            #[cfg(test)]
             capabilities: manifest
                 .services
                 .iter()
@@ -258,7 +256,6 @@ impl HostProviderBinding {
         &self.artifact_version
     }
 
-    #[cfg(test)]
     pub(crate) fn capabilities(&self) -> &BTreeSet<String> {
         &self.capabilities
     }
@@ -292,6 +289,7 @@ pub(crate) type HostStateProviderBinding = HostProviderBinding;
 
 #[derive(Clone, Debug)]
 pub(crate) struct HostStateInvocationAuthorization {
+    pub(crate) source: crate::extension_host_invocation::HostStateReadSource,
     pub(crate) package_id: String,
     pub(crate) service_id: String,
     pub(crate) namespace: String,
@@ -301,6 +299,7 @@ pub(crate) struct HostStateInvocationAuthorization {
     pub(crate) package_revision: u64,
     pub(crate) manager_generation: u64,
     pub(crate) provider_generation: u64,
+    pub(crate) artifact_generation: u64,
     pub(crate) scope_id: String,
     pub(crate) scope_revision: u64,
     pub(crate) store_id: String,
@@ -311,6 +310,7 @@ pub(crate) struct HostStateInvocationAuthorization {
 
 #[derive(Clone, Debug)]
 pub(crate) struct HostStateInvocationLease {
+    pub(crate) source: crate::extension_host_invocation::HostStateReadSource,
     pub(crate) outer_request_id: String,
     pub(crate) identity: RuntimeIdentityV1,
     pub(crate) package_id: String,
@@ -322,6 +322,7 @@ pub(crate) struct HostStateInvocationLease {
     pub(crate) package_revision: u64,
     pub(crate) manager_generation: u64,
     pub(crate) provider_generation: u64,
+    pub(crate) artifact_generation: u64,
     pub(crate) runtime_generation: u64,
     pub(crate) scope_id: String,
     pub(crate) scope_revision: u64,
@@ -341,6 +342,7 @@ impl HostStateInvocationAuthorization {
         canceled: Arc<AtomicBool>,
     ) -> HostStateInvocationLease {
         HostStateInvocationLease {
+            source: self.source,
             outer_request_id,
             runtime_generation: identity.generation,
             identity,
@@ -353,6 +355,7 @@ impl HostStateInvocationAuthorization {
             package_revision: self.package_revision,
             manager_generation: self.manager_generation,
             provider_generation: self.provider_generation,
+            artifact_generation: self.artifact_generation,
             scope_id: self.scope_id.clone(),
             scope_revision: self.scope_revision,
             store_id: self.store_id.clone(),

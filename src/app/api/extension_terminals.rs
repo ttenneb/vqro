@@ -100,7 +100,6 @@ impl App {
                 .any(|namespace| namespace == &lease.namespace)
             && record.active.as_ref().is_some_and(|active| {
                 active.runtime_generation == lease.fence.artifact_generation
-                    && active.runtime_generation == lease.fence.runtime_generation
                     && active.package_sha256 == lease.artifact_sha256
                     && active.version == lease.artifact_version
             })

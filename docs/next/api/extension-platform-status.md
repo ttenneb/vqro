@@ -31,27 +31,27 @@ Use these lifecycle terms precisely:
 | Install/update/rollback/remove lifecycle | Production compatibility lifecycle | Production exact-Git package journey; file/link contracts remain lower-level foundations |
 | Runtime instantiation after enable/restart | Production | Production |
 | Host document v1 | Production for admitted protocol-2 providers | Not the component package contribution path |
-| `host.state.v1` lease | Not granted through the package dispatcher | Staged/conformance only; production package services receive no lease |
-| `host.terminals.v1` lease | Not granted through the package dispatcher | Staged/conformance only; production package services receive no lease |
-| `host.document.render.v2` invocation and audit | Not part of the legacy surface | Test-only semantic/conformance gate |
-| Document-v2 provider admission | Unavailable | Unavailable |
+| `host.state.v1` lease | Not granted through the package dispatcher | Revocable read-only lease for an exact pinned, non-publishing candidate; no candidate write lease |
+| `host.terminals.v1` lease | Not granted through the package dispatcher | Revocable exact-scope read lease for an exact pinned, non-publishing candidate |
+| `host.document.render.v2` invocation and audit | Not part of the legacy surface | Bounded worker invocation and quarantined semantic audit for the Collections candidate |
+| Document-v2 provider admission | Unavailable | Candidate-only; no visible provider admission |
 | Document-v2 client-visible publication | Unavailable | Unavailable |
-| Collections document profile/projections | Unavailable | R0 schema, validator, and fixtures only; no registered service method or publication path |
-| Document-bound package actions/effect plans | Unavailable | Collections-specific R0 schemas and validators only; no ticket issuer or commit path |
-| Collections policy authority | Bundled host implementation | Unavailable; external package is conformance-only |
+| Collections document profile/projections | Unavailable | Rebuildable non-authoritative shadow profile and compatibility audit; never read by presentation paths |
+| Document-bound package actions/effect plans | Unavailable | Shadow declarations and representative typed plans are audited; no production ticket issuer or commit path |
+| Collections policy authority | Bundled host implementation | Unavailable; the external package remains non-authoritative |
 | Stable component author SDK | Unavailable | Unavailable |
 
-Starting a component service currently proves verified runtime and lifecycle behavior. It does not grant host-state access, admit a provider, publish a document, or transfer feature authority.
+Starting an ordinary component service proves verified runtime and lifecycle behavior but grants no host reads. The exact pinned Collections candidate is the sole exception: bounded workers may receive revocable state/terminal read leases into a quarantined shadow audit. That exception does not admit a visible provider, issue a production action ticket, commit package state, or transfer feature authority.
 
-The `availability` strings in the frozen `host-state-v1` and `host-terminals-v1` schema snapshots still say that “production package activation is not enabled.” Those exact bytes are pinned by the external Collections conformance bundle. Interpret “activation” there narrowly as production host-call lease/admission, not artifact installation or runtime instantiation. Change that wording only through a deliberate contract-bundle and provenance update.
+The `availability` strings in the frozen `host-state-v1` and `host-terminals-v1` schema snapshots still say that “production package activation is not enabled.” Those exact R0 bytes remain pinned by the external package and predate candidate read admission. They still correctly deny general package access and all publication/write authority; this status document records the narrower R1–R2 candidate exception.
 
 ## Collections authority today
 
 The checked-in `vqro.collections` manifest is a legacy bundled compatibility provider. It starts the current Vqro binary with `_extension-service collections`; the Collections policy implementation, compatibility API, persistence projection, and current client behavior remain host-owned.
 
-The separately pinned external Collections component proves package verification, component execution, bounded host-call routing, exact state/terminal observations, and document-v2 semantic auditing in an ignored conformance test. It is not the production catalog owner and does not affect the visible document or persistence authority.
+The separately pinned external Collections component now runs in bounded per-service candidate workers after exact-Git installation. The host rebuilds a nonpersistent legacy-policy overlay, issues revocable read leases, and audits package profiles, synchronized compatibility projections, action declarations, and representative one-state-CAS plans. Candidate results remain quarantined from every presentation and persistence path.
 
-The [Collections v1 R0 contracts](vqro-collections-v1.md) now freeze the profile, compatibility projections, typed actions, one-state-CAS plan, durable authority shape, snapshot reader floor, and operation baseline. They are dormant contracts: a separate exact-Git artifact record is pinned for future explicit installation, but no host read lease, provider admission, ticket issuer, state commit path, visible publication, or authority transition is installed.
+The [Collections v1 R0 contracts](vqro-collections-v1.md) freeze the profile, compatibility projections, typed actions, one-state-CAS plan, durable authority shape, snapshot reader floor, and operation baseline. R1–R2 implement read admission and rebuildable shadow evidence only. No production ticket issuer, state commit path, visible publication, snapshot-v7 writer, or authority transition is installed.
 
 See the accepted [Collections package authority transition](../architecture/collections-authority-transition.md) for the implementation boundaries.
 

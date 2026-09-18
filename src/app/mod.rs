@@ -186,12 +186,10 @@ pub struct App {
     pub(crate) terminal_telemetry_cache:
         HashMap<crate::terminal::TerminalId, terminal_inspector::CachedTerminalTelemetry>,
     pub(crate) extension_services: crate::extension_service::ExtensionServiceManager,
-    /// Live component supervisors owned by package-v1 lifecycle state. Removing or
-    /// replacing a package drops only these runtimes; pane PTYs remain independently owned.
-    pub(crate) extension_package_services: std::collections::BTreeMap<
-        String,
-        Vec<crate::extension_service::ExtensionServiceSupervisor>,
-    >,
+    /// Non-publishing package candidates owned by package-v1 lifecycle state. Bootstrap and
+    /// service work happen on bounded workers; replacing a slot never affects pane PTYs.
+    pub(crate) extension_package_services:
+        std::collections::BTreeMap<String, crate::extension_candidate::PackageCandidateSlot>,
     pub(crate) host_document_services: crate::extension_service::HostDocumentServiceCatalog,
     pub(crate) extension_index: crate::extensions::CuratedIndex,
     pub(crate) marketplace_state: crate::extensions::MarketplaceStateFile,
@@ -227,6 +225,11 @@ pub struct App {
         (String, String),
         std::sync::Arc<crate::extension_host_state::HostInvocationAuthority>,
     >,
+    /// Rebuildable, nonpersistent import of legacy Collections policy for candidate reads.
+    pub(crate) collections_shadow_overlay: api::collections_candidate::CollectionsShadowOverlay,
+    /// Audited candidate profiles. These are quarantined from every presentation path.
+    pub(crate) collections_candidate_audits:
+        api::collections_candidate::CollectionsCandidateCoordinator,
     #[cfg(test)]
     pub(crate) document_shadow_audits: api::document_shadow_audit::DocumentShadowAuditCoordinator<
         crate::host_document_v2::HostDocumentV2,
@@ -961,6 +964,8 @@ impl App {
             host_semantic_retry_scheduled: std::collections::HashSet::new(),
             host_document_confirmation_grants: HashMap::new(),
             host_invocation_authorities: HashMap::new(),
+            collections_shadow_overlay: Default::default(),
+            collections_candidate_audits: Default::default(),
             #[cfg(test)]
             document_shadow_audits: Default::default(),
         };
