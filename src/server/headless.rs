@@ -3675,6 +3675,19 @@ impl HeadlessServer {
         };
 
         self.sync_foreground_client_state();
+        if self.app.collections_mutations_blocked && crate::api::request_changes_ui(&msg.request) {
+            let _ = msg.respond_to.send(
+                serde_json::to_string(&api::schema::ErrorResponse {
+                    id: msg.request.id,
+                    error: api::schema::ErrorBody {
+                        code: "collections_checkpoint_busy".into(),
+                        message: "an atomic Collections checkpoint is in progress".into(),
+                    },
+                })
+                .unwrap_or_else(|_| "{}".into()),
+            );
+            return changed;
+        }
         if let Some(error) = self.agent_read_not_idle_error(&msg.request) {
             let response = serde_json::to_string(&api::schema::ErrorResponse {
                 id: msg.request.id.clone(),
@@ -3711,6 +3724,14 @@ impl HeadlessServer {
             == crate::collections_extension_contract::CollectionsAuthorityPhaseV1::Package
         {
             match msg.request.method.clone() {
+                api::schema::Method::CollectionCreate(params) if params.label.is_some() => {
+                    return changed
+                        | self.app.defer_collections_labeled_create(
+                            msg.request.id,
+                            params,
+                            msg.respond_to,
+                        );
+                }
                 api::schema::Method::CollectionArchive(params) => {
                     return changed
                         | self.app.defer_collections_archive(

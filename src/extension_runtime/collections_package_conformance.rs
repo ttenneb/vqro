@@ -310,6 +310,7 @@ fn invoke_shadow_plan(
             crate::extension_host_invocation::HostReadInvocationPurpose {
                 state: crate::extension_host_invocation::HostStateReadSource::CollectionsShadow,
                 terminals: None,
+                provisional_container: None,
             },
             ARTIFACT_GENERATION,
             record.revision,

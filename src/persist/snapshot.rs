@@ -892,6 +892,84 @@ fn first_pane_id_in_layout(layout: &LayoutSnapshot) -> Option<u32> {
     }
 }
 
+pub(crate) fn reserve_empty_collection(
+    snapshot: &mut SessionSnapshot,
+    workspace_index: usize,
+    tab_index: usize,
+    target_pane: u32,
+    collection_id: crate::layout::CollectionId,
+    direction: ratatui::layout::Direction,
+    ratio: f32,
+    focus: bool,
+) -> Result<(), String> {
+    fn insert(
+        node: &mut LayoutSnapshot,
+        target: u32,
+        collection_id: crate::layout::CollectionId,
+        direction: &DirectionSnapshot,
+        ratio: f32,
+    ) -> bool {
+        match node {
+            LayoutSnapshot::Pane(pane) if *pane == target => {
+                let old = std::mem::replace(node, LayoutSnapshot::Pane(target));
+                *node = LayoutSnapshot::Split {
+                    direction: direction.clone(),
+                    ratio,
+                    first: Box::new(old),
+                    second: Box::new(LayoutSnapshot::Collection(collection_id)),
+                };
+                true
+            }
+            LayoutSnapshot::Split { first, second, .. } => {
+                insert(first, target, collection_id, direction, ratio)
+                    || insert(second, target, collection_id, direction, ratio)
+            }
+            _ => false,
+        }
+    }
+    let tab = snapshot
+        .workspaces
+        .get_mut(workspace_index)
+        .and_then(|workspace| workspace.tabs.get_mut(tab_index))
+        .ok_or("reserved Collections tab disappeared")?;
+    if tab
+        .collections
+        .iter()
+        .any(|entry| entry.id == collection_id)
+    {
+        return Err("reserved Collections identity already exists".into());
+    }
+    let direction = match direction {
+        ratatui::layout::Direction::Horizontal => DirectionSnapshot::Horizontal,
+        ratatui::layout::Direction::Vertical => DirectionSnapshot::Vertical,
+    };
+    let ratio = if ratio.is_finite() {
+        ratio.clamp(0.1, 0.9)
+    } else {
+        0.5
+    };
+    if !insert(
+        &mut tab.layout,
+        target_pane,
+        collection_id,
+        &direction,
+        ratio,
+    ) {
+        return Err("reserved Collections target disappeared".into());
+    }
+    tab.collections.push(CollectionSnapshot {
+        id: collection_id,
+        label: None,
+        members: Vec::new(),
+        selected: None,
+        archived: Vec::new(),
+    });
+    if focus {
+        tab.focused_leaf = Some(LayoutLeafSnapshot::Collection(collection_id));
+    }
+    Ok(())
+}
+
 /// Capture the current app state into a serializable snapshot.
 pub fn capture(
     workspaces: &[Workspace],
@@ -1339,6 +1417,48 @@ mod tests {
         );
         assert_eq!(snapshot.repositories, state.repositories);
         assert_eq!(snapshot.space_order, state.space_order);
+    }
+
+    #[test]
+    fn reserved_empty_collection_changes_only_candidate_snapshot() {
+        let state = state_with_workspaces(&["atomic-create"]);
+        let pane_id = state.workspaces[0].tabs[0].root_pane;
+        let collection_id = crate::layout::CollectionId::alloc().unwrap();
+        let mut candidate = capture_from_state(&state);
+        reserve_empty_collection(
+            &mut candidate,
+            0,
+            0,
+            pane_id.raw(),
+            collection_id,
+            ratatui::layout::Direction::Horizontal,
+            0.5,
+            true,
+        )
+        .unwrap();
+        assert_eq!(candidate.workspaces[0].tabs[0].collections.len(), 1);
+        assert!(matches!(
+            candidate.workspaces[0].tabs[0].focused_leaf,
+            Some(LayoutLeafSnapshot::Collection(id)) if id == collection_id
+        ));
+        assert!(state.workspaces[0].tabs[0]
+            .collection(collection_id)
+            .is_none());
+
+        let mut rejected = capture_from_state(&state);
+        let before = serde_json::to_vec(&rejected).unwrap();
+        assert!(reserve_empty_collection(
+            &mut rejected,
+            0,
+            0,
+            u32::MAX,
+            crate::layout::CollectionId::alloc().unwrap(),
+            ratatui::layout::Direction::Horizontal,
+            0.5,
+            false,
+        )
+        .is_err());
+        assert_eq!(serde_json::to_vec(&rejected).unwrap(), before);
     }
 
     #[test]

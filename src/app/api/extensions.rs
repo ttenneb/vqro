@@ -1554,6 +1554,9 @@ impl App {
         if !current {
             return;
         }
+        if self.finish_collections_create_stage(result.attempt_id, result.result.clone()) {
+            return;
+        }
         if self.finish_collections_action_plan(result.attempt_id, result.result.clone()) {
             return;
         }

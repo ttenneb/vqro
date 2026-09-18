@@ -78,6 +78,7 @@ pub(crate) struct HostTerminalsInvocationAuthorization {
     pub(crate) artifact_version: String,
     pub(crate) workspace_id: String,
     pub(crate) tab_id: crate::workspace::TabId,
+    pub(crate) provisional_container: Option<String>,
     pub(crate) fence: HostTerminalsLeaseFenceV1,
     pub(crate) authority: Arc<crate::extension_host_state::HostInvocationAuthority>,
     pub(crate) event_tx: tokio::sync::mpsc::Sender<crate::events::AppEvent>,
@@ -94,6 +95,7 @@ pub(crate) struct HostTerminalsInvocationLease {
     pub(crate) artifact_version: String,
     pub(crate) workspace_id: String,
     pub(crate) tab_id: crate::workspace::TabId,
+    pub(crate) provisional_container: Option<String>,
     pub(crate) fence: HostTerminalsLeaseFenceV1,
     pub(crate) deadline: Instant,
     pub(crate) canceled: Arc<AtomicBool>,
@@ -118,6 +120,7 @@ impl HostTerminalsInvocationAuthorization {
             artifact_version: self.artifact_version.clone(),
             workspace_id: self.workspace_id.clone(),
             tab_id: self.tab_id.clone(),
+            provisional_container: self.provisional_container.clone(),
             fence: self.fence.clone(),
             deadline,
             canceled,
@@ -398,6 +401,30 @@ pub(crate) fn snapshot_fingerprint(snapshot: &HostTerminalsSnapshotV1) -> Result
     })
     .map_err(|error| format!("cannot fingerprint terminal snapshot: {error}"))?;
     Ok(format!("{:x}", Sha256::digest(&canonical)))
+}
+
+pub(crate) fn append_provisional_container(
+    snapshot: &mut HostTerminalsSnapshotV1,
+    container_id: &str,
+) -> Result<(), RuntimeErrorBodyV1> {
+    if crate::terminal_container::parse_terminal_container_id_text(container_id).is_none()
+        || snapshot.layout.iter().any(|item| {
+            matches!(item, HostTerminalLayoutItemV1::Container { container_id: existing, .. } if existing == container_id)
+        })
+    {
+        return Err(malformed_error("invalid provisional container reservation"));
+    }
+    snapshot.layout.push(HostTerminalLayoutItemV1::Container {
+        container_id: container_id.into(),
+        terminal_ids: Vec::new(),
+        selected_terminal_id: None,
+    });
+    snapshot.fingerprint_sha256 =
+        snapshot_fingerprint(snapshot).map_err(|message| RuntimeErrorBodyV1 {
+            code: "host_snapshot_malformed".into(),
+            message,
+        })?;
+    Ok(())
 }
 
 pub(crate) fn validate_snapshot_value(
@@ -758,6 +785,31 @@ mod tests {
         assert_eq!(snapshot.layout.len(), 2);
         let repeated = build_snapshot(&workspace, &workspace.tabs[0], &terminals, fence()).unwrap();
         assert_eq!(snapshot, repeated);
+    }
+
+    #[test]
+    fn provisional_container_is_empty_fingerprinted_and_snapshot_local() {
+        let (workspace, terminals) = fixture();
+        let mut snapshot =
+            build_snapshot(&workspace, &workspace.tabs[0], &terminals, fence()).unwrap();
+        let original = snapshot.clone();
+        let id = "container_000000000000002a";
+        append_provisional_container(&mut snapshot, id).unwrap();
+        assert_ne!(snapshot.fingerprint_sha256, original.fingerprint_sha256);
+        assert!(snapshot.layout.iter().any(|item| matches!(
+            item,
+            HostTerminalLayoutItemV1::Container {
+                container_id,
+                terminal_ids,
+                selected_terminal_id
+            } if container_id == id && terminal_ids.is_empty() && selected_terminal_id.is_none()
+        )));
+        validate_snapshot_value(serde_json::to_value(&snapshot).unwrap()).unwrap();
+        assert_eq!(
+            build_snapshot(&workspace, &workspace.tabs[0], &terminals, fence()).unwrap(),
+            original
+        );
+        assert!(append_provisional_container(&mut snapshot, id).is_err());
     }
 
     #[test]

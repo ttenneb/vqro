@@ -439,6 +439,18 @@ impl Tab {
         })
     }
 
+    pub(crate) fn create_collection_near_reserved(
+        &mut self,
+        target: LayoutLeaf,
+        direction: Direction,
+        ratio: f32,
+        collection_id: CollectionId,
+    ) -> Result<CollectionId, CollectionMutationError> {
+        self.create_collection_near_with_allocator(target, direction, ratio, None, || {
+            Ok(collection_id)
+        })
+    }
+
     fn create_collection_near_with_allocator<F>(
         &mut self,
         target: LayoutLeaf,

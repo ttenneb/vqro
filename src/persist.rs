@@ -31,8 +31,9 @@ pub use self::snapshot::{
     SessionSnapshot, TabSnapshot, WorkspaceSnapshot,
 };
 pub(crate) use self::snapshot::{
-    normalize_identity_changes, parse_snapshot, terminal_id_for_pane_snapshot, validate_snapshot,
-    LEGACY_SNAPSHOT_WRITER_VERSION, SNAPSHOT_VERSION,
+    normalize_identity_changes, parse_snapshot, reserve_empty_collection,
+    terminal_id_for_pane_snapshot, validate_snapshot, LEGACY_SNAPSHOT_WRITER_VERSION,
+    SNAPSHOT_VERSION,
 };
 
 pub(crate) fn collections_checkpoint_paths() -> coordinator::PersistencePaths {

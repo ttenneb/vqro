@@ -25,6 +25,8 @@ pub(crate) enum HostStateReadSource {
 pub(crate) struct HostReadInvocationPurpose {
     pub(crate) state: HostStateReadSource,
     pub(crate) terminals: Option<(String, crate::workspace::TabId)>,
+    /// One host-reserved, unpublished empty container visible only to this invocation.
+    pub(crate) provisional_container: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -890,6 +892,7 @@ mod tests {
                 HostReadInvocationPurpose {
                     state: crate::extension_host_invocation::HostStateReadSource::Durable,
                     terminals: Some(("missing".into(), tab_id)),
+                    provisional_container: None,
                 },
                 3,
                 4,
@@ -909,6 +912,7 @@ mod tests {
                 HostReadInvocationPurpose {
                     state: crate::extension_host_invocation::HostStateReadSource::Durable,
                     terminals: None,
+                    provisional_container: None,
                 },
                 3,
                 4,
@@ -956,6 +960,7 @@ mod tests {
                 HostReadInvocationPurpose {
                     state: crate::extension_host_invocation::HostStateReadSource::Durable,
                     terminals: Some((workspace_id, tab_id)),
+                    provisional_container: None,
                 },
                 3,
                 4,

@@ -23,7 +23,7 @@ use crate::extension_state::{
 };
 
 // The coordinator and package action path are production-wired, but authority admission remains
-// closed until reserved labeled creation and the Local/SSH/Cloud cutover gates land.
+// closed until the Local/SSH/Cloud, restart, rollback, and race cutover gates pass.
 const COLLECTIONS_AUTHORITY_CUTOVER_ADMITTED: bool = false;
 
 pub(crate) struct PendingCollectionsAction {
@@ -512,6 +512,7 @@ impl App {
             crate::extension_host_invocation::HostReadInvocationPurpose {
                 state: crate::extension_host_invocation::HostStateReadSource::Durable,
                 terminals: None,
+                provisional_container: None,
             },
             artifact_generation,
             provider_generation,
@@ -753,6 +754,9 @@ impl App {
         }
         self.collections_package_projections.clear();
         self.collections_mutations_blocked = false;
+        for (_, pending) in self.collections_pending_creates.drain() {
+            pending.cancel("the authoritative Collections package was retired");
+        }
         for (_, pending) in self.collections_pending_actions.drain() {
             pending.canceled.store(true, Ordering::Release);
             let response = super::responses::encode_error(

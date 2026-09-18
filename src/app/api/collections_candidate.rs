@@ -202,6 +202,7 @@ impl CollectionsCandidateCoordinator {
                     crate::extension_host_invocation::HostStateReadSource::CollectionsShadow
                 },
                 terminals: Some((workspace_id.clone(), tab_id.clone())),
+                provisional_container: None,
             },
             service_generation,
             provider_generation,
@@ -830,7 +831,7 @@ pub(super) fn topology_from_snapshot(
     })
 }
 
-fn current_terminal_snapshot(
+pub(super) fn current_terminal_snapshot(
     app: &App,
     authorization: &HostReadInvocationAuthorization,
     workspace_id: &str,
@@ -863,16 +864,21 @@ fn current_terminal_snapshot(
                 .map(|tab| (workspace, tab))
         })
         .ok_or("exact workspace/tab scope disappeared")?;
-    crate::extension_host_terminals::build_snapshot(
+    let mut snapshot = crate::extension_host_terminals::build_snapshot(
         workspace,
         tab,
         &app.state.terminals,
         terminals.fence.clone(),
     )
-    .map_err(|error| error.message)
+    .map_err(|error| error.message)?;
+    if let Some(container_id) = &terminals.provisional_container {
+        crate::extension_host_terminals::append_provisional_container(&mut snapshot, container_id)
+            .map_err(|error| error.message)?;
+    }
+    Ok(snapshot)
 }
 
-fn current_state_snapshot(
+pub(super) fn current_state_snapshot(
     app: &App,
     authorization: &HostReadInvocationAuthorization,
 ) -> Result<crate::extension_host_state::HostStateSnapshotV1, String> {

@@ -10,6 +10,7 @@ mod agents;
 pub(crate) use agents::{AGENT_START_SETTLE_DELAY, MAX_AGENT_START_TIMEOUT};
 mod api;
 pub(crate) use api::collections_authority::CollectionsCheckpointResult;
+pub(crate) use api::collections_create::CollectionsCreateCheckpointResult;
 pub(crate) use api::extension_state::ExtensionStatePersistResult;
 #[cfg_attr(test, allow(unused_imports))]
 pub(crate) use api::plugins::{bundled_document_service_declarations, manifest_json_schema};
@@ -240,6 +241,8 @@ pub struct App {
     >,
     pub(crate) collections_pending_actions:
         HashMap<u64, api::collections_authority::PendingCollectionsAction>,
+    pub(crate) collections_pending_creates:
+        HashMap<u64, api::collections_create::PendingCollectionsCreate>,
     pub(crate) next_collections_action_id: u64,
     #[cfg(test)]
     pub(crate) document_shadow_audits: api::document_shadow_audit::DocumentShadowAuditCoordinator<
@@ -994,6 +997,7 @@ impl App {
             collections_candidate_audits: Default::default(),
             collections_package_projections: Default::default(),
             collections_pending_actions: Default::default(),
+            collections_pending_creates: Default::default(),
             next_collections_action_id: 0,
             #[cfg(test)]
             document_shadow_audits: Default::default(),

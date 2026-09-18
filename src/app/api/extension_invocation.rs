@@ -129,6 +129,7 @@ impl App {
                 artifact_version: binding.artifact_version().to_owned(),
                 workspace_id,
                 tab_id,
+                provisional_container: purpose.provisional_container.clone(),
                 fence: crate::extension_host_terminals::HostTerminalsLeaseFenceV1 {
                     catalog_generation,
                     package_generation,

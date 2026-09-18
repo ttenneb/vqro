@@ -4,6 +4,7 @@ mod agent_view;
 mod agents;
 mod collections;
 pub(crate) mod collections_authority;
+pub(crate) mod collections_create;
 pub(crate) use collections::DeferredHostDocumentSnapshot;
 pub(crate) use collections::HostDocumentConfirmationGrant;
 pub(crate) mod collections_candidate;
@@ -173,6 +174,10 @@ impl App {
             }
             AppEvent::CollectionsCheckpointPersisted(result) => {
                 self.finish_collections_checkpoint(*result);
+                return Vec::new();
+            }
+            AppEvent::CollectionsCreateCheckpointPersisted(result) => {
+                self.finish_collections_create_checkpoint(*result);
                 return Vec::new();
             }
             AppEvent::HostDocumentProviderActionFinished {

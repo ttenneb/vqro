@@ -66,6 +66,7 @@ impl App {
                 artifact_version: binding.artifact_version().to_owned(),
                 workspace_id: workspace_id.to_owned(),
                 tab_id: tab_id.clone(),
+                provisional_container: None,
                 fence: crate::extension_host_terminals::HostTerminalsLeaseFenceV1 {
                     catalog_generation,
                     package_generation,
@@ -166,12 +167,19 @@ impl App {
                         )
                     })
                     .and_then(|(workspace, tab)| {
-                        crate::extension_host_terminals::build_snapshot(
+                        let mut snapshot = crate::extension_host_terminals::build_snapshot(
                             workspace,
                             tab,
                             &self.state.terminals,
                             request.lease.fence.clone(),
-                        )
+                        )?;
+                        if let Some(container_id) = &request.lease.provisional_container {
+                            crate::extension_host_terminals::append_provisional_container(
+                                &mut snapshot,
+                                container_id,
+                            )?;
+                        }
+                        Ok(snapshot)
                     })
                     .and_then(|snapshot| {
                         serde_json::to_value(snapshot).map_err(|error| {

@@ -1546,6 +1546,7 @@ mod tests {
                 crate::extension_host_invocation::HostReadInvocationPurpose {
                     state: crate::extension_host_invocation::HostStateReadSource::Durable,
                     terminals: Some((workspace_id, tab_id)),
+                    provisional_container: None,
                 },
                 5,
                 7,

@@ -217,6 +217,7 @@ pub enum AppEvent {
     ExtensionHostTerminalsCall(Box<crate::extension_host_terminals::HostTerminalsActorRequest>),
     ExtensionStatePersisted(Box<crate::app::ExtensionStatePersistResult>),
     CollectionsCheckpointPersisted(Box<crate::app::CollectionsCheckpointResult>),
+    CollectionsCreateCheckpointPersisted(Box<crate::app::CollectionsCreateCheckpointResult>),
     HostDocumentProviderActionFinished {
         request_id: String,
         namespace: String,

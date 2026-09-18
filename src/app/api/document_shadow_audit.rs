@@ -210,6 +210,7 @@ impl<D: ShadowAuditDocument> DocumentShadowAuditCoordinator<D> {
             HostReadInvocationPurpose {
                 state: crate::extension_host_invocation::HostStateReadSource::None,
                 terminals: Some((workspace_id.clone(), tab_id.clone())),
+                provisional_container: None,
             },
             service_generation,
             provider_generation,
@@ -287,6 +288,7 @@ impl<D: ShadowAuditDocument> DocumentShadowAuditCoordinator<D> {
             HostReadInvocationPurpose {
                 state: crate::extension_host_invocation::HostStateReadSource::Durable,
                 terminals: Some((workspace_id.clone(), tab_id.clone())),
+                provisional_container: None,
             },
             service_generation,
             provider_generation,
@@ -385,6 +387,7 @@ impl<D: ShadowAuditDocument> DocumentShadowAuditCoordinator<D> {
             HostReadInvocationPurpose {
                 state: crate::extension_host_invocation::HostStateReadSource::Durable,
                 terminals: Some((workspace_id.clone(), tab_id.clone())),
+                provisional_container: None,
             },
             service_generation,
             provider_generation,
