@@ -48,6 +48,15 @@ pub(crate) fn collections_checkpoint_paths() -> coordinator::PersistencePaths {
 pub(crate) fn recover_collections_checkpoint(
 ) -> Result<coordinator::StartupRecovery, coordinator::PersistenceError> {
     let paths = collections_checkpoint_paths();
+    for parent in [paths.session.parent(), paths.extension_state.parent()]
+        .into_iter()
+        .flatten()
+    {
+        std::fs::create_dir_all(parent).map_err(|source| coordinator::PersistenceError {
+            source,
+            outcome: coordinator::PersistenceOutcome::NotPublished,
+        })?;
+    }
     let ownership = coordinator::PersistenceOwnership::try_acquire(&paths)?;
     coordinator::recover_checkpoint_at_startup(&ownership, &paths)
 }
