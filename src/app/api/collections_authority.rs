@@ -19,7 +19,6 @@ use crate::collections_extension_contract::{
 };
 use crate::extension_state::{
     ExtensionStateOperationV1, ExtensionStateTransactionV1, EXTENSION_STATE_CONTRACT_V1,
-    MAX_STATE_OPERATIONS,
 };
 
 // The coordinator and package action path are production-wired, but authority admission remains
@@ -167,6 +166,16 @@ impl App {
         self.collections_mutations_blocked = true;
         let result = self.persist_collections_cutover(&pin);
         self.collections_mutations_blocked = false;
+        if result.is_ok()
+            && self.collections_authority.phase == CollectionsAuthorityPhaseV1::Package
+        {
+            // Publish the already-audited exact-state profiles in the same App turn as authority.
+            // Callers must never observe package authority without its compatibility document.
+            self.publish_ready_collections_package_profiles();
+            if !self.collections_package_runtime_available() {
+                return Err("Collections cutover profile publication failed closed".into());
+            }
+        }
         result
     }
 
@@ -174,44 +183,28 @@ impl App {
         &mut self,
         pin: &crate::collections_extension_contract::CollectionsProductionPinV1,
     ) -> Result<(), String> {
-        let mut next_state = self.extension_state.clone();
         let migration_epoch = self
             .collections_authority
             .authority_epoch
             .checked_add(1)
             .ok_or("Collections authority epoch exhausted")?;
-        next_state
-            .clear_namespace(
-                COLLECTIONS_NAMESPACE,
-                format!("collections-cutover-clear-{migration_epoch}"),
-            )
-            .map_err(|error| format!("cannot clear pre-cutover package state: {error:?}"))?;
-        let operations = self
+        let next_state = super::collections_candidate::build_collections_import_state(
+            &self.extension_state,
+            self.collections_shadow_overlay.imported_values(),
+            migration_epoch,
+        )?;
+        let candidate_snapshot = self
             .collections_shadow_overlay
-            .imported_values()
-            .iter()
-            .map(|(key, value)| ExtensionStateOperationV1 {
-                key: key.clone(),
-                value: Some(value.clone()),
-            })
-            .collect::<Vec<_>>();
-        let mut namespace_revision = next_state
+            .state()
             .snapshot(COLLECTIONS_NAMESPACE)
-            .map_err(|error| format!("cannot inspect package state: {error:?}"))?
-            .revision;
-        for (chunk_index, operations) in operations.chunks(MAX_STATE_OPERATIONS).enumerate() {
-            let commit = next_state
-                .transact(&ExtensionStateTransactionV1 {
-                    contract: EXTENSION_STATE_CONTRACT_V1.into(),
-                    namespace: COLLECTIONS_NAMESPACE.into(),
-                    expected_store_generation: next_state.store_generation,
-                    expected_revision: namespace_revision,
-                    idempotency_key: format!("collections-cutover-{migration_epoch}-{chunk_index}"),
-                    operations: operations.to_vec(),
-                })
-                .map_err(|error| format!("cannot import Collections package state: {error:?}"))?;
-            namespace_revision = commit.revision;
+            .map_err(|error| format!("cannot inspect audited candidate state: {error:?}"))?;
+        let next_snapshot = next_state
+            .snapshot(COLLECTIONS_NAMESPACE)
+            .map_err(|error| format!("cannot inspect package state: {error:?}"))?;
+        if next_snapshot != candidate_snapshot {
+            return Err("audited Collections candidate state changed before cutover".into());
         }
+        let namespace_revision = next_snapshot.revision;
         let authority = CollectionsAuthorityV1 {
             contract: crate::collections_extension_contract::COLLECTIONS_AUTHORITY_CONTRACT_V1
                 .into(),

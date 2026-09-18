@@ -38,6 +38,7 @@ struct DesiredObservation {
     runtime_generation: u64,
     state_store_generation: u64,
     state_revision: u64,
+    state_values: BTreeMap<String, serde_json::Value>,
     terminal_fingerprint: String,
 }
 
@@ -99,52 +100,19 @@ impl CollectionsShadowOverlay {
         &self.imported_values
     }
 
-    fn rebuild(&mut self, mut values: BTreeMap<String, serde_json::Value>) -> Result<bool, String> {
+    fn rebuild(
+        &mut self,
+        durable: &crate::extension_state::DurableExtensionStateV1,
+        migration_epoch: u64,
+        mut values: BTreeMap<String, serde_json::Value>,
+    ) -> Result<bool, String> {
         values.insert(
             "shadow_import".into(),
             serde_json::json!({"schema": "vqro.collections.shadow-import", "schema_version": 1}),
         );
-        if values == self.imported_values {
+        let state = build_collections_import_state(durable, &values, migration_epoch)?;
+        if values == self.imported_values && state == self.state {
             return Ok(false);
-        }
-        if values.len() > crate::extension_state::MAX_STATE_KEYS_PER_NAMESPACE {
-            return Err("legacy Collections policy exceeds shadow state capacity".into());
-        }
-        let generation = self
-            .state
-            .store_generation
-            .checked_add(1)
-            .ok_or("Collections shadow store generation exhausted")?;
-        let mut state = crate::extension_state::DurableExtensionStateV1::new(
-            "collections_shadow_overlay".into(),
-            generation,
-        )
-        .map_err(|error| format!("cannot create Collections shadow state: {error:?}"))?;
-        let operations = values
-            .iter()
-            .map(
-                |(key, value)| crate::extension_state::ExtensionStateOperationV1 {
-                    key: key.clone(),
-                    value: Some(value.clone()),
-                },
-            )
-            .collect::<Vec<_>>();
-        let mut expected_revision = 0;
-        for (chunk_index, chunk) in operations
-            .chunks(crate::extension_state::MAX_STATE_OPERATIONS)
-            .enumerate()
-        {
-            let commit = state
-                .transact(&crate::extension_state::ExtensionStateTransactionV1 {
-                    contract: crate::extension_state::EXTENSION_STATE_CONTRACT_V1.into(),
-                    namespace: crate::collections_extension_contract::COLLECTIONS_NAMESPACE.into(),
-                    expected_store_generation: generation,
-                    expected_revision,
-                    idempotency_key: format!("shadow-import-{generation}-{chunk_index}"),
-                    operations: chunk.to_vec(),
-                })
-                .map_err(|error| format!("cannot import legacy Collections policy: {error:?}"))?;
-            expected_revision = commit.revision;
         }
         self.state = state;
         self.imported_values = values;
@@ -216,6 +184,7 @@ impl CollectionsCandidateCoordinator {
             runtime_generation,
             state_store_generation: expected_state.store_generation,
             state_revision: expected_state.revision,
+            state_values: expected_state.values.clone(),
             terminal_fingerprint: expected_terminals.fingerprint_sha256.clone(),
         };
         let scope_id = tab_id.to_string();
@@ -549,6 +518,53 @@ impl CollectionsCandidateCoordinator {
     }
 }
 
+pub(super) fn build_collections_import_state(
+    durable: &crate::extension_state::DurableExtensionStateV1,
+    values: &BTreeMap<String, serde_json::Value>,
+    migration_epoch: u64,
+) -> Result<crate::extension_state::DurableExtensionStateV1, String> {
+    if values.len() > crate::extension_state::MAX_STATE_KEYS_PER_NAMESPACE {
+        return Err("legacy Collections policy exceeds shadow state capacity".into());
+    }
+    let mut state = durable.clone();
+    state
+        .clear_namespace(
+            crate::collections_extension_contract::COLLECTIONS_NAMESPACE,
+            format!("collections-cutover-clear-{migration_epoch}"),
+        )
+        .map_err(|error| format!("cannot clear pre-cutover package state: {error:?}"))?;
+    let operations = values
+        .iter()
+        .map(
+            |(key, value)| crate::extension_state::ExtensionStateOperationV1 {
+                key: key.clone(),
+                value: Some(value.clone()),
+            },
+        )
+        .collect::<Vec<_>>();
+    let mut expected_revision = state
+        .snapshot(crate::collections_extension_contract::COLLECTIONS_NAMESPACE)
+        .map_err(|error| format!("cannot inspect package state: {error:?}"))?
+        .revision;
+    for (chunk_index, chunk) in operations
+        .chunks(crate::extension_state::MAX_STATE_OPERATIONS)
+        .enumerate()
+    {
+        let commit = state
+            .transact(&crate::extension_state::ExtensionStateTransactionV1 {
+                contract: crate::extension_state::EXTENSION_STATE_CONTRACT_V1.into(),
+                namespace: crate::collections_extension_contract::COLLECTIONS_NAMESPACE.into(),
+                expected_store_generation: state.store_generation,
+                expected_revision,
+                idempotency_key: format!("collections-cutover-{migration_epoch}-{chunk_index}"),
+                operations: chunk.to_vec(),
+            })
+            .map_err(|error| format!("cannot import Collections package state: {error:?}"))?;
+        expected_revision = commit.revision;
+    }
+    Ok(state)
+}
+
 impl App {
     pub(crate) fn rebuild_collections_shadow_overlay(&mut self) -> Result<bool, String> {
         let mut values = BTreeMap::new();
@@ -597,7 +613,13 @@ impl App {
                 }
             }
         }
-        self.collections_shadow_overlay.rebuild(values)
+        let migration_epoch = self
+            .collections_authority
+            .authority_epoch
+            .checked_add(1)
+            .ok_or("Collections authority epoch exhausted")?;
+        self.collections_shadow_overlay
+            .rebuild(&self.extension_state, migration_epoch, values)
     }
 
     pub(crate) fn schedule_collections_candidate(
@@ -969,7 +991,8 @@ mod tests {
             .state()
             .snapshot(crate::collections_extension_contract::COLLECTIONS_NAMESPACE)
             .unwrap();
-        assert_eq!(second.store_generation, first.store_generation + 1);
+        assert_eq!(second.store_generation, first.store_generation);
+        assert_eq!(second.revision, first.revision);
         assert_eq!(
             second.values[&container_id]["archived_terminal_ids"],
             serde_json::json!([terminal_id])
