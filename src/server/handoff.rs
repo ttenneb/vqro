@@ -1104,7 +1104,7 @@ mod tests {
 
     #[test]
     fn raw_future_handoff_is_rejected_before_typed_snapshot_decode() {
-        let raw = r#"{"version":3,"snapshot":{"version":7,"future_identity":{"must":"survive"}}}"#;
+        let raw = r#"{"version":3,"snapshot":{"version":8,"future_identity":{"must":"survive"}}}"#;
         let preserved = raw.as_bytes().to_vec();
         let error = preflight_handoff_json_versions(raw).unwrap_err();
         assert!(error.to_string().contains("newer than supported"));
@@ -1124,7 +1124,7 @@ mod tests {
             assert_eq!(read_line_unbuffered(&mut stream).unwrap(), "future-token\n");
             stream
                 .write_all(
-                    b"{\"version\":3,\"snapshot\":{\"version\":7,\"future_identity\":{\"must\":\"survive\"}}}\n",
+                    b"{\"version\":3,\"snapshot\":{\"version\":8,\"future_identity\":{\"must\":\"survive\"}}}\n",
                 )
                 .unwrap();
             stream.flush().unwrap();
