@@ -357,7 +357,7 @@ pub fn clear_history() {
 
 pub(crate) enum StartupSessionLoad {
     Missing,
-    Loaded(SessionSnapshot),
+    Loaded(Box<SessionSnapshot>),
     Rejected(String),
 }
 
@@ -420,7 +420,7 @@ fn load_for_startup_from_path(path: &Path) -> StartupSessionLoad {
                     return StartupSessionLoad::Rejected(diagnostic);
                 }
             }
-            StartupSessionLoad::Loaded(snapshot)
+            StartupSessionLoad::Loaded(Box::new(snapshot))
         }
         Err(err) => {
             let diagnostic = if let Some(version) = snapshot_file_version(&content) {
@@ -443,7 +443,7 @@ fn load_for_startup_from_path(path: &Path) -> StartupSessionLoad {
 #[cfg(test)]
 pub fn load() -> Option<SessionSnapshot> {
     match load_for_startup() {
-        StartupSessionLoad::Loaded(snapshot) => Some(snapshot),
+        StartupSessionLoad::Loaded(snapshot) => Some(*snapshot),
         StartupSessionLoad::Missing | StartupSessionLoad::Rejected(_) => None,
     }
 }
@@ -507,7 +507,8 @@ mod tests {
     fn empty_snapshot() -> SessionSnapshot {
         SessionSnapshot {
             delegations: Vec::new(),
-            version: SNAPSHOT_VERSION,
+            collections_authority: Default::default(),
+            version: super::super::LEGACY_SNAPSHOT_WRITER_VERSION,
             repositories: Vec::new(),
             space_order: Vec::new(),
             workspaces: vec![],
@@ -534,19 +535,28 @@ mod tests {
             "../../docs/next/api/vqro-collections-v1.fixtures/old-reader-rejection-v7.json"
         ))
         .unwrap();
-        assert_eq!(rejection["snapshot_version"], SNAPSHOT_VERSION + 1);
-        assert_eq!(rejection["reader_snapshot_version"], SNAPSHOT_VERSION);
+        assert_eq!(rejection["snapshot_version"], 7);
+        assert_eq!(rejection["reader_snapshot_version"], 6);
+        assert!(
+            rejection["snapshot_version"].as_u64().unwrap()
+                > rejection["reader_snapshot_version"].as_u64().unwrap()
+        );
+        assert_eq!(
+            rejection["expected_error"],
+            "session file version 7 is newer than supported 6"
+        );
         let newer = temp_session_path("newer-load");
         std::fs::create_dir_all(newer.parent().unwrap()).unwrap();
-        let newer_bytes = format!(
-            "{{\"version\":{},\"future_identity\":{{\"must\":\"survive\"}}}}",
-            rejection["snapshot_version"]
-        );
+        let newer_version = SNAPSHOT_VERSION + 1;
+        let newer_bytes =
+            format!("{{\"version\":{newer_version},\"future_identity\":{{\"must\":\"survive\"}}}}");
         std::fs::write(&newer, &newer_bytes).unwrap();
         let StartupSessionLoad::Rejected(error) = load_for_startup_from_path(&newer) else {
-            panic!("version-6 reader accepted the package-authority snapshot version")
+            panic!("current reader accepted a future snapshot version")
         };
-        assert!(error.contains(rejection["expected_error"].as_str().unwrap()));
+        assert!(error.contains(&format!(
+            "session file version {newer_version} is newer than supported {SNAPSHOT_VERSION}"
+        )));
         assert_eq!(std::fs::read_to_string(&newer).unwrap(), newer_bytes);
 
         let unreadable = temp_session_path("unreadable-load");
@@ -634,10 +644,16 @@ mod tests {
         let StartupSessionLoad::Loaded(snapshot) = load_for_startup_from_path(&path) else {
             panic!("legacy snapshot should migrate");
         };
-        assert_eq!(snapshot.version, SNAPSHOT_VERSION);
+        assert_eq!(
+            snapshot.version,
+            super::super::LEGACY_SNAPSHOT_WRITER_VERSION
+        );
         let published: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-        assert_eq!(published["version"], SNAPSHOT_VERSION);
+        assert_eq!(
+            published["version"],
+            super::super::LEGACY_SNAPSHOT_WRITER_VERSION
+        );
         let tab_id = published["workspaces"][0]["tabs"][0]["id"]
             .as_str()
             .expect("published tab identity");
@@ -665,7 +681,7 @@ mod tests {
             super::super::snapshot::parse_snapshot(&published)
                 .unwrap()
                 .version,
-            SNAPSHOT_VERSION
+            super::super::LEGACY_SNAPSHOT_WRITER_VERSION
         );
         std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }

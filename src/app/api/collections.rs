@@ -214,6 +214,13 @@ impl App {
                 .entry(request_key.clone())
                 .or_default();
             cache.disable();
+            if namespace == crate::first_party::collections::NAMESPACE
+                && self.collections_authority.phase
+                    == crate::collections_extension_contract::CollectionsAuthorityPhaseV1::Package
+            {
+                self.collections_package_projections.remove(&scope_id);
+                continue;
+            }
             if namespace == crate::first_party::collections::NAMESPACE {
                 let _ = cache.install_fallback(&snapshot);
             }
@@ -1647,7 +1654,7 @@ impl App {
         documents
     }
 
-    fn collections_shadow_snapshot(
+    pub(super) fn collections_shadow_snapshot(
         &self,
         ws_idx: usize,
         tab_idx: usize,
@@ -1744,7 +1751,7 @@ impl App {
         crate::first_party::collections::project(&snapshot)
     }
 
-    fn find_collection(&self, id: CollectionId) -> Option<(usize, usize)> {
+    pub(super) fn find_collection(&self, id: CollectionId) -> Option<(usize, usize)> {
         self.state
             .workspaces
             .iter()
@@ -1768,23 +1775,53 @@ impl App {
         let collection = tab.collection(id)?;
         let collection_id = collection_id_text(id);
         let selected = collection.selected();
+        let tab_id = self.public_tab_id(ws_idx, tab_idx)?;
+        let package_projection = (self.collections_authority.phase
+            == crate::collections_extension_contract::CollectionsAuthorityPhaseV1::Package)
+            .then(|| self.collections_package_projections.get(&tab_id))
+            .flatten()
+            .and_then(|projection| {
+                projection
+                    .collections
+                    .iter()
+                    .find(|projected| projected.collection_id == collection_id)
+            });
+        let projected_member = |pane_id: &str| {
+            package_projection.and_then(|projected| {
+                projected
+                    .members
+                    .iter()
+                    .find(|member| member.pane_id == pane_id)
+            })
+        };
         Some(CollectionInfo {
             collection_id,
             workspace_id: self.public_workspace_id(ws_idx),
-            tab_id: self.public_tab_id(ws_idx, tab_idx)?,
-            label: collection.label().map(str::to_owned),
+            tab_id,
+            label: package_projection
+                .map(|projected| projected.label.clone())
+                .unwrap_or_else(|| collection.label().map(str::to_owned)),
             focused: tab.layout.focused_leaf() == LayoutLeaf::Collection(id.into()),
-            selected_pane_id: selected.and_then(|pane| self.public_pane_id(ws_idx, pane)),
+            selected_pane_id: package_projection
+                .and_then(|projected| projected.selected_pane_id.clone())
+                .or_else(|| selected.and_then(|pane| self.public_pane_id(ws_idx, pane))),
             members: collection
                 .members()
                 .iter()
                 .enumerate()
                 .filter_map(|(index, pane)| {
+                    let pane_id = self.public_pane_id(ws_idx, *pane)?;
                     Some(CollectionMemberInfo {
-                        pane_id: self.public_pane_id(ws_idx, *pane)?,
+                        archived: projected_member(&pane_id).map_or_else(
+                            || collection.is_archived(*pane),
+                            |member| member.archived,
+                        ),
+                        selected: package_projection.is_none() && selected == Some(*pane)
+                            || package_projection.is_some_and(|projected| {
+                                projected.selected_pane_id.as_deref() == Some(pane_id.as_str())
+                            }),
+                        pane_id,
                         index,
-                        archived: collection.is_archived(*pane),
-                        selected: selected == Some(*pane),
                     })
                 })
                 .collect(),
@@ -1882,6 +1919,16 @@ impl App {
         request_id: String,
         params: CollectionCreateParams,
     ) -> String {
+        if self.collections_authority.phase
+            == crate::collections_extension_contract::CollectionsAuthorityPhaseV1::Package
+            && params.label.is_some()
+        {
+            return responses::encode_error(
+                request_id,
+                "collections_atomic_create_required",
+                "labeled creation requires the package-authority reservation coordinator",
+            );
+        }
         let Some((ws_idx, pane_id)) = self.parse_current_public_pane_id(&params.target_pane_id)
         else {
             return responses::encode_error(request_id, "not_found", "target pane was not found");

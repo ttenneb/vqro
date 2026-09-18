@@ -51,7 +51,9 @@ The checked-in `vqro.collections` manifest is a legacy bundled compatibility pro
 
 The separately pinned external Collections component now runs in bounded per-service candidate workers after exact-Git installation. The host rebuilds a nonpersistent legacy-policy overlay, issues revocable read leases, and audits package profiles, synchronized compatibility projections, action declarations, and representative one-state-CAS plans. Candidate results remain quarantined from every presentation and persistence path.
 
-The [Collections v1 R0 contracts](vqro-collections-v1.md) freeze the profile, compatibility projections, typed actions, one-state-CAS plan, durable authority shape, snapshot reader floor, and operation baseline. R1–R2 implement read admission and rebuildable shadow evidence only. No production ticket issuer, state commit path, visible publication, snapshot-v7 writer, or authority transition is installed.
+The [Collections v1 R0 contracts](vqro-collections-v1.md) freeze the profile, compatibility projections, typed actions, one-state-CAS plan, durable authority shape, snapshot reader floor, and operation baseline. R1–R2 implement read admission and rebuildable shadow evidence only. No production authority transition is admitted.
+
+R3 implementation is in progress. The binary can read and validate snapshot version 7, startup now recovers the journaled session/extension-state coordinator, and package-authority compatibility publication, fail-closed routing, and typed `set_archived` checkpoint orchestration are implemented behind the authority phase. Legacy-authoritative sessions continue writing version 6. The cutover admission gate remains hard-closed until reserved atomic labeled creation and the required Local/SSH/Cloud, restart, rollback, and race evidence are complete; therefore none of this R3 machinery currently transfers production authority.
 
 See the accepted [Collections package authority transition](../architecture/collections-authority-transition.md) for the implementation boundaries.
 

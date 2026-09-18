@@ -34,34 +34,49 @@ impl App {
             if let Some(thread) = self.session_save_thread.take() {
                 let _ = thread.join();
             }
+            if let Err(error) = self.maybe_cutover_collections_authority() {
+                tracing::warn!(%error, "deferred Collections authority cutover failed");
+            }
         }
+    }
+
+    pub(super) fn capture_session_snapshot(&self) -> crate::persist::SessionSnapshot {
+        let mut snapshot = crate::persist::capture(
+            &self.state.workspaces,
+            &self.state.repositories,
+            &self.state.space_order,
+            &self.state.terminals,
+            &self.terminal_runtimes,
+            self.state.active,
+            self.state.selected,
+        );
+        snapshot.delegations = self
+            .state
+            .delegations
+            .preorder()
+            .into_iter()
+            .filter_map(|id| self.state.delegations.get(id).cloned())
+            .collect();
+        snapshot.collections_authority = self.collections_authority.clone();
+        snapshot.version = if self.collections_authority.phase
+            == crate::collections_extension_contract::CollectionsAuthorityPhaseV1::Package
+        {
+            crate::persist::SNAPSHOT_VERSION
+        } else {
+            crate::persist::LEGACY_SNAPSHOT_WRITER_VERSION
+        };
+        snapshot
     }
 
     fn capture_session_save_job(&self) -> SessionSaveJob {
         if self.state.workspaces.is_empty() {
             SessionSaveJob::Clear
         } else {
-            let mut snapshot = crate::persist::capture(
-                &self.state.workspaces,
-                &self.state.repositories,
-                &self.state.space_order,
-                &self.state.terminals,
-                &self.terminal_runtimes,
-                self.state.active,
-                self.state.selected,
-            );
-            snapshot.delegations = self
-                .state
-                .delegations
-                .preorder()
-                .into_iter()
-                .filter_map(|id| self.state.delegations.get(id).cloned())
-                .collect();
             let history = self.persist_pane_history.then(|| {
                 crate::persist::capture_history(&self.state.workspaces, &self.terminal_runtimes)
             });
             SessionSaveJob::Save {
-                snapshot: Box::new(snapshot),
+                snapshot: Box::new(self.capture_session_snapshot()),
                 history,
             }
         }
@@ -70,6 +85,10 @@ impl App {
     pub(crate) fn start_background_session_save(&mut self) {
         if !self.policy.persist_session || self.session_persistence_blocked {
             self.session_save_deadline = None;
+            return;
+        }
+        if self.collections_mutations_blocked {
+            self.session_save_deadline = Some(Instant::now() + Duration::from_millis(250));
             return;
         }
 
@@ -101,6 +120,10 @@ impl App {
 
         if !self.policy.persist_session || self.session_persistence_blocked {
             self.session_save_deadline = None;
+            return;
+        }
+        if self.collections_mutations_blocked {
+            self.session_save_deadline = Some(Instant::now() + Duration::from_millis(250));
             return;
         }
 

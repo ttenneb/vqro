@@ -1472,6 +1472,9 @@ impl App {
     fn retire_extension_package_runtime(&mut self, package_id: &str) {
         self.extension_package_services.remove(package_id);
         self.revoke_host_invocation_authority_for_package(package_id);
+        if package_id == crate::collections_extension_contract::COLLECTIONS_PACKAGE_ID {
+            self.disable_collections_package_authority_runtime();
+        }
     }
 
     pub(crate) fn handle_extension_package_candidate_ready(
@@ -1514,6 +1517,11 @@ impl App {
             }
             Err(error) => {
                 self.revoke_host_invocation_authority_for_package(&result.package_id);
+                if result.package_id
+                    == crate::collections_extension_contract::COLLECTIONS_PACKAGE_ID
+                {
+                    self.disable_collections_package_authority_runtime();
+                }
                 tracing::warn!(
                     package_id = %result.package_id,
                     artifact_generation = result.artifact_generation,
@@ -1546,7 +1554,11 @@ impl App {
         if !current {
             return;
         }
+        if self.finish_collections_action_plan(result.attempt_id, result.result.clone()) {
+            return;
+        }
         if let Err(error) = self.finalize_collections_candidate(result.attempt_id, result.result) {
+            self.disable_collections_package_authority_runtime();
             tracing::debug!(
                 package_id = %result.package_id,
                 service_id = %result.service_id,

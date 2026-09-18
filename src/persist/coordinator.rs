@@ -1316,7 +1316,7 @@ mod tests {
         std::fs::create_dir_all(&directory).unwrap();
         let paths = paths_for_directory(&directory);
         let session = SessionSnapshot {
-            version: super::super::snapshot::SNAPSHOT_VERSION,
+            version: super::super::snapshot::LEGACY_SNAPSHOT_WRITER_VERSION,
             workspaces: Vec::new(),
             repositories: Vec::new(),
             space_order: Vec::new(),
@@ -1326,6 +1326,7 @@ mod tests {
             sidebar_section_split: None,
             collapsed_space_keys: Default::default(),
             delegations: Vec::new(),
+            collections_authority: Default::default(),
         };
         let state = DurableExtensionStateV1::new("session:test".into(), 1).unwrap();
         let ownership = PersistenceOwnership::try_acquire(&paths).unwrap();

@@ -92,6 +92,12 @@ impl HeadlessServer {
             .into_iter()
             .filter_map(|id| self.app.state.delegations.get(id).cloned())
             .collect();
+        snapshot.collections_authority = self.app.collections_authority.clone();
+        if self.app.collections_authority.phase
+            == crate::collections_extension_contract::CollectionsAuthorityPhaseV1::Package
+        {
+            snapshot.version = crate::persist::SNAPSHOT_VERSION;
+        }
 
         let mut handoff_entries = Vec::new();
         for (terminal_id, runtime) in self.app.terminal_runtimes.iter() {

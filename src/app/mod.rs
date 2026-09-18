@@ -9,6 +9,7 @@ pub(crate) mod agent_view;
 mod agents;
 pub(crate) use agents::{AGENT_START_SETTLE_DELAY, MAX_AGENT_START_TIMEOUT};
 mod api;
+pub(crate) use api::collections_authority::CollectionsCheckpointResult;
 pub(crate) use api::extension_state::ExtensionStatePersistResult;
 #[cfg_attr(test, allow(unused_imports))]
 pub(crate) use api::plugins::{bundled_document_service_declarations, manifest_json_schema};
@@ -157,6 +158,8 @@ pub struct App {
     /// authoritative until an operator repairs or removes them.
     session_persistence_blocked: bool,
     pub(crate) extension_state: crate::extension_state::DurableExtensionStateV1,
+    pub(crate) collections_authority: crate::collections_extension_contract::CollectionsAuthorityV1,
+    pub(crate) collections_mutations_blocked: bool,
     pub(crate) extension_state_path: Option<std::path::PathBuf>,
     /// Rejected extension-state bytes remain authoritative and block automatic writes.
     pub(crate) extension_state_persistence_blocked: bool,
@@ -227,9 +230,17 @@ pub struct App {
     >,
     /// Rebuildable, nonpersistent import of legacy Collections policy for candidate reads.
     pub(crate) collections_shadow_overlay: api::collections_candidate::CollectionsShadowOverlay,
-    /// Audited candidate profiles. These are quarantined from every presentation path.
+    /// Audited candidate profiles. Legacy authority quarantines these from presentation.
     pub(crate) collections_candidate_audits:
         api::collections_candidate::CollectionsCandidateCoordinator,
+    /// Generation-1 compatibility projections published only under package authority.
+    pub(crate) collections_package_projections: HashMap<
+        String,
+        crate::collections_extension_contract::CollectionsCompatibilityProjectionV1,
+    >,
+    pub(crate) collections_pending_actions:
+        HashMap<u64, api::collections_authority::PendingCollectionsAction>,
+    pub(crate) next_collections_action_id: u64,
     #[cfg(test)]
     pub(crate) document_shadow_audits: api::document_shadow_audit::DocumentShadowAuditCoordinator<
         crate::host_document_v2::HostDocumentV2,
@@ -529,9 +540,17 @@ impl App {
         let mut restored_terminals = std::collections::HashMap::new();
         let mut restored_terminal_runtimes = crate::terminal::TerminalRuntimeRegistry::new();
         let mut session_persistence_blocked = false;
+        let mut checkpoint_recovery_blocked = false;
         let mut loaded_snapshot = None;
         let mut loaded_history = None;
-        if policy.restore_session {
+        if policy.restore_session || policy.persist_session {
+            if let Err(error) = crate::persist::recover_collections_checkpoint() {
+                session_persistence_blocked = true;
+                checkpoint_recovery_blocked = true;
+                tracing::error!(%error, "Collections checkpoint recovery failed; preserving both durable images and blocking writes");
+            }
+        }
+        if policy.restore_session && !checkpoint_recovery_blocked {
             match crate::persist::load_for_startup() {
                 crate::persist::StartupSessionLoad::Loaded(snapshot) => {
                     loaded_snapshot = Some(snapshot);
@@ -559,6 +578,10 @@ impl App {
                 crate::persist::StartupHistoryLoad::Missing => {}
             }
         }
+        let loaded_collections_authority = loaded_snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.collections_authority.clone())
+            .unwrap_or_default();
         let (workspaces, repositories, space_order, active, selected, delegations) = if !policy
             .restore_session
         {
@@ -571,6 +594,7 @@ impl App {
                 crate::delegation::Delegations::new(),
             )
         } else if let Some(snap) = loaded_snapshot {
+            let snap = *snap;
             let history = config
                 .experimental
                 .pane_history
@@ -832,7 +856,7 @@ impl App {
         let extension_state_path = policy
             .persist_session
             .then(|| crate::session::data_dir().join("extension-state-v1.json"));
-        let mut extension_state_persistence_blocked = false;
+        let mut extension_state_persistence_blocked = checkpoint_recovery_blocked;
         let extension_state = extension_state_path
             .as_deref()
             .and_then(|path| match crate::persist::extension_state::load(path) {
@@ -909,6 +933,8 @@ impl App {
             session_save_thread: None,
             session_persistence_blocked,
             extension_state,
+            collections_authority: loaded_collections_authority,
+            collections_mutations_blocked: false,
             extension_state_path,
             extension_state_persistence_blocked,
             extension_state_transaction_pending: false,
@@ -966,12 +992,16 @@ impl App {
             host_invocation_authorities: HashMap::new(),
             collections_shadow_overlay: Default::default(),
             collections_candidate_audits: Default::default(),
+            collections_package_projections: Default::default(),
+            collections_pending_actions: Default::default(),
+            next_collections_action_id: 0,
             #[cfg(test)]
             document_shadow_audits: Default::default(),
         };
         app.configure_tab_bar_status(&config.ui.tab_bar_right, &config.ui.tab_bar_right_separator);
         app.configure_window_title(&config.ui.window_title);
         app.recover_extension_state_on_startup();
+        app.validate_loaded_collections_authority();
         app.activate_persisted_extension_packages();
         app.refresh_collection_documents();
         app
@@ -1014,6 +1044,8 @@ impl App {
         app.restore_handoff_delegations(snapshot);
         app.state.repositories = snapshot.repositories.clone();
         app.state.space_order = snapshot.space_order.clone();
+        app.collections_authority = snapshot.collections_authority.clone();
+        app.validate_loaded_collections_authority();
         app.state.terminals = terminals;
         app.terminal_runtimes = runtimes.into();
         app.state.active = snapshot
@@ -3698,6 +3730,7 @@ mod tests {
                 sibling_rank: 0,
                 tombstone: false,
             }],
+            collections_authority: Default::default(),
         };
 
         app.restore_handoff_delegations(&snapshot);

@@ -347,6 +347,32 @@ impl TrustedTerminalSnapshotObservations {
         }
     }
 
+    pub(crate) fn exactly_one_state(
+        &self,
+    ) -> Result<crate::extension_host_state::HostStateSnapshotV1, CompositeObservationError> {
+        let state = self.state.lock().expect("host-read observation lock");
+        if state.expect_state_then_terminals {
+            return Err(CompositeObservationError::Invalid(
+                "state-only observation expectation is absent".into(),
+            ));
+        }
+        if let Some(error) = &state.invalid {
+            return Err(CompositeObservationError::Invalid(error.clone()));
+        }
+        if state.trace != [crate::extension_host_state::HOST_STATE_SNAPSHOT_METHOD] {
+            return Err(CompositeObservationError::Invalid(format!(
+                "expected exactly one state.snapshot trace, observed {:?}",
+                state.trace
+            )));
+        }
+        state
+            .state_snapshot
+            .clone()
+            .ok_or(CompositeObservationError::Invalid(
+                "state snapshot observation is absent".into(),
+            ))
+    }
+
     pub(crate) fn exact_state_then_terminals(
         &self,
     ) -> Result<CompositeSnapshotObservation, CompositeObservationError> {

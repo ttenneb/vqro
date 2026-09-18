@@ -1728,6 +1728,7 @@ mod tests {
             sidebar_section_split: None,
             collapsed_space_keys: HashSet::new(),
             delegations: Vec::new(),
+            collections_authority: Default::default(),
         };
 
         super::super::snapshot::normalize_terminal_identities(&mut snapshot, false)
@@ -2055,6 +2056,7 @@ mod tests {
             sidebar_section_split: None,
             collapsed_space_keys: HashSet::new(),
             delegations: Vec::new(),
+            collections_authority: Default::default(),
         };
         let (events, _event_rx) = mpsc::channel(4);
 
@@ -2140,6 +2142,7 @@ mod tests {
         let cwd = std::env::current_dir().unwrap();
         let snapshot = SessionSnapshot {
             delegations: Vec::new(),
+            collections_authority: Default::default(),
             version: super::super::snapshot::SNAPSHOT_VERSION,
             repositories: Vec::new(),
             space_order: Vec::new(),
@@ -2229,6 +2232,7 @@ mod tests {
         let cwd = std::env::current_dir().unwrap();
         let mut snapshot = SessionSnapshot {
             delegations: Vec::new(),
+            collections_authority: Default::default(),
             version: super::super::snapshot::SNAPSHOT_VERSION,
             repositories: Vec::new(),
             space_order: Vec::new(),
@@ -2375,6 +2379,7 @@ mod tests {
         };
         let mut snapshot = SessionSnapshot {
             delegations: Vec::new(),
+            collections_authority: Default::default(),
             version: super::super::snapshot::SNAPSHOT_VERSION,
             repositories: Vec::new(),
             space_order: Vec::new(),
@@ -2532,6 +2537,7 @@ mod tests {
         let cwd = std::env::current_dir().unwrap();
         let snapshot = SessionSnapshot {
             delegations: Vec::new(),
+            collections_authority: Default::default(),
             version: super::super::snapshot::SNAPSHOT_VERSION,
             repositories: Vec::new(),
             space_order: Vec::new(),
@@ -2753,6 +2759,7 @@ mod tests {
         };
         let snapshot = SessionSnapshot {
             delegations: Vec::new(),
+            collections_authority: Default::default(),
             version: super::super::snapshot::SNAPSHOT_VERSION,
             repositories: Vec::new(),
             space_order: Vec::new(),

@@ -154,6 +154,23 @@ impl App {
         request_id: String,
         transaction: crate::extension_state::ExtensionStateTransactionV1,
     ) -> String {
+        if transaction.namespace == crate::collections_extension_contract::COLLECTIONS_NAMESPACE
+            && self.collections_authority.phase
+                == crate::collections_extension_contract::CollectionsAuthorityPhaseV1::Package
+        {
+            return responses::encode_error(
+                request_id,
+                "collections_action_required",
+                "authoritative Collections state changes require a typed package action",
+            );
+        }
+        if self.collections_mutations_blocked {
+            return responses::encode_error(
+                request_id,
+                "extension_state_busy",
+                "a Collections checkpoint is in progress",
+            );
+        }
         if self.extension_state_persistence_blocked {
             return responses::encode_error(
                 request_id,
@@ -192,6 +209,25 @@ impl App {
         transaction: crate::extension_state::ExtensionStateTransactionV1,
         respond_to: std::sync::mpsc::Sender<String>,
     ) -> bool {
+        if transaction.namespace == crate::collections_extension_contract::COLLECTIONS_NAMESPACE
+            && self.collections_authority.phase
+                == crate::collections_extension_contract::CollectionsAuthorityPhaseV1::Package
+        {
+            let _ = respond_to.send(responses::encode_error(
+                request_id,
+                "collections_action_required",
+                "authoritative Collections state changes require a typed package action",
+            ));
+            return false;
+        }
+        if self.collections_mutations_blocked {
+            let _ = respond_to.send(responses::encode_error(
+                request_id,
+                "extension_state_busy",
+                "a Collections checkpoint is in progress",
+            ));
+            return false;
+        }
         if self.extension_state_persistence_blocked {
             let _ = respond_to.send(responses::encode_error(
                 request_id,

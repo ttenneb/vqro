@@ -3567,7 +3567,14 @@ impl HeadlessServer {
         let stream_active = msg.stream_active.clone();
 
         if let api::schema::Method::ServerLiveHandoff(params) = &msg.request.method {
-            let handoff_result = self.perform_live_handoff(params.clone());
+            let handoff_result = if self.app.collections_mutations_blocked {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::WouldBlock,
+                    "Collections authority checkpoint is in progress",
+                ))
+            } else {
+                self.perform_live_handoff(params.clone())
+            };
             let handoff_succeeded = handoff_result.is_ok();
             let response = match handoff_result {
                 Ok(()) => serde_json::to_string(&api::schema::SuccessResponse {
@@ -3699,6 +3706,31 @@ impl HeadlessServer {
                     params,
                     msg.respond_to,
                 );
+        }
+        if self.app.collections_authority.phase
+            == crate::collections_extension_contract::CollectionsAuthorityPhaseV1::Package
+        {
+            match msg.request.method.clone() {
+                api::schema::Method::CollectionArchive(params) => {
+                    return changed
+                        | self.app.defer_collections_archive(
+                            msg.request.id,
+                            params,
+                            true,
+                            msg.respond_to,
+                        );
+                }
+                api::schema::Method::CollectionRestore(params) => {
+                    return changed
+                        | self.app.defer_collections_archive(
+                            msg.request.id,
+                            params,
+                            false,
+                            msg.respond_to,
+                        );
+                }
+                _ => {}
+            }
         }
         if let api::schema::Method::ExtensionStateTransactV1(transaction) =
             msg.request.method.clone()

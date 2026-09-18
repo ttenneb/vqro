@@ -10,7 +10,10 @@ use crate::terminal::TerminalRuntimeRegistry;
 use crate::workspace::Workspace;
 
 /// Current structural session snapshot format version.
-pub(crate) const SNAPSHOT_VERSION: u32 = 6;
+/// Maximum snapshot version this binary can read.
+pub(crate) const SNAPSHOT_VERSION: u32 = 7;
+/// Legacy-authority sessions remain byte-compatible until the atomic authority cutover.
+pub(crate) const LEGACY_SNAPSHOT_WRITER_VERSION: u32 = 6;
 /// Pane history has no terminal-identity fields and remains wire-compatible at v4.
 pub(super) const HISTORY_SNAPSHOT_VERSION: u32 = 4;
 pub(super) const MAX_SESSION_SNAPSHOT_BYTES: u64 = 16 * 1024 * 1024;
@@ -40,6 +43,12 @@ pub struct SessionSnapshot {
     /// Session-wide delegation provenance. Pane IDs refer to pre-restore IDs.
     #[serde(default)]
     pub delegations: Vec<crate::delegation::DelegationRecord>,
+    /// Single durable Collections feature-authority owner. Version 7 readers require this field.
+    #[serde(
+        default,
+        skip_serializing_if = "crate::collections_extension_contract::CollectionsAuthorityV1::is_default_legacy"
+    )]
+    pub collections_authority: crate::collections_extension_contract::CollectionsAuthorityV1,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -367,6 +376,8 @@ struct RawSessionSnapshot {
     collapsed_space_keys: std::collections::HashSet<String>,
     #[serde(default)]
     delegations: Vec<crate::delegation::DelegationRecord>,
+    #[serde(default)]
+    collections_authority: Option<crate::collections_extension_contract::CollectionsAuthorityV1>,
 }
 
 fn migrate_snapshot(raw: RawSessionSnapshot) -> Result<(SessionSnapshot, bool), String> {
@@ -388,6 +399,19 @@ fn migrate_snapshot(raw: RawSessionSnapshot) -> Result<(SessionSnapshot, bool), 
     } else {
         raw.space_order
     };
+    let collections_authority = match raw.collections_authority {
+        Some(authority) if original_version >= SNAPSHOT_VERSION => authority,
+        Some(_) => {
+            return Err("Collections authority cannot appear before snapshot version 7".into())
+        }
+        None if original_version >= SNAPSHOT_VERSION => {
+            return Err("snapshot version 7 requires Collections authority".into());
+        }
+        None => crate::collections_extension_contract::CollectionsAuthorityV1::default(),
+    };
+    collections_authority
+        .validate()
+        .map_err(|error| format!("invalid Collections authority: {error}"))?;
     let mut snapshot = SessionSnapshot {
         version: original_version,
         workspaces,
@@ -399,10 +423,11 @@ fn migrate_snapshot(raw: RawSessionSnapshot) -> Result<(SessionSnapshot, bool), 
         sidebar_section_split: raw.sidebar_section_split,
         collapsed_space_keys: raw.collapsed_space_keys,
         delegations: raw.delegations,
+        collections_authority,
     };
     super::restore::validate_snapshot_pane_admission(&snapshot)?;
     let normalized = normalize_terminal_identities(&mut snapshot, false)?;
-    Ok((snapshot, normalized || original_version != SNAPSHOT_VERSION))
+    Ok((snapshot, normalized))
 }
 
 /// Normalize all persisted session identities before any PTY, runtime, or
@@ -450,7 +475,14 @@ where
     T: FnMut() -> std::io::Result<crate::workspace::TabId>,
     U: FnMut() -> std::io::Result<crate::terminal::TerminalId>,
 {
-    let schema_version_changed = snapshot.version != SNAPSHOT_VERSION;
+    let target_version = if snapshot.collections_authority.phase
+        == crate::collections_extension_contract::CollectionsAuthorityPhaseV1::Package
+    {
+        SNAPSHOT_VERSION
+    } else {
+        LEGACY_SNAPSHOT_WRITER_VERSION
+    };
+    let schema_version_changed = snapshot.version != target_version;
     let mut changed = schema_version_changed;
     let mut internal_identities_changed = false;
     let mut public_identities_changed = false;
@@ -786,7 +818,7 @@ where
             }
         }
     }
-    snapshot.version = SNAPSHOT_VERSION;
+    snapshot.version = target_version;
     Ok(IdentityNormalization {
         changed,
         schema_version_changed,
@@ -874,7 +906,7 @@ pub fn capture(
     selected: usize,
 ) -> SessionSnapshot {
     SessionSnapshot {
-        version: SNAPSHOT_VERSION,
+        version: LEGACY_SNAPSHOT_WRITER_VERSION,
         workspaces: workspaces
             .iter()
             .map(|workspace| capture_workspace(workspace, terminals, terminal_runtimes))
@@ -887,6 +919,8 @@ pub fn capture(
         sidebar_section_split: None,
         collapsed_space_keys: std::collections::HashSet::new(),
         delegations: Vec::new(),
+        collections_authority:
+            crate::collections_extension_contract::CollectionsAuthorityV1::default(),
     }
 }
 
@@ -1311,7 +1345,8 @@ mod tests {
     fn round_trip_empty_session() {
         let snap = SessionSnapshot {
             delegations: Vec::new(),
-            version: SNAPSHOT_VERSION,
+            collections_authority: Default::default(),
+            version: LEGACY_SNAPSHOT_WRITER_VERSION,
             repositories: Vec::new(),
             space_order: Vec::new(),
             workspaces: vec![],
@@ -1383,6 +1418,7 @@ mod tests {
             repositories: Vec::new(),
             space_order: Vec::new(),
             delegations: Vec::new(),
+            collections_authority: Default::default(),
             workspaces: vec![WorkspaceSnapshot {
                 id: Some("w1".to_string()),
                 custom_name: Some("pi-mono".to_string()),
@@ -1416,7 +1452,7 @@ mod tests {
             sidebar_width: Some(26),
             sidebar_section_split: Some(0.5),
             collapsed_space_keys: std::collections::HashSet::new(),
-            version: SNAPSHOT_VERSION,
+            version: LEGACY_SNAPSHOT_WRITER_VERSION,
         };
 
         let json = serde_json::to_string_pretty(&snap).unwrap();
@@ -1446,7 +1482,7 @@ mod tests {
     fn current_session_fixture_parses() {
         let snap = parse_snapshot(session_fixture("current-herdr")).unwrap();
 
-        assert_eq!(snap.version, SNAPSHOT_VERSION);
+        assert_eq!(snap.version, LEGACY_SNAPSHOT_WRITER_VERSION);
         assert_eq!(snap.workspaces.len(), 2);
         assert_eq!(snap.active, Some(0));
         assert_eq!(snap.selected, 0);
@@ -1463,7 +1499,7 @@ mod tests {
     fn current_dev_session_fixture_parses_additive_fields() {
         let snap = parse_snapshot(session_fixture("current-herdr-dev")).unwrap();
 
-        assert_eq!(snap.version, SNAPSHOT_VERSION);
+        assert_eq!(snap.version, LEGACY_SNAPSHOT_WRITER_VERSION);
         assert_eq!(snap.workspaces.len(), 2);
         assert_eq!(snap.sidebar_section_split, Some(0.4));
         assert_eq!(snap.workspaces[0].active_tab, 1);
@@ -1473,7 +1509,7 @@ mod tests {
     #[test]
     fn old_snapshot_defaults_sidebar_fields() {
         let json = serde_json::json!({
-            "version": SNAPSHOT_VERSION,
+            "version": SNAPSHOT_VERSION - 1,
             "workspaces": [],
             "active": null,
             "selected": 0
@@ -1489,7 +1525,7 @@ mod tests {
     #[test]
     fn old_pane_snapshot_with_embedded_history_is_ignored() {
         let json = serde_json::json!({
-            "version": SNAPSHOT_VERSION,
+            "version": SNAPSHOT_VERSION - 1,
             "workspaces": [{
                 "id": "wtest",
                 "identity_cwd": "/tmp",
@@ -1527,7 +1563,7 @@ mod tests {
         let snap = parse_snapshot(session_fixture("legacy-pre-tabs-v2")).unwrap();
         let ws = &snap.workspaces[0];
 
-        assert_eq!(snap.version, SNAPSHOT_VERSION);
+        assert_eq!(snap.version, LEGACY_SNAPSHOT_WRITER_VERSION);
         assert_eq!(snap.workspaces.len(), 1);
         assert_eq!(ws.custom_name.as_deref(), Some("legacy"));
         assert_eq!(ws.identity_cwd, PathBuf::from("/tmp/pion"));
@@ -1909,7 +1945,7 @@ mod tests {
     fn old_unversioned_snapshot_normalizes_to_current_version() {
         let json = r#"{"workspaces":[],"active":null,"selected":0}"#;
         let snap = parse_snapshot(json).unwrap();
-        assert_eq!(snap.version, SNAPSHOT_VERSION);
+        assert_eq!(snap.version, LEGACY_SNAPSHOT_WRITER_VERSION);
     }
 
     #[test]
@@ -1928,7 +1964,7 @@ mod tests {
         }"#;
         let (snapshot, changed) = parse_snapshot_with_status(json).unwrap();
         assert!(changed);
-        assert_eq!(snapshot.version, SNAPSHOT_VERSION);
+        assert_eq!(snapshot.version, LEGACY_SNAPSHOT_WRITER_VERSION);
         let tab_id = tab_id_for_snapshot(&snapshot.workspaces[0].tabs[0]).unwrap();
         let first =
             terminal_id_for_pane_snapshot(&snapshot.workspaces[0].tabs[0].panes[&1]).unwrap();
@@ -2032,7 +2068,7 @@ mod tests {
 
         let (snapshot, changed) = parse_snapshot_with_status(&json.to_string()).unwrap();
         assert!(changed);
-        assert_eq!(snapshot.version, SNAPSHOT_VERSION);
+        assert_eq!(snapshot.version, LEGACY_SNAPSHOT_WRITER_VERSION);
         assert_eq!(snapshot.workspaces[0].id.as_deref(), Some("w1"));
         assert_eq!(snapshot.workspaces[1].id.as_deref(), Some("w3"));
         assert_eq!(snapshot.workspaces[2].id.as_deref(), Some("w2"));
@@ -2288,6 +2324,57 @@ mod tests {
     }
 
     #[test]
+    fn package_authority_requires_and_round_trips_snapshot_v7() {
+        let missing = serde_json::json!({
+            "version": 7,
+            "workspaces": [],
+            "selected": 0
+        });
+        let Err(error) = parse_snapshot(&missing.to_string()) else {
+            panic!("version 7 without authority was accepted");
+        };
+        assert!(error.contains("requires Collections authority"));
+
+        let mut snapshot = capture(
+            &[],
+            &[],
+            &[],
+            &std::collections::HashMap::new(),
+            &crate::terminal::TerminalRuntimeRegistry::new(),
+            None,
+            0,
+        );
+        snapshot.version = 7;
+        snapshot.collections_authority =
+            crate::collections_extension_contract::CollectionsAuthorityV1 {
+                contract: crate::collections_extension_contract::COLLECTIONS_AUTHORITY_CONTRACT_V1
+                    .into(),
+                phase: crate::collections_extension_contract::CollectionsAuthorityPhaseV1::Package,
+                authority_epoch: 2,
+                package: Some(crate::collections_extension_contract::CollectionsAuthorityPackageV1 {
+                    package_id: crate::collections_extension_contract::COLLECTIONS_PACKAGE_ID.into(),
+                    service_id: "collections".into(),
+                    package_sha256: "a".repeat(64),
+                    component_sha256: "b".repeat(64),
+                    profile_contract: crate::collections_extension_contract::COLLECTIONS_DOCUMENT_PROFILE_CONTRACT_V1.into(),
+                }),
+                state: Some(crate::collections_extension_contract::CollectionsAuthorityStateV1 {
+                    store_generation: 2,
+                    namespace_revision: 3,
+                }),
+                migration_id: Some("collections_r3_test".into()),
+                minimum_reader_version: 7,
+            };
+        let encoded = serde_json::to_string(&snapshot).unwrap();
+        let restored = parse_snapshot(&encoded).unwrap();
+        assert_eq!(restored.version, 7);
+        assert_eq!(
+            restored.collections_authority,
+            snapshot.collections_authority
+        );
+    }
+
+    #[test]
     fn future_version_is_rejected() {
         let json = r#"{"version":999,"workspaces":[],"active":null,"selected":0}"#;
         assert!(parse_snapshot(json).is_err());
@@ -2332,7 +2419,7 @@ mod tests {
         let snapshot = capture_from_state(&state);
         let json = serde_json::to_string(&snapshot).expect("serialize");
         let shape: serde_json::Value = serde_json::from_str(&json).expect("snapshot json");
-        assert_eq!(shape["version"], SNAPSHOT_VERSION);
+        assert_eq!(shape["version"], LEGACY_SNAPSHOT_WRITER_VERSION);
         assert!(shape["workspaces"][0]["tabs"][0]
             .get("collections")
             .is_some());
@@ -2400,6 +2487,7 @@ mod tests {
             sidebar_section_split: None,
             collapsed_space_keys: std::collections::HashSet::new(),
             delegations: Vec::new(),
+            collections_authority: Default::default(),
         };
 
         assert_eq!(
@@ -2440,7 +2528,8 @@ mod tests {
 
         let snap = SessionSnapshot {
             delegations: Vec::new(),
-            version: SNAPSHOT_VERSION,
+            collections_authority: Default::default(),
+            version: LEGACY_SNAPSHOT_WRITER_VERSION,
             repositories: Vec::new(),
             space_order: Vec::new(),
             workspaces: vec![WorkspaceSnapshot {

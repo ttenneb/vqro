@@ -95,6 +95,10 @@ impl CollectionsShadowOverlay {
         &self.state
     }
 
+    pub(crate) fn imported_values(&self) -> &BTreeMap<String, serde_json::Value> {
+        &self.imported_values
+    }
+
     fn rebuild(&mut self, mut values: BTreeMap<String, serde_json::Value>) -> Result<bool, String> {
         values.insert(
             "shadow_import".into(),
@@ -190,7 +194,13 @@ impl CollectionsCandidateCoordinator {
         let authorization = app.stage_host_read_authorization(
             binding,
             HostReadInvocationPurpose {
-                state: crate::extension_host_invocation::HostStateReadSource::CollectionsShadow,
+                state: if app.collections_authority.phase
+                    == crate::collections_extension_contract::CollectionsAuthorityPhaseV1::Package
+                {
+                    crate::extension_host_invocation::HostStateReadSource::Durable
+                } else {
+                    crate::extension_host_invocation::HostStateReadSource::CollectionsShadow
+                },
                 terminals: Some((workspace_id.clone(), tab_id.clone())),
             },
             service_generation,
@@ -519,6 +529,14 @@ impl CollectionsCandidateCoordinator {
         self.pending.len()
     }
 
+    pub(crate) fn profiles(&self) -> impl Iterator<Item = &CollectionsDocumentProfileV1> {
+        self.profile_cache.values()
+    }
+
+    pub(crate) fn actions(&self) -> impl Iterator<Item = &CollectionsActionDeclarationsV1> {
+        self.action_cache.values()
+    }
+
     #[cfg(test)]
     pub(crate) fn first_profile(&self) -> Option<&CollectionsDocumentProfileV1> {
         self.profile_cache.first_value()
@@ -659,11 +677,15 @@ impl App {
         let mut coordinator = std::mem::take(&mut self.collections_candidate_audits);
         let outcome = coordinator.finalize(self, attempt_id, result);
         self.collections_candidate_audits = coordinator;
+        if outcome.is_ok() {
+            self.maybe_cutover_collections_authority()?;
+            self.publish_ready_collections_package_profiles();
+        }
         outcome
     }
 }
 
-fn production_pin() -> Result<CollectionsProductionPinV1, String> {
+pub(crate) fn production_pin() -> Result<CollectionsProductionPinV1, String> {
     let pin: CollectionsProductionPinV1 = serde_json::from_str(include_str!(
         "../../../extensions/first-party/collections/production-pin-v1.json"
     ))
@@ -764,7 +786,7 @@ fn validate_authorization(
     Ok(())
 }
 
-fn topology_from_snapshot(
+pub(super) fn topology_from_snapshot(
     snapshot: &crate::extension_host_terminals::HostTerminalsSnapshotV1,
     pane_ids: &HashMap<crate::terminal::TerminalId, String>,
     producer: DocumentProducerFenceV2,

@@ -1730,6 +1730,7 @@ impl AppState {
             | AppEvent::ExtensionHostStateCall(_)
             | AppEvent::ExtensionHostTerminalsCall(_)
             | AppEvent::ExtensionStatePersisted(_)
+            | AppEvent::CollectionsCheckpointPersisted(_)
             | AppEvent::ExtensionServiceFinished(_)
             | AppEvent::HostDocumentFinished(_)
             | AppEvent::HostSpacesDocumentFinished(_)

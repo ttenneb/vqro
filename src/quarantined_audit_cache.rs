@@ -225,6 +225,10 @@ impl<V> QuarantinedAuditCache<V> {
         self.entries.get(key).map(|entry| &entry.value)
     }
 
+    pub(crate) fn values(&self) -> impl Iterator<Item = &V> {
+        self.entries.values().map(|entry| &entry.value)
+    }
+
     #[cfg(test)]
     pub(crate) fn first_value(&self) -> Option<&V> {
         self.entries.values().next().map(|entry| &entry.value)

@@ -3,6 +3,7 @@ use std::time::{Duration, Instant};
 mod agent_view;
 mod agents;
 mod collections;
+pub(crate) mod collections_authority;
 pub(crate) use collections::DeferredHostDocumentSnapshot;
 pub(crate) use collections::HostDocumentConfirmationGrant;
 pub(crate) mod collections_candidate;
@@ -168,6 +169,10 @@ impl App {
             }
             AppEvent::ExtensionStatePersisted(result) => {
                 self.handle_extension_state_persisted(*result);
+                return Vec::new();
+            }
+            AppEvent::CollectionsCheckpointPersisted(result) => {
+                self.finish_collections_checkpoint(*result);
                 return Vec::new();
             }
             AppEvent::HostDocumentProviderActionFinished {
@@ -1086,6 +1091,27 @@ impl App {
         use crate::api::schema::{
             ErrorBody, ErrorResponse, Method, ResponseResult, SuccessResponse,
         };
+
+        let collection_method = matches!(
+            &request.method,
+            Method::CollectionList(_)
+                | Method::CollectionGet(_)
+                | Method::CollectionCreate(_)
+                | Method::CollectionAdd(_)
+                | Method::CollectionPromote(_)
+                | Method::CollectionSelect(_)
+                | Method::CollectionReorder(_)
+                | Method::CollectionArchive(_)
+                | Method::CollectionRestore(_)
+                | Method::CollectionClose(_)
+        );
+        if collection_method && !self.collections_package_runtime_available() {
+            return responses::encode_error(
+                request.id,
+                "collections_authority_unavailable",
+                "the authoritative Collections package is unavailable",
+            );
+        }
 
         let required_provider = match &request.method {
             Method::DelegationCreate(_)

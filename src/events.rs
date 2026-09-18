@@ -216,6 +216,7 @@ pub enum AppEvent {
     /// Staged read-only package-v1 terminal snapshot request.
     ExtensionHostTerminalsCall(Box<crate::extension_host_terminals::HostTerminalsActorRequest>),
     ExtensionStatePersisted(Box<crate::app::ExtensionStatePersistResult>),
+    CollectionsCheckpointPersisted(Box<crate::app::CollectionsCheckpointResult>),
     HostDocumentProviderActionFinished {
         request_id: String,
         namespace: String,

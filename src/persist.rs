@@ -5,9 +5,8 @@
 //! Installed plugins are persisted separately at `plugins.json`.
 
 // Kept separate from ordinary session saves so rejected bytes remain authoritative.
-pub(crate) mod extension_state;
-// Staged foundation only: no production persistence path invokes the coordinator yet.
 pub(crate) mod coordinator;
+pub(crate) mod extension_state;
 mod io;
 pub mod plugin_registry;
 mod restore;
@@ -33,7 +32,32 @@ pub use self::snapshot::{
 };
 pub(crate) use self::snapshot::{
     normalize_identity_changes, parse_snapshot, terminal_id_for_pane_snapshot, validate_snapshot,
-    SNAPSHOT_VERSION,
+    LEGACY_SNAPSHOT_WRITER_VERSION, SNAPSHOT_VERSION,
 };
+
+pub(crate) fn collections_checkpoint_paths() -> coordinator::PersistencePaths {
+    let directory = crate::session::data_dir();
+    coordinator::PersistencePaths {
+        session: directory.join("session.json"),
+        extension_state: directory.join("extension-state-v1.json"),
+        journal: directory.join("session-extension-state.journal.json"),
+    }
+}
+
+pub(crate) fn recover_collections_checkpoint(
+) -> Result<coordinator::StartupRecovery, coordinator::PersistenceError> {
+    let paths = collections_checkpoint_paths();
+    let ownership = coordinator::PersistenceOwnership::try_acquire(&paths)?;
+    coordinator::recover_checkpoint_at_startup(&ownership, &paths)
+}
+
+pub(crate) fn persist_collections_checkpoint(
+    session: &SessionSnapshot,
+    extension_state: &crate::extension_state::DurableExtensionStateV1,
+) -> Result<(), coordinator::PersistenceError> {
+    let paths = collections_checkpoint_paths();
+    let ownership = coordinator::PersistenceOwnership::try_acquire(&paths)?;
+    coordinator::persist_checkpoint(&ownership, &paths, session, extension_state)
+}
 #[cfg(test)]
 pub(crate) use self::snapshot::{PaneAgentSessionSnapshot, PaneSnapshot};

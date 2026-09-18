@@ -251,18 +251,18 @@ impl PackageCandidateSet {
         })
     }
 
-    fn binding(&self, service_id: &str) -> Option<&HostProviderBinding> {
+    pub(crate) fn binding(&self, service_id: &str) -> Option<&HostProviderBinding> {
         self.workers.get(service_id).map(|worker| &worker.binding)
     }
 
-    fn runtime_generation(&self, service_id: &str) -> Option<u64> {
+    pub(crate) fn runtime_generation(&self, service_id: &str) -> Option<u64> {
         self.workers
             .get(service_id)
             .map(|worker| worker.runtime_generation)
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn invoke(
+    pub(crate) fn invoke(
         &self,
         service_id: &str,
         attempt_id: u64,
