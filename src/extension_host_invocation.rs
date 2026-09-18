@@ -185,6 +185,7 @@ pub(crate) struct CompositeSnapshotObservation {
 #[derive(Debug, Default)]
 struct TerminalObservationState {
     expect_state_then_terminals: bool,
+    expect_state_only: bool,
     trace: Vec<String>,
     state_snapshot: Option<crate::extension_host_state::HostStateSnapshotV1>,
     terminal_snapshot: Option<crate::extension_host_terminals::HostTerminalsSnapshotV1>,
@@ -214,25 +215,42 @@ impl crate::extension_runtime::RuntimeHostCallObserver for TrustedTerminalSnapsh
     fn observe_accepted(&self, method: &str, response: &RuntimeHostCallResponseV1) {
         let mut state = self.state.lock().expect("host-read observation lock");
         if !state.expect_state_then_terminals {
-            if method != crate::extension_host_terminals::HOST_TERMINALS_SNAPSHOT_METHOD
-                || response.error.is_some()
-            {
+            let expected_method = if state.expect_state_only {
+                crate::extension_host_state::HOST_STATE_SNAPSHOT_METHOD
+            } else {
+                crate::extension_host_terminals::HOST_TERMINALS_SNAPSHOT_METHOD
+            };
+            if method != expected_method || response.error.is_some() {
                 return;
             }
-            let validation = response
+            let result = response
                 .result
                 .clone()
-                .ok_or_else(|| "accepted terminal response has no result".to_string())
-                .and_then(crate::extension_host_terminals::validate_snapshot_value);
-            match validation {
-                Ok(snapshot) => {
-                    state.trace.push(method.into());
-                    state.terminal_count += 1;
-                    state.terminal_snapshot = Some(snapshot);
+                .ok_or_else(|| format!("accepted {method} response has no result"));
+            if state.expect_state_only {
+                match result.and_then(validate_state_snapshot_value) {
+                    Ok(snapshot) if state.state_snapshot.is_none() => {
+                        state.trace.push(method.into());
+                        state.state_snapshot = Some(snapshot);
+                    }
+                    Ok(_) => {
+                        state
+                            .invalid
+                            .get_or_insert_with(|| "duplicate state snapshot".into());
+                    }
+                    Err(error) => {
+                        state.invalid.get_or_insert(error);
+                    }
                 }
-                Err(error) => {
-                    if state.invalid.is_none() {
-                        state.invalid = Some(error);
+            } else {
+                match result.and_then(crate::extension_host_terminals::validate_snapshot_value) {
+                    Ok(snapshot) => {
+                        state.trace.push(method.into());
+                        state.terminal_count += 1;
+                        state.terminal_snapshot = Some(snapshot);
+                    }
+                    Err(error) => {
+                        state.invalid.get_or_insert(error);
                     }
                 }
             }
@@ -325,6 +343,15 @@ fn valid_state_store_id(value: &str) -> bool {
 }
 
 impl TrustedTerminalSnapshotObservations {
+    pub(crate) fn state_only() -> Self {
+        Self {
+            state: Arc::new(std::sync::Mutex::new(TerminalObservationState {
+                expect_state_only: true,
+                ..TerminalObservationState::default()
+            })),
+        }
+    }
+
     pub(crate) fn state_then_terminals() -> Self {
         Self {
             state: Arc::new(std::sync::Mutex::new(TerminalObservationState {
@@ -353,7 +380,7 @@ impl TrustedTerminalSnapshotObservations {
         &self,
     ) -> Result<crate::extension_host_state::HostStateSnapshotV1, CompositeObservationError> {
         let state = self.state.lock().expect("host-read observation lock");
-        if state.expect_state_then_terminals {
+        if !state.expect_state_only || state.expect_state_then_terminals {
             return Err(CompositeObservationError::Invalid(
                 "state-only observation expectation is absent".into(),
             ));
@@ -622,6 +649,30 @@ mod tests {
             crate::extension_host_terminals::snapshot_fingerprint(&snapshot).unwrap(),
         );
         value
+    }
+
+    #[test]
+    fn state_only_observation_records_one_canonical_snapshot() {
+        let durable =
+            crate::extension_state::DurableExtensionStateV1::new("state-observation".into(), 1)
+                .unwrap();
+        let snapshot = crate::extension_host_state::HostStateSnapshotV1::from(
+            durable.snapshot("example.extension").unwrap(),
+        );
+        let observations = TrustedTerminalSnapshotObservations::state_only();
+        let response = RuntimeHostCallResponseV1 {
+            kind: "host_response".into(),
+            call_id: "state".into(),
+            identity: observation_identity(),
+            result: Some(serde_json::to_value(&snapshot).unwrap()),
+            error: None,
+        };
+        crate::extension_runtime::RuntimeHostCallObserver::observe_accepted(
+            &observations,
+            crate::extension_host_state::HOST_STATE_SNAPSHOT_METHOD,
+            &response,
+        );
+        assert_eq!(observations.exactly_one_state().unwrap(), snapshot);
     }
 
     #[test]

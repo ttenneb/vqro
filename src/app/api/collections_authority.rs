@@ -1,6 +1,6 @@
 //! Atomic Collections package-authority cutover and compatibility publication.
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
@@ -13,17 +13,16 @@ use crate::collections_extension_contract::{
     CollectionsActionDependencyV1, CollectionsActionInputV1, CollectionsActionInvocationV1,
     CollectionsActionKindV1, CollectionsAuthorityPackageV1, CollectionsAuthorityPhaseV1,
     CollectionsAuthorityStateV1, CollectionsAuthorityV1, CollectionsDocumentProfileV1,
-    CollectionsEffectPlanV1, CollectionsProfileContainerV1, CollectionsProfileTopologyV1,
-    CollectionsTerminalPlacementV1, COLLECTIONS_ACTION_INVOCATION_CONTRACT_V1,
+    CollectionsEffectPlanV1, COLLECTIONS_ACTION_INVOCATION_CONTRACT_V1,
     COLLECTIONS_ACTION_PLAN_METHOD_V1, COLLECTIONS_NAMESPACE,
 };
 use crate::extension_state::{
     ExtensionStateOperationV1, ExtensionStateTransactionV1, EXTENSION_STATE_CONTRACT_V1,
 };
 
-// The coordinator and package action path are production-wired, but authority admission remains
-// closed until the Local/SSH/Cloud, restart, rollback, and race cutover gates pass.
-const COLLECTIONS_AUTHORITY_CUTOVER_ADMITTED: bool = false;
+// R3 admission is open only after the exact-state cutover, coordinator recovery, compatibility,
+// transport, replacement, rollback, and fail-closed evidence recorded in the release ledger.
+const COLLECTIONS_AUTHORITY_CUTOVER_ADMITTED: bool = true;
 
 pub(crate) struct PendingCollectionsAction {
     request_id: String,
@@ -113,13 +112,8 @@ impl App {
             if !self.bundled_extension_enabled("collections", Some(workspace_index)) {
                 continue;
             }
-            for tab_index in 0..workspace.tabs.len() {
-                let snapshot = self
-                    .collections_shadow_snapshot(workspace_index, tab_index, 1, 1)
-                    .map_err(|error| {
-                        format!("cannot capture Collections cutover scope: {error}")
-                    })?;
-                expected_scopes.insert(snapshot.scope_id);
+            for tab in &workspace.tabs {
+                expected_scopes.insert(tab.id.to_string());
             }
         }
         if expected_scopes.is_empty() {
@@ -141,15 +135,11 @@ impl App {
         if profile_scopes != expected_scopes || profiles.len() != expected_scopes.len() {
             return Ok(());
         }
-        let action_revisions = self
-            .collections_candidate_audits
-            .actions()
-            .map(|actions| actions.document_revision)
-            .collect::<BTreeSet<_>>();
-        if profiles
-            .iter()
-            .any(|profile| !action_revisions.contains(&profile.document.revision))
-        {
+        if profiles.iter().any(|profile| {
+            self.collections_candidate_audits
+                .actions_for(profile)
+                .is_none_or(|actions| actions.document_revision != profile.document.revision)
+        }) {
             return Ok(());
         }
 
@@ -274,41 +264,67 @@ impl App {
             .filter(|profile| profile.document.producer.artifact_sha256 == package_sha256)
             .cloned()
             .collect::<Vec<CollectionsDocumentProfileV1>>();
-        for profile in profiles {
-            let scope_id = profile.document.scope.scope_id.clone();
-            let located =
-                self.state
-                    .workspaces
-                    .iter()
-                    .enumerate()
-                    .find_map(|(ws_idx, workspace)| {
-                        workspace.tabs.iter().enumerate().find_map(|(tab_idx, _)| {
-                            let snapshot = self
-                                .collections_shadow_snapshot(
-                                    ws_idx,
-                                    tab_idx,
-                                    1,
-                                    profile.document.revision,
-                                )
-                                .ok()?;
-                            (snapshot.scope_id == scope_id).then_some((ws_idx, tab_idx, snapshot))
+        'profiles: for profile in profiles {
+            let package_scope_id = profile.document.scope.scope_id.clone();
+            let located = self.state.workspaces.iter().enumerate().find_map(
+                |(workspace_index, workspace)| {
+                    workspace
+                        .tabs
+                        .iter()
+                        .enumerate()
+                        .find_map(|(tab_index, tab)| {
+                            (tab.id.to_string() == package_scope_id)
+                                .then_some((workspace_index, tab_index))
                         })
-                    });
-            let Some((ws_idx, _tab_idx, snapshot)) = located else {
+                },
+            );
+            let Some((workspace_index, tab_index)) = located else {
                 continue;
             };
-            let Some(topology) =
-                compatibility_topology(&profile, &snapshot, self.public_workspace_id(ws_idx))
+            let Some(topology) = self
+                .collections_candidate_audits
+                .topology_for(&profile)
+                .cloned()
             else {
                 continue;
             };
-            let projection = match profile.project_compatibility(&topology) {
+            let mut projection = match profile.project_compatibility(&topology) {
                 Ok(projection) => projection,
                 Err(_) => continue,
             };
+            let Some(compatibility_scope_id) = self.public_tab_id(workspace_index, tab_index)
+            else {
+                continue;
+            };
+            let compatibility_workspace_id = self.public_workspace_id(workspace_index);
+            let tab = &self.state.workspaces[workspace_index].tabs[tab_index];
+            let pane_ids = tab
+                .panes
+                .iter()
+                .filter_map(|(pane_id, pane)| {
+                    self.public_pane_id(workspace_index, *pane_id)
+                        .map(|public_id| {
+                            (
+                                format!("pane_{}", pane_id.raw()),
+                                (pane.attached_terminal_id.to_string(), public_id),
+                            )
+                        })
+                })
+                .collect::<HashMap<_, _>>();
+            if !translate_generation_one_identities(
+                &mut projection,
+                &compatibility_workspace_id,
+                &compatibility_scope_id,
+                &pane_ids,
+            ) {
+                continue 'profiles;
+            }
             let generation = projection.document.generation;
             let revision = projection.document.revision;
-            let key = (COLLECTIONS_NAMESPACE.to_string(), scope_id.clone());
+            let key = (
+                COLLECTIONS_NAMESPACE.to_string(),
+                compatibility_scope_id.clone(),
+            );
             let cache = self
                 .collections_shadow_documents
                 .entry(key.clone())
@@ -327,7 +343,7 @@ impl App {
                 self.host_document_request_watermarks
                     .insert(key, (generation, revision));
                 self.collections_package_projections
-                    .insert(scope_id, projection);
+                    .insert(compatibility_scope_id, projection);
             }
         }
     }
@@ -396,9 +412,7 @@ impl App {
             .ok_or("pane was not found")?
             .attached_terminal_id
             .to_string();
-        let tab_id = self
-            .public_tab_id(workspace_index, tab_index)
-            .ok_or("tab has no public identity")?;
+        let package_scope_id = tab.id.to_string();
         let package_sha256 = self
             .collections_authority
             .package
@@ -410,7 +424,7 @@ impl App {
             .collections_candidate_audits
             .profiles()
             .filter(|profile| {
-                profile.document.scope.scope_id == tab_id
+                profile.document.scope.scope_id == package_scope_id
                     && profile.document.producer.artifact_sha256 == package_sha256
             })
             .max_by_key(|profile| profile.document.revision)
@@ -418,9 +432,8 @@ impl App {
             .ok_or("audited Collections profile is unavailable")?;
         let actions = self
             .collections_candidate_audits
-            .actions()
+            .actions_for(&profile)
             .filter(|actions| actions.document_revision == profile.document.revision)
-            .max_by_key(|actions| actions.revision)
             .cloned()
             .ok_or("audited Collections actions are unavailable")?;
         let container_id = crate::terminal_container::format_terminal_container_id(
@@ -770,65 +783,50 @@ impl App {
     }
 }
 
-fn compatibility_topology(
-    profile: &CollectionsDocumentProfileV1,
-    snapshot: &crate::extension_contract::HostTerminalGroupsV1,
-    workspace_id: String,
-) -> Option<CollectionsProfileTopologyV1> {
-    let state_dependency = profile
-        .document
-        .dependencies
-        .iter()
-        .find(|dependency| {
-            dependency.contract == crate::extension_host_state::HOST_STATE_CONTRACT_V1
-        })?
-        .clone();
-    let terminals_dependency = profile
-        .document
-        .dependencies
-        .iter()
-        .find(|dependency| {
-            dependency.contract == crate::extension_host_terminals::HOST_TERMINALS_CONTRACT_V1
-        })?
-        .clone();
-    if profile.collections.len() != snapshot.groups.len() {
-        return None;
+fn translate_generation_one_identities(
+    projection: &mut crate::collections_extension_contract::CollectionsCompatibilityProjectionV1,
+    workspace_id: &str,
+    tab_id: &str,
+    pane_ids: &HashMap<String, (String, String)>,
+) -> bool {
+    projection.document.target = crate::extension_contract::HostTarget::Tab {
+        tab_id: tab_id.into(),
+    };
+    for item in &mut projection.document.items {
+        let Some(terminal) = &mut item.terminal else {
+            continue;
+        };
+        let Some(placement) = &mut terminal.placement else {
+            continue;
+        };
+        let Some(public_pane_id) = pane_ids
+            .values()
+            .find(|(terminal_id, _)| terminal_id == &terminal.terminal_id)
+            .map(|(_, pane_id)| pane_id.clone())
+        else {
+            return false;
+        };
+        placement.pane_id = public_pane_id;
+        placement.workspace_id = workspace_id.into();
+        placement.tab_id = tab_id.into();
     }
-    let containers = snapshot
-        .groups
-        .iter()
-        .zip(&profile.collections)
-        .map(|(group, projected)| CollectionsProfileContainerV1 {
-            container_id: projected.container_id.clone(),
-            terminal_ids: group
-                .members
-                .iter()
-                .map(|member| member.terminal.terminal_id.clone())
-                .collect(),
-            selected_terminal_id: group.selected_terminal_id.clone(),
-        })
-        .collect();
-    let placements = snapshot
-        .groups
-        .iter()
-        .flat_map(|group| group.members.iter())
-        .chain(snapshot.ungrouped.iter())
-        .filter_map(|member| {
-            Some(CollectionsTerminalPlacementV1 {
-                terminal_id: member.terminal.terminal_id.clone(),
-                pane_id: member.terminal.placement.as_ref()?.pane_id.clone(),
-            })
-        })
-        .collect();
-    Some(CollectionsProfileTopologyV1 {
-        workspace_id,
-        tab_id: snapshot.scope_id.clone(),
-        containers,
-        placements,
-        producer: profile.document.producer.clone(),
-        state_dependency,
-        terminals_dependency,
-    })
+    for collection in &mut projection.collections {
+        collection.workspace_id = workspace_id.into();
+        collection.tab_id = tab_id.into();
+        if let Some(selected) = &mut collection.selected_pane_id {
+            let Some((_, public)) = pane_ids.get(selected) else {
+                return false;
+            };
+            *selected = public.clone();
+        }
+        for member in &mut collection.members {
+            let Some((_, public)) = pane_ids.get(&member.pane_id) else {
+                return false;
+            };
+            member.pane_id = public.clone();
+        }
+    }
+    true
 }
 
 #[cfg(test)]
@@ -872,6 +870,95 @@ mod tests {
     }
 
     #[test]
+    fn package_projection_preserves_generation_one_public_identities() {
+        use crate::extension_contract::{
+            HostDocumentItem, HostDocumentItemFlags, HostDocumentV1, HostItemRole, HostSurface,
+            HostTarget, HostTerminalPlacement, HostTerminalRef,
+        };
+        use crate::protocol::endpoint::{ClientShellCollection, ClientShellCollectionMember};
+
+        let mut projection =
+            crate::collections_extension_contract::CollectionsCompatibilityProjectionV1 {
+                document: HostDocumentV1 {
+                    contract: "host.document.v1".into(),
+                    namespace: COLLECTIONS_NAMESPACE.into(),
+                    generation: 1,
+                    revision: 1,
+                    surface: HostSurface::Navigation,
+                    target: HostTarget::Tab {
+                        tab_id: "tab_0123456789abcdef0123456789abcdef".into(),
+                    },
+                    items: vec![HostDocumentItem {
+                        id: "terminal:term_0123456789abcdef0123456789abcdef".into(),
+                        parent_id: None,
+                        role: HostItemRole::Terminal,
+                        label: "terminal".into(),
+                        detail: None,
+                        terminal: Some(HostTerminalRef {
+                            terminal_id: "term_0123456789abcdef0123456789abcdef".into(),
+                            placement: Some(HostTerminalPlacement {
+                                pane_id: "pane_7".into(),
+                                workspace_id: "internal".into(),
+                                tab_id: "tab_0123456789abcdef0123456789abcdef".into(),
+                            }),
+                        }),
+                        action_ids: Vec::new(),
+                        flags: HostDocumentItemFlags::default(),
+                    }],
+                    actions: Vec::new(),
+                    required_capabilities: Vec::new(),
+                },
+                collections: vec![ClientShellCollection {
+                    collection_id: "collection_1".into(),
+                    workspace_id: "internal".into(),
+                    tab_id: "tab_0123456789abcdef0123456789abcdef".into(),
+                    label: Some("review".into()),
+                    selected_pane_id: Some("pane_7".into()),
+                    members: vec![ClientShellCollectionMember {
+                        pane_id: "pane_7".into(),
+                        index: 0,
+                        archived: false,
+                    }],
+                }],
+            };
+        let pane_ids = HashMap::from([(
+            "pane_7".into(),
+            (
+                "term_0123456789abcdef0123456789abcdef".into(),
+                "w1:p2".into(),
+            ),
+        )]);
+
+        assert!(translate_generation_one_identities(
+            &mut projection,
+            "w1",
+            "w1:t1",
+            &pane_ids,
+        ));
+        assert_eq!(
+            projection.document.target,
+            HostTarget::Tab {
+                tab_id: "w1:t1".into()
+            }
+        );
+        let placement = projection.document.items[0]
+            .terminal
+            .as_ref()
+            .unwrap()
+            .placement
+            .as_ref()
+            .unwrap();
+        assert_eq!(placement.pane_id, "w1:p2");
+        assert_eq!(placement.workspace_id, "w1");
+        assert_eq!(placement.tab_id, "w1:t1");
+        assert_eq!(
+            projection.collections[0].selected_pane_id.as_deref(),
+            Some("w1:p2")
+        );
+        assert_eq!(projection.collections[0].members[0].pane_id, "w1:p2");
+    }
+
+    #[test]
     fn package_failure_disables_collection_methods_but_not_generic_api() {
         let mut app = test_app();
         install_unavailable_package_authority(&mut app);
@@ -888,6 +975,37 @@ mod tests {
         });
         serde_json::from_str::<crate::api::schema::SuccessResponse>(&workspaces)
             .expect("generic workspace access remains available");
+    }
+
+    #[test]
+    fn restart_state_fence_mismatch_blocks_both_durable_images() {
+        let mut app = test_app();
+        install_unavailable_package_authority(&mut app);
+        let snapshot = app.extension_state.snapshot(COLLECTIONS_NAMESPACE).unwrap();
+        app.extension_state
+            .transact(&ExtensionStateTransactionV1 {
+                contract: EXTENSION_STATE_CONTRACT_V1.into(),
+                namespace: COLLECTIONS_NAMESPACE.into(),
+                expected_store_generation: snapshot.store_generation,
+                expected_revision: snapshot.revision,
+                idempotency_key: "state-fence-mismatch".into(),
+                operations: vec![ExtensionStateOperationV1 {
+                    key: "container_0000000000000001".into(),
+                    value: Some(serde_json::json!({
+                        "schema": "vqro.collections.policy",
+                        "schema_version": 1,
+                        "container_id": "container_0000000000000001",
+                        "archived_terminal_ids": []
+                    })),
+                }],
+            })
+            .unwrap();
+
+        app.validate_loaded_collections_authority();
+
+        assert!(app.session_persistence_blocked);
+        assert!(app.extension_state_persistence_blocked);
+        assert!(!app.collections_package_runtime_available());
     }
 
     #[test]

@@ -31,29 +31,29 @@ Use these lifecycle terms precisely:
 | Install/update/rollback/remove lifecycle | Production compatibility lifecycle | Production exact-Git package journey; file/link contracts remain lower-level foundations |
 | Runtime instantiation after enable/restart | Production | Production |
 | Host document v1 | Production for admitted protocol-2 providers | Not the component package contribution path |
-| `host.state.v1` lease | Not granted through the package dispatcher | Revocable read-only lease for an exact pinned, non-publishing candidate; no candidate write lease |
-| `host.terminals.v1` lease | Not granted through the package dispatcher | Revocable exact-scope read lease for an exact pinned, non-publishing candidate |
-| `host.document.render.v2` invocation and audit | Not part of the legacy surface | Bounded worker invocation and quarantined semantic audit for the Collections candidate |
-| Document-v2 provider admission | Unavailable | Candidate-only; no visible provider admission |
-| Document-v2 client-visible publication | Unavailable | Unavailable |
-| Collections document profile/projections | Unavailable | Rebuildable non-authoritative shadow profile and compatibility audit; never read by presentation paths |
-| Document-bound package actions/effect plans | Unavailable | Shadow declarations and representative typed plans are audited; no production ticket issuer or commit path |
-| Collections policy authority | Bundled host implementation | Unavailable; the external package remains non-authoritative |
+| `host.state.v1` lease | Not granted through the package dispatcher | Revocable read-only lease for the exact pinned Collections package during audit and typed action planning; no package write lease |
+| `host.terminals.v1` lease | Not granted through the package dispatcher | Revocable exact-scope read lease for the exact pinned Collections package |
+| `host.document.render.v2` invocation and audit | Not part of the legacy surface | Bounded worker invocation and semantic audit for Collections |
+| Document-v2 provider admission | Unavailable | Production for the exact pinned Collections package after atomic authority cutover |
+| Document-v2 client-visible publication | Unavailable | Production through cached generation-1 compatibility projections for Collections |
+| Collections document profile/projections | Unavailable | Package-authoritative after cutover; profile and both compatibility projections publish from one audited topology |
+| Document-bound package actions/effect plans | Unavailable | Production typed `set_label` and `set_archived` plans with host tickets, validation, state CAS, and atomic checkpointing |
+| Collections policy authority | Legacy only before cutover | Exact pinned package after snapshot-v7 atomic cutover; fail-closed if unavailable or replaced |
 | Stable component author SDK | Unavailable | Unavailable |
 
-Starting an ordinary component service proves verified runtime and lifecycle behavior but grants no host reads. The exact pinned Collections candidate is the sole exception: bounded workers may receive revocable state/terminal read leases into a quarantined shadow audit. That exception does not admit a visible provider, issue a production action ticket, commit package state, or transfer feature authority.
+Starting an ordinary component service proves verified runtime and lifecycle behavior but grants no host reads. The exact pinned Collections package is the sole exception: before cutover its bounded workers receive revocable state/terminal reads only for quarantined audit; after the atomic snapshot-v7 cutover the same exact package supplies cached profiles and typed action plans. The host still executes effects, owns PTYs, validates tickets and dependencies, performs state CAS, and coordinates durable publication.
 
-The `availability` strings in the frozen `host-state-v1` and `host-terminals-v1` schema snapshots still say that “production package activation is not enabled.” Those exact R0 bytes remain pinned by the external package and predate candidate read admission. They still correctly deny general package access and all publication/write authority; this status document records the narrower R1–R2 candidate exception.
+The `availability` strings in the frozen `host-state-v1` and `host-terminals-v1` schema snapshots still say that “production package activation is not enabled.” Those exact R0 bytes remain pinned by the external package and predate read admission. They still correctly deny general package access and all direct write authority; this live status document records the exact-pin R1–R3 exception and Collections package authority.
 
 ## Collections authority today
 
-The checked-in `vqro.collections` manifest is a legacy bundled compatibility provider. It starts the current Vqro binary with `_extension-service collections`; the Collections policy implementation, compatibility API, persistence projection, and current client behavior remain host-owned.
+Legacy-authoritative sessions continue using the checked-in compatibility provider and writing snapshot version 6 until the user installs the exact production pin and every scope completes package profile/action audit. R3 admission is open: the host then persists package state plus snapshot-v7 authority through the two-image journal and publishes package document, namespace, policy, state, and typed-action authority in one App turn without a dual-writer interval.
 
-The separately pinned external Collections component now runs in bounded per-service candidate workers after exact-Git installation. The host rebuilds a nonpersistent legacy-policy overlay, issues revocable read leases, and audits package profiles, synchronized compatibility projections, action declarations, and representative one-state-CAS plans. Candidate results remain quarantined from every presentation and persistence path.
+After cutover, cached package profiles produce both `HostDocumentV1` and generation-1 `ClientShellCollection` output. Labeled creation reserves an unpublished container identity, validates a provisional package profile and `set_label` declaration/plan, checkpoints topology plus package state, and publishes only after durable success. Archive/restore use the package `set_archived` plan through the same state-CAS/checkpoint boundary. Generic writes to `vqro.collections` are rejected.
 
-The [Collections v1 R0 contracts](vqro-collections-v1.md) freeze the profile, compatibility projections, typed actions, one-state-CAS plan, durable authority shape, snapshot reader floor, and operation baseline. R1–R2 implement read admission and rebuildable shadow evidence only. No production authority transition is admitted.
+Restart recovery validates the authority/state fence before mutation. Package disablement, digest replacement, retirement, timeout, or stale completion clears package projections and rejects every `collection.*` method with `collections_authority_unavailable`; generic workspace, tab, pane, and PTY access remains available. Recovery requires the exact retained artifact or an explicit lifecycle rollback to it—there is no compiled fallback after cutover.
 
-R3 implementation is in progress. The binary can read and validate snapshot version 7, startup now recovers the journaled session/extension-state coordinator, and package-authority compatibility publication, fail-closed routing, and typed `set_archived` checkpoint orchestration are implemented behind the authority phase. Legacy-authoritative sessions continue writing version 6. Reserved labeled creation now uses an unpublished container identity, a package-rendered provisional profile and declaration, one typed `set_label` plan, and one two-image checkpoint before in-memory publication. The cutover admission gate remains hard-closed until the required Local/SSH/Cloud, restart, rollback, and race evidence is complete; therefore none of this R3 machinery currently transfers production authority.
+The [Collections v1 R0 contracts](vqro-collections-v1.md) freeze the profile, compatibility projections, typed actions, one-state-CAS plan, durable authority shape, snapshot reader floor, and operation baseline. R1–R2 remain the non-publishing pre-cutover audit phases; R3 is the admitted atomic authority transition.
 
 See the accepted [Collections package authority transition](../architecture/collections-authority-transition.md) for the implementation boundaries.
 

@@ -213,14 +213,15 @@ impl App {
                 .collections_shadow_documents
                 .entry(request_key.clone())
                 .or_default();
-            cache.disable();
             if namespace == crate::first_party::collections::NAMESPACE
                 && self.collections_authority.phase
                     == crate::collections_extension_contract::CollectionsAuthorityPhaseV1::Package
             {
-                self.collections_package_projections.remove(&scope_id);
+                // Keep the last audited package projection visible while its bounded replacement
+                // runs. Runtime failure clears all projections through the fail-closed path.
                 continue;
             }
+            cache.disable();
             if namespace == crate::first_party::collections::NAMESPACE {
                 let _ = cache.install_fallback(&snapshot);
             }
@@ -249,7 +250,10 @@ impl App {
             })
         {
             // Candidate results are quarantined and cannot affect the legacy-visible document.
-            let _ = self.schedule_collections_candidate(workspace_id, tab_id, revision);
+            if let Err(error) = self.schedule_collections_candidate(workspace_id, tab_id, revision)
+            {
+                tracing::debug!(%error, "Collections candidate audit was not scheduled");
+            }
         }
     }
 

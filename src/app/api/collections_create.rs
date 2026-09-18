@@ -732,7 +732,29 @@ impl App {
                 self.collections_authority = result.authority;
                 self.state.session_dirty = false;
                 self.session_save_deadline = None;
+                let checkpointed_publication = pending
+                    .profile
+                    .clone()
+                    .zip(pending.actions.clone())
+                    .zip(pending.topology.clone())
+                    .ok_or_else(|| "checkpointed create publication is incomplete".to_string())
+                    .and_then(|((profile, actions), topology)| {
+                        self.collections_candidate_audits
+                            .publish_checkpointed_create(profile, actions, topology)
+                    });
+                if let Err(error) = checkpointed_publication {
+                    self.session_persistence_blocked = true;
+                    self.extension_state_persistence_blocked = true;
+                    self.disable_collections_package_authority_runtime();
+                    let _ = pending.respond_to.send(super::responses::encode_error(
+                        pending.request_id,
+                        "collections_checkpoint_inconsistent",
+                        &error,
+                    ));
+                    return;
+                }
                 self.refresh_collection_documents();
+                self.publish_ready_collections_package_profiles();
                 let mut collection = self
                     .collection_info(
                         pending.workspace_index,

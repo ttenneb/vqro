@@ -24,6 +24,15 @@ pub const COLLECTIONS_ACTION_INVOCATION_CONTRACT_V1: &str = "vqro.collections.ac
 pub const COLLECTIONS_EFFECT_PLAN_CONTRACT_V1: &str = "vqro.collections.effect-plan.v1";
 pub const COLLECTIONS_PRODUCTION_PIN_CONTRACT_V1: &str = "vqro.collections.production-pin.v1";
 pub const COLLECTIONS_AUTHORITY_CONTRACT_V1: &str = "collections_authority.v1";
+
+pub(crate) fn embedded_collections_production_pin() -> Result<CollectionsProductionPinV1, String> {
+    let pin: CollectionsProductionPinV1 = serde_json::from_str(include_str!(
+        "../extensions/first-party/collections/production-pin-v1.json"
+    ))
+    .map_err(|error| format!("invalid embedded Collections production pin: {error}"))?;
+    pin.validate().map_err(|error| error.to_string())?;
+    Ok(pin)
+}
 pub const COLLECTIONS_PACKAGE_AUTHORITY_SNAPSHOT_VERSION: u32 = 7;
 pub const COLLECTIONS_PACKAGE_AUTHORITY_MINIMUM_READER_VERSION: u32 = 7;
 pub const COLLECTIONS_NAMESPACE: &str = "vqro.collections";

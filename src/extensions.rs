@@ -451,8 +451,8 @@ impl MarketplaceStateFile {
             }
         }
         if let Some(namespace) = self.entries.values().find_map(|state| {
-            package_namespaces
-                .contains_key(&state.data_id)
+            let owner = package_namespaces.get(&state.data_id)?;
+            (!self.collections_transition_overlap_is_exact(&state.data_id, owner))
                 .then_some(state.data_id.as_str())
         }) {
             return Err(format!(
@@ -460,6 +460,45 @@ impl MarketplaceStateFile {
             ));
         }
         Ok(())
+    }
+
+    fn collections_transition_overlap_is_exact(&self, namespace: &str, owner: &str) -> bool {
+        use crate::extension_package::PackageProvenanceV1;
+
+        if namespace != crate::collections_extension_contract::COLLECTIONS_NAMESPACE
+            || owner != crate::collections_extension_contract::COLLECTIONS_PACKAGE_ID
+        {
+            return false;
+        }
+        let Ok(pin) = crate::collections_extension_contract::embedded_collections_production_pin()
+        else {
+            return false;
+        };
+        let Some(record) = self.packages.packages.get(owner) else {
+            return false;
+        };
+        let exact_source = matches!(
+            &record.source,
+            PackageProvenanceV1::Git {
+                url,
+                source_commit,
+                package_path,
+                package_id,
+                package_sha256,
+                manifest_sha256,
+                ..
+            } if url == &pin.source_url
+                && source_commit == &pin.source_commit
+                && package_path == &pin.package_path
+                && package_id == &pin.package_id
+                && package_sha256 == &pin.package_sha256
+                && manifest_sha256 == &pin.manifest_sha256
+        );
+        exact_source
+            && record
+                .active
+                .as_ref()
+                .is_some_and(|active| active.package_sha256 == pin.package_sha256)
     }
 
     // Compatibility adapter preserving current marketplace response shapes.
@@ -1233,6 +1272,41 @@ mod tests {
         *repository = "attacker/forged".into();
         let mut rejected = MarketplaceStateFile::defaults(&index);
         assert!(rejected.register_package_v1(&index, forged, 0).is_err());
+    }
+
+    #[test]
+    fn exact_collections_pin_may_overlap_only_its_legacy_transition_namespace() {
+        let index = CuratedIndex::bundled().unwrap();
+        let pin =
+            crate::collections_extension_contract::embedded_collections_production_pin().unwrap();
+        let record = crate::extension_package::PackageLifecycleRecordV1 {
+            package_id: pin.package_id.clone(),
+            source: crate::extension_package::PackageProvenanceV1::Git {
+                url: pin.source_url,
+                source_commit: pin.source_commit,
+                package_path: pin.package_path,
+                package_id: pin.package_id.clone(),
+                version: "1.0.0".into(),
+                package_sha256: pin.package_sha256.clone(),
+                manifest_sha256: pin.manifest_sha256,
+            },
+            previous_source: None,
+            namespaces: vec![crate::collections_extension_contract::COLLECTIONS_NAMESPACE.into()],
+            revision: 1,
+            status: crate::extension_package::PackageLifecycleStatusV1::Enabled,
+            active: Some(crate::extension_package::PackageArtifactPointerV1 {
+                package_sha256: pin.package_sha256,
+                version: "1.0.0".into(),
+                runtime_generation: 1,
+            }),
+            previous: None,
+            activation_error: None,
+            pending_activation: None,
+            retained_data: true,
+        };
+        let mut state = MarketplaceStateFile::defaults(&index);
+        state.register_package_v1(&index, record, 0).unwrap();
+        state.validate_data_ids(&index).unwrap();
     }
 
     #[test]

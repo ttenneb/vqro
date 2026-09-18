@@ -351,6 +351,13 @@ impl CandidateWorker {
                     if worker_canceled.load(Ordering::Acquire) {
                         break;
                     }
+                    tracing::debug!(
+                        package_id = %thread_package_id,
+                        service_id = %thread_service_id,
+                        method = %request.method,
+                        attempt_id = request.attempt_id,
+                        "Collections candidate invocation started"
+                    );
                     let result = supervisor
                         .invoke_package_read_candidate(
                             &request.method,
@@ -360,6 +367,14 @@ impl CandidateWorker {
                             request.authorization,
                         )
                         .map_err(|error| error.to_string());
+                    tracing::debug!(
+                        package_id = %thread_package_id,
+                        service_id = %thread_service_id,
+                        method = %request.method,
+                        attempt_id = request.attempt_id,
+                        succeeded = result.is_ok(),
+                        "Collections candidate invocation finished"
+                    );
                     let completion = PackageCandidateInvocationResult {
                         package_id: thread_package_id.clone(),
                         service_id: thread_service_id.clone(),

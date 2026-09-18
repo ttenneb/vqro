@@ -1562,7 +1562,7 @@ impl App {
         }
         if let Err(error) = self.finalize_collections_candidate(result.attempt_id, result.result) {
             self.disable_collections_package_authority_runtime();
-            tracing::debug!(
+            tracing::warn!(
                 package_id = %result.package_id,
                 service_id = %result.service_id,
                 runtime_generation = result.runtime_generation,

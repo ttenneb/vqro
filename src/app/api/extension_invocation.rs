@@ -156,6 +156,7 @@ impl App {
             );
         }
 
+        let observes_state_only = state.is_some() && terminals.is_none();
         Ok(
             crate::extension_host_invocation::HostReadInvocationAuthorization {
                 package_id: binding.package_id().to_owned(),
@@ -175,6 +176,8 @@ impl App {
                 authority,
                 terminal_observations: if observes_state_then_terminals {
                     crate::extension_host_invocation::TrustedTerminalSnapshotObservations::state_then_terminals()
+                } else if observes_state_only {
+                    crate::extension_host_invocation::TrustedTerminalSnapshotObservations::state_only()
                 } else {
                     crate::extension_host_invocation::TrustedTerminalSnapshotObservations::default()
                 },

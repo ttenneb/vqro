@@ -617,7 +617,9 @@ mod tests {
     }
 
     #[test]
-    fn optional_structure_control_round_trips_revision_and_identity() {
+    fn generation_one_structure_control_is_transport_neutral_for_local_ssh_and_cloud() {
+        // Endpoint controls intentionally contain no transport discriminator: Local sockets, SSH
+        // bridges, and Cloud relays carry the same generation-1 frame bytes.
         let projection = ClientShellStructureProjection {
             session_id: "alpha".into(),
             boot_id: "boot-7".into(),

@@ -133,6 +133,7 @@ pub(crate) struct CollectionsCandidateWork {
 pub(crate) struct CollectionsCandidateCoordinator {
     profile_cache: QuarantinedAuditCache<CollectionsDocumentProfileV1>,
     action_cache: QuarantinedAuditCache<CollectionsActionDeclarationsV1>,
+    profile_topologies: BTreeMap<AuditCacheKey, CollectionsProfileTopologyV1>,
     pending: HashMap<u64, PendingCandidate>,
     pending_by_scope: HashMap<(String, CandidateAuditKind), u64>,
     profile_desired_by_scope: HashMap<String, DesiredObservation>,
@@ -270,6 +271,11 @@ impl CollectionsCandidateCoordinator {
         let ticket = match kind {
             CandidateAuditKind::Profile => {
                 self.profile_cache
+                    .retire_scope(&key.scope)
+                    .map_err(|error| format!("cannot retire prior profile scope: {error:?}"))?;
+                self.profile_topologies
+                    .retain(|cache_key, _| cache_key.scope != key.scope);
+                self.profile_cache
                     .update_authority(key.clone(), producer, dependencies)
                     .map_err(|error| format!("cannot install profile authority: {error:?}"))?;
                 CandidateAuditTicket::Profile(
@@ -279,6 +285,9 @@ impl CollectionsCandidateCoordinator {
                 )
             }
             CandidateAuditKind::Actions => {
+                self.action_cache
+                    .retire_scope(&key.scope)
+                    .map_err(|error| format!("cannot retire prior action scope: {error:?}"))?;
                 self.action_cache
                     .update_authority(key.clone(), producer, dependencies)
                     .map_err(|error| format!("cannot install action authority: {error:?}"))?;
@@ -355,7 +364,12 @@ impl CollectionsCandidateCoordinator {
             (CandidateAuditTicket::Profile(ticket), Ok(ValidatedCandidate::Profile(profile))) => {
                 self.profile_cache
                     .accept(ticket, *profile)
-                    .map_err(|error| format!("candidate cache rejected profile: {error:?}"))
+                    .map_err(|error| format!("candidate cache rejected profile: {error:?}"))?;
+                self.profile_topologies
+                    .retain(|key, _| self.profile_cache.get(key).is_some());
+                self.profile_topologies
+                    .insert(pending.key.clone(), pending.topology.clone());
+                Ok(())
             }
             (CandidateAuditTicket::Actions(ticket), Ok(ValidatedCandidate::Actions(actions))) => {
                 self.action_cache
@@ -503,8 +517,83 @@ impl CollectionsCandidateCoordinator {
         self.profile_cache.values()
     }
 
-    pub(crate) fn actions(&self) -> impl Iterator<Item = &CollectionsActionDeclarationsV1> {
-        self.action_cache.values()
+    pub(crate) fn actions_for(
+        &self,
+        profile: &CollectionsDocumentProfileV1,
+    ) -> Option<&CollectionsActionDeclarationsV1> {
+        self.action_cache.get(&AuditCacheKey {
+            producer: profile.document.producer.producer(),
+            scope: profile.document.scope.clone(),
+        })
+    }
+
+    pub(crate) fn topology_for(
+        &self,
+        profile: &CollectionsDocumentProfileV1,
+    ) -> Option<&CollectionsProfileTopologyV1> {
+        self.profile_topologies.get(&AuditCacheKey {
+            producer: profile.document.producer.producer(),
+            scope: profile.document.scope.clone(),
+        })
+    }
+
+    pub(crate) fn publish_checkpointed_create(
+        &mut self,
+        profile: CollectionsDocumentProfileV1,
+        actions: CollectionsActionDeclarationsV1,
+        topology: CollectionsProfileTopologyV1,
+    ) -> Result<(), String> {
+        let key = AuditCacheKey {
+            producer: profile.document.producer.producer(),
+            scope: profile.document.scope.clone(),
+        };
+        let scope_id = key.scope.scope_id.clone();
+        for kind in [CandidateAuditKind::Profile, CandidateAuditKind::Actions] {
+            if let Some(attempt_id) = self.pending_by_scope.remove(&(scope_id.clone(), kind)) {
+                if let Some(pending) = self.pending.remove(&attempt_id) {
+                    pending.canceled.store(true, Ordering::Release);
+                    self.fail_ticket(pending.ticket);
+                }
+            }
+        }
+        self.profile_desired_by_scope.remove(&scope_id);
+        self.action_desired_by_scope.remove(&scope_id);
+
+        let mut dependencies = profile.document.dependencies.clone();
+        dependencies.sort();
+        let producer = profile.document.producer.clone();
+        self.profile_cache
+            .retire_scope(&key.scope)
+            .map_err(|error| format!("cannot retire checkpointed profile scope: {error:?}"))?;
+        self.action_cache
+            .retire_scope(&key.scope)
+            .map_err(|error| format!("cannot retire checkpointed action scope: {error:?}"))?;
+        self.profile_topologies
+            .retain(|cache_key, _| cache_key.scope != key.scope);
+        self.profile_cache
+            .update_authority(key.clone(), producer.clone(), dependencies.clone())
+            .map_err(|error| format!("cannot install checkpointed profile authority: {error:?}"))?;
+        self.action_cache
+            .update_authority(key.clone(), producer, dependencies)
+            .map_err(|error| format!("cannot install checkpointed action authority: {error:?}"))?;
+        let action_ticket = self
+            .action_cache
+            .begin_audit(&key)
+            .map_err(|error| format!("cannot issue checkpointed action audit: {error:?}"))?;
+        let profile_ticket = self
+            .profile_cache
+            .begin_audit(&key)
+            .map_err(|error| format!("cannot issue checkpointed profile audit: {error:?}"))?;
+        self.action_cache
+            .accept(action_ticket, actions)
+            .map_err(|error| format!("cannot publish checkpointed actions: {error:?}"))?;
+        self.profile_cache
+            .accept(profile_ticket, profile)
+            .map_err(|error| format!("cannot publish checkpointed profile: {error:?}"))?;
+        self.profile_topologies
+            .retain(|cache_key, _| self.profile_cache.get(cache_key).is_some());
+        self.profile_topologies.insert(key, topology);
+        Ok(())
     }
 
     #[cfg(test)]
@@ -709,12 +798,7 @@ impl App {
 }
 
 pub(crate) fn production_pin() -> Result<CollectionsProductionPinV1, String> {
-    let pin: CollectionsProductionPinV1 = serde_json::from_str(include_str!(
-        "../../../extensions/first-party/collections/production-pin-v1.json"
-    ))
-    .map_err(|error| format!("invalid embedded Collections production pin: {error}"))?;
-    pin.validate().map_err(|error| error.to_string())?;
-    Ok(pin)
+    crate::collections_extension_contract::embedded_collections_production_pin()
 }
 
 fn validate_exact_candidate(
@@ -932,6 +1016,81 @@ pub(super) fn current_state_snapshot(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn checkpointed_create_publishes_profile_actions_and_topology_together() {
+        let profile: CollectionsDocumentProfileV1 = serde_json::from_str(include_str!(
+            "../../../docs/next/api/vqro-collections-v1.fixtures/document-profile-valid.json"
+        ))
+        .unwrap();
+        let actions: CollectionsActionDeclarationsV1 = serde_json::from_str(include_str!(
+            "../../../docs/next/api/vqro-collections-v1.fixtures/actions-valid.json"
+        ))
+        .unwrap();
+        let topology = CollectionsProfileTopologyV1 {
+            workspace_id: "w1".into(),
+            tab_id: profile.document.scope.scope_id.clone(),
+            containers: vec![CollectionsProfileContainerV1 {
+                container_id: "container_000000000000002a".into(),
+                terminal_ids: vec![
+                    "term_11111111111111111111111111111111".into(),
+                    "term_22222222222222222222222222222222".into(),
+                ],
+                selected_terminal_id: Some("term_11111111111111111111111111111111".into()),
+            }],
+            placements: vec![
+                CollectionsTerminalPlacementV1 {
+                    terminal_id: "term_11111111111111111111111111111111".into(),
+                    pane_id: "pane_1".into(),
+                },
+                CollectionsTerminalPlacementV1 {
+                    terminal_id: "term_22222222222222222222222222222222".into(),
+                    pane_id: "pane_2".into(),
+                },
+            ],
+            producer: profile.document.producer.clone(),
+            state_dependency: profile.document.dependencies[0].clone(),
+            terminals_dependency: profile.document.dependencies[1].clone(),
+        };
+        let mut coordinator = CollectionsCandidateCoordinator::default();
+
+        coordinator
+            .publish_checkpointed_create(profile.clone(), actions.clone(), topology.clone())
+            .unwrap();
+
+        assert_eq!(coordinator.first_profile(), Some(&profile));
+        assert_eq!(coordinator.first_actions(), Some(&actions));
+        assert_eq!(coordinator.actions_for(&profile), Some(&actions));
+        assert_eq!(coordinator.topology_for(&profile), Some(&topology));
+
+        let mut replacement_profile = profile.clone();
+        replacement_profile.document.producer.runtime_generation += 1;
+        replacement_profile.document.revision += 1;
+        let mut replacement_actions = actions.clone();
+        replacement_actions.document_revision = replacement_profile.document.revision;
+        let mut replacement_topology = topology.clone();
+        replacement_topology.producer = replacement_profile.document.producer.clone();
+        coordinator
+            .publish_checkpointed_create(
+                replacement_profile.clone(),
+                replacement_actions.clone(),
+                replacement_topology.clone(),
+            )
+            .unwrap();
+
+        assert_eq!(coordinator.cached_len(), 1);
+        assert_eq!(coordinator.action_cached_len(), 1);
+        assert_eq!(coordinator.first_profile(), Some(&replacement_profile));
+        assert_eq!(coordinator.first_actions(), Some(&replacement_actions));
+        assert_eq!(
+            coordinator.actions_for(&replacement_profile),
+            Some(&replacement_actions)
+        );
+        assert_eq!(
+            coordinator.topology_for(&replacement_profile),
+            Some(&replacement_topology)
+        );
+    }
 
     #[test]
     fn legacy_import_is_rebuildable_nonpersistent_and_change_sensitive() {
