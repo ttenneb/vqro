@@ -453,7 +453,7 @@ pub(super) fn render_collection_lists(
                     .set_skip(false);
             }
         }
-        let message = "No members · right-click for collection actions";
+        let message = "No members";
         let width = u16::try_from(message.len())
             .unwrap_or(u16::MAX)
             .min(area.width);
