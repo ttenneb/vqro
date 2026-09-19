@@ -1788,7 +1788,6 @@ fn disconnected_active_endpoint_freezes_surface_and_marks_cached_ui_stale() {
     let mut remote_surface = surface();
     remote_surface.boot_id = "remote-boot".into();
     state.set_pane_surface(remote_surface);
-    state.pending_integration_installs = 2;
 
     state.mark_endpoint_disconnected(&endpoint_id);
     let frame = state.compose(100, 28).expect("frozen endpoint frame");
@@ -1803,7 +1802,6 @@ fn disconnected_active_endpoint_freezes_surface_and_marks_cached_ui_stale() {
         .collect::<Vec<_>>()
         .join("\n");
 
-    assert_eq!(state.pending_integration_installs, 0);
     assert_eq!(
         state.endpoint_status(&endpoint_id),
         Some(ClientEndpointStatus::Reconnecting)

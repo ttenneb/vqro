@@ -17,8 +17,7 @@ pub(super) fn global_menu_item_has_badge(
     action: ClientGlobalMenuAction,
 ) -> bool {
     (action == ClientGlobalMenuAction::WhatsNew && snapshot.update_available.is_some())
-        || (action == ClientGlobalMenuAction::Binding(crate::input::KeybindAction::Settings)
-            && snapshot.integration_updates_available)
+        || (action == ClientGlobalMenuAction::Extensions && snapshot.integration_updates_available)
 }
 
 pub(super) fn global_menu_items(

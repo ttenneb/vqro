@@ -335,36 +335,6 @@ fn stale_queued_request_is_cancelled_without_blocking_the_current_generation() {
 }
 
 #[test]
-fn cancelled_integration_install_does_not_queue_a_refresh() {
-    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
-    state.set_snapshot(Box::new(snapshot()));
-    state.open_settings_overlay();
-    let Some(ClientShellOverlay::Settings(settings)) = state.overlay.as_mut() else {
-        panic!("settings overlay");
-    };
-    settings.installing_integrations = true;
-    state.pending_integration_installs = 1;
-    let mut outcome = ClientShellInput::default();
-    assert!(state.push_endpoint_method_with_kind(
-        crate::api::schema::Method::IntegrationInstall(
-            crate::api::schema::IntegrationInstallParams {
-                target: crate::api::schema::IntegrationTarget::Pi,
-            }
-        ),
-        PendingEndpointKind::IntegrationInstall,
-        &mut outcome,
-    ));
-    assert!(state.cancel_endpoint_request(request_id(&outcome.actions)));
-    assert!(state.pending_requests.is_empty());
-    assert_eq!(state.pending_integration_installs, 0);
-    assert!(matches!(
-        &state.overlay,
-        Some(ClientShellOverlay::Settings(settings))
-            if !settings.installing_integrations && !settings.loading_integrations
-    ));
-}
-
-#[test]
 fn failed_selection_copy_does_not_send_terminal_input() {
     let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
     state.set_snapshot(Box::new(snapshot()));

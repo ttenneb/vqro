@@ -210,7 +210,6 @@ impl ClientShellState {
             for request_id in pending {
                 self.cancel_endpoint_request(&request_id);
             }
-            self.pending_integration_installs = 0;
             self.pane_scroll_in_flight.clear();
             self.pane_scroll_queued.clear();
         }

@@ -89,9 +89,7 @@ pub(crate) fn render_client_overlay(
             render_navigator_overlay(b, v, endpoints, active_endpoint_id, p)
         }
         ClientShellOverlay::Recovery(v) => render_recovery_overlay(b, v, recovery_presentation?, p),
-        ClientShellOverlay::Settings(v) => {
-            settings_overlay::render_settings_overlay(b, v, s.integration_updates_available, p)
-        }
+        ClientShellOverlay::Settings(v) => settings_overlay::render_settings_overlay(b, v, p),
         ClientShellOverlay::Extensions(v) => extensions_overlay::render_extensions_overlay(b, v, p),
         ClientShellOverlay::WorktreeCreate(v) => {
             worktree_overlays::render_worktree_create_overlay(b, v, p)

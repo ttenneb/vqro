@@ -186,8 +186,10 @@ impl ClientShellState {
             self.set_local_config_diagnostic(Some(error));
         }
         self.config.startup_onboarding = false;
-        self.open_settings_overlay();
-        self.select_settings_section(ClientSettingsSection::Integrations, outcome);
+        self.open_extensions_overlay(outcome);
+        if let Some(ClientShellOverlay::Extensions(extensions)) = self.overlay.as_mut() {
+            extensions.category = Some("Agents".into());
+        }
     }
 
     pub(super) fn open_navigator_overlay(&mut self) {

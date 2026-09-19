@@ -577,17 +577,10 @@ pub(super) enum ClientSettingsSection {
     Indicators,
     Sound,
     Toast,
-    Integrations,
 }
 
 impl ClientSettingsSection {
-    pub(super) const ALL: &[Self] = &[
-        Self::Theme,
-        Self::Indicators,
-        Self::Sound,
-        Self::Toast,
-        Self::Integrations,
-    ];
+    pub(super) const ALL: &[Self] = &[Self::Theme, Self::Indicators, Self::Sound, Self::Toast];
 
     pub(super) fn label(self) -> &'static str {
         match self {
@@ -595,7 +588,6 @@ impl ClientSettingsSection {
             Self::Indicators => "indicators",
             Self::Sound => "sound",
             Self::Toast => "toasts",
-            Self::Integrations => "integrations",
         }
     }
 }
@@ -606,10 +598,6 @@ pub(super) struct ClientSettingsOverlay {
     pub(super) selected: usize,
     pub(super) original_theme_name: String,
     pub(super) original_palette: Palette,
-    pub(super) integrations: Vec<crate::api::schema::IntegrationInfo>,
-    pub(super) integration_messages: Vec<String>,
-    pub(super) loading_integrations: bool,
-    pub(super) installing_integrations: bool,
 }
 
 #[derive(Debug)]
@@ -863,8 +851,6 @@ pub(super) enum PendingEndpointKind {
     ReleaseNotesDismiss,
     PopupCommand,
     ReloadConfig,
-    IntegrationList,
-    IntegrationInstall,
     ExtensionList(u64),
     ExtensionPackageList(u64),
     ExtensionPackageInspect(u64),
@@ -1180,7 +1166,6 @@ pub(crate) struct ClientShellState {
     pub(super) popup_pending_deadline: Option<std::time::Instant>,
     pub(super) next_request_id: u64,
     pub(super) pending_requests: HashMap<String, PendingEndpointRequest>,
-    pub(super) pending_integration_installs: usize,
     pub(super) pending_notifications: Vec<ClientPendingNotification>,
     pub(super) visible_notification: Option<ClientVisibleNotification>,
     pub(super) queued_notifications: VecDeque<ClientVisibleNotification>,
@@ -1360,7 +1345,6 @@ impl ClientShellState {
             popup_pending_deadline: None,
             next_request_id: 1,
             pending_requests: HashMap::new(),
-            pending_integration_installs: 0,
             pending_notifications: Vec::new(),
             visible_notification: None,
             queued_notifications: VecDeque::new(),
@@ -1594,7 +1578,6 @@ impl ClientShellState {
         self.pane_scroll_targets.clear();
         self.popup_pending = false;
         self.popup_pending_deadline = None;
-        self.pending_integration_installs = 0;
         self.endpoint_notice_seen.clear();
         self.visible_endpoint_notice = None;
         self.endpoint_error = None;

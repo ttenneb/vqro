@@ -1759,17 +1759,8 @@ impl ClientShellState {
                 } else if super::contains(self.hits.overlay_cancel, point)
                     || !super::contains(self.hits.settings_popup, point)
                 {
-                    let installing = matches!(
-                        self.overlay,
-                        Some(ClientShellOverlay::Settings(ClientSettingsOverlay {
-                            installing_integrations: true,
-                            ..
-                        }))
-                    );
-                    if !installing {
-                        self.cancel_settings_overlay();
-                        outcome.repaint = true;
-                    }
+                    self.cancel_settings_overlay();
+                    outcome.repaint = true;
                 }
             }
             return;
