@@ -160,6 +160,9 @@ pub struct App {
     session_persistence_blocked: bool,
     pub(crate) extension_state: crate::extension_state::DurableExtensionStateV1,
     pub(crate) collections_authority: crate::collections_extension_contract::CollectionsAuthorityV1,
+    #[cfg(test)]
+    pub(crate) collections_checkpoint_paths_override:
+        Option<crate::persist::coordinator::PersistencePaths>,
     pub(crate) collections_mutations_blocked: bool,
     pub(crate) extension_state_path: Option<std::path::PathBuf>,
     /// Rejected extension-state bytes remain authoritative and block automatic writes.
@@ -945,6 +948,8 @@ impl App {
             session_persistence_blocked,
             extension_state,
             collections_authority: loaded_collections_authority,
+            #[cfg(test)]
+            collections_checkpoint_paths_override: None,
             collections_mutations_blocked: false,
             extension_state_path,
             extension_state_persistence_blocked,

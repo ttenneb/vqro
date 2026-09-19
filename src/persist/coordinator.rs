@@ -1,7 +1,7 @@
-//! Unwired two-file persistence coordinator and roll-forward recovery journal.
+//! Two-file persistence coordinator and roll-forward recovery journal.
 //!
-//! This module deliberately has no production caller. It establishes the crash contract needed
-//! before session and extension-state persistence can share authority: one process-local writer,
+//! Collections package authority uses this crash contract so session and extension-state images
+//! share one publication point: one process-local writer,
 //! exact resolved-path and digest binding, and roll-forward recovery after publication starts.
 //!
 //! Every operation requires a path-bound cross-process ownership guard in addition to the
@@ -75,7 +75,6 @@ pub(crate) struct PersistenceOwnership {
 }
 
 impl PersistenceOwnership {
-    #[allow(dead_code)] // Removed when production persistence acquires the staged ownership fence.
     pub(crate) fn try_acquire(paths: &PersistencePaths) -> Result<Self, PersistenceError> {
         let paths = resolve_paths(paths).map_err(not_published)?;
         let guard = crate::platform::try_lock_persistence(&paths.ownership).map_err(|error| {

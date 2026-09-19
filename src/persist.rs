@@ -66,8 +66,17 @@ pub(crate) fn persist_collections_checkpoint(
     extension_state: &crate::extension_state::DurableExtensionStateV1,
 ) -> Result<(), coordinator::PersistenceError> {
     let paths = collections_checkpoint_paths();
-    let ownership = coordinator::PersistenceOwnership::try_acquire(&paths)?;
-    coordinator::persist_checkpoint(&ownership, &paths, session, extension_state)
+    persist_collections_checkpoint_at(&paths, session, extension_state)
+}
+
+#[cfg_attr(test, allow(dead_code))]
+pub(crate) fn persist_collections_checkpoint_at(
+    paths: &coordinator::PersistencePaths,
+    session: &SessionSnapshot,
+    extension_state: &crate::extension_state::DurableExtensionStateV1,
+) -> Result<(), coordinator::PersistenceError> {
+    let ownership = coordinator::PersistenceOwnership::try_acquire(paths)?;
+    coordinator::persist_checkpoint(&ownership, paths, session, extension_state)
 }
 #[cfg(test)]
 pub(crate) use self::snapshot::{PaneAgentSessionSnapshot, PaneSnapshot};

@@ -1,7 +1,9 @@
 {
   "contract": "vqro.collections.operation-baseline.v1",
   "runtime_revision": "99fede25",
-  "measurement": "deterministic ownership and dispatch counts",
+  "observed_runtime_revision": "099239da",
+  "measurement": "instrumented Wasmtime ownership, invocation, and cached-fanout counts",
+  "verification": "extension_runtime::component::tests::collections_operation_baseline_matches_instrumented_component_topology",
   "scenarios": [
     {
       "id": "one-service-one-pane-one-client",

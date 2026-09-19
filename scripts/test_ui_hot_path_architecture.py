@@ -29,6 +29,18 @@ COLLECTIONS_CONFORMANCE_SOURCE = PROJECT_ROOT / "src" / "extension_runtime" / "c
 COMPOSITE_HOST_READ_APP_MODULE = (
     PROJECT_ROOT / "src" / "app" / "api" / "extension_invocation.rs"
 )
+# Composite host reads are production authority only for the exact-Git Collections package.
+# Keep this list explicit: adding another package or generic host path must update the reviewed
+# architecture boundary rather than silently broadening it.
+COLLECTIONS_COMPOSITE_HOST_READ_SOURCES = frozenset(
+    {
+        PROJECT_ROOT / "src" / "app" / "api" / "collections_authority.rs",
+        PROJECT_ROOT / "src" / "app" / "api" / "collections_candidate.rs",
+        PROJECT_ROOT / "src" / "app" / "api" / "collections_create.rs",
+        PROJECT_ROOT / "src" / "extension_candidate.rs",
+        PROJECT_ROOT / "src" / "extension_service.rs",
+    }
+)
 COMPOSITE_HOST_READ_BOUNDARY_SOURCES = frozenset(
     {
         PROJECT_ROOT / "src" / "main.rs",
@@ -38,6 +50,7 @@ COMPOSITE_HOST_READ_BOUNDARY_SOURCES = frozenset(
         COMPOSITE_HOST_READ_APP_MODULE,
         PROJECT_ROOT / "src" / "app" / "api" / "document_shadow_audit.rs",
         COLLECTIONS_CONFORMANCE_SOURCE,
+        *COLLECTIONS_COMPOSITE_HOST_READ_SOURCES,
     }
 )
 DOCUMENT_V2_SOURCES = (
@@ -61,6 +74,15 @@ DOCUMENT_V2_REFERENCE = re.compile(
 )
 DOCUMENT_V2_INTERNAL_PATHS = frozenset(
     (*DOCUMENT_V2_SOURCES, DOCUMENT_SHADOW_AUDIT_SOURCE, COLLECTIONS_CONFORMANCE_SOURCE)
+)
+# Document v2 remains unavailable to generic extensions. These three files are the complete,
+# reviewed production bridge for Collections profile auditing and atomic labeled creation.
+COLLECTIONS_DOCUMENT_V2_AUTHORITY_SOURCES = frozenset(
+    {
+        PROJECT_ROOT / "src" / "collections_extension_contract.rs",
+        PROJECT_ROOT / "src" / "app" / "api" / "collections_candidate.rs",
+        PROJECT_ROOT / "src" / "app" / "api" / "collections_create.rs",
+    }
 )
 DOCUMENT_V2_DECLARATION_SOURCE = PROJECT_ROOT / "src" / "main.rs"
 DOCUMENT_V2_SCHEMA_SOURCE = PROJECT_ROOT / "src" / "extension_spec.rs"
@@ -113,7 +135,7 @@ DOCUMENT_V2_ALLOWED_IMPORTS = {
 }
 DOCUMENT_V2_ALLOWED_DECLARATION_LINES = Counter(
     {
-        "pub mod host_document_v2;": 1,
+        "mod host_document_v2;": 1,
         "pub mod quarantined_audit_cache;": 1,
     }
 )
@@ -145,6 +167,7 @@ DOCUMENT_V2_ALLOWED_SCHEMA_LINES = Counter(
         ": crate::host_document_v2::MAX_DOCUMENT_V2_ACCESSIBLE_DESCRIPTION_CHARS,",
         ": crate::host_document_v2::HOST_DOCUMENT_CONTRACT_V2,",
         "serde_json::json!(crate::host_document_v2::MAX_DOCUMENT_V2_DEPENDENCIES);",
+        "serde_json::json!(crate::host_document_v2::MAX_DOCUMENT_V2_NODES);",
         "serde_json::json!(crate::host_document_v2::MAX_DOCUMENT_V2_NODES);",
         "serde_json::json!(crate::host_document_v2::MAX_DOCUMENT_V2_NODES);",
         "serde_json::json!(crate::host_document_v2::MAX_DOCUMENT_V2_NODES);",
@@ -413,7 +436,7 @@ def document_v2_wiring_violations_for_sources(
 ) -> list[str]:
     violations: list[str] = []
     for path, source in sources:
-        if path in DOCUMENT_V2_INTERNAL_PATHS:
+        if path in DOCUMENT_V2_INTERNAL_PATHS or path in COLLECTIONS_DOCUMENT_V2_AUTHORITY_SOURCES:
             continue
         code = production_code(source)
         actual = _reference_lines(code)
@@ -608,14 +631,21 @@ fn live() { allowed::call(); }
             with self.subTest(source=source):
                 self.assertTrue(document_v2_wiring_violations_for_sources([(synthetic, source)]))
 
-    def test_document_v2_has_no_runtime_wiring_anywhere_in_src(self) -> None:
+    def test_document_v2_runtime_wiring_is_confined_to_collections_authority(self) -> None:
         violations = document_v2_wiring_violations(ALL_SRC_SOURCES)
         self.assertEqual(
             violations,
             [],
-            "Only module declarations, schema generation, and the isolated modules may "
+            "Only schema/declaration modules and the explicit Collections authority bridge may "
             "reference document-v2/cache symbols:\n" + "\n".join(violations),
         )
+        for path in COLLECTIONS_DOCUMENT_V2_AUTHORITY_SOURCES:
+            code = production_code(path.read_text(encoding="utf-8"))
+            self.assertRegex(
+                code,
+                DOCUMENT_V2_REFERENCE,
+                f"stale Collections document-v2 allowlist entry: {path}",
+            )
 
     def test_document_v2_dependency_scanner_denies_indirection(self) -> None:
         contract_path, cache_path = DOCUMENT_V2_SOURCES
@@ -691,28 +721,31 @@ fn live() { allowed::call(); }
                 )
                 self.assertTrue(violations)
 
-    def test_composite_host_read_modules_and_dispatch_entry_are_cfg_test_only(self) -> None:
-        main = (PROJECT_ROOT / "src" / "main.rs").read_text(encoding="utf-8")
-        app_api = (PROJECT_ROOT / "src" / "app" / "api.rs").read_text(encoding="utf-8")
-        runtime = (PROJECT_ROOT / "src" / "extension_runtime" / "mod.rs").read_text(
-            encoding="utf-8"
+    def test_composite_host_read_modules_and_dispatch_entry_are_production_fenced(self) -> None:
+        main = production_code(
+            (PROJECT_ROOT / "src" / "main.rs").read_text(encoding="utf-8")
         )
-        self.assertRegex(main, r"#\[cfg\(test\)\]\s*mod extension_host_invocation;")
-        self.assertRegex(app_api, r"#\[cfg\(test\)\]\s*mod extension_invocation;")
+        app_api = production_code(
+            (PROJECT_ROOT / "src" / "app" / "api.rs").read_text(encoding="utf-8")
+        )
+        runtime = production_code(
+            (PROJECT_ROOT / "src" / "extension_runtime" / "mod.rs").read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertRegex(main, r"\bmod extension_host_invocation;")
+        self.assertRegex(app_api, r"\bmod extension_invocation;")
+        self.assertRegex(runtime, r"pub\(crate\) fn invoke_with_host_reads\(")
         self.assertRegex(
             runtime,
-            r"#\[cfg\(test\)\]\s*pub\(crate\) fn invoke_with_host_reads\(",
+            r"Composite\(Box<crate::extension_host_invocation::",
         )
         self.assertRegex(
             runtime,
-            r"#\[cfg\(test\)\]\s*Composite\(Box<crate::extension_host_invocation::",
-        )
-        self.assertRegex(
-            runtime,
-            r"#\[cfg\(test\)\]\s*Some\(\(HostInvocationAuthorization::Composite",
+            r"Some\(\(HostInvocationAuthorization::Composite",
         )
 
-    def test_composite_host_read_symbols_stay_inside_cfg_test_boundaries(self) -> None:
+    def test_composite_host_read_symbols_stay_inside_collections_boundary(self) -> None:
         violations = []
         for path in ALL_SRC_SOURCES:
             if path in COMPOSITE_HOST_READ_BOUNDARY_SOURCES:
@@ -723,7 +756,7 @@ fn live() { allowed::call(); }
         self.assertEqual(
             violations,
             [],
-            "Composite symbols must not escape their compile-gated modules/runtime entry",
+            "Composite symbols must not escape the exact Collections authority boundary",
         )
 
     def test_extension_state_actor_handler_never_invokes_extension_runtime(self) -> None:

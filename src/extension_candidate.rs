@@ -38,6 +38,41 @@ impl std::fmt::Debug for PackageCandidateSlot {
 }
 
 impl PackageCandidateSlot {
+    #[cfg(test)]
+    pub(crate) fn ready_for_test(binding: HostProviderBinding, artifact_generation: u64) -> Self {
+        let package_id = binding.package_id().to_owned();
+        let service_id = binding.service_id().to_owned();
+        let artifact_sha256 = binding.artifact_sha256().to_owned();
+        let canceled = Arc::new(AtomicBool::new(false));
+        let worker_canceled = Arc::clone(&canceled);
+        let (requests, request_rx) = mpsc::sync_channel::<CandidateRequest>(1);
+        let join = std::thread::spawn(move || {
+            while request_rx.recv().is_ok() {
+                if worker_canceled.load(Ordering::Acquire) {
+                    break;
+                }
+            }
+        });
+        let worker = CandidateWorker {
+            binding,
+            runtime_generation: CANDIDATE_RUNTIME_GENERATION,
+            requests,
+            canceled: Arc::clone(&canceled),
+            _join: join,
+        };
+        Self {
+            package_id: package_id.clone(),
+            artifact_sha256,
+            artifact_generation,
+            canceled,
+            ready: Some(PackageCandidateSet {
+                package_id,
+                artifact_generation,
+                workers: BTreeMap::from([(service_id, worker)]),
+            }),
+        }
+    }
+
     pub(crate) fn spawn(
         installed: crate::extension_package::InstalledPackageV1,
         artifact_generation: u64,

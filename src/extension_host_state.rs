@@ -190,6 +190,25 @@ pub(crate) struct HostProviderBinding {
 }
 
 impl HostProviderBinding {
+    #[cfg(test)]
+    pub(crate) fn for_test(
+        package_id: String,
+        service_id: String,
+        namespace: String,
+        artifact_sha256: String,
+        artifact_version: String,
+        capabilities: BTreeSet<String>,
+    ) -> Self {
+        Self {
+            package_id,
+            service_id,
+            namespace,
+            artifact_sha256,
+            artifact_version,
+            capabilities,
+        }
+    }
+
     // Staged until the production package-provider catalog constructs bindings.
     #[allow(dead_code)]
     pub(crate) fn from_installed(

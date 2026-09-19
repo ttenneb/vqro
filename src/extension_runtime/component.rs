@@ -32,6 +32,83 @@ const COMPONENT_FUEL_PER_INVOCATION: u64 = 1_000_000_000;
 const COMPONENT_LOG_BYTES_PER_INVOCATION: usize = 64 * 1024;
 const INTERRUPT_POLL_INTERVAL: Duration = Duration::from_millis(1);
 
+#[cfg(test)]
+mod operation_metrics {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    pub(super) const PACKAGE_ID: &str = "test.collections.baseline";
+    static FACTORIES: AtomicU64 = AtomicU64::new(0);
+    static ENGINES: AtomicU64 = AtomicU64::new(0);
+    static COMPONENTS: AtomicU64 = AtomicU64::new(0);
+    static STORES: AtomicU64 = AtomicU64::new(0);
+    static INSTANCES: AtomicU64 = AtomicU64::new(0);
+    static INVOCATIONS: AtomicU64 = AtomicU64::new(0);
+
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+    pub(super) struct Snapshot {
+        pub(super) component_factories: u64,
+        pub(super) wasmtime_engines: u64,
+        pub(super) compiled_components: u64,
+        pub(super) active_stores: u64,
+        pub(super) active_instances: u64,
+        pub(super) provider_invocations: u64,
+    }
+
+    pub(super) fn reset() {
+        assert_eq!(STORES.load(Ordering::Acquire), 0);
+        assert_eq!(INSTANCES.load(Ordering::Acquire), 0);
+        for counter in [
+            &FACTORIES,
+            &ENGINES,
+            &COMPONENTS,
+            &STORES,
+            &INSTANCES,
+            &INVOCATIONS,
+        ] {
+            counter.store(0, Ordering::Release);
+        }
+    }
+
+    pub(super) fn factory(package_id: &str) {
+        if package_id == PACKAGE_ID {
+            FACTORIES.fetch_add(1, Ordering::AcqRel);
+            ENGINES.fetch_add(1, Ordering::AcqRel);
+            COMPONENTS.fetch_add(1, Ordering::AcqRel);
+        }
+    }
+
+    pub(super) fn runtime_started(package_id: &str) {
+        if package_id == PACKAGE_ID {
+            STORES.fetch_add(1, Ordering::AcqRel);
+            INSTANCES.fetch_add(1, Ordering::AcqRel);
+        }
+    }
+
+    pub(super) fn runtime_stopped(package_id: &str) {
+        if package_id == PACKAGE_ID {
+            STORES.fetch_sub(1, Ordering::AcqRel);
+            INSTANCES.fetch_sub(1, Ordering::AcqRel);
+        }
+    }
+
+    pub(super) fn invocation(package_id: &str) {
+        if package_id == PACKAGE_ID {
+            INVOCATIONS.fetch_add(1, Ordering::AcqRel);
+        }
+    }
+
+    pub(super) fn snapshot() -> Snapshot {
+        Snapshot {
+            component_factories: FACTORIES.load(Ordering::Acquire),
+            wasmtime_engines: ENGINES.load(Ordering::Acquire),
+            compiled_components: COMPONENTS.load(Ordering::Acquire),
+            active_stores: STORES.load(Ordering::Acquire),
+            active_instances: INSTANCES.load(Ordering::Acquire),
+            provider_invocations: INVOCATIONS.load(Ordering::Acquire),
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct ComponentRuntimeFactory {
     engine: Engine,
@@ -125,7 +202,7 @@ impl ComponentRuntimeFactory {
             .collect::<Vec<_>>();
         legacy.sort_by_key(|capability| format!("{capability:?}"));
         legacy.dedup();
-        Ok(Self {
+        let factory = Self {
             engine,
             component,
             active: Arc::new(AtomicBool::new(false)),
@@ -138,7 +215,10 @@ impl ComponentRuntimeFactory {
                 installed_package: true,
             },
             fuel_per_invocation: COMPONENT_FUEL_PER_INVOCATION,
-        })
+        };
+        #[cfg(test)]
+        operation_metrics::factory(&factory.package_id);
+        Ok(factory)
     }
 
     pub(crate) fn identity(&self, generation: u64) -> RuntimeIdentityV1 {
@@ -334,7 +414,7 @@ impl ComponentRuntime {
             ));
         }
         let methods = descriptor.methods.into_iter().collect::<BTreeSet<_>>();
-        Ok(Self {
+        let runtime = Self {
             engine,
             store,
             bindings,
@@ -345,7 +425,10 @@ impl ComponentRuntime {
             retired: false,
             lease: Some(lease),
             fuel_per_invocation: factory.fuel_per_invocation,
-        })
+        };
+        #[cfg(test)]
+        operation_metrics::runtime_started(&runtime.descriptor.identity.package_id);
+        Ok(runtime)
     }
 }
 
@@ -365,6 +448,8 @@ impl ExtensionRuntime for ComponentRuntime {
         if self.retired {
             return Err(RuntimeError::Exited);
         }
+        #[cfg(test)]
+        operation_metrics::invocation(&self.descriptor.identity.package_id);
         let bytes = canonical_json_bytes(request).map_err(|error| {
             RuntimeError::Protocol(format!("encode canonical component request: {error}"))
         })?;
@@ -404,10 +489,21 @@ impl ExtensionRuntime for ComponentRuntime {
             return;
         }
         self.retired = true;
+        #[cfg(test)]
+        operation_metrics::runtime_stopped(&self.descriptor.identity.package_id);
         self.engine.increment_epoch();
         self.store.data_mut().host_calls = None;
         self.store.data().canceled.store(true, Ordering::Release);
         self.lease.take();
+    }
+}
+
+impl Drop for ComponentRuntime {
+    fn drop(&mut self) {
+        #[cfg(test)]
+        if !self.retired {
+            operation_metrics::runtime_stopped(&self.descriptor.identity.package_id);
+        }
     }
 }
 
@@ -759,6 +855,22 @@ mod tests {
         world: &str,
         namespaces: &[&str],
     ) -> Vec<u8> {
+        package_bytes_with_id(
+            component,
+            capabilities,
+            world,
+            namespaces,
+            "example.component",
+        )
+    }
+
+    fn package_bytes_with_id(
+        component: &[u8],
+        capabilities: &[&str],
+        world: &str,
+        namespaces: &[&str],
+        package_id: &str,
+    ) -> Vec<u8> {
         let capabilities = capabilities
             .iter()
             .map(|value| serde_json::to_string(value).unwrap())
@@ -770,7 +882,7 @@ mod tests {
             .collect::<Vec<_>>()
             .join(", ");
         let manifest = format!(
-            "manifest_version = 2\npackage_contract = \"vqro.package.v1\"\nid = \"example.component\"\nversion = \"1.0.0\"\nmin_vqro_version = \"0.1.0\"\nnamespaces = [{namespaces}]\n\n[[services]]\nid = \"echo\"\nprovides = []\ncapabilities = [{capabilities}]\n\n[services.runtime]\nkind = \"component\"\ncomponent = \"services/echo.wasm\"\nworld = \"{world}\"\n"
+            "manifest_version = 2\npackage_contract = \"vqro.package.v1\"\nid = \"{package_id}\"\nversion = \"1.0.0\"\nmin_vqro_version = \"0.1.0\"\nnamespaces = [{namespaces}]\n\n[[services]]\nid = \"echo\"\nprovides = []\ncapabilities = [{capabilities}]\n\n[services.runtime]\nkind = \"component\"\ncomponent = \"services/echo.wasm\"\nworld = \"{world}\"\n"
         );
         let mut files = vec![
             (
@@ -985,6 +1097,172 @@ mod tests {
             .map(|(name, bytes)| format!("{}  {name}\n", sha256(bytes)))
             .collect::<String>();
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn collections_operation_baseline_matches_instrumented_component_topology() {
+        let archive = package_bytes_with_id(
+            ECHO_COMPONENT,
+            &[],
+            "vqro:extension/service@1.0.0",
+            &[operation_metrics::PACKAGE_ID],
+            operation_metrics::PACKAGE_ID,
+        );
+        let (root, installed) = install_archive(archive);
+        let baseline: serde_json::Value = serde_json::from_str(include_str!(
+            "../../docs/next/api/collections-r0-operation-baseline.json"
+        ))
+        .unwrap();
+
+        for scenario in baseline["scenarios"].as_array().unwrap() {
+            operation_metrics::reset();
+            let enabled_services = scenario["enabled_services"].as_u64().unwrap() as usize;
+            let active_services = scenario["counts"]["active_stores"].as_u64().unwrap() as usize;
+            let changed_scopes = scenario["changed_scopes"].as_u64().unwrap() as usize;
+            let panes = scenario["panes"].as_u64().unwrap() as usize;
+            let clients = scenario["clients"].as_u64().unwrap() as usize;
+            let frames = scenario["composed_frames"].as_u64().unwrap() as usize;
+
+            let factories = (0..enabled_services)
+                .map(|_| {
+                    ComponentRuntimeFactory::installed(
+                        &installed,
+                        "echo",
+                        operation_metrics::PACKAGE_ID,
+                    )
+                    .unwrap()
+                })
+                .collect::<Vec<_>>();
+            let canceled = AtomicBool::new(false);
+            let mut runtimes = factories
+                .iter()
+                .take(active_services)
+                .enumerate()
+                .map(|(index, factory)| factory.start(index as u64 + 1, &canceled).unwrap())
+                .collect::<Vec<_>>();
+
+            for (index, runtime) in runtimes.iter_mut().take(changed_scopes).enumerate() {
+                let identity = runtime.descriptor().identity.clone();
+                let host_calls = Arc::new(super::super::RuntimeHostCallRouter::new(
+                    identity.clone(),
+                    identity.namespace.clone(),
+                    std::collections::BTreeMap::new(),
+                    super::super::DisabledHostCalls {
+                        identity: identity.clone(),
+                        grants: factories[index].grants(),
+                    },
+                ));
+                runtime
+                    .invoke(
+                        &RuntimeRequestV1 {
+                            contract: super::super::EXTENSION_SERVICE_CONTRACT_V1.into(),
+                            request_id: format!("baseline-{index}"),
+                            identity,
+                            method: "conformance.echo".into(),
+                            params: serde_json::json!({}),
+                        },
+                        Instant::now() + Duration::from_secs(1),
+                        &canceled,
+                        &host_calls,
+                        MAX_RUNTIME_FRAME_BYTES,
+                    )
+                    .unwrap();
+            }
+
+            let pane_topology = vec![0_u8; panes];
+            let mut projection_cache = crate::host_document_cache::HostDocumentCache::default();
+            projection_cache
+                .publish_for_namespace(
+                    crate::collections_extension_contract::COLLECTIONS_NAMESPACE,
+                    1,
+                    100,
+                    &std::collections::HashSet::new(),
+                    crate::extension_contract::HostDocumentV1 {
+                        contract: crate::extension_contract::HOST_DOCUMENT_CONTRACT_V1.into(),
+                        namespace: crate::collections_extension_contract::COLLECTIONS_NAMESPACE
+                            .into(),
+                        generation: 1,
+                        revision: 1,
+                        surface: crate::extension_contract::HostSurface::Navigation,
+                        target: crate::extension_contract::HostTarget::Session,
+                        items: Vec::new(),
+                        actions: Vec::new(),
+                        required_capabilities: Vec::new(),
+                    },
+                )
+                .unwrap();
+            let client_projections = (0..clients)
+                .map(|_| projection_cache.current().unwrap().clone())
+                .collect::<Vec<_>>();
+            let before_frames = operation_metrics::snapshot().provider_invocations;
+            for _ in 0..frames {
+                std::hint::black_box(&pane_topology);
+                for projection in &client_projections {
+                    std::hint::black_box(projection);
+                }
+            }
+            let observed = operation_metrics::snapshot();
+            let counts = &scenario["counts"];
+            assert_eq!(
+                observed.component_factories,
+                counts["component_factories"].as_u64().unwrap(),
+                "{} component factories",
+                scenario["id"]
+            );
+            assert_eq!(
+                observed.wasmtime_engines,
+                counts["wasmtime_engines"].as_u64().unwrap(),
+                "{} Wasmtime engines",
+                scenario["id"]
+            );
+            assert_eq!(
+                observed.compiled_components,
+                counts["compiled_components"].as_u64().unwrap(),
+                "{} compiled components",
+                scenario["id"]
+            );
+            assert_eq!(
+                observed.active_stores,
+                counts["active_stores"].as_u64().unwrap(),
+                "{} active stores",
+                scenario["id"]
+            );
+            assert_eq!(
+                observed.active_instances,
+                counts["active_instances"].as_u64().unwrap(),
+                "{} active instances",
+                scenario["id"]
+            );
+            assert_eq!(
+                observed.provider_invocations,
+                counts["provider_invocations"].as_u64().unwrap(),
+                "{} provider invocations",
+                scenario["id"]
+            );
+            assert_eq!(
+                observed.provider_invocations - before_frames,
+                counts["extension_calls_during_frame_composition"]
+                    .as_u64()
+                    .unwrap(),
+                "{} frame-composition extension calls",
+                scenario["id"]
+            );
+            assert_eq!(
+                client_projections.len() as u64,
+                counts["cached_projection_fanout"].as_u64().unwrap(),
+                "{} cached projection fanout",
+                scenario["id"]
+            );
+
+            for runtime in &mut runtimes {
+                runtime.stop(RuntimeStopReason::Requested);
+            }
+            drop(runtimes);
+            drop(factories);
+            assert_eq!(operation_metrics::snapshot().active_stores, 0);
+            assert_eq!(operation_metrics::snapshot().active_instances, 0);
+        }
+        cleanup(root);
     }
 
     #[test]

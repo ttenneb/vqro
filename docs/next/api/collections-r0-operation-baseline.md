@@ -1,11 +1,13 @@
 # Collections R0 operation baseline
 
-Status: **frozen pre-R1 comparison baseline** at runtime revision `99fede25`.
+Status: **frozen pre-R1 baseline with an instrumented post-R4 comparison** at runtime revision `099239da`.
 
 Machine-readable counts: [`collections-r0-operation-baseline.json`](collections-r0-operation-baseline.json)
 
-This is a deterministic ownership/dispatch baseline, not a wall-clock benchmark. Counts follow the
-current implementation boundaries:
+This is an instrumented ownership/dispatch comparison, not a wall-clock benchmark. The test creates
+verified component-package factories against separate Wasmtime Engines, starts real Stores and
+Instances, invokes changed scopes, and repeatedly consumes cached projections for the configured
+pane/client/frame dimensions. Counts follow the current implementation boundaries:
 
 - every installed `ComponentRuntimeFactory` owns one Wasmtime `Engine` and one compiled `Component`;
 - every active component generation owns one `Store` and one `Instance`;
@@ -17,8 +19,9 @@ current implementation boundaries:
 
 The scenario set intentionally is not a Cartesian benchmark matrix. It covers 1/15 services and
 scopes, 1/15 panes, 1/3 clients, one unrelated-scope invalidation, and the 100-service cold smoke.
-R1 instrumentation must report the same named counters so a change is directly comparable. R5 may
-add timing, memory, lazy activation, Engine sharing, or compiled-component cache benchmarks.
+The component-runtime probe reports the same named counters for every scenario, including the
+100-service cold-capacity smoke. R5 may add timing, memory, lazy activation, Engine sharing, or
+compiled-component cache benchmarks.
 
 ## Acceptance interpretation
 
@@ -33,12 +36,15 @@ can be shared.
 
 ## Evidence commands
 
-The frozen counts are checked structurally by the Collections baseline unit test. Existing runtime,
-projection, and multi-client tests remain the behavioral evidence for startup fencing, stale result
-rejection, cached shell projection, and fanout. The R0 verification command is:
+The contract test checks the frozen cardinality invariants. The runtime test compares those counts
+with observed factory, Engine, compiled Component, active Store/Instance, invocation, and cached
+fanout counts. Existing stale/cancel tests retain the one-attempt publication bound. Run both with:
 
 ```bash
-ZIG=$HOME/.local/opt/zig-0.16.0/zig cargo test \
+ZIG=$HOME/.local/opt/zig-0.16.0/zig cargo test --locked \
   collections_extension_contract::tests::r0_operation_baseline_has_bounded_cardinality \
+  -- --exact
+ZIG=$HOME/.local/opt/zig-0.16.0/zig cargo test --locked \
+  extension_runtime::component::tests::collections_operation_baseline_matches_instrumented_component_topology \
   -- --exact
 ```

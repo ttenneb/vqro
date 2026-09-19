@@ -218,7 +218,15 @@ impl App {
         let mut session = self.capture_session_snapshot();
         session.version = crate::persist::SNAPSHOT_VERSION;
         session.collections_authority = authority.clone();
-        if let Err(error) = crate::persist::persist_collections_checkpoint(&session, &next_state) {
+        #[cfg(test)]
+        let persisted = if let Some(paths) = self.collections_checkpoint_paths_override.as_ref() {
+            crate::persist::persist_collections_checkpoint_at(paths, &session, &next_state)
+        } else {
+            crate::persist::persist_collections_checkpoint(&session, &next_state)
+        };
+        #[cfg(not(test))]
+        let persisted = crate::persist::persist_collections_checkpoint(&session, &next_state);
+        if let Err(error) = persisted {
             self.session_persistence_blocked = true;
             self.extension_state_persistence_blocked = true;
             return Err(format!("Collections cutover persistence failed: {error}"));
@@ -861,6 +869,176 @@ mod tests {
             migration_id: Some("collections_r3_test".into()),
             minimum_reader_version: 7,
         };
+    }
+
+    #[test]
+    fn atomic_cutover_publishes_both_images_and_restart_accepts_the_exact_state() {
+        use crate::collections_extension_contract::{
+            CollectionsActionDeclarationsV1, CollectionsProfileContainerV1,
+            CollectionsProfileTopologyV1, CollectionsTerminalPlacementV1,
+        };
+        use crate::persist::coordinator::{
+            PersistenceOwnership, PersistencePaths, StartupRecovery,
+        };
+
+        let unique = format!(
+            "vqro-collections-cutover-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        );
+        let root = std::env::temp_dir().join(unique);
+        std::fs::create_dir_all(&root).unwrap();
+        let paths = PersistencePaths {
+            session: root.join("session.json"),
+            extension_state: root.join("extension-state-v1.json"),
+            journal: root.join("session-extension-state.journal.json"),
+        };
+
+        let mut app = test_app();
+        app.policy.persist_session = true;
+        app.collections_checkpoint_paths_override = Some(paths.clone());
+        let mut workspace = crate::workspace::Workspace::test_new("cutover");
+        let workspace_id = workspace.id.clone();
+        let tab_id = workspace.tabs[0].id.to_string();
+        let first_pane = workspace.tabs[0].layout.pane_ids()[0];
+        let second_pane = workspace.test_split(ratatui::layout::Direction::Vertical);
+        let collection_id = workspace.tabs[0]
+            .create_collection_near(
+                crate::layout::LayoutLeaf::Pane(first_pane),
+                ratatui::layout::Direction::Vertical,
+                0.5,
+                Some("Helpers".into()),
+            )
+            .unwrap();
+        workspace.tabs[0]
+            .collect_tiled_pane(second_pane, collection_id)
+            .unwrap();
+        workspace.tabs[0]
+            .set_collection_member_archived(collection_id, second_pane, true)
+            .unwrap();
+        let first_terminal = workspace.tabs[0]
+            .terminal_id(first_pane)
+            .unwrap()
+            .to_string();
+        let second_terminal = workspace.tabs[0]
+            .terminal_id(second_pane)
+            .unwrap()
+            .to_string();
+        let container_id = crate::terminal_container::format_terminal_container_id(
+            crate::terminal_container::TerminalContainerId::from(collection_id),
+        );
+        app.state.workspaces = vec![workspace];
+        app.state.ensure_test_terminals();
+        app.rebuild_collections_import_overlay().unwrap();
+
+        let pin = production_pin().unwrap();
+        let replace_fixture_ids = |fixture: &str| {
+            fixture
+                .replace(
+                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    &pin.package_sha256,
+                )
+                .replace("tab_11111111111111111111111111111111", &tab_id)
+                .replace("container_000000000000002a", &container_id)
+                .replace("term_11111111111111111111111111111111", &first_terminal)
+                .replace("term_22222222222222222222222222222222", &second_terminal)
+        };
+        let profile: CollectionsDocumentProfileV1 =
+            serde_json::from_str(&replace_fixture_ids(include_str!(
+                "../../../docs/next/api/vqro-collections-v1.fixtures/document-profile-valid.json"
+            )))
+            .unwrap();
+        let actions: CollectionsActionDeclarationsV1 = serde_json::from_str(&replace_fixture_ids(
+            include_str!("../../../docs/next/api/vqro-collections-v1.fixtures/actions-valid.json"),
+        ))
+        .unwrap();
+        let topology = CollectionsProfileTopologyV1 {
+            workspace_id,
+            tab_id: tab_id.clone(),
+            containers: vec![CollectionsProfileContainerV1 {
+                container_id,
+                terminal_ids: vec![first_terminal.clone(), second_terminal.clone()],
+                selected_terminal_id: Some(first_terminal.clone()),
+            }],
+            placements: vec![
+                CollectionsTerminalPlacementV1 {
+                    terminal_id: first_terminal,
+                    pane_id: format!("pane_{}", first_pane.raw()),
+                },
+                CollectionsTerminalPlacementV1 {
+                    terminal_id: second_terminal,
+                    pane_id: format!("pane_{}", second_pane.raw()),
+                },
+            ],
+            producer: profile.document.producer.clone(),
+            state_dependency: profile.document.dependencies[0].clone(),
+            terminals_dependency: profile.document.dependencies[1].clone(),
+        };
+        app.collections_candidate_audits
+            .publish_checkpointed_create(profile, actions, topology)
+            .unwrap();
+
+        let binding = crate::extension_host_state::HostProviderBinding::for_test(
+            pin.package_id.clone(),
+            pin.service_id.clone(),
+            COLLECTIONS_NAMESPACE.into(),
+            pin.package_sha256.clone(),
+            "1.0.0".into(),
+            std::collections::BTreeSet::from([
+                crate::extension_host_state::HOST_STATE_READ_CAPABILITY.into(),
+                crate::extension_host_terminals::HOST_TERMINALS_READ_CAPABILITY.into(),
+            ]),
+        );
+        app.extension_package_services.insert(
+            pin.package_id.clone(),
+            crate::extension_candidate::PackageCandidateSlot::ready_for_test(binding, 1),
+        );
+
+        assert_eq!(
+            app.collections_authority.phase,
+            CollectionsAuthorityPhaseV1::Legacy
+        );
+        app.maybe_cutover_collections_authority().unwrap();
+        assert_eq!(
+            app.collections_authority.phase,
+            CollectionsAuthorityPhaseV1::Package
+        );
+        assert!(app.collections_package_runtime_available());
+        assert!(!paths.journal.exists());
+
+        let ownership = PersistenceOwnership::try_acquire(&paths).unwrap();
+        assert_eq!(
+            crate::persist::coordinator::recover_checkpoint_at_startup(&ownership, &paths).unwrap(),
+            StartupRecovery::NoJournal
+        );
+        drop(ownership);
+        let session =
+            crate::persist::parse_snapshot(&std::fs::read_to_string(&paths.session).unwrap())
+                .unwrap();
+        let state = match crate::persist::extension_state::load(&paths.extension_state) {
+            crate::persist::extension_state::ExtensionStateLoad::Loaded(state) => state,
+            other => panic!("expected committed extension state, got {other:?}"),
+        };
+        let authority_state = session.collections_authority.state.as_ref().unwrap();
+        let state_snapshot = state.snapshot(COLLECTIONS_NAMESPACE).unwrap();
+        assert_eq!(
+            authority_state.store_generation,
+            state_snapshot.store_generation
+        );
+        assert_eq!(authority_state.namespace_revision, state_snapshot.revision);
+
+        let mut restarted = test_app();
+        restarted.collections_authority = session.collections_authority;
+        restarted.extension_state = state;
+        restarted.validate_loaded_collections_authority();
+        assert!(!restarted.session_persistence_blocked);
+        assert!(!restarted.extension_state_persistence_blocked);
+        assert_eq!(
+            restarted.collections_authority.phase,
+            CollectionsAuthorityPhaseV1::Package
+        );
+
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
