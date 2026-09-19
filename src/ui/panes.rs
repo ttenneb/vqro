@@ -236,6 +236,27 @@ pub(super) fn resize_tab_panes(
     area: Rect,
     cell_size: crate::kitty_graphics::HostCellSize,
 ) {
+    resize_tab_panes_except(
+        app,
+        terminal_runtimes,
+        workspace_index,
+        tab,
+        area,
+        cell_size,
+        &std::collections::HashSet::new(),
+    );
+}
+
+/// Resize ordinary layout panes while preserving narrower client-owned viewport claims.
+pub(super) fn resize_tab_panes_except(
+    app: &AppState,
+    terminal_runtimes: &TerminalRuntimeRegistry,
+    workspace_index: usize,
+    tab: &crate::workspace::Tab,
+    area: Rect,
+    cell_size: crate::kitty_graphics::HostCellSize,
+    excluded_panes: &std::collections::HashSet<crate::layout::PaneId>,
+) {
     let multi_pane = tab.layout.pane_count() > 1;
 
     if tab.zoomed {
@@ -251,7 +272,9 @@ pub(super) fn resize_tab_panes(
             let pane_inner =
                 collection_content_rect(tab, focused_id, pane_inner_rect(area, borders));
             let inner_rect = terminal_inner_rect(rt, pane_inner, app.pane_scrollbars);
-            if !app.direct_attach_resize_locks.contains(terminal_id) {
+            if !excluded_panes.contains(&focused_id)
+                && !app.direct_attach_resize_locks.contains(terminal_id)
+            {
                 rt.resize(
                     inner_rect.height,
                     inner_rect.width,
@@ -276,7 +299,9 @@ pub(super) fn resize_tab_panes(
             runtime_for_tab_pane(app, terminal_runtimes, workspace_index, tab, info.id)
         {
             let inner_rect = terminal_inner_rect(rt, pane_inner, app.pane_scrollbars);
-            if !app.direct_attach_resize_locks.contains(terminal_id) {
+            if !excluded_panes.contains(&info.id)
+                && !app.direct_attach_resize_locks.contains(terminal_id)
+            {
                 rt.resize(
                     inner_rect.height,
                     inner_rect.width,

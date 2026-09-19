@@ -2326,6 +2326,31 @@ async fn terminal_views_interest_is_bounded_revision_bound_and_controller_owned_
     let initial_surface: crate::protocol::endpoint::ServerTerminalViewsSurface =
         serde_json::from_str(&data).unwrap();
     assert_eq!(initial_surface.views.len(), 1);
+
+    let preview_content_seq = server.app.state.workspaces[0].test_runtimes[&pane].content_seq();
+    server.app.state.workspaces[0].custom_name = Some("renamed while previewing".into());
+    server.render_and_stream();
+    let revision = server.clients[&174].shell_projection_revision;
+    assert!(revision > initial_surface.projection_revision);
+    assert_eq!(
+        server.clients[&174]
+            .shell_terminal_views_interest
+            .as_ref()
+            .map(|interest| interest.projection_revision),
+        Some(revision),
+        "a valid preview claim follows projection-only updates"
+    );
+    assert_eq!(
+        server.app.state.workspaces[0].test_runtimes[&pane].current_size(),
+        (8, 30),
+        "updating collection chrome must not restore full-leaf geometry"
+    );
+    assert_eq!(
+        server.app.state.workspaces[0].test_runtimes[&pane].content_seq(),
+        preview_content_seq,
+        "projection-only updates must not resize the preview PTY"
+    );
+
     server
         .clients
         .get_mut(&174)
@@ -2347,11 +2372,17 @@ async fn terminal_views_interest_is_bounded_revision_bound_and_controller_owned_
         (6, 20),
         "the narrower accessory viewport wins over its enclosing preview"
     );
+    let viewport_content_seq = server.app.state.workspaces[0].test_runtimes[&pane].content_seq();
     assert!(server.resize_shell_tab_if_controller(174, false));
     assert_eq!(
         server.app.state.workspaces[0].test_runtimes[&pane].current_size(),
         (6, 20),
         "controller geometry replay preserves viewport precedence"
+    );
+    assert_eq!(
+        server.app.state.workspaces[0].test_runtimes[&pane].content_seq(),
+        viewport_content_seq,
+        "geometry replay must not resize to the full leaf before restoring the viewport"
     );
     assert!(
         server.handle_server_event(ServerEvent::ClientShellPaneViewport {

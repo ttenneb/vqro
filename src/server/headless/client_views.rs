@@ -588,28 +588,62 @@ impl HeadlessServer {
         } else {
             crate::kitty_graphics::HostCellSize::default()
         };
+        // A preview or accessory viewport is the geometry authority for its PTY. Exclude these
+        // panes from the ordinary layout pass so one geometry replay cannot resize the PTY to the
+        // full leaf and immediately back to the preview, emitting duplicate SIGWINCH events.
+        let excluded_panes = viewport_pane_id
+            .iter()
+            .chain(
+                terminal_views
+                    .as_ref()
+                    .into_iter()
+                    .flat_map(|interest| interest.views.iter().map(|view| &view.pane_id)),
+            )
+            .filter_map(|pane_id| self.app.parse_pane_id(pane_id))
+            .filter_map(|(workspace_index, pane_id)| {
+                (workspace_index == target.workspace_index
+                    && self
+                        .app
+                        .state
+                        .workspaces
+                        .get(workspace_index)
+                        .and_then(|workspace| workspace.tabs.get(target.tab_index))
+                        .is_some_and(|tab| tab.terminal_id(pane_id).is_some()))
+                .then_some(pane_id)
+            })
+            .collect::<HashSet<_>>();
+        let no_excluded_panes = HashSet::new();
         let area = Rect::new(0, 0, cols, rows);
         if self.app_client_count() == 1 {
             for (workspace_index, workspace) in self.app.state.workspaces.iter().enumerate() {
                 for tab_index in 0..workspace.tabs.len() {
-                    crate::ui::resize_tab_surface(
+                    let exclusions = if workspace_index == target.workspace_index
+                        && tab_index == target.tab_index
+                    {
+                        &excluded_panes
+                    } else {
+                        &no_excluded_panes
+                    };
+                    crate::ui::resize_tab_surface_except(
                         &self.app.state,
                         &self.app.terminal_runtimes,
                         workspace_index,
                         tab_index,
                         area,
                         cell_size,
+                        exclusions,
                     );
                 }
             }
         } else {
-            crate::ui::compute_tab_surface_for(
+            crate::ui::resize_tab_surface_except(
                 &self.app.state,
                 &self.app.terminal_runtimes,
-                Some(target),
+                target.workspace_index,
+                target.tab_index,
                 area,
-                true,
                 cell_size,
+                &excluded_panes,
             );
         }
         if let Some(request) = pane_viewport {

@@ -765,7 +765,36 @@ impl HeadlessServer {
                 });
             if changed {
                 if let Some(target) = self.shell_target_for_client(*client_id) {
-                    crate::ui::resize_tab_surface(
+                    let excluded_panes = client
+                        .shell_pane_viewport
+                        .as_ref()
+                        .filter(|viewport| {
+                            viewport.boot_id == self.client_shell_boot_id
+                                && viewport.projection_revision == client.shell_projection_revision
+                                && viewport.size.is_some()
+                        })
+                        .map(|viewport| &viewport.pane_id)
+                        .into_iter()
+                        .chain(
+                            client
+                                .shell_terminal_views_interest
+                                .as_ref()
+                                .filter(|interest| {
+                                    interest.boot_id == self.client_shell_boot_id
+                                        && interest.projection_revision
+                                            == client.shell_projection_revision
+                                })
+                                .into_iter()
+                                .flat_map(|interest| {
+                                    interest.views.iter().map(|view| &view.pane_id)
+                                }),
+                        )
+                        .filter_map(|pane_id| self.app.parse_pane_id(pane_id))
+                        .filter_map(|(workspace_index, pane_id)| {
+                            (workspace_index == target.workspace_index).then_some(pane_id)
+                        })
+                        .collect::<HashSet<_>>();
+                    crate::ui::resize_tab_surface_except(
                         &self.app.state,
                         &self.app.terminal_runtimes,
                         target.workspace_index,
@@ -776,6 +805,7 @@ impl HeadlessServer {
                         } else {
                             crate::kitty_graphics::HostCellSize::default()
                         },
+                        &excluded_panes,
                     );
                 }
             }
@@ -816,6 +846,24 @@ impl HeadlessServer {
                     .clients
                     .get(&client_id)
                     .and_then(|client| client.shell_location.clone());
+                let terminal_view_panes = shell_target
+                    .and_then(|target| {
+                        self.app
+                            .state
+                            .workspaces
+                            .get(target.workspace_index)
+                            .and_then(|workspace| workspace.tabs.get(target.tab_index))
+                            .map(|tab| {
+                                tab.layout
+                                    .pane_ids()
+                                    .into_iter()
+                                    .filter_map(|pane_id| {
+                                        self.app.public_pane_id(target.workspace_index, pane_id)
+                                    })
+                                    .collect::<HashSet<_>>()
+                            })
+                    })
+                    .unwrap_or_default();
                 let agent_view = self.app.state.agent_view_override.clone();
                 let Some(client) = self.clients.get_mut(&client_id) else {
                     continue;
@@ -866,7 +914,21 @@ impl HeadlessServer {
                     client.shell_projection_revision =
                         client.shell_projection_revision.saturating_add(1);
                     restore_pane_viewport |= client.shell_pane_viewport.take().is_some();
-                    restore_pane_viewport |= client.shell_terminal_views_interest.take().is_some();
+                    if let Some(mut interest) = client.shell_terminal_views_interest.take() {
+                        // Terminal previews are presentation geometry, not extension leases. Keep
+                        // valid preview claims across projection-only updates so focusing collection
+                        // chrome cannot briefly restore the full leaf and then shrink the PTY again.
+                        let panes_still_exist = interest
+                            .views
+                            .iter()
+                            .all(|view| terminal_view_panes.contains(&view.pane_id));
+                        if panes_still_exist {
+                            interest.projection_revision = client.shell_projection_revision;
+                            client.shell_terminal_views_interest = Some(interest);
+                        } else {
+                            restore_pane_viewport = true;
+                        }
+                    }
                     if let Some(pending) = client.pending_pane_view.as_ref() {
                         self.app.extension_services.cancel(
                             &crate::extension_service::ExtensionRequestIdentity {
