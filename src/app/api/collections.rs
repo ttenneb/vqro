@@ -168,7 +168,7 @@ impl App {
         revision
     }
 
-    fn refresh_collection_document(&mut self, ws_idx: usize, tab_idx: usize) {
+    pub(super) fn refresh_collection_document(&mut self, ws_idx: usize, tab_idx: usize) {
         let revision = self.next_host_document_revision();
         let namespaces = self
             .host_document_services

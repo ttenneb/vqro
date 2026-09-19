@@ -32,10 +32,21 @@ const SERVICE_ID: &str = "collections";
 const INVOCATION_TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_PENDING_CANDIDATE_SCOPES: usize = crate::quarantined_audit_cache::MAX_AUDIT_AUTHORITIES;
 
+pub(crate) fn is_retryable_collections_candidate_error(error: &str) -> bool {
+    error == "Collections candidate invocation was canceled or expired"
+        || error == "Collections candidate authorization is stale or mismatched"
+        || error == "candidate captured, observed, and current snapshots differ"
+        || error == "candidate actions completed before an audited profile"
+        || error.contains("candidate actions rejected: stale Collections revision")
+        || (error.starts_with("candidate host-read trace rejected:")
+            && error.contains("observed []"))
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct DesiredObservation {
     artifact_generation: u64,
     runtime_generation: u64,
+    requested_revision: u64,
     state_store_generation: u64,
     state_revision: u64,
     state_values: BTreeMap<String, serde_json::Value>,
@@ -187,6 +198,7 @@ impl CollectionsCandidateCoordinator {
         let desired = DesiredObservation {
             artifact_generation,
             runtime_generation,
+            requested_revision,
             state_store_generation: expected_state.store_generation,
             state_revision: expected_state.revision,
             state_values: expected_state.values.clone(),
@@ -263,15 +275,40 @@ impl CollectionsCandidateCoordinator {
             producer: producer.producer(),
             scope,
         };
-        let pending_key = (scope_id.clone(), kind);
-        if let Some(older_attempt) = self.pending_by_scope.remove(&pending_key) {
+        if kind == CandidateAuditKind::Actions {
+            let profile_is_current = self.profile_cache.get(&key).is_some_and(|profile| {
+                profile.document.revision == requested_revision
+                    && self.profile_topologies.get(&key) == Some(&topology)
+            });
+            if !profile_is_current {
+                // Profile and action requests share a scope but may complete out of order. Do not
+                // validate new action declarations against the prior profile revision; the
+                // accepted profile completion schedules this action pass.
+                return Ok(None);
+            }
+        }
+        let superseded_kinds: &[CandidateAuditKind] = match kind {
+            CandidateAuditKind::Profile => {
+                &[CandidateAuditKind::Profile, CandidateAuditKind::Actions]
+            }
+            CandidateAuditKind::Actions => &[CandidateAuditKind::Actions],
+        };
+        let mut superseded_any = false;
+        for superseded_kind in superseded_kinds {
+            let pending_key = (scope_id.clone(), *superseded_kind);
+            let Some(older_attempt) = self.pending_by_scope.remove(&pending_key) else {
+                continue;
+            };
             if let Some(older) = self.pending.remove(&older_attempt) {
                 older.canceled.store(true, Ordering::Release);
                 self.fail_ticket(older.ticket);
+                superseded_any = true;
             }
-        } else if self.pending.len() >= MAX_PENDING_CANDIDATE_SCOPES * 2 {
+        }
+        if !superseded_any && self.pending.len() >= MAX_PENDING_CANDIDATE_SCOPES * 2 {
             return Err("Collections candidate pending capacity reached".into());
         }
+        let pending_key = (scope_id.clone(), kind);
         let ticket = match kind {
             CandidateAuditKind::Profile => {
                 self.profile_cache
@@ -357,10 +394,15 @@ impl CollectionsCandidateCoordinator {
         attempt_id: u64,
         result: Result<serde_json::Value, String>,
     ) -> Result<(), String> {
-        let pending = self
-            .pending
-            .remove(&attempt_id)
-            .ok_or("Collections candidate attempt is absent, stale, or replayed")?;
+        let Some(pending) = self.pending.remove(&attempt_id) else {
+            if attempt_id > 0 && attempt_id <= self.next_attempt_id {
+                // A newer observation may supersede work already queued in the bounded worker.
+                // Its eventual completion is non-authoritative and must not disable the current
+                // package generation or republish stale data.
+                return Ok(());
+            }
+            return Err("Collections candidate attempt is absent or was never issued".into());
+        };
         self.pending_by_scope
             .remove(&(pending.params.scope.scope_id.clone(), pending.kind));
         let outcome = self.validate_completion(app, &pending, result);
@@ -791,13 +833,46 @@ impl App {
         result: Result<serde_json::Value, String>,
     ) -> Result<(), String> {
         let mut coordinator = std::mem::take(&mut self.collections_candidate_audits);
+        let candidate_scope = coordinator.pending.get(&attempt_id).map(|pending| {
+            (
+                pending.expected_terminals.workspace_id.clone(),
+                pending.expected_terminals.tab_id.clone(),
+                pending.params.requested_revision,
+                pending.kind,
+            )
+        });
         let outcome = coordinator.finalize(self, attempt_id, result);
         self.collections_candidate_audits = coordinator;
-        if outcome.is_ok() {
-            self.maybe_cutover_collections_authority()?;
-            self.publish_ready_collections_package_profiles();
+        if let Err(error) = &outcome {
+            if is_retryable_collections_candidate_error(error) {
+                if let Some((workspace_id, tab_id, _, _)) = candidate_scope {
+                    let location = self.state.workspaces.iter().enumerate().find_map(
+                        |(workspace_index, workspace)| {
+                            (workspace.id == workspace_id).then(|| {
+                                workspace
+                                    .tabs
+                                    .iter()
+                                    .position(|tab| tab.id == tab_id)
+                                    .map(|tab_index| (workspace_index, tab_index))
+                            })?
+                        },
+                    );
+                    if let Some((workspace_index, tab_index)) = location {
+                        self.refresh_collection_document(workspace_index, tab_index);
+                    }
+                }
+                return Ok(());
+            }
+            return outcome;
         }
-        outcome
+        self.maybe_cutover_collections_authority()?;
+        self.publish_ready_collections_package_profiles();
+        if let Some((workspace_id, tab_id, requested_revision, CandidateAuditKind::Profile)) =
+            candidate_scope
+        {
+            self.schedule_collections_candidate(workspace_id, tab_id, requested_revision)?;
+        }
+        Ok(())
     }
 }
 
@@ -1020,6 +1095,25 @@ pub(super) fn current_state_snapshot(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_superseded_observation_failures_are_retryable() {
+        assert!(is_retryable_collections_candidate_error(
+            "Collections candidate authorization is stale or mismatched"
+        ));
+        assert!(is_retryable_collections_candidate_error(
+            "candidate host-read trace rejected: Invalid(\"expected exact state.snapshot then terminals.snapshot trace, observed []\")"
+        ));
+        assert!(is_retryable_collections_candidate_error(
+            "candidate actions rejected: stale Collections revision"
+        ));
+        assert!(!is_retryable_collections_candidate_error(
+            "candidate runtime failed: component trapped"
+        ));
+        assert!(!is_retryable_collections_candidate_error(
+            "candidate returned malformed profile: missing field"
+        ));
+    }
 
     #[test]
     fn checkpointed_create_publishes_profile_actions_and_topology_together() {

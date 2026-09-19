@@ -749,16 +749,27 @@ impl App {
                     ));
                     return;
                 }
-                self.refresh_collection_documents();
+                // Publish the checkpointed profile before scheduling its replacement. Beginning a
+                // replacement retires the audit-cache entry, while the compatibility projection
+                // intentionally remains visible until that replacement is accepted.
                 self.publish_ready_collections_package_profiles();
-                let mut collection = self
-                    .collection_info(
-                        pending.workspace_index,
-                        pending.tab_index,
-                        pending.reserved_id,
-                    )
-                    .expect("reserved collection published");
+                let Some(mut collection) = self.collection_info(
+                    pending.workspace_index,
+                    pending.tab_index,
+                    pending.reserved_id,
+                ) else {
+                    self.session_persistence_blocked = true;
+                    self.extension_state_persistence_blocked = true;
+                    self.disable_collections_package_authority_runtime();
+                    let _ = pending.respond_to.send(super::responses::encode_error(
+                        pending.request_id,
+                        "collections_checkpoint_inconsistent",
+                        "checkpointed collection projection was not published",
+                    ));
+                    return;
+                };
                 collection.label.clone_from(&pending.params.label);
+                self.refresh_collection_documents();
                 self.emit_collection_event("created", collection.clone());
                 let _ = pending.respond_to.send(super::responses::encode_success(
                     pending.request_id,

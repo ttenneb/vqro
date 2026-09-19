@@ -132,6 +132,10 @@ fn collections_candidate_passes_authoritative_host_gate() {
                 panic!("App event channel disconnected during candidate audit")
             }
         }
+        assert!(
+            app.collections_candidate_audits.pending_len() <= 1,
+            "profile and action audits must be sequenced so actions cannot race the profile"
+        );
     }
 
     assert_eq!(
