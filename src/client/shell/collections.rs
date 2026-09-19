@@ -83,12 +83,20 @@ fn put(buffer: &mut Buffer, rect: Rect, text: &str, style: Style) {
     }
 }
 
+#[derive(Clone, Debug)]
+pub(super) struct CollectionSurface {
+    pub(super) collection_id: String,
+    pub(super) rect: Rect,
+    pub(super) inner_rect: Rect,
+}
+
 pub(super) fn render_collection_chrome(
     buffer: &mut Buffer,
     snapshot: &crate::protocol::ClientShellSnapshot,
     structure: Option<&crate::protocol::endpoint::ClientShellStructureProjection>,
     documented_delegations: Option<&super::document_navigation::DelegationNavigation>,
     panes: &[PaneHit],
+    surfaces: &[CollectionSurface],
     list_views: &HashSet<String>,
     maximized_pane: Option<&(String, String)>,
     palette: &Palette,
@@ -311,14 +319,58 @@ pub(super) fn render_collection_chrome(
         });
         hits.push(CollectionChromeHit {
             rect,
+            surface_rect: pane.rect,
             collection_id: collection.collection_id.clone(),
-            selected_pane_id: pane.pane_id.clone(),
+            selected_pane_id: Some(pane.pane_id.clone()),
             previous_pane_id,
             next_pane_id,
             previous,
             next,
             presentation_toggle,
             inspect,
+        });
+    }
+
+    for collection in structure
+        .collections
+        .iter()
+        .filter(|collection| collection.selected_pane_id.is_none())
+    {
+        let Some(surface) = surfaces
+            .iter()
+            .find(|surface| surface.collection_id == collection.collection_id)
+        else {
+            continue;
+        };
+        let header_y = surface.inner_rect.y.saturating_sub(1);
+        if header_y < surface.rect.y || surface.inner_rect.width < 12 {
+            continue;
+        }
+        let rect = Rect::new(surface.inner_rect.x, header_y, surface.inner_rect.width, 1);
+        let base = Style::default().fg(palette.text).bg(Color::Reset);
+        buffer.set_style(rect, base);
+        for x in rect.x..rect.right() {
+            buffer[(x, rect.y)]
+                .set_symbol(" ")
+                .set_style(base)
+                .set_skip(false);
+        }
+        let text = format!(
+            "  {}  ·  empty collection",
+            collection.label.as_deref().unwrap_or("Collection")
+        );
+        put(buffer, rect, &text, Style::default().fg(palette.overlay1));
+        hits.push(CollectionChromeHit {
+            rect,
+            surface_rect: surface.rect,
+            collection_id: collection.collection_id.clone(),
+            selected_pane_id: None,
+            previous_pane_id: None,
+            next_pane_id: None,
+            previous: Rect::default(),
+            next: Rect::default(),
+            presentation_toggle: Rect::default(),
+            inspect: Rect::default(),
         });
     }
     hits
@@ -328,6 +380,7 @@ pub(super) struct CollectionProjection<'a> {
     pub(super) structure: Option<&'a crate::protocol::endpoint::ClientShellStructureProjection>,
     pub(super) host_documents: Option<&'a crate::protocol::endpoint::HostDocumentsProjectionV1>,
     pub(super) documented_delegations: Option<&'a super::document_navigation::DelegationNavigation>,
+    pub(super) surfaces: &'a [CollectionSurface],
 }
 
 pub(super) fn render_collection_lists(
@@ -375,6 +428,44 @@ pub(super) fn render_collection_lists(
         .map(|delegation| (delegation.delegation_id.as_str(), delegation))
         .collect::<HashMap<_, _>>();
     let mut hits = Vec::new();
+
+    for collection in structure
+        .collections
+        .iter()
+        .filter(|collection| collection.selected_pane_id.is_none())
+    {
+        let Some(area) = projection
+            .surfaces
+            .iter()
+            .find(|surface| surface.collection_id == collection.collection_id)
+            .map(|surface| surface.inner_rect.intersection(buffer.area))
+            .filter(|area| !area.is_empty())
+        else {
+            continue;
+        };
+        let base = Style::default().fg(palette.text).bg(Color::Reset);
+        buffer.set_style(area, base);
+        for y in area.y..area.bottom() {
+            for x in area.x..area.right() {
+                buffer[(x, y)]
+                    .set_symbol(" ")
+                    .set_style(base)
+                    .set_skip(false);
+            }
+        }
+        let message = "No members · right-click for collection actions";
+        let width = u16::try_from(message.len())
+            .unwrap_or(u16::MAX)
+            .min(area.width);
+        let x = area.x.saturating_add(area.width.saturating_sub(width) / 2);
+        let y = area.y.saturating_add(area.height / 2);
+        put(
+            buffer,
+            Rect::new(x, y, width, 1),
+            message,
+            Style::default().fg(palette.overlay1).bg(Color::Reset),
+        );
+    }
 
     for collection in structure
         .collections

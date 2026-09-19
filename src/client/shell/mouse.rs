@@ -2045,87 +2045,93 @@ impl ClientShellState {
             .find(|hit| super::contains(hit.rect, point))
             .cloned()
         {
-            let target =
-                match mouse.kind {
-                    MouseEventKind::Down(MouseButton::Right)
-                        if super::contains(collection.rect, point) =>
+            let target = match mouse.kind {
+                MouseEventKind::Down(MouseButton::Right)
+                    if super::contains(collection.rect, point) =>
+                {
+                    self.overlay =
+                        Some(ClientShellOverlay::ContextMenu(ClientContextMenuOverlay {
+                            target: ClientContextMenuTarget::Collection {
+                                collection_id: collection.collection_id,
+                            },
+                            x: mouse.column,
+                            y: mouse.row,
+                            highlighted: 0,
+                        }));
+                    outcome.repaint = true;
+                    return;
+                }
+                MouseEventKind::ScrollUp => collection.previous_pane_id.clone(),
+                MouseEventKind::ScrollDown => collection.next_pane_id.clone(),
+                MouseEventKind::Down(MouseButton::Left)
+                    if super::contains(collection.previous, point) =>
+                {
+                    collection.previous_pane_id.clone()
+                }
+                MouseEventKind::Down(MouseButton::Left)
+                    if super::contains(collection.next, point) =>
+                {
+                    collection.next_pane_id.clone()
+                }
+                MouseEventKind::Down(MouseButton::Left)
+                    if super::contains(collection.presentation_toggle, point) =>
+                {
+                    let terminal_views = self.supports_endpoint_capability(
+                        crate::protocol::endpoint::TERMINAL_VIEWS_CAPABILITY,
+                    );
+                    let maximized = self.collection_maximized_pane.as_ref().is_some_and(
+                        |(collection_id, _)| collection_id == &collection.collection_id,
+                    );
+                    if maximized {
+                        // A maximized child is already a terminal presentation. Its header
+                        // switch returns to the collection list rather than skipping past it
+                        // into the compact terminal presentation.
+                        self.collection_maximized_pane = None;
+                        self.collection_entered_pane = None;
+                        self.collection_list_views
+                            .insert(collection.collection_id.clone());
+                    } else if self
+                        .collection_list_views
+                        .insert(collection.collection_id.clone())
                     {
-                        self.overlay =
-                            Some(ClientShellOverlay::ContextMenu(ClientContextMenuOverlay {
-                                target: ClientContextMenuTarget::Collection {
-                                    collection_id: collection.collection_id,
-                                },
-                                x: mouse.column,
-                                y: mouse.row,
-                                highlighted: 0,
-                            }));
-                        outcome.repaint = true;
-                        return;
-                    }
-                    MouseEventKind::ScrollUp => collection.previous_pane_id.clone(),
-                    MouseEventKind::ScrollDown => collection.next_pane_id.clone(),
-                    MouseEventKind::Down(MouseButton::Left)
-                        if super::contains(collection.previous, point) =>
-                    {
-                        collection.previous_pane_id.clone()
-                    }
-                    MouseEventKind::Down(MouseButton::Left)
-                        if super::contains(collection.next, point) =>
-                    {
-                        collection.next_pane_id.clone()
-                    }
-                    MouseEventKind::Down(MouseButton::Left)
-                        if super::contains(collection.presentation_toggle, point) =>
-                    {
-                        let terminal_views = self.supports_endpoint_capability(
-                            crate::protocol::endpoint::TERMINAL_VIEWS_CAPABILITY,
-                        );
-                        let maximized = self.collection_maximized_pane.as_ref().is_some_and(
-                            |(collection_id, _)| collection_id == &collection.collection_id,
-                        );
-                        if maximized {
-                            // A maximized child is already a terminal presentation. Its header
-                            // switch returns to the collection list rather than skipping past it
-                            // into the compact terminal presentation.
-                            self.collection_maximized_pane = None;
-                            self.collection_entered_pane = None;
-                            self.collection_list_views
-                                .insert(collection.collection_id.clone());
-                        } else if self
-                            .collection_list_views
-                            .insert(collection.collection_id.clone())
-                        {
-                            if terminal_views {
+                        if terminal_views {
+                            if let Some(selected_pane_id) = collection.selected_pane_id.clone() {
                                 self.collection_expanded_members
                                     .entry(collection.collection_id.clone())
                                     .or_default()
-                                    .insert(collection.selected_pane_id.clone());
+                                    .insert(selected_pane_id);
                             }
-                        } else {
-                            self.collection_list_views.remove(&collection.collection_id);
-                            self.collection_entered_pane = None;
                         }
-                        if self.inspector.is_some() {
-                            self.close_terminal_inspector(outcome);
-                        }
-                        outcome.repaint = true;
-                        return;
+                    } else {
+                        self.collection_list_views.remove(&collection.collection_id);
+                        self.collection_entered_pane = None;
                     }
-                    MouseEventKind::Down(MouseButton::Left)
-                        if super::contains(collection.inspect, point) =>
+                    if self.inspector.is_some() {
+                        self.close_terminal_inspector(outcome);
+                    }
+                    outcome.repaint = true;
+                    return;
+                }
+                MouseEventKind::Down(MouseButton::Left)
+                    if super::contains(collection.inspect, point) =>
+                {
+                    let Some(selected_pane_id) = collection.selected_pane_id else {
+                        return;
+                    };
+                    if self
+                        .inspector
+                        .as_ref()
+                        .is_some_and(|inspector| inspector.pane_id == selected_pane_id)
                     {
-                        if self.inspector.as_ref().is_some_and(|inspector| {
-                            inspector.pane_id == collection.selected_pane_id
-                        }) {
-                            self.close_terminal_inspector(outcome);
-                        } else {
-                            self.open_terminal_inspector(collection.selected_pane_id, outcome);
-                        }
-                        outcome.repaint = true;
-                        return;
+                        self.close_terminal_inspector(outcome);
+                    } else {
+                        self.open_terminal_inspector(selected_pane_id, outcome);
                     }
-                    _ => None,
-                };
+                    outcome.repaint = true;
+                    return;
+                }
+                _ => None,
+            };
             if let Some(pane_id) = target {
                 self.collection_entered_pane = None;
                 if self.inspector.is_some() {
@@ -2189,6 +2195,27 @@ impl ClientShellState {
                 .cloned()
             {
                 self.open_pane_context_menu(member.pane_id, mouse.column, mouse.row);
+                outcome.repaint = true;
+                return;
+            }
+            if let Some(collection) = self
+                .hits
+                .collections
+                .iter()
+                .find(|collection| {
+                    collection.selected_pane_id.is_none()
+                        && super::contains(collection.surface_rect, point)
+                })
+                .cloned()
+            {
+                self.overlay = Some(ClientShellOverlay::ContextMenu(ClientContextMenuOverlay {
+                    target: ClientContextMenuTarget::Collection {
+                        collection_id: collection.collection_id,
+                    },
+                    x: mouse.column,
+                    y: mouse.row,
+                    highlighted: 0,
+                }));
                 outcome.repaint = true;
                 return;
             }
@@ -2409,6 +2436,17 @@ impl ClientShellState {
                     self.open_workspace_context_menu(workspace_id, mouse.column, mouse.row);
                     outcome.repaint = true;
                     return;
+                }
+                if !self.sidebar_collapsed && super::contains(self.hits.workspace_body, point) {
+                    let focused_workspace_id = self
+                        .snapshot
+                        .as_deref()
+                        .and_then(|snapshot| snapshot.focused_workspace_id.clone());
+                    if let Some(workspace_id) = focused_workspace_id {
+                        self.open_workspace_context_menu(workspace_id, mouse.column, mouse.row);
+                        outcome.repaint = true;
+                        return;
+                    }
                 }
                 let tab_id = self
                     .hits

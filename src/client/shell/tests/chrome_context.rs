@@ -417,6 +417,33 @@ fn context_menus_capture_stable_targets_and_route_actions() {
 
     state.overlay = None;
     state.compose(106, 20).expect("composed frame");
+    let workspace_body = state.hits.workspace_body;
+    let blank_workspace_point = (workspace_body.y..workspace_body.bottom())
+        .flat_map(|row| (workspace_body.x..workspace_body.right()).map(move |column| (column, row)))
+        .find(|(column, row)| {
+            !state
+                .hits
+                .workspaces
+                .iter()
+                .any(|workspace| super::contains(workspace.rect, (*column, *row)))
+        })
+        .expect("blank workspace body cell");
+    state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Right),
+        column: blank_workspace_point.0,
+        row: blank_workspace_point.1,
+        modifiers: KeyModifiers::empty(),
+    })]);
+    assert!(matches!(
+        state.overlay,
+        Some(ClientShellOverlay::ContextMenu(ClientContextMenuOverlay {
+            target: ClientContextMenuTarget::Workspace { ref workspace_id, .. },
+            ..
+        })) if workspace_id == "ws_1"
+    ));
+
+    state.overlay = None;
+    state.compose(106, 20).expect("composed frame");
     let pane = state.hits.panes[0].rect;
     state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
         kind: MouseEventKind::Down(MouseButton::Right),
@@ -1395,6 +1422,7 @@ fn stale_large_surface_resize_clips_integrated_contributions_and_all_hits() {
             pixel_width: 0,
             pixel_height: 0,
         }],
+        collections: Vec::new(),
         splits: vec![crate::protocol::PaneSurfaceSplit {
             direction: crate::protocol::PaneSurfaceSplitDirection::Horizontal,
             pos: 219,
@@ -2323,5 +2351,89 @@ fn close_confirmation_error_becomes_client_owned_overlay_and_stable_group_close(
         &request.method,
         crate::api::schema::Method::WorkspaceClose(params)
             if params.workspace_id == "ws_1" && params.close_group
+    ));
+}
+
+#[test]
+fn empty_collection_surface_renders_and_owns_blank_space_context_menu() {
+    let projected = snapshot();
+    let structure = crate::protocol::endpoint::ClientShellStructureProjection {
+        session_id: "alpha".into(),
+        boot_id: "boot-1".into(),
+        revision: 1,
+        collections: vec![crate::protocol::endpoint::ClientShellCollection {
+            collection_id: "collection_empty".into(),
+            workspace_id: "ws_1".into(),
+            tab_id: "tab_1".into(),
+            label: Some("Empty workflow".into()),
+            selected_pane_id: None,
+            members: Vec::new(),
+        }],
+        delegations: Vec::new(),
+        repositories: Vec::new(),
+        space_order: Vec::new(),
+    };
+    let mut pane_surface = surface();
+    let blank = Buffer::empty(Rect::new(0, 0, 80, 19));
+    pane_surface.frame = FrameData::from_ratatui_buffer_with_hyperlinks(&blank, None, &[]);
+    pane_surface.panes[0].rect = crate::protocol::SurfaceRect {
+        x: 0,
+        y: 0,
+        width: 40,
+        height: 19,
+    };
+    pane_surface.panes[0].inner_rect = pane_surface.panes[0].rect;
+    pane_surface.collections = vec![crate::protocol::PaneSurfaceCollection {
+        collection_id: "collection_empty".into(),
+        rect: crate::protocol::SurfaceRect {
+            x: 40,
+            y: 0,
+            width: 40,
+            height: 19,
+        },
+        inner_rect: crate::protocol::SurfaceRect {
+            x: 40,
+            y: 1,
+            width: 40,
+            height: 18,
+        },
+        focused: true,
+    }];
+
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    state.set_snapshot(Box::new(projected));
+    state.structure = Some(Box::new(structure));
+    state.set_pane_surface(pane_surface);
+    let frame = state.compose(106, 20).expect("empty collection frame");
+    let text = frame
+        .cells
+        .chunks(frame.width as usize)
+        .map(|row| {
+            row.iter()
+                .map(|cell| cell.symbol.as_str())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(text.contains("Empty workflow"), "{text}");
+    assert!(text.contains("No members"), "{text}");
+
+    let collection = state.hits.collections[0].clone();
+    let point = (
+        collection.surface_rect.x + 2,
+        collection.surface_rect.bottom().saturating_sub(2),
+    );
+    state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Right),
+        column: point.0,
+        row: point.1,
+        modifiers: KeyModifiers::empty(),
+    })]);
+    assert!(matches!(
+        state.overlay,
+        Some(ClientShellOverlay::ContextMenu(ClientContextMenuOverlay {
+            target: ClientContextMenuTarget::Collection { ref collection_id },
+            ..
+        })) if collection_id == "collection_empty"
     ));
 }

@@ -127,6 +127,7 @@ impl ClientRenderState {
                 last.projection_revision == surface.projection_revision
                     && last.frame == surface.frame
                     && last.panes == surface.panes
+                    && last.collections == surface.collections
                     && last.splits == surface.splits
                     && last.popup == surface.popup
                     && last.graphics.placements == surface.graphics.placements
@@ -473,6 +474,7 @@ mod tests {
             surface_revision: 1,
             frame: FrameData::from_ratatui_buffer_with_hyperlinks(&pane, None, &[]),
             panes: Vec::new(),
+            collections: Vec::new(),
             splits: Vec::new(),
             popup: Some(Box::new(ClientShellPopupSurface {
                 terminal_id: "popup-terminal".into(),

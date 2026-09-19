@@ -224,6 +224,7 @@ fn surface(boot_id: &str, revision: u64, pane: &str) -> crate::protocol::PaneSur
             pixel_width: 0,
             pixel_height: 0,
         }],
+        collections: Vec::new(),
         splits: Vec::new(),
         popup: None,
         graphics: Default::default(),

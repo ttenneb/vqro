@@ -127,6 +127,7 @@ fn surface() -> PaneSurfaceFrame {
             pixel_width: 0,
             pixel_height: 0,
         }],
+        collections: Vec::new(),
         splits: Vec::new(),
         popup: None,
         graphics: crate::protocol::SurfaceGraphicsScene::default(),

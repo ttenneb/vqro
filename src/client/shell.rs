@@ -179,6 +179,19 @@ fn pane_surface_topology_signature(surface: &PaneSurfaceFrame) -> u64 {
     for pane_id in pane_ids {
         write(&mut hash, pane_id);
     }
+    let mut collections = surface.collections.iter().collect::<Vec<_>>();
+    collections.sort_by(|left, right| left.collection_id.cmp(&right.collection_id));
+    for collection in collections {
+        write(&mut hash, collection.collection_id.as_bytes());
+        for value in [
+            collection.rect.x,
+            collection.rect.y,
+            collection.rect.width,
+            collection.rect.height,
+        ] {
+            write(&mut hash, &value.to_le_bytes());
+        }
+    }
     let mut splits = surface.splits.iter().collect::<Vec<_>>();
     splits.sort_by(|left, right| left.path.cmp(&right.path));
     for split in splits {

@@ -304,6 +304,10 @@ impl TileLayout {
         result
     }
 
+    pub(crate) fn leaf_rect(&self, leaf: LayoutLeaf, area: Rect) -> Option<Rect> {
+        typed_leaf_rect(&self.root, leaf, area)
+    }
+
     pub fn splits(&self, area: Rect) -> Vec<SplitBorder> {
         let mut result = Vec::new();
         typed_collect_splits(&self.root, area, vec![], &mut result);

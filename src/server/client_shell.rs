@@ -452,6 +452,7 @@ pub(super) fn snapshot(
 pub(super) struct RenderedPaneSurface {
     pub(super) frame: FrameData,
     pub(super) panes: Vec<protocol::PaneSurfacePane>,
+    pub(super) collections: Vec<protocol::PaneSurfaceCollection>,
     pub(super) splits: Vec<protocol::PaneSurfaceSplit>,
     pub(super) popup: Option<Box<protocol::ClientShellPopupSurface>>,
     pub(super) graphics: protocol::SurfaceGraphicsScene,
@@ -559,10 +560,49 @@ pub(super) fn render_pane_surface(
                 .collect()
         })
         .unwrap_or_default();
+    let collections: Vec<protocol::PaneSurfaceCollection> = target
+        .and_then(|target| {
+            let workspace = app.state.workspaces.get(target.workspace_index)?;
+            let tab = workspace.tabs.get(target.tab_index)?;
+            Some(
+                tab.layout
+                    .collection_ids()
+                    .into_iter()
+                    .filter_map(|collection_id| {
+                        let rect = tab.layout.leaf_rect(
+                            crate::layout::LayoutLeaf::Collection(collection_id),
+                            area,
+                        )?;
+                        let inner_rect = Rect::new(
+                            rect.x,
+                            rect.y.saturating_add(1),
+                            rect.width,
+                            rect.height.saturating_sub(1),
+                        );
+                        Some(protocol::PaneSurfaceCollection {
+                            collection_id: format!("collection_{}", collection_id.raw()),
+                            rect: rect.into(),
+                            inner_rect: inner_rect.into(),
+                            focused: tab.layout.focused_leaf()
+                                == crate::layout::LayoutLeaf::Collection(collection_id),
+                        })
+                    })
+                    .collect(),
+            )
+        })
+        .unwrap_or_default();
     let pane_frames = layout
         .pane_infos
         .iter()
         .map(|pane| pane.rect)
+        .chain(collections.iter().map(|collection| {
+            Rect::new(
+                collection.rect.x,
+                collection.rect.y,
+                collection.rect.width,
+                collection.rect.height,
+            )
+        }))
         .collect::<Vec<_>>();
     let splits = layout
         .split_borders
@@ -607,6 +647,7 @@ pub(super) fn render_pane_surface(
     RenderedPaneSurface {
         frame: FrameData::from_ratatui_buffer_with_hyperlinks(&buffer, cursor, &hyperlinks),
         panes,
+        collections,
         splits,
         popup,
         graphics,
@@ -936,6 +977,72 @@ mod tests {
             ]
         );
         assert_eq!(projected.space_order[0].id, "repo_1");
+    }
+
+    #[test]
+    fn pane_surface_exposes_empty_collection_leaf_geometry() {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = crate::app::App::new(
+            &crate::config::Config::default(),
+            crate::app::AppPolicy::TEST,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        let mut workspace = crate::workspace::Workspace::test_new("plain");
+        let root = workspace.tabs[0].root_pane;
+        let collection = workspace.tabs[0]
+            .create_collection_near(
+                crate::layout::LayoutLeaf::Pane(root),
+                ratatui::layout::Direction::Horizontal,
+                0.5,
+                Some("empty".into()),
+            )
+            .unwrap();
+        workspace.tabs[0]
+            .focus_layout_leaf(crate::layout::LayoutLeaf::Collection(collection.into()));
+        app.state.workspaces = vec![workspace];
+        app.state.active = Some(0);
+
+        let rendered = render_pane_surface(
+            &mut app,
+            Some(crate::ui::TabSurfaceTarget {
+                workspace_index: 0,
+                tab_index: 0,
+            }),
+            Rect::new(0, 0, 80, 20),
+            false,
+            false,
+            crate::kitty_graphics::HostCellSize::default(),
+            &crate::kitty_graphics::surface::DeliveryCache::default(),
+            1,
+        );
+
+        assert_eq!(rendered.collections.len(), 1);
+        let projected = &rendered.collections[0];
+        assert_eq!(
+            projected.collection_id,
+            format!("collection_{}", collection.raw())
+        );
+        assert_eq!(
+            projected.rect,
+            protocol::SurfaceRect {
+                x: 40,
+                y: 0,
+                width: 40,
+                height: 20
+            }
+        );
+        assert_eq!(
+            projected.inner_rect,
+            protocol::SurfaceRect {
+                x: 40,
+                y: 1,
+                width: 40,
+                height: 19
+            }
+        );
+        assert!(projected.focused);
     }
 
     #[test]

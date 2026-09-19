@@ -106,6 +106,7 @@ impl RenderPipeline {
             surface_revision: 0,
             frame: rendered.frame,
             panes: rendered.panes,
+            collections: rendered.collections,
             splits: rendered.splits,
             popup: rendered.popup,
             graphics: rendered.graphics,

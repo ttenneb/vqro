@@ -1046,6 +1046,7 @@ impl HeadlessServer {
                     let crate::server::client_shell::RenderedPaneSurface {
                         frame,
                         panes,
+                        collections,
                         splits,
                         popup,
                         graphics,
@@ -1064,7 +1065,14 @@ impl HeadlessServer {
                         "full_render.render_tab_surface_virtual",
                         render_started,
                     );
-                    surface_parts = Some((panes, splits, popup, graphics, next_graphics_delivery));
+                    surface_parts = Some((
+                        panes,
+                        collections,
+                        splits,
+                        popup,
+                        graphics,
+                        next_graphics_delivery,
+                    ));
                     frame
                 }
                 ClientConnectionMode::TerminalPending => continue,
@@ -1149,13 +1157,15 @@ impl HeadlessServer {
             });
             let has_graphics = surface_parts
                 .as_ref()
-                .is_some_and(|(_, _, _, graphics, _)| {
+                .is_some_and(|(_, _, _, _, graphics, _)| {
                     !graphics.assets.is_empty()
                         || !graphics.placements.is_empty()
                         || !graphics.retained_assets.is_empty()
                 });
             let mut next_shell_graphics_delivery = None;
-            let prepared = if let Some((panes, splits, popup, graphics, delivery)) = surface_parts {
+            let prepared = if let Some((panes, collections, splits, popup, graphics, delivery)) =
+                surface_parts
+            {
                 next_shell_graphics_delivery = Some(delivery);
                 client
                     .render_state
@@ -1165,6 +1175,7 @@ impl HeadlessServer {
                         surface_revision: 0,
                         frame,
                         panes,
+                        collections,
                         splits,
                         popup,
                         graphics,

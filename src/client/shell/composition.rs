@@ -335,6 +335,37 @@ impl ClientShellState {
                 }
             })
             .collect();
+        let collection_surfaces = surface
+            .collections
+            .iter()
+            .map(|collection| collections::CollectionSurface {
+                collection_id: collection.collection_id.clone(),
+                rect: clip_rect(
+                    Rect::new(
+                        layout.pane_surface.x.saturating_add(collection.rect.x),
+                        layout.pane_surface.y.saturating_add(collection.rect.y),
+                        collection.rect.width,
+                        collection.rect.height,
+                    ),
+                    frame_bounds,
+                ),
+                inner_rect: clip_rect(
+                    Rect::new(
+                        layout
+                            .pane_surface
+                            .x
+                            .saturating_add(collection.inner_rect.x),
+                        layout
+                            .pane_surface
+                            .y
+                            .saturating_add(collection.inner_rect.y),
+                        collection.inner_rect.width,
+                        collection.inner_rect.height,
+                    ),
+                    frame_bounds,
+                ),
+            })
+            .collect::<Vec<_>>();
         let topology_signature = pane_surface_topology_signature(surface);
         self.hits.pane_splits = surface
             .splits
@@ -429,6 +460,7 @@ impl ClientShellState {
             self.structure.as_deref(),
             documented_delegations.as_ref(),
             &self.hits.panes,
+            &collection_surfaces,
             &self.collection_list_views,
             self.collection_maximized_pane.as_ref(),
             &self.config.palette,
@@ -440,6 +472,7 @@ impl ClientShellState {
                 structure: self.structure.as_deref(),
                 host_documents,
                 documented_delegations: documented_delegations.as_ref(),
+                surfaces: &collection_surfaces,
             },
             &self.hits.panes,
             &self.collection_list_views,

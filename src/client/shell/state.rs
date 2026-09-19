@@ -213,8 +213,9 @@ pub(super) struct ShellHitMap {
 #[derive(Clone, Debug)]
 pub(super) struct CollectionChromeHit {
     pub(super) rect: Rect,
+    pub(super) surface_rect: Rect,
     pub(super) collection_id: String,
-    pub(super) selected_pane_id: String,
+    pub(super) selected_pane_id: Option<String>,
     pub(super) previous_pane_id: Option<String>,
     pub(super) next_pane_id: Option<String>,
     pub(super) previous: Rect,
