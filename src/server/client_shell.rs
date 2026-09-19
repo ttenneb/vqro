@@ -54,10 +54,24 @@ pub(super) fn structure_projection(
             detached_head,
         )
     };
+    let spaces_document = app
+        .host_document_caches
+        .get(&(
+            crate::spaces_extension_contract::SPACES_NAMESPACE.into(),
+            crate::spaces_extension_contract::SPACES_SCOPE_ID.into(),
+        ))
+        .and_then(crate::host_document_cache::HostDocumentCache::current);
+    let spaces_repository_ids = spaces_document
+        .into_iter()
+        .flat_map(|document| document.items.iter())
+        .filter(|item| item.parent_id.is_none())
+        .filter_map(|item| item.id.strip_prefix("repository:"))
+        .collect::<std::collections::HashSet<_>>();
     let repositories = app
         .state
         .repositories
         .iter()
+        .filter(|repository| spaces_repository_ids.contains(repository.id.as_str()))
         .map(|repository| {
             let mut web_url = None;
             let checkouts = repository
@@ -117,43 +131,27 @@ pub(super) fn structure_projection(
             }
         })
         .collect();
-    let mut space_order = app
-        .state
-        .space_order
-        .iter()
-        .map(|space| match space {
-            crate::repository::SpaceRef::Repository(id) => {
-                protocol::endpoint::ClientShellSpaceRef {
+    let space_order = spaces_document
+        .into_iter()
+        .flat_map(|document| document.items.iter())
+        .filter(|item| item.parent_id.is_none())
+        .filter_map(|item| {
+            item.id
+                .strip_prefix("repository:")
+                .map(|id| protocol::endpoint::ClientShellSpaceRef {
                     kind: protocol::endpoint::ClientShellSpaceKind::Repository,
-                    id: id.clone(),
-                }
-            }
-            crate::repository::SpaceRef::StandaloneWorkspace(id) => {
-                protocol::endpoint::ClientShellSpaceRef {
-                    kind: protocol::endpoint::ClientShellSpaceKind::StandaloneWorkspace,
-                    id: id.clone(),
-                }
-            }
+                    id: id.into(),
+                })
+                .or_else(|| {
+                    item.id.strip_prefix("workspace:").map(|id| {
+                        protocol::endpoint::ClientShellSpaceRef {
+                            kind: protocol::endpoint::ClientShellSpaceKind::StandaloneWorkspace,
+                            id: id.into(),
+                        }
+                    })
+                })
         })
         .collect();
-    if !app.bundled_extension_enabled("spaces", None) {
-        let repository_workspaces = app
-            .state
-            .repositories
-            .iter()
-            .flat_map(|repository| repository.checkout_workspace_ids.iter())
-            .collect::<std::collections::HashSet<_>>();
-        space_order = app
-            .state
-            .workspaces
-            .iter()
-            .filter(|workspace| !repository_workspaces.contains(&workspace.id))
-            .map(|workspace| protocol::endpoint::ClientShellSpaceRef {
-                kind: protocol::endpoint::ClientShellSpaceKind::StandaloneWorkspace,
-                id: workspace.id.clone(),
-            })
-            .collect();
-    }
     let collections = if app.collections_package_runtime_available() {
         app.collection_infos(None, None)
     } else {
@@ -849,6 +847,62 @@ mod tests {
             last_focused_workspace_id: Some(linked_id.clone()),
         }];
         app.state.space_order = vec![crate::repository::SpaceRef::Repository("repo_1".into())];
+        let item = |id: &str, parent_id: Option<&str>, role, label: &str| {
+            crate::extension_contract::HostDocumentItem {
+                id: id.into(),
+                parent_id: parent_id.map(str::to_owned),
+                role,
+                label: label.into(),
+                detail: None,
+                terminal: None,
+                action_ids: Vec::new(),
+                flags: crate::extension_contract::HostDocumentItemFlags::default(),
+            }
+        };
+        let document = crate::extension_contract::HostDocumentV1 {
+            contract: crate::extension_contract::HOST_DOCUMENT_CONTRACT_V1.into(),
+            namespace: crate::spaces_extension_contract::SPACES_NAMESPACE.into(),
+            generation: 1,
+            revision: 1,
+            surface: crate::extension_contract::HostSurface::Navigation,
+            target: crate::extension_contract::HostTarget::Session,
+            items: vec![
+                item(
+                    "repository:repo_1",
+                    None,
+                    crate::extension_contract::HostItemRole::Group,
+                    "custom repo",
+                ),
+                item(
+                    &format!("workspace:{primary_id}"),
+                    Some("repository:repo_1"),
+                    crate::extension_contract::HostItemRole::Section,
+                    "primary",
+                ),
+                item(
+                    &format!("workspace:{linked_id}"),
+                    Some("repository:repo_1"),
+                    crate::extension_contract::HostItemRole::Section,
+                    "linked",
+                ),
+            ],
+            actions: Vec::new(),
+            required_capabilities: Vec::new(),
+        };
+        app.host_document_caches
+            .entry((
+                crate::spaces_extension_contract::SPACES_NAMESPACE.into(),
+                crate::spaces_extension_contract::SPACES_SCOPE_ID.into(),
+            ))
+            .or_default()
+            .publish_for_namespace(
+                crate::spaces_extension_contract::SPACES_NAMESPACE,
+                1,
+                100,
+                &std::collections::HashSet::new(),
+                document,
+            )
+            .unwrap();
 
         let projected = structure_projection(&app, "boot", 3);
 
@@ -929,7 +983,7 @@ mod tests {
     }
 
     #[test]
-    fn disabled_spaces_projects_repository_workspaces_only_through_repositories() {
+    fn unavailable_spaces_hides_projection_without_hiding_generic_workspaces() {
         let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
         let mut app = crate::app::App::new(
             &crate::config::Config::default(),
@@ -963,13 +1017,14 @@ mod tests {
 
         let projection = structure_projection(&app, "boot", 1);
 
-        assert_eq!(projection.repositories.len(), 1);
-        assert_eq!(projection.space_order.len(), 1);
-        assert_eq!(projection.space_order[0].id, standalone_id);
-        assert_eq!(
-            projection.space_order[0].kind,
-            protocol::endpoint::ClientShellSpaceKind::StandaloneWorkspace
-        );
+        assert!(projection.repositories.is_empty());
+        assert!(projection.space_order.is_empty());
+        let generic = app.session_snapshot_v1_compat();
+        assert_eq!(generic.workspaces.len(), 2);
+        assert!(generic
+            .workspaces
+            .iter()
+            .any(|workspace| workspace.workspace_id == standalone_id));
     }
 
     #[test]

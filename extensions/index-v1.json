@@ -2,28 +2,6 @@
   "schema_version": 1,
   "extensions": [
     {
-      "id": "vqro.spaces",
-      "repository": "ttenneb/vqro-extension-spaces",
-      "source_commit": "5a8b9b9b6329fbaec68d100e88d20bc6aad0a6ca",
-      "source_sha256": "fc2c8d08a069c9d5611ffb75daa220c367f2fff5467fb57b3755bc62ad285b00",
-      "manifest_sha256": "605534056a08b304816a9f5b60f774c5d9ef8833ae0a1b796a90768199997ef5",
-      "name": "Spaces",
-      "summary": "Repository-aware workspace navigation and ordering.",
-      "details": "The first-party Spaces provider projects stable repositories and workspaces through host.spaces.v1.",
-      "version": "1.0.0",
-      "categories": [
-        "Workflow",
-        "Interface"
-      ],
-      "package": {
-        "kind": "bundled",
-        "provider": "spaces"
-      },
-      "default_installed": true,
-      "default_enabled": true,
-      "manifest_path": "vqro-extension.toml"
-    },
-    {
       "id": "vqro.delegation",
       "repository": "ttenneb/vqro-extension-delegation",
       "source_commit": "cc8d261cbbb65cd07b070f42b79bdefca500f98a",

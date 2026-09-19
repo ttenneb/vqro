@@ -764,34 +764,54 @@ fn trusted_first_party_git_namespace(
     manifest: &PackageManifestV2,
     namespace: &str,
 ) -> bool {
-    let Ok(pin) =
-        serde_json::from_str::<crate::collections_extension_contract::CollectionsProductionPinV1>(
-            include_str!("../extensions/first-party/collections/production-pin-v1.json"),
-        )
+    let pin = if namespace == crate::collections_extension_contract::COLLECTIONS_PACKAGE_ID {
+        crate::collections_extension_contract::embedded_collections_production_pin().map(|pin| {
+            (
+                pin.package_id,
+                pin.source_url,
+                pin.source_commit,
+                pin.package_path,
+                pin.package_sha256,
+                pin.manifest_sha256,
+            )
+        })
+    } else if namespace == crate::spaces_extension_contract::SPACES_PACKAGE_ID {
+        crate::spaces_extension_contract::embedded_spaces_production_pin().map(|pin| {
+            (
+                pin.package_id,
+                pin.source_url,
+                pin.source_commit,
+                pin.package_path,
+                pin.package_sha256,
+                pin.manifest_sha256,
+            )
+        })
+    } else {
+        return false;
+    };
+    let Ok((package, source_url, source_commit, pinned_path, package_digest, manifest_digest)) =
+        pin
     else {
         return false;
     };
-    if pin.validate().is_err() {
-        return false;
-    }
     matches!(provenance,
         PackageProvenanceV1::Git {
             url,
-            source_commit,
+            source_commit: commit,
             package_path,
             package_id,
             version: _,
             package_sha256,
             manifest_sha256,
-        } if namespace == pin.package_id
-            && manifest.id == pin.package_id
-            && manifest.namespaces == [pin.package_id.as_str()]
-            && url == &pin.source_url
-            && source_commit == &pin.source_commit
-            && package_path == &pin.package_path
-            && package_id == &pin.package_id
-            && package_sha256 == &pin.package_sha256
-            && manifest_sha256 == &pin.manifest_sha256)
+        } if namespace == package
+            && manifest.id == package
+            && manifest.namespaces == [package.as_str()]
+            && url == &source_url
+            && commit == &source_commit
+            && package_path == &pinned_path
+            && package_id == &package
+            && package_sha256 == &package_digest
+            && manifest_sha256 == &manifest_digest)
 }
 
 pub fn install_local_file(
@@ -2640,6 +2660,37 @@ mod tests {
         assert!(
             validate_namespace_claims(&host, &curated, &BTreeMap::new(), Some(&curated)).is_err()
         );
+    }
+
+    #[test]
+    fn spaces_reserved_namespace_requires_the_exact_production_pin() {
+        let pin = crate::spaces_extension_contract::embedded_spaces_production_pin().unwrap();
+        let manifest: PackageManifestV2 =
+            toml::from_str(&asset_manifest(&pin.package_id, &[&pin.namespace])).unwrap();
+        let exact = PackageProvenanceV1::Git {
+            url: pin.source_url.clone(),
+            source_commit: pin.source_commit.clone(),
+            package_path: pin.package_path.clone(),
+            package_id: pin.package_id.clone(),
+            version: pin.version.clone(),
+            package_sha256: pin.package_sha256.clone(),
+            manifest_sha256: pin.manifest_sha256.clone(),
+        };
+        assert!(trusted_first_party_git_namespace(
+            &exact,
+            &manifest,
+            &pin.namespace
+        ));
+        let mut wrong_commit = exact.clone();
+        let PackageProvenanceV1::Git { source_commit, .. } = &mut wrong_commit else {
+            unreachable!()
+        };
+        *source_commit = "0".repeat(40);
+        assert!(!trusted_first_party_git_namespace(
+            &wrong_commit,
+            &manifest,
+            &pin.namespace
+        ));
     }
 
     #[test]

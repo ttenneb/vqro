@@ -166,7 +166,7 @@ impl ClientShellState {
         };
         let extension = *extension;
         let package_method = if extension.package_kind
-            == crate::api::schema::ExtensionPackageKind::GithubPlugin
+            == crate::api::schema::ExtensionPackageKind::SandboxedPackage
         {
             match confirmation {
                 Some(ClientExtensionConfirmation::Install) => git_inspection.map(|inspection| {
@@ -210,7 +210,7 @@ impl ClientShellState {
         } else {
             None
         };
-        if extension.package_kind == crate::api::schema::ExtensionPackageKind::GithubPlugin {
+        if extension.package_kind == crate::api::schema::ExtensionPackageKind::SandboxedPackage {
             if let Some(method) = package_method {
                 self.queue_extension_mutation(method, outcome);
             }
@@ -288,25 +288,26 @@ impl ClientShellState {
             outcome.repaint = true;
             return;
         }
-        let method =
-            if extension.package_kind == crate::api::schema::ExtensionPackageKind::GithubPlugin {
-                let params = crate::api::schema::ExtensionPackageMutationParams {
-                    package_id: extension.id,
-                    confirmed: true,
-                };
-                if extension.enabled {
-                    crate::api::schema::Method::ExtensionPackageDisable(params)
-                } else {
-                    crate::api::schema::Method::ExtensionPackageEnable(params)
-                }
-            } else {
-                crate::api::schema::Method::ExtensionEnable(
-                    crate::api::schema::ExtensionSetEnabledParams {
-                        repository: extension.repository,
-                        enabled: !extension.enabled,
-                    },
-                )
+        let method = if extension.package_kind
+            == crate::api::schema::ExtensionPackageKind::SandboxedPackage
+        {
+            let params = crate::api::schema::ExtensionPackageMutationParams {
+                package_id: extension.id,
+                confirmed: true,
             };
+            if extension.enabled {
+                crate::api::schema::Method::ExtensionPackageDisable(params)
+            } else {
+                crate::api::schema::Method::ExtensionPackageEnable(params)
+            }
+        } else {
+            crate::api::schema::Method::ExtensionEnable(
+                crate::api::schema::ExtensionSetEnabledParams {
+                    repository: extension.repository,
+                    enabled: !extension.enabled,
+                },
+            )
+        };
         self.queue_extension_mutation(method, outcome);
     }
 
@@ -572,11 +573,11 @@ impl ClientShellState {
                         && matches!(
                             extension.package_kind,
                             crate::api::schema::ExtensionPackageKind::AgentIntegration
-                                | crate::api::schema::ExtensionPackageKind::GithubPlugin
+                                | crate::api::schema::ExtensionPackageKind::SandboxedPackage
                         )
                 }) {
                     if extension.package_kind
-                        == crate::api::schema::ExtensionPackageKind::GithubPlugin
+                        == crate::api::schema::ExtensionPackageKind::SandboxedPackage
                     {
                         if let Some(ClientShellOverlay::Extensions(extensions)) =
                             self.overlay.as_mut()
@@ -601,7 +602,7 @@ impl ClientShellState {
                         matches!(
                             extension.package_kind,
                             crate::api::schema::ExtensionPackageKind::AgentIntegration
-                                | crate::api::schema::ExtensionPackageKind::GithubPlugin
+                                | crate::api::schema::ExtensionPackageKind::SandboxedPackage
                         ) && extension.rollback_version.is_some()
                     }) =>
             {
@@ -621,14 +622,14 @@ impl ClientShellState {
             repository: package.source.url,
             source_commit: Some(package.source.commit),
             source_sha256: Some(package.package_sha256),
-            manifest_sha256: None,
+            manifest_sha256: Some(package.manifest_sha256),
             manifest_path: Some(package.source.package_path),
             name: package.package_id,
             summary: "Pinned Git extension package".into(),
             details: "Executable services use the constrained WASI component runtime.".into(),
             categories: Vec::new(),
             requested_capabilities: package.requested_capabilities,
-            package_kind: crate::api::schema::ExtensionPackageKind::GithubPlugin,
+            package_kind: crate::api::schema::ExtensionPackageKind::SandboxedPackage,
             integration_target: None,
             integration_status: None,
             available_version: package.version.clone(),
@@ -666,7 +667,7 @@ impl ClientShellState {
             ),
             categories: Vec::new(),
             requested_capabilities: inspection.requested_capabilities.clone(),
-            package_kind: crate::api::schema::ExtensionPackageKind::GithubPlugin,
+            package_kind: crate::api::schema::ExtensionPackageKind::SandboxedPackage,
             integration_target: None,
             integration_status: None,
             available_version: inspection.version.clone(),
@@ -717,7 +718,7 @@ impl ClientShellState {
                                     .iter()
                                     .filter(|extension| {
                                         extension.package_kind
-                                            == crate::api::schema::ExtensionPackageKind::GithubPlugin
+                                            == crate::api::schema::ExtensionPackageKind::SandboxedPackage
                                     })
                                     .cloned(),
                             );
@@ -755,7 +756,7 @@ impl ClientShellState {
                         }) => {
                             extensions.extensions.retain(|extension| {
                                 extension.package_kind
-                                    != crate::api::schema::ExtensionPackageKind::GithubPlugin
+                                    != crate::api::schema::ExtensionPackageKind::SandboxedPackage
                             });
                             extensions
                                 .extensions
@@ -928,5 +929,41 @@ impl ClientShellState {
             }
             _ => (false, Vec::new()),
         }
+    }
+}
+
+#[cfg(test)]
+mod package_inventory_tests {
+    use super::ClientShellState;
+
+    #[test]
+    fn installed_git_package_is_presented_as_a_sandboxed_package() {
+        let package = crate::api::schema::InstalledExtensionPackageInfo {
+            package_id: "vqro.spaces".into(),
+            version: "1.0.0".into(),
+            source: crate::api::schema::ExtensionPackageSource {
+                url: "https://github.com/ttenneb/vqro-extension-spaces.git".into(),
+                commit: "a".repeat(40),
+                package_path: "dist/vqro-spaces.vqrox".into(),
+            },
+            package_sha256: "b".repeat(64),
+            manifest_sha256: "c".repeat(64),
+            enabled: true,
+            removed_retaining_data: false,
+            load_order: 0,
+            requested_capabilities: Vec::new(),
+            rollback_version: None,
+            activation_error: None,
+        };
+
+        let extension = ClientShellState::git_package_extension(package);
+        assert_eq!(
+            extension.package_kind,
+            crate::api::schema::ExtensionPackageKind::SandboxedPackage
+        );
+        assert!(extension.artifact_verified);
+        assert_eq!(extension.source_sha256, Some("b".repeat(64)));
+        assert_eq!(extension.manifest_sha256, Some("c".repeat(64)));
+        assert!(extension.requested_capabilities.is_empty());
     }
 }

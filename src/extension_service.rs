@@ -243,7 +243,7 @@ fn limit_host_document_specs(
 )> {
     specs.retain(|(namespace, _, _, _)| {
         namespace != crate::collections_extension_contract::COLLECTIONS_NAMESPACE
-            && namespace != crate::first_party::spaces::NAMESPACE
+            && namespace != crate::spaces_extension_contract::SPACES_NAMESPACE
             && namespace != crate::first_party::delegation::NAMESPACE
             && namespace != crate::first_party::agent_status::NAMESPACE
             && namespace != "host.fallback"
@@ -389,7 +389,6 @@ struct HostDocumentProvider {
 #[serde(untagged)]
 enum HostDocumentSnapshotV1 {
     TerminalGroups(crate::extension_contract::HostTerminalGroupsV1),
-    Spaces(crate::extension_contract::HostSpacesV1),
     Relationships(crate::extension_contract::HostRelationshipsV1),
     AgentActivity(crate::extension_contract::HostAgentActivityV1),
 }
@@ -398,7 +397,6 @@ impl HostDocumentSnapshotV1 {
     fn scope_id(&self) -> &str {
         match self {
             Self::TerminalGroups(snapshot) => &snapshot.scope_id,
-            Self::Spaces(snapshot) => &snapshot.scope_id,
             Self::Relationships(snapshot) => &snapshot.scope_id,
             Self::AgentActivity(snapshot) => &snapshot.scope_id,
         }
@@ -407,7 +405,6 @@ impl HostDocumentSnapshotV1 {
     fn generation(&self) -> u64 {
         match self {
             Self::TerminalGroups(snapshot) => snapshot.generation,
-            Self::Spaces(snapshot) => snapshot.generation,
             Self::Relationships(snapshot) => snapshot.generation,
             Self::AgentActivity(snapshot) => snapshot.generation,
         }
@@ -416,7 +413,6 @@ impl HostDocumentSnapshotV1 {
     fn revision(&self) -> u64 {
         match self {
             Self::TerminalGroups(snapshot) => snapshot.revision,
-            Self::Spaces(snapshot) => snapshot.revision,
             Self::Relationships(snapshot) => snapshot.revision,
             Self::AgentActivity(snapshot) => snapshot.revision,
         }
@@ -425,7 +421,6 @@ impl HostDocumentSnapshotV1 {
     fn source(&self) -> crate::api::schema::HostDocumentSourceKind {
         match self {
             Self::TerminalGroups(_) => crate::api::schema::HostDocumentSourceKind::TerminalGroups,
-            Self::Spaces(_) => crate::api::schema::HostDocumentSourceKind::Spaces,
             Self::Relationships(_) => crate::api::schema::HostDocumentSourceKind::Relationships,
             Self::AgentActivity(_) => crate::api::schema::HostDocumentSourceKind::AgentActivity,
         }
@@ -531,9 +526,7 @@ fn host_document_target_matches(
             crate::extension_contract::HostTarget::Tab { tab_id },
         ) => tab_id == &snapshot.scope_id,
         (
-            HostDocumentSnapshotV1::Spaces(_)
-            | HostDocumentSnapshotV1::Relationships(_)
-            | HostDocumentSnapshotV1::AgentActivity(_),
+            HostDocumentSnapshotV1::Relationships(_) | HostDocumentSnapshotV1::AgentActivity(_),
             crate::extension_contract::HostTarget::Session,
         ) => true,
         _ => false,
@@ -608,16 +601,6 @@ pub(crate) fn complete_host_document_provider_action() {
 }
 
 #[derive(Debug)]
-pub struct HostSpacesDocumentAsyncResult {
-    pub(crate) _render_slot: Option<Arc<HostDocumentRenderSlotGuard>>,
-    pub namespace: String,
-    pub provider_priority: i32,
-    pub snapshot: crate::extension_contract::HostSpacesV1,
-    pub result: Result<crate::extension_contract::HostDocumentV1, String>,
-    pub grants: std::collections::HashSet<crate::extension_contract::HostCapability>,
-}
-
-#[derive(Debug)]
 pub struct HostRelationshipsDocumentAsyncResult {
     pub(crate) _render_slot: Option<Arc<HostDocumentRenderSlotGuard>>,
     pub namespace: String,
@@ -665,7 +648,6 @@ impl HostDocumentServiceCatalog {
             .collect::<std::collections::BTreeMap<_, _>>();
         for namespace in [
             crate::collections_extension_contract::COLLECTIONS_NAMESPACE,
-            crate::first_party::spaces::NAMESPACE,
             crate::first_party::delegation::NAMESPACE,
             crate::first_party::agent_status::NAMESPACE,
         ] {
@@ -1234,18 +1216,6 @@ impl HostDocumentServiceCatalog {
                                 },
                             ))
                         }
-                        HostDocumentSnapshotV1::Spaces(snapshot) => {
-                            crate::events::AppEvent::HostSpacesDocumentFinished(Box::new(
-                                HostSpacesDocumentAsyncResult {
-                                    _render_slot: request.render_slot,
-                                    namespace: request.namespace,
-                                    provider_priority: provider.priority,
-                                    snapshot,
-                                    result,
-                                    grants: provider.grants.clone(),
-                                },
-                            ))
-                        }
                         HostDocumentSnapshotV1::Relationships(snapshot) => {
                             crate::events::AppEvent::HostRelationshipsDocumentFinished(Box::new(
                                 HostRelationshipsDocumentAsyncResult {
@@ -1504,14 +1474,6 @@ impl HostDocumentServiceCatalog {
         snapshot: crate::extension_contract::HostTerminalGroupsV1,
     ) -> Result<(), String> {
         self.request_snapshot(namespace, HostDocumentSnapshotV1::TerminalGroups(snapshot))
-    }
-
-    pub fn request_spaces(
-        &self,
-        namespace: &str,
-        snapshot: crate::extension_contract::HostSpacesV1,
-    ) -> Result<(), String> {
-        self.request_snapshot(namespace, HostDocumentSnapshotV1::Spaces(snapshot))
     }
 
     pub fn request_relationships(
@@ -2589,6 +2551,40 @@ impl ExtensionServiceSupervisor {
             deadline,
             canceled,
             authorization,
+        );
+        self.finish_request(result)
+    }
+
+    pub(crate) fn invoke_package_candidate_no_host_calls(
+        &mut self,
+        method: &str,
+        params: serde_json::Value,
+        deadline: Instant,
+        canceled: Arc<AtomicBool>,
+    ) -> Result<serde_json::Value, ExtensionServiceError> {
+        if canceled.load(Ordering::Acquire) {
+            return Err(ExtensionServiceError::Canceled);
+        }
+        if !matches!(self.status, ExtensionServiceStatus::Running) {
+            return Err(ExtensionServiceError::Configuration(
+                "package candidate runtime is not running".into(),
+            ));
+        }
+        let runtime = self
+            .runtime
+            .as_mut()
+            .ok_or_else(|| ExtensionServiceError::Configuration("service is not running".into()))?;
+        if !runtime.methods().contains(method) {
+            return Err(ExtensionServiceError::Protocol(
+                "package candidate did not advertise the requested method".into(),
+            ));
+        }
+        let result = runtime.invoke(
+            method,
+            params,
+            self.runtime_generation,
+            deadline,
+            canceled.as_ref(),
         );
         self.finish_request(result)
     }

@@ -161,9 +161,26 @@ impl PackageCandidateSlot {
                 attempt_id,
                 method,
                 params,
-                authorization,
+                Some(authorization),
                 deadline,
                 canceled,
+            )
+    }
+
+    pub(crate) fn invoke_no_host_calls(
+        &self,
+        service_id: &str,
+        attempt_id: u64,
+        method: String,
+        params: serde_json::Value,
+        deadline: Instant,
+        canceled: Arc<AtomicBool>,
+    ) -> Result<(), String> {
+        self.ready
+            .as_ref()
+            .ok_or("package candidate is not ready")?
+            .invoke(
+                service_id, attempt_id, method, params, None, deadline, canceled,
             )
     }
 }
@@ -209,7 +226,7 @@ struct CandidateRequest {
     attempt_id: u64,
     method: String,
     params: serde_json::Value,
-    authorization: HostReadInvocationAuthorization,
+    authorization: Option<HostReadInvocationAuthorization>,
     deadline: Instant,
     canceled: Arc<AtomicBool>,
 }
@@ -303,7 +320,7 @@ impl PackageCandidateSet {
         attempt_id: u64,
         method: String,
         params: serde_json::Value,
-        authorization: HostReadInvocationAuthorization,
+        authorization: Option<HostReadInvocationAuthorization>,
         deadline: Instant,
         canceled: Arc<AtomicBool>,
     ) -> Result<(), String> {
@@ -391,24 +408,31 @@ impl CandidateWorker {
                         service_id = %thread_service_id,
                         method = %request.method,
                         attempt_id = request.attempt_id,
-                        "Collections candidate invocation started"
+                        "package candidate invocation started"
                     );
-                    let result = supervisor
-                        .invoke_package_read_candidate(
+                    let result = match request.authorization {
+                        Some(authorization) => supervisor.invoke_package_read_candidate(
                             &request.method,
                             request.params,
                             request.deadline,
                             Arc::clone(&request.canceled),
-                            request.authorization,
-                        )
-                        .map_err(|error| error.to_string());
+                            authorization,
+                        ),
+                        None => supervisor.invoke_package_candidate_no_host_calls(
+                            &request.method,
+                            request.params,
+                            request.deadline,
+                            Arc::clone(&request.canceled),
+                        ),
+                    }
+                    .map_err(|error| error.to_string());
                     tracing::debug!(
                         package_id = %thread_package_id,
                         service_id = %thread_service_id,
                         method = %request.method,
                         attempt_id = request.attempt_id,
                         succeeded = result.is_ok(),
-                        "Collections candidate invocation finished"
+                        "package candidate invocation finished"
                     );
                     let completion = PackageCandidateInvocationResult {
                         package_id: thread_package_id.clone(),

@@ -393,7 +393,7 @@ mod tests {
             contract: "host.spaces.v1".into(),
             generation: 1,
             revision: 1,
-            scope_id: crate::first_party::spaces::SESSION_SCOPE_ID.into(),
+            scope_id: crate::spaces_extension_contract::SPACES_SCOPE_ID.into(),
             repositories: Vec::new(),
             standalone: Vec::new(),
             order: Vec::new(),

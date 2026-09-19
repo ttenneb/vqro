@@ -1734,11 +1734,9 @@ impl AppState {
             | AppEvent::CollectionsCreateCheckpointPersisted(_)
             | AppEvent::ExtensionServiceFinished(_)
             | AppEvent::HostDocumentFinished(_)
-            | AppEvent::HostSpacesDocumentFinished(_)
             | AppEvent::HostRelationshipsDocumentFinished(_)
             | AppEvent::HostAgentActivityDocumentFinished(_)
             | AppEvent::HostDocumentRetryDue { .. }
-            | AppEvent::HostSpacesRetryDue { .. }
             | AppEvent::HostSemanticDocumentRetryDue { .. }
             | AppEvent::HostDocumentProviderActionFinished { .. } => Vec::new(),
         }

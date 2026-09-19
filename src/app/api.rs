@@ -23,6 +23,7 @@ mod panes;
 pub(crate) mod plugins;
 pub(super) mod responses;
 mod session;
+pub(crate) mod spaces_candidate;
 mod tabs;
 mod workspaces;
 mod worktrees;
@@ -219,10 +220,6 @@ impl App {
                 let _ = respond_to.send(response);
                 return Vec::new();
             }
-            AppEvent::HostSpacesDocumentFinished(result) => {
-                self.handle_host_spaces_document_result(*result);
-                return Vec::new();
-            }
             AppEvent::HostRelationshipsDocumentFinished(result) => {
                 self.handle_host_relationships_document_result(*result);
                 return Vec::new();
@@ -259,13 +256,6 @@ impl App {
                         }
                         Some(_) | None => {}
                     }
-                }
-                return Vec::new();
-            }
-            AppEvent::HostSpacesRetryDue { epoch } => {
-                if epoch == self.host_spaces_retry_epoch {
-                    self.host_spaces_retry_scheduled = false;
-                    self.refresh_spaces_document();
                 }
                 return Vec::new();
             }

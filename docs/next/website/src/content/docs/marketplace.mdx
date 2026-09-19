@@ -21,29 +21,23 @@ commit off the server event loop, verifies a deterministic source archive plus
 the declared manifest digest and identity, and retains the verified artifact in
 managed storage. Source-backed agent integration updates preserve the prior
 verified artifact for rollback; rollback never refetches a mutable reference.
-Collections, Spaces, Delegation, and Agent Status are currently native bundled
-compatibility providers: their repository pins attest the matching source
-release, while their executable implementation remains compiled into Vqro and
-updates or rolls back only with the Vqro binary. They use public process-service
-protocol shapes but are not yet independently built component extensions. The
-marketplace does not offer a metadata-only update for those providers.
-Unsupported actions stay hidden.
+Delegation and Agent Status are currently native bundled compatibility
+providers: their executable implementation remains compiled into Vqro and
+updates or rolls back only with the Vqro binary. Collections and Spaces are
+independently built component packages installed from their exact Git commits;
+they are not Browse catalog rows and appear as **sandboxed packages** in
+Installed. Unsupported actions stay hidden.
 A successful install enables the extension immediately. If activation fails, Vqro keeps the package installed but disabled
 and displays the activation error so it can be retried. Removing an extension
 retains its config and state; use the separate **delete data** action only after
 removal when those files should be destroyed.
 
 Enablement and load order are global to the server user. Extensions load in the
-shown order and later contributions win deterministic conflicts. Collections
-can override global enablement for an individual repository's tab documents by
-its durable repository identity, so linked worktrees share the same override;
-Vqro does not project that override onto other repositories or clients.
-Extensions without a repository-scoped contribution do not expose this action.
-Built-in entries are presented through the same Extensions user journey and are
+shown order and later contributions win deterministic conflicts. Built-in entries are presented through the same Extensions user journey and are
 removable, but their compatibility records are not package-v1 runtime records.
-Vqro initially marks Collections, Spaces, Delegation, Agent Status, Pi, Claude
-Code, and Codex installed and enabled; the other bundled agent integrations
-remain available in Browse. Agent cards report the separately reconciled adapter
+Vqro initially marks Delegation, Agent Status, Pi, Claude Code, and Codex
+installed and enabled; the other bundled agent integrations remain available in
+Browse. Agent cards report the separately reconciled adapter
 deployment state; an enabled marketplace entry does not claim that an adapter
 managed outside Vqro's namespace was installed.
 
@@ -53,12 +47,15 @@ Component Model components under Wasmtime with only the Vqro WIT world linked
 and with explicit host capabilities, fuel, memory, table, stack, frame,
 host-call, cancellation, and deadline limits; curated status never adds a
 capability or selects a more privileged runtime. Installation can verify,
-instantiate, negotiate, supervise, and restore these services. It does not yet
-grant production host-state or terminal leases, admit a document-v2 provider,
-publish component output to clients, or transfer feature authority. First-party
-native host providers and managed agent assets contain no downloaded executable
-service. Legacy explicitly configured process plugins remain a separate
-compatibility surface and cannot be installed as extension packages.
+instantiate, negotiate, supervise, and restore these services. Ordinary packages
+receive no host-state or terminal lease and no feature authority. The exact
+Collections package is the bounded read-lease exception; the exact Spaces
+package has zero host-call capabilities and receives only its complete
+host-authored invocation parameter. Both outputs are semantically audited before
+publication. First-party native host providers and managed agent assets contain
+no downloaded executable service. Legacy explicitly configured process plugins
+remain a separate compatibility surface and cannot be installed as extension
+packages.
 
 New marketplace methods are optional endpoint capabilities, so an older
 compatible server disables only marketplace actions and does not affect attached

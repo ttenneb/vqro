@@ -9,6 +9,8 @@ pub(crate) mod process;
 
 #[cfg(test)]
 mod collections_package_conformance;
+#[cfg(test)]
+mod spaces_package_conformance;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{

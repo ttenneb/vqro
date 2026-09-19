@@ -378,9 +378,15 @@ impl MarketplaceStateFile {
     }
 
     pub(crate) fn normalize(&mut self, index: &CuratedIndex) {
-        // R4 retired the self-spawning Collections marketplace entry. Package state and policy
-        // live in the package-v1 registry/store; this legacy catalog row carried no policy data.
-        self.entries.remove("ttenneb/vqro-extension-collections");
+        // Package authority retired the self-spawning Collections and Spaces marketplace entries.
+        // Their package-v1 registry/store records are independent; these legacy rows carried no
+        // policy data and must not collide with the exact package namespaces after an upgrade.
+        for repository in [
+            "ttenneb/vqro-extension-collections",
+            "ttenneb/vqro-extension-spaces",
+        ] {
+            self.entries.remove(repository);
+        }
         let known = index
             .extensions
             .iter()
@@ -1055,17 +1061,10 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(
             defaults,
-            [
-                "Spaces",
-                "Delegation",
-                "Agent Status",
-                "Pi",
-                "Claude Code",
-                "Codex"
-            ]
+            ["Delegation", "Agent Status", "Pi", "Claude Code", "Codex"]
         );
         assert!(index.search("session", Some("Agents")).len() >= 3);
-        assert!(!index.search("repository", Some("Workflow")).is_empty());
+        assert!(!index.search("delegation", Some("Workflow")).is_empty());
     }
 
     #[test]
@@ -1098,12 +1097,6 @@ mod tests {
 
         let index = CuratedIndex::bundled().unwrap();
         let expected = [
-            (
-                "vqro.spaces",
-                "5a8b9b9b6329fbaec68d100e88d20bc6aad0a6ca",
-                "fc2c8d08a069c9d5611ffb75daa220c367f2fff5467fb57b3755bc62ad285b00",
-                "605534056a08b304816a9f5b60f774c5d9ef8833ae0a1b796a90768199997ef5",
-            ),
             (
                 "vqro.delegation",
                 "cc8d261cbbb65cd07b070f42b79bdefca500f98a",
@@ -1145,10 +1138,6 @@ mod tests {
 
         for (id, manifest) in [
             (
-                "vqro.spaces",
-                include_bytes!("../extensions/first-party/spaces/vqro-extension.toml").as_slice(),
-            ),
-            (
                 "vqro.delegation",
                 include_bytes!("../extensions/first-party/delegation/vqro-extension.toml")
                     .as_slice(),
@@ -1166,7 +1155,7 @@ mod tests {
     }
 
     #[test]
-    fn retired_collections_catalog_row_is_removed_before_package_validation() {
+    fn retired_package_catalog_rows_are_removed_before_package_validation() {
         let index = CuratedIndex::bundled().unwrap();
         let pin =
             crate::collections_extension_contract::embedded_collections_production_pin().unwrap();
@@ -1200,11 +1189,16 @@ mod tests {
         retired.data_id = crate::collections_extension_contract::COLLECTIONS_NAMESPACE.into();
         state
             .entries
-            .insert("ttenneb/vqro-extension-collections".into(), retired);
+            .insert("ttenneb/vqro-extension-collections".into(), retired.clone());
+        retired.data_id = crate::spaces_extension_contract::SPACES_NAMESPACE.into();
+        state
+            .entries
+            .insert("ttenneb/vqro-extension-spaces".into(), retired);
         state.normalize(&index);
         assert!(!state
             .entries
             .contains_key("ttenneb/vqro-extension-collections"));
+        assert!(!state.entries.contains_key("ttenneb/vqro-extension-spaces"));
         state.register_package_v1(&index, record, 0).unwrap();
         state.validate_data_ids(&index).unwrap();
     }
@@ -1436,7 +1430,7 @@ mod tests {
     #[test]
     fn activation_failure_keeps_package_installed_but_disabled() {
         let index = CuratedIndex::bundled().unwrap();
-        let extension = index.extension("vqro.spaces").unwrap();
+        let extension = index.extension("vqro.delegation").unwrap();
         let mut state = MarketplaceStateFile::defaults(&index);
         state
             .finish_activation(&extension.repository, Err("service exited".into()))

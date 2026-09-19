@@ -216,8 +216,15 @@ pub(super) fn render_extensions_overlay(
             y,
             details.width.saturating_sub(2),
             &if extension.installed {
+                let runtime = if extension.activation_error.is_some() {
+                    "activation failed"
+                } else if extension.enabled {
+                    "enabled"
+                } else {
+                    "disabled"
+                };
                 format!(
-                    "{} · v{} · load {} (later wins)",
+                    "{} · v{} · {runtime} · load {}",
                     extension.package_kind,
                     extension.active_version,
                     extension.load_order.saturating_add(1)
@@ -231,21 +238,30 @@ pub(super) fn render_extensions_overlay(
             muted,
         );
         y += 1;
-        if extension.source_commit.is_some() {
+        if let Some(commit) = extension.source_commit.as_deref() {
+            let source_status = match extension.package_kind {
+                crate::api::schema::ExtensionPackageKind::Bundled => {
+                    format!("catalog source commit: {}", &commit[..commit.len().min(12)])
+                }
+                crate::api::schema::ExtensionPackageKind::SandboxedPackage => format!(
+                    "exact Git commit: {} · artifact: {}",
+                    &commit[..commit.len().min(12)],
+                    if extension.artifact_verified {
+                        "verified"
+                    } else {
+                        "missing"
+                    }
+                ),
+                _ => format!("source commit: {}", &commit[..commit.len().min(12)]),
+            };
             put_text(
                 buffer,
                 details.x + 1,
                 y,
                 details.width.saturating_sub(2),
-                if extension.package_kind == crate::api::schema::ExtensionPackageKind::Bundled {
-                    "source pin: catalog attestation · runtime: native host provider"
-                } else if extension.artifact_verified {
-                    "source artifact: retained (press u to reverify)"
-                } else {
-                    "source artifact: not retained (press u to verify)"
-                },
-                if extension.package_kind == crate::api::schema::ExtensionPackageKind::Bundled
-                    || extension.artifact_verified
+                &source_status,
+                if extension.artifact_verified
+                    || extension.package_kind == crate::api::schema::ExtensionPackageKind::Bundled
                 {
                     base.fg(palette.green)
                 } else {
@@ -253,6 +269,24 @@ pub(super) fn render_extensions_overlay(
                 },
             );
             y += 1;
+            if extension.package_kind == crate::api::schema::ExtensionPackageKind::SandboxedPackage
+            {
+                let package = extension.source_sha256.as_deref().unwrap_or("unknown");
+                let manifest = extension.manifest_sha256.as_deref().unwrap_or("unknown");
+                put_text(
+                    buffer,
+                    details.x + 1,
+                    y,
+                    details.width.saturating_sub(2),
+                    &format!(
+                        "SHA-256 package {} · manifest {}",
+                        &package[..package.len().min(12)],
+                        &manifest[..manifest.len().min(12)]
+                    ),
+                    muted,
+                );
+                y += 1;
+            }
         }
         let capabilities = if extension.requested_capabilities.is_empty() {
             "requested capabilities: none".to_string()

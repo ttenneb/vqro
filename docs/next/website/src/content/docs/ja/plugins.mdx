@@ -255,7 +255,7 @@ enable では実行されません。Herdr はこれらを非同期で開始し�
 
 プラグインは `provides = ["host_document"]` と `capabilities = ["host_document"]` を持つ長時間実行 `[[services]]` を宣言できます。コマンドは stdin/stdout 上でバージョン付き JSON-lines プロトコルを話し、`host.document.render` 要求に対して検証可能な `host.document.v1` 意味ドキュメントを返します。Herdr はターミナル、配置、フォーカス、入力、表示を所有し、フレームごとにサービスを呼ばず、最後に検証されたドキュメントを描画します。
 
-組み込みの `vqro.collections`、`vqro.spaces`、`vqro.delegation`、`vqro.agent-status` は同じ公開プロセスサービス形状を使う互換プロバイダーですが、実装は Vqro にコンパイルされたままです。独立ビルドされたコンポーネント拡張ではありません。プロバイダーを無効化または喪失しても、汎用投影を通じてワークスペース、ペイン、実行中ターミナルへ到達できます。
+組み込みの互換プロバイダーとして残るのは `vqro.delegation` と `vqro.agent-status` です。`vqro.collections` と `vqro.spaces` は組み込みではなく、独立してビルドされた exact-Git 固定のサンドボックス化コンポーネントパッケージです。コンパイル済みプロバイダーと組み込みカタログ行は削除されています。正確なパッケージを無効化または喪失すると、その製品固有の権限だけが fail closed になり、ワークスペース、タブ、ペイン、PTY への汎用アクセスは維持されます。
 
 ### 実験的契約と基盤契約
 

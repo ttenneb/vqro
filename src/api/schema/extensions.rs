@@ -99,6 +99,7 @@ pub struct InstalledExtensionPackageInfo {
     pub version: String,
     pub source: ExtensionPackageSource,
     pub package_sha256: String,
+    pub manifest_sha256: String,
     pub enabled: bool,
     pub removed_retaining_data: bool,
     pub load_order: usize,
@@ -114,14 +115,16 @@ pub struct InstalledExtensionPackageInfo {
 pub enum ExtensionPackageKind {
     Bundled,
     AgentIntegration,
+    SandboxedPackage,
     GithubPlugin,
 }
 
 impl std::fmt::Display for ExtensionPackageKind {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(match self {
-            Self::Bundled => "bundled",
+            Self::Bundled => "bundled provider",
             Self::AgentIntegration => "agent integration",
+            Self::SandboxedPackage => "sandboxed package",
             Self::GithubPlugin => "GitHub plugin",
         })
     }

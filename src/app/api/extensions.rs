@@ -1471,6 +1471,8 @@ impl App {
         self.revoke_host_invocation_authority_for_package(package_id);
         if package_id == crate::collections_extension_contract::COLLECTIONS_PACKAGE_ID {
             self.disable_collections_package_authority_runtime();
+        } else if package_id == crate::spaces_extension_contract::SPACES_PACKAGE_ID {
+            self.disable_spaces_package_authority_runtime();
         }
     }
 
@@ -1518,6 +1520,8 @@ impl App {
                     == crate::collections_extension_contract::COLLECTIONS_PACKAGE_ID
                 {
                     self.disable_collections_package_authority_runtime();
+                } else if result.package_id == crate::spaces_extension_contract::SPACES_PACKAGE_ID {
+                    self.disable_spaces_package_authority_runtime();
                 }
                 tracing::warn!(
                     package_id = %result.package_id,
@@ -1528,7 +1532,11 @@ impl App {
             }
         }
         if became_ready
-            && result.package_id == crate::collections_extension_contract::COLLECTIONS_PACKAGE_ID
+            && matches!(
+                result.package_id.as_str(),
+                crate::collections_extension_contract::COLLECTIONS_PACKAGE_ID
+                    | crate::spaces_extension_contract::SPACES_PACKAGE_ID
+            )
         {
             self.refresh_collection_documents();
         }
@@ -1549,6 +1557,22 @@ impl App {
                     && active.runtime_generation == result.artifact_generation
             });
         if !current {
+            return;
+        }
+        if result.package_id == crate::spaces_extension_contract::SPACES_PACKAGE_ID {
+            match self.finalize_spaces_candidate(result.attempt_id, result.result) {
+                Ok(true) | Ok(false) => {}
+                Err(error) => {
+                    self.disable_spaces_package_authority_runtime();
+                    tracing::warn!(
+                        package_id = %result.package_id,
+                        service_id = %result.service_id,
+                        runtime_generation = result.runtime_generation,
+                        %error,
+                        "Spaces package candidate result was rejected"
+                    );
+                }
+            }
             return;
         }
         if self.finish_collections_create_stage(result.attempt_id, result.result.clone()) {
@@ -1587,7 +1611,8 @@ impl App {
             package_path,
             version,
             package_sha256,
-            ..
+            manifest_sha256,
+            package_id: _,
         } = &record.source
         else {
             return Err("package is not a Git-installed extension".into());
@@ -1616,6 +1641,7 @@ impl App {
                 package_path: package_path.clone(),
             },
             package_sha256: package_sha256.clone(),
+            manifest_sha256: manifest_sha256.clone(),
             enabled: record.status == PackageLifecycleStatusV1::Enabled,
             removed_retaining_data: record.status == PackageLifecycleStatusV1::RemovedRetainingData,
             load_order: self
@@ -2454,14 +2480,7 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(
             installed,
-            [
-                "Spaces",
-                "Delegation",
-                "Agent Status",
-                "Pi",
-                "Claude Code",
-                "Codex"
-            ]
+            ["Delegation", "Agent Status", "Pi", "Claude Code", "Codex"]
         );
         assert!(extensions
             .iter()
@@ -2472,7 +2491,7 @@ mod tests {
             .filter(|extension| {
                 matches!(
                     extension.name.as_str(),
-                    "Spaces" | "Delegation" | "Agent Status" | "Pi" | "Claude Code" | "Codex"
+                    "Delegation" | "Agent Status" | "Pi" | "Claude Code" | "Codex"
                 )
             })
             .collect::<Vec<_>>();
@@ -2485,6 +2504,29 @@ mod tests {
             .iter()
             .filter(|extension| extension.package_kind == ExtensionPackageKind::Bundled)
             .all(|extension| extension.install_supported));
+    }
+
+    #[test]
+    fn curated_inventory_distinguishes_bundled_and_agent_entries() {
+        let mut app = test_app();
+        let response = app.handle_api_request(Request {
+            id: "extensions".into(),
+            method: Method::ExtensionList(ExtensionListParams::default()),
+        });
+        let ResponseResult::ExtensionList { extensions } = result(&response) else {
+            panic!("extension list response");
+        };
+        assert!(extensions
+            .iter()
+            .all(|extension| extension.id != "vqro.spaces"));
+        assert!(extensions.iter().any(|extension| {
+            extension.id == "vqro.delegation"
+                && extension.package_kind == ExtensionPackageKind::Bundled
+        }));
+        assert!(extensions.iter().any(|extension| {
+            extension.name == "Pi"
+                && extension.package_kind == ExtensionPackageKind::AgentIntegration
+        }));
     }
 
     #[test]
@@ -2600,7 +2642,7 @@ mod tests {
         let native = Request {
             id: "install-native".into(),
             method: Method::ExtensionInstall(ExtensionConfirmedParams {
-                repository: "ttenneb/vqro-extension-spaces".into(),
+                repository: "ttenneb/vqro-extension-delegation".into(),
                 confirmed: true,
             }),
         };
@@ -2622,7 +2664,7 @@ mod tests {
         app.extension_state
             .transact(&crate::extension_state::ExtensionStateTransactionV1 {
                 contract: crate::extension_state::EXTENSION_STATE_CONTRACT_V1.into(),
-                namespace: "vqro.spaces".into(),
+                namespace: "vqro.delegation".into(),
                 expected_store_generation: 1,
                 expected_revision: 0,
                 idempotency_key: "seed-delete-test".into(),
@@ -2635,20 +2677,20 @@ mod tests {
         let _ = result(&app.handle_api_request(Request {
             id: "remove".into(),
             method: Method::ExtensionRemove(ExtensionConfirmedParams {
-                repository: "ttenneb/vqro-extension-spaces".into(),
+                repository: "ttenneb/vqro-extension-delegation".into(),
                 confirmed: true,
             }),
         }));
         let _ = result(&app.handle_api_request(Request {
             id: "delete".into(),
             method: Method::ExtensionDataDelete(ExtensionConfirmedParams {
-                repository: "ttenneb/vqro-extension-spaces".into(),
+                repository: "ttenneb/vqro-extension-delegation".into(),
                 confirmed: true,
             }),
         }));
         assert!(app
             .extension_state
-            .snapshot("vqro.spaces")
+            .snapshot("vqro.delegation")
             .unwrap()
             .values
             .is_empty());
@@ -2684,11 +2726,11 @@ mod tests {
         let _ = result(&app.handle_api_request(Request {
             id: "remove".into(),
             method: Method::ExtensionRemove(ExtensionConfirmedParams {
-                repository: "ttenneb/vqro-extension-spaces".into(),
+                repository: "ttenneb/vqro-extension-delegation".into(),
                 confirmed: true,
             }),
         }));
-        let data_id = app.marketplace_state.entries["ttenneb/vqro-extension-spaces"]
+        let data_id = app.marketplace_state.entries["ttenneb/vqro-extension-delegation"]
             .data_id
             .clone();
         let config_marker = crate::plugin_paths::plugin_config_dir(&data_id).join("marker");
@@ -2708,7 +2750,7 @@ mod tests {
         let response: serde_json::Value = serde_json::from_str(&app.handle_api_request(Request {
             id: "delete".into(),
             method: Method::ExtensionDataDelete(ExtensionConfirmedParams {
-                repository: "ttenneb/vqro-extension-spaces".into(),
+                repository: "ttenneb/vqro-extension-delegation".into(),
                 confirmed: true,
             }),
         }))
@@ -2881,7 +2923,7 @@ mod tests {
     #[test]
     fn bundled_removal_requires_confirmation_and_is_reinstallable() {
         let mut app = test_app();
-        let repository = "ttenneb/vqro-extension-spaces".to_string();
+        let repository = "ttenneb/vqro-extension-delegation".to_string();
         let rejected: serde_json::Value = serde_json::from_str(&app.handle_api_request(Request {
             id: "remove".into(),
             method: Method::ExtensionRemove(ExtensionConfirmedParams {
@@ -2909,7 +2951,7 @@ mod tests {
                 }
             }
         ));
-        assert!(app.disabled_extensions.contains("vqro.spaces"));
+        assert!(app.disabled_extensions.contains("vqro.delegation"));
 
         let installed = app.handle_api_request(Request {
             id: "install".into(),
@@ -2928,7 +2970,7 @@ mod tests {
                 }
             }
         ));
-        assert!(!app.disabled_extensions.contains("vqro.spaces"));
+        assert!(!app.disabled_extensions.contains("vqro.delegation"));
     }
 
     #[tokio::test]

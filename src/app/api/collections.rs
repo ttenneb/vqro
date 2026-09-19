@@ -10,7 +10,6 @@ use crate::api::schema::{
 use crate::layout::{CollectionId, LayoutLeaf};
 
 const MAX_HOST_DOCUMENT_CONFIRMATION_GRANTS: usize = 8_192;
-const MAX_HOST_SPACES_RETRY_ATTEMPTS: u32 = 6;
 const MAX_HOST_SEMANTIC_RETRY_ATTEMPTS: u32 = 6;
 const MAX_HOST_DOCUMENT_RETRY_ATTEMPTS: u32 = 6;
 const MAX_HOST_DOCUMENTS_PROJECTION_BYTES: usize = crate::protocol::MAX_FRAME_SIZE / 2;
@@ -26,7 +25,6 @@ fn bounded_document_text(value: &str) -> String {
 #[derive(Debug, Clone)]
 pub(crate) enum DeferredHostDocumentSnapshot {
     TerminalGroups(crate::extension_contract::HostTerminalGroupsV1),
-    Spaces(crate::extension_contract::HostSpacesV1),
     Relationships(crate::extension_contract::HostRelationshipsV1),
     AgentActivity(crate::extension_contract::HostAgentActivityV1),
 }
@@ -84,7 +82,7 @@ impl App {
             }
         }
         let mut live_tab_ids = std::collections::HashSet::from([
-            crate::first_party::spaces::SESSION_SCOPE_ID.to_string(),
+            crate::spaces_extension_contract::SPACES_SCOPE_ID.to_string(),
         ]);
         for (ws_idx, workspace) in self.state.workspaces.iter().enumerate() {
             for tab_idx in 0..workspace.tabs.len() {
@@ -347,9 +345,6 @@ impl App {
                 DeferredHostDocumentSnapshot::TerminalGroups(snapshot) => self
                     .host_document_services
                     .request(&key.0, snapshot.clone()),
-                DeferredHostDocumentSnapshot::Spaces(snapshot) => self
-                    .host_document_services
-                    .request_spaces(&key.0, snapshot.clone()),
                 DeferredHostDocumentSnapshot::Relationships(snapshot) => self
                     .host_document_services
                     .request_relationships(&key.0, snapshot.clone()),
@@ -413,22 +408,10 @@ impl App {
     }
 
     pub(crate) fn refresh_spaces_document(&mut self) {
-        let namespace = crate::first_party::spaces::NAMESPACE;
-        let scope_id = crate::first_party::spaces::SESSION_SCOPE_ID.to_string();
-        if !self.bundled_extension_enabled("spaces", None) {
-            self.host_document_caches
-                .remove(&(namespace.into(), scope_id.clone()));
-            self.host_document_request_watermarks
-                .remove(&(namespace.into(), scope_id));
-            self.host_spaces_last_desired = None;
-            return;
-        }
-        let Some(generation) = self.host_document_services.generation(namespace) else {
-            self.host_document_caches
-                .remove(&(namespace.into(), scope_id.clone()));
-            self.host_document_request_watermarks
-                .remove(&(namespace.into(), scope_id));
-            self.host_spaces_last_desired = None;
+        let namespace = crate::spaces_extension_contract::SPACES_NAMESPACE;
+        let scope_id = crate::spaces_extension_contract::SPACES_SCOPE_ID.to_string();
+        let Some(generation) = self.spaces_package_provider_generation() else {
+            self.disable_spaces_package_authority_runtime();
             return;
         };
         let workspace_labels = self
@@ -558,7 +541,9 @@ impl App {
             standalone,
             order,
         };
-        if snapshot.validate().is_err() {
+        if let Err(error) = snapshot.validate() {
+            self.disable_spaces_package_authority_runtime();
+            tracing::warn!(%error, "host Spaces snapshot is invalid");
             return;
         }
         let unchanged = self
@@ -577,26 +562,13 @@ impl App {
         self.host_spaces_last_desired = Some(snapshot.clone());
         let key = (namespace.to_string(), scope_id);
         self.host_document_request_watermarks
-            .insert(key.clone(), (generation, revision));
-        self.disable_host_document_projection(&key, generation, revision);
-        match self
-            .host_document_services
-            .request_spaces(namespace, snapshot.clone())
-        {
-            Ok(()) => {
-                self.host_document_retry_snapshots.remove(&key);
-            }
-            Err(error) if error.contains("global document render queue is full") => {
-                if !self.host_document_retry_snapshots.contains_key(&key) {
-                    self.host_document_retry_order.push_back(key.clone());
-                }
-                self.host_document_retry_snapshots
-                    .insert(key, DeferredHostDocumentSnapshot::Spaces(snapshot));
-            }
-            Err(error) => {
-                self.host_spaces_last_desired = None;
-                self.schedule_host_spaces_retry();
-                tracing::warn!(%error, "Spaces provider unavailable; using native fallback")
+            .insert(key, (generation, revision));
+        if let Err(error) = self.schedule_spaces_candidate(snapshot) {
+            if error.contains("candidate queue is full") {
+                tracing::debug!(%error, "Spaces package replacement was deferred");
+            } else {
+                self.disable_spaces_package_authority_runtime();
+                tracing::warn!(%error, "Spaces package authority is unavailable");
             }
         }
     }
@@ -620,7 +592,7 @@ impl App {
 
     pub(crate) fn refresh_relationships_document(&mut self) {
         let namespace = crate::first_party::delegation::NAMESPACE;
-        let scope_id = crate::first_party::spaces::SESSION_SCOPE_ID.to_string();
+        let scope_id = crate::spaces_extension_contract::SPACES_SCOPE_ID.to_string();
         let Some(generation) = self.host_document_services.generation(namespace) else {
             self.host_document_caches
                 .remove(&(namespace.into(), scope_id.clone()));
@@ -716,7 +688,7 @@ impl App {
 
     pub(crate) fn refresh_agent_activity_document(&mut self) {
         let namespace = crate::first_party::agent_status::NAMESPACE;
-        let scope_id = crate::first_party::spaces::SESSION_SCOPE_ID.to_string();
+        let scope_id = crate::spaces_extension_contract::SPACES_SCOPE_ID.to_string();
         let Some(generation) = self.host_document_services.generation(namespace) else {
             self.host_document_caches
                 .remove(&(namespace.into(), scope_id.clone()));
@@ -856,7 +828,7 @@ impl App {
         }
     }
 
-    fn emit_host_document_updated(
+    pub(crate) fn emit_host_document_updated(
         &self,
         namespace: String,
         scope_id: String,
@@ -1006,71 +978,6 @@ impl App {
         self.retry_one_host_document_render();
     }
 
-    pub(crate) fn handle_host_spaces_document_result(
-        &mut self,
-        mut result: crate::extension_service::HostSpacesDocumentAsyncResult,
-    ) {
-        let render_slot = result._render_slot.take();
-        self.host_document_services.complete_render(
-            &result.namespace,
-            &result.snapshot.scope_id,
-            result.snapshot.generation,
-            result.snapshot.revision,
-        );
-        let key = (result.namespace.clone(), result.snapshot.scope_id.clone());
-        let current = self.host_document_services.generation(&result.namespace)
-            == Some(result.snapshot.generation)
-            && self
-                .host_document_request_watermarks
-                .get(&key)
-                .is_some_and(|watermark| {
-                    *watermark == (result.snapshot.generation, result.snapshot.revision)
-                });
-        if current {
-            match result.result {
-                Ok(document) => {
-                    self.host_spaces_retry_epoch =
-                        self.host_spaces_retry_epoch.saturating_add(1).max(1);
-                    self.host_spaces_retry_attempt = 0;
-                    self.host_spaces_retry_scheduled = false;
-                    let cache = self.host_document_caches.entry(key).or_default();
-                    let _ = cache.publish_for_namespace(
-                        &result.namespace,
-                        result.snapshot.generation,
-                        result.provider_priority,
-                        &result.grants,
-                        document,
-                    );
-                }
-                Err(error) => {
-                    self.host_spaces_last_desired = None;
-                    self.schedule_host_spaces_retry();
-                    tracing::warn!(%error, "Spaces document render failed; using native fallback");
-                }
-            }
-        }
-        if current
-            && self
-                .host_document_caches
-                .get(&(result.namespace.clone(), result.snapshot.scope_id.clone()))
-                .and_then(|cache| cache.current())
-                .is_some_and(|document| {
-                    document.generation == result.snapshot.generation
-                        && document.revision == result.snapshot.revision
-                })
-        {
-            self.emit_host_document_updated(
-                result.namespace.clone(),
-                result.snapshot.scope_id.clone(),
-                result.snapshot.generation,
-                result.snapshot.revision,
-                true,
-            );
-        }
-        drop(render_slot);
-        self.retry_one_host_document_render();
-    }
-
     fn schedule_host_semantic_retry(&mut self, namespace: &str) {
         let attempts = self
             .host_semantic_retry_attempts
@@ -1129,49 +1036,6 @@ impl App {
         *epoch = epoch.saturating_add(1).max(1);
         self.host_semantic_retry_attempts.remove(namespace);
         self.host_semantic_retry_scheduled.remove(namespace);
-    }
-
-    fn schedule_host_spaces_retry(&mut self) {
-        if self.host_spaces_retry_scheduled
-            || self.host_spaces_retry_attempt >= MAX_HOST_SPACES_RETRY_ATTEMPTS
-            || self
-                .host_document_services
-                .generation(crate::first_party::spaces::NAMESPACE)
-                .is_none()
-        {
-            if self.host_spaces_retry_attempt >= MAX_HOST_SPACES_RETRY_ATTEMPTS {
-                tracing::warn!(
-                    attempts = self.host_spaces_retry_attempt,
-                    "Spaces provider retry budget exhausted; retaining native fallback"
-                );
-            }
-            return;
-        }
-        let exponent = self.host_spaces_retry_attempt.min(6);
-        let delay_ms = 100_u64.saturating_mul(1_u64 << exponent).min(5_000);
-        self.host_spaces_retry_attempt = self.host_spaces_retry_attempt.saturating_add(1);
-        self.host_spaces_retry_scheduled = true;
-        let epoch = self.host_spaces_retry_epoch;
-        let event_tx = self.event_tx.clone();
-        if let Err(error) = std::thread::Builder::new()
-            .name("vqro-spaces-retry".into())
-            .spawn(move || {
-                std::thread::sleep(std::time::Duration::from_millis(delay_ms));
-                let mut event = crate::events::AppEvent::HostSpacesRetryDue { epoch };
-                loop {
-                    match event_tx.try_send(event) {
-                        Ok(()) | Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => return,
-                        Err(tokio::sync::mpsc::error::TrySendError::Full(returned)) => {
-                            event = returned;
-                            std::thread::sleep(std::time::Duration::from_millis(10));
-                        }
-                    }
-                }
-            })
-        {
-            self.host_spaces_retry_scheduled = false;
-            tracing::warn!(%error, "failed to schedule Spaces provider retry");
-        }
     }
 
     pub(crate) fn handle_host_document_result(
@@ -1491,7 +1355,7 @@ impl App {
                     && params.scope_id.as_ref().is_none_or(|scope_id| {
                         match &entry.document.target {
                             crate::extension_contract::HostTarget::Session => {
-                                scope_id == crate::first_party::spaces::SESSION_SCOPE_ID
+                                scope_id == crate::spaces_extension_contract::SPACES_SCOPE_ID
                             }
                             crate::extension_contract::HostTarget::Workspace { workspace_id } => {
                                 scope_id == workspace_id
@@ -1521,7 +1385,7 @@ impl App {
         &mut self,
     ) -> Vec<crate::protocol::endpoint::HostDocumentProjectionEntryV1> {
         let mut live_tab_ids = std::collections::HashSet::from([
-            crate::first_party::spaces::SESSION_SCOPE_ID.to_string(),
+            crate::spaces_extension_contract::SPACES_SCOPE_ID.to_string(),
         ]);
         for (ws_idx, workspace) in self.state.workspaces.iter().enumerate() {
             for tab_idx in 0..workspace.tabs.len() {
@@ -2894,141 +2758,6 @@ mod tests {
     }
 
     #[test]
-    fn shared_render_retry_queue_wakes_spaces_after_terminal_group_release() {
-        let mut app = app_with_workspace();
-        let collections = crate::collections_extension_contract::COLLECTIONS_NAMESPACE;
-        let spaces = crate::first_party::spaces::NAMESPACE;
-        app.host_document_services =
-            crate::extension_service::HostDocumentServiceCatalog::with_test_saturated_render_providers(&[
-                (collections, 7, crate::api::schema::HostDocumentSourceKind::TerminalGroups),
-                (spaces, 8, crate::api::schema::HostDocumentSourceKind::Spaces),
-            ]);
-        app.refresh_collection_documents();
-        assert_eq!(app.host_document_retry_snapshots.len(), 2);
-
-        app.host_document_services.release_test_render_slot();
-        app.retry_one_host_document_render();
-        assert_eq!(
-            app.host_document_services
-                .pending_render_count_for_test(collections),
-            1
-        );
-        assert!(app.host_document_retry_snapshots.contains_key(&(
-            spaces.into(),
-            crate::first_party::spaces::SESSION_SCOPE_ID.into()
-        )));
-
-        app.host_document_services
-            .retain_scopes(&std::collections::HashSet::from([
-                crate::first_party::spaces::SESSION_SCOPE_ID.to_string(),
-            ]));
-        app.retry_one_host_document_render();
-        assert_eq!(
-            app.host_document_services
-                .pending_render_count_for_test(spaces),
-            1
-        );
-        assert!(app.host_document_retry_snapshots.is_empty());
-    }
-
-    #[test]
-    fn transient_spaces_failure_schedules_bounded_idle_retry() {
-        let mut app = app_with_workspace();
-        let namespace = crate::first_party::spaces::NAMESPACE;
-        app.host_document_services =
-            crate::extension_service::HostDocumentServiceCatalog::with_test_document_source_provider(
-                namespace,
-                9,
-                crate::api::schema::HostDocumentSourceKind::Spaces,
-            );
-        let snapshot = crate::extension_contract::HostSpacesV1 {
-            contract: "host.spaces.v1".into(),
-            generation: 9,
-            revision: 4,
-            scope_id: crate::first_party::spaces::SESSION_SCOPE_ID.into(),
-            repositories: Vec::new(),
-            standalone: Vec::new(),
-            order: Vec::new(),
-        };
-        app.host_document_request_watermarks.insert(
-            (namespace.into(), snapshot.scope_id.clone()),
-            (snapshot.generation, snapshot.revision),
-        );
-        app.handle_host_spaces_document_result(
-            crate::extension_service::HostSpacesDocumentAsyncResult {
-                _render_slot: None,
-                namespace: namespace.into(),
-                provider_priority: 100,
-                snapshot,
-                result: Err("transient crash".into()),
-                grants: std::collections::HashSet::new(),
-            },
-        );
-        assert!(app.host_spaces_retry_scheduled);
-        assert_eq!(app.host_spaces_retry_attempt, 1);
-        let event = loop {
-            let event = app
-                .event_rx
-                .blocking_recv()
-                .expect("retry timer should wake an idle app");
-            if matches!(&event, crate::events::AppEvent::HostSpacesRetryDue { .. }) {
-                break event;
-            }
-            app.handle_internal_event(event);
-        };
-        app.handle_internal_event(event);
-        assert!(!app.host_spaces_retry_scheduled);
-        assert!(app.host_spaces_last_desired.is_some());
-        assert_eq!(
-            app.host_document_services
-                .pending_render_count_for_test(namespace),
-            1
-        );
-    }
-
-    #[test]
-    fn spaces_failure_stops_after_retry_budget_until_new_lifecycle_work() {
-        let mut app = app_with_workspace();
-        let namespace = crate::first_party::spaces::NAMESPACE;
-        app.host_document_services =
-            crate::extension_service::HostDocumentServiceCatalog::with_test_document_source_provider(
-                namespace,
-                9,
-                crate::api::schema::HostDocumentSourceKind::Spaces,
-            );
-        app.host_spaces_retry_attempt = MAX_HOST_SPACES_RETRY_ATTEMPTS;
-        app.host_spaces_retry_scheduled = false;
-        let snapshot = crate::extension_contract::HostSpacesV1 {
-            contract: "host.spaces.v1".into(),
-            generation: 9,
-            revision: 4,
-            scope_id: crate::first_party::spaces::SESSION_SCOPE_ID.into(),
-            repositories: Vec::new(),
-            standalone: Vec::new(),
-            order: Vec::new(),
-        };
-        app.host_document_request_watermarks.insert(
-            (namespace.into(), snapshot.scope_id.clone()),
-            (snapshot.generation, snapshot.revision),
-        );
-        app.handle_host_spaces_document_result(
-            crate::extension_service::HostSpacesDocumentAsyncResult {
-                _render_slot: None,
-                namespace: namespace.into(),
-                provider_priority: 100,
-                snapshot,
-                result: Err("persistent invalid output".into()),
-                grants: std::collections::HashSet::new(),
-            },
-        );
-        assert!(!app.host_spaces_retry_scheduled);
-        assert_eq!(
-            app.host_spaces_retry_attempt,
-            MAX_HOST_SPACES_RETRY_ATTEMPTS
-        );
-    }
-
-    #[test]
     fn linked_worktree_spaces_label_preserves_branch_and_custom_name_parity() {
         let mut app = app_with_workspace();
         let workspace = &mut app.state.workspaces[0];
@@ -3057,7 +2786,7 @@ mod tests {
             contract: "host.spaces.v1".into(),
             generation: 1,
             revision: 1,
-            scope_id: crate::first_party::spaces::SESSION_SCOPE_ID.into(),
+            scope_id: crate::spaces_extension_contract::SPACES_SCOPE_ID.into(),
             repositories: Vec::new(),
             standalone: Vec::new(),
             order: Vec::new(),
@@ -3248,7 +2977,7 @@ mod tests {
         assert!(app.host_relationships_last_desired.is_none());
         assert!(!app.host_document_caches.contains_key(&(
             namespace.into(),
-            crate::first_party::spaces::SESSION_SCOPE_ID.into()
+            crate::spaces_extension_contract::SPACES_SCOPE_ID.into()
         )));
     }
 
@@ -3292,7 +3021,7 @@ mod tests {
             app.host_document_caches.insert(
                 (
                     namespace,
-                    crate::first_party::spaces::SESSION_SCOPE_ID.into(),
+                    crate::spaces_extension_contract::SPACES_SCOPE_ID.into(),
                 ),
                 cache,
             );

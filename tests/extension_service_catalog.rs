@@ -12,83 +12,13 @@ fn compiled_collections_service_is_absent() {
 }
 
 #[test]
-fn bundled_spaces_provider_parses_the_public_session_snapshot() {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_vqro"))
+fn compiled_spaces_service_is_absent() {
+    let output = Command::new(env!("CARGO_BIN_EXE_vqro"))
         .args(["_extension-service", "spaces"])
-        .env("VQRO_EXTENSION_SERVICE_ID", "vqro.spaces")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .spawn()
+        .output()
         .unwrap();
-    let mut stdin = child.stdin.take().unwrap();
-    let mut stdout = BufReader::new(child.stdout.take().unwrap());
-    let mut line = String::new();
-    stdout.read_line(&mut line).unwrap();
-    let hello: serde_json::Value = serde_json::from_str(&line).unwrap();
-    assert_eq!(hello["service_id"], "vqro.spaces");
-    assert_eq!(
-        hello["requested_capabilities"],
-        serde_json::json!(["host_document"])
-    );
-
-    writeln!(
-        stdin,
-        "{}",
-        serde_json::json!({
-            "type": "welcome",
-            "protocol": 2,
-            "granted_capabilities": ["host_document"],
-            "methods": ["host.document.render"],
-            "trust": "trusted_same_user_not_sandboxed"
-        })
-    )
-    .unwrap();
-    writeln!(
-        stdin,
-        "{}",
-        serde_json::json!({
-            "type": "request",
-            "id": 8,
-            "method": "host.document.render",
-            "params": {
-                "contract": "host.spaces.v1",
-                "generation": 4,
-                "revision": 6,
-                "scope_id": "session_alpha",
-                "repositories": [{
-                    "repository_id": "repo_vqro",
-                    "label": "vqro",
-                    "workspaces": [{"workspace_id": "workspace_main", "label": "main"}]
-                }],
-                "standalone": [{"workspace_id": "workspace_notes", "label": "Notes"}],
-                "order": [
-                    {"kind": "standalone_workspace", "workspace_id": "workspace_notes"},
-                    {"kind": "repository", "repository_id": "repo_vqro"}
-                ]
-            }
-        })
-    )
-    .unwrap();
-    stdin.flush().unwrap();
-
-    line.clear();
-    stdout.read_line(&mut line).unwrap();
-    let response: serde_json::Value = serde_json::from_str(&line).unwrap();
-    assert_eq!(response["id"], 8);
-    assert_eq!(response["result"]["namespace"], "vqro.spaces");
-    assert_eq!(response["result"]["target"]["kind"], "session");
-    assert_eq!(
-        response["result"]["items"][0]["id"],
-        "workspace:workspace_notes"
-    );
-    assert_eq!(response["result"]["items"][1]["id"], "repository:repo_vqro");
-    assert_eq!(
-        response["result"]["items"][2]["parent_id"],
-        "repository:repo_vqro"
-    );
-
-    drop(stdin);
-    assert!(child.wait().unwrap().success());
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
 }
 
 fn render_with_bundled_provider(provider: &str, params: serde_json::Value) -> serde_json::Value {

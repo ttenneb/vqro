@@ -9,6 +9,8 @@ Vqro currently supports two distinct extension models:
 - **Legacy executable plugin** — a manifest-v1 plugin, hook, pane command, or protocol-2 service that runs as trusted same-user code. It may run repository build commands during legacy installation and is not sandboxed.
 - **Component extension package** — a deterministic `vqro.package.v1` archive with a manifest-v2 WebAssembly Component Model service executed by Wasmtime with only the checked-in Vqro WIT world linked. Git-installed packages do not run repository build commands and cannot request the native process backend.
 
+The Extensions inventory reports provenance rather than flattening these models: independently installed component archives are **sandboxed packages**, distribution-owned entries are **bundled providers**, and detected coding tools are **agent integrations**. Curated discovery never converts one kind into another or grants authority.
+
 Use these lifecycle terms precisely:
 
 1. **Artifact commit** — verified package bytes are retained in immutable storage.
@@ -30,18 +32,19 @@ Use these lifecycle terms precisely:
 | Runtime | Trusted process protocol 2 | Restricted Wasmtime component using `vqro.service.v1` |
 | Install/update/rollback/remove lifecycle | Production compatibility lifecycle | Production exact-Git package journey; file/link contracts remain lower-level foundations |
 | Runtime instantiation after enable/restart | Production | Production |
-| Host document v1 | Production for admitted protocol-2 providers | Not the component package contribution path |
+| Host document v1 | Production for admitted protocol-2 providers | Validated cached output for the exact pinned Collections and Spaces authority packages |
 | `host.state.v1` lease | Not granted through the package dispatcher | Revocable read-only lease for the exact pinned Collections package during audit and typed action planning; no package write lease |
 | `host.terminals.v1` lease | Not granted through the package dispatcher | Revocable exact-scope read lease for the exact pinned Collections package |
-| `host.document.render.v2` invocation and audit | Not part of the legacy surface | Bounded worker invocation and semantic audit for Collections |
+| Package document invocation and audit | Not part of the legacy surface | Bounded, fenced invocation and semantic audit for exact pinned Collections and Spaces packages |
 | Document-v2 provider admission | Unavailable | Production for the exact pinned Collections package after atomic authority cutover |
 | Document-v2 client-visible publication | Unavailable | Production through cached generation-1 compatibility projections for Collections |
 | Collections document profile/projections | Unavailable | Package-authoritative after cutover; profile and both compatibility projections publish from one audited topology |
 | Document-bound package actions/effect plans | Unavailable | Production typed `set_label` and `set_archived` plans with host tickets, validation, state CAS, and atomic checkpointing |
 | Collections policy authority | Unavailable; the compiled provider was removed in R4 | Exact pinned package after snapshot-v7 atomic cutover; fail-closed if absent, unavailable, or replaced |
+| Spaces projection authority | Unavailable; the compiled and bundled providers are removed | Exact pinned zero-host-call package; fail-closed if absent, unavailable, stale, or replaced |
 | Stable component author SDK | Unavailable | Unavailable |
 
-Starting an ordinary component service proves verified runtime and lifecycle behavior but grants no host reads. The exact pinned Collections package is the sole exception: before cutover its bounded workers receive revocable state/terminal reads only for quarantined audit; after the atomic snapshot-v7 cutover the same exact package supplies cached profiles and typed action plans. The host still executes effects, owns PTYs, validates tickets and dependencies, performs state CAS, and coordinates durable publication.
+Starting an ordinary component service proves verified runtime and lifecycle behavior but grants no host reads. The exact pinned Collections package is the sole host-read exception: before cutover its bounded workers receive revocable state/terminal reads only for quarantined audit; after the atomic snapshot-v7 cutover the same exact package supplies cached profiles and typed action plans. The exact pinned Spaces package receives no host-call capability; the host passes one complete `host.spaces.v1` value as invocation parameters. The host still executes effects, owns PTYs, validates package output and current authority, and coordinates durable publication.
 
 The `availability` strings in the frozen `host-state-v1` and `host-terminals-v1` schema snapshots still say that “production package activation is not enabled.” Those exact R0 bytes remain pinned by the external package and predate read admission. They still correctly deny general package access and all direct write authority; this live status document records the exact-pin Collections exception and package authority.
 
@@ -57,11 +60,17 @@ The [Collections v1 R0 contracts](vqro-collections-v1.md) freeze the profile, co
 
 See the accepted [Collections package authority transition](../architecture/collections-authority-transition.md) for the implementation boundaries.
 
+## Spaces authority today
+
+There is no compiled Spaces projection and no bundled Spaces catalog entry. The exact Git-pinned `vqro.spaces` package receives a complete host-authored `host.spaces.v1` snapshot and no host-call capabilities. Its action-free `host.document.v1` result is published only after exact artifact/runtime fencing and structural parity validation of generation, revision, repository membership, workspace membership, labels, ordering, roles, flags, and full snapshot coverage.
+
+Changed snapshots supersede older attempts; stale or canceled completions cannot publish or disable a newer attempt. The last audited document remains visible during an ordinary replacement invocation, then publication swaps atomically. Package absence, disablement, runtime failure, digest mismatch, or invalid output removes Spaces document authority without changing generic workspace, tab, pane, or PTY access. Re-enabling or explicitly rolling back to the exact production pin rebuilds the projection from a fresh host snapshot.
+
 ## Compatibility boundaries
 
 - Endpoint generation 1 and its named codecs remain frozen.
 - `host.document.v2` remains action-free. Actions and effect plans require separately named contracts.
-- `vqro.collections` has no bundled provider owner; only the exact package may publish it.
+- `vqro.collections` and `vqro.spaces` have no bundled provider owner; only their exact production packages may publish them.
 - Real PTYs remain host-owned and recoverable without any extension provider.
 - Disabling or removing a package retains its namespaced state unless the user separately confirms data deletion.
 - Native process containment is lifecycle containment, not an OS sandbox.

@@ -24,6 +24,10 @@ test-one filter:
 collections-package-conformance:
     cargo nextest run --locked 'collections_candidate_passes_authoritative_host_gate' --run-ignored ignored-only --status-level fail --final-status-level fail --failure-output final --success-output never
 
+# Verify and invoke the exact pinned zero-capability Spaces package artifact.
+spaces-package-conformance:
+    cargo nextest run --locked 'spaces_package_passes_authoritative_host_gate' --run-ignored ignored-only --status-level fail --final-status-level fail --failure-output final --success-output never
+
 # Enforce deterministic UI hot-path architecture boundaries
 ui-hot-path-architecture-test:
     {{python}} -m unittest scripts.test_ui_hot_path_architecture

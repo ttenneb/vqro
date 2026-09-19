@@ -19,13 +19,13 @@ impl App {
         }
         let state_requested =
             purpose.state != crate::extension_host_invocation::HostStateReadSource::None;
-        if !state_requested && purpose.terminals.is_none() {
-            return Err("composite host-read purpose must select at least one method".into());
-        }
         if purpose.state == crate::extension_host_invocation::HostStateReadSource::Durable
             && self.extension_state_persistence_blocked
         {
             return Err("durable extension state authority is unavailable".into());
+        }
+        if !state_requested && purpose.terminals.is_none() {
+            return Err("composite host-read purpose must select at least one method".into());
         }
         let observes_state_then_terminals = state_requested && purpose.terminals.is_some();
 

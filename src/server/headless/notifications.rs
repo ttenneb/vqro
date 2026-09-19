@@ -335,13 +335,6 @@ impl HeadlessServer {
             self.app.handle_host_agent_activity_document_result(*result);
             return true;
         }
-        if matches!(&ev, AppEvent::HostSpacesDocumentFinished(_)) {
-            let AppEvent::HostSpacesDocumentFinished(result) = ev else {
-                unreachable!("variant checked above");
-            };
-            self.app.handle_host_spaces_document_result(*result);
-            return true;
-        }
         if matches!(&ev, AppEvent::HostDocumentFinished(_)) {
             let AppEvent::HostDocumentFinished(result) = ev else {
                 unreachable!("variant checked above");

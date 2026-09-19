@@ -80,6 +80,7 @@ mod selection;
 mod server;
 mod session;
 mod sound;
+pub mod spaces_extension_contract;
 mod terminal;
 mod terminal_container;
 mod terminal_effects;

@@ -288,32 +288,32 @@ actions; Herdr continues to own terminal processes, geometry, focus, input,
 colors, accessibility, admission, and rendering. Rendering uses the last
 validated cached document rather than making per-frame service calls.
 
-The bundled `vqro.collections`, `vqro.spaces`, `vqro.delegation`, and
-`vqro.agent-status` compatibility providers use this same public process-service
-and document protocol, but their implementations remain compiled into Vqro and
-their manifests self-spawn the current Vqro binary. They are migration oracles,
-not independently built component extensions. Their shipped
-`extensions/first-party/*/vqro-extension.toml` declarations are parsed by the
-production manifest types and drive runtime service identity, source, priority,
-and capabilities. At launch, the host replaces only the manifest's `vqro`
-executable token with its exact current executable, so preview, update-handoff,
-and side-by-side installations cannot accidentally spawn a different installed
-version. They are enabled by default and can be disabled independently:
+The bundled `vqro.delegation` and `vqro.agent-status` compatibility providers
+use this public process-service and document protocol, but their implementations
+remain compiled into Vqro and their manifests self-spawn the current Vqro binary.
+Their shipped declarations drive runtime service identity, source, priority, and
+capabilities. They are enabled by default and can be disabled independently:
 
 ```toml
 [extensions]
-disabled = ["vqro.collections", "vqro.spaces", "vqro.delegation", "vqro.agent-status"]
+disabled = ["vqro.delegation", "vqro.agent-status"]
 ```
 
-Disabling or losing any provider removes its product-specific document, but
-all workspaces, tabs, panes, and live terminals remain reachable through the
-native generic projection. The `spaces`, `relationships`, and `agent_activity` document sources carry
-host-derived repository, relationship, or attributed activity facts and are
-currently restricted to their matching bundled providers. Their bounded
-`host.spaces.v1`, `host.relationships.v1`, and `host.agent-activity.v1` JSON
-contracts remain the versioned service boundary and are included in the
-publishable extension contract bundle even though registration for those
-host-derived sources is restricted. Agent activity is neutral
+Collections and Spaces are not bundled providers. They are independently built,
+exact-Git-pinned component packages shown as **sandboxed packages** in
+Extensions. Their compiled providers and bundled catalog rows have been removed;
+when either exact package is unavailable, its product-specific authority fails
+closed while generic workspace, tab, pane, and PTY access remains available.
+See [Extension platform status](/docs/extension-platform-status/) for their
+production authority boundaries.
+
+The `relationships` and `agent_activity` document sources carry host-derived
+relationship or attributed activity facts and remain restricted to their
+matching bundled providers. Spaces instead receives one complete bounded
+`host.spaces.v1` snapshot as the exact package invocation parameter and has no
+host-call capability. The `host.spaces.v1`, `host.relationships.v1`, and
+`host.agent-activity.v1` JSON contracts remain versioned boundaries. Agent
+activity is neutral
 (`idle`, `working`, `blocked`, or `unknown`); each client still derives `done`
 from its own acknowledgement cursor. User document providers use the public
 terminal-group source. The namespaces `vqro.collections`, `vqro.spaces`,

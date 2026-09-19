@@ -185,9 +185,6 @@ pub enum AppEvent {
     // Unit-test executables cannot recursively host the bundled service binary.
     #[cfg_attr(test, allow(dead_code))]
     HostDocumentFinished(Box<crate::extension_service::HostDocumentAsyncResult>),
-    // Constructed by production provider workers; test catalogs use injected terminal-group sources.
-    #[cfg_attr(test, allow(dead_code))]
-    HostSpacesDocumentFinished(Box<crate::extension_service::HostSpacesDocumentAsyncResult>),
     // Production bundled providers construct these; unit tests install explicit sources.
     #[cfg_attr(test, allow(dead_code))]
     HostRelationshipsDocumentFinished(
@@ -202,9 +199,6 @@ pub enum AppEvent {
         scope_id: String,
         generation: u64,
         revision: u64,
-    },
-    HostSpacesRetryDue {
-        epoch: u64,
     },
     HostSemanticDocumentRetryDue {
         namespace: String,

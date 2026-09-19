@@ -68,9 +68,14 @@ impl App {
         self.extension_services = extension_services;
         self.host_document_services = host_document_services;
         self.extension_catalog_rebuilt = true;
+        let package_namespaces = [
+            crate::collections_extension_contract::COLLECTIONS_NAMESPACE,
+            crate::spaces_extension_contract::SPACES_NAMESPACE,
+        ];
         let retired_documents = self
             .host_document_caches
             .iter()
+            .filter(|((namespace, _), _)| !package_namespaces.contains(&namespace.as_str()))
             .filter_map(|((_, scope_id), cache)| {
                 let document = cache.current()?;
                 Some((
@@ -81,7 +86,8 @@ impl App {
                 ))
             })
             .collect::<Vec<_>>();
-        self.host_document_caches.clear();
+        self.host_document_caches
+            .retain(|(namespace, _), _| package_namespaces.contains(&namespace.as_str()));
         for (namespace, scope_id, generation, revision) in retired_documents {
             self.event_hub.push(crate::api::schema::EventEnvelope {
                 event: crate::api::schema::EventKind::HostDocumentUpdated,
@@ -94,18 +100,15 @@ impl App {
                 },
             });
         }
-        self.host_document_request_watermarks.clear();
+        self.host_document_request_watermarks
+            .retain(|(namespace, _), _| package_namespaces.contains(&namespace.as_str()));
         self.host_document_confirmation_grants.clear();
         self.host_document_retry_snapshots.clear();
         self.host_document_retry_order.clear();
         self.host_document_retry_scheduled.clear();
         self.host_document_retry_attempts.clear();
-        self.host_spaces_last_desired = None;
         self.host_relationships_last_desired = None;
         self.host_agent_activity_last_desired = None;
-        self.host_spaces_retry_epoch = self.host_spaces_retry_epoch.saturating_add(1).max(1);
-        self.host_spaces_retry_attempt = 0;
-        self.host_spaces_retry_scheduled = false;
         for namespace in [
             crate::first_party::delegation::NAMESPACE,
             crate::first_party::agent_status::NAMESPACE,

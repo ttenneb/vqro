@@ -4,10 +4,6 @@ use std::io::{BufRead, Write};
 
 pub(crate) fn run(provider: &str) -> std::io::Result<i32> {
     let (namespace, capabilities) = match provider {
-        "spaces" => (
-            crate::first_party::spaces::NAMESPACE,
-            serde_json::json!(["host_document"]),
-        ),
         "delegation" => (
             crate::first_party::delegation::NAMESPACE,
             serde_json::json!(["host_document"]),
@@ -51,14 +47,6 @@ pub(crate) fn run(provider: &str) -> std::io::Result<i32> {
                 if request.kind == "request" && request.method == "host.document.render" =>
             {
                 let projection = match provider {
-                    "spaces" => serde_json::from_value::<crate::extension_contract::HostSpacesV1>(
-                        request.params,
-                    )
-                    .map_err(|error| error.to_string())
-                    .and_then(|snapshot| {
-                        crate::first_party::spaces::project(&snapshot)
-                            .map_err(|error| error.to_string())
-                    }),
                     "delegation" => serde_json::from_value::<
                         crate::extension_contract::HostRelationshipsV1,
                     >(request.params)

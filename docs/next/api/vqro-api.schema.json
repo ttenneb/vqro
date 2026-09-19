@@ -9645,6 +9645,7 @@
           "enum": [
             "bundled",
             "agent_integration",
+            "sandboxed_package",
             "github_plugin"
           ],
           "type": "string"
@@ -10273,6 +10274,9 @@
               "minimum": 0,
               "type": "integer"
             },
+            "manifest_sha256": {
+              "type": "string"
+            },
             "package_id": {
               "type": "string"
             },
@@ -10306,6 +10310,7 @@
             "version",
             "source",
             "package_sha256",
+            "manifest_sha256",
             "enabled",
             "removed_retaining_data",
             "load_order",

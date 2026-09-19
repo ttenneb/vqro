@@ -228,7 +228,7 @@ Herdr 恢复会话且 API socket 就绪后,会为每个已启用插件运行一�
 
 插件可以声明带有 `provides = ["host_document"]` 和 `capabilities = ["host_document"]` 的长期运行 `[[services]]`。命令通过 stdin/stdout 使用版本化 JSON-lines 协议,并响应 `host.document.render` 请求返回经验证的 `host.document.v1` 语义文档。Herdr 继续拥有终端、布局、焦点、输入与渲染;渲染使用最后一个已验证文档,不会逐帧调用服务。
 
-内置的 `vqro.collections`、`vqro.spaces`、`vqro.delegation` 和 `vqro.agent-status` 兼容提供程序使用相同的公开进程服务形状,但实现仍编译在 Vqro 中。它们不是独立构建的组件扩展。禁用或丢失提供程序后,工作区、窗格和运行中的终端仍可通过通用投影访问。
+保留的内置兼容提供程序只有 `vqro.delegation` 和 `vqro.agent-status`。`vqro.collections` 与 `vqro.spaces` 不再内置；它们是独立构建、按 exact-Git 固定的沙箱组件包。已删除编译提供程序和内置目录条目。禁用或丢失精确包时，只有该产品专属权限会 fail closed；工作区、标签页、窗格和 PTY 的通用访问仍然可用。
 
 ### 实验与基础契约
 

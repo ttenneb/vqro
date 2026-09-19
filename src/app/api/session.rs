@@ -68,22 +68,27 @@ impl App {
                     .is_some_and(|focused| repository.checkout_workspace_ids.contains(focused)),
             })
             .collect();
-        let space_order = if self.disabled_extensions.contains("vqro.spaces") {
-            Vec::new()
-        } else {
-            self.state
-                .space_order
-                .iter()
-                .map(|space| match space {
-                    crate::repository::SpaceRef::Repository(id) => {
-                        crate::api::schema::SpaceInfo::Repository(id.clone())
-                    }
-                    crate::repository::SpaceRef::StandaloneWorkspace(id) => {
-                        crate::api::schema::SpaceInfo::StandaloneWorkspace(id.clone())
-                    }
-                })
-                .collect()
-        };
+        let space_order = self
+            .host_document_caches
+            .get(&(
+                crate::spaces_extension_contract::SPACES_NAMESPACE.into(),
+                crate::spaces_extension_contract::SPACES_SCOPE_ID.into(),
+            ))
+            .and_then(crate::host_document_cache::HostDocumentCache::current)
+            .into_iter()
+            .flat_map(|document| document.items.iter())
+            .filter(|item| item.parent_id.is_none())
+            .filter_map(|item| {
+                item.id
+                    .strip_prefix("repository:")
+                    .map(|id| crate::api::schema::SpaceInfo::Repository(id.into()))
+                    .or_else(|| {
+                        item.id
+                            .strip_prefix("workspace:")
+                            .map(|id| crate::api::schema::SpaceInfo::StandaloneWorkspace(id.into()))
+                    })
+            })
+            .collect();
 
         SessionSnapshot {
             version: crate::build_info::version(),
@@ -154,6 +159,55 @@ mod tests {
             is_linked_worktree: false,
         });
         app.state.reconcile_repositories();
+        let repository_id = app.state.repositories[0].id.clone();
+        app.host_document_caches
+            .entry((
+                crate::spaces_extension_contract::SPACES_NAMESPACE.into(),
+                crate::spaces_extension_contract::SPACES_SCOPE_ID.into(),
+            ))
+            .or_default()
+            .publish_for_namespace(
+                crate::spaces_extension_contract::SPACES_NAMESPACE,
+                1,
+                100,
+                &std::collections::HashSet::new(),
+                crate::extension_contract::HostDocumentV1 {
+                    contract: crate::extension_contract::HOST_DOCUMENT_CONTRACT_V1.into(),
+                    namespace: crate::spaces_extension_contract::SPACES_NAMESPACE.into(),
+                    generation: 1,
+                    revision: 1,
+                    surface: crate::extension_contract::HostSurface::Navigation,
+                    target: crate::extension_contract::HostTarget::Session,
+                    items: vec![
+                        crate::extension_contract::HostDocumentItem {
+                            id: format!("repository:{repository_id}"),
+                            parent_id: None,
+                            role: crate::extension_contract::HostItemRole::Group,
+                            label: "app".into(),
+                            detail: Some("1 workspace".into()),
+                            terminal: None,
+                            action_ids: Vec::new(),
+                            flags: crate::extension_contract::HostDocumentItemFlags {
+                                expanded: true,
+                                ..Default::default()
+                            },
+                        },
+                        crate::extension_contract::HostDocumentItem {
+                            id: format!("workspace:{workspace_id}"),
+                            parent_id: Some(format!("repository:{repository_id}")),
+                            role: crate::extension_contract::HostItemRole::Section,
+                            label: "snapshot".into(),
+                            detail: None,
+                            terminal: None,
+                            action_ids: Vec::new(),
+                            flags: crate::extension_contract::HostDocumentItemFlags::default(),
+                        },
+                    ],
+                    actions: Vec::new(),
+                    required_capabilities: Vec::new(),
+                },
+            )
+            .unwrap();
 
         let snapshot = app.session_snapshot();
 
@@ -224,17 +278,49 @@ mod tests {
     }
 
     #[test]
-    fn session_snapshot_hides_disabled_spaces_projection() {
+    fn session_snapshot_space_order_requires_package_document_authority() {
         let mut app = app_with_two_tabs();
         let workspace_id = app.state.workspaces[0].id.clone();
         app.state
             .space_order
             .push(crate::repository::SpaceRef::StandaloneWorkspace(
-                workspace_id,
+                workspace_id.clone(),
             ));
-        assert!(!app.session_snapshot().space_order.is_empty());
-        app.disabled_extensions.insert("vqro.spaces".into());
         assert!(app.session_snapshot().space_order.is_empty());
+        app.host_document_caches
+            .entry((
+                crate::spaces_extension_contract::SPACES_NAMESPACE.into(),
+                crate::spaces_extension_contract::SPACES_SCOPE_ID.into(),
+            ))
+            .or_default()
+            .publish_for_namespace(
+                crate::spaces_extension_contract::SPACES_NAMESPACE,
+                1,
+                100,
+                &std::collections::HashSet::new(),
+                crate::extension_contract::HostDocumentV1 {
+                    contract: crate::extension_contract::HOST_DOCUMENT_CONTRACT_V1.into(),
+                    namespace: crate::spaces_extension_contract::SPACES_NAMESPACE.into(),
+                    generation: 1,
+                    revision: 1,
+                    surface: crate::extension_contract::HostSurface::Navigation,
+                    target: crate::extension_contract::HostTarget::Session,
+                    items: vec![crate::extension_contract::HostDocumentItem {
+                        id: format!("workspace:{workspace_id}"),
+                        parent_id: None,
+                        role: crate::extension_contract::HostItemRole::Section,
+                        label: "main".into(),
+                        detail: None,
+                        terminal: None,
+                        action_ids: Vec::new(),
+                        flags: crate::extension_contract::HostDocumentItemFlags::default(),
+                    }],
+                    actions: Vec::new(),
+                    required_capabilities: Vec::new(),
+                },
+            )
+            .unwrap();
+        assert_eq!(app.session_snapshot().space_order.len(), 1);
     }
 
     #[test]
