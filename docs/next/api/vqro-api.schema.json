@@ -2881,6 +2881,127 @@
           ],
           "type": "object"
         },
+        "ExtensionServiceBindingApproveParams": {
+          "properties": {
+            "confirmed": {
+              "default": false,
+              "type": "boolean"
+            },
+            "consumer": {
+              "$ref": "#/schemas/request/$defs/ExtensionServiceEndpointParams"
+            },
+            "expected_binding_revision": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "expected_consent_sha256": {
+              "type": "string"
+            },
+            "expected_registry_revision": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "provider": {
+              "$ref": "#/schemas/request/$defs/ExtensionServiceEndpointParams"
+            }
+          },
+          "required": [
+            "consumer",
+            "provider",
+            "expected_registry_revision",
+            "expected_consent_sha256"
+          ],
+          "type": "object"
+        },
+        "ExtensionServiceBindingInspectParams": {
+          "properties": {
+            "consumer": {
+              "$ref": "#/schemas/request/$defs/ExtensionServiceEndpointParams"
+            },
+            "provider": {
+              "$ref": "#/schemas/request/$defs/ExtensionServiceEndpointParams"
+            }
+          },
+          "required": [
+            "consumer",
+            "provider"
+          ],
+          "type": "object"
+        },
+        "ExtensionServiceBindingInvokeParams": {
+          "properties": {
+            "binding_id": {
+              "type": "string"
+            },
+            "consumer_method": {
+              "type": "string"
+            },
+            "expected_binding_revision": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "params": true
+          },
+          "required": [
+            "binding_id",
+            "expected_binding_revision",
+            "consumer_method",
+            "params"
+          ],
+          "type": "object"
+        },
+        "ExtensionServiceBindingRevokeParams": {
+          "properties": {
+            "binding_id": {
+              "type": "string"
+            },
+            "confirmed": {
+              "default": false,
+              "type": "boolean"
+            },
+            "expected_binding_revision": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "expected_registry_revision": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "binding_id",
+            "expected_registry_revision",
+            "expected_binding_revision"
+          ],
+          "type": "object"
+        },
+        "ExtensionServiceEndpointParams": {
+          "properties": {
+            "endpoint_id": {
+              "type": "string"
+            },
+            "package_id": {
+              "type": "string"
+            },
+            "service_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "package_id",
+            "service_id",
+            "endpoint_id"
+          ],
+          "type": "object"
+        },
         "ExtensionSetEnabledParams": {
           "properties": {
             "enabled": {
@@ -7974,6 +8095,86 @@
             "params"
           ],
           "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "extension.service.binding.inspect",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/ExtensionServiceBindingInspectParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "extension.service.binding.approve",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/ExtensionServiceBindingApproveParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "extension.service.binding.list",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/EmptyParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "extension.service.binding.revoke",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/ExtensionServiceBindingRevokeParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "extension.service.binding.invoke",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/ExtensionServiceBindingInvokeParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
         }
       ],
       "properties": {
@@ -8625,6 +8826,14 @@
             "depth"
           ],
           "type": "object"
+        },
+        "EffectiveServiceBindingStatusV1": {
+          "enum": [
+            "ready",
+            "suspended",
+            "revoked"
+          ],
+          "type": "string"
         },
         "EventData": {
           "oneOf": [
@@ -9443,6 +9652,83 @@
           ],
           "type": "string"
         },
+        "ExtensionContractInspection": {
+          "properties": {
+            "contract_id": {
+              "type": "string"
+            },
+            "contract_version": {
+              "type": "string"
+            },
+            "descriptor_sha256": {
+              "type": "string"
+            },
+            "endpoint_id": {
+              "type": "string"
+            },
+            "methods": {
+              "items": {
+                "$ref": "#/schemas/success_response/$defs/ExtensionContractMethodInspection"
+              },
+              "type": "array"
+            },
+            "required": {
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "service_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "service_id",
+            "endpoint_id",
+            "contract_id",
+            "contract_version",
+            "descriptor_sha256",
+            "methods"
+          ],
+          "type": "object"
+        },
+        "ExtensionContractMethodInspection": {
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "max_request_bytes": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "max_response_bytes": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "request_information": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "response_information": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "id",
+            "request_information",
+            "response_information",
+            "max_request_bytes",
+            "max_response_bytes"
+          ],
+          "type": "object"
+        },
         "ExtensionInfo": {
           "properties": {
             "activation_error": {
@@ -9535,6 +9821,12 @@
                 "null"
               ]
             },
+            "provided_contracts": {
+              "items": {
+                "$ref": "#/schemas/success_response/$defs/ExtensionContractInspection"
+              },
+              "type": "array"
+            },
             "repository": {
               "type": "string"
             },
@@ -9552,6 +9844,12 @@
               "description": "Capabilities requested by executable package services. An empty list means\nthat this catalog item has no downloaded executable service.",
               "items": {
                 "type": "string"
+              },
+              "type": "array"
+            },
+            "required_contracts": {
+              "items": {
+                "$ref": "#/schemas/success_response/$defs/ExtensionContractInspection"
               },
               "type": "array"
             },
@@ -9610,9 +9908,21 @@
             "package_sha256": {
               "type": "string"
             },
+            "provided_contracts": {
+              "items": {
+                "$ref": "#/schemas/success_response/$defs/ExtensionContractInspection"
+              },
+              "type": "array"
+            },
             "requested_capabilities": {
               "items": {
                 "type": "string"
+              },
+              "type": "array"
+            },
+            "required_contracts": {
+              "items": {
+                "$ref": "#/schemas/success_response/$defs/ExtensionContractInspection"
               },
               "type": "array"
             },
@@ -9681,6 +9991,52 @@
           "required": [
             "repository_id",
             "enabled"
+          ],
+          "type": "object"
+        },
+        "ExtensionServiceBindingInfo": {
+          "properties": {
+            "binding": {
+              "$ref": "#/schemas/success_response/$defs/ServiceBindingV1"
+            },
+            "effective_status": {
+              "$ref": "#/schemas/success_response/$defs/EffectiveServiceBindingStatusV1"
+            }
+          },
+          "required": [
+            "binding",
+            "effective_status"
+          ],
+          "type": "object"
+        },
+        "ExtensionServiceBindingInspection": {
+          "properties": {
+            "consent": {
+              "$ref": "#/schemas/success_response/$defs/ServiceBindingConsentV1"
+            },
+            "consent_sha256": {
+              "type": "string"
+            },
+            "existing_binding": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/success_response/$defs/ServiceBindingV1"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "registry_revision": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "registry_revision",
+            "consent_sha256",
+            "consent"
           ],
           "type": "object"
         },
@@ -10283,12 +10639,24 @@
             "package_sha256": {
               "type": "string"
             },
+            "provided_contracts": {
+              "items": {
+                "$ref": "#/schemas/success_response/$defs/ExtensionContractInspection"
+              },
+              "type": "array"
+            },
             "removed_retaining_data": {
               "type": "boolean"
             },
             "requested_capabilities": {
               "items": {
                 "type": "string"
+              },
+              "type": "array"
+            },
+            "required_contracts": {
+              "items": {
+                "$ref": "#/schemas/success_response/$defs/ExtensionContractInspection"
               },
               "type": "array"
             },
@@ -13701,6 +14069,81 @@
             },
             {
               "properties": {
+                "inspection": {
+                  "$ref": "#/schemas/success_response/$defs/ExtensionServiceBindingInspection"
+                },
+                "type": {
+                  "const": "extension_service_binding_inspected",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "inspection"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "bindings": {
+                  "items": {
+                    "$ref": "#/schemas/success_response/$defs/ExtensionServiceBindingInfo"
+                  },
+                  "type": "array"
+                },
+                "registry_revision": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "type": {
+                  "const": "extension_service_binding_list",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "registry_revision",
+                "bindings"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "binding": {
+                  "$ref": "#/schemas/success_response/$defs/ExtensionServiceBindingInfo"
+                },
+                "type": {
+                  "const": "extension_service_binding_changed",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "binding"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "binding_id": {
+                  "type": "string"
+                },
+                "result": true,
+                "type": {
+                  "const": "extension_service_binding_invoked",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "binding_id",
+                "result"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
                 "actions": {
                   "items": {
                     "$ref": "#/schemas/success_response/$defs/PluginActionInfo"
@@ -13941,6 +14384,155 @@
           },
           "required": [
             "live_handoff"
+          ],
+          "type": "object"
+        },
+        "ServiceBindingConsentV1": {
+          "properties": {
+            "consumer": {
+              "$ref": "#/schemas/success_response/$defs/ServiceEndpointV1"
+            },
+            "contract": {
+              "$ref": "#/schemas/success_response/$defs/ServiceContractIdentityV1"
+            },
+            "methods": {
+              "items": {
+                "$ref": "#/schemas/success_response/$defs/ServiceBindingMethodV1"
+              },
+              "type": "array"
+            },
+            "provider": {
+              "$ref": "#/schemas/success_response/$defs/ServiceEndpointV1"
+            }
+          },
+          "required": [
+            "consumer",
+            "provider",
+            "contract",
+            "methods"
+          ],
+          "type": "object"
+        },
+        "ServiceBindingMethodV1": {
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "max_request_bytes": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "max_response_bytes": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "request_information": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "response_information": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "id",
+            "request_information",
+            "response_information",
+            "max_request_bytes",
+            "max_response_bytes"
+          ],
+          "type": "object"
+        },
+        "ServiceBindingStateV1": {
+          "enum": [
+            "approved",
+            "revoked"
+          ],
+          "type": "string"
+        },
+        "ServiceBindingV1": {
+          "properties": {
+            "binding_id": {
+              "type": "string"
+            },
+            "consent": {
+              "$ref": "#/schemas/success_response/$defs/ServiceBindingConsentV1"
+            },
+            "consent_sha256": {
+              "type": "string"
+            },
+            "revision": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "state": {
+              "$ref": "#/schemas/success_response/$defs/ServiceBindingStateV1"
+            }
+          },
+          "required": [
+            "binding_id",
+            "revision",
+            "state",
+            "consent_sha256",
+            "consent"
+          ],
+          "type": "object"
+        },
+        "ServiceContractIdentityV1": {
+          "properties": {
+            "contract_id": {
+              "type": "string"
+            },
+            "contract_version": {
+              "type": "string"
+            },
+            "descriptor_sha256": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "contract_id",
+            "contract_version",
+            "descriptor_sha256"
+          ],
+          "type": "object"
+        },
+        "ServiceEndpointV1": {
+          "properties": {
+            "endpoint_id": {
+              "type": "string"
+            },
+            "manifest_sha256": {
+              "type": "string"
+            },
+            "package_id": {
+              "type": "string"
+            },
+            "package_sha256": {
+              "type": "string"
+            },
+            "package_version": {
+              "type": "string"
+            },
+            "service_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "package_id",
+            "package_version",
+            "package_sha256",
+            "manifest_sha256",
+            "service_id",
+            "endpoint_id"
           ],
           "type": "object"
         },

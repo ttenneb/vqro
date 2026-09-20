@@ -310,6 +310,74 @@ pub(super) fn render_extensions_overlay(
             );
             y += 1;
         }
+        for (direction, contracts) in [
+            ("provides", &extension.provided_contracts),
+            ("requires", &extension.required_contracts),
+        ] {
+            for contract in contracts {
+                let requirement = contract
+                    .required
+                    .map(|required| if required { " required" } else { " optional" })
+                    .unwrap_or_default();
+                let summary = format!(
+                    "{direction}{requirement}: {}@{} · {}",
+                    contract.contract_id,
+                    contract.contract_version,
+                    &contract.descriptor_sha256[..contract.descriptor_sha256.len().min(12)]
+                );
+                for line in wrap_text(&summary, details.width.saturating_sub(2)) {
+                    if y >= details.bottom().saturating_sub(6) {
+                        break;
+                    }
+                    put_text(
+                        buffer,
+                        details.x + 1,
+                        y,
+                        details.width.saturating_sub(2),
+                        &line,
+                        base.fg(palette.yellow),
+                    );
+                    y += 1;
+                }
+                for method in &contract.methods {
+                    if y >= details.bottom().saturating_sub(6) {
+                        break;
+                    }
+                    let request = if method.request_information.is_empty() {
+                        "none".into()
+                    } else {
+                        method.request_information.join(", ")
+                    };
+                    let response = if method.response_information.is_empty() {
+                        "none".into()
+                    } else {
+                        method.response_information.join(", ")
+                    };
+                    let flow = format!(
+                        "  {}: sends {} (≤{} B), receives {} (≤{} B)",
+                        method.id,
+                        request,
+                        method.max_request_bytes,
+                        response,
+                        method.max_response_bytes
+                    );
+                    for line in wrap_text(&flow, details.width.saturating_sub(2)) {
+                        if y >= details.bottom().saturating_sub(6) {
+                            break;
+                        }
+                        put_text(
+                            buffer,
+                            details.x + 1,
+                            y,
+                            details.width.saturating_sub(2),
+                            &line,
+                            muted,
+                        );
+                        y += 1;
+                    }
+                }
+            }
+        }
         if let Some(status) = extension.integration_status {
             let status_label = match status {
                 crate::api::schema::IntegrationState::NotInstalled => "not installed",

@@ -197,6 +197,11 @@ pub struct App {
     /// service work happen on bounded workers; replacing a slot never affects pane PTYs.
     pub(crate) extension_package_services:
         std::collections::BTreeMap<String, crate::extension_candidate::PackageCandidateSlot>,
+    /// Runtime-only revocation cells for exact durable service-binding revisions.
+    pub(crate) service_binding_revocations:
+        std::collections::BTreeMap<(String, u64), Arc<std::sync::atomic::AtomicBool>>,
+    pub(crate) pending_service_fabric_invocations:
+        std::collections::BTreeMap<u64, crate::service_fabric::PendingServiceFabricInvocation>,
     pub(crate) host_document_services: crate::extension_service::HostDocumentServiceCatalog,
     pub(crate) extension_index: crate::extensions::CuratedIndex,
     pub(crate) marketplace_state: crate::extensions::MarketplaceStateFile,
@@ -987,6 +992,8 @@ impl App {
             terminal_telemetry_cache: HashMap::new(),
             extension_services,
             extension_package_services: std::collections::BTreeMap::new(),
+            service_binding_revocations: std::collections::BTreeMap::new(),
+            pending_service_fabric_invocations: std::collections::BTreeMap::new(),
             host_document_services,
             extension_index,
             marketplace_state,
@@ -3959,5 +3966,416 @@ mod tests {
             AgentState::Idle,
             "Working→Idle should still apply after temporary queue pressure"
         );
+    }
+
+    #[test]
+    fn service_fabric_public_invoke_normalizes_missing_authority() {
+        let mut app = test_app();
+        let (respond_to, response_rx) = std::sync::mpsc::channel();
+        app.start_deferred_extension_artifact_request(
+            crate::api::schema::Request {
+                id: "fabric-missing".into(),
+                method: crate::api::schema::Method::ExtensionServiceBindingInvoke(
+                    crate::api::schema::ExtensionServiceBindingInvokeParams {
+                        binding_id: "sb_missing".into(),
+                        expected_binding_revision: 1,
+                        consumer_method: "compose".into(),
+                        params: serde_json::json!({}),
+                    },
+                ),
+            },
+            respond_to,
+        );
+        let response: crate::api::schema::ErrorResponse = serde_json::from_str(
+            &response_rx
+                .recv_timeout(std::time::Duration::from_secs(1))
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            response.error.code,
+            crate::service_fabric::ERROR_BINDING_UNAVAILABLE
+        );
+    }
+
+    #[test]
+    fn service_fabric_public_invoke_is_deferred_exact_and_pty_isolated() {
+        fn ready_slot(
+            app: &mut App,
+            installed: crate::extension_package::InstalledPackageV1,
+            generation: u64,
+        ) -> crate::extension_candidate::PackageCandidateSlot {
+            let expected_package_id = installed.package_id.clone();
+            let mut slot = crate::extension_candidate::PackageCandidateSlot::spawn(
+                installed,
+                generation,
+                app.event_tx.clone(),
+            )
+            .unwrap();
+            let ready = loop {
+                match app.event_rx.blocking_recv().unwrap() {
+                    AppEvent::ExtensionPackageCandidateReady(ready)
+                        if ready.package_id == expected_package_id =>
+                    {
+                        break ready;
+                    }
+                    event => {
+                        app.handle_internal_event(event);
+                    }
+                }
+            };
+            assert!(slot.accepts(&ready));
+            slot.install_ready(ready.result.unwrap());
+            slot
+        }
+
+        fn lifecycle_record(
+            package: &crate::extension_package::ValidatedPackageV1,
+            generation: u64,
+        ) -> crate::extension_package::PackageLifecycleRecordV1 {
+            crate::extension_package::PackageLifecycleRecordV1 {
+                package_id: package.manifest.id.clone(),
+                source: crate::extension_package::PackageProvenanceV1::Git {
+                    url: format!("https://example.invalid/{}.git", package.manifest.id),
+                    source_commit: "a".repeat(40),
+                    package_path: "package".into(),
+                    package_id: package.manifest.id.clone(),
+                    version: package.manifest.version.clone(),
+                    package_sha256: package.package_sha256.clone(),
+                    manifest_sha256: package.manifest_sha256.clone(),
+                },
+                previous_source: None,
+                namespaces: package.manifest.namespaces.clone(),
+                revision: 1,
+                status: crate::extension_package::PackageLifecycleStatusV1::Enabled,
+                active: Some(crate::extension_package::PackageArtifactPointerV1 {
+                    package_sha256: package.package_sha256.clone(),
+                    version: package.manifest.version.clone(),
+                    runtime_generation: generation,
+                }),
+                previous: None,
+                activation_error: None,
+                pending_activation: None,
+                retained_data: false,
+            }
+        }
+
+        let mut app = test_app();
+        app.state.workspaces = vec![Workspace::test_new("fabric-pty-isolation")];
+        app.state.ensure_test_terminals();
+        let terminal_ids = app
+            .state
+            .terminals
+            .keys()
+            .cloned()
+            .collect::<std::collections::HashSet<_>>();
+
+        let provider_component = crate::extension_runtime::component::tests::component_bytes(
+            crate::extension_runtime::component::tests::ECHO_BODY,
+        );
+        let consumer_component =
+            crate::extension_runtime::component::tests::fabric_component("example.api-consumer");
+        let (provider_root, provider_installed) =
+            crate::extension_runtime::component::tests::install_archive(
+                crate::extension_runtime::component::tests::fabric_package_bytes(
+                    &provider_component,
+                    "example.api-provider",
+                    false,
+                    "conformance.echo",
+                ),
+            );
+        let (consumer_root, consumer_installed) =
+            crate::extension_runtime::component::tests::install_archive(
+                crate::extension_runtime::component::tests::fabric_package_bytes(
+                    &consumer_component,
+                    "example.api-consumer",
+                    true,
+                    "conformance.echo",
+                ),
+            );
+        let provider_package = crate::extension_package::validate_package_file(
+            &std::path::Path::new(&provider_installed.immutable_root).join("package.vqrox"),
+            Some(&provider_installed.package_sha256),
+        )
+        .unwrap()
+        .descriptor;
+        let consumer_package = crate::extension_package::validate_package_file(
+            &std::path::Path::new(&consumer_installed.immutable_root).join("package.vqrox"),
+            Some(&consumer_installed.package_sha256),
+        )
+        .unwrap()
+        .descriptor;
+        let provider_slot = ready_slot(&mut app, provider_installed, 13);
+        let consumer_slot = ready_slot(&mut app, consumer_installed, 11);
+        app.marketplace_state.packages.revision = 2;
+        app.marketplace_state.packages.packages.insert(
+            provider_package.manifest.id.clone(),
+            lifecycle_record(&provider_package, 13),
+        );
+        app.marketplace_state.packages.packages.insert(
+            consumer_package.manifest.id.clone(),
+            lifecycle_record(&consumer_package, 11),
+        );
+        app.marketplace_state.packages.load_order = vec![
+            consumer_package.manifest.id.clone(),
+            provider_package.manifest.id.clone(),
+        ];
+        app.extension_package_services
+            .insert(provider_package.manifest.id.clone(), provider_slot);
+        app.extension_package_services
+            .insert(consumer_package.manifest.id.clone(), consumer_slot);
+
+        let consumer_endpoint = crate::api::schema::ExtensionServiceEndpointParams {
+            package_id: consumer_package.manifest.id.clone(),
+            service_id: "echo".into(),
+            endpoint_id: "echo-source".into(),
+        };
+        let provider_endpoint = crate::api::schema::ExtensionServiceEndpointParams {
+            package_id: provider_package.manifest.id.clone(),
+            service_id: "echo".into(),
+            endpoint_id: "echo".into(),
+        };
+        let inspected: crate::api::schema::SuccessResponse =
+            serde_json::from_str(&app.handle_api_request(crate::api::schema::Request {
+                id: "fabric-inspect".into(),
+                method: crate::api::schema::Method::ExtensionServiceBindingInspect(
+                    crate::api::schema::ExtensionServiceBindingInspectParams {
+                        consumer: consumer_endpoint.clone(),
+                        provider: provider_endpoint.clone(),
+                    },
+                ),
+            }))
+            .unwrap();
+        let crate::api::schema::ResponseResult::ExtensionServiceBindingInspected { inspection } =
+            inspected.result
+        else {
+            panic!("unexpected binding inspection response");
+        };
+        let approved: crate::api::schema::SuccessResponse =
+            serde_json::from_str(&app.handle_api_request(crate::api::schema::Request {
+                id: "fabric-approve".into(),
+                method: crate::api::schema::Method::ExtensionServiceBindingApprove(
+                    crate::api::schema::ExtensionServiceBindingApproveParams {
+                        consumer: consumer_endpoint.clone(),
+                        provider: provider_endpoint.clone(),
+                        expected_registry_revision: inspection.registry_revision,
+                        expected_binding_revision: None,
+                        expected_consent_sha256: inspection.consent_sha256.clone(),
+                        confirmed: true,
+                    },
+                ),
+            }))
+            .unwrap();
+        let crate::api::schema::ResponseResult::ExtensionServiceBindingChanged {
+            binding: approved_binding,
+        } = approved.result
+        else {
+            panic!("unexpected binding approval response");
+        };
+        let binding = approved_binding.binding;
+        let stale: crate::api::schema::ErrorResponse =
+            serde_json::from_str(&app.handle_api_request(crate::api::schema::Request {
+                id: "fabric-stale-approve".into(),
+                method: crate::api::schema::Method::ExtensionServiceBindingApprove(
+                    crate::api::schema::ExtensionServiceBindingApproveParams {
+                        consumer: consumer_endpoint.clone(),
+                        provider: provider_endpoint.clone(),
+                        expected_registry_revision: inspection.registry_revision,
+                        expected_binding_revision: None,
+                        expected_consent_sha256: inspection.consent_sha256,
+                        confirmed: true,
+                    },
+                ),
+            }))
+            .unwrap();
+        assert_eq!(
+            stale.error.code,
+            "extension_service_binding_approval_failed"
+        );
+        let (respond_to, response_rx) = std::sync::mpsc::channel();
+        let request = crate::api::schema::Request {
+            id: "fabric-api-call".into(),
+            method: crate::api::schema::Method::ExtensionServiceBindingInvoke(
+                crate::api::schema::ExtensionServiceBindingInvokeParams {
+                    binding_id: binding.binding_id.clone(),
+                    expected_binding_revision: binding.revision,
+                    consumer_method: "conformance.echo".into(),
+                    params: serde_json::json!({"trigger": "public-api"}),
+                },
+            ),
+        };
+        assert!(app.extension_artifact_request_requires_staging(&request));
+        let started = std::time::Instant::now();
+        app.start_deferred_extension_artifact_request(request, respond_to);
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(100),
+            "the App actor must enqueue without waiting for either component"
+        );
+        assert_eq!(
+            terminal_ids,
+            app.state
+                .terminals
+                .keys()
+                .cloned()
+                .collect::<std::collections::HashSet<_>>()
+        );
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            match app.event_rx.try_recv() {
+                Ok(AppEvent::ExtensionPackageCandidateFinished(completion)) => {
+                    app.handle_extension_package_candidate_finished(*completion);
+                    break;
+                }
+                Ok(event) => {
+                    app.handle_internal_event(event);
+                }
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+                    if std::time::Instant::now() < deadline =>
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                Err(error) => panic!("fabric completion unavailable: {error}"),
+            }
+        }
+        let encoded = response_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .unwrap();
+        let response: crate::api::schema::SuccessResponse = serde_json::from_str(&encoded).unwrap();
+        let crate::api::schema::ResponseResult::ExtensionServiceBindingInvoked {
+            binding_id,
+            result,
+        } = response.result
+        else {
+            panic!("unexpected service fabric response");
+        };
+        assert_eq!(binding_id, binding.binding_id);
+        assert_eq!(
+            result["result"],
+            serde_json::json!({"count": 2, "text": "vqro"})
+        );
+        assert_eq!(
+            terminal_ids,
+            app.state
+                .terminals
+                .keys()
+                .cloned()
+                .collect::<std::collections::HashSet<_>>()
+        );
+
+        let revoked: crate::api::schema::SuccessResponse =
+            serde_json::from_str(&app.handle_api_request(crate::api::schema::Request {
+                id: "fabric-revoke".into(),
+                method: crate::api::schema::Method::ExtensionServiceBindingRevoke(
+                    crate::api::schema::ExtensionServiceBindingRevokeParams {
+                        binding_id: binding.binding_id.clone(),
+                        expected_registry_revision: app.marketplace_state.service_bindings.revision,
+                        expected_binding_revision: binding.revision,
+                        confirmed: true,
+                    },
+                ),
+            }))
+            .unwrap();
+        let crate::api::schema::ResponseResult::ExtensionServiceBindingChanged {
+            binding: revoked_binding,
+        } = revoked.result
+        else {
+            panic!("unexpected binding revocation response");
+        };
+        assert_eq!(
+            revoked_binding.effective_status,
+            crate::service_fabric::EffectiveServiceBindingStatusV1::Revoked
+        );
+        let (respond_to, response_rx) = std::sync::mpsc::channel();
+        app.start_deferred_extension_artifact_request(
+            crate::api::schema::Request {
+                id: "fabric-revoked-call".into(),
+                method: crate::api::schema::Method::ExtensionServiceBindingInvoke(
+                    crate::api::schema::ExtensionServiceBindingInvokeParams {
+                        binding_id: binding.binding_id.clone(),
+                        expected_binding_revision: revoked_binding.binding.revision,
+                        consumer_method: "conformance.echo".into(),
+                        params: serde_json::json!({}),
+                    },
+                ),
+            },
+            respond_to,
+        );
+        let denied: crate::api::schema::ErrorResponse = serde_json::from_str(
+            &response_rx
+                .recv_timeout(std::time::Duration::from_secs(1))
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            denied.error.code,
+            crate::service_fabric::ERROR_BINDING_REVOKED
+        );
+
+        let reinspection: crate::api::schema::SuccessResponse =
+            serde_json::from_str(&app.handle_api_request(crate::api::schema::Request {
+                id: "fabric-reinspect".into(),
+                method: crate::api::schema::Method::ExtensionServiceBindingInspect(
+                    crate::api::schema::ExtensionServiceBindingInspectParams {
+                        consumer: consumer_endpoint.clone(),
+                        provider: provider_endpoint.clone(),
+                    },
+                ),
+            }))
+            .unwrap();
+        let crate::api::schema::ResponseResult::ExtensionServiceBindingInspected {
+            inspection: reinspection,
+        } = reinspection.result
+        else {
+            panic!("unexpected binding reinspection response");
+        };
+        let restored: crate::api::schema::SuccessResponse =
+            serde_json::from_str(&app.handle_api_request(crate::api::schema::Request {
+                id: "fabric-restore".into(),
+                method: crate::api::schema::Method::ExtensionServiceBindingApprove(
+                    crate::api::schema::ExtensionServiceBindingApproveParams {
+                        consumer: consumer_endpoint,
+                        provider: provider_endpoint,
+                        expected_registry_revision: reinspection.registry_revision,
+                        expected_binding_revision: Some(revoked_binding.binding.revision),
+                        expected_consent_sha256: reinspection.consent_sha256,
+                        confirmed: true,
+                    },
+                ),
+            }))
+            .unwrap();
+        let crate::api::schema::ResponseResult::ExtensionServiceBindingChanged {
+            binding: restored,
+        } = restored.result
+        else {
+            panic!("unexpected identical-artifact binding restoration response");
+        };
+        assert_eq!(
+            restored.effective_status,
+            crate::service_fabric::EffectiveServiceBindingStatusV1::Ready
+        );
+        app.extension_package_services
+            .remove(&provider_package.manifest.id);
+        let listed: crate::api::schema::SuccessResponse =
+            serde_json::from_str(&app.handle_api_request(crate::api::schema::Request {
+                id: "fabric-list".into(),
+                method: crate::api::schema::Method::ExtensionServiceBindingList(
+                    crate::api::schema::EmptyParams::default(),
+                ),
+            }))
+            .unwrap();
+        let crate::api::schema::ResponseResult::ExtensionServiceBindingList { bindings, .. } =
+            listed.result
+        else {
+            panic!("unexpected binding list response");
+        };
+        assert_eq!(
+            bindings[0].effective_status,
+            crate::service_fabric::EffectiveServiceBindingStatusV1::Suspended
+        );
+
+        drop(app);
+        let _ = std::fs::remove_dir_all(consumer_root);
+        let _ = std::fs::remove_dir_all(provider_root);
     }
 }

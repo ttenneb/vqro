@@ -1726,6 +1726,7 @@ impl AppState {
             | AppEvent::ExtensionGitPackageFinished(_)
             | AppEvent::ExtensionPackageCandidateReady(_)
             | AppEvent::ExtensionPackageCandidateFinished(_)
+            | AppEvent::ExtensionServiceFabricTimeout { .. }
             | AppEvent::ExtensionCatalogCapacityAvailable
             | AppEvent::ExtensionHostStateCall(_)
             | AppEvent::ExtensionHostTerminalsCall(_)

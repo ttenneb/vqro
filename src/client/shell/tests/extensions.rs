@@ -17,6 +17,8 @@ fn extension_info(installed: bool) -> crate::api::schema::ExtensionInfo {
         details: "First-party collection workflows through a public contract.".into(),
         categories: vec!["Workflow".into(), "Interface".into()],
         requested_capabilities: vec!["host.document.render".into()],
+        provided_contracts: Vec::new(),
+        required_contracts: Vec::new(),
         package_kind: crate::api::schema::ExtensionPackageKind::Bundled,
         integration_target: None,
         integration_status: None,
@@ -229,6 +231,22 @@ fn inspected_git_package_requires_digest_bound_approval() {
         namespaces: vec!["example.git".into()],
         services: vec!["main".into()],
         requested_capabilities: vec!["host.state.read".into()],
+        provided_contracts: vec![crate::api::schema::ExtensionContractInspection {
+            service_id: "main".into(),
+            endpoint_id: "echo".into(),
+            contract_id: "example.echo".into(),
+            contract_version: "1.0.0".into(),
+            descriptor_sha256: "d".repeat(64),
+            required: None,
+            methods: vec![crate::api::schema::ExtensionContractMethodInspection {
+                id: "echo".into(),
+                request_information: vec!["user.supplied.text".into()],
+                response_information: vec!["provider.generated.text".into()],
+                max_request_bytes: 4096,
+                max_response_bytes: 4096,
+            }],
+        }],
+        required_contracts: Vec::new(),
     };
 
     let (handled, actions) = state.handle_extensions_endpoint_result(
@@ -248,6 +266,18 @@ fn inspected_git_package_requires_digest_bound_approval() {
             ..
         }))
     ));
+    let Some(ClientShellOverlay::Extensions(extensions)) = state.overlay.as_ref() else {
+        unreachable!()
+    };
+    let confirmation = extensions.confirmation_extension.as_ref().unwrap();
+    assert_eq!(
+        confirmation.provided_contracts,
+        inspection.provided_contracts
+    );
+    assert_eq!(
+        confirmation.provided_contracts[0].methods[0].request_information,
+        ["user.supplied.text"]
+    );
 
     let mut outcome = ClientShellInput::default();
     state.confirm_extension_action(&mut outcome);

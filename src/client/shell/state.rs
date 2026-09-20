@@ -536,7 +536,7 @@ pub(super) struct ClientExtensionsOverlay {
     pub(super) repository_context: Option<String>,
     pub(super) message: Option<String>,
     pub(super) git_install_mode: bool,
-    pub(super) git_inspection: Option<crate::api::schema::ExtensionPackageInspection>,
+    pub(super) git_inspection: Option<Box<crate::api::schema::ExtensionPackageInspection>>,
 }
 
 impl ClientExtensionsOverlay {

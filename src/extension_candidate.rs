@@ -4,12 +4,12 @@
 //! shutdown all stay off the App actor. A ready candidate owns one worker per declared service;
 //! dropping or replacing it revokes queued work without joining from the App actor.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
-    mpsc, Arc,
+    mpsc, Arc, Mutex,
 };
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::extension_host_invocation::HostReadInvocationAuthorization;
 use crate::extension_host_state::HostProviderBinding;
@@ -58,6 +58,7 @@ impl PackageCandidateSlot {
             runtime_generation: CANDIDATE_RUNTIME_GENERATION,
             requests,
             canceled: Arc::clone(&canceled),
+            active: Arc::new(Mutex::new(None)),
             _join: join,
         };
         Self {
@@ -68,6 +69,7 @@ impl PackageCandidateSlot {
             ready: Some(PackageCandidateSet {
                 package_id,
                 artifact_generation,
+                validated_package: None,
                 workers: BTreeMap::from([(service_id, worker)]),
             }),
         }
@@ -134,12 +136,33 @@ impl PackageCandidateSlot {
         self.ready.is_some()
     }
 
+    pub(crate) fn artifact_sha256(&self) -> &str {
+        &self.artifact_sha256
+    }
+
+    pub(crate) fn artifact_generation(&self) -> u64 {
+        self.artifact_generation
+    }
+
     pub(crate) fn binding(&self, service_id: &str) -> Option<&HostProviderBinding> {
         self.ready.as_ref()?.binding(service_id)
     }
 
     pub(crate) fn runtime_generation(&self, service_id: &str) -> Option<u64> {
         self.ready.as_ref()?.runtime_generation(service_id)
+    }
+
+    pub(crate) fn validated_package(
+        &self,
+    ) -> Option<&crate::extension_package::ValidatedPackageV1> {
+        self.ready.as_ref()?.validated_package.as_deref()
+    }
+
+    pub(crate) fn service_read_endpoint(
+        &self,
+        service_id: &str,
+    ) -> Option<ServiceReadProviderEndpoint> {
+        self.ready.as_ref()?.service_read_endpoint(service_id)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -161,7 +184,7 @@ impl PackageCandidateSlot {
                 attempt_id,
                 method,
                 params,
-                Some(authorization),
+                CandidateAuthorization::HostReads(authorization),
                 deadline,
                 canceled,
             )
@@ -180,7 +203,38 @@ impl PackageCandidateSlot {
             .as_ref()
             .ok_or("package candidate is not ready")?
             .invoke(
-                service_id, attempt_id, method, params, None, deadline, canceled,
+                service_id,
+                attempt_id,
+                method,
+                params,
+                CandidateAuthorization::None,
+                deadline,
+                canceled,
+            )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn invoke_service_read(
+        &self,
+        service_id: &str,
+        attempt_id: u64,
+        method: String,
+        params: serde_json::Value,
+        authorization: crate::service_fabric::ServiceReadInvocationAuthorization,
+        deadline: Instant,
+        canceled: Arc<AtomicBool>,
+    ) -> Result<(), String> {
+        self.ready
+            .as_ref()
+            .ok_or("package candidate is not ready")?
+            .invoke(
+                service_id,
+                attempt_id,
+                method,
+                params,
+                CandidateAuthorization::ServiceRead(authorization),
+                deadline,
+                canceled,
             )
     }
 }
@@ -221,14 +275,197 @@ pub(crate) struct PackageCandidateInvocationResult {
     pub(crate) result: Result<serde_json::Value, String>,
 }
 
-#[derive(Debug)]
+#[allow(dead_code)] // ServiceRead is live through fabric conformance before R3 composition.
+enum CandidateAuthorization {
+    None,
+    HostReads(HostReadInvocationAuthorization),
+    ServiceRead(crate::service_fabric::ServiceReadInvocationAuthorization),
+}
+
+enum CandidateCompletion {
+    AppEvent,
+    ServiceRead(mpsc::SyncSender<Result<serde_json::Value, String>>),
+}
+
 struct CandidateRequest {
     attempt_id: u64,
     method: String,
     params: serde_json::Value,
-    authorization: Option<HostReadInvocationAuthorization>,
+    authorization: CandidateAuthorization,
     deadline: Instant,
     canceled: Arc<AtomicBool>,
+    completion: CandidateCompletion,
+}
+
+#[derive(Clone)]
+pub(crate) struct ServiceReadProviderEndpoint {
+    package_id: String,
+    service_id: String,
+    artifact_sha256: String,
+    artifact_generation: u64,
+    runtime_generation: u64,
+    requests: mpsc::SyncSender<CandidateRequest>,
+    worker_canceled: Arc<AtomicBool>,
+}
+
+impl ServiceReadProviderEndpoint {
+    #[cfg(test)]
+    pub(crate) fn for_test(
+        package_id: &str,
+        service_id: &str,
+        artifact_sha256: &str,
+        artifact_generation: u64,
+        runtime_generation: u64,
+        respond: impl Fn(&str, serde_json::Value) -> Result<serde_json::Value, String> + Send + 'static,
+    ) -> Self {
+        Self::for_test_with_capacity(
+            package_id,
+            service_id,
+            artifact_sha256,
+            artifact_generation,
+            runtime_generation,
+            MAX_CANDIDATE_REQUESTS_PER_SERVICE,
+            respond,
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test_with_capacity(
+        package_id: &str,
+        service_id: &str,
+        artifact_sha256: &str,
+        artifact_generation: u64,
+        runtime_generation: u64,
+        queue_capacity: usize,
+        respond: impl Fn(&str, serde_json::Value) -> Result<serde_json::Value, String> + Send + 'static,
+    ) -> Self {
+        let (requests, request_rx) = mpsc::sync_channel::<CandidateRequest>(queue_capacity);
+        let worker_canceled = Arc::new(AtomicBool::new(false));
+        let thread_canceled = Arc::clone(&worker_canceled);
+        std::thread::spawn(move || {
+            while let Ok(request) = request_rx.recv() {
+                if thread_canceled.load(Ordering::Acquire) {
+                    break;
+                }
+                let result = respond(&request.method, request.params);
+                if let CandidateCompletion::ServiceRead(respond_to) = request.completion {
+                    let _ = respond_to.send(result);
+                }
+            }
+        });
+        Self {
+            package_id: package_id.into(),
+            service_id: service_id.into(),
+            artifact_sha256: artifact_sha256.into(),
+            artifact_generation,
+            runtime_generation,
+            requests,
+            worker_canceled,
+        }
+    }
+
+    pub(crate) fn package_id(&self) -> &str {
+        &self.package_id
+    }
+
+    pub(crate) fn service_id(&self) -> &str {
+        &self.service_id
+    }
+
+    pub(crate) fn artifact_sha256(&self) -> &str {
+        &self.artifact_sha256
+    }
+
+    pub(crate) fn artifact_generation(&self) -> u64 {
+        self.artifact_generation
+    }
+
+    pub(crate) fn runtime_generation(&self) -> u64 {
+        self.runtime_generation
+    }
+
+    pub(crate) fn is_current(&self) -> bool {
+        !self.worker_canceled.load(Ordering::Acquire)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn retire_for_test(&self) {
+        self.worker_canceled.store(true, Ordering::Release);
+    }
+
+    pub(crate) fn call(
+        &self,
+        attempt_id: u64,
+        method: String,
+        params: serde_json::Value,
+        deadline: Instant,
+        canceled: Arc<AtomicBool>,
+        outer_canceled: &AtomicBool,
+        binding_revoked: &AtomicBool,
+    ) -> Result<serde_json::Value, String> {
+        if attempt_id == 0
+            || Instant::now() >= deadline
+            || canceled.load(Ordering::Acquire)
+            || outer_canceled.load(Ordering::Acquire)
+            || binding_revoked.load(Ordering::Acquire)
+            || self.worker_canceled.load(Ordering::Acquire)
+        {
+            return Err("service provider is canceled or expired".into());
+        }
+        let (respond_to, response_rx) = mpsc::sync_channel(1);
+        self.requests
+            .try_send(CandidateRequest {
+                attempt_id,
+                method,
+                params,
+                authorization: CandidateAuthorization::None,
+                deadline,
+                canceled: Arc::clone(&canceled),
+                completion: CandidateCompletion::ServiceRead(respond_to),
+            })
+            .map_err(|error| match error {
+                mpsc::TrySendError::Full(_) => String::from("service provider queue is full"),
+                mpsc::TrySendError::Disconnected(_) => {
+                    String::from("service provider worker is unavailable")
+                }
+            })?;
+        loop {
+            if canceled.load(Ordering::Acquire)
+                || outer_canceled.load(Ordering::Acquire)
+                || binding_revoked.load(Ordering::Acquire)
+                || self.worker_canceled.load(Ordering::Acquire)
+            {
+                canceled.store(true, Ordering::Release);
+                return Err("service call was canceled".into());
+            }
+            let now = Instant::now();
+            if now >= deadline {
+                canceled.store(true, Ordering::Release);
+                return Err("service call timed out".into());
+            }
+            let wait = deadline
+                .saturating_duration_since(now)
+                .min(Duration::from_millis(10));
+            match response_rx.recv_timeout(wait) {
+                Ok(result)
+                    if !canceled.load(Ordering::Acquire)
+                        && !outer_canceled.load(Ordering::Acquire)
+                        && !binding_revoked.load(Ordering::Acquire)
+                        && !self.worker_canceled.load(Ordering::Acquire) =>
+                {
+                    return result;
+                }
+                Ok(_) => {
+                    canceled.store(true, Ordering::Release);
+                    return Err("service call completed after cancellation".into());
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    return Err("service provider response channel closed".into());
+                }
+            }
+        }
+    }
 }
 
 struct CandidateWorker {
@@ -236,6 +473,7 @@ struct CandidateWorker {
     runtime_generation: u64,
     requests: mpsc::SyncSender<CandidateRequest>,
     canceled: Arc<AtomicBool>,
+    active: Arc<Mutex<Option<Arc<AtomicBool>>>>,
     // Deliberately detached on drop: the App actor must never join a runtime worker.
     _join: std::thread::JoinHandle<()>,
 }
@@ -243,6 +481,7 @@ struct CandidateWorker {
 pub(crate) struct PackageCandidateSet {
     package_id: String,
     artifact_generation: u64,
+    validated_package: Option<Arc<crate::extension_package::ValidatedPackageV1>>,
     workers: BTreeMap<String, CandidateWorker>,
 }
 
@@ -284,11 +523,23 @@ impl PackageCandidateSet {
             if bootstrap_canceled.load(Ordering::Acquire) {
                 return Err("package candidate bootstrap was canceled".into());
             }
+            let exported_methods = service
+                .exports
+                .iter()
+                .filter_map(|export| {
+                    package
+                        .descriptor
+                        .contract_descriptors
+                        .get(&export.descriptor_sha256)
+                })
+                .flat_map(|descriptor| descriptor.methods.iter().map(|method| method.id.clone()))
+                .collect::<BTreeSet<_>>();
             let worker = CandidateWorker::start(
                 installed.clone(),
                 service.id.clone(),
                 namespace.clone(),
                 artifact_generation,
+                exported_methods,
                 event_tx.clone(),
             )?;
             workers.insert(service.id.clone(), worker);
@@ -299,6 +550,7 @@ impl PackageCandidateSet {
         Ok(Self {
             package_id: installed.package_id,
             artifact_generation,
+            validated_package: Some(Arc::new(package.descriptor)),
             workers,
         })
     }
@@ -313,14 +565,31 @@ impl PackageCandidateSet {
             .map(|worker| worker.runtime_generation)
     }
 
+    #[allow(dead_code)]
+    pub(crate) fn service_read_endpoint(
+        &self,
+        service_id: &str,
+    ) -> Option<ServiceReadProviderEndpoint> {
+        let worker = self.workers.get(service_id)?;
+        Some(ServiceReadProviderEndpoint {
+            package_id: self.package_id.clone(),
+            service_id: service_id.into(),
+            artifact_sha256: worker.binding.artifact_sha256().into(),
+            artifact_generation: self.artifact_generation,
+            runtime_generation: worker.runtime_generation,
+            requests: worker.requests.clone(),
+            worker_canceled: Arc::clone(&worker.canceled),
+        })
+    }
+
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn invoke(
+    fn invoke(
         &self,
         service_id: &str,
         attempt_id: u64,
         method: String,
         params: serde_json::Value,
-        authorization: Option<HostReadInvocationAuthorization>,
+        authorization: CandidateAuthorization,
         deadline: Instant,
         canceled: Arc<AtomicBool>,
     ) -> Result<(), String> {
@@ -340,6 +609,7 @@ impl PackageCandidateSet {
                 authorization,
                 deadline,
                 canceled,
+                completion: CandidateCompletion::AppEvent,
             })
             .map_err(|error| match error {
                 mpsc::TrySendError::Full(_) => "package candidate queue is full".into(),
@@ -354,6 +624,14 @@ impl Drop for PackageCandidateSet {
     fn drop(&mut self) {
         for worker in self.workers.values() {
             worker.canceled.store(true, Ordering::Release);
+            if let Some(active) = worker
+                .active
+                .lock()
+                .expect("candidate active-call lock")
+                .as_ref()
+            {
+                active.store(true, Ordering::Release);
+            }
         }
     }
 }
@@ -364,6 +642,7 @@ impl CandidateWorker {
         service_id: String,
         namespace: String,
         artifact_generation: u64,
+        exported_methods: BTreeSet<String>,
         event_tx: tokio::sync::mpsc::Sender<crate::events::AppEvent>,
     ) -> Result<Self, String> {
         let binding = HostProviderBinding::from_installed(&installed, &service_id, &namespace)?;
@@ -371,6 +650,8 @@ impl CandidateWorker {
             mpsc::sync_channel::<CandidateRequest>(MAX_CANDIDATE_REQUESTS_PER_SERVICE);
         let canceled = Arc::new(AtomicBool::new(false));
         let worker_canceled = Arc::clone(&canceled);
+        let active = Arc::new(Mutex::new(None::<Arc<AtomicBool>>));
+        let thread_active = Arc::clone(&active);
         let thread_package_id = installed.package_id.clone();
         let thread_artifact_sha256 = installed.package_sha256.clone();
         let thread_service_id = service_id.clone();
@@ -387,6 +668,12 @@ impl CandidateWorker {
                 )
                 .and_then(|mut supervisor| {
                     supervisor.start()?;
+                    if !supervisor.package_candidate_supports_methods(&exported_methods) {
+                        return Err(crate::extension_runtime::RuntimeError::Protocol(
+                            "component handshake omitted a manifest-v3 exported contract method"
+                                .into(),
+                        ));
+                    }
                     Ok(supervisor)
                 });
                 let mut supervisor = match supervisor {
@@ -401,7 +688,17 @@ impl CandidateWorker {
                 };
                 while let Ok(request) = request_rx.recv() {
                     if worker_canceled.load(Ordering::Acquire) {
+                        request.canceled.store(true, Ordering::Release);
+                        if let CandidateCompletion::ServiceRead(respond_to) = request.completion {
+                            let _ = respond_to.send(Err("service provider was retired".into()));
+                        }
                         break;
+                    }
+                    *thread_active
+                        .lock()
+                        .expect("candidate active-call lock") = Some(Arc::clone(&request.canceled));
+                    if worker_canceled.load(Ordering::Acquire) {
+                        request.canceled.store(true, Ordering::Release);
                     }
                     tracing::debug!(
                         package_id = %thread_package_id,
@@ -411,21 +708,37 @@ impl CandidateWorker {
                         "package candidate invocation started"
                     );
                     let result = match request.authorization {
-                        Some(authorization) => supervisor.invoke_package_read_candidate(
-                            &request.method,
-                            request.params,
-                            request.deadline,
-                            Arc::clone(&request.canceled),
-                            authorization,
-                        ),
-                        None => supervisor.invoke_package_candidate_no_host_calls(
-                            &request.method,
-                            request.params,
-                            request.deadline,
-                            Arc::clone(&request.canceled),
-                        ),
+                        CandidateAuthorization::HostReads(authorization) => {
+                            supervisor.invoke_package_read_candidate(
+                                &request.method,
+                                request.params,
+                                request.deadline,
+                                Arc::clone(&request.canceled),
+                                authorization,
+                            )
+                        }
+                        CandidateAuthorization::ServiceRead(authorization) => {
+                            supervisor.invoke_package_service_read_candidate(
+                                &request.method,
+                                request.params,
+                                request.deadline,
+                                Arc::clone(&request.canceled),
+                                authorization,
+                            )
+                        }
+                        CandidateAuthorization::None => {
+                            supervisor.invoke_package_candidate_no_host_calls(
+                                &request.method,
+                                request.params,
+                                request.deadline,
+                                Arc::clone(&request.canceled),
+                            )
+                        }
                     }
                     .map_err(|error| error.to_string());
+                    *thread_active
+                        .lock()
+                        .expect("candidate active-call lock") = None;
                     tracing::debug!(
                         package_id = %thread_package_id,
                         service_id = %thread_service_id,
@@ -434,22 +747,31 @@ impl CandidateWorker {
                         succeeded = result.is_ok(),
                         "package candidate invocation finished"
                     );
-                    let completion = PackageCandidateInvocationResult {
-                        package_id: thread_package_id.clone(),
-                        service_id: thread_service_id.clone(),
-                        artifact_sha256: thread_artifact_sha256.clone(),
-                        artifact_generation,
-                        runtime_generation: CANDIDATE_RUNTIME_GENERATION,
-                        attempt_id: request.attempt_id,
-                        result,
-                    };
-                    if event_tx
-                        .blocking_send(crate::events::AppEvent::ExtensionPackageCandidateFinished(
-                            Box::new(completion),
-                        ))
-                        .is_err()
-                    {
-                        break;
+                    match request.completion {
+                        CandidateCompletion::ServiceRead(respond_to) => {
+                            let _ = respond_to.send(result);
+                        }
+                        CandidateCompletion::AppEvent => {
+                            let completion = PackageCandidateInvocationResult {
+                                package_id: thread_package_id.clone(),
+                                service_id: thread_service_id.clone(),
+                                artifact_sha256: thread_artifact_sha256.clone(),
+                                artifact_generation,
+                                runtime_generation: CANDIDATE_RUNTIME_GENERATION,
+                                attempt_id: request.attempt_id,
+                                result,
+                            };
+                            if event_tx
+                                .blocking_send(
+                                    crate::events::AppEvent::ExtensionPackageCandidateFinished(
+                                        Box::new(completion),
+                                    ),
+                                )
+                                .is_err()
+                            {
+                                break;
+                            }
+                        }
                     }
                 }
                 supervisor.stop();
@@ -461,6 +783,7 @@ impl CandidateWorker {
                 runtime_generation: CANDIDATE_RUNTIME_GENERATION,
                 requests,
                 canceled,
+                active,
                 _join: join,
             }),
             Ok(Err(error)) => Err(error),

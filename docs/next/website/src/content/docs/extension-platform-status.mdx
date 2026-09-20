@@ -7,7 +7,7 @@ Vqro currently has two extension models with different trust and capability boun
 
 | Capability | Legacy executable plugin | Component extension package |
 | --- | --- | --- |
-| Manifest | v1 | v2 in deterministic `.vqrox` |
+| Manifest | v1 | v2 or v3 in deterministic `.vqrox`; v2 is frozen and v3 adds exact service contracts |
 | Runtime | Trusted same-user process | WebAssembly Component Model component executed by Wasmtime with only the Vqro WIT world linked |
 | Repository build commands | Legacy Git install may run confirmed commands | Never run by package installation |
 | Git-installed native process | Supported by the legacy plugin path | Rejected |
@@ -17,8 +17,11 @@ Vqro currently has two extension models with different trust and capability boun
 | Client-visible component contribution | Not applicable | Collections publishes synchronized compatibility projections; Spaces publishes an audited navigation document |
 | Collections policy authority | Unavailable; compiled provider removed | Exact pinned package after atomic snapshot-v7 cutover; fail-closed when absent, unavailable, or replaced |
 | Spaces projection authority | Unavailable; compiled and bundled providers removed | Exact pinned zero-host-call package; fail-closed when absent, unavailable, stale, or replaced |
+| Package-to-package services | Unavailable | Experimental exact-artifact bindings and one bounded, non-recursive component read call; not yet used by an ordinary product composition |
 
-A component package that installs and starts successfully has crossed only the verified artifact and runtime boundaries. Ordinary packages still cannot read host state. The exact pinned Collections package additionally receives bounded read leases. Once all scopes pass audit, Vqro atomically checkpoints package state and snapshot-v7 authority, then uses package profiles and typed action plans. The exact pinned Spaces package instead receives one complete host-authored snapshot as invocation parameters and has zero host-call capabilities. Neither feature has a bundled fallback; failure removes only package-owned authority while generic workspace, pane, and PTY access remains available.
+A component package that installs and starts successfully has crossed only the verified artifact and runtime boundaries. Ordinary packages still cannot read host state. A manifest-v3 package may declare exact descriptor-digested imports and exports, but declarations and discovery grant no authority. A user-approved binding names exact consumer and provider artifacts, methods, information-flow categories, and byte limits. The experimental R1 relay permits one read call, gives the provider no host-call router, and never waits on the App actor.
+
+The exact pinned Collections package additionally receives bounded read leases. Once all scopes pass audit, Vqro atomically checkpoints package state and snapshot-v7 authority, then uses package profiles and typed action plans. The exact pinned Spaces package instead receives one complete host-authored snapshot as invocation parameters and has zero host-call capabilities. Neither feature has a bundled fallback; failure removes only package-owned authority while generic workspace, pane, and PTY access remains available.
 
 The Extensions inventory reports provenance explicitly: independently installed component archives are **sandboxed packages**, distribution-owned entries are **bundled providers**, and detected coding tools are **agent integrations**. Curated discovery does not change kind or grant authority.
 

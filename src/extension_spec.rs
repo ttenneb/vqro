@@ -27,6 +27,8 @@ pub const COLLECTIONS_AUTHORITY_SCHEMA_ID_V1: &str =
 pub const EXTENSION_BUNDLE_SCHEMA_ID_V1: &str = "https://vqro.dev/schema/extensions/v1";
 pub const PACKAGE_SCHEMA_ID_V1: &str = crate::extension_package::PACKAGE_SCHEMA_ID_V1;
 pub const EXTENSION_MANIFEST_SCHEMA_ID_V2: &str = crate::extension_package::MANIFEST_SCHEMA_ID_V2;
+pub const EXTENSION_MANIFEST_SCHEMA_ID_V3: &str = crate::extension_package::MANIFEST_SCHEMA_ID_V3;
+pub const SERVICE_CONTRACT_SCHEMA_ID_V1: &str = "https://vqro.dev/schema/service-contract/v1";
 
 pub fn manifest_v2_schema_document() -> serde_json::Value {
     let mut schema = serde_json::to_value(schemars::schema_for!(
@@ -48,6 +50,91 @@ pub fn manifest_v2_schema_document() -> serde_json::Value {
         "contract".into(),
         serde_json::Value::String(crate::extension_package::PACKAGE_CONTRACT_V1.into()),
     );
+    schema
+}
+
+pub fn manifest_v3_schema_document() -> serde_json::Value {
+    let mut schema = serde_json::to_value(schemars::schema_for!(
+        crate::extension_package::PackageManifestV3
+    ))
+    .expect("generated manifest-v3 schema serializes");
+    let object = schema
+        .as_object_mut()
+        .expect("generated manifest-v3 schema is an object");
+    object.insert(
+        "$id".into(),
+        serde_json::Value::String(EXTENSION_MANIFEST_SCHEMA_ID_V3.into()),
+    );
+    object.insert(
+        "title".into(),
+        serde_json::Value::String("vqro extension manifest v3".into()),
+    );
+    object.insert(
+        "contract".into(),
+        serde_json::Value::String(crate::extension_package::PACKAGE_CONTRACT_V1.into()),
+    );
+    schema["properties"]["manifest_version"]["const"] =
+        serde_json::json!(crate::extension_package::MANIFEST_VERSION_V3);
+    schema["properties"]["package_contract"]["const"] =
+        serde_json::json!(crate::extension_package::PACKAGE_CONTRACT_V1);
+    schema["properties"]["services"]["maxItems"] =
+        serde_json::json!(crate::extension_package::MAX_SERVICES);
+    schema["properties"]["namespaces"]["maxItems"] =
+        serde_json::json!(crate::extension_package::MAX_NAMESPACES);
+    schema["$defs"]["PackageServiceV2"]["properties"]["capabilities"]["maxItems"] =
+        serde_json::json!(crate::extension_package::MAX_CAPABILITIES);
+    for endpoint in ["exports", "imports"] {
+        schema["$defs"]["PackageServiceV2"]["properties"][endpoint]["maxItems"] =
+            serde_json::json!(crate::extension_package::MAX_SERVICE_ENDPOINTS);
+    }
+    for endpoint in ["ServiceContractExportV1", "ServiceContractImportV1"] {
+        schema["$defs"][endpoint]["properties"]["descriptor_sha256"]["minLength"] =
+            serde_json::json!(64);
+        schema["$defs"][endpoint]["properties"]["descriptor_sha256"]["maxLength"] =
+            serde_json::json!(64);
+        schema["$defs"][endpoint]["properties"]["descriptor_sha256"]["pattern"] =
+            serde_json::json!("^[0-9a-f]{64}$");
+    }
+    schema
+}
+
+pub fn service_contract_schema_document() -> serde_json::Value {
+    let mut schema = serde_json::to_value(schemars::schema_for!(
+        crate::extension_package::ServiceContractDescriptorV1
+    ))
+    .expect("generated service-contract schema serializes");
+    let object = schema
+        .as_object_mut()
+        .expect("generated service-contract schema is an object");
+    object.insert(
+        "$id".into(),
+        serde_json::Value::String(SERVICE_CONTRACT_SCHEMA_ID_V1.into()),
+    );
+    object.insert(
+        "title".into(),
+        serde_json::Value::String("vqro service contract descriptor v1".into()),
+    );
+    object.insert(
+        "contract".into(),
+        serde_json::Value::String(crate::extension_package::SERVICE_CONTRACT_V1.into()),
+    );
+    schema["properties"]["contract"]["const"] =
+        serde_json::json!(crate::extension_package::SERVICE_CONTRACT_V1);
+    schema["properties"]["methods"]["minItems"] = serde_json::json!(1);
+    schema["properties"]["methods"]["maxItems"] =
+        serde_json::json!(crate::extension_package::MAX_CONTRACT_METHODS);
+    for flow in ["request_information", "response_information"] {
+        schema["$defs"]["ServiceContractMethodV1"]["properties"][flow]["maxItems"] =
+            serde_json::json!(crate::extension_package::MAX_INFORMATION_CATEGORIES);
+        schema["$defs"]["ServiceContractMethodV1"]["properties"][flow]["items"]["pattern"] =
+            serde_json::json!("^[a-z0-9_-]+(?:\\.[a-z0-9_-]+)+$");
+    }
+    for bound in ["max_request_bytes", "max_response_bytes"] {
+        schema["$defs"]["ServiceContractMethodV1"]["properties"][bound]["minimum"] =
+            serde_json::json!(1);
+        schema["$defs"]["ServiceContractMethodV1"]["properties"][bound]["maximum"] =
+            serde_json::json!(crate::extension_package::MAX_SERVICE_CALL_BYTES);
+    }
     schema
 }
 
@@ -696,6 +783,8 @@ pub fn package_schema_document() -> serde_json::Value {
         },
         "schemas": {
             "manifest": scoped_schema::<crate::extension_package::PackageManifestV2>("manifest"),
+            "manifest_v3": scoped_schema::<crate::extension_package::PackageManifestV3>("manifest_v3"),
+            "service_contract": scoped_schema::<crate::extension_package::ServiceContractDescriptorV1>("service_contract"),
             "provenance": scoped_schema::<crate::extension_package::PackageProvenanceV1>("provenance"),
             "validated_package": scoped_schema::<crate::extension_package::ValidatedPackageV1>("validated_package"),
             "installed_package": scoped_schema::<crate::extension_package::InstalledPackageV1>("installed_package"),
@@ -1213,6 +1302,14 @@ mod tests {
             (
                 "docs/next/api/vqro-extension-manifest-v2.schema.json",
                 manifest_v2_schema_document(),
+            ),
+            (
+                "docs/next/api/vqro-extension-manifest-v3.schema.json",
+                manifest_v3_schema_document(),
+            ),
+            (
+                "docs/next/api/vqro-service-contract-v1.schema.json",
+                service_contract_schema_document(),
             ),
             (
                 "docs/next/api/vqro-package-v1.schema.json",

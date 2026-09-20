@@ -403,6 +403,20 @@ herdr integration uninstall cursor
 herdr integration status [--outdated-only]
 ```
 
+## 实验性服务绑定
+
+manifest v3 组件包可以检查并明确授权一条精确的只读包间连接：
+
+```bash
+vqro service-binding inspect --consumer-package ID --consumer-service ID --import ID --provider-package ID --provider-service ID --export ID
+vqro service-binding list
+vqro service-binding approve --consumer-package ID --consumer-service ID --import ID --provider-package ID --provider-service ID --export ID --registry-revision N [--binding-revision N] --consent-sha256 SHA256 --confirm
+vqro service-binding revoke BINDING_ID --registry-revision N --binding-revision N --confirm
+vqro service-binding call BINDING_ID --binding-revision N --consumer-method METHOD --params-json JSON
+```
+
+请先运行 `inspect`，检查精确制品、方法、请求/响应信息类别和字节限制。批准和撤销需要修订号 CAS 以及明确确认。`call` 在 App actor 之外启动一次有界 consumer 调用；必需 import 未就绪、替换、撤销、超时、队列饱和或陈旧完成都会 fail closed。此功能仍为实验性。
+
 ## 插件
 
 插件命令用于安装和运行本地可执行的工作流插件。插件是清单加进程外命令;Herdr 负责宿主侧,插件负责自己的实现语言。

@@ -572,6 +572,11 @@ pub(crate) fn api_method_name(method: &Method) -> &'static str {
         Method::ExtensionPackageDisable(_) => "extension.package.disable",
         Method::ExtensionPackageRemove(_) => "extension.package.remove",
         Method::ExtensionPackageRollback(_) => "extension.package.rollback",
+        Method::ExtensionServiceBindingInspect(_) => "extension.service.binding.inspect",
+        Method::ExtensionServiceBindingApprove(_) => "extension.service.binding.approve",
+        Method::ExtensionServiceBindingList(_) => "extension.service.binding.list",
+        Method::ExtensionServiceBindingRevoke(_) => "extension.service.binding.revoke",
+        Method::ExtensionServiceBindingInvoke(_) => "extension.service.binding.invoke",
     }
 }
 

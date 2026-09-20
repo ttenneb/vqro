@@ -108,6 +108,8 @@ pub(crate) fn request_changes_ui(request: &Request) -> bool {
             | Method::ExtensionPackageDisable(_)
             | Method::ExtensionPackageRemove(_)
             | Method::ExtensionPackageRollback(_)
+            | Method::ExtensionServiceBindingApprove(_)
+            | Method::ExtensionServiceBindingRevoke(_)
     )
 }
 

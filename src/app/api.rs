@@ -156,6 +156,10 @@ impl App {
                 self.handle_extension_package_candidate_finished(*result);
                 return Vec::new();
             }
+            AppEvent::ExtensionServiceFabricTimeout { attempt_id } => {
+                self.handle_extension_service_fabric_timeout(attempt_id);
+                return Vec::new();
+            }
             AppEvent::ExtensionCatalogCapacityAvailable => {
                 if self.extension_catalog_rebuild_pending {
                     self.rebuild_extension_catalogs();
@@ -1605,6 +1609,25 @@ impl App {
             }
             Method::ExtensionPackageRollback(params) => {
                 return self.handle_extension_package_rollback(request.id, params);
+            }
+            Method::ExtensionServiceBindingInspect(params) => {
+                return self.handle_extension_service_binding_inspect(request.id, params);
+            }
+            Method::ExtensionServiceBindingApprove(params) => {
+                return self.handle_extension_service_binding_approve(request.id, params);
+            }
+            Method::ExtensionServiceBindingList(_) => {
+                return self.handle_extension_service_binding_list(request.id);
+            }
+            Method::ExtensionServiceBindingRevoke(params) => {
+                return self.handle_extension_service_binding_revoke(request.id, params);
+            }
+            Method::ExtensionServiceBindingInvoke(_) => {
+                return responses::encode_error(
+                    request.id,
+                    crate::service_fabric::stable_r1_error_code("service_binding_unavailable"),
+                    "service binding invocation requires deferred API dispatch",
+                );
             }
             Method::ExtensionPackageInspect(_)
             | Method::ExtensionPackageInstall(_)

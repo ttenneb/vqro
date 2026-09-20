@@ -678,7 +678,7 @@ fn canonical_json_bytes(value: &impl serde::Serialize) -> Result<Vec<u8>, serde_
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use sha2::{Digest, Sha256};
     use std::path::PathBuf;
@@ -710,7 +710,7 @@ mod tests {
     const TABLE_LIMIT_COMPONENT: &[u8] =
         include_bytes!("../../tests/fixtures/extension-components/table-limit.wasm");
 
-    const ECHO_BODY: &str = r#"
+    pub(crate) const ECHO_BODY: &str = r#"
     i32.const 64
     i32.const 0
     i32.store8
@@ -832,7 +832,7 @@ mod tests {
             .unwrap()
     }
 
-    fn component_bytes(body: &str) -> Vec<u8> {
+    pub(crate) fn component_bytes(body: &str) -> Vec<u8> {
         let wat = include_str!("../../tests/fixtures/extension-component-service.wat")
             .replace(";; INVOKE_BODY", body);
         component_bytes_from_wat(&wat)
@@ -927,7 +927,132 @@ mod tests {
         package_bytes_with_world(component, capabilities, "vqro:extension/service@1.0.0")
     }
 
-    fn install_archive(bytes: Vec<u8>) -> (PathBuf, crate::extension_package::InstalledPackageV1) {
+    pub(crate) fn fabric_component(package_id: &str) -> Vec<u8> {
+        let identity = super::super::RuntimeIdentityV1 {
+            package_id: package_id.into(),
+            namespace: package_id.into(),
+            service_id: "echo".into(),
+            generation: 1,
+        };
+        let call = super::super::RuntimeHostCallV1 {
+            kind: "host_call".into(),
+            call_id: "fabric-call-1".into(),
+            identity,
+            depth: super::super::MAX_HOST_CALL_DEPTH,
+            capability: crate::service_fabric::SERVICE_READ_CAPABILITY.into(),
+            method: crate::service_fabric::SERVICE_READ_METHOD.into(),
+            namespace: package_id.into(),
+            params: serde_json::json!({
+                "contract": crate::service_fabric::SERVICE_READ_CALL_V1,
+                "import_id": "echo-source",
+                "method": "conformance.echo",
+                "payload": {"text": "hello"}
+            }),
+        };
+        let call = canonical_json_bytes(&call).unwrap();
+        let escaped = call
+            .iter()
+            .map(|byte| format!("\\{byte:02x}"))
+            .collect::<String>();
+        let body = format!(
+            r#"
+    i32.const 500 i32.const {} i32.const 800 call $host-call
+    i32.const 800 i32.load8_u
+    if unreachable end
+    i32.const 64 i32.const 0 i32.store8
+    i32.const 68 i32.const 804 i32.load i32.store
+    i32.const 72 i32.const 808 i32.load i32.store
+    i32.const 64
+"#,
+            call.len()
+        );
+        let old_data = r#"(data (i32.const 500) "{\22call_id\22:\22call-1\22,\22capability\22:\22state\22,\22depth\22:1,\22identity\22:{\22generation\22:26,\22namespace\22:\22example.component\22,\22package_id\22:\22example.component\22,\22service_id\22:\22echo\22},\22method\22:\22state.snapshot\22,\22namespace\22:\22example.component\22,\22params\22:{},\22type\22:\22host_call\22}")"#;
+        let new_data = format!(r#"(data (i32.const 500) "{escaped}")"#);
+        let wat = include_str!("../../tests/fixtures/extension-component-service.wat")
+            .replace(";; INVOKE_BODY", &body)
+            .replace(old_data, &new_data);
+        assert!(wat.contains(&new_data));
+        component_bytes_from_wat(&wat)
+    }
+
+    pub(crate) fn fabric_package_bytes(
+        component: &[u8],
+        package_id: &str,
+        consumer: bool,
+        contract_method: &str,
+    ) -> Vec<u8> {
+        let descriptor = crate::extension_package::ServiceContractDescriptorV1 {
+            contract: crate::extension_package::SERVICE_CONTRACT_V1.into(),
+            contract_id: "example.echo".into(),
+            contract_version: "1.0.0".into(),
+            methods: vec![crate::extension_package::ServiceContractMethodV1 {
+                id: contract_method.into(),
+                request_schema: serde_json::json!({"type": "object"}),
+                response_schema: serde_json::json!({"type": "object"}),
+                request_information: vec!["user.supplied.text".into()],
+                response_information: vec!["provider.generated.text".into()],
+                max_request_bytes: 4096,
+                max_response_bytes: 4096,
+            }],
+        };
+        let descriptor_bytes = serde_json::to_vec(&descriptor).unwrap();
+        let (_, descriptor_sha256) =
+            crate::extension_package::parse_service_contract_descriptor(&descriptor_bytes).unwrap();
+        let endpoint = if consumer {
+            format!(
+                "[[services.imports]]\nid = \"echo-source\"\ndescriptor = \"contracts/echo.json\"\ndescriptor_sha256 = \"{descriptor_sha256}\"\nrequired = true\n"
+            )
+        } else {
+            format!(
+                "[[services.exports]]\nid = \"echo\"\ndescriptor = \"contracts/echo.json\"\ndescriptor_sha256 = \"{descriptor_sha256}\"\n"
+            )
+        };
+        let manifest = format!(
+            "manifest_version = 3\npackage_contract = \"vqro.package.v1\"\nid = \"{package_id}\"\nversion = \"1.0.0\"\nmin_vqro_version = \"0.1.0\"\nnamespaces = [\"{package_id}\"]\n\n[[services]]\nid = \"echo\"\ncapabilities = []\n\n{endpoint}\n[services.runtime]\nkind = \"component\"\ncomponent = \"services/echo.wasm\"\nworld = \"vqro:extension/service@1.0.0\"\n"
+        );
+        let mut files = vec![
+            (
+                crate::extension_package::PACKAGE_MANIFEST_FILE.to_string(),
+                manifest.into_bytes(),
+                0o644,
+            ),
+            ("contracts/echo.json".into(), descriptor_bytes, 0o644),
+            ("services/echo.wasm".into(), component.to_vec(), 0o644),
+        ];
+        files.sort_by(|left, right| left.0.cmp(&right.0));
+        let checksums = files
+            .iter()
+            .map(|(path, bytes, _)| format!("{}  {path}\n", sha256(bytes)))
+            .collect::<String>();
+        files.push((
+            crate::extension_package::PACKAGE_CHECKSUM_FILE.into(),
+            checksums.into_bytes(),
+            0o644,
+        ));
+        files.sort_by(|left, right| left.0.cmp(&right.0));
+        let mut archive = Vec::new();
+        {
+            let mut builder = tar::Builder::new(&mut archive);
+            builder.mode(tar::HeaderMode::Deterministic);
+            for (path, bytes, mode) in files {
+                let mut header = tar::Header::new_ustar();
+                header.set_path(path).unwrap();
+                header.set_size(bytes.len() as u64);
+                header.set_mode(mode);
+                header.set_uid(0);
+                header.set_gid(0);
+                header.set_mtime(0);
+                header.set_cksum();
+                builder.append(&header, bytes.as_slice()).unwrap();
+            }
+            builder.finish().unwrap();
+        }
+        archive
+    }
+
+    pub(crate) fn install_archive(
+        bytes: Vec<u8>,
+    ) -> (PathBuf, crate::extension_package::InstalledPackageV1) {
         let mut random = [0_u8; 8];
         crate::platform::fill_secure_random(&mut random).unwrap();
         let suffix = random
@@ -961,6 +1086,251 @@ mod tests {
         capabilities: &[&str],
     ) -> (PathBuf, crate::extension_package::InstalledPackageV1) {
         install_archive(package_bytes(component, capabilities))
+    }
+
+    #[test]
+    fn two_independent_manifest_v3_components_complete_one_brokered_read_call() {
+        fn ready_slot(
+            installed: crate::extension_package::InstalledPackageV1,
+            artifact_generation: u64,
+        ) -> (
+            crate::extension_candidate::PackageCandidateSlot,
+            tokio::sync::mpsc::Receiver<crate::events::AppEvent>,
+        ) {
+            let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(8);
+            let mut slot = crate::extension_candidate::PackageCandidateSlot::spawn(
+                installed,
+                artifact_generation,
+                event_tx,
+            )
+            .unwrap();
+            let event = event_rx.blocking_recv().unwrap();
+            let crate::events::AppEvent::ExtensionPackageCandidateReady(result) = event else {
+                panic!("unexpected package bootstrap event");
+            };
+            assert!(slot.accepts(&result));
+            slot.install_ready(result.result.unwrap());
+            (slot, event_rx)
+        }
+
+        let provider_component = component_bytes(ECHO_BODY);
+        let consumer_component = fabric_component("example.fabric-consumer");
+        let (provider_root, provider_installed) = install_archive(fabric_package_bytes(
+            &provider_component,
+            "example.fabric-provider",
+            false,
+            "conformance.echo",
+        ));
+        let (consumer_root, consumer_installed) = install_archive(fabric_package_bytes(
+            &consumer_component,
+            "example.fabric-consumer",
+            true,
+            "conformance.echo",
+        ));
+        let provider_package = crate::extension_package::validate_package_file(
+            &Path::new(&provider_installed.immutable_root).join("package.vqrox"),
+            Some(&provider_installed.package_sha256),
+        )
+        .unwrap()
+        .descriptor;
+        let consumer_package = crate::extension_package::validate_package_file(
+            &Path::new(&consumer_installed.immutable_root).join("package.vqrox"),
+            Some(&consumer_installed.package_sha256),
+        )
+        .unwrap()
+        .descriptor;
+        let consent = crate::service_fabric::consent_for_binding(
+            &consumer_package,
+            "echo",
+            "echo-source",
+            &provider_package,
+            "echo",
+            "echo",
+        )
+        .unwrap();
+        let consent_sha256 = crate::service_fabric::consent_sha256(&consent).unwrap();
+        let mut bindings = crate::service_fabric::ServiceBindingRegistryV1::default();
+        let binding = bindings
+            .approve(consent, 0, None, &consent_sha256, true)
+            .unwrap()
+            .clone();
+
+        let (provider_slot, _provider_events) = ready_slot(provider_installed, 13);
+        let (consumer_slot, mut consumer_events) = ready_slot(consumer_installed, 11);
+        let provider_endpoint = provider_slot.service_read_endpoint("echo").unwrap();
+        let authorization = crate::service_fabric::ServiceReadInvocationAuthorization::new(
+            binding,
+            bindings.revision,
+            consumer_slot.artifact_sha256(),
+            consumer_slot.artifact_generation(),
+            consumer_slot.runtime_generation("echo").unwrap(),
+            provider_endpoint,
+            Arc::new(AtomicBool::new(false)),
+        )
+        .unwrap();
+        consumer_slot
+            .invoke_service_read(
+                "echo",
+                1001,
+                "conformance.echo".into(),
+                serde_json::json!({"trigger": "fabric-conformance"}),
+                authorization,
+                Instant::now() + Duration::from_secs(2),
+                Arc::new(AtomicBool::new(false)),
+            )
+            .unwrap();
+        let completion = consumer_events.blocking_recv().unwrap();
+        let crate::events::AppEvent::ExtensionPackageCandidateFinished(completion) = completion
+        else {
+            panic!("unexpected consumer completion event");
+        };
+        let response = completion.result.unwrap();
+        assert_eq!(
+            response["result"],
+            serde_json::json!({"count": 2, "text": "vqro"})
+        );
+        assert!(response["error"].is_null());
+
+        drop(consumer_slot);
+        drop(provider_slot);
+        cleanup(consumer_root);
+        cleanup(provider_root);
+    }
+
+    #[test]
+    fn retiring_provider_cancels_an_active_brokered_component_call() {
+        fn ready_slot(
+            installed: crate::extension_package::InstalledPackageV1,
+            artifact_generation: u64,
+        ) -> (
+            crate::extension_candidate::PackageCandidateSlot,
+            tokio::sync::mpsc::Receiver<crate::events::AppEvent>,
+        ) {
+            let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(8);
+            let mut slot = crate::extension_candidate::PackageCandidateSlot::spawn(
+                installed,
+                artifact_generation,
+                event_tx,
+            )
+            .unwrap();
+            let crate::events::AppEvent::ExtensionPackageCandidateReady(result) =
+                event_rx.blocking_recv().unwrap()
+            else {
+                panic!("unexpected package bootstrap event");
+            };
+            slot.install_ready(result.result.unwrap());
+            (slot, event_rx)
+        }
+
+        let (provider_root, provider_installed) = install_archive(fabric_package_bytes(
+            &component_bytes(LOOP_BODY),
+            "example.fabric-loop-provider",
+            false,
+            "conformance.echo",
+        ));
+        let (consumer_root, consumer_installed) = install_archive(fabric_package_bytes(
+            &fabric_component("example.fabric-loop-consumer"),
+            "example.fabric-loop-consumer",
+            true,
+            "conformance.echo",
+        ));
+        let provider_package = crate::extension_package::validate_package_file(
+            &Path::new(&provider_installed.immutable_root).join("package.vqrox"),
+            Some(&provider_installed.package_sha256),
+        )
+        .unwrap()
+        .descriptor;
+        let consumer_package = crate::extension_package::validate_package_file(
+            &Path::new(&consumer_installed.immutable_root).join("package.vqrox"),
+            Some(&consumer_installed.package_sha256),
+        )
+        .unwrap()
+        .descriptor;
+        let consent = crate::service_fabric::consent_for_binding(
+            &consumer_package,
+            "echo",
+            "echo-source",
+            &provider_package,
+            "echo",
+            "echo",
+        )
+        .unwrap();
+        let digest = crate::service_fabric::consent_sha256(&consent).unwrap();
+        let mut bindings = crate::service_fabric::ServiceBindingRegistryV1::default();
+        let binding = bindings
+            .approve(consent, 0, None, &digest, true)
+            .unwrap()
+            .clone();
+        let (provider_slot, _provider_events) = ready_slot(provider_installed, 23);
+        let (consumer_slot, mut consumer_events) = ready_slot(consumer_installed, 21);
+        let authorization = crate::service_fabric::ServiceReadInvocationAuthorization::new(
+            binding,
+            bindings.revision,
+            consumer_slot.artifact_sha256(),
+            consumer_slot.artifact_generation(),
+            consumer_slot.runtime_generation("echo").unwrap(),
+            provider_slot.service_read_endpoint("echo").unwrap(),
+            Arc::new(AtomicBool::new(false)),
+        )
+        .unwrap();
+        consumer_slot
+            .invoke_service_read(
+                "echo",
+                2001,
+                "conformance.echo".into(),
+                serde_json::json!({}),
+                authorization,
+                Instant::now() + Duration::from_secs(3),
+                Arc::new(AtomicBool::new(false)),
+            )
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(50));
+        drop(provider_slot);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let completion = loop {
+            match consumer_events.try_recv() {
+                Ok(event) => break event,
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => panic!("consumer completion unavailable: {error}"),
+            }
+        };
+        let crate::events::AppEvent::ExtensionPackageCandidateFinished(completion) = completion
+        else {
+            panic!("unexpected consumer completion event");
+        };
+        let response = completion.result.unwrap();
+        assert_eq!(response["error"]["code"], "stale_service_call_lease");
+
+        drop(consumer_slot);
+        cleanup(consumer_root);
+        cleanup(provider_root);
+    }
+
+    #[test]
+    fn manifest_v3_export_methods_must_be_advertised_by_component_handshake() {
+        let bytes = fabric_package_bytes(
+            &component_bytes(ECHO_BODY),
+            "example.fabric-mismatch",
+            false,
+            "missing.method",
+        );
+        let (root, installed) = install_archive(bytes);
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(2);
+        let slot = crate::extension_candidate::PackageCandidateSlot::spawn(installed, 9, event_tx)
+            .unwrap();
+        let event = event_rx.blocking_recv().unwrap();
+        let crate::events::AppEvent::ExtensionPackageCandidateReady(result) = event else {
+            panic!("unexpected package bootstrap event");
+        };
+        assert!(slot.accepts(&result));
+        assert!(result
+            .result
+            .unwrap_err()
+            .contains("omitted a manifest-v3 exported contract method"));
+        drop(slot);
+        cleanup(root);
     }
 
     #[cfg(unix)]

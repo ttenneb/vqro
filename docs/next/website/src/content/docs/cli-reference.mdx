@@ -444,6 +444,20 @@ herdr integration uninstall grok
 herdr integration status [--outdated-only]
 ```
 
+## Experimental service bindings
+
+Manifest-v3 component packages can inspect and explicitly authorize one exact read-only package-to-package edge:
+
+```bash
+vqro service-binding inspect --consumer-package ID --consumer-service ID --import ID --provider-package ID --provider-service ID --export ID
+vqro service-binding list
+vqro service-binding approve --consumer-package ID --consumer-service ID --import ID --provider-package ID --provider-service ID --export ID --registry-revision N [--binding-revision N] --consent-sha256 SHA256 --confirm
+vqro service-binding revoke BINDING_ID --registry-revision N --binding-revision N --confirm
+vqro service-binding call BINDING_ID --binding-revision N --consumer-method METHOD --params-json JSON
+```
+
+Run `inspect` first and review the exact artifacts, methods, request/response information categories, and byte limits. Approval and revocation require revision compare-and-swap values plus explicit confirmation. `call` starts one bounded consumer invocation off the App actor; every required import must be ready, and replacement, revocation, timeout, queue saturation, or stale completion fails closed. This surface is experimental and is not yet used by an ordinary product composition.
+
 ## Plugins
 
 These `plugin` commands install and run legacy manifest-v1 executable workflow plugins. Their build commands and services run as trusted same-user code. They are distinct from deterministic component extension packages installed through the Extensions marketplace journey; see [Extension platform status](/docs/extension-platform-status/) and [Marketplace](/docs/marketplace/).

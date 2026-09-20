@@ -180,6 +180,10 @@ pub enum AppEvent {
     ExtensionPackageCandidateFinished(
         Box<crate::extension_candidate::PackageCandidateInvocationResult>,
     ),
+    /// Backstop for one host-started Service Fabric consumer invocation.
+    ExtensionServiceFabricTimeout {
+        attempt_id: u64,
+    },
     /// A bounded extension service job completed on its worker thread.
     ExtensionServiceFinished(Box<crate::extension_service::ExtensionAsyncResult>),
     // Unit-test executables cannot recursively host the bundled service binary.

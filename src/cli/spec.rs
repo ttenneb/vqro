@@ -41,6 +41,7 @@ pub(super) fn command() -> Command {
         .subcommand(worktree_command())
         .subcommand(tab_command())
         .subcommand(collection_command())
+        .subcommand(service_binding_command())
         .subcommand(delegation_command())
         .subcommand(notification_command())
         .subcommand(agent_command())
@@ -372,6 +373,53 @@ fn collection_command() -> Command {
                         .args(["cascade-close", "promote-members"])
                         .multiple(false),
                 ),
+        )
+}
+
+fn service_binding_command() -> Command {
+    let endpoints = || {
+        [
+            option("consumer-package", "PACKAGE_ID").required(true),
+            option("consumer-service", "SERVICE_ID").required(true),
+            option("import", "IMPORT_ID").required(true),
+            option("provider-package", "PACKAGE_ID").required(true),
+            option("provider-service", "SERVICE_ID").required(true),
+            option("export", "EXPORT_ID").required(true),
+        ]
+    };
+    Command::new("service-binding")
+        .about("Inspect and manage package service bindings")
+        .subcommand(endpoints().into_iter().fold(
+            Command::new("inspect").about("Inspect exact binding consent"),
+            |command, arg| command.arg(arg),
+        ))
+        .subcommand(Command::new("list").about("List durable service bindings"))
+        .subcommand(
+            endpoints().into_iter().fold(
+                Command::new("approve")
+                    .about("Approve an exact service binding")
+                    .arg(option("registry-revision", "REVISION").required(true))
+                    .arg(option("binding-revision", "REVISION"))
+                    .arg(option("consent-sha256", "SHA256").required(true))
+                    .arg(flag("confirm").required(true)),
+                |command, arg| command.arg(arg),
+            ),
+        )
+        .subcommand(
+            Command::new("revoke")
+                .about("Revoke a durable service binding")
+                .arg(required("binding_id", "BINDING_ID"))
+                .arg(option("registry-revision", "REVISION").required(true))
+                .arg(option("binding-revision", "REVISION").required(true))
+                .arg(flag("confirm").required(true)),
+        )
+        .subcommand(
+            Command::new("call")
+                .about("Run one bounded consumer invocation")
+                .arg(required("binding_id", "BINDING_ID"))
+                .arg(option("binding-revision", "REVISION").required(true))
+                .arg(option("consumer-method", "METHOD").required(true))
+                .arg(option("params-json", "JSON").required(true)),
         )
 }
 
@@ -1503,6 +1551,37 @@ mod tests {
             ),
             "pane send-text is missing its next-step hint: {pane_send_text}"
         );
+    }
+
+    #[test]
+    fn spec_exposes_service_binding_commands_and_mutation_guards() {
+        let cmd = super::command();
+        for name in ["inspect", "list", "approve", "revoke", "call"] {
+            command_path(&cmd, &["service-binding", name]);
+        }
+        let inspect = command_path(&cmd, &["service-binding", "inspect"]);
+        for option in [
+            "consumer-package",
+            "consumer-service",
+            "import",
+            "provider-package",
+            "provider-service",
+            "export",
+        ] {
+            assert!(has_option(inspect, option));
+        }
+        let approve = command_path(&cmd, &["service-binding", "approve"]);
+        for option in ["registry-revision", "consent-sha256", "confirm"] {
+            assert!(has_option(approve, option));
+        }
+        let revoke = command_path(&cmd, &["service-binding", "revoke"]);
+        for option in ["registry-revision", "binding-revision", "confirm"] {
+            assert!(has_option(revoke, option));
+        }
+        let call = command_path(&cmd, &["service-binding", "call"]);
+        for option in ["binding-revision", "consumer-method", "params-json"] {
+            assert!(has_option(call, option));
+        }
     }
 
     #[test]

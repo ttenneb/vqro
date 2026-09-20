@@ -356,6 +356,16 @@ pub enum Method {
     ExtensionPackageRemove(ExtensionPackageMutationParams),
     #[serde(rename = "extension.package.rollback")]
     ExtensionPackageRollback(ExtensionPackageMutationParams),
+    #[serde(rename = "extension.service.binding.inspect")]
+    ExtensionServiceBindingInspect(ExtensionServiceBindingInspectParams),
+    #[serde(rename = "extension.service.binding.approve")]
+    ExtensionServiceBindingApprove(ExtensionServiceBindingApproveParams),
+    #[serde(rename = "extension.service.binding.list")]
+    ExtensionServiceBindingList(EmptyParams),
+    #[serde(rename = "extension.service.binding.revoke")]
+    ExtensionServiceBindingRevoke(ExtensionServiceBindingRevokeParams),
+    #[serde(rename = "extension.service.binding.invoke")]
+    ExtensionServiceBindingInvoke(ExtensionServiceBindingInvokeParams),
 }
 
 #[cfg(test)]

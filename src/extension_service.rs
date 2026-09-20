@@ -2519,6 +2519,15 @@ impl ExtensionServiceSupervisor {
         self.finish_request(result)
     }
 
+    pub(crate) fn package_candidate_supports_methods(
+        &self,
+        expected: &std::collections::BTreeSet<String>,
+    ) -> bool {
+        self.runtime
+            .as_ref()
+            .is_some_and(|runtime| expected.is_subset(runtime.methods()))
+    }
+
     pub(crate) fn invoke_package_read_candidate(
         &mut self,
         method: &str,
@@ -2545,6 +2554,42 @@ impl ExtensionServiceSupervisor {
             ));
         }
         let result = runtime.invoke_with_host_reads(
+            method,
+            params,
+            self.runtime_generation,
+            deadline,
+            canceled,
+            authorization,
+        );
+        self.finish_request(result)
+    }
+
+    pub(crate) fn invoke_package_service_read_candidate(
+        &mut self,
+        method: &str,
+        params: serde_json::Value,
+        deadline: Instant,
+        canceled: Arc<AtomicBool>,
+        authorization: crate::service_fabric::ServiceReadInvocationAuthorization,
+    ) -> Result<serde_json::Value, ExtensionServiceError> {
+        if canceled.load(Ordering::Acquire) {
+            return Err(ExtensionServiceError::Canceled);
+        }
+        if !matches!(self.status, ExtensionServiceStatus::Running) {
+            return Err(ExtensionServiceError::Configuration(
+                "package candidate runtime is not running".into(),
+            ));
+        }
+        let runtime = self
+            .runtime
+            .as_mut()
+            .ok_or_else(|| ExtensionServiceError::Configuration("service is not running".into()))?;
+        if !runtime.methods().contains(method) {
+            return Err(ExtensionServiceError::Protocol(
+                "package candidate did not advertise the requested method".into(),
+            ));
+        }
+        let result = runtime.invoke_with_service_read(
             method,
             params,
             self.runtime_generation,

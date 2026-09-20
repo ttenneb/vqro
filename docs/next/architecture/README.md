@@ -12,3 +12,8 @@ Each document must declare one status:
 Architecture documents describe stable ownership, invariants, compatibility obligations, and acceptance or removal gates. They do not contain temporary owners, pane IDs, schedules, branch-local test receipts, or active-task bookkeeping; those remain in ignored `.local/prd/` ledgers.
 
 Normative wire/data semantics remain under `docs/next/api/`. Public user guidance remains under `docs/next/website/`. A decision that changes either must update those sources in the same implementation change that crosses the boundary.
+
+Accepted decisions:
+
+- [Collections authority transition](collections-authority-transition.md)
+- [Extension Service Fabric R0/R1](extension-service-fabric-r0-r1.md)

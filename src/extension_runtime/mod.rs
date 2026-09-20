@@ -477,6 +477,7 @@ impl RuntimeFactory {
 
 enum HostInvocationAuthorization {
     Composite(Box<crate::extension_host_invocation::HostReadInvocationAuthorization>),
+    ServiceRead(Box<crate::service_fabric::ServiceReadInvocationAuthorization>),
     /// Temporary write-capable conformance path. Composite package invocations are read-only.
     LegacyState(Box<crate::extension_host_state::HostStateInvocationAuthorization>),
     LegacyTerminals(Box<crate::extension_host_terminals::HostTerminalsInvocationAuthorization>),
@@ -613,6 +614,27 @@ impl ExtensionRuntimeDispatcher {
             deadline,
             canceled,
             HostInvocationAuthorization::Composite(Box::new(authorization)),
+        )
+    }
+
+    /// Experimental R1 package-to-package read-call entry point. The App resolves the exact
+    /// durable edge before the consumer starts; the worker relay never waits on the App actor.
+    pub(crate) fn invoke_with_service_read(
+        &mut self,
+        method: &str,
+        params: serde_json::Value,
+        expected_generation: u64,
+        deadline: Instant,
+        canceled: Arc<AtomicBool>,
+        authorization: crate::service_fabric::ServiceReadInvocationAuthorization,
+    ) -> Result<serde_json::Value, RuntimeError> {
+        self.invoke_with_host_authorization(
+            method,
+            params,
+            expected_generation,
+            deadline,
+            canceled,
+            HostInvocationAuthorization::ServiceRead(Box::new(authorization)),
         )
     }
 
@@ -756,6 +778,20 @@ impl ExtensionRuntimeDispatcher {
                     )
                     .with_observer(observer),
                 )
+            }
+            Some((HostInvocationAuthorization::ServiceRead(authorization), canceled)) => {
+                let bound = authorization.bind(
+                    request.request_id.clone(),
+                    self.identity.clone(),
+                    deadline,
+                    canceled,
+                )?;
+                Arc::new(RuntimeHostCallRouter::new(
+                    bound.identity(),
+                    bound.namespace(),
+                    bound.allowed_methods(),
+                    bound,
+                ))
             }
             Some((HostInvocationAuthorization::LegacyTerminals(authorization), canceled)) => {
                 let event_tx = authorization.event_tx.clone();

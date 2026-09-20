@@ -1,6 +1,6 @@
 # `vqro.package.v1`
 
-Status: package/lifecycle contract with a production exact-Git component journey and verified runtime instantiation. Installed component services do not yet receive production host-call leases, provider admission, visible publication, or feature authority. File/link source contracts remain lower-level foundations rather than the arbitrary-Git user journey. See the [extension platform status](extension-platform-status.md) for the capability matrix.
+Status: package/lifecycle contract with a production exact-Git component journey and verified runtime instantiation. Exact pinned feature packages receive their separately documented leases; manifest-v3 packages may participate in the experimental Service Fabric when an exact durable binding is approved. File/link source contracts remain lower-level foundations rather than the arbitrary-Git user journey. See the [extension platform status](extension-platform-status.md) for the capability matrix.
 
 ## Package archive
 
@@ -8,7 +8,7 @@ A `.vqrox` file is an uncompressed deterministic tar archive. It contains regula
 
 Required root files:
 
-- `vqro-extension.toml`: manifest v2;
+- `vqro-extension.toml`: manifest v2 or separately parsed manifest v3;
 - `checksums.sha256`: exact inventory of every other file.
 
 `checksums.sha256` uses lowercase SHA-256, two ASCII spaces, a package-relative path, and LF. Lines are in strict bytewise path order. It cannot list itself; missing, extra, duplicate, case-colliding, or mismatched entries reject the package.
@@ -42,6 +42,12 @@ Each service has exactly one tagged runtime. A process runtime instead provides 
 
 Manifest v1 and service protocol 2 remain unchanged compatibility inputs. Manifest v2 does not reinterpret either contract.
 
+## Manifest v3
+
+Manifest v3 adds exact `services.exports` and `services.imports` declarations referencing bounded `vqro.service-contract.v1` JSON descriptors under `contracts/`. Descriptor identity includes canonical JSON SHA-256, not only a free-form contract name. Manifest v2 remains immutable: its `provides` strings never become fabric exports, and v3 is parsed through a distinct deny-unknown-fields DTO.
+
+Imports and exports do not grant host capabilities, choose providers, or publish documents. A host-owned exact-artifact ServiceBinding is separately inspected and approved. See [`vqro-service-fabric-r1.md`](vqro-service-fabric-r1.md) and the generated [`vqro-extension-manifest-v3.schema.json`](vqro-extension-manifest-v3.schema.json).
+
 ## Sources and provenance
 
 Package lifecycle state uses one model for:
@@ -56,7 +62,7 @@ Installed file artifacts live under a SHA-256-derived immutable directory and re
 
 ## Lifecycle and recovery
 
-The package registry records source, claims, revision, status, active and previous artifact pointers, runtime generation, retained-data state, and deterministic load order. Existing marketplace entries are exposed only through a named legacy compatibility projection; their `Bundled` and `AgentIntegration` tags are not package-v1 runtime selectors.
+The package registry records source, claims, revision, status, active and previous artifact pointers, runtime generation, retained-data state, and deterministic load order. Existing marketplace entries are exposed only through a named legacy compatibility projection; their `Bundled` and `AgentIntegration` tags are not package-v1 runtime selectors. Extension state schema 2 also stores exact, user-approved service bindings; schema 1 migrates with no fabricated bindings, and old writers reject schema 2.
 
 The activation journal has `prepared`, `artifact_committed`, and `registry_committed` phases plus an idempotent operation ID, expected registry and package revisions, previous pointer, and candidate pointer. Journal writes are bounded, atomic, and durable. Recovery can commit an already-retained candidate, keep an already-committed candidate, roll back an uncommitted candidate, or stop on conflicting state. The current package lifecycle verifies, instantiates, negotiates, and retains enabled component services, including restoration after restart. Runtime instantiation is not a capability lease or provider admission: these services cannot yet read production host state, publish a client-visible document, or become feature authority.
 

@@ -780,6 +780,187 @@
       "title": "PackageManifestV2",
       "type": "object"
     },
+    "manifest_v3": {
+      "$defs": {
+        "PackageRuntimeV1": {
+          "oneOf": [
+            {
+              "additionalProperties": false,
+              "properties": {
+                "component": {
+                  "type": "string"
+                },
+                "kind": {
+                  "const": "component",
+                  "type": "string"
+                },
+                "world": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind",
+                "component",
+                "world"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "args": {
+                  "default": [],
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "executables": {
+                  "additionalProperties": {
+                    "type": "string"
+                  },
+                  "type": "object"
+                },
+                "kind": {
+                  "const": "process",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind",
+                "executables"
+              ],
+              "type": "object"
+            }
+          ]
+        },
+        "PackageServiceV2": {
+          "additionalProperties": false,
+          "properties": {
+            "capabilities": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "exports": {
+              "default": [],
+              "items": {
+                "$ref": "#/schemas/manifest_v3/$defs/ServiceContractExportV1"
+              },
+              "type": "array"
+            },
+            "id": {
+              "type": "string"
+            },
+            "imports": {
+              "default": [],
+              "items": {
+                "$ref": "#/schemas/manifest_v3/$defs/ServiceContractImportV1"
+              },
+              "type": "array"
+            },
+            "runtime": {
+              "$ref": "#/schemas/manifest_v3/$defs/PackageRuntimeV1"
+            }
+          },
+          "required": [
+            "id",
+            "runtime"
+          ],
+          "type": "object"
+        },
+        "ServiceContractExportV1": {
+          "additionalProperties": false,
+          "properties": {
+            "descriptor": {
+              "type": "string"
+            },
+            "descriptor_sha256": {
+              "type": "string"
+            },
+            "id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "descriptor",
+            "descriptor_sha256"
+          ],
+          "type": "object"
+        },
+        "ServiceContractImportV1": {
+          "additionalProperties": false,
+          "properties": {
+            "descriptor": {
+              "type": "string"
+            },
+            "descriptor_sha256": {
+              "type": "string"
+            },
+            "id": {
+              "type": "string"
+            },
+            "required": {
+              "default": true,
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "id",
+            "descriptor",
+            "descriptor_sha256"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "manifest_version": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "min_vqro_version": {
+          "type": "string"
+        },
+        "namespaces": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "package_contract": {
+          "type": "string"
+        },
+        "services": {
+          "default": [],
+          "items": {
+            "$ref": "#/schemas/manifest_v3/$defs/PackageServiceV2"
+          },
+          "type": "array"
+        },
+        "version": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "manifest_version",
+        "package_contract",
+        "id",
+        "version",
+        "min_vqro_version"
+      ],
+      "title": "PackageManifestV3",
+      "type": "object"
+    },
     "provenance": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "oneOf": [
@@ -1255,6 +1436,79 @@
       "title": "PackageRegistryV1",
       "type": "object"
     },
+    "service_contract": {
+      "$defs": {
+        "ServiceContractMethodV1": {
+          "additionalProperties": false,
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "max_request_bytes": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "max_response_bytes": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "request_information": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "request_schema": true,
+            "response_information": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "response_schema": true
+          },
+          "required": [
+            "id",
+            "request_schema",
+            "response_schema",
+            "max_request_bytes",
+            "max_response_bytes"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "contract": {
+          "type": "string"
+        },
+        "contract_id": {
+          "type": "string"
+        },
+        "contract_version": {
+          "type": "string"
+        },
+        "methods": {
+          "items": {
+            "$ref": "#/schemas/service_contract/$defs/ServiceContractMethodV1"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "contract",
+        "contract_id",
+        "contract_version",
+        "methods"
+      ],
+      "title": "ServiceContractDescriptorV1",
+      "type": "object"
+    },
     "validated_package": {
       "$defs": {
         "PackageFileV1": {
@@ -1279,50 +1533,6 @@
             "sha256",
             "size",
             "executable"
-          ],
-          "type": "object"
-        },
-        "PackageManifestV2": {
-          "additionalProperties": false,
-          "properties": {
-            "id": {
-              "type": "string"
-            },
-            "manifest_version": {
-              "format": "uint32",
-              "minimum": 0,
-              "type": "integer"
-            },
-            "min_vqro_version": {
-              "type": "string"
-            },
-            "namespaces": {
-              "default": [],
-              "items": {
-                "type": "string"
-              },
-              "type": "array"
-            },
-            "package_contract": {
-              "type": "string"
-            },
-            "services": {
-              "default": [],
-              "items": {
-                "$ref": "#/schemas/validated_package/$defs/PackageServiceV1"
-              },
-              "type": "array"
-            },
-            "version": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "manifest_version",
-            "package_contract",
-            "id",
-            "version",
-            "min_vqro_version"
           ],
           "type": "object"
         },
@@ -1378,8 +1588,163 @@
             }
           ]
         },
-        "PackageServiceV1": {
+        "ServiceContractDescriptorV1": {
           "additionalProperties": false,
+          "properties": {
+            "contract": {
+              "type": "string"
+            },
+            "contract_id": {
+              "type": "string"
+            },
+            "contract_version": {
+              "type": "string"
+            },
+            "methods": {
+              "items": {
+                "$ref": "#/schemas/validated_package/$defs/ServiceContractMethodV1"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "contract",
+            "contract_id",
+            "contract_version",
+            "methods"
+          ],
+          "type": "object"
+        },
+        "ServiceContractExportV1": {
+          "additionalProperties": false,
+          "properties": {
+            "descriptor": {
+              "type": "string"
+            },
+            "descriptor_sha256": {
+              "type": "string"
+            },
+            "id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "descriptor",
+            "descriptor_sha256"
+          ],
+          "type": "object"
+        },
+        "ServiceContractImportV1": {
+          "additionalProperties": false,
+          "properties": {
+            "descriptor": {
+              "type": "string"
+            },
+            "descriptor_sha256": {
+              "type": "string"
+            },
+            "id": {
+              "type": "string"
+            },
+            "required": {
+              "default": true,
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "id",
+            "descriptor",
+            "descriptor_sha256"
+          ],
+          "type": "object"
+        },
+        "ServiceContractMethodV1": {
+          "additionalProperties": false,
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "max_request_bytes": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "max_response_bytes": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "request_information": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "request_schema": true,
+            "response_information": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "response_schema": true
+          },
+          "required": [
+            "id",
+            "request_schema",
+            "response_schema",
+            "max_request_bytes",
+            "max_response_bytes"
+          ],
+          "type": "object"
+        },
+        "ValidatedPackageManifestV1": {
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "manifest_version": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "min_vqro_version": {
+              "type": "string"
+            },
+            "namespaces": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "package_contract": {
+              "type": "string"
+            },
+            "services": {
+              "items": {
+                "$ref": "#/schemas/validated_package/$defs/ValidatedPackageServiceV1"
+              },
+              "type": "array"
+            },
+            "version": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "manifest_version",
+            "package_contract",
+            "id",
+            "version",
+            "min_vqro_version",
+            "namespaces",
+            "services"
+          ],
+          "type": "object"
+        },
+        "ValidatedPackageServiceV1": {
           "properties": {
             "capabilities": {
               "default": [],
@@ -1388,8 +1753,22 @@
               },
               "type": "array"
             },
+            "exports": {
+              "default": [],
+              "items": {
+                "$ref": "#/schemas/validated_package/$defs/ServiceContractExportV1"
+              },
+              "type": "array"
+            },
             "id": {
               "type": "string"
+            },
+            "imports": {
+              "default": [],
+              "items": {
+                "$ref": "#/schemas/validated_package/$defs/ServiceContractImportV1"
+              },
+              "type": "array"
             },
             "provides": {
               "default": [],
@@ -1414,6 +1793,13 @@
         "contract": {
           "type": "string"
         },
+        "contract_descriptors": {
+          "additionalProperties": {
+            "$ref": "#/schemas/validated_package/$defs/ServiceContractDescriptorV1"
+          },
+          "default": {},
+          "type": "object"
+        },
         "files": {
           "items": {
             "$ref": "#/schemas/validated_package/$defs/PackageFileV1"
@@ -1421,7 +1807,7 @@
           "type": "array"
         },
         "manifest": {
-          "$ref": "#/schemas/validated_package/$defs/PackageManifestV2"
+          "$ref": "#/schemas/validated_package/$defs/ValidatedPackageManifestV1"
         },
         "manifest_sha256": {
           "type": "string"

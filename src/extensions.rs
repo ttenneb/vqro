@@ -12,7 +12,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use serde::{Deserialize, Serialize};
 
 pub(crate) const CATALOG_SCHEMA_VERSION: u32 = 1;
-pub(crate) const STATE_SCHEMA_VERSION: u32 = 1;
+pub(crate) const STATE_SCHEMA_VERSION: u32 = 2;
+pub(crate) const LEGACY_STATE_SCHEMA_VERSION: u32 = 1;
 const MAX_MARKETPLACE_STATE_BYTES: u64 = 1024 * 1024;
 const MAX_MARKETPLACE_JOURNAL_BYTES: u64 = 64 * 1024;
 static NEXT_STATE_TEMP_ID: AtomicU64 = AtomicU64::new(1);
@@ -108,6 +109,10 @@ pub(crate) struct MarketplaceStateFile {
         skip_serializing_if = "crate::extension_package::PackageRegistryV1::is_empty"
     )]
     pub packages: crate::extension_package::PackageRegistryV1,
+    /// User-approved exact package-to-package service authority. Runtime leases
+    /// are derived and never persisted.
+    #[serde(default)]
+    pub service_bindings: crate::service_fabric::ServiceBindingRegistryV1,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -374,6 +379,7 @@ impl MarketplaceStateFile {
                 .map(|extension| extension.repository.clone())
                 .collect(),
             packages: crate::extension_package::PackageRegistryV1::default(),
+            service_bindings: crate::service_fabric::ServiceBindingRegistryV1::default(),
         }
     }
 
@@ -450,6 +456,7 @@ impl MarketplaceStateFile {
             }
         }
         self.packages.validate(&index.package_v1_trust())?;
+        self.service_bindings.validate()?;
         let package_namespaces = self.packages.namespace_owners();
         for record in self.packages.packages.values() {
             if matches!(
@@ -742,7 +749,12 @@ pub(crate) fn load_state(index: &CuratedIndex) -> MarketplaceStateFile {
     let loaded = (|| {
         let path = state_storage_path()?;
         let _guard = lock_state_file(&path)?;
-        load_state_from_path(&path, index)
+        let legacy = state_schema_version_from_path(&path)? == Some(LEGACY_STATE_SCHEMA_VERSION);
+        let state = load_state_from_path(&path, index)?;
+        if legacy {
+            save_state_to_path(&path, &state)?;
+        }
+        Ok::<_, String>(state)
     })();
     match loaded {
         Ok(state) => state,
@@ -819,6 +831,108 @@ fn bounded_read(path: &Path, maximum: u64, label: &str) -> Result<Vec<u8>, Strin
     std::fs::read(path).map_err(|error| format!("read {label}: {error}"))
 }
 
+fn state_schema_version_from_path(path: &Path) -> Result<Option<u32>, String> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let bytes = bounded_read(path, MAX_MARKETPLACE_STATE_BYTES, "extension state")?;
+    let value: serde_json::Value = serde_json::from_slice(&bytes)
+        .map_err(|error| format!("parse extension state: {error}"))?;
+    let version = value
+        .get("schema_version")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|version| u32::try_from(version).ok())
+        .ok_or_else(|| "extension state schema version is invalid".to_string())?;
+    Ok(Some(version))
+}
+
+fn validate_ready_service_binding_declarations(
+    state: &MarketplaceStateFile,
+    state_path: &Path,
+) -> Result<(), String> {
+    let load_endpoint = |endpoint: &crate::service_fabric::ServiceEndpointV1| -> Result<
+        Option<crate::extension_package::ValidatedPackageV1>,
+        String,
+    > {
+        let Some(record) = state.packages.packages.get(&endpoint.package_id) else {
+            return Ok(None);
+        };
+        let Some(pointer) = record.active.as_ref() else {
+            return Ok(None);
+        };
+        let exact_source = matches!(
+            &record.source,
+            crate::extension_package::PackageProvenanceV1::Git {
+                version,
+                package_sha256,
+                manifest_sha256,
+                ..
+            } if version == &endpoint.package_version
+                && package_sha256 == &endpoint.package_sha256
+                && manifest_sha256 == &endpoint.manifest_sha256
+        );
+        if record.status != crate::extension_package::PackageLifecycleStatusV1::Enabled
+            || pointer.package_sha256 != endpoint.package_sha256
+            || pointer.version != endpoint.package_version
+            || !exact_source
+        {
+            return Ok(None);
+        }
+        let root = state_path
+            .parent()
+            .ok_or_else(|| "extension state path has no parent".to_string())?
+            .join("extension-packages")
+            .join("sha256")
+            .join(&endpoint.package_sha256);
+        if !root.exists() {
+            return Ok(None);
+        }
+        let archive = root.join("package.vqrox");
+        let package = if archive.is_file() {
+            crate::extension_package::validate_package_file(
+                &archive,
+                Some(&endpoint.package_sha256),
+            )?
+            .descriptor
+        } else {
+            crate::extension_package::validate_directory_package(&root)?
+        };
+        if package.manifest.id != endpoint.package_id
+            || package.manifest.version != endpoint.package_version
+            || package.manifest_sha256 != endpoint.manifest_sha256
+        {
+            return Err("service binding artifact identity is inconsistent".into());
+        }
+        Ok(Some(package))
+    };
+    for binding in
+        state.service_bindings.bindings.values().filter(|binding| {
+            binding.state == crate::service_fabric::ServiceBindingStateV1::Approved
+        })
+    {
+        let Some(consumer) = load_endpoint(&binding.consent.consumer)? else {
+            continue;
+        };
+        let Some(provider) = load_endpoint(&binding.consent.provider)? else {
+            continue;
+        };
+        let expected = crate::service_fabric::consent_for_binding(
+            &consumer,
+            &binding.consent.consumer.service_id,
+            &binding.consent.consumer.endpoint_id,
+            &provider,
+            &binding.consent.provider.service_id,
+            &binding.consent.provider.endpoint_id,
+        )?;
+        if expected != binding.consent {
+            return Err(
+                "persisted service binding does not match exact package declarations".into(),
+            );
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn load_state_from_path(
     path: &Path,
     index: &CuratedIndex,
@@ -829,14 +943,23 @@ pub(crate) fn load_state_from_path(
     let bytes = bounded_read(path, MAX_MARKETPLACE_STATE_BYTES, "extension state")?;
     let mut state: MarketplaceStateFile = serde_json::from_slice(&bytes)
         .map_err(|error| format!("parse extension state: {error}"))?;
-    if state.schema_version != STATE_SCHEMA_VERSION {
+    if state.schema_version != STATE_SCHEMA_VERSION
+        && state.schema_version != LEGACY_STATE_SCHEMA_VERSION
+    {
         return Err(format!(
             "unsupported extension state schema {}",
             state.schema_version
         ));
     }
+    // Schema 1 had no service authority. Its only safe migration is an empty
+    // binding registry; v2 `provides` strings are intentionally not inferred.
+    if state.schema_version == LEGACY_STATE_SCHEMA_VERSION {
+        state.schema_version = STATE_SCHEMA_VERSION;
+        state.service_bindings = crate::service_fabric::ServiceBindingRegistryV1::default();
+    }
     state.normalize(index);
     state.validate_data_ids(index)?;
+    validate_ready_service_binding_declarations(&state, path)?;
     Ok(state)
 }
 
@@ -1268,6 +1391,41 @@ mod tests {
                 0,
             )
             .unwrap();
+        let consent = crate::service_fabric::ServiceBindingConsentV1 {
+            consumer: crate::service_fabric::ServiceEndpointV1 {
+                package_id: "example.consumer".into(),
+                package_version: "1.0.0".into(),
+                package_sha256: "1".repeat(64),
+                manifest_sha256: "2".repeat(64),
+                service_id: "main".into(),
+                endpoint_id: "echo-source".into(),
+            },
+            provider: crate::service_fabric::ServiceEndpointV1 {
+                package_id: "example.provider".into(),
+                package_version: "1.0.0".into(),
+                package_sha256: "3".repeat(64),
+                manifest_sha256: "4".repeat(64),
+                service_id: "main".into(),
+                endpoint_id: "echo".into(),
+            },
+            contract: crate::service_fabric::ServiceContractIdentityV1 {
+                contract_id: "example.echo".into(),
+                contract_version: "1.0.0".into(),
+                descriptor_sha256: "a".repeat(64),
+            },
+            methods: vec![crate::service_fabric::ServiceBindingMethodV1 {
+                id: "echo".into(),
+                request_information: vec!["user.supplied.text".into()],
+                response_information: vec!["provider.generated.text".into()],
+                max_request_bytes: 4096,
+                max_response_bytes: 4096,
+            }],
+        };
+        let consent_sha256 = crate::service_fabric::consent_sha256(&consent).unwrap();
+        state
+            .service_bindings
+            .approve(consent, 0, None, &consent_sha256, true)
+            .unwrap();
         let directory = std::env::temp_dir().join(format!(
             "vqro-package-registry-state-{}-{}",
             std::process::id(),
@@ -1278,6 +1436,7 @@ mod tests {
         save_state_to_path(&path, &state).unwrap();
         let restored = load_state_from_path(&path, &index).unwrap();
         assert_eq!(restored.packages, state.packages);
+        assert_eq!(restored.service_bindings, state.service_bindings);
         std::fs::remove_dir_all(directory).unwrap();
     }
 
@@ -1293,12 +1452,14 @@ mod tests {
         let path = directory.join("extensions.json");
         let state = MarketplaceStateFile::defaults(&index);
         let mut legacy = serde_json::to_value(&state).unwrap();
+        legacy["schema_version"] = serde_json::json!(LEGACY_STATE_SCHEMA_VERSION);
         legacy.as_object_mut().unwrap().remove("packages");
+        legacy.as_object_mut().unwrap().remove("service_bindings");
         std::fs::write(&path, serde_json::to_vec(&legacy).unwrap()).unwrap();
-        assert!(load_state_from_path(&path, &index)
-            .unwrap()
-            .packages
-            .is_empty());
+        let migrated = load_state_from_path(&path, &index).unwrap();
+        assert_eq!(migrated.schema_version, STATE_SCHEMA_VERSION);
+        assert!(migrated.packages.is_empty());
+        assert!(migrated.service_bindings.bindings.is_empty());
 
         let mut invalid = state;
         invalid

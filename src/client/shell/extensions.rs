@@ -629,6 +629,8 @@ impl ClientShellState {
             details: "Executable services use the constrained WASI component runtime.".into(),
             categories: Vec::new(),
             requested_capabilities: package.requested_capabilities,
+            provided_contracts: package.provided_contracts,
+            required_contracts: package.required_contracts,
             package_kind: crate::api::schema::ExtensionPackageKind::SandboxedPackage,
             integration_target: None,
             integration_status: None,
@@ -667,6 +669,8 @@ impl ClientShellState {
             ),
             categories: Vec::new(),
             requested_capabilities: inspection.requested_capabilities.clone(),
+            provided_contracts: inspection.provided_contracts.clone(),
+            required_contracts: inspection.required_contracts.clone(),
             package_kind: crate::api::schema::ExtensionPackageKind::SandboxedPackage,
             integration_target: None,
             integration_status: None,
@@ -802,7 +806,7 @@ impl ClientShellState {
                                 .iter()
                                 .position(|index| extensions.extensions[*index].id == preview.id)
                                 .unwrap_or(0);
-                            extensions.git_inspection = Some(inspection);
+                            extensions.git_inspection = Some(Box::new(inspection));
                             extensions.git_install_mode = false;
                             extensions.confirmation = Some(if installed {
                                 ClientExtensionConfirmation::Update
@@ -952,6 +956,8 @@ mod package_inventory_tests {
             removed_retaining_data: false,
             load_order: 0,
             requested_capabilities: Vec::new(),
+            provided_contracts: Vec::new(),
+            required_contracts: Vec::new(),
             rollback_version: None,
             activation_error: None,
         };

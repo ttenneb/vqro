@@ -82,6 +82,84 @@ pub struct ExtensionPackageMutationParams {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct ExtensionContractMethodInspection {
+    pub id: String,
+    pub request_information: Vec<String>,
+    pub response_information: Vec<String>,
+    pub max_request_bytes: u64,
+    pub max_response_bytes: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct ExtensionContractInspection {
+    pub service_id: String,
+    pub endpoint_id: String,
+    pub contract_id: String,
+    pub contract_version: String,
+    pub descriptor_sha256: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub required: Option<bool>,
+    pub methods: Vec<ExtensionContractMethodInspection>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct ExtensionServiceEndpointParams {
+    pub package_id: String,
+    pub service_id: String,
+    pub endpoint_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct ExtensionServiceBindingInspectParams {
+    pub consumer: ExtensionServiceEndpointParams,
+    pub provider: ExtensionServiceEndpointParams,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct ExtensionServiceBindingApproveParams {
+    pub consumer: ExtensionServiceEndpointParams,
+    pub provider: ExtensionServiceEndpointParams,
+    pub expected_registry_revision: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_binding_revision: Option<u64>,
+    pub expected_consent_sha256: String,
+    #[serde(default)]
+    pub confirmed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct ExtensionServiceBindingRevokeParams {
+    pub binding_id: String,
+    pub expected_registry_revision: u64,
+    pub expected_binding_revision: u64,
+    #[serde(default)]
+    pub confirmed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct ExtensionServiceBindingInvokeParams {
+    pub binding_id: String,
+    pub expected_binding_revision: u64,
+    pub consumer_method: String,
+    pub params: serde_json::Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct ExtensionServiceBindingInspection {
+    pub registry_revision: u64,
+    pub consent_sha256: String,
+    pub consent: crate::service_fabric::ServiceBindingConsentV1,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub existing_binding: Option<crate::service_fabric::ServiceBindingV1>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct ExtensionServiceBindingInfo {
+    pub binding: crate::service_fabric::ServiceBindingV1,
+    pub effective_status: crate::service_fabric::EffectiveServiceBindingStatusV1,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ExtensionPackageInspection {
     pub source: ExtensionPackageSource,
     pub package_id: String,
@@ -91,6 +169,10 @@ pub struct ExtensionPackageInspection {
     pub namespaces: Vec<String>,
     pub services: Vec<String>,
     pub requested_capabilities: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub provided_contracts: Vec<ExtensionContractInspection>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub required_contracts: Vec<ExtensionContractInspection>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -104,6 +186,10 @@ pub struct InstalledExtensionPackageInfo {
     pub removed_retaining_data: bool,
     pub load_order: usize,
     pub requested_capabilities: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub provided_contracts: Vec<ExtensionContractInspection>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub required_contracts: Vec<ExtensionContractInspection>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rollback_version: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -150,6 +236,10 @@ pub struct ExtensionInfo {
     /// that this catalog item has no downloaded executable service.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub requested_capabilities: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub provided_contracts: Vec<ExtensionContractInspection>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub required_contracts: Vec<ExtensionContractInspection>,
     pub package_kind: ExtensionPackageKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub integration_target: Option<super::IntegrationTarget>,

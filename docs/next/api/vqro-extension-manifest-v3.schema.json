@@ -1,0 +1,196 @@
+{
+  "$defs": {
+    "PackageRuntimeV1": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "component": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "component",
+              "type": "string"
+            },
+            "world": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "component",
+            "world"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "args": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "executables": {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "type": "object"
+            },
+            "kind": {
+              "const": "process",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "executables"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "PackageServiceV2": {
+      "additionalProperties": false,
+      "properties": {
+        "capabilities": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 64,
+          "type": "array"
+        },
+        "exports": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/ServiceContractExportV1"
+          },
+          "maxItems": 32,
+          "type": "array"
+        },
+        "id": {
+          "type": "string"
+        },
+        "imports": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/ServiceContractImportV1"
+          },
+          "maxItems": 32,
+          "type": "array"
+        },
+        "runtime": {
+          "$ref": "#/$defs/PackageRuntimeV1"
+        }
+      },
+      "required": [
+        "id",
+        "runtime"
+      ],
+      "type": "object"
+    },
+    "ServiceContractExportV1": {
+      "additionalProperties": false,
+      "properties": {
+        "descriptor": {
+          "type": "string"
+        },
+        "descriptor_sha256": {
+          "maxLength": 64,
+          "minLength": 64,
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "descriptor",
+        "descriptor_sha256"
+      ],
+      "type": "object"
+    },
+    "ServiceContractImportV1": {
+      "additionalProperties": false,
+      "properties": {
+        "descriptor": {
+          "type": "string"
+        },
+        "descriptor_sha256": {
+          "maxLength": 64,
+          "minLength": 64,
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "required": {
+          "default": true,
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "id",
+        "descriptor",
+        "descriptor_sha256"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "https://vqro.dev/schema/extension-manifest/v3",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "contract": "vqro.package.v1",
+  "properties": {
+    "id": {
+      "type": "string"
+    },
+    "manifest_version": {
+      "const": 3,
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "min_vqro_version": {
+      "type": "string"
+    },
+    "namespaces": {
+      "default": [],
+      "items": {
+        "type": "string"
+      },
+      "maxItems": 64,
+      "type": "array"
+    },
+    "package_contract": {
+      "const": "vqro.package.v1",
+      "type": "string"
+    },
+    "services": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/PackageServiceV2"
+      },
+      "maxItems": 32,
+      "type": "array"
+    },
+    "version": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "manifest_version",
+    "package_contract",
+    "id",
+    "version",
+    "min_vqro_version"
+  ],
+  "title": "vqro extension manifest v3",
+  "type": "object"
+}

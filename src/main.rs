@@ -78,6 +78,7 @@ mod render_signal;
 mod repository;
 mod selection;
 mod server;
+mod service_fabric;
 mod session;
 mod sound;
 pub mod spaces_extension_contract;

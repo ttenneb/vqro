@@ -17,10 +17,13 @@ use sha2::{Digest, Sha256};
 
 pub const PACKAGE_CONTRACT_V1: &str = "vqro.package.v1";
 pub const MANIFEST_VERSION_V2: u32 = 2;
+pub const MANIFEST_VERSION_V3: u32 = 3;
 pub const PACKAGE_MANIFEST_FILE: &str = "vqro-extension.toml";
 pub const PACKAGE_CHECKSUM_FILE: &str = "checksums.sha256";
 pub const PACKAGE_SCHEMA_ID_V1: &str = "https://vqro.dev/schema/package/v1";
 pub const MANIFEST_SCHEMA_ID_V2: &str = "https://vqro.dev/schema/extension-manifest/v2";
+pub const MANIFEST_SCHEMA_ID_V3: &str = "https://vqro.dev/schema/extension-manifest/v3";
+pub const SERVICE_CONTRACT_V1: &str = "vqro.service-contract.v1";
 pub const ACTIVATION_JOURNAL_CONTRACT_V1: &str = "vqro.package-activation-journal.v1";
 pub const PACKAGE_REGISTRY_CONTRACT_V1: &str = "vqro.package-registry.v1";
 
@@ -41,6 +44,12 @@ pub const MAX_PATH_COMPONENT_BYTES: usize = 128;
 pub const MAX_PATH_DEPTH: usize = 16;
 pub const MAX_ACTIVATION_JOURNAL_BYTES: u64 = 256 * 1024;
 pub const MAX_INSTALLED_PACKAGES: usize = 1_024;
+pub const MAX_SERVICE_ENDPOINTS: usize = 32;
+pub const MAX_CONTRACT_DESCRIPTOR_BYTES: usize = 64 * 1024;
+pub const MAX_CONTRACT_METHODS: usize = 32;
+pub const MAX_INFORMATION_CATEGORIES: usize = 32;
+// Leaves deterministic room for both runtime envelopes inside the 256 KiB frame cap.
+pub const MAX_SERVICE_CALL_BYTES: u64 = 128 * 1024;
 
 static NEXT_PACKAGE_TEMP: AtomicU64 = AtomicU64::new(1);
 
@@ -70,6 +79,103 @@ pub struct PackageServiceV1 {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PackageManifestV3 {
+    pub manifest_version: u32,
+    pub package_contract: String,
+    pub id: String,
+    pub version: String,
+    pub min_vqro_version: String,
+    #[serde(default)]
+    pub namespaces: Vec<String>,
+    #[serde(default)]
+    pub services: Vec<PackageServiceV2>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PackageServiceV2 {
+    pub id: String,
+    #[serde(default)]
+    pub capabilities: Vec<String>,
+    #[serde(default)]
+    pub exports: Vec<ServiceContractExportV1>,
+    #[serde(default)]
+    pub imports: Vec<ServiceContractImportV1>,
+    pub runtime: PackageRuntimeV1,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ServiceContractExportV1 {
+    pub id: String,
+    pub descriptor: String,
+    pub descriptor_sha256: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ServiceContractImportV1 {
+    pub id: String,
+    pub descriptor: String,
+    pub descriptor_sha256: String,
+    #[serde(default = "default_required_contract")]
+    pub required: bool,
+}
+
+fn default_required_contract() -> bool {
+    true
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ServiceContractDescriptorV1 {
+    pub contract: String,
+    pub contract_id: String,
+    pub contract_version: String,
+    pub methods: Vec<ServiceContractMethodV1>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ServiceContractMethodV1 {
+    pub id: String,
+    pub request_schema: serde_json::Value,
+    pub response_schema: serde_json::Value,
+    #[serde(default)]
+    pub request_information: Vec<String>,
+    #[serde(default)]
+    pub response_information: Vec<String>,
+    pub max_request_bytes: u64,
+    pub max_response_bytes: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ValidatedPackageManifestV1 {
+    pub manifest_version: u32,
+    pub package_contract: String,
+    pub id: String,
+    pub version: String,
+    pub min_vqro_version: String,
+    pub namespaces: Vec<String>,
+    pub services: Vec<ValidatedPackageServiceV1>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ValidatedPackageServiceV1 {
+    pub id: String,
+    #[serde(default)]
+    pub provides: Vec<String>,
+    #[serde(default)]
+    pub capabilities: Vec<String>,
+    #[serde(default)]
+    pub exports: Vec<ServiceContractExportV1>,
+    #[serde(default)]
+    pub imports: Vec<ServiceContractImportV1>,
+    pub runtime: PackageRuntimeV1,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum PackageRuntimeV1 {
     Component {
@@ -81,6 +187,56 @@ pub enum PackageRuntimeV1 {
         #[serde(default)]
         args: Vec<String>,
     },
+}
+
+impl From<PackageManifestV2> for ValidatedPackageManifestV1 {
+    fn from(manifest: PackageManifestV2) -> Self {
+        Self {
+            manifest_version: manifest.manifest_version,
+            package_contract: manifest.package_contract,
+            id: manifest.id,
+            version: manifest.version,
+            min_vqro_version: manifest.min_vqro_version,
+            namespaces: manifest.namespaces,
+            services: manifest
+                .services
+                .into_iter()
+                .map(|service| ValidatedPackageServiceV1 {
+                    id: service.id,
+                    provides: service.provides,
+                    capabilities: service.capabilities,
+                    exports: Vec::new(),
+                    imports: Vec::new(),
+                    runtime: service.runtime,
+                })
+                .collect(),
+        }
+    }
+}
+
+impl From<PackageManifestV3> for ValidatedPackageManifestV1 {
+    fn from(manifest: PackageManifestV3) -> Self {
+        Self {
+            manifest_version: manifest.manifest_version,
+            package_contract: manifest.package_contract,
+            id: manifest.id,
+            version: manifest.version,
+            min_vqro_version: manifest.min_vqro_version,
+            namespaces: manifest.namespaces,
+            services: manifest
+                .services
+                .into_iter()
+                .map(|service| ValidatedPackageServiceV1 {
+                    id: service.id,
+                    provides: Vec::new(),
+                    capabilities: service.capabilities,
+                    exports: service.exports,
+                    imports: service.imports,
+                    runtime: service.runtime,
+                })
+                .collect(),
+        }
+    }
 }
 
 #[derive(
@@ -158,7 +314,9 @@ pub struct ValidatedPackageV1 {
     pub contract: String,
     pub package_sha256: String,
     pub manifest_sha256: String,
-    pub manifest: PackageManifestV2,
+    pub manifest: ValidatedPackageManifestV1,
+    #[serde(default)]
+    pub contract_descriptors: BTreeMap<String, ServiceContractDescriptorV1>,
     pub files: Vec<PackageFileV1>,
 }
 
@@ -357,9 +515,7 @@ pub fn validate_package_bytes(
 
     let manifest_text = std::str::from_utf8(&manifest_entry.bytes)
         .map_err(|error| format!("package manifest is not UTF-8: {error}"))?;
-    let manifest: PackageManifestV2 = toml::from_str(manifest_text)
-        .map_err(|error| format!("parse package manifest v2: {error}"))?;
-    validate_manifest(&manifest)?;
+    let (manifest, contract_descriptors) = parse_and_validate_manifest(manifest_text, &entries)?;
     let manifest_sha256 = sha256(&manifest_entry.bytes);
     let file_descriptors = entries
         .iter()
@@ -381,12 +537,516 @@ pub fn validate_package_bytes(
             package_sha256,
             manifest_sha256,
             manifest,
+            contract_descriptors,
             files: file_descriptors,
         },
         files,
     };
     validate_runtime_inventory(&validated)?;
     Ok(validated)
+}
+
+#[derive(Deserialize)]
+struct ManifestVersionProbe {
+    manifest_version: u32,
+}
+
+fn parse_and_validate_manifest(
+    manifest_text: &str,
+    entries: &[PackageEntry],
+) -> Result<
+    (
+        ValidatedPackageManifestV1,
+        BTreeMap<String, ServiceContractDescriptorV1>,
+    ),
+    String,
+> {
+    let probe: ManifestVersionProbe = toml::from_str(manifest_text)
+        .map_err(|error| format!("parse package manifest version: {error}"))?;
+    match probe.manifest_version {
+        MANIFEST_VERSION_V2 => {
+            let manifest: PackageManifestV2 = toml::from_str(manifest_text)
+                .map_err(|error| format!("parse package manifest v2: {error}"))?;
+            validate_manifest(&manifest)?;
+            Ok((manifest.into(), BTreeMap::new()))
+        }
+        MANIFEST_VERSION_V3 => {
+            let manifest: PackageManifestV3 = toml::from_str(manifest_text)
+                .map_err(|error| format!("parse package manifest v3: {error}"))?;
+            validate_manifest_v3(&manifest)?;
+            let descriptors = validate_contract_inventory(&manifest, entries)?;
+            Ok((manifest.into(), descriptors))
+        }
+        version => Err(format!("unsupported package manifest version {version}")),
+    }
+}
+
+fn validate_contract_inventory(
+    manifest: &PackageManifestV3,
+    entries: &[PackageEntry],
+) -> Result<BTreeMap<String, ServiceContractDescriptorV1>, String> {
+    let mut descriptors = BTreeMap::new();
+    for declaration in manifest.services.iter().flat_map(|service| {
+        service
+            .exports
+            .iter()
+            .map(|export| (&export.descriptor, &export.descriptor_sha256))
+            .chain(
+                service
+                    .imports
+                    .iter()
+                    .map(|import| (&import.descriptor, &import.descriptor_sha256)),
+            )
+    }) {
+        let (path, expected_digest) = declaration;
+        validate_contract_descriptor_path(path)?;
+        if !path.ends_with(".json") {
+            return Err("service contract descriptor must be a JSON file".into());
+        }
+        validate_digest(expected_digest, "service contract descriptor")?;
+        let entry = required_entry(entries, path)?;
+        if entry.bytes.len() > MAX_CONTRACT_DESCRIPTOR_BYTES {
+            return Err("service contract descriptor exceeds 64 KiB".into());
+        }
+        let (descriptor, digest) = parse_service_contract_descriptor(&entry.bytes)?;
+        if digest != *expected_digest {
+            return Err(format!(
+                "service contract descriptor digest mismatch for {path}"
+            ));
+        }
+        if let Some(previous) = descriptors.insert(digest, descriptor.clone()) {
+            if previous != descriptor {
+                return Err("service contract descriptor digest collision".into());
+            }
+        }
+    }
+    for service in &manifest.services {
+        let mut exported_methods = BTreeSet::new();
+        for export in &service.exports {
+            let descriptor = descriptors
+                .get(&export.descriptor_sha256)
+                .ok_or_else(|| "service export descriptor is unavailable".to_string())?;
+            for method in &descriptor.methods {
+                if !exported_methods.insert(&method.id) {
+                    return Err(format!(
+                        "service {} exports ambiguous method {} through multiple contracts",
+                        service.id, method.id
+                    ));
+                }
+            }
+        }
+    }
+    Ok(descriptors)
+}
+
+pub fn parse_service_contract_descriptor(
+    bytes: &[u8],
+) -> Result<(ServiceContractDescriptorV1, String), String> {
+    if bytes.len() > MAX_CONTRACT_DESCRIPTOR_BYTES {
+        return Err("service contract descriptor exceeds 64 KiB".into());
+    }
+    let mut deserializer = serde_json::Deserializer::from_slice(bytes);
+    let unique = UniqueJsonValue::deserialize(&mut deserializer)
+        .map_err(|error| format!("parse service contract descriptor: {error}"))?;
+    deserializer
+        .end()
+        .map_err(|error| format!("parse service contract descriptor: {error}"))?;
+    let descriptor: ServiceContractDescriptorV1 = serde_json::from_value(unique.0.clone())
+        .map_err(|error| format!("decode service contract descriptor: {error}"))?;
+    validate_service_contract_descriptor(&descriptor)?;
+    let normalized = serde_json::to_value(&descriptor)
+        .map_err(|error| format!("normalize service contract descriptor: {error}"))?;
+    let mut canonical = Vec::new();
+    write_canonical_json(&normalized, &mut canonical)?;
+    Ok((descriptor, sha256(&canonical)))
+}
+
+fn validate_service_contract_descriptor(
+    descriptor: &ServiceContractDescriptorV1,
+) -> Result<(), String> {
+    if descriptor.contract != SERVICE_CONTRACT_V1 {
+        return Err("service contract descriptor has an unsupported contract".into());
+    }
+    validate_package_id(&descriptor.contract_id)?;
+    validate_version(&descriptor.contract_version, "service contract version")?;
+    if descriptor.methods.is_empty() || descriptor.methods.len() > MAX_CONTRACT_METHODS {
+        return Err("service contract descriptor has an invalid method count".into());
+    }
+    let mut previous_method: Option<&str> = None;
+    for method in &descriptor.methods {
+        validate_identifier(&method.id, 128, "service contract method")?;
+        if previous_method.is_some_and(|previous| previous >= method.id.as_str()) {
+            return Err("service contract methods must be in strict bytewise order".into());
+        }
+        previous_method = Some(&method.id);
+        validate_contract_schema(&method.request_schema, "request")?;
+        validate_contract_schema(&method.response_schema, "response")?;
+        validate_information_categories(&method.request_information)?;
+        validate_information_categories(&method.response_information)?;
+        if method.max_request_bytes == 0
+            || method.max_response_bytes == 0
+            || method.max_request_bytes > MAX_SERVICE_CALL_BYTES
+            || method.max_response_bytes > MAX_SERVICE_CALL_BYTES
+        {
+            return Err("service contract method byte bound is invalid".into());
+        }
+    }
+    Ok(())
+}
+
+fn validate_information_categories(values: &[String]) -> Result<(), String> {
+    if values.len() > MAX_INFORMATION_CATEGORIES {
+        return Err("service contract method has too many information categories".into());
+    }
+    let mut previous: Option<&str> = None;
+    for value in values {
+        validate_package_id(value)?;
+        if previous.is_some_and(|previous| previous >= value.as_str()) {
+            return Err("information categories must be in strict bytewise order".into());
+        }
+        previous = Some(value);
+    }
+    Ok(())
+}
+
+fn validate_contract_schema(value: &serde_json::Value, label: &str) -> Result<(), String> {
+    if !value.is_object() {
+        return Err(format!("service contract {label} schema must be an object"));
+    }
+    fn visit(value: &serde_json::Value, depth: usize, nodes: &mut usize) -> Result<(), String> {
+        *nodes = nodes.saturating_add(1);
+        if depth > 32 || *nodes > 4_096 {
+            return Err("service contract schema exceeds structural limits".into());
+        }
+        match value {
+            serde_json::Value::Array(values) => {
+                for value in values {
+                    visit(value, depth + 1, nodes)?;
+                }
+            }
+            serde_json::Value::Object(values) => {
+                for value in values.values() {
+                    visit(value, depth + 1, nodes)?;
+                }
+            }
+            serde_json::Value::Number(number) if !number.is_i64() && !number.is_u64() => {
+                return Err("service contract schema cannot contain floating-point numbers".into());
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+    visit(value, 0, &mut 0)?;
+    validate_contract_schema_subset(value, label)
+}
+
+fn validate_contract_schema_subset(value: &serde_json::Value, path: &str) -> Result<(), String> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| format!("service contract schema {path} must be an object"))?;
+    for (key, value) in object {
+        match key.as_str() {
+            "$schema" => {
+                if value.as_str() != Some("https://json-schema.org/draft/2020-12/schema") {
+                    return Err(format!(
+                        "service contract schema {path} has unsupported $schema"
+                    ));
+                }
+            }
+            "$id" | "title" | "description" => {
+                if value.as_str().is_none_or(|value| value.len() > 4_096) {
+                    return Err(format!(
+                        "service contract schema {path}.{key} must be a bounded string"
+                    ));
+                }
+            }
+            "$ref" => {
+                if value
+                    .as_str()
+                    .is_none_or(|value| !value.starts_with("#/$defs/") || value.len() > 512)
+                {
+                    return Err(format!(
+                        "service contract schema {path} has a non-local $ref"
+                    ));
+                }
+            }
+            "type" => {
+                if !matches!(
+                    value.as_str(),
+                    Some("null" | "boolean" | "object" | "array" | "number" | "integer" | "string")
+                ) {
+                    return Err(format!("service contract schema {path}.type is invalid"));
+                }
+            }
+            "$defs" | "properties" => {
+                let children = value.as_object().ok_or_else(|| {
+                    format!("service contract schema {path}.{key} must be an object")
+                })?;
+                for (name, schema) in children {
+                    if name.is_empty() || name.len() > 128 {
+                        return Err(format!(
+                            "service contract schema {path}.{key} has an invalid name"
+                        ));
+                    }
+                    validate_contract_schema_subset(schema, &format!("{path}.{key}.{name}"))?;
+                }
+            }
+            "required" => {
+                let names = value.as_array().ok_or_else(|| {
+                    format!("service contract schema {path}.required must be an array")
+                })?;
+                if names.len() > 256 {
+                    return Err(format!(
+                        "service contract schema {path}.required is too large"
+                    ));
+                }
+                let mut unique = std::collections::BTreeSet::new();
+                for name in names {
+                    let name = name
+                        .as_str()
+                        .filter(|name| !name.is_empty())
+                        .ok_or_else(|| {
+                            format!("service contract schema {path}.required must contain strings")
+                        })?;
+                    if !unique.insert(name) {
+                        return Err(format!(
+                            "service contract schema {path}.required has duplicates"
+                        ));
+                    }
+                }
+            }
+            "additionalProperties" => {
+                if !value.is_boolean() {
+                    validate_contract_schema_subset(
+                        value,
+                        &format!("{path}.additionalProperties"),
+                    )?;
+                }
+            }
+            "items" | "not" => {
+                validate_contract_schema_subset(value, &format!("{path}.{key}"))?;
+            }
+            "oneOf" | "anyOf" | "allOf" => {
+                let schemas = value
+                    .as_array()
+                    .filter(|values| !values.is_empty())
+                    .ok_or_else(|| {
+                        format!("service contract schema {path}.{key} must be a non-empty array")
+                    })?;
+                for (index, schema) in schemas.iter().enumerate() {
+                    validate_contract_schema_subset(schema, &format!("{path}.{key}[{index}]"))?;
+                }
+            }
+            "minItems" | "maxItems" | "minLength" | "maxLength" => {
+                if value.as_u64().is_none() {
+                    return Err(format!(
+                        "service contract schema {path}.{key} must be an unsigned integer"
+                    ));
+                }
+            }
+            "minimum" | "maximum" => {
+                if value.as_i64().is_none() && value.as_u64().is_none() {
+                    return Err(format!(
+                        "service contract schema {path}.{key} must be an integer"
+                    ));
+                }
+            }
+            "pattern" => {
+                let pattern = value.as_str().ok_or_else(|| {
+                    format!("service contract schema {path}.pattern must be a string")
+                })?;
+                regex::Regex::new(pattern)
+                    .map_err(|_| format!("service contract schema {path}.pattern is invalid"))?;
+            }
+            "format" => {
+                if !matches!(
+                    value.as_str(),
+                    Some(
+                        "date-time"
+                            | "date"
+                            | "time"
+                            | "email"
+                            | "hostname"
+                            | "ipv4"
+                            | "ipv6"
+                            | "uri"
+                            | "uuid"
+                    )
+                ) {
+                    return Err(format!(
+                        "service contract schema {path}.format is unsupported"
+                    ));
+                }
+            }
+            "enum" => {
+                let values = value
+                    .as_array()
+                    .filter(|values| !values.is_empty())
+                    .ok_or_else(|| {
+                        format!("service contract schema {path}.enum must be a non-empty array")
+                    })?;
+                let mut unique = std::collections::BTreeSet::new();
+                for value in values {
+                    let mut encoded = Vec::new();
+                    write_canonical_json(value, &mut encoded)?;
+                    if !unique.insert(encoded) {
+                        return Err(format!(
+                            "service contract schema {path}.enum has duplicates"
+                        ));
+                    }
+                }
+            }
+            "const" | "default" => {}
+            _ => {
+                return Err(format!(
+                    "service contract schema {path} uses unsupported keyword {key}"
+                ));
+            }
+        }
+    }
+    for (minimum, maximum) in [
+        ("minItems", "maxItems"),
+        ("minLength", "maxLength"),
+        ("minimum", "maximum"),
+    ] {
+        if let (Some(minimum), Some(maximum)) = (object.get(minimum), object.get(maximum)) {
+            let ordered = minimum
+                .as_i64()
+                .zip(maximum.as_i64())
+                .is_some_and(|(minimum, maximum)| minimum <= maximum)
+                || minimum
+                    .as_u64()
+                    .zip(maximum.as_u64())
+                    .is_some_and(|(minimum, maximum)| minimum <= maximum);
+            if !ordered {
+                return Err(format!(
+                    "service contract schema {path} has inverted bounds"
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn write_canonical_json(value: &serde_json::Value, output: &mut Vec<u8>) -> Result<(), String> {
+    match value {
+        serde_json::Value::Null => output.extend_from_slice(b"null"),
+        serde_json::Value::Bool(true) => output.extend_from_slice(b"true"),
+        serde_json::Value::Bool(false) => output.extend_from_slice(b"false"),
+        serde_json::Value::Number(number) if number.is_i64() || number.is_u64() => {
+            output.extend_from_slice(number.to_string().as_bytes());
+        }
+        serde_json::Value::Number(_) => {
+            return Err("canonical service contract JSON cannot contain floats".into());
+        }
+        serde_json::Value::String(value) => {
+            output.extend_from_slice(
+                serde_json::to_string(value)
+                    .map_err(|error| error.to_string())?
+                    .as_bytes(),
+            );
+        }
+        serde_json::Value::Array(values) => {
+            output.push(b'[');
+            for (index, value) in values.iter().enumerate() {
+                if index > 0 {
+                    output.push(b',');
+                }
+                write_canonical_json(value, output)?;
+            }
+            output.push(b']');
+        }
+        serde_json::Value::Object(values) => {
+            output.push(b'{');
+            let mut entries = values.iter().collect::<Vec<_>>();
+            entries.sort_by(|left, right| left.0.as_bytes().cmp(right.0.as_bytes()));
+            for (index, (key, value)) in entries.into_iter().enumerate() {
+                if index > 0 {
+                    output.push(b',');
+                }
+                output.extend_from_slice(
+                    serde_json::to_string(key)
+                        .map_err(|error| error.to_string())?
+                        .as_bytes(),
+                );
+                output.push(b':');
+                write_canonical_json(value, output)?;
+            }
+            output.push(b'}');
+        }
+    }
+    Ok(())
+}
+
+struct UniqueJsonValue(serde_json::Value);
+
+impl<'de> Deserialize<'de> for UniqueJsonValue {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct Visitor;
+        impl<'de> serde::de::Visitor<'de> for Visitor {
+            type Value = UniqueJsonValue;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("JSON without duplicate object keys or floats")
+            }
+
+            fn visit_bool<E>(self, value: bool) -> Result<Self::Value, E> {
+                Ok(UniqueJsonValue(value.into()))
+            }
+            fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E> {
+                Ok(UniqueJsonValue(value.into()))
+            }
+            fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E> {
+                Ok(UniqueJsonValue(value.into()))
+            }
+            fn visit_f64<E: serde::de::Error>(self, _value: f64) -> Result<Self::Value, E> {
+                Err(E::custom("floating-point JSON is not canonical"))
+            }
+            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                Ok(UniqueJsonValue(value.into()))
+            }
+            fn visit_string<E>(self, value: String) -> Result<Self::Value, E> {
+                Ok(UniqueJsonValue(value.into()))
+            }
+            fn visit_none<E>(self) -> Result<Self::Value, E> {
+                Ok(UniqueJsonValue(serde_json::Value::Null))
+            }
+            fn visit_unit<E>(self) -> Result<Self::Value, E> {
+                Ok(UniqueJsonValue(serde_json::Value::Null))
+            }
+            fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+            where
+                A: serde::de::SeqAccess<'de>,
+            {
+                let mut values = Vec::new();
+                while let Some(value) = sequence.next_element::<UniqueJsonValue>()? {
+                    values.push(value.0);
+                }
+                Ok(UniqueJsonValue(values.into()))
+            }
+            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+            where
+                A: serde::de::MapAccess<'de>,
+            {
+                let mut values = serde_json::Map::new();
+                while let Some((key, value)) = map.next_entry::<String, UniqueJsonValue>()? {
+                    if values.insert(key.clone(), value.0).is_some() {
+                        return Err(serde::de::Error::custom(format!(
+                            "duplicate JSON object key {key}"
+                        )));
+                    }
+                }
+                Ok(UniqueJsonValue(values.into()))
+            }
+        }
+        deserializer.deserialize_any(Visitor)
+    }
 }
 
 fn deterministic_archive(entries: &[PackageEntry]) -> Result<Vec<u8>, String> {
@@ -553,6 +1213,122 @@ pub fn validate_manifest(manifest: &PackageManifestV2) -> Result<(), String> {
     Ok(())
 }
 
+pub fn validate_manifest_v3(manifest: &PackageManifestV3) -> Result<(), String> {
+    if manifest.manifest_version != MANIFEST_VERSION_V3
+        || manifest.package_contract != PACKAGE_CONTRACT_V1
+    {
+        return Err("manifest does not declare vqro.package.v1 manifest version 3".into());
+    }
+    validate_package_id(&manifest.id)?;
+    validate_version(&manifest.version, "package version")?;
+    let minimum = crate::update::Version::parse(&manifest.min_vqro_version)
+        .ok_or_else(|| "min_vqro_version is not canonical semantic versioning".to_string())?;
+    if minimum > crate::update::Version::current() {
+        return Err(format!("package requires vqro {minimum}"));
+    }
+    if manifest.namespaces.len() > MAX_NAMESPACES || manifest.services.len() > MAX_SERVICES {
+        return Err("manifest exceeds namespace or service limits".into());
+    }
+    let mut namespaces = BTreeSet::new();
+    for namespace in &manifest.namespaces {
+        validate_package_id(namespace)?;
+        if !namespaces.insert(namespace) {
+            return Err("manifest contains duplicate namespace claims".into());
+        }
+    }
+    let mut service_ids = BTreeSet::new();
+    let mut runtime_paths = BTreeSet::new();
+    for service in &manifest.services {
+        validate_identifier(&service.id, 128, "service id")?;
+        if !service_ids.insert(service.id.as_str()) {
+            return Err("manifest contains duplicate service IDs".into());
+        }
+        if service.capabilities.len() > MAX_CAPABILITIES
+            || service.exports.len() > MAX_SERVICE_ENDPOINTS
+            || service.imports.len() > MAX_SERVICE_ENDPOINTS
+        {
+            return Err("service exceeds capability or endpoint limits".into());
+        }
+        let mut capabilities = BTreeSet::new();
+        for capability in &service.capabilities {
+            validate_identifier(capability, 128, "service capability")?;
+            if !capabilities.insert(capability) {
+                return Err("service contains duplicate capabilities".into());
+            }
+        }
+        let mut endpoints = BTreeSet::new();
+        for export in &service.exports {
+            validate_identifier(&export.id, 128, "service export id")?;
+            if !endpoints.insert(export.id.as_str()) {
+                return Err("service contains duplicate endpoint IDs".into());
+            }
+            validate_contract_descriptor_path(&export.descriptor)?;
+            validate_digest(&export.descriptor_sha256, "service contract descriptor")?;
+        }
+        for import in &service.imports {
+            validate_identifier(&import.id, 128, "service import id")?;
+            if !endpoints.insert(import.id.as_str()) {
+                return Err("service contains duplicate endpoint IDs".into());
+            }
+            validate_contract_descriptor_path(&import.descriptor)?;
+            validate_digest(&import.descriptor_sha256, "service contract descriptor")?;
+        }
+        match &service.runtime {
+            PackageRuntimeV1::Component { component, world } => {
+                validate_runtime_path(component, false)?;
+                if !component.ends_with(".wasm") || world != "vqro:extension/service@1.0.0" {
+                    return Err("component runtime has an invalid payload or world".into());
+                }
+                if !runtime_paths.insert(component.to_ascii_lowercase()) {
+                    return Err("runtime payload is owned by multiple services".into());
+                }
+            }
+            PackageRuntimeV1::Process { executables, args } => {
+                if executables.is_empty() || executables.len() > 5 {
+                    return Err(
+                        "process runtime must declare one to five target executables".into(),
+                    );
+                }
+                if args.len() > MAX_PROCESS_ARGS {
+                    return Err("process runtime has too many arguments".into());
+                }
+                let mut argument_bytes = 0usize;
+                for argument in args {
+                    if argument.contains('\0') || argument.len() > MAX_PROCESS_ARG_BYTES {
+                        return Err("process runtime contains an invalid argument".into());
+                    }
+                    argument_bytes = argument_bytes.saturating_add(argument.len());
+                }
+                if argument_bytes > MAX_PROCESS_ARGS_BYTES
+                    || args.iter().any(|argument| argument == "_extension-service")
+                {
+                    return Err("process runtime arguments are unsafe or self-spawn Vqro".into());
+                }
+                for (target, executable) in executables {
+                    if !all_target_names().contains(&target.as_str()) {
+                        return Err(format!("process runtime has unknown target {target}"));
+                    }
+                    validate_runtime_path(executable, true)?;
+                    if target == "windows-x86_64" && !executable.ends_with(".exe") {
+                        return Err("Windows process payload must end in .exe".into());
+                    }
+                    let file_name = Path::new(executable)
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .unwrap_or_default();
+                    if matches!(file_name.to_ascii_lowercase().as_str(), "vqro" | "vqro.exe") {
+                        return Err("installed package cannot execute the Vqro binary".into());
+                    }
+                    if !runtime_paths.insert(executable.to_ascii_lowercase()) {
+                        return Err("runtime payload is owned by multiple services".into());
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 fn validate_runtime_inventory(package: &ValidatedPackageContents) -> Result<(), String> {
     for service in &package.descriptor.manifest.services {
         match &service.runtime {
@@ -627,7 +1403,7 @@ pub fn resolve_runtime(
 }
 
 pub fn validate_namespace_claims(
-    manifest: &PackageManifestV2,
+    manifest: &ValidatedPackageManifestV1,
     provenance: &PackageProvenanceV1,
     occupied: &BTreeMap<String, String>,
     trusted_curated: Option<&PackageProvenanceV1>,
@@ -761,7 +1537,7 @@ pub fn validate_namespace_claims(
 
 fn trusted_first_party_git_namespace(
     provenance: &PackageProvenanceV1,
-    manifest: &PackageManifestV2,
+    manifest: &ValidatedPackageManifestV1,
     namespace: &str,
 ) -> bool {
     let pin = if namespace == crate::collections_extension_contract::COLLECTIONS_PACKAGE_ID {
@@ -1038,12 +1814,18 @@ pub fn validate_directory_package(root: &Path) -> Result<ValidatedPackageV1, Str
         .get(PACKAGE_MANIFEST_FILE)
         .ok_or_else(|| format!("developer link is missing {PACKAGE_MANIFEST_FILE}"))?
         .0;
-    let manifest: PackageManifestV2 = toml::from_str(
-        std::str::from_utf8(manifest_bytes)
-            .map_err(|error| format!("developer link manifest is not UTF-8: {error}"))?,
-    )
-    .map_err(|error| format!("parse developer link manifest: {error}"))?;
-    validate_manifest(&manifest)?;
+    let manifest_text = std::str::from_utf8(manifest_bytes)
+        .map_err(|error| format!("developer link manifest is not UTF-8: {error}"))?;
+    let package_entries = entries
+        .iter()
+        .map(|(path, (bytes, mode))| PackageEntry {
+            path: path.clone(),
+            bytes: bytes.clone(),
+            mode: *mode,
+        })
+        .collect::<Vec<_>>();
+    let (manifest, contract_descriptors) =
+        parse_and_validate_manifest(manifest_text, &package_entries)?;
     let mut inventory = Sha256::new();
     let files = entries
         .iter()
@@ -1066,6 +1848,7 @@ pub fn validate_directory_package(root: &Path) -> Result<ValidatedPackageV1, Str
         package_sha256: format!("{:x}", inventory.finalize()),
         manifest_sha256: sha256(manifest_bytes),
         manifest,
+        contract_descriptors,
         files,
     };
     let contents = ValidatedPackageContents {
@@ -1266,6 +2049,14 @@ fn windows_reserved(component: &str) -> bool {
     )
 }
 
+fn validate_contract_descriptor_path(path: &str) -> Result<(), String> {
+    let portable = portable_package_path(Path::new(path))?;
+    if !portable.starts_with("contracts/") || portable.split('/').count() < 2 {
+        return Err("contract descriptor must be package-relative under contracts/".into());
+    }
+    Ok(())
+}
+
 fn validate_runtime_path(path: &str, process: bool) -> Result<(), String> {
     let portable = portable_package_path(Path::new(path))?;
     if !portable.starts_with("services/") || (process && portable.split('/').count() < 3) {
@@ -1274,7 +2065,7 @@ fn validate_runtime_path(path: &str, process: bool) -> Result<(), String> {
     Ok(())
 }
 
-fn validate_package_id(value: &str) -> Result<(), String> {
+pub(crate) fn validate_package_id(value: &str) -> Result<(), String> {
     if value == "host" || value.starts_with("host.") {
         return Err("host.* package identities are reserved".into());
     }
@@ -1592,7 +2383,7 @@ fn validate_lifecycle_record(record: &PackageLifecycleRecordV1) -> Result<(), St
     Ok(())
 }
 
-fn lifecycle_manifest(record: &PackageLifecycleRecordV1) -> PackageManifestV2 {
+fn lifecycle_manifest(record: &PackageLifecycleRecordV1) -> ValidatedPackageManifestV1 {
     PackageManifestV2 {
         manifest_version: MANIFEST_VERSION_V2,
         package_contract: PACKAGE_CONTRACT_V1.into(),
@@ -1610,6 +2401,7 @@ fn lifecycle_manifest(record: &PackageLifecycleRecordV1) -> PackageManifestV2 {
         namespaces: record.namespaces.clone(),
         services: Vec::new(),
     }
+    .into()
 }
 
 impl PackageRegistryV1 {
@@ -1755,7 +2547,7 @@ impl PackageRegistryV1 {
             services: Vec::new(),
         };
         validate_namespace_claims(
-            &candidate_manifest,
+            &candidate_manifest.into(),
             &candidate_source,
             &occupied,
             trusted_curated.get(package_id),
@@ -2526,6 +3318,252 @@ mod tests {
     }
 
     #[test]
+    fn manifest_v3_uses_exact_canonical_contract_descriptors() {
+        let descriptor = br#"{
+          "contract":"vqro.service-contract.v1",
+          "contract_id":"example.echo",
+          "contract_version":"1.0.0",
+          "methods":[{
+            "id":"echo",
+            "request_schema":{"type":"object"},
+            "response_schema":{"type":"object"},
+            "request_information":["user.supplied.text"],
+            "response_information":["provider.generated.text"],
+            "max_request_bytes":4096,
+            "max_response_bytes":4096
+          }]
+        }"#;
+        let (_, digest) = parse_service_contract_descriptor(descriptor).unwrap();
+        let manifest = format!(
+            r#"manifest_version = 3
+package_contract = "vqro.package.v1"
+id = "example.consumer"
+version = "1.0.0"
+min_vqro_version = "0.1.0"
+namespaces = ["example.consumer"]
+
+[[services]]
+id = "main"
+capabilities = []
+
+[[services.exports]]
+id = "echo"
+descriptor = "contracts/example.echo.v1.json"
+descriptor_sha256 = "{digest}"
+
+[[services.imports]]
+id = "echo-source"
+descriptor = "contracts/example.echo.v1.json"
+descriptor_sha256 = "{digest}"
+required = true
+
+[services.runtime]
+kind = "component"
+component = "services/main.wasm"
+world = "vqro:extension/service@1.0.0"
+"#
+        );
+        let package = validate_package_bytes(
+            &package_bytes(vec![
+                (PACKAGE_MANIFEST_FILE.into(), manifest.into_bytes(), 0o644),
+                (
+                    "contracts/example.echo.v1.json".into(),
+                    descriptor.to_vec(),
+                    0o644,
+                ),
+                ("services/main.wasm".into(), b"\0asm".to_vec(), 0o644),
+            ]),
+            None,
+        )
+        .unwrap();
+        assert_eq!(package.descriptor.manifest.manifest_version, 3);
+        assert_eq!(package.descriptor.manifest.services[0].exports.len(), 1);
+        assert_eq!(package.descriptor.manifest.services[0].imports.len(), 1);
+        assert_eq!(
+            package
+                .descriptor
+                .contract_descriptors
+                .get(&digest)
+                .unwrap()
+                .contract_id,
+            "example.echo"
+        );
+
+        let differently_formatted = br#"{"methods":[{"response_information":["provider.generated.text"],"request_schema":{"type":"object"},"id":"echo","max_response_bytes":4096,"response_schema":{"type":"object"},"request_information":["user.supplied.text"],"max_request_bytes":4096}],"contract_version":"1.0.0","contract_id":"example.echo","contract":"vqro.service-contract.v1"}"#;
+        assert_eq!(
+            parse_service_contract_descriptor(differently_formatted)
+                .unwrap()
+                .1,
+            digest
+        );
+        let omitted_defaults = br#"{"contract":"vqro.service-contract.v1","contract_id":"example.defaults","contract_version":"1.0.0","methods":[{"id":"echo","request_schema":{},"response_schema":{},"max_request_bytes":1,"max_response_bytes":1}]}"#;
+        let explicit_defaults = br#"{"contract":"vqro.service-contract.v1","contract_id":"example.defaults","contract_version":"1.0.0","methods":[{"id":"echo","request_schema":{},"response_schema":{},"request_information":[],"response_information":[],"max_request_bytes":1,"max_response_bytes":1}]}"#;
+        assert_eq!(
+            parse_service_contract_descriptor(omitted_defaults)
+                .unwrap()
+                .1,
+            parse_service_contract_descriptor(explicit_defaults)
+                .unwrap()
+                .1
+        );
+    }
+
+    #[test]
+    fn manifest_v3_rejects_v2_provides_unknown_fields_and_duplicate_endpoints() {
+        let raw = r#"manifest_version = 3
+package_contract = "vqro.package.v1"
+id = "example.invalid-v3"
+version = "1.0.0"
+min_vqro_version = "0.1.0"
+[[services]]
+id = "main"
+provides = ["legacy"]
+[services.runtime]
+kind = "component"
+component = "services/main.wasm"
+world = "vqro:extension/service@1.0.0"
+"#;
+        assert!(toml::from_str::<PackageManifestV3>(raw).is_err());
+
+        let endpoint = ServiceContractExportV1 {
+            id: "same".into(),
+            descriptor: "contracts/echo.json".into(),
+            descriptor_sha256: "a".repeat(64),
+        };
+        let manifest = PackageManifestV3 {
+            manifest_version: 3,
+            package_contract: PACKAGE_CONTRACT_V1.into(),
+            id: "example.invalid-v3".into(),
+            version: "1.0.0".into(),
+            min_vqro_version: "0.1.0".into(),
+            namespaces: Vec::new(),
+            services: vec![PackageServiceV2 {
+                id: "main".into(),
+                capabilities: Vec::new(),
+                exports: vec![endpoint],
+                imports: vec![ServiceContractImportV1 {
+                    id: "same".into(),
+                    descriptor: "contracts/echo.json".into(),
+                    descriptor_sha256: "a".repeat(64),
+                    required: true,
+                }],
+                runtime: PackageRuntimeV1::Component {
+                    component: "services/main.wasm".into(),
+                    world: "vqro:extension/service@1.0.0".into(),
+                },
+            }],
+        };
+        assert!(validate_manifest_v3(&manifest)
+            .unwrap_err()
+            .contains("duplicate endpoint"));
+    }
+
+    #[test]
+    fn manifest_v3_rejects_ambiguous_provider_methods_across_contracts() {
+        let first = br#"{"contract":"vqro.service-contract.v1","contract_id":"example.echo","contract_version":"1.0.0","methods":[{"id":"echo","request_schema":{},"response_schema":{},"request_information":[],"response_information":[],"max_request_bytes":1,"max_response_bytes":1}]}"#;
+        let second = br#"{"contract":"vqro.service-contract.v1","contract_id":"example.other","contract_version":"1.0.0","methods":[{"id":"echo","request_schema":{},"response_schema":{},"request_information":[],"response_information":[],"max_request_bytes":1,"max_response_bytes":1}]}"#;
+        let first_digest = parse_service_contract_descriptor(first).unwrap().1;
+        let second_digest = parse_service_contract_descriptor(second).unwrap().1;
+        let manifest = format!(
+            r#"manifest_version = 3
+package_contract = "vqro.package.v1"
+id = "example.ambiguous"
+version = "1.0.0"
+min_vqro_version = "0.1.0"
+[[services]]
+id = "main"
+[[services.exports]]
+id = "first"
+descriptor = "contracts/first.json"
+descriptor_sha256 = "{first_digest}"
+[[services.exports]]
+id = "second"
+descriptor = "contracts/second.json"
+descriptor_sha256 = "{second_digest}"
+[services.runtime]
+kind = "component"
+component = "services/main.wasm"
+world = "vqro:extension/service@1.0.0"
+"#
+        );
+        assert!(validate_package_bytes(
+            &package_bytes(vec![
+                (PACKAGE_MANIFEST_FILE.into(), manifest.into_bytes(), 0o644),
+                ("contracts/first.json".into(), first.to_vec(), 0o644),
+                ("contracts/second.json".into(), second.to_vec(), 0o644),
+                ("services/main.wasm".into(), b"\0asm".to_vec(), 0o644),
+            ]),
+            None,
+        )
+        .unwrap_err()
+        .contains("ambiguous method echo"));
+    }
+
+    #[test]
+    fn contract_descriptor_rejects_duplicate_keys_floats_and_digest_mismatch() {
+        assert!(parse_service_contract_descriptor(
+            br#"{"contract":"vqro.service-contract.v1","contract":"vqro.service-contract.v1"}"#
+        )
+        .unwrap_err()
+        .contains("duplicate JSON object key"));
+        assert!(parse_service_contract_descriptor(
+            br#"{"contract":"vqro.service-contract.v1","contract_id":"example.echo","contract_version":"1.0.0","methods":[],"extra":0.5}"#
+        )
+        .unwrap_err()
+        .contains("floating-point"));
+        assert!(parse_service_contract_descriptor(
+            br#"{"contract":"vqro.service-contract.v1","contract_id":"example.echo","contract_version":"1.0.0","methods":[{"id":"echo","request_schema":{"type":7},"response_schema":{},"request_information":[],"response_information":[],"max_request_bytes":1,"max_response_bytes":1}]}"#
+        )
+        .unwrap_err()
+        .contains("type is invalid"));
+        assert!(parse_service_contract_descriptor(
+            br#"{"contract":"vqro.service-contract.v1","contract_id":"example.echo","contract_version":"1.0.0","methods":[{"id":"echo","request_schema":{"invented":true},"response_schema":{},"request_information":[],"response_information":[],"max_request_bytes":1,"max_response_bytes":1}]}"#
+        )
+        .unwrap_err()
+        .contains("unsupported keyword"));
+
+        let descriptor = br#"{"contract":"vqro.service-contract.v1","contract_id":"example.echo","contract_version":"1.0.0","methods":[{"id":"echo","request_schema":{},"response_schema":{},"request_information":[],"response_information":[],"max_request_bytes":1,"max_response_bytes":1}]}"#;
+        let manifest = format!(
+            r#"manifest_version = 3
+package_contract = "vqro.package.v1"
+id = "example.bad-digest"
+version = "1.0.0"
+min_vqro_version = "0.1.0"
+[[services]]
+id = "main"
+[[services.exports]]
+id = "echo"
+descriptor = "contracts/echo.json"
+descriptor_sha256 = "{}"
+[services.runtime]
+kind = "component"
+component = "services/main.wasm"
+world = "vqro:extension/service@1.0.0"
+"#,
+            "0".repeat(64)
+        );
+        assert!(validate_package_bytes(
+            &package_bytes(vec![
+                (PACKAGE_MANIFEST_FILE.into(), manifest.into_bytes(), 0o644),
+                ("contracts/echo.json".into(), descriptor.to_vec(), 0o644),
+                ("services/main.wasm".into(), b"\0asm".to_vec(), 0o644),
+            ]),
+            None,
+        )
+        .unwrap_err()
+        .contains("descriptor digest mismatch"));
+    }
+
+    #[test]
+    fn manifest_v2_does_not_gain_fabric_fields() {
+        let manifest = format!(
+            "{}\n[[services]]\nid = \"main\"\nprovides = []\ncapabilities = []\nexports = []\n[services.runtime]\nkind = \"component\"\ncomponent = \"services/main.wasm\"\nworld = \"vqro:extension/service@1.0.0\"\n",
+            asset_manifest("example.v2-fabric", &[])
+        );
+        assert!(toml::from_str::<PackageManifestV2>(&manifest).is_err());
+    }
+
+    #[test]
     fn package_size_and_entry_limits_fail_before_unbounded_allocation() {
         let oversized = vec![0_u8; MAX_PACKAGE_BYTES as usize + 1];
         assert_eq!(
@@ -2636,7 +3674,10 @@ mod tests {
         let file = PackageProvenanceV1::File {
             package_sha256: "0".repeat(64),
         };
-        assert!(validate_namespace_claims(&manifest, &file, &BTreeMap::new(), None).is_err());
+        assert!(
+            validate_namespace_claims(&manifest.clone().into(), &file, &BTreeMap::new(), None)
+                .is_err()
+        );
         let curated = PackageProvenanceV1::Curated {
             catalog: "builtin-v1".into(),
             publisher: "vqro".into(),
@@ -2648,6 +3689,7 @@ mod tests {
             manifest_sha256: "2".repeat(64),
             authorized_namespaces: vec!["vqro.collections".into()],
         };
+        let manifest: ValidatedPackageManifestV1 = manifest.into();
         assert!(validate_namespace_claims(&manifest, &curated, &BTreeMap::new(), None).is_err());
         assert!(
             validate_namespace_claims(&manifest, &curated, &BTreeMap::new(), Some(&curated))
@@ -2657,9 +3699,13 @@ mod tests {
         assert!(validate_namespace_claims(&manifest, &curated, &occupied, Some(&curated)).is_err());
         let host: PackageManifestV2 =
             toml::from_str(&asset_manifest("example.package", &["host.terminals"])).unwrap();
-        assert!(
-            validate_namespace_claims(&host, &curated, &BTreeMap::new(), Some(&curated)).is_err()
-        );
+        assert!(validate_namespace_claims(
+            &host.into(),
+            &curated,
+            &BTreeMap::new(),
+            Some(&curated)
+        )
+        .is_err());
     }
 
     #[test]
@@ -2676,6 +3722,7 @@ mod tests {
             package_sha256: pin.package_sha256.clone(),
             manifest_sha256: pin.manifest_sha256.clone(),
         };
+        let manifest: ValidatedPackageManifestV1 = manifest.into();
         assert!(trusted_first_party_git_namespace(
             &exact,
             &manifest,

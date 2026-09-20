@@ -90,6 +90,10 @@ pub(super) fn collection(method: Method) -> std::io::Result<i32> {
     print_method_response("cli:collection", method)
 }
 
+pub(super) fn service_binding(method: Method) -> std::io::Result<i32> {
+    print_method_response("cli:service-binding", method)
+}
+
 pub(super) fn delegation(method: Method) -> std::io::Result<i32> {
     print_method_response("cli:delegation", method)
 }

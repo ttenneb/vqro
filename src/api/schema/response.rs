@@ -316,6 +316,20 @@ pub enum ResponseResult {
     ExtensionPackageChanged {
         package: super::extensions::InstalledExtensionPackageInfo,
     },
+    ExtensionServiceBindingInspected {
+        inspection: super::extensions::ExtensionServiceBindingInspection,
+    },
+    ExtensionServiceBindingList {
+        registry_revision: u64,
+        bindings: Vec<super::extensions::ExtensionServiceBindingInfo>,
+    },
+    ExtensionServiceBindingChanged {
+        binding: super::extensions::ExtensionServiceBindingInfo,
+    },
+    ExtensionServiceBindingInvoked {
+        binding_id: String,
+        result: serde_json::Value,
+    },
     PluginActionList {
         actions: Vec<PluginActionInfo>,
     },

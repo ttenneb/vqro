@@ -36,6 +36,7 @@ mod protocol_guard;
 mod runtime;
 mod server;
 mod server_not_running;
+mod service_binding;
 mod spec;
 mod status;
 mod tab;
@@ -129,6 +130,7 @@ pub fn maybe_run(args: &[String]) -> std::io::Result<CommandOutcome> {
         "worktree" => worktree::run_worktree_command(&args[2..])?,
         "tab" => tab::run_tab_command(&args[2..])?,
         "collection" => collection::run_collection_command(&args[2..])?,
+        "service-binding" => service_binding::run_service_binding_command(&args[2..])?,
         "delegation" => delegation::run_delegation_command(&args[2..])?,
         "notification" => notification::run_notification_command(&args[2..])?,
         "agent" => agent::run_agent_command(&args[2..])?,
