@@ -317,9 +317,13 @@ pub(super) fn render_collection_chrome(
                 .pane_id
                 .clone()
         });
+        let surface_rect = surfaces
+            .iter()
+            .find(|surface| surface.collection_id == collection.collection_id)
+            .map_or(pane.rect, |surface| surface.rect);
         hits.push(CollectionChromeHit {
             rect,
-            surface_rect: pane.rect,
+            surface_rect,
             collection_id: collection.collection_id.clone(),
             selected_pane_id: Some(pane.pane_id.clone()),
             previous_pane_id,

@@ -587,6 +587,22 @@ fn collection_chrome_renders_members_delegation_and_routes_selection() {
     pane_surface.panes[0].inner_rect.y = 1;
     pane_surface.panes[0].inner_rect.width = 70;
     pane_surface.panes[0].inner_rect.height = 19;
+    pane_surface.collections = vec![crate::protocol::PaneSurfaceCollection {
+        collection_id: "collection_1".into(),
+        rect: crate::protocol::SurfaceRect {
+            x: 0,
+            y: 0,
+            width: 70,
+            height: 20,
+        },
+        inner_rect: crate::protocol::SurfaceRect {
+            x: 0,
+            y: 1,
+            width: 70,
+            height: 19,
+        },
+        focused: true,
+    }];
 
     let structure = crate::protocol::endpoint::ClientShellStructureProjection {
         session_id: "alpha".into(),
@@ -955,6 +971,58 @@ fn collection_chrome_renders_members_delegation_and_routes_selection() {
         .symbol,
         "┘"
     );
+
+    let collection_hit = state.hits.collections[0].clone();
+    let collection_background = (preview_hit.resize_handle.bottom()
+        ..collection_hit.surface_rect.bottom())
+        .flat_map(|row| {
+            (collection_hit.surface_rect.x..collection_hit.surface_rect.right())
+                .map(move |column| (column, row))
+        })
+        .find(|(column, row)| {
+            let point = (*column, *row);
+            !state
+                .hits
+                .panes
+                .iter()
+                .any(|pane| super::contains(pane.rect, point))
+                && !state.hits.collection_members.iter().any(|member| {
+                    super::contains(member.rect, point)
+                        || super::contains(member.preview, point)
+                        || super::contains(member.resize_handle, point)
+                })
+        })
+        .expect("collection background below preview");
+    state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Right),
+        column: collection_background.0,
+        row: collection_background.1,
+        modifiers: KeyModifiers::empty(),
+    })]);
+    assert!(matches!(
+        state.overlay,
+        Some(ClientShellOverlay::ContextMenu(ClientContextMenuOverlay {
+            target: ClientContextMenuTarget::Collection { ref collection_id },
+            ..
+        })) if collection_id == "collection_1"
+    ));
+
+    state.overlay = None;
+    state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Right),
+        column: preview_hit.preview.x,
+        row: preview_hit.preview.y,
+        modifiers: KeyModifiers::empty(),
+    })]);
+    assert!(matches!(
+        state.overlay,
+        Some(ClientShellOverlay::ContextMenu(ClientContextMenuOverlay {
+            target: ClientContextMenuTarget::Pane { ref pane_id, .. },
+            ..
+        })) if pane_id == "pane_1"
+    ));
+    state.overlay = None;
+
     state
         .collection_expanded_members
         .get_mut("collection_1")

@@ -2203,8 +2203,12 @@ impl ClientShellState {
                 .collections
                 .iter()
                 .find(|collection| {
-                    collection.selected_pane_id.is_none()
-                        && super::contains(collection.surface_rect, point)
+                    super::contains(collection.surface_rect, point)
+                        && !self
+                            .hits
+                            .panes
+                            .iter()
+                            .any(|pane| super::contains(pane.rect, point))
                 })
                 .cloned()
             {
