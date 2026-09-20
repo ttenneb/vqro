@@ -18,6 +18,7 @@ pub(crate) const LEGACY_SNAPSHOT_WRITER_VERSION: u32 = 6;
 pub(super) const HISTORY_SNAPSHOT_VERSION: u32 = 4;
 pub(super) const MAX_SESSION_SNAPSHOT_BYTES: u64 = 16 * 1024 * 1024;
 pub(super) const MAX_HISTORY_SNAPSHOT_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_COLLECTIONS_ACTION_SEQUENCE: u64 = (1 << 60) - 1;
 
 /// Serializable snapshot of the entire herdr session.
 #[derive(Clone, Serialize, Deserialize)]
@@ -49,6 +50,13 @@ pub struct SessionSnapshot {
         skip_serializing_if = "crate::collections_extension_contract::CollectionsAuthorityV1::is_default_legacy"
     )]
     pub collections_authority: crate::collections_extension_contract::CollectionsAuthorityV1,
+    /// Durable high-water mark for package action tickets and state idempotency keys.
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub collections_action_sequence: u64,
+}
+
+fn is_zero_u64(value: &u64) -> bool {
+    *value == 0
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -378,6 +386,8 @@ struct RawSessionSnapshot {
     delegations: Vec<crate::delegation::DelegationRecord>,
     #[serde(default)]
     collections_authority: Option<crate::collections_extension_contract::CollectionsAuthorityV1>,
+    #[serde(default)]
+    collections_action_sequence: u64,
 }
 
 fn migrate_snapshot(raw: RawSessionSnapshot) -> Result<(SessionSnapshot, bool), String> {
@@ -412,6 +422,12 @@ fn migrate_snapshot(raw: RawSessionSnapshot) -> Result<(SessionSnapshot, bool), 
     collections_authority
         .validate()
         .map_err(|error| format!("invalid Collections authority: {error}"))?;
+    if original_version < SNAPSHOT_VERSION && raw.collections_action_sequence != 0 {
+        return Err("Collections action sequence cannot appear before snapshot version 7".into());
+    }
+    if raw.collections_action_sequence > MAX_COLLECTIONS_ACTION_SEQUENCE {
+        return Err("Collections action sequence exceeds the supported range".into());
+    }
     let mut snapshot = SessionSnapshot {
         version: original_version,
         workspaces,
@@ -424,6 +440,7 @@ fn migrate_snapshot(raw: RawSessionSnapshot) -> Result<(SessionSnapshot, bool), 
         collapsed_space_keys: raw.collapsed_space_keys,
         delegations: raw.delegations,
         collections_authority,
+        collections_action_sequence: raw.collections_action_sequence,
     };
     super::restore::validate_snapshot_pane_admission(&snapshot)?;
     let normalized = normalize_terminal_identities(&mut snapshot, false)?;
@@ -999,6 +1016,7 @@ pub fn capture(
         delegations: Vec::new(),
         collections_authority:
             crate::collections_extension_contract::CollectionsAuthorityV1::default(),
+        collections_action_sequence: 0,
     }
 }
 
@@ -1469,6 +1487,7 @@ mod tests {
         let snap = SessionSnapshot {
             delegations: Vec::new(),
             collections_authority: Default::default(),
+            collections_action_sequence: 0,
             version: LEGACY_SNAPSHOT_WRITER_VERSION,
             repositories: Vec::new(),
             space_order: Vec::new(),
@@ -1542,6 +1561,7 @@ mod tests {
             space_order: Vec::new(),
             delegations: Vec::new(),
             collections_authority: Default::default(),
+            collections_action_sequence: 0,
             workspaces: vec![WorkspaceSnapshot {
                 id: Some("w1".to_string()),
                 custom_name: Some("pi-mono".to_string()),
@@ -2488,12 +2508,27 @@ mod tests {
                 migration_id: Some("collections_r3_test".into()),
                 minimum_reader_version: 7,
             };
+        snapshot.collections_action_sequence = 9;
         let encoded = serde_json::to_string(&snapshot).unwrap();
         let restored = parse_snapshot(&encoded).unwrap();
         assert_eq!(restored.version, 7);
         assert_eq!(
             restored.collections_authority,
             snapshot.collections_authority
+        );
+        assert_eq!(restored.collections_action_sequence, 9);
+
+        let mut prior_v7: serde_json::Value = serde_json::from_str(&encoded).unwrap();
+        prior_v7
+            .as_object_mut()
+            .unwrap()
+            .remove("collections_action_sequence");
+        assert_eq!(
+            parse_snapshot(&prior_v7.to_string())
+                .unwrap()
+                .collections_action_sequence,
+            0,
+            "snapshot-v7 images written before the high-water field must remain readable"
         );
     }
 
@@ -2611,6 +2646,7 @@ mod tests {
             collapsed_space_keys: std::collections::HashSet::new(),
             delegations: Vec::new(),
             collections_authority: Default::default(),
+            collections_action_sequence: 0,
         };
 
         assert_eq!(
@@ -2652,6 +2688,7 @@ mod tests {
         let snap = SessionSnapshot {
             delegations: Vec::new(),
             collections_authority: Default::default(),
+            collections_action_sequence: 0,
             version: LEGACY_SNAPSHOT_WRITER_VERSION,
             repositories: Vec::new(),
             space_order: Vec::new(),

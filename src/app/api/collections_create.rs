@@ -153,10 +153,7 @@ impl App {
         let tab_id = self.state.workspaces[workspace_index].tabs[tab_index]
             .id
             .clone();
-        let sequence = self
-            .next_collections_action_id
-            .checked_add(1)
-            .ok_or("Collections action sequence exhausted")?;
+        let sequence = self.reserve_collections_action_sequence()?;
         let prepared = self.prepare_create_read(&workspace_id, &tab_id, &container_id, sequence)?;
         let authorization = prepared.authorization;
         let expected_state = prepared.state;
@@ -167,7 +164,6 @@ impl App {
         let canceled = prepared.canceled;
         let attempt_id = CREATE_ATTEMPT_BIT | (sequence << 2);
         self.collections_mutations_blocked = true;
-        self.next_collections_action_id = sequence;
         self.collections_pending_creates.insert(
             attempt_id,
             PendingCollectionsCreate {

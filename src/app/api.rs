@@ -7,6 +7,7 @@ pub(crate) mod collections_authority;
 pub(crate) mod collections_create;
 pub(crate) use collections::DeferredHostDocumentSnapshot;
 pub(crate) use collections::HostDocumentConfirmationGrant;
+pub(crate) use collections::COLLECTIONS_ACTION_IDEMPOTENCY_PREFIXES;
 pub(crate) mod collections_candidate;
 mod delegations;
 #[cfg(test)]

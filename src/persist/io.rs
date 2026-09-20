@@ -508,6 +508,7 @@ mod tests {
         SessionSnapshot {
             delegations: Vec::new(),
             collections_authority: Default::default(),
+            collections_action_sequence: 0,
             version: super::super::LEGACY_SNAPSHOT_WRITER_VERSION,
             repositories: Vec::new(),
             space_order: Vec::new(),

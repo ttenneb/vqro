@@ -827,6 +827,7 @@ mod tests {
         crate::persist::SessionSnapshot {
             delegations: Vec::new(),
             collections_authority: Default::default(),
+            collections_action_sequence: 0,
             version: 0,
             repositories: Vec::new(),
             space_order: Vec::new(),
@@ -843,6 +844,7 @@ mod tests {
         let mut snapshot = crate::persist::SessionSnapshot {
             delegations: Vec::new(),
             collections_authority: Default::default(),
+            collections_action_sequence: 0,
             version: 4,
             repositories: Vec::new(),
             space_order: Vec::new(),

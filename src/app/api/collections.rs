@@ -10,6 +10,9 @@ use crate::api::schema::{
 use crate::layout::{CollectionId, LayoutLeaf};
 
 const MAX_HOST_DOCUMENT_CONFIRMATION_GRANTS: usize = 8_192;
+const MAX_COLLECTIONS_ACTION_SEQUENCE: u64 = (1 << 60) - 1;
+pub(crate) const COLLECTIONS_ACTION_IDEMPOTENCY_PREFIXES: &[&str] =
+    &["collections-r3-create-", "collections-r3-archive-"];
 const MAX_HOST_SEMANTIC_RETRY_ATTEMPTS: u32 = 6;
 const MAX_HOST_DOCUMENT_RETRY_ATTEMPTS: u32 = 6;
 const MAX_HOST_DOCUMENTS_PROJECTION_BYTES: usize = crate::protocol::MAX_FRAME_SIZE / 2;
@@ -60,6 +63,16 @@ fn collection_id_text(id: CollectionId) -> String {
 }
 
 impl App {
+    pub(crate) fn reserve_collections_action_sequence(&mut self) -> Result<u64, String> {
+        let sequence = self
+            .next_collections_action_id
+            .checked_add(1)
+            .filter(|sequence| *sequence <= MAX_COLLECTIONS_ACTION_SEQUENCE)
+            .ok_or("Collections action sequence exhausted")?;
+        self.next_collections_action_id = sequence;
+        Ok(sequence)
+    }
+
     pub(super) fn emit_collection_event(&mut self, action: &str, collection: CollectionInfo) {
         if let Some((ws_idx, tab_idx)) = self.parse_tab_id(&collection.tab_id) {
             self.refresh_collection_document(ws_idx, tab_idx);
@@ -2148,6 +2161,63 @@ mod tests {
             .unwrap();
         app.state.ensure_test_terminals();
         (app, collection, member)
+    }
+
+    #[test]
+    fn collections_action_sequence_rebases_to_durable_state_after_restart() {
+        let mut app = app_with_workspace();
+        let initial_generation = app.extension_state.store_generation;
+        app.extension_state
+            .transact(&crate::extension_state::ExtensionStateTransactionV1 {
+                contract: crate::extension_state::EXTENSION_STATE_CONTRACT_V1.into(),
+                namespace: crate::collections_extension_contract::COLLECTIONS_NAMESPACE.into(),
+                expected_store_generation: initial_generation,
+                expected_revision: 0,
+                // Action 1 failed before state commit; action 2 was the first durable receipt.
+                idempotency_key: "collections-r3-create-2".into(),
+                operations: vec![crate::extension_state::ExtensionStateOperationV1 {
+                    key: "prior-key".into(),
+                    value: Some(serde_json::json!({"prior": true})),
+                }],
+            })
+            .unwrap();
+        assert_eq!(app.extension_state.sequence, 1);
+
+        app.next_collections_action_id = app.extension_state.idempotency_suffix_high_water(
+            crate::collections_extension_contract::COLLECTIONS_NAMESPACE,
+            COLLECTIONS_ACTION_IDEMPOTENCY_PREFIXES,
+        );
+        let sequence = app.reserve_collections_action_sequence().unwrap();
+        assert_eq!(sequence, 3);
+        app.extension_state
+            .transact(&crate::extension_state::ExtensionStateTransactionV1 {
+                contract: crate::extension_state::EXTENSION_STATE_CONTRACT_V1.into(),
+                namespace: crate::collections_extension_contract::COLLECTIONS_NAMESPACE.into(),
+                expected_store_generation: initial_generation,
+                expected_revision: 1,
+                idempotency_key: format!("collections-r3-create-{sequence}"),
+                operations: vec![crate::extension_state::ExtensionStateOperationV1 {
+                    key: "next-key".into(),
+                    value: Some(serde_json::json!({"next": true})),
+                }],
+            })
+            .expect("first post-restart action must not reuse a durable receipt key");
+        app.collections_authority.phase =
+            crate::collections_extension_contract::CollectionsAuthorityPhaseV1::Package;
+        assert_eq!(
+            app.capture_session_snapshot().collections_action_sequence,
+            3
+        );
+    }
+
+    #[test]
+    fn collections_action_sequence_rejects_attempt_id_overflow() {
+        let mut app = app_with_workspace();
+        app.next_collections_action_id = MAX_COLLECTIONS_ACTION_SEQUENCE;
+        assert_eq!(
+            app.reserve_collections_action_sequence().unwrap_err(),
+            "Collections action sequence exhausted"
+        );
     }
 
     #[test]

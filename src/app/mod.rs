@@ -594,6 +594,9 @@ impl App {
             .as_ref()
             .map(|snapshot| snapshot.collections_authority.clone())
             .unwrap_or_default();
+        let loaded_collections_action_sequence = loaded_snapshot
+            .as_ref()
+            .map_or(0, |snapshot| snapshot.collections_action_sequence);
         let (workspaces, repositories, space_order, active, selected, delegations) = if !policy
             .restore_session
         {
@@ -903,6 +906,12 @@ impl App {
                 .expect("host-generated extension state identity is valid")
             });
 
+        let loaded_collections_action_sequence =
+            loaded_collections_action_sequence.max(extension_state.idempotency_suffix_high_water(
+                crate::collections_extension_contract::COLLECTIONS_NAMESPACE,
+                api::COLLECTIONS_ACTION_IDEMPOTENCY_PREFIXES,
+            ));
+
         let mut app = Self {
             config_diagnostic_deadline: None,
             toast_deadline: None,
@@ -1007,7 +1016,7 @@ impl App {
             collections_package_projections: Default::default(),
             collections_pending_actions: Default::default(),
             collections_pending_creates: Default::default(),
-            next_collections_action_id: 0,
+            next_collections_action_id: loaded_collections_action_sequence,
             #[cfg(test)]
             document_shadow_audits: Default::default(),
         };
@@ -1058,6 +1067,12 @@ impl App {
         app.state.repositories = snapshot.repositories.clone();
         app.state.space_order = snapshot.space_order.clone();
         app.collections_authority = snapshot.collections_authority.clone();
+        app.next_collections_action_id = snapshot.collections_action_sequence.max(
+            app.extension_state.idempotency_suffix_high_water(
+                crate::collections_extension_contract::COLLECTIONS_NAMESPACE,
+                api::COLLECTIONS_ACTION_IDEMPOTENCY_PREFIXES,
+            ),
+        );
         app.validate_loaded_collections_authority();
         app.state.terminals = terminals;
         app.terminal_runtimes = runtimes.into();
@@ -3744,6 +3759,7 @@ mod tests {
                 tombstone: false,
             }],
             collections_authority: Default::default(),
+            collections_action_sequence: 0,
         };
 
         app.restore_handoff_delegations(&snapshot);

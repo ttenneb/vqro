@@ -467,10 +467,7 @@ impl App {
             .extension_state
             .snapshot(COLLECTIONS_NAMESPACE)
             .map_err(|error| format!("cannot capture Collections state: {error:?}"))?;
-        let action_sequence = self
-            .next_collections_action_id
-            .checked_add(1)
-            .ok_or("Collections action sequence exhausted")?;
+        let action_sequence = self.reserve_collections_action_sequence()?;
         let invocation = CollectionsActionInvocationV1 {
             contract: COLLECTIONS_ACTION_INVOCATION_CONTRACT_V1.into(),
             ticket: format!("ticket:r3-{action_sequence}"),
@@ -482,7 +479,7 @@ impl App {
             expected_namespace_revision: state.revision,
             dependency: CollectionsActionDependencyV1::TerminalMembership {
                 container_id,
-                terminal_id,
+                terminal_id: terminal_id.clone(),
                 terminal_snapshot_fingerprint_sha256: fingerprint,
                 provider_generation: dependency.generation,
             },
@@ -490,7 +487,7 @@ impl App {
                 container_id: crate::terminal_container::format_terminal_container_id(
                     crate::terminal_container::TerminalContainerId::from(collection_id),
                 ),
-                terminal_id: tab.panes[&pane_id].attached_terminal_id.to_string(),
+                terminal_id,
                 archived,
             },
         };
@@ -543,7 +540,6 @@ impl App {
             member.archived = archived;
         }
         self.collections_mutations_blocked = true;
-        self.next_collections_action_id = action_sequence;
         self.collections_pending_actions.insert(
             attempt_id,
             PendingCollectionsAction {

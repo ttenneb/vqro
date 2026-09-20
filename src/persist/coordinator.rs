@@ -1326,6 +1326,7 @@ mod tests {
             collapsed_space_keys: Default::default(),
             delegations: Vec::new(),
             collections_authority: Default::default(),
+            collections_action_sequence: 0,
         };
         let state = DurableExtensionStateV1::new("session:test".into(), 1).unwrap();
         let ownership = PersistenceOwnership::try_acquire(&paths).unwrap();

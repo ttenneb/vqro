@@ -148,6 +148,23 @@ impl DurableExtensionStateV1 {
         })
     }
 
+    pub(crate) fn idempotency_suffix_high_water(&self, namespace: &str, prefixes: &[&str]) -> u64 {
+        self.namespaces
+            .get(namespace)
+            .into_iter()
+            .flat_map(|state| state.receipts.iter())
+            .filter_map(|receipt| {
+                prefixes.iter().find_map(|prefix| {
+                    receipt
+                        .key
+                        .strip_prefix(prefix)
+                        .and_then(|suffix| suffix.parse::<u64>().ok())
+                })
+            })
+            .max()
+            .unwrap_or(0)
+    }
+
     pub fn transact(
         &mut self,
         transaction: &ExtensionStateTransactionV1,

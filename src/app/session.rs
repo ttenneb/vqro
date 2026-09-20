@@ -58,9 +58,14 @@ impl App {
             .filter_map(|id| self.state.delegations.get(id).cloned())
             .collect();
         snapshot.collections_authority = self.collections_authority.clone();
-        snapshot.version = if self.collections_authority.phase
-            == crate::collections_extension_contract::CollectionsAuthorityPhaseV1::Package
-        {
+        let package_authority = self.collections_authority.phase
+            == crate::collections_extension_contract::CollectionsAuthorityPhaseV1::Package;
+        snapshot.collections_action_sequence = if package_authority {
+            self.next_collections_action_id
+        } else {
+            0
+        };
+        snapshot.version = if package_authority {
             crate::persist::SNAPSHOT_VERSION
         } else {
             crate::persist::LEGACY_SNAPSHOT_WRITER_VERSION
