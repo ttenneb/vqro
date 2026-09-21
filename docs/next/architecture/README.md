@@ -17,3 +17,4 @@ Accepted decisions:
 
 - [Collections authority transition](collections-authority-transition.md)
 - [Extension Service Fabric R0/R1](extension-service-fabric-r0-r1.md)
+- [Extension Health R1 product composition](extension-health-r1-product.md)
