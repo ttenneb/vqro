@@ -17,7 +17,7 @@ Vqro currently has two extension models with different trust and capability boun
 | Client-visible component contribution | Not applicable | Collections publishes synchronized compatibility projections; Spaces publishes an audited navigation document |
 | Collections policy authority | Unavailable; compiled provider removed | Exact pinned package after atomic snapshot-v7 cutover; fail-closed when absent, unavailable, or replaced |
 | Spaces projection authority | Unavailable; compiled and bundled providers removed | Exact pinned zero-host-call package; fail-closed when absent, unavailable, stale, or replaced |
-| Package-to-package services | Unavailable | Experimental exact-artifact bindings and one bounded, non-recursive component read call; not yet used by an ordinary product composition |
+| Package-to-package services | Unavailable | Experimental exact-artifact bindings and one bounded, non-recursive component read call; the `extension.doctor` host/CLI seam exists, but independently published Doctor/Health artifacts and production pins remain unavailable |
 
 A component package that installs and starts successfully has crossed only the verified artifact and runtime boundaries. Ordinary packages still cannot read host state. A manifest-v3 package may declare exact descriptor-digested imports and exports, but declarations and discovery grant no authority. A user-approved binding names exact consumer and provider artifacts, methods, information-flow categories, and byte limits. The experimental R1 relay permits one read call, gives the provider no host-call router, and never waits on the App actor.
 

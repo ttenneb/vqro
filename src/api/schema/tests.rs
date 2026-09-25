@@ -245,6 +245,41 @@ fn generated_native_api_schema_artifact_is_current() {
 }
 
 #[test]
+fn extension_doctor_uses_additive_method_and_success_variant() {
+    let request = Request {
+        id: "doctor_1".into(),
+        method: Method::ExtensionDoctor(ExtensionDoctorParams::default()),
+    };
+    let encoded = serde_json::to_value(&request).unwrap();
+    assert_eq!(encoded["method"], "extension.doctor");
+    assert_eq!(encoded["params"], serde_json::json!({}));
+    assert_eq!(serde_json::from_value::<Request>(encoded).unwrap(), request);
+    assert!(serde_json::from_value::<Request>(serde_json::json!({
+        "id": "doctor_2",
+        "method": "extension.doctor",
+        "params": {"provider": "not-allowed"}
+    }))
+    .is_err());
+
+    let response = SuccessResponse {
+        id: "doctor_1".into(),
+        result: ResponseResult::ExtensionDoctorDiagnostic {
+            diagnostic: crate::extension_health::ExtensionDoctorDiagnosticV1 {
+                contract: crate::extension_health::DIAGNOSTIC_CONTRACT_V1.into(),
+                status: crate::extension_health::ExtensionDoctorStatusV1::Healthy,
+                findings: Vec::new(),
+            },
+        },
+    };
+    let encoded = serde_json::to_value(&response).unwrap();
+    assert_eq!(encoded["result"]["type"], "extension_doctor_diagnostic");
+    assert_eq!(
+        serde_json::from_value::<SuccessResponse>(encoded).unwrap(),
+        response
+    );
+}
+
+#[test]
 fn request_round_trips_for_server_stop() {
     let request = Request {
         id: "req_stop".into(),

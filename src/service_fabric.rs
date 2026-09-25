@@ -68,8 +68,16 @@ pub(crate) fn next_service_fabric_outer_attempt_id() -> Result<u64, String> {
     Ok((1_u64 << 63) | sequence)
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ServiceFabricCompletionKind {
+    Generic,
+    ExtensionDoctor,
+}
+
 pub(crate) struct PendingServiceFabricInvocation {
     pub(crate) request_id: String,
+    pub(crate) completion_kind: ServiceFabricCompletionKind,
+    pub(crate) request_constraint: Option<ServiceReadConstraintReceipt>,
     pub(crate) binding_id: String,
     pub(crate) binding_revision: u64,
     pub(crate) consumer_package_id: String,
@@ -512,6 +520,22 @@ fn validate_digest(value: &str, label: &str) -> Result<(), String> {
 }
 
 #[derive(Clone)]
+struct ServiceReadRequestConstraint {
+    method: String,
+    payload_sha256: String,
+    satisfied: Arc<AtomicBool>,
+}
+
+#[derive(Clone)]
+pub(crate) struct ServiceReadConstraintReceipt(Arc<AtomicBool>);
+
+impl ServiceReadConstraintReceipt {
+    pub(crate) fn is_satisfied(&self) -> bool {
+        self.0.load(Ordering::Acquire)
+    }
+}
+
+#[derive(Clone)]
 pub(crate) struct ServiceReadInvocationAuthorization {
     binding: ServiceBindingV1,
     binding_registry_revision: u64,
@@ -519,6 +543,7 @@ pub(crate) struct ServiceReadInvocationAuthorization {
     consumer_runtime_generation: u64,
     provider: crate::extension_candidate::ServiceReadProviderEndpoint,
     revoked: Arc<AtomicBool>,
+    request_constraint: Option<ServiceReadRequestConstraint>,
 }
 
 impl ServiceReadInvocationAuthorization {
@@ -553,7 +578,24 @@ impl ServiceReadInvocationAuthorization {
             consumer_runtime_generation,
             provider,
             revoked,
+            request_constraint: None,
         })
+    }
+
+    pub(crate) fn constrain_request(
+        mut self,
+        method: &str,
+        payload_sha256: &str,
+    ) -> Result<(Self, ServiceReadConstraintReceipt), String> {
+        validate_bounded_id(method, "service-read constrained method")?;
+        validate_digest(payload_sha256, "service-read constrained payload")?;
+        let satisfied = Arc::new(AtomicBool::new(false));
+        self.request_constraint = Some(ServiceReadRequestConstraint {
+            method: method.into(),
+            payload_sha256: payload_sha256.into(),
+            satisfied: Arc::clone(&satisfied),
+        });
+        Ok((self, ServiceReadConstraintReceipt(satisfied)))
     }
 
     pub(crate) fn bind(
@@ -596,6 +638,7 @@ impl ServiceReadInvocationAuthorization {
             consumer_runtime_generation: self.consumer_runtime_generation,
             provider: self.provider,
             revoked: self.revoked,
+            request_constraint: self.request_constraint,
             deadline,
             outer_canceled,
             used: AtomicBool::new(false),
@@ -616,6 +659,7 @@ pub(crate) struct BoundServiceReadInvocation {
     consumer_runtime_generation: u64,
     provider: crate::extension_candidate::ServiceReadProviderEndpoint,
     revoked: Arc<AtomicBool>,
+    request_constraint: Option<ServiceReadRequestConstraint>,
     deadline: Instant,
     outer_canceled: Arc<AtomicBool>,
     used: AtomicBool,
@@ -704,6 +748,19 @@ impl crate::extension_runtime::RuntimeHostCallHandler for BoundServiceReadInvoca
                 "service-read request does not match the approved import",
             );
         }
+        if let Some(constraint) = &self.request_constraint {
+            let payload_sha256 =
+                crate::extension_package::canonical_json_sha256(&params.payload).ok();
+            if params.method != constraint.method
+                || payload_sha256.as_deref() != Some(constraint.payload_sha256.as_str())
+            {
+                return respond(
+                    None,
+                    Some("service_request_invalid"),
+                    "service-read request does not match its host constraint",
+                );
+            }
+        }
         let Some(method) = self.methods.get(&params.method) else {
             return respond(
                 None,
@@ -750,6 +807,9 @@ impl crate::extension_runtime::RuntimeHostCallHandler for BoundServiceReadInvoca
             outer_request_id = %self.outer_request_id,
             "service-read call admitted"
         );
+        if let Some(constraint) = &self.request_constraint {
+            constraint.satisfied.store(true, Ordering::Release);
+        }
         let attempt_canceled = Arc::new(AtomicBool::new(false));
         let result = self.provider.call(
             attempt_id,
@@ -1040,6 +1100,180 @@ mod tests {
             serde_json::json!({"echoed": {"text": "hello"}})
         );
         assert_eq!(router.handle(call).error.unwrap().code, "service_call_busy");
+    }
+
+    #[test]
+    fn constrained_service_read_binds_method_and_canonical_payload() {
+        fn invoke(
+            payload: serde_json::Value,
+            method: &str,
+            expected_payload: &serde_json::Value,
+            revoked_now: bool,
+        ) -> (
+            crate::extension_runtime::RuntimeHostCallResponseV1,
+            u64,
+            bool,
+        ) {
+            let (mut binding, consumer, provider) = approved_binding();
+            binding.consent.methods[0].max_request_bytes = 16 * 1024;
+            binding.consent_sha256 = consent_sha256(&binding.consent).unwrap();
+            let calls = Arc::new(std::sync::atomic::AtomicU64::new(0));
+            let provider_calls = Arc::clone(&calls);
+            let provider_endpoint =
+                crate::extension_candidate::ServiceReadProviderEndpoint::for_test(
+                    &provider.manifest.id,
+                    "main",
+                    &provider.package_sha256,
+                    13,
+                    17,
+                    move |_, _| {
+                        provider_calls.fetch_add(1, Ordering::AcqRel);
+                        Ok(serde_json::json!({}))
+                    },
+                );
+            let revoked = Arc::new(AtomicBool::new(false));
+            let authorization = ServiceReadInvocationAuthorization::new(
+                binding,
+                1,
+                &consumer.package_sha256,
+                11,
+                7,
+                provider_endpoint,
+                Arc::clone(&revoked),
+            )
+            .unwrap();
+            let digest = crate::extension_package::canonical_json_sha256(expected_payload).unwrap();
+            let (authorization, receipt) =
+                authorization.constrain_request("echo", &digest).unwrap();
+            let identity = crate::extension_runtime::RuntimeIdentityV1 {
+                package_id: consumer.manifest.id.clone(),
+                namespace: consumer.manifest.id.clone(),
+                service_id: "main".into(),
+                generation: 7,
+            };
+            let bound = authorization
+                .bind(
+                    "outer-constrained".into(),
+                    identity.clone(),
+                    Instant::now() + std::time::Duration::from_secs(1),
+                    Arc::new(AtomicBool::new(false)),
+                )
+                .unwrap();
+            let router = crate::extension_runtime::RuntimeHostCallRouter::new(
+                bound.identity(),
+                bound.namespace(),
+                bound.allowed_methods(),
+                bound,
+            );
+            if revoked_now {
+                revoked.store(true, Ordering::Release);
+            }
+            let response = router.handle(crate::extension_runtime::RuntimeHostCallV1 {
+                kind: "host_call".into(),
+                call_id: "constrained-call".into(),
+                identity: identity.clone(),
+                depth: crate::extension_runtime::MAX_HOST_CALL_DEPTH,
+                capability: SERVICE_READ_CAPABILITY.into(),
+                method: SERVICE_READ_METHOD.into(),
+                namespace: identity.namespace,
+                params: serde_json::json!({
+                    "contract": SERVICE_READ_CALL_V1,
+                    "import_id": "echo-source",
+                    "method": method,
+                    "payload": payload
+                }),
+            });
+            (
+                response,
+                calls.load(Ordering::Acquire),
+                receipt.is_satisfied(),
+            )
+        }
+
+        let observation: serde_json::Value = serde_json::from_str(
+            r#"{
+                "services":{"unavailable":6,"total":8,"ready":2},
+                "registry_revision":9,
+                "packages":{"total":4,"enabled_unavailable":1,"enabled_ready":2,"disabled":1},
+                "doctor_edge":{
+                    "provider_package_sha256":"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+                    "provider_manifest_sha256":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                    "consumer_package_sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                    "consumer_manifest_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "binding_revision":7,
+                    "binding_id":"sb_doctor"
+                },
+                "contract":"vqro.extension-health-observation.v1",
+                "bindings":{"total":3,"suspended":1,"revoked":1,"ready":1}
+            }"#,
+        )
+        .unwrap();
+        let canonical_order: serde_json::Value = serde_json::from_str(
+            r#"{
+                "bindings":{"ready":1,"revoked":1,"suspended":1,"total":3},
+                "contract":"vqro.extension-health-observation.v1",
+                "doctor_edge":{
+                    "binding_id":"sb_doctor",
+                    "binding_revision":7,
+                    "consumer_manifest_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "consumer_package_sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                    "provider_manifest_sha256":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                    "provider_package_sha256":"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+                },
+                "packages":{"disabled":1,"enabled_ready":2,"enabled_unavailable":1,"total":4},
+                "registry_revision":9,
+                "services":{"ready":2,"total":8,"unavailable":6}
+            }"#,
+        )
+        .unwrap();
+        let (response, calls, satisfied) = invoke(canonical_order, "echo", &observation, false);
+        assert!(response.error.is_none());
+        assert_eq!(calls, 1);
+        assert!(satisfied);
+
+        let paths = [
+            "/contract",
+            "/registry_revision",
+            "/packages/disabled",
+            "/packages/enabled_ready",
+            "/packages/enabled_unavailable",
+            "/packages/total",
+            "/services/ready",
+            "/services/unavailable",
+            "/services/total",
+            "/bindings/ready",
+            "/bindings/suspended",
+            "/bindings/revoked",
+            "/bindings/total",
+            "/doctor_edge/binding_id",
+            "/doctor_edge/binding_revision",
+            "/doctor_edge/consumer_package_sha256",
+            "/doctor_edge/consumer_manifest_sha256",
+            "/doctor_edge/provider_package_sha256",
+            "/doctor_edge/provider_manifest_sha256",
+        ];
+        for path in paths {
+            let mut mutated = observation.clone();
+            *mutated.pointer_mut(path).unwrap() = serde_json::Value::Null;
+            let (response, calls, satisfied) = invoke(mutated, "echo", &observation, false);
+            assert_eq!(
+                response.error.unwrap().code,
+                "service_request_invalid",
+                "mutation at {path} was not rejected"
+            );
+            assert_eq!(calls, 0, "provider ran for mutation at {path}");
+            assert!(!satisfied);
+        }
+        let (response, calls, satisfied) =
+            invoke(observation.clone(), "other", &observation, false);
+        assert_eq!(response.error.unwrap().code, "service_request_invalid");
+        assert_eq!(calls, 0);
+        assert!(!satisfied);
+
+        let (response, calls, satisfied) = invoke(observation.clone(), "echo", &observation, true);
+        assert_eq!(response.error.unwrap().code, "stale_service_call_lease");
+        assert_eq!(calls, 0);
+        assert!(!satisfied);
     }
 
     #[test]

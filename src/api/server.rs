@@ -577,6 +577,7 @@ pub(crate) fn api_method_name(method: &Method) -> &'static str {
         Method::ExtensionServiceBindingList(_) => "extension.service.binding.list",
         Method::ExtensionServiceBindingRevoke(_) => "extension.service.binding.revoke",
         Method::ExtensionServiceBindingInvoke(_) => "extension.service.binding.invoke",
+        Method::ExtensionDoctor(_) => "extension.doctor",
     }
 }
 

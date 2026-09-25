@@ -42,6 +42,7 @@ pub(super) fn command() -> Command {
         .subcommand(tab_command())
         .subcommand(collection_command())
         .subcommand(service_binding_command())
+        .subcommand(extension_command())
         .subcommand(delegation_command())
         .subcommand(notification_command())
         .subcommand(agent_command())
@@ -420,6 +421,16 @@ fn service_binding_command() -> Command {
                 .arg(option("binding-revision", "REVISION").required(true))
                 .arg(option("consumer-method", "METHOD").required(true))
                 .arg(option("params-json", "JSON").required(true)),
+        )
+}
+
+fn extension_command() -> Command {
+    Command::new("extension")
+        .about("Inspect extension product health")
+        .subcommand(
+            Command::new("doctor")
+                .about("Run the approved Extension Doctor composition")
+                .arg(flag("json").help("Print the stable diagnostic or API error as JSON")),
         )
 }
 
@@ -1581,6 +1592,16 @@ mod tests {
         let call = command_path(&cmd, &["service-binding", "call"]);
         for option in ["binding-revision", "consumer-method", "params-json"] {
             assert!(has_option(call, option));
+        }
+    }
+
+    #[test]
+    fn spec_exposes_extension_doctor_without_provider_selection() {
+        let cmd = super::command();
+        let doctor = command_path(&cmd, &["extension", "doctor"]);
+        assert!(has_option(doctor, "json"));
+        for forbidden in ["provider", "binding", "method", "params-json"] {
+            assert!(!has_option(doctor, forbidden));
         }
     }
 

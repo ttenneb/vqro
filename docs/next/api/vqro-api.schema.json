@@ -2751,6 +2751,10 @@
           ],
           "type": "object"
         },
+        "ExtensionDoctorParams": {
+          "additionalProperties": false,
+          "type": "object"
+        },
         "ExtensionListParams": {
           "properties": {
             "category": {
@@ -8175,6 +8179,22 @@
             "params"
           ],
           "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "extension.doctor",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/ExtensionDoctorParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
         }
       ],
       "properties": {
@@ -9728,6 +9748,80 @@
             "max_response_bytes"
           ],
           "type": "object"
+        },
+        "ExtensionDoctorDiagnosticV1": {
+          "additionalProperties": false,
+          "properties": {
+            "contract": {
+              "type": "string"
+            },
+            "findings": {
+              "items": {
+                "$ref": "#/schemas/success_response/$defs/ExtensionDoctorFindingV1"
+              },
+              "type": "array"
+            },
+            "status": {
+              "$ref": "#/schemas/success_response/$defs/ExtensionDoctorStatusV1"
+            }
+          },
+          "required": [
+            "contract",
+            "status",
+            "findings"
+          ],
+          "type": "object"
+        },
+        "ExtensionDoctorFindingCodeV1": {
+          "enum": [
+            "binding_revoked",
+            "binding_suspended",
+            "package_disabled",
+            "package_unavailable",
+            "service_unavailable"
+          ],
+          "type": "string"
+        },
+        "ExtensionDoctorFindingV1": {
+          "additionalProperties": false,
+          "properties": {
+            "code": {
+              "$ref": "#/schemas/success_response/$defs/ExtensionDoctorFindingCodeV1"
+            },
+            "count": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "message": {
+              "type": "string"
+            },
+            "severity": {
+              "$ref": "#/schemas/success_response/$defs/ExtensionDoctorSeverityV1"
+            }
+          },
+          "required": [
+            "code",
+            "severity",
+            "count",
+            "message"
+          ],
+          "type": "object"
+        },
+        "ExtensionDoctorSeverityV1": {
+          "enum": [
+            "warning",
+            "error"
+          ],
+          "type": "string"
+        },
+        "ExtensionDoctorStatusV1": {
+          "enum": [
+            "healthy",
+            "degraded",
+            "unhealthy"
+          ],
+          "type": "string"
         },
         "ExtensionInfo": {
           "properties": {
@@ -14139,6 +14233,22 @@
                 "type",
                 "binding_id",
                 "result"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "diagnostic": {
+                  "$ref": "#/schemas/success_response/$defs/ExtensionDoctorDiagnosticV1"
+                },
+                "type": {
+                  "const": "extension_doctor_diagnostic",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "diagnostic"
               ],
               "type": "object"
             },

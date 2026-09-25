@@ -27,6 +27,7 @@ mod api;
 mod collection;
 mod completion;
 mod delegation;
+mod extension;
 mod integration;
 mod machine;
 mod notification;
@@ -131,6 +132,7 @@ pub fn maybe_run(args: &[String]) -> std::io::Result<CommandOutcome> {
         "tab" => tab::run_tab_command(&args[2..])?,
         "collection" => collection::run_collection_command(&args[2..])?,
         "service-binding" => service_binding::run_service_binding_command(&args[2..])?,
+        "extension" => extension::run_extension_command(&args[2..])?,
         "delegation" => delegation::run_delegation_command(&args[2..])?,
         "notification" => notification::run_notification_command(&args[2..])?,
         "agent" => agent::run_agent_command(&args[2..])?,

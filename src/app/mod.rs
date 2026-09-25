@@ -4378,4 +4378,404 @@ mod tests {
         let _ = std::fs::remove_dir_all(consumer_root);
         let _ = std::fs::remove_dir_all(provider_root);
     }
+
+    fn extension_doctor_test_binding(
+        state: crate::service_fabric::ServiceBindingStateV1,
+    ) -> crate::service_fabric::ServiceBindingV1 {
+        let digest = |byte: char| byte.to_string().repeat(64);
+        crate::service_fabric::ServiceBindingV1 {
+            binding_id: "sb_extension_doctor".into(),
+            revision: 7,
+            state,
+            consent_sha256: digest('e'),
+            consent: crate::service_fabric::ServiceBindingConsentV1 {
+                consumer: crate::service_fabric::ServiceEndpointV1 {
+                    package_id: crate::extension_health::DOCTOR_PACKAGE_ID.into(),
+                    package_version: "1.0.0".into(),
+                    package_sha256: digest('a'),
+                    manifest_sha256: digest('b'),
+                    service_id: crate::extension_health::DOCTOR_SERVICE_ID.into(),
+                    endpoint_id: crate::extension_health::DOCTOR_IMPORT_ID.into(),
+                },
+                provider: crate::service_fabric::ServiceEndpointV1 {
+                    package_id: "vqro.extension-health-default".into(),
+                    package_version: "1.0.0".into(),
+                    package_sha256: digest('c'),
+                    manifest_sha256: digest('d'),
+                    service_id: "health".into(),
+                    endpoint_id: "health".into(),
+                },
+                contract: crate::service_fabric::ServiceContractIdentityV1 {
+                    contract_id: "vqro.extension-health".into(),
+                    contract_version: "1.0.0".into(),
+                    descriptor_sha256: digest('f'),
+                },
+                methods: Vec::new(),
+            },
+        }
+    }
+
+    #[test]
+    fn extension_doctor_preflight_uses_only_normalized_r1_errors() {
+        for (binding, expected) in [
+            (None, crate::service_fabric::ERROR_BINDING_UNAVAILABLE),
+            (
+                Some(extension_doctor_test_binding(
+                    crate::service_fabric::ServiceBindingStateV1::Revoked,
+                )),
+                crate::service_fabric::ERROR_BINDING_REVOKED,
+            ),
+        ] {
+            let mut app = test_app();
+            if let Some(binding) = binding {
+                app.marketplace_state
+                    .service_bindings
+                    .bindings
+                    .insert(binding.binding_id.clone(), binding);
+            }
+            let (respond_to, response_rx) = std::sync::mpsc::channel();
+            app.start_deferred_extension_artifact_request(
+                crate::api::schema::Request {
+                    id: "doctor-preflight".into(),
+                    method: crate::api::schema::Method::ExtensionDoctor(
+                        crate::api::schema::ExtensionDoctorParams::default(),
+                    ),
+                },
+                respond_to,
+            );
+            let encoded = response_rx
+                .recv_timeout(std::time::Duration::from_secs(1))
+                .unwrap();
+            let error: crate::api::schema::ErrorResponse = serde_json::from_str(&encoded).unwrap();
+            assert_eq!(error.error.code, expected);
+            assert!(!encoded.contains("extension_doctor_diagnostic"));
+        }
+    }
+
+    #[test]
+    fn extension_health_capture_is_complete_bounded_and_credential_free() {
+        let mut app = test_app();
+        let binding =
+            extension_doctor_test_binding(crate::service_fabric::ServiceBindingStateV1::Approved);
+        app.marketplace_state.service_bindings.revision = binding.revision;
+        app.marketplace_state
+            .service_bindings
+            .bindings
+            .insert(binding.binding_id.clone(), binding.clone());
+        app.marketplace_state.packages.revision = 3;
+        app.marketplace_state.packages.packages.insert(
+            "secret.package".into(),
+            crate::extension_package::PackageLifecycleRecordV1 {
+                package_id: "secret.package".into(),
+                source: crate::extension_package::PackageProvenanceV1::Git {
+                    url: "https://credential@example.invalid/private.git".into(),
+                    source_commit: "1".repeat(40),
+                    package_path: "/arbitrary/private/package.vqrox".into(),
+                    package_id: "secret.package".into(),
+                    version: "1.0.0".into(),
+                    package_sha256: "1".repeat(64),
+                    manifest_sha256: "2".repeat(64),
+                },
+                previous_source: None,
+                namespaces: Vec::new(),
+                revision: 1,
+                status: crate::extension_package::PackageLifecycleStatusV1::Failed,
+                active: None,
+                previous: None,
+                activation_error: Some("raw trap includes credential and /private/path".into()),
+                pending_activation: None,
+                retained_data: false,
+            },
+        );
+
+        let observation = app.extension_health_observation(&binding).unwrap();
+        assert_eq!(observation.packages.total, 1);
+        assert_eq!(observation.packages.enabled_unavailable, 1);
+        assert_eq!(observation.bindings.total, 1);
+        assert_eq!(
+            observation.doctor_edge.consumer_manifest_sha256,
+            "b".repeat(64)
+        );
+        assert_eq!(
+            observation.doctor_edge.provider_manifest_sha256,
+            "d".repeat(64)
+        );
+        let encoded = serde_json::to_string(&observation).unwrap();
+        assert!(encoded.len() <= crate::extension_health::MAX_OBSERVATION_BYTES);
+        for secret in ["credential", "private", "raw trap", "package.vqrox"] {
+            assert!(!encoded.contains(secret), "observation leaked {secret}");
+        }
+
+        let recovered_state = app.marketplace_state.clone();
+        let mut restarted = test_app();
+        restarted.marketplace_state = recovered_state;
+        let resupplied = restarted.extension_health_observation(&binding).unwrap();
+        assert_eq!(resupplied, observation);
+    }
+
+    #[test]
+    fn extension_health_services_cover_every_retained_active_manifest() {
+        let _guard = config_env_lock().lock().unwrap();
+        let temp = unique_temp_path("extension-health-services");
+        std::fs::create_dir_all(&temp).unwrap();
+        let original_xdg_config_home = std::env::var_os("XDG_CONFIG_HOME");
+        std::env::set_var("XDG_CONFIG_HOME", &temp);
+
+        fn make_tree_writable(path: &std::path::Path) {
+            if path.is_dir() {
+                let mut permissions = std::fs::metadata(path).unwrap().permissions();
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    permissions.set_mode(0o755);
+                }
+                #[cfg(windows)]
+                permissions.set_readonly(false);
+                std::fs::set_permissions(path, permissions).unwrap();
+                for entry in std::fs::read_dir(path).unwrap() {
+                    make_tree_writable(&entry.unwrap().path());
+                }
+            }
+        }
+
+        fn record(
+            package: &crate::extension_package::ValidatedPackageV1,
+            status: crate::extension_package::PackageLifecycleStatusV1,
+            activating: bool,
+        ) -> crate::extension_package::PackageLifecycleRecordV1 {
+            let active = crate::extension_package::PackageArtifactPointerV1 {
+                package_sha256: package.package_sha256.clone(),
+                version: package.manifest.version.clone(),
+                runtime_generation: 11,
+            };
+            crate::extension_package::PackageLifecycleRecordV1 {
+                package_id: package.manifest.id.clone(),
+                source: crate::extension_package::PackageProvenanceV1::File {
+                    package_sha256: package.package_sha256.clone(),
+                },
+                previous_source: None,
+                namespaces: package.manifest.namespaces.clone(),
+                revision: 1,
+                status,
+                active: Some(active.clone()),
+                previous: activating.then_some(active),
+                activation_error: None,
+                pending_activation: activating.then(|| {
+                    crate::extension_package::PendingActivationV1 {
+                        operation_id: "doctor-activating".into(),
+                        candidate: crate::extension_package::PackageArtifactPointerV1 {
+                            package_sha256: "f".repeat(64),
+                            version: "2.0.0".into(),
+                            runtime_generation: 12,
+                        },
+                    }
+                }),
+                retained_data: false,
+            }
+        }
+
+        let mut app = test_app();
+        let binding =
+            extension_doctor_test_binding(crate::service_fabric::ServiceBindingStateV1::Approved);
+        app.marketplace_state.service_bindings.revision = binding.revision;
+        app.marketplace_state
+            .service_bindings
+            .bindings
+            .insert(binding.binding_id.clone(), binding.clone());
+
+        let component = crate::extension_runtime::component::tests::component_bytes(
+            crate::extension_runtime::component::tests::ECHO_BODY,
+        );
+        let statuses = [
+            (
+                "doctor.disabled",
+                crate::extension_package::PackageLifecycleStatusV1::Disabled,
+                false,
+            ),
+            (
+                "doctor.failed",
+                crate::extension_package::PackageLifecycleStatusV1::Failed,
+                false,
+            ),
+            (
+                "doctor.activating",
+                crate::extension_package::PackageLifecycleStatusV1::Activating,
+                true,
+            ),
+            (
+                "doctor.absent-slot",
+                crate::extension_package::PackageLifecycleStatusV1::Enabled,
+                false,
+            ),
+            (
+                "doctor.ready",
+                crate::extension_package::PackageLifecycleStatusV1::Enabled,
+                false,
+            ),
+        ];
+        let mut installed_roots = Vec::new();
+        for (index, (package_id, status, activating)) in statuses.into_iter().enumerate() {
+            let bytes = crate::extension_runtime::component::tests::fabric_package_bytes(
+                &component,
+                package_id,
+                false,
+                "conformance.echo",
+            );
+            let digest = format!("{:x}", <sha2::Sha256 as sha2::Digest>::digest(&bytes));
+            let source = temp.join(format!("package-{index}.vqrox"));
+            std::fs::write(&source, bytes).unwrap();
+            let installed = crate::extension_package::install_local_file(
+                &source,
+                &crate::extensions::package_storage_path().unwrap(),
+                Some(&digest),
+                crate::extension_package::PackageProvenanceV1::File {
+                    package_sha256: digest.clone(),
+                },
+                &std::collections::BTreeMap::new(),
+                None,
+            )
+            .unwrap();
+            let package = crate::extension_package::validate_package_file(
+                &std::path::Path::new(&installed.immutable_root).join("package.vqrox"),
+                Some(&installed.package_sha256),
+            )
+            .unwrap()
+            .descriptor;
+            app.marketplace_state
+                .packages
+                .packages
+                .insert(package_id.into(), record(&package, status, activating));
+            if package_id == "doctor.ready" {
+                let mut slot = crate::extension_candidate::PackageCandidateSlot::spawn(
+                    installed.clone(),
+                    11,
+                    app.event_tx.clone(),
+                )
+                .unwrap();
+                let ready = loop {
+                    match app.event_rx.blocking_recv().unwrap() {
+                        AppEvent::ExtensionPackageCandidateReady(ready)
+                            if ready.package_id == package_id =>
+                        {
+                            break ready;
+                        }
+                        event => app.handle_internal_event(event),
+                    }
+                };
+                assert!(slot.accepts(&ready));
+                slot.install_ready(ready.result.unwrap());
+                app.extension_package_services
+                    .insert(package_id.into(), slot);
+            }
+            installed_roots.push(std::path::PathBuf::from(installed.immutable_root));
+        }
+        app.marketplace_state.packages.packages.insert(
+            "doctor.removed".into(),
+            crate::extension_package::PackageLifecycleRecordV1 {
+                package_id: "doctor.removed".into(),
+                source: crate::extension_package::PackageProvenanceV1::File {
+                    package_sha256: "0".repeat(64),
+                },
+                previous_source: None,
+                namespaces: Vec::new(),
+                revision: 1,
+                status: crate::extension_package::PackageLifecycleStatusV1::RemovedRetainingData,
+                active: None,
+                previous: None,
+                activation_error: None,
+                pending_activation: None,
+                retained_data: true,
+            },
+        );
+
+        let observation = app.extension_health_observation(&binding).unwrap();
+        assert_eq!(observation.packages.total, 6);
+        assert_eq!(observation.services.total, 5);
+        assert_eq!(observation.services.ready, 1);
+        assert_eq!(observation.services.unavailable, 4);
+
+        let missing_root = installed_roots.pop().unwrap();
+        let archive = missing_root.join("package.vqrox");
+        let original_archive = std::fs::read(&archive).unwrap();
+        let mut permissions = std::fs::metadata(&archive).unwrap().permissions();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            permissions.set_mode(0o644);
+        }
+        #[cfg(windows)]
+        permissions.set_readonly(false);
+        std::fs::set_permissions(&archive, permissions).unwrap();
+        std::fs::write(&archive, b"corrupt active artifact").unwrap();
+        let corrupt = app.extension_health_observation(&binding).unwrap_err();
+        assert!(corrupt.contains("cannot validate retained active artifact"));
+        std::fs::write(&archive, original_archive).unwrap();
+        assert!(app.extension_health_observation(&binding).is_ok());
+
+        let missing_artifact = missing_root.with_extension("missing");
+        std::fs::rename(&missing_root, &missing_artifact).unwrap();
+        let missing = app.extension_health_observation(&binding).unwrap_err();
+        assert!(missing.contains("cannot validate retained active artifact"));
+
+        if let Some(original) = original_xdg_config_home {
+            std::env::set_var("XDG_CONFIG_HOME", original);
+        } else {
+            std::env::remove_var("XDG_CONFIG_HOME");
+        }
+        drop(installed_roots);
+        drop(missing_artifact);
+        make_tree_writable(&temp);
+        std::fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn extension_doctor_stale_completion_uses_r1_error_not_success() {
+        let mut app = test_app();
+        let (respond_to, response_rx) = std::sync::mpsc::channel();
+        let attempt_id = 42;
+        app.pending_service_fabric_invocations.insert(
+            attempt_id,
+            crate::service_fabric::PendingServiceFabricInvocation {
+                request_id: "doctor-stale".into(),
+                completion_kind:
+                    crate::service_fabric::ServiceFabricCompletionKind::ExtensionDoctor,
+                request_constraint: None,
+                binding_id: "sb_extension_doctor".into(),
+                binding_revision: 1,
+                consumer_package_id: crate::extension_health::DOCTOR_PACKAGE_ID.into(),
+                consumer_service_id: crate::extension_health::DOCTOR_SERVICE_ID.into(),
+                consumer_artifact_sha256: "a".repeat(64),
+                consumer_artifact_generation: 1,
+                consumer_runtime_generation: 1,
+                provider_package_id: "vqro.extension-health-default".into(),
+                provider_service_id: "health".into(),
+                provider_artifact_sha256: "b".repeat(64),
+                provider_artifact_generation: 1,
+                provider_runtime_generation: 1,
+                canceled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                respond_to,
+            },
+        );
+        app.handle_extension_package_candidate_finished(
+            crate::extension_candidate::PackageCandidateInvocationResult {
+                package_id: crate::extension_health::DOCTOR_PACKAGE_ID.into(),
+                service_id: crate::extension_health::DOCTOR_SERVICE_ID.into(),
+                artifact_sha256: "a".repeat(64),
+                artifact_generation: 1,
+                runtime_generation: 1,
+                attempt_id,
+                result: Ok(serde_json::json!({
+                    "contract": crate::extension_health::DIAGNOSTIC_CONTRACT_V1,
+                    "status": "healthy",
+                    "findings": []
+                })),
+            },
+        );
+        let encoded = response_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .unwrap();
+        let error: crate::api::schema::ErrorResponse = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(error.error.code, crate::service_fabric::ERROR_STALE_LEASE);
+        assert!(!encoded.contains("extension_doctor_diagnostic"));
+    }
 }

@@ -19,6 +19,26 @@ fn encode_service_fabric_error(id: String, code: &str, message: impl Into<String
     )
 }
 
+fn checked_increment(value: &mut u64) -> Result<(), String> {
+    *value = value
+        .checked_add(1)
+        .ok_or_else(|| "extension health count overflow".to_string())?;
+    Ok(())
+}
+
+fn encode_extension_doctor_completion(id: String, value: serde_json::Value) -> String {
+    match serde_json::from_value::<crate::extension_health::ExtensionDoctorDiagnosticV1>(value) {
+        Ok(diagnostic) if diagnostic.validate().is_ok() => {
+            encode_success(id, ResponseResult::ExtensionDoctorDiagnostic { diagnostic })
+        }
+        _ => encode_service_fabric_error(
+            id,
+            "service_response_invalid",
+            "Extension Doctor returned an invalid diagnostic",
+        ),
+    }
+}
+
 fn contract_inspections(
     package: &crate::extension_package::ValidatedPackageV1,
 ) -> (
@@ -734,6 +754,7 @@ impl App {
                 | crate::api::schema::Method::ExtensionPackageInstall(_)
                 | crate::api::schema::Method::ExtensionPackageUpdate(_)
                 | crate::api::schema::Method::ExtensionServiceBindingInvoke(_)
+                | crate::api::schema::Method::ExtensionDoctor(_)
         ) {
             return true;
         }
@@ -763,6 +784,7 @@ impl App {
         if matches!(
             request.method,
             crate::api::schema::Method::ExtensionServiceBindingInvoke(_)
+                | crate::api::schema::Method::ExtensionDoctor(_)
         ) {
             self.start_deferred_extension_service_binding_invoke(request, respond_to);
             return;
@@ -913,75 +935,325 @@ impl App {
         respond_to: std::sync::mpsc::Sender<String>,
     ) {
         let id = request.id;
-        let encode_error: fn(String, &str, &str) -> String =
-            |id, code, message| encode_service_fabric_error(id, code, message);
-        let crate::api::schema::Method::ExtensionServiceBindingInvoke(params) = request.method
-        else {
-            let _ = respond_to.send(encode_error(
-                id,
-                "service_binding_unavailable",
-                "request is not a service binding invocation",
-            ));
-            return;
-        };
         if self.pending_service_fabric_invocations.len()
             >= crate::service_fabric::MAX_PENDING_SERVICE_FABRIC_INVOCATIONS
         {
-            let _ = respond_to.send(encode_error(
+            let _ = respond_to.send(encode_service_fabric_error(
                 id,
                 "service_call_busy",
                 "too many service fabric invocations are pending",
             ));
             return;
         }
-        let Some(binding) = self
+        let prepared = match request.method {
+            crate::api::schema::Method::ExtensionServiceBindingInvoke(params) => {
+                let binding = self
+                    .marketplace_state
+                    .service_bindings
+                    .bindings
+                    .get(&params.binding_id)
+                    .cloned()
+                    .ok_or((
+                        "service_binding_unavailable",
+                        "service binding is not installed".to_string(),
+                    ));
+                binding.and_then(|binding| {
+                    if binding.revision != params.expected_binding_revision {
+                        Err((
+                            "stale_service_call_lease",
+                            "service binding revision changed".into(),
+                        ))
+                    } else {
+                        Ok((
+                            binding,
+                            params.consumer_method,
+                            params.params,
+                            crate::service_fabric::ServiceFabricCompletionKind::Generic,
+                            None,
+                        ))
+                    }
+                })
+            }
+            crate::api::schema::Method::ExtensionDoctor(_) => self
+                .prepare_extension_doctor_invocation()
+                .and_then(|(binding, observation)| {
+                    let payload = serde_json::to_value(observation).map_err(|_| {
+                        (
+                            "service_request_invalid",
+                            "Extension Doctor observation cannot be encoded".into(),
+                        )
+                    })?;
+                    let digest = crate::extension_package::canonical_json_sha256(&payload)
+                        .map_err(|message| ("service_request_invalid", message))?;
+                    Ok((
+                        binding,
+                        crate::extension_health::DOCTOR_METHOD.into(),
+                        payload,
+                        crate::service_fabric::ServiceFabricCompletionKind::ExtensionDoctor,
+                        Some((crate::extension_health::HEALTH_METHOD.into(), digest)),
+                    ))
+                }),
+            _ => Err((
+                "service_binding_unavailable",
+                "request is not a service fabric invocation".into(),
+            )),
+        };
+        let (binding, consumer_method, params, completion_kind, request_constraint) = match prepared
+        {
+            Ok(prepared) => prepared,
+            Err((code, message)) => {
+                let _ = respond_to.send(encode_service_fabric_error(id, code, &message));
+                return;
+            }
+        };
+        self.start_deferred_service_fabric_invocation(
+            id,
+            binding,
+            consumer_method,
+            params,
+            completion_kind,
+            request_constraint,
+            respond_to,
+        );
+    }
+
+    fn prepare_extension_doctor_invocation(
+        &self,
+    ) -> Result<
+        (
+            crate::service_fabric::ServiceBindingV1,
+            crate::extension_health::ExtensionHealthObservationV1,
+        ),
+        (&'static str, String),
+    > {
+        let matching = self
             .marketplace_state
             .service_bindings
             .bindings
-            .get(&params.binding_id)
+            .values()
+            .find(|binding| {
+                binding.consent.consumer.package_id == crate::extension_health::DOCTOR_PACKAGE_ID
+                    && binding.consent.consumer.service_id
+                        == crate::extension_health::DOCTOR_SERVICE_ID
+                    && binding.consent.consumer.endpoint_id
+                        == crate::extension_health::DOCTOR_IMPORT_ID
+            })
             .cloned()
-        else {
-            let _ = respond_to.send(encode_error(
-                id,
+            .ok_or((
                 "service_binding_unavailable",
-                "service binding is not installed",
-            ));
-            return;
-        };
-        if binding.revision != params.expected_binding_revision {
-            let _ = respond_to.send(encode_error(
-                id,
-                "stale_service_call_lease",
-                "service binding revision changed",
-            ));
-            return;
-        }
-        if binding.state == crate::service_fabric::ServiceBindingStateV1::Revoked {
-            let _ = respond_to.send(encode_error(
-                id,
+                "Extension Doctor binding is not installed".to_string(),
+            ))?;
+        if matching.state == crate::service_fabric::ServiceBindingStateV1::Revoked {
+            return Err((
                 "service_binding_revoked",
-                "service binding is revoked",
+                "Extension Doctor binding is revoked".into(),
             ));
+        }
+        let exact_contract = matching.consent.contract.contract_id
+            == crate::extension_health::HEALTH_CONTRACT_ID
+            && matching.consent.contract.contract_version
+                == crate::extension_health::HEALTH_CONTRACT_VERSION
+            && matching.consent.contract.descriptor_sha256
+                == crate::extension_health::HEALTH_DESCRIPTOR_SHA256
+            && matching.consent.methods.len() == 1
+            && matching.consent.methods[0].id == crate::extension_health::HEALTH_METHOD;
+        if !exact_contract {
+            return Err((
+                "service_binding_unavailable",
+                "Extension Doctor binding does not match the frozen health contract".into(),
+            ));
+        }
+        if self.service_binding_info(&matching).effective_status
+            != crate::service_fabric::EffectiveServiceBindingStatusV1::Ready
+        {
+            return Err((
+                "service_binding_unavailable",
+                "Extension Doctor binding is suspended".into(),
+            ));
+        }
+        let observation = self
+            .extension_health_observation(&matching)
+            .map_err(|message| ("service_request_invalid", message))?;
+        Ok((matching, observation))
+    }
+
+    pub(crate) fn extension_health_observation(
+        &self,
+        doctor_binding: &crate::service_fabric::ServiceBindingV1,
+    ) -> Result<crate::extension_health::ExtensionHealthObservationV1, String> {
+        use crate::extension_health::{
+            ExtensionHealthBindingCountsV1, ExtensionHealthDoctorEdgeV1,
+            ExtensionHealthObservationV1, ExtensionHealthPackageCountsV1,
+            ExtensionHealthServiceCountsV1,
+        };
+        use crate::extension_package::PackageLifecycleStatusV1;
+        use crate::service_fabric::EffectiveServiceBindingStatusV1;
+
+        let mut packages = ExtensionHealthPackageCountsV1 {
+            disabled: 0,
+            enabled_ready: 0,
+            enabled_unavailable: 0,
+            total: 0,
+        };
+        for record in self.marketplace_state.packages.packages.values() {
+            checked_increment(&mut packages.total)?;
+            match record.status {
+                PackageLifecycleStatusV1::Disabled
+                | PackageLifecycleStatusV1::RemovedRetainingData => {
+                    checked_increment(&mut packages.disabled)?;
+                }
+                PackageLifecycleStatusV1::Enabled => {
+                    let ready = record.active.as_ref().is_some_and(|active| {
+                        self.extension_package_services
+                            .get(&record.package_id)
+                            .and_then(|slot| {
+                                slot.validated_package().map(|package| (slot, package))
+                            })
+                            .is_some_and(|(slot, package)| {
+                                slot.artifact_sha256() == active.package_sha256
+                                    && package.manifest.services.iter().all(|service| {
+                                        slot.runtime_generation(&service.id).is_some()
+                                    })
+                            })
+                    });
+                    checked_increment(if ready {
+                        &mut packages.enabled_ready
+                    } else {
+                        &mut packages.enabled_unavailable
+                    })?;
+                }
+                PackageLifecycleStatusV1::Activating | PackageLifecycleStatusV1::Failed => {
+                    checked_increment(&mut packages.enabled_unavailable)?;
+                }
+            }
+        }
+
+        let mut services = ExtensionHealthServiceCountsV1 {
+            ready: 0,
+            unavailable: 0,
+            total: 0,
+        };
+        for record in self.marketplace_state.packages.packages.values() {
+            let Some(active) = record.active.as_ref() else {
+                // Removed or otherwise pointerless records retain package history but no
+                // authoritative service declarations.
+                continue;
+            };
+            let package = self
+                .validated_active_package(&record.package_id)
+                .map_err(|error| {
+                    format!(
+                        "cannot validate retained active artifact for {}: {error}",
+                        record.package_id
+                    )
+                })?;
+            let exact_slot = self
+                .extension_package_services
+                .get(&record.package_id)
+                .filter(|slot| {
+                    slot.artifact_sha256() == active.package_sha256
+                        && slot.artifact_generation() == active.runtime_generation
+                });
+            for service in &package.manifest.services {
+                if !matches!(
+                    &service.runtime,
+                    crate::extension_package::PackageRuntimeV1::Component { .. }
+                ) {
+                    continue;
+                }
+                checked_increment(&mut services.total)?;
+                checked_increment(
+                    if exact_slot
+                        .and_then(|slot| slot.runtime_generation(&service.id))
+                        .is_some()
+                    {
+                        &mut services.ready
+                    } else {
+                        &mut services.unavailable
+                    },
+                )?;
+            }
+        }
+
+        let mut bindings = ExtensionHealthBindingCountsV1 {
+            ready: 0,
+            suspended: 0,
+            revoked: 0,
+            total: 0,
+        };
+        for binding in self.marketplace_state.service_bindings.bindings.values() {
+            checked_increment(&mut bindings.total)?;
+            checked_increment(match self.service_binding_info(binding).effective_status {
+                EffectiveServiceBindingStatusV1::Ready => &mut bindings.ready,
+                EffectiveServiceBindingStatusV1::Suspended => &mut bindings.suspended,
+                EffectiveServiceBindingStatusV1::Revoked => &mut bindings.revoked,
+            })?;
+        }
+
+        let observation = ExtensionHealthObservationV1 {
+            contract: crate::extension_health::OBSERVATION_CONTRACT_V1.into(),
+            registry_revision: self.marketplace_state.service_bindings.revision,
+            packages,
+            services,
+            bindings,
+            doctor_edge: ExtensionHealthDoctorEdgeV1 {
+                binding_id: doctor_binding.binding_id.clone(),
+                binding_revision: doctor_binding.revision,
+                consumer_package_sha256: doctor_binding.consent.consumer.package_sha256.clone(),
+                consumer_manifest_sha256: doctor_binding.consent.consumer.manifest_sha256.clone(),
+                provider_package_sha256: doctor_binding.consent.provider.package_sha256.clone(),
+                provider_manifest_sha256: doctor_binding.consent.provider.manifest_sha256.clone(),
+            },
+        };
+        observation.validate().map_err(str::to_string)?;
+        Ok(observation)
+    }
+
+    fn start_deferred_service_fabric_invocation(
+        &mut self,
+        id: String,
+        binding: crate::service_fabric::ServiceBindingV1,
+        consumer_method: String,
+        params: serde_json::Value,
+        completion_kind: crate::service_fabric::ServiceFabricCompletionKind,
+        request_constraint: Option<(String, String)>,
+        respond_to: std::sync::mpsc::Sender<String>,
+    ) {
+        let send_error = |code: &str, message: &str| {
+            let _ = respond_to.send(encode_service_fabric_error(id.clone(), code, message));
+        };
+        if binding.state == crate::service_fabric::ServiceBindingStateV1::Revoked {
+            send_error("service_binding_revoked", "service binding is revoked");
             return;
         }
         if let Err(error) = self.required_service_imports_ready(
             &binding.consent.consumer.package_id,
             &binding.consent.consumer.service_id,
         ) {
-            let _ = respond_to.send(encode_error(id, "service_binding_unavailable", &error));
+            send_error("service_binding_unavailable", &error);
             return;
         }
-        let authorization = match self.service_read_authorization(&params.binding_id) {
+        let authorization = match self.service_read_authorization(&binding.binding_id) {
             Ok(authorization) => authorization,
             Err(error) => {
-                let _ = respond_to.send(encode_error(id, "service_binding_unavailable", &error));
+                send_error("service_binding_unavailable", &error);
                 return;
             }
+        };
+        let (authorization, request_constraint_receipt) = match request_constraint {
+            Some((method, digest)) => match authorization.constrain_request(&method, &digest) {
+                Ok((authorization, receipt)) => (authorization, Some(receipt)),
+                Err(error) => {
+                    send_error("service_request_invalid", &error);
+                    return;
+                }
+            },
+            None => (authorization, None),
         };
         let attempt_id = match crate::service_fabric::next_service_fabric_outer_attempt_id() {
             Ok(attempt_id) => attempt_id,
             Err(error) => {
-                let _ = respond_to.send(encode_error(id, "service_provider_failed", &error));
+                send_error("service_provider_failed", &error);
                 return;
             }
         };
@@ -993,61 +1265,59 @@ impl App {
         let consumer_service_id = binding.consent.consumer.service_id.clone();
         let consumer_artifact_sha256 = binding.consent.consumer.package_sha256.clone();
         let Some(slot) = self.extension_package_services.get(&consumer_package_id) else {
-            let _ = respond_to.send(encode_error(
-                id,
+            send_error(
                 "service_binding_unavailable",
                 "service consumer is unavailable",
-            ));
+            );
             return;
         };
         let consumer_artifact_generation = slot.artifact_generation();
         let Some(consumer_runtime_generation) = slot.runtime_generation(&consumer_service_id)
         else {
-            let _ = respond_to.send(encode_error(
-                id,
+            send_error(
                 "service_binding_unavailable",
                 "service consumer is unavailable",
-            ));
+            );
             return;
         };
         let provider_package_id = binding.consent.provider.package_id.clone();
         let provider_service_id = binding.consent.provider.service_id.clone();
         let provider_artifact_sha256 = binding.consent.provider.package_sha256.clone();
         let Some(provider_slot) = self.extension_package_services.get(&provider_package_id) else {
-            let _ = respond_to.send(encode_error(
-                id,
+            send_error(
                 "service_binding_unavailable",
                 "service provider is unavailable",
-            ));
+            );
             return;
         };
         let provider_artifact_generation = provider_slot.artifact_generation();
         let Some(provider_runtime_generation) =
             provider_slot.runtime_generation(&provider_service_id)
         else {
-            let _ = respond_to.send(encode_error(
-                id,
+            send_error(
                 "service_binding_unavailable",
                 "service provider is unavailable",
-            ));
+            );
             return;
         };
         if let Err(error) = slot.invoke_service_read(
             &consumer_service_id,
             attempt_id,
-            params.consumer_method,
-            params.params,
+            consumer_method,
+            params,
             authorization,
             deadline,
             Arc::clone(&canceled),
         ) {
-            let _ = respond_to.send(encode_error(id, "service_call_busy", &error));
+            send_error("service_call_busy", &error);
             return;
         }
         self.pending_service_fabric_invocations.insert(
             attempt_id,
             crate::service_fabric::PendingServiceFabricInvocation {
                 request_id: id,
+                completion_kind,
+                request_constraint: request_constraint_receipt,
                 binding_id: binding.binding_id,
                 binding_revision: binding.revision,
                 consumer_package_id,
@@ -1841,16 +2111,34 @@ impl App {
                 "stale_service_call_lease",
                 "service binding or consumer generation changed before completion",
             )
+        } else if pending.completion_kind
+            == crate::service_fabric::ServiceFabricCompletionKind::ExtensionDoctor
+            && !pending
+                .request_constraint
+                .as_ref()
+                .is_some_and(crate::service_fabric::ServiceReadConstraintReceipt::is_satisfied)
+        {
+            encode_service_fabric_error(
+                pending.request_id,
+                "service_request_invalid",
+                "Extension Doctor did not make its constrained health call",
+            )
         } else {
-            match &result.result {
-                Ok(value) => encode_success(
-                    pending.request_id,
-                    ResponseResult::ExtensionServiceBindingInvoked {
-                        binding_id: pending.binding_id,
-                        result: value.clone(),
-                    },
-                ),
-                Err(_) => encode_service_fabric_error(
+            match (&pending.completion_kind, &result.result) {
+                (crate::service_fabric::ServiceFabricCompletionKind::Generic, Ok(value)) => {
+                    encode_success(
+                        pending.request_id,
+                        ResponseResult::ExtensionServiceBindingInvoked {
+                            binding_id: pending.binding_id,
+                            result: value.clone(),
+                        },
+                    )
+                }
+                (
+                    crate::service_fabric::ServiceFabricCompletionKind::ExtensionDoctor,
+                    Ok(value),
+                ) => encode_extension_doctor_completion(pending.request_id, value.clone()),
+                (_, Err(_)) => encode_service_fabric_error(
                     pending.request_id,
                     "service_provider_failed",
                     "service consumer invocation failed closed",
@@ -2412,10 +2700,6 @@ impl App {
             .packages
             .get(package_id)
             .ok_or_else(|| format!("package {package_id} is not installed"))?;
-        if record.status == crate::extension_package::PackageLifecycleStatusV1::RemovedRetainingData
-        {
-            return Err(format!("package {package_id} is removed"));
-        }
         let pointer = record
             .active
             .as_ref()
@@ -3826,5 +4110,38 @@ mod tests {
         assert!(terminal_ids
             .iter()
             .all(|terminal_id| app.terminal_runtimes.get(terminal_id).is_some()));
+    }
+
+    #[test]
+    fn extension_doctor_completion_has_one_success_and_one_error_channel() {
+        let valid = serde_json::json!({
+            "contract": crate::extension_health::DIAGNOSTIC_CONTRACT_V1,
+            "status": "healthy",
+            "findings": []
+        });
+        let success: crate::api::schema::SuccessResponse = serde_json::from_str(
+            &encode_extension_doctor_completion("doctor-ok".into(), valid),
+        )
+        .unwrap();
+        assert!(matches!(
+            success.result,
+            crate::api::schema::ResponseResult::ExtensionDoctorDiagnostic { .. }
+        ));
+
+        let invalid = serde_json::json!({
+            "contract": crate::extension_health::DIAGNOSTIC_CONTRACT_V1,
+            "status": "healthy",
+            "findings": [],
+            "raw_error": "/private/credential"
+        });
+        let error: crate::api::schema::ErrorResponse = serde_json::from_str(
+            &encode_extension_doctor_completion("doctor-error".into(), invalid),
+        )
+        .unwrap();
+        assert_eq!(
+            error.error.code,
+            crate::service_fabric::ERROR_RESPONSE_INVALID
+        );
+        assert!(!error.error.message.contains("credential"));
     }
 }

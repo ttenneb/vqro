@@ -928,6 +928,12 @@ fn validate_contract_schema_subset(value: &serde_json::Value, path: &str) -> Res
     Ok(())
 }
 
+pub(crate) fn canonical_json_sha256(value: &serde_json::Value) -> Result<String, String> {
+    let mut canonical = Vec::new();
+    write_canonical_json(value, &mut canonical)?;
+    Ok(sha256(&canonical))
+}
+
 fn write_canonical_json(value: &serde_json::Value, output: &mut Vec<u8>) -> Result<(), String> {
     match value {
         serde_json::Value::Null => output.extend_from_slice(b"null"),

@@ -330,6 +330,9 @@ pub enum ResponseResult {
         binding_id: String,
         result: serde_json::Value,
     },
+    ExtensionDoctorDiagnostic {
+        diagnostic: crate::extension_health::ExtensionDoctorDiagnosticV1,
+    },
     PluginActionList {
         actions: Vec<PluginActionInfo>,
     },

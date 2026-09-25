@@ -366,6 +366,8 @@ pub enum Method {
     ExtensionServiceBindingRevoke(ExtensionServiceBindingRevokeParams),
     #[serde(rename = "extension.service.binding.invoke")]
     ExtensionServiceBindingInvoke(ExtensionServiceBindingInvokeParams),
+    #[serde(rename = "extension.doctor")]
+    ExtensionDoctor(ExtensionDoctorParams),
 }
 
 #[cfg(test)]

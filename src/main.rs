@@ -32,6 +32,7 @@ mod extension_artifact;
 mod extension_candidate;
 pub mod extension_contract;
 mod extension_git_package;
+mod extension_health;
 mod extension_host_invocation;
 mod extension_host_state;
 mod extension_host_terminals;

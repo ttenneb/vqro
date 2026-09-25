@@ -136,6 +136,10 @@ pub struct ExtensionServiceBindingRevokeParams {
     pub confirmed: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema, Default)]
+#[serde(deny_unknown_fields)]
+pub struct ExtensionDoctorParams {}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ExtensionServiceBindingInvokeParams {
     pub binding_id: String,
