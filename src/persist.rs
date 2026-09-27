@@ -27,12 +27,14 @@ pub(crate) use self::restore::validate_snapshot_admission;
 #[cfg(unix)]
 pub use self::restore::{handoff_pane_aliases, restore_handoff};
 pub use self::restore::{restore, restore_delegations};
+#[cfg(unix)]
+pub(crate) use self::snapshot::normalize_identity_changes;
+#[cfg(any(unix, test))]
+pub(crate) use self::snapshot::terminal_id_for_pane_snapshot;
 pub use self::snapshot::{
     capture, capture_history, DirectionSnapshot, LayoutSnapshot, SessionHistorySnapshot,
     SessionSnapshot, TabSnapshot, WorkspaceSnapshot,
 };
-#[cfg(unix)]
-pub(crate) use self::snapshot::{normalize_identity_changes, terminal_id_for_pane_snapshot};
 pub(crate) use self::snapshot::{
     parse_snapshot, reserve_empty_collection, validate_snapshot, LEGACY_SNAPSHOT_WRITER_VERSION,
     SNAPSHOT_VERSION,
