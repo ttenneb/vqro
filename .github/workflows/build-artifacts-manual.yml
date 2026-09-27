@@ -13,6 +13,16 @@ on:
           - macos
           - windows
           - all
+          - windows-check
+      expected_commit:
+        description: full 40-character SHA of the open upstream PR #2 head to validate
+        required: false
+        type: string
+      dry_run:
+        description: verify exact PR head and workflow dispatch only; skip tools and tests
+        required: false
+        default: true
+        type: boolean
       libghostty_optimize:
         description: libghostty-vt optimize mode for this build
         required: true
@@ -41,6 +51,122 @@ env:
   RUST_TOOLCHAIN_VERSION: 1.96.1
 
 jobs:
+  windows-check:
+    if: ${{ inputs.build_group == 'windows-check' }}
+    runs-on: windows-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      pull-requests: read
+    env:
+      CARGO_PROFILE_DEV_DEBUG: "1"
+      CARGO_PROFILE_TEST_DEBUG: "1"
+      ZIG_GLOBAL_CACHE_DIR: ${{ github.workspace }}/.zig-cache
+    steps:
+      - name: Verify requested commit format
+        shell: pwsh
+        env:
+          EXPECTED_COMMIT: ${{ inputs.expected_commit }}
+        run: |
+          if ($env:EXPECTED_COMMIT -cnotmatch '^[a-f0-9]{40}$') {
+            throw 'expected_commit must be a full lowercase 40-character commit SHA'
+          }
+
+      - name: Checkout exact PR head
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          ref: ${{ inputs.expected_commit }}
+          persist-credentials: false
+
+      - name: Verify checkout and live upstream PR head
+        shell: pwsh
+        env:
+          EXPECTED_COMMIT: ${{ inputs.expected_commit }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $actual = (git rev-parse HEAD).Trim()
+          if ($LASTEXITCODE -ne 0 -or $actual -cne $env:EXPECTED_COMMIT) {
+            throw "checkout $actual does not match expected $env:EXPECTED_COMMIT"
+          }
+          $headers = @{
+            Authorization = "Bearer $env:GH_TOKEN"
+            Accept = 'application/vnd.github+json'
+            'X-GitHub-Api-Version' = '2022-11-28'
+          }
+          $pr = Invoke-RestMethod -Uri "$env:GITHUB_API_URL/repos/$env:GITHUB_REPOSITORY/pulls/2" -Headers $headers
+          if ($pr.state -cne 'open' -or $pr.head.sha -cne $actual -or $pr.head.repo.full_name -cne $env:GITHUB_REPOSITORY) {
+            throw "upstream PR #2 is not open at the checked-out head $actual"
+          }
+          Write-Output "Validated open PR #2 and checkout at $actual"
+
+      - name: Install Rust
+        if: ${{ !inputs.dry_run }}
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # v1
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN_VERSION }}
+          components: rustfmt,clippy
+          targets: x86_64-pc-windows-msvc
+
+      - name: Install Rust tools
+        if: ${{ !inputs.dry_run }}
+        uses: taiki-e/install-action@fd2f5e3d644b484055ebf4268f474c565f148f25 # v2.81.9
+        with:
+          tool: just,cargo-nextest
+
+      - name: Install Bun
+        if: ${{ !inputs.dry_run }}
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.3.14
+
+      - name: Install Zig
+        if: ${{ !inputs.dry_run }}
+        uses: vercel-labs/setup-zig@83c1594f26b86da8a9a8ddd9b5ee5f3af0f96943 # v1.0.2
+        with:
+          version: 0.16.0
+
+      - name: Stabilize Zig installation path
+        if: ${{ !inputs.dry_run }}
+        shell: pwsh
+        run: |
+          $source = Split-Path (Get-Command zig).Source
+          $stable = Join-Path $env:RUNNER_TEMP 'herdr-zig-0.16.0'
+          Move-Item -LiteralPath $source -Destination $stable
+          $stable | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          "ZIG=$(Join-Path $stable 'zig.exe')" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Restore Zig build cache
+        if: ${{ !inputs.dry_run }}
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .zig-cache
+          key: zig-build-v1-Windows-X64-0.16.0-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            zig-build-v1-Windows-X64-0.16.0-
+
+      - name: Restore cargo cache
+        if: ${{ !inputs.dry_run }}
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          cache-bin: false
+          key: windows-latest
+
+      - name: Restore Windows incremental compiler state
+        if: ${{ !inputs.dry_run }}
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: target/debug/incremental
+          key: ci-incremental-v1-Windows-X64-${{ env.RUST_TOOLCHAIN_VERSION }}-${{ env.CARGO_PROFILE_DEV_DEBUG }}-${{ env.CARGO_PROFILE_TEST_DEBUG }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', '.cargo/config.toml', 'build.rs') }}-${{ inputs.expected_commit }}
+          restore-keys: |
+            ci-incremental-v1-Windows-X64-${{ env.RUST_TOOLCHAIN_VERSION }}-${{ env.CARGO_PROFILE_DEV_DEBUG }}-${{ env.CARGO_PROFILE_TEST_DEBUG }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', '.cargo/config.toml', 'build.rs') }}-
+
+      - name: Run Windows full checks
+        if: ${{ !inputs.dry_run }}
+        shell: pwsh
+        run: |
+          $env:CARGO_INCREMENTAL = '1'
+          just check
+
   build-linux:
     if: ${{ inputs.build_group == 'linux' || inputs.build_group == 'all' }}
     runs-on: ${{ matrix.os }}
