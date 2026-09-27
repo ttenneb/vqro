@@ -42,11 +42,25 @@ rustPlatform.buildRustPackage {
         ../assets
         ../distribution/install.ps1
         ../distribution/latest.json
+        # Include only schemas embedded with include_str! in the Rust source.
+        ../docs/next/api/collections-authority-v1.schema.json
         ../docs/next/api/herdr-api.schema.json
+        ../docs/next/api/host-document-render-v2.schema.json
+        ../docs/next/api/host-document-v2.schema.json
+        ../docs/next/api/host-state-v1.schema.json
+        ../docs/next/api/host-terminals-v1.schema.json
         ../docs/next/api/vqro-api.schema.json
+        ../docs/next/api/vqro-collections-action-invocation-v1.schema.json
+        ../docs/next/api/vqro-collections-actions-v1.schema.json
+        ../docs/next/api/vqro-collections-document-profile-v1.schema.json
+        ../docs/next/api/vqro-collections-effect-plan-v1.schema.json
+        ../docs/next/api/vqro-collections-production-pin-v1.schema.json
+        ../docs/next/api/vqro-extension-manifest-v2.schema.json
         ../docs/next/api/vqro-extension-manifest.schema.json
         ../docs/next/api/vqro-extension-service.schema.json
         ../docs/next/api/vqro-extension.schema.json
+        ../docs/next/api/vqro-package-v1.schema.json
+        ../docs/next/api/vqro-service-v1.schema.json
         ../extensions/first-party
         ../extensions/index-v1.json
         ../extensions/reference-host-document
@@ -56,6 +70,7 @@ rustPlatform.buildRustPackage {
         ../vendor/libghostty-vt
         ../vendor/libghostty-vt.vendor.json
         ../vendor/portable-pty
+        ../wit/vqro-extension-service
         ../build.rs
         ../Cargo.lock
         ../Cargo.toml
