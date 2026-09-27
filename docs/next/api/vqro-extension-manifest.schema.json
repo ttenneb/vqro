@@ -1,0 +1,431 @@
+{
+  "$defs": {
+    "ExtensionServiceCapability": {
+      "enum": [
+        "view_contribution",
+        "host_document",
+        "action_choices",
+        "focus_terminal",
+        "terminal_interrupt"
+      ],
+      "type": "string"
+    },
+    "HostDocumentSourceKind": {
+      "enum": [
+        "terminal_groups",
+        "spaces",
+        "relationships",
+        "agent_activity"
+      ],
+      "type": "string"
+    },
+    "PluginActionContext": {
+      "enum": [
+        "global",
+        "workspace",
+        "tab",
+        "pane",
+        "selection"
+      ],
+      "type": "string"
+    },
+    "PluginPanePlacement": {
+      "enum": [
+        "overlay",
+        "popup",
+        "split",
+        "tab",
+        "zoomed"
+      ],
+      "type": "string"
+    },
+    "PluginServiceCapability": {
+      "enum": [
+        "pane_inspector",
+        "host_document",
+        "action_choices"
+      ],
+      "type": "string"
+    },
+    "PopupSize": {
+      "oneOf": [
+        {
+          "description": "Outer popup size in terminal cells, including the border.",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        },
+        {
+          "description": "Outer popup size as a percentage of the terminal area, for example 80%.",
+          "pattern": "^(100|[1-9][0-9]?)%$",
+          "type": "string"
+        }
+      ]
+    },
+    "RawPlatform": {
+      "description": "Raw string platform value from the manifest, validated before conversion.",
+      "enum": [
+        "linux",
+        "macos",
+        "windows"
+      ],
+      "type": "string"
+    },
+    "RawPluginManifestAction": {
+      "properties": {
+        "command": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "contexts": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/PluginActionContext"
+          },
+          "type": "array"
+        },
+        "description": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "type": "string"
+        },
+        "platforms": {
+          "items": {
+            "$ref": "#/$defs/RawPlatform"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "title",
+        "command"
+      ],
+      "type": "object"
+    },
+    "RawPluginManifestBuild": {
+      "properties": {
+        "command": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "platforms": {
+          "items": {
+            "$ref": "#/$defs/RawPlatform"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "command"
+      ],
+      "type": "object"
+    },
+    "RawPluginManifestEventHook": {
+      "properties": {
+        "command": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "on": {
+          "type": "string"
+        },
+        "platforms": {
+          "items": {
+            "$ref": "#/$defs/RawPlatform"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "on",
+        "command"
+      ],
+      "type": "object"
+    },
+    "RawPluginManifestLinkHandler": {
+      "properties": {
+        "action": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "pattern": {
+          "type": "string"
+        },
+        "platforms": {
+          "items": {
+            "$ref": "#/$defs/RawPlatform"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "title",
+        "pattern",
+        "action"
+      ],
+      "type": "object"
+    },
+    "RawPluginManifestPane": {
+      "properties": {
+        "command": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "description": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "height": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PopupSize"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "id": {
+          "type": "string"
+        },
+        "placement": {
+          "$ref": "#/$defs/PluginPanePlacement",
+          "default": "overlay"
+        },
+        "platforms": {
+          "items": {
+            "$ref": "#/$defs/RawPlatform"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "title": {
+          "type": "string"
+        },
+        "width": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PopupSize"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "id",
+        "title",
+        "command"
+      ],
+      "type": "object"
+    },
+    "RawPluginManifestService": {
+      "properties": {
+        "capabilities": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/ExtensionServiceCapability"
+          },
+          "type": "array"
+        },
+        "command": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "document_source": {
+          "$ref": "#/$defs/HostDocumentSourceKind",
+          "default": "terminal_groups"
+        },
+        "id": {
+          "type": "string"
+        },
+        "platforms": {
+          "items": {
+            "$ref": "#/$defs/RawPlatform"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "priority": {
+          "default": 0,
+          "format": "int32",
+          "type": "integer"
+        },
+        "provides": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/PluginServiceCapability"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "id",
+        "command"
+      ],
+      "type": "object"
+    },
+    "RawPluginManifestStartup": {
+      "properties": {
+        "command": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "platforms": {
+          "items": {
+            "$ref": "#/$defs/RawPlatform"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "command"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "https://vqro.dev/schema/extension-manifest/v1",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "contract": "vqro.extension-manifest.v1",
+  "properties": {
+    "actions": {
+      "items": {
+        "$ref": "#/$defs/RawPluginManifestAction"
+      },
+      "type": "array"
+    },
+    "build": {
+      "items": {
+        "$ref": "#/$defs/RawPluginManifestBuild"
+      },
+      "type": "array"
+    },
+    "description": {
+      "default": null,
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "events": {
+      "items": {
+        "$ref": "#/$defs/RawPluginManifestEventHook"
+      },
+      "type": "array"
+    },
+    "id": {
+      "type": "string"
+    },
+    "link_handlers": {
+      "items": {
+        "$ref": "#/$defs/RawPluginManifestLinkHandler"
+      },
+      "type": "array"
+    },
+    "manifest_version": {
+      "const": 1,
+      "type": "integer"
+    },
+    "min_vqro_version": {
+      "default": null,
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "name": {
+      "type": "string"
+    },
+    "panes": {
+      "items": {
+        "$ref": "#/$defs/RawPluginManifestPane"
+      },
+      "type": "array"
+    },
+    "platforms": {
+      "items": {
+        "$ref": "#/$defs/RawPlatform"
+      },
+      "type": [
+        "array",
+        "null"
+      ]
+    },
+    "services": {
+      "items": {
+        "$ref": "#/$defs/RawPluginManifestService"
+      },
+      "type": "array"
+    },
+    "startup": {
+      "items": {
+        "$ref": "#/$defs/RawPluginManifestStartup"
+      },
+      "type": "array"
+    },
+    "version": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "id",
+    "name",
+    "version",
+    "manifest_version",
+    "min_vqro_version"
+  ],
+  "title": "vqro extension manifest v1",
+  "type": "object"
+}

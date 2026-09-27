@@ -7,6 +7,78 @@ The Herdr plugin marketplace indexes community plugins. Browse it at
 [herdr.dev/plugins](/plugins/). The index covers public GitHub repositories; it
 is not a reviewed catalog.
 
+## Vqro Extensions
+
+Vqro also ships a native, host-owned Extensions marketplace. Open the main menu
+and choose **Extensions**. **Browse** searches a checked-in curated index and
+filters it by category; **Agents** is one category rather than a separate
+settings surface. Select an entry to inspect its repository, package type,
+version, details, and pinned source revision when the curated entry supplies one.
+
+Installation, removal, update, rollback, and permanent data deletion require
+separate host confirmations. For pinned entries, Vqro fetches the exact Git
+commit off the server event loop, verifies a deterministic source archive plus
+the declared manifest digest and identity, and retains the verified artifact in
+managed storage. Source-backed agent integration updates preserve the prior
+verified artifact for rollback; rollback never refetches a mutable reference.
+Delegation and Agent Status are currently native bundled compatibility
+providers: their executable implementation remains compiled into Vqro and
+updates or rolls back only with the Vqro binary. Collections and Spaces are
+independently built component packages installed from their exact Git commits;
+they are not Browse catalog rows and appear as **sandboxed packages** in
+Installed. Unsupported actions stay hidden.
+A successful install enables the extension immediately. If activation fails, Vqro keeps the package installed but disabled
+and displays the activation error so it can be retried. Removing an extension
+retains its config and state; use the separate **delete data** action only after
+removal when those files should be destroyed.
+
+Enablement and load order are global to the server user. Extensions load in the
+shown order and later contributions win deterministic conflicts. Built-in entries are presented through the same Extensions user journey and are
+removable, but their compatibility records are not package-v1 runtime records.
+Vqro initially marks Delegation, Agent Status, Pi, Claude Code, and Codex
+installed and enabled; the other bundled agent integrations remain available in
+Browse. Agent cards report the separately reconciled adapter
+deployment state; an enabled marketplace entry does not claim that an adapter
+managed outside Vqro's namespace was installed.
+
+Downloaded executable packages are admitted only when every service uses the
+`vqro:extension/service@1.0.0` component world. They execute as WebAssembly
+Component Model components under Wasmtime with only the Vqro WIT world linked
+and with explicit host capabilities, fuel, memory, table, stack, frame,
+host-call, cancellation, and deadline limits; curated status never adds a
+capability or selects a more privileged runtime. Installation can verify,
+instantiate, negotiate, supervise, and restore these services. Ordinary packages
+receive no host-state or terminal lease and no feature authority. The exact
+Collections package is the bounded read-lease exception; the exact Spaces
+package has zero host-call capabilities and receives only its complete
+host-authored invocation parameter. Both outputs are semantically audited before
+publication. First-party native host providers and managed agent assets contain
+no downloaded executable service. Legacy explicitly configured process plugins
+remain a separate compatibility surface and cannot be installed as extension
+packages.
+
+New marketplace methods are optional endpoint capabilities, so an older
+compatible server disables only marketplace actions and does not affect attached
+PTYs or the generation-1 client bridge.
+
+### Install from an exact Git revision
+
+Press **g** in **Extensions** and enter a credential-free HTTPS Git URL, a full
+40-character commit, and optionally a repository-relative `.vqrox` path. The
+path defaults to `package.vqrox`. Vqro fetches only that exact commit off the
+server event loop, rejects submodules and linked package paths, validates the
+deterministic package, and refuses the entire package if any service requests a
+native process runtime.
+
+Inspection does not install or execute the package. The confirmation view shows
+the exact URL, commit, package and manifest digests, namespaces, component
+services, and requested capabilities. Approval is bound to those digests; the
+host refetches and revalidates the pinned bytes before activation. An installed
+package appears in **Installed** immediately. Press **u** to inspect and approve
+an exact replacement revision, **b** to use the retained rollback artifact, or
+**r** to remove the package while retaining its namespaced configuration and
+state. These lifecycle operations do not replace or restart pane PTYs.
+
 ## Browse plugins
 
 The [marketplace](/plugins/) lists public repositories tagged with the GitHub

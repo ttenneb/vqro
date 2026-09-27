@@ -367,7 +367,7 @@ pub(super) fn render_mobile_switcher(
     endpoints: &[ClientShellEndpoint],
     active_endpoint_id: &ClientEndpointId,
     config: &ClientShellConfig,
-    selected_workspace_id: Option<&str>,
+    selected_workspace_id: Option<&WorkspaceNavigationTarget>,
     scroll: &mut usize,
     reveal_workspace: &mut bool,
     hits: &mut ShellHitMap,
@@ -457,7 +457,7 @@ pub(super) fn render_mobile_switcher(
                     Some(ClientMobileTarget::Workspace {
                         endpoint_id,
                         workspace_id,
-                    }) if endpoint_id == active_endpoint_id && workspace_id == selected_workspace_id
+                    }) if selected_workspace_id.matches(endpoint_id, workspace_id)
                 ) {
                     if start < *scroll {
                         *scroll = start;
@@ -577,7 +577,7 @@ fn mobile_items(
     endpoints: &[ClientShellEndpoint],
     active_endpoint_id: &ClientEndpointId,
     config: &ClientShellConfig,
-    selected_workspace_id: Option<&str>,
+    selected_workspace_id: Option<&WorkspaceNavigationTarget>,
     content_width: u16,
 ) -> Vec<MobileItem> {
     let palette = &config.palette;
@@ -610,8 +610,26 @@ fn mobile_items(
             });
         }
     }
-    let agents =
-        super::aggregate_navigation::aggregate_agent_rows(endpoints, config.agent_panel_sort);
+    let navigation = super::aggregate_navigation::agent_navigation_cache(endpoints);
+    let agents = super::aggregate_navigation::aggregate_agent_rows_cached(
+        endpoints,
+        active_endpoint_id,
+        config.agent_panel_sort,
+        &navigation,
+    );
+    let documented_agent_labels = endpoints
+        .iter()
+        .filter_map(|endpoint| {
+            let rows = navigation.get(&endpoint.endpoint_id)?.as_ref()?;
+            Some(rows.iter().map(move |row| {
+                (
+                    (endpoint.endpoint_id.clone(), row.pane_id.clone()),
+                    row.label.clone(),
+                )
+            }))
+        })
+        .flatten()
+        .collect::<std::collections::HashMap<_, _>>();
     let agent_view_label = snapshot.agent_view_label.as_deref();
     if !agents.is_empty() || agent_view_label.is_some() {
         let title = agent_view_label
@@ -644,9 +662,11 @@ fn mobile_items(
                 .tabs
                 .iter()
                 .find(|tab| tab.tab_id == agent.tab_id);
-            let agent_label = agent
-                .display_agent
-                .as_deref()
+            let documented_label =
+                documented_agent_labels.get(&(endpoint.endpoint_id.clone(), agent.pane_id.clone()));
+            let agent_label = documented_label
+                .map(String::as_str)
+                .or(agent.display_agent.as_deref())
                 .or(agent.name.as_deref())
                 .or(agent.agent.as_deref())
                 .unwrap_or("agent");
@@ -751,14 +771,24 @@ fn mobile_items(
         palette,
     ));
     for endpoint in super::aggregate_navigation::cached_endpoint_snapshots(endpoints) {
-        for entry in super::render::workspace_entries(endpoint.snapshot, &HashSet::new()) {
+        for entry in super::render::workspace_entries_with_structure(
+            endpoint.snapshot,
+            endpoint.structure,
+            endpoint.host_documents,
+            &HashSet::new(),
+        ) {
             let Some(workspace) = endpoint.snapshot.workspaces.get(entry.index) else {
                 continue;
             };
-            let selected = endpoint.endpoint_id == active_endpoint_id
-                && selected_workspace_id == Some(workspace.workspace_id.as_str());
+            let selected = selected_workspace_id.is_some_and(|target| {
+                target.matches(endpoint.endpoint_id, &workspace.workspace_id)
+            });
             let background = if selected {
-                palette.surface0
+                if palette.surface0 == ratatui::style::Color::Reset {
+                    palette.active_row_bg
+                } else {
+                    palette.surface0
+                }
             } else if endpoint.endpoint_id == active_endpoint_id && workspace.focused {
                 palette.surface_dim
             } else {
@@ -773,16 +803,47 @@ fn mobile_items(
             } else {
                 ""
             };
-            let name = if entry.indented && !workspace.custom_label {
+            let repository = entry.repository_index.and_then(|index| {
+                endpoint
+                    .structure
+                    .and_then(|structure| structure.repositories.get(index))
+            });
+            let checkout = entry
+                .checkout_index
+                .and_then(|index| repository?.checkouts.get(index));
+            let name = if let Some(label) = entry.label.as_deref() {
+                label
+            } else if entry.indented && !workspace.custom_label {
                 workspace
                     .branch
                     .as_deref()
-                    .and_then(|branch| branch.strip_prefix("worktree/").or(Some(branch)))
+                    .map(|branch| branch.strip_prefix("worktree/").unwrap_or(branch))
                     .unwrap_or(&workspace.label)
+            } else if !entry.indented {
+                repository.map_or(workspace.label.as_str(), |repository| {
+                    repository.label.as_str()
+                })
             } else {
                 &workspace.label
             };
-            let branch = workspace.branch.as_deref().unwrap_or("shell");
+            let branch = match (
+                workspace.branch.as_deref(),
+                checkout.and_then(|checkout| checkout.upstream.as_deref()),
+            ) {
+                (Some(branch), Some(upstream)) if branch != upstream => {
+                    format!("{branch} → {upstream}")
+                }
+                (Some(branch), _) => branch.to_owned(),
+                (None, _) => checkout.map_or_else(
+                    || "shell".to_owned(),
+                    |checkout| {
+                        checkout
+                            .detached_head
+                            .as_deref()
+                            .map_or_else(|| "git".to_owned(), |head| format!("detached@{head}"))
+                    },
+                ),
+            };
             let detail_prefix = if entry.indented {
                 if entry.last_child {
                     "       "
@@ -950,10 +1011,7 @@ impl ClientShellState {
                 self.mobile_switcher_scroll = 0;
                 self.reveal_mobile_workspace = false;
                 self.mode = ClientShellMode::Navigate;
-                self.navigate_workspace_id = self
-                    .snapshot
-                    .as_deref()
-                    .and_then(|snapshot| snapshot.focused_workspace_id.clone());
+                self.navigate_workspace_id = self.focused_navigation_target();
                 outcome.repaint = true;
                 return true;
             }

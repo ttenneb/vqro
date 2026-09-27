@@ -81,7 +81,7 @@ pub fn persisted_session_from_launch_args(
     }
 
     Some(PersistedAgentSession {
-        source: "herdr:codex".into(),
+        source: "vqro:codex".into(),
         agent: "codex".into(),
         session_ref: AgentSessionRef::id(session_id.clone())?,
     })
@@ -100,8 +100,8 @@ pub fn normalize_session_start_source(value: Option<String>) -> Option<String> {
 pub fn is_reserved_native_state_source(source: &str, agent: &str) -> bool {
     matches!(
         (source, agent),
-        ("herdr:claude", "claude")
-            | ("herdr:codex", "codex")
+        ("vqro:claude", "claude")
+            | ("vqro:codex", "codex")
             | ("herdr:copilot", "copilot")
             | ("herdr:devin", "devin")
             | ("herdr:droid", "droid")
@@ -139,14 +139,14 @@ pub fn plan(source: &str, agent: &str, session_ref: &AgentSessionRef) -> Option<
     }
 
     let argv = match (source, agent, session_ref.kind) {
-        ("herdr:claude", "claude", AgentSessionRefKind::Id) => {
+        ("vqro:claude", "claude", AgentSessionRefKind::Id) => {
             vec![
                 "claude".into(),
                 "--resume".into(),
                 session_ref.value.clone(),
             ]
         }
-        ("herdr:codex", "codex", AgentSessionRefKind::Id) => {
+        ("vqro:codex", "codex", AgentSessionRefKind::Id) => {
             vec!["codex".into(), "resume".into(), session_ref.value.clone()]
         }
         ("herdr:copilot", "copilot", AgentSessionRefKind::Id) => {
@@ -168,7 +168,7 @@ pub fn plan(source: &str, agent: &str, session_ref: &AgentSessionRef) -> Option<
                 session_ref.value.clone(),
             ]
         }
-        ("herdr:pi", "pi", AgentSessionRefKind::Path | AgentSessionRefKind::Id) => {
+        ("vqro:pi", "pi", AgentSessionRefKind::Path | AgentSessionRefKind::Id) => {
             vec!["pi".into(), "--session".into(), session_ref.value.clone()]
         }
         ("herdr:omp", "omp", AgentSessionRefKind::Path | AgentSessionRefKind::Id) => {
@@ -225,6 +225,26 @@ pub fn plan(source: &str, agent: &str, session_ref: &AgentSessionRef) -> Option<
         ("herdr:grok", "grok", AgentSessionRefKind::Id) => {
             vec!["grok".into(), "--resume".into(), session_ref.value.clone()]
         }
+        ("herdr:letta", "letta", AgentSessionRefKind::Id) => {
+            if let Some(agent_id) = session_ref.value.strip_prefix("default:") {
+                if agent_id.is_empty() {
+                    return None;
+                }
+                vec![
+                    "letta".into(),
+                    "--conversation".into(),
+                    "default".into(),
+                    "--agent".into(),
+                    agent_id.into(),
+                ]
+            } else {
+                vec![
+                    "letta".into(),
+                    "--conversation".into(),
+                    session_ref.value.clone(),
+                ]
+            }
+        }
         _ => return None,
     };
 
@@ -245,15 +265,15 @@ pub fn dedupe_key(source: &str, agent: &str, session_ref: &AgentSessionRef) -> S
 pub(crate) fn is_official_agent_source(source: &str, agent: &str) -> bool {
     matches!(
         (source, agent),
-        ("herdr:claude", "claude")
-            | ("herdr:codex", "codex")
+        ("vqro:claude", "claude")
+            | ("vqro:codex", "codex")
+            | ("vqro:pi", "pi")
             | ("herdr:copilot", "copilot")
             | ("herdr:devin", "devin")
             | ("herdr:droid", "droid")
             | ("herdr:kimi", "kimi")
             | ("herdr:omp", "omp")
             | ("herdr:mastracode", "mastracode")
-            | ("herdr:pi", "pi")
             | ("herdr:hermes", "hermes")
             | ("herdr:opencode", "opencode")
             | ("herdr:qodercli", "qodercli")
@@ -262,6 +282,7 @@ pub(crate) fn is_official_agent_source(source: &str, agent: &str) -> bool {
             | ("herdr:cursor", "cursor")
             | ("herdr:antigravity_cli", "agy")
             | ("herdr:grok", "grok")
+            | ("herdr:letta", "letta")
     )
 }
 
@@ -289,15 +310,12 @@ mod tests {
     }
 
     #[test]
-    fn native_state_reservation_excludes_full_lifecycle_sources() {
-        assert!(is_reserved_native_state_source("herdr:claude", "claude"));
-        assert!(is_reserved_native_state_source("herdr:codex", "codex"));
+    fn native_state_reservation_uses_vqro_sources_for_converted_integrations() {
+        assert!(is_reserved_native_state_source("vqro:claude", "claude"));
+        assert!(is_reserved_native_state_source("vqro:codex", "codex"));
+        assert!(!is_reserved_native_state_source("herdr:claude", "claude"));
+        assert!(!is_reserved_native_state_source("herdr:codex", "codex"));
         assert!(is_reserved_native_state_source("herdr:devin", "devin"));
-        assert!(!is_reserved_native_state_source("herdr:kimi", "kimi"));
-        assert!(!is_reserved_native_state_source(
-            "herdr:opencode",
-            "opencode"
-        ));
     }
 
     #[test]
@@ -340,7 +358,7 @@ mod tests {
         let omp_session = absolute_test_path("omp-session.jsonl");
         assert_eq!(
             plan(
-                "herdr:claude",
+                "vqro:claude",
                 "claude",
                 &AgentSessionRef::id("claude-session").unwrap()
             )
@@ -350,7 +368,7 @@ mod tests {
         );
         assert_eq!(
             plan(
-                "herdr:codex",
+                "vqro:codex",
                 "codex",
                 &AgentSessionRef::id("codex-session").unwrap()
             )
@@ -410,7 +428,7 @@ mod tests {
         );
         assert_eq!(
             plan(
-                "herdr:pi",
+                "vqro:pi",
                 "pi",
                 &AgentSessionRef::path(&pi_session).unwrap()
             )
@@ -516,6 +534,32 @@ mod tests {
             .argv,
             vec!["grok", "--resume", "grok-session"]
         );
+        assert_eq!(
+            plan(
+                "herdr:letta",
+                "letta",
+                &AgentSessionRef::id("conversation-123").unwrap()
+            )
+            .unwrap()
+            .argv,
+            vec!["letta", "--conversation", "conversation-123"]
+        );
+        assert_eq!(
+            plan(
+                "herdr:letta",
+                "letta",
+                &AgentSessionRef::id("default:agent-123").unwrap()
+            )
+            .unwrap()
+            .argv,
+            vec!["letta", "--conversation", "default", "--agent", "agent-123"]
+        );
+        assert!(plan(
+            "herdr:letta",
+            "letta",
+            &AgentSessionRef::id("default:").unwrap()
+        )
+        .is_none());
     }
 
     #[test]
@@ -528,7 +572,7 @@ mod tests {
         )
         .is_none());
         assert!(plan(
-            "herdr:claude",
+            "vqro:claude",
             "claude",
             &AgentSessionRef::path(&claude_session).unwrap()
         )
@@ -542,7 +586,7 @@ mod tests {
         let claude_session = absolute_test_path("claude-session");
         let copilot_session = absolute_test_path("copilot-session");
         let session_ref = session_ref_from_report(
-            "herdr:pi",
+            "vqro:pi",
             "pi",
             Some("pi-id".into()),
             Some(pi_session.clone()),
@@ -551,10 +595,9 @@ mod tests {
         assert_eq!(session_ref.kind, AgentSessionRefKind::Path);
         assert_eq!(session_ref.value, pi_session);
 
-        assert!(session_ref_from_report("herdr:pi", "pi", Some("bad\nid".into()), None).is_none());
+        assert!(session_ref_from_report("vqro:pi", "pi", Some("bad\nid".into()), None).is_none());
         assert!(
-            session_ref_from_report("herdr:pi", "pi", None, Some("relative.jsonl".into()))
-                .is_none()
+            session_ref_from_report("vqro:pi", "pi", None, Some("relative.jsonl".into())).is_none()
         );
         assert!(session_ref_from_report("custom:pi", "pi", Some("pi-id".into()), None).is_none());
 
@@ -587,7 +630,7 @@ mod tests {
         );
 
         assert!(
-            session_ref_from_report("herdr:claude", "claude", None, Some(claude_session)).is_none()
+            session_ref_from_report("vqro:claude", "claude", None, Some(claude_session)).is_none()
         );
 
         let session_ref =
@@ -700,7 +743,7 @@ mod tests {
     #[test]
     fn ids_are_data_not_shell_text() {
         let id = "abc; rm -rf /";
-        let codex_plan = plan("herdr:codex", "codex", &AgentSessionRef::id(id).unwrap()).unwrap();
+        let codex_plan = plan("vqro:codex", "codex", &AgentSessionRef::id(id).unwrap()).unwrap();
         assert_eq!(codex_plan.argv, vec!["codex", "resume", id]);
 
         let copilot_plan = plan(

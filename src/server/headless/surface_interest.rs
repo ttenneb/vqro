@@ -13,6 +13,9 @@ impl HeadlessServer {
     ) -> Option<(bool, u64)> {
         let focus_before = self.shell_focus_targets();
         let focused_tabs_before = self.focused_shell_tabs();
+        if !active {
+            self.cancel_client_extension_work(client_id);
+        }
         let (changed, projection_revision) = {
             let client = self.clients.get_mut(&client_id)?;
             if !client.is_shell_client() {
@@ -25,11 +28,20 @@ impl HeadlessServer {
                 // Force the next control snapshot to carry this new floor instead of reusing a
                 // same-boot cached snapshot from the prior surface epoch.
                 client.shell_snapshot = None;
+                client.shell_structure = None;
             }
             if !changed && !active {
                 return Some((false, client.shell_projection_revision));
             }
             client.shell_surface_active = active;
+            if !active {
+                client.shell_pane_viewport = None;
+                client.shell_terminal_views_interest = None;
+                client.pending_pane_view = None;
+                client.pane_contribution_lease = None;
+                client.pending_pane_action = None;
+                client.pending_pane_confirmation = None;
+            }
             client.request_repaint();
             client.shell_graphics_delivery = Default::default();
             // The client drops target effects while its old source frame is frozen. Reset the
@@ -69,7 +81,20 @@ impl HeadlessServer {
             // explicitly requests the bounded replay after its coherent frame is visible.
             self.sent_window_title = None;
             self.resize_shared_runtime_to_effective_size_with_pending_agent_resumes(true);
-            self.claim_shell_tab_geometry(client_id, true);
+            let focused_viewer_already_owns_tab = self
+                .shell_tab_id_for_client(client_id)
+                .is_some_and(|tab_id| {
+                    self.clients.iter().any(|(&other_id, client)| {
+                        other_id != client_id
+                            && client.is_active_shell_client()
+                            && client.outer_terminal_focus == Some(true)
+                            && self.shell_tab_id_for_client(other_id).as_deref()
+                                == Some(tab_id.as_str())
+                    })
+                });
+            if !focused_viewer_already_owns_tab {
+                self.claim_shell_tab_geometry(client_id, true);
+            }
         } else {
             self.tab_geometry_controllers
                 .retain(|_, controller_id| *controller_id != client_id);

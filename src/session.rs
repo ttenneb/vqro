@@ -1,21 +1,23 @@
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use interprocess::local_socket::traits::Stream as _;
 
 use crate::ipc::LocalStream;
 
-pub const SESSION_ENV_VAR: &str = "HERDR_SESSION";
+pub const SESSION_ENV_VAR: &str = crate::product::SESSION_ENV;
 pub const DEFAULT_SESSION_NAME: &str = "default";
 
 const MAX_SESSION_NAME_LEN: usize = 64;
 const STOP_WAIT_TIMEOUT: Duration = Duration::from_secs(15);
 const STOP_WAIT_POLL: Duration = Duration::from_millis(25);
 const MIN_SOCKET_TIMEOUT: Duration = Duration::from_millis(1);
+const MAX_IMPORTED_SNAPSHOT_BYTES: u64 = 64 * 1024 * 1024;
 
 static EXPLICIT_SESSION_REQUESTED: AtomicBool = AtomicBool::new(false);
+static IMPORT_STAGING_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct SessionInfo {
@@ -24,6 +26,14 @@ pub struct SessionInfo {
     pub running: bool,
     pub socket_path: String,
     pub session_dir: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ImportedHerdrSession {
+    pub source: String,
+    pub target: String,
+    pub source_snapshot: String,
+    pub target_snapshot: String,
 }
 
 pub fn configure_from_args(args: &[String]) -> Result<Vec<String>, String> {
@@ -42,10 +52,10 @@ pub fn configure_from_args(args: &[String]) -> Result<Vec<String>, String> {
             return Ok(args.to_vec());
         }
         let Some(name) = args.get(3) else {
-            return Err("usage: herdr session attach <name>".to_string());
+            return Err("usage: vqro session attach <name>".to_string());
         };
         if args.len() != 4 {
-            return Err("usage: herdr session attach <name>".to_string());
+            return Err("usage: vqro session attach <name>".to_string());
         }
         apply_explicit_name(name)?;
         return Ok(cleaned);
@@ -102,8 +112,8 @@ pub fn active_name() -> Option<String> {
 
 pub fn local_attach_command() -> String {
     match active_name() {
-        Some(name) => format!("herdr session attach {name}"),
-        None => "herdr".to_string(),
+        Some(name) => crate::product::command(&format!("session attach {name}")),
+        None => crate::product::command(""),
     }
 }
 
@@ -113,15 +123,15 @@ pub fn local_stop_command() -> String {
 
 pub fn stop_command_for(name: Option<&str>) -> String {
     match name {
-        Some(name) => format!("herdr session stop {name}"),
-        None => "herdr server stop".to_string(),
+        Some(name) => crate::product::command(&format!("session stop {name}")),
+        None => crate::product::command("server stop"),
     }
 }
 
 pub fn restart_after_update_guidance(stop_command: &str, attach_command: Option<&str>) -> String {
     let restart = match attach_command {
         Some(command) => format!("Run `{stop_command}`, then run `{command}` again."),
-        None => format!("Run `{stop_command}`, then restart Herdr with the same socket override."),
+        None => format!("Run `{stop_command}`, then restart vqro with the same socket override."),
     };
     format!(
         "Stop the old server to use the new version.\nStopping exits pane processes.\n{restart}"
@@ -133,9 +143,10 @@ pub fn active_restart_after_update_guidance() -> String {
         if let Ok(socket_path) = std::env::var(crate::api::SOCKET_PATH_ENV_VAR) {
             return restart_after_update_guidance(
                 &format!(
-                    "{}={} herdr server stop",
+                    "{}={} {} server stop",
                     crate::api::SOCKET_PATH_ENV_VAR,
-                    socket_path
+                    socket_path,
+                    crate::product::NAME
                 ),
                 None,
             );
@@ -166,8 +177,274 @@ pub fn data_dir_for(name: Option<&str>) -> PathBuf {
     }
 }
 
+fn strip_imported_runtime_identity(snapshot: &mut serde_json::Value) {
+    let Some(workspaces) = snapshot
+        .get_mut("workspaces")
+        .and_then(|value| value.as_array_mut())
+    else {
+        return;
+    };
+    for workspace in workspaces {
+        let Some(tabs) = workspace
+            .get_mut("tabs")
+            .and_then(|value| value.as_array_mut())
+        else {
+            continue;
+        };
+        for tab in tabs {
+            if let Some(tab) = tab.as_object_mut() {
+                // Imports retain generation-1 public numbering but create new
+                // logical tabs and terminals in the destination session.
+                tab.remove("id");
+            }
+            let Some(panes) = tab.get_mut("panes").and_then(|value| value.as_object_mut()) else {
+                continue;
+            };
+            for pane in panes.values_mut() {
+                if let Some(pane) = pane.as_object_mut() {
+                    // Imported sessions create new logical terminals and PTYs;
+                    // source terminal identity must never be cloned.
+                    pane.remove("terminal_id");
+                    pane.remove("agent_name");
+                    pane.remove("managed_agent_kind");
+                    pane.remove("agent_session");
+                    pane.remove("launch_argv");
+                }
+            }
+        }
+    }
+}
+
+pub fn import_herdr_session(
+    source_name: Option<&str>,
+    target_name: &str,
+) -> Result<ImportedHerdrSession, String> {
+    let vqro_root = crate::config::config_dir();
+    let config_parent = vqro_root
+        .parent()
+        .ok_or_else(|| "vqro config directory has no parent".to_string())?;
+    import_herdr_session_from_roots(
+        &config_parent.join("herdr"),
+        &vqro_root,
+        source_name,
+        target_name,
+    )
+}
+
+fn publish_import_snapshot_no_replace(
+    staging_snapshot: &Path,
+    target_snapshot: &Path,
+) -> std::io::Result<()> {
+    // Both paths live below the same sessions directory. A hard link publishes the already
+    // synced inode atomically and fails if any creator won the destination name first.
+    std::fs::hard_link(staging_snapshot, target_snapshot)
+}
+
+fn import_herdr_session_from_roots(
+    herdr_root: &Path,
+    vqro_root: &Path,
+    source_name: Option<&str>,
+    target_name: &str,
+) -> Result<ImportedHerdrSession, String> {
+    let source_name = match source_name {
+        Some(name) => parse_target_name(name)?,
+        None => None,
+    };
+    if target_name == DEFAULT_SESSION_NAME {
+        return Err("import target must be a new named vqro session".to_string());
+    }
+    validate_name(target_name)?;
+
+    let source_dir = source_name.as_deref().map_or_else(
+        || herdr_root.to_path_buf(),
+        |name| herdr_root.join("sessions").join(name),
+    );
+    let source_snapshot = source_dir.join("session.json");
+    let canonical_herdr_root = std::fs::canonicalize(herdr_root).map_err(|err| {
+        format!(
+            "cannot resolve Herdr data directory {}: {err}",
+            herdr_root.display()
+        )
+    })?;
+    let canonical_source = std::fs::canonicalize(&source_snapshot).map_err(|err| {
+        format!(
+            "cannot resolve Herdr session snapshot {}: {err}",
+            source_snapshot.display()
+        )
+    })?;
+    if !canonical_source.starts_with(&canonical_herdr_root) {
+        return Err(format!(
+            "Herdr session snapshot escapes the Herdr data directory: {}",
+            source_snapshot.display()
+        ));
+    }
+    let source_file = std::fs::File::open(&canonical_source)
+        .map_err(|err| format!("cannot open {}: {err}", source_snapshot.display()))?;
+    let metadata = source_file.metadata().map_err(|err| {
+        format!(
+            "cannot read Herdr session snapshot {}: {err}",
+            source_snapshot.display()
+        )
+    })?;
+    if !metadata.is_file() {
+        return Err(format!(
+            "Herdr session snapshot is not a regular file: {}",
+            source_snapshot.display()
+        ));
+    }
+    if metadata.len() > MAX_IMPORTED_SNAPSHOT_BYTES {
+        return Err(format!(
+            "Herdr session snapshot exceeds the {} MiB import limit",
+            MAX_IMPORTED_SNAPSHOT_BYTES / (1024 * 1024)
+        ));
+    }
+    let mut content = String::new();
+    source_file
+        .take(MAX_IMPORTED_SNAPSHOT_BYTES + 1)
+        .read_to_string(&mut content)
+        .map_err(|err| format!("cannot read {}: {err}", source_snapshot.display()))?;
+    if content.len() as u64 > MAX_IMPORTED_SNAPSHOT_BYTES {
+        return Err(format!(
+            "Herdr session snapshot exceeds the {} MiB import limit",
+            MAX_IMPORTED_SNAPSHOT_BYTES / (1024 * 1024)
+        ));
+    }
+    crate::persist::validate_snapshot(&content)
+        .map_err(|err| format!("incompatible Herdr session snapshot: {err}"))?;
+    let mut imported_value = serde_json::from_str(&content)
+        .map_err(|err| format!("cannot prepare Herdr session snapshot: {err}"))?;
+    strip_imported_runtime_identity(&mut imported_value);
+    let stripped = serde_json::to_string(&imported_value)
+        .map_err(|err| format!("cannot prepare imported session snapshot: {err}"))?;
+    let imported_snapshot = crate::persist::parse_snapshot(&stripped)
+        .map_err(|err| format!("cannot regenerate imported terminal identities: {err}"))?;
+    content = serde_json::to_string_pretty(&imported_snapshot)
+        .map_err(|err| format!("cannot encode imported session snapshot: {err}"))?;
+    content.push('\n');
+    if content.len() as u64 > MAX_IMPORTED_SNAPSHOT_BYTES {
+        return Err(format!(
+            "regenerated session snapshot exceeds the {} MiB import limit",
+            MAX_IMPORTED_SNAPSHOT_BYTES / (1024 * 1024)
+        ));
+    }
+
+    std::fs::create_dir_all(vqro_root)
+        .map_err(|err| format!("cannot create {}: {err}", vqro_root.display()))?;
+    let canonical_vqro_root = std::fs::canonicalize(vqro_root)
+        .map_err(|err| format!("cannot resolve {}: {err}", vqro_root.display()))?;
+    let sessions_dir = vqro_root.join("sessions");
+    match std::fs::symlink_metadata(&sessions_dir) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+            return Err(format!(
+                "vqro sessions path is not a real directory: {}",
+                sessions_dir.display()
+            ));
+        }
+        Ok(_) => {}
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            match std::fs::create_dir(&sessions_dir) {
+                Ok(()) => {}
+                Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+                    let metadata = std::fs::symlink_metadata(&sessions_dir).map_err(|err| {
+                        format!("cannot inspect {}: {err}", sessions_dir.display())
+                    })?;
+                    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                        return Err(format!(
+                            "vqro sessions path is not a real directory: {}",
+                            sessions_dir.display()
+                        ));
+                    }
+                }
+                Err(err) => {
+                    return Err(format!("cannot create {}: {err}", sessions_dir.display()));
+                }
+            }
+        }
+        Err(err) => return Err(format!("cannot inspect {}: {err}", sessions_dir.display())),
+    }
+    let canonical_sessions_dir = std::fs::canonicalize(&sessions_dir)
+        .map_err(|err| format!("cannot resolve {}: {err}", sessions_dir.display()))?;
+    if !canonical_sessions_dir.starts_with(&canonical_vqro_root) {
+        return Err("vqro sessions directory escapes the vqro data directory".to_string());
+    }
+    let target_dir = sessions_dir.join(target_name);
+    // Keep staging on the destination filesystem so hard-link publication cannot cross devices.
+    let staging_snapshot = sessions_dir.join(format!(
+        ".session-import-{target_name}-{}-{}.json",
+        std::process::id(),
+        IMPORT_STAGING_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+    ));
+    let result = (|| -> Result<(), String> {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&staging_snapshot)
+            .map_err(|err| format!("cannot create imported snapshot: {err}"))?;
+        file.write_all(content.as_bytes())
+            .map_err(|err| format!("cannot write imported snapshot: {err}"))?;
+        file.sync_all()
+            .map_err(|err| format!("cannot sync imported snapshot: {err}"))?;
+        drop(file);
+
+        match std::fs::create_dir(&target_dir) {
+            Ok(()) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+                return Err(format!(
+                    "vqro session {target_name} already exists; choose a new name"
+                ));
+            }
+            Err(err) => return Err(format!("cannot reserve imported session: {err}")),
+        }
+        if let Err(err) = crate::platform::sync_parent_directory(&sessions_dir) {
+            let _ = std::fs::remove_dir(&target_dir);
+            return Err(format!("cannot sync imported session reservation: {err}"));
+        }
+        let target_snapshot = target_dir.join("session.json");
+        if let Err(err) = publish_import_snapshot_no_replace(&staging_snapshot, &target_snapshot) {
+            // Never recurse: another creator may have populated this directory after reservation.
+            let _ = std::fs::remove_dir(&target_dir);
+            if err.kind() == std::io::ErrorKind::AlreadyExists {
+                return Err(format!(
+                    "vqro session {target_name} already exists; choose a new name"
+                ));
+            }
+            return Err(format!("cannot publish imported session: {err}"));
+        }
+        crate::platform::sync_parent_directory(&target_dir)
+            .map_err(|err| format!("cannot sync imported session: {err}"))?;
+        if let Err(err) = std::fs::remove_file(&staging_snapshot) {
+            tracing::warn!(
+                path = %staging_snapshot.display(),
+                %err,
+                "could not remove imported session staging link"
+            );
+        } else if let Err(err) = crate::platform::sync_parent_directory(&sessions_dir) {
+            tracing::warn!(
+                path = %sessions_dir.display(),
+                %err,
+                "could not sync imported session staging cleanup"
+            );
+        }
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&staging_snapshot);
+    }
+    result?;
+
+    Ok(ImportedHerdrSession {
+        source: source_name
+            .as_deref()
+            .unwrap_or(DEFAULT_SESSION_NAME)
+            .to_owned(),
+        target: target_name.to_owned(),
+        source_snapshot: source_snapshot.display().to_string(),
+        target_snapshot: target_dir.join("session.json").display().to_string(),
+    })
+}
+
 pub fn api_socket_path_for(name: Option<&str>) -> PathBuf {
-    data_dir_for(name).join("herdr.sock")
+    data_dir_for(name).join(crate::product::API_SOCKET_FILE)
 }
 
 pub fn active_api_socket_path() -> PathBuf {
@@ -181,7 +458,7 @@ pub fn active_api_socket_path() -> PathBuf {
 }
 
 pub fn client_socket_path_for(name: Option<&str>) -> PathBuf {
-    data_dir_for(name).join("herdr-client.sock")
+    data_dir_for(name).join(crate::product::CLIENT_SOCKET_FILE)
 }
 
 pub fn list_sessions() -> std::io::Result<Vec<SessionInfo>> {
@@ -495,6 +772,357 @@ mod tests {
     }
 
     #[test]
+    fn imported_snapshot_publication_never_replaces_an_existing_file() {
+        let root = std::env::temp_dir().join(format!(
+            "vqro-session-publish-no-replace-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let staging = root.join("staging.json");
+        let target = root.join("session.json");
+        std::fs::write(&staging, "imported").unwrap();
+        std::fs::write(&target, "creator").unwrap();
+
+        let error = publish_import_snapshot_no_replace(&staging, &target).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "creator");
+        assert_eq!(std::fs::read_to_string(&staging).unwrap(), "imported");
+
+        std::fs::remove_file(&target).unwrap();
+        publish_import_snapshot_no_replace(&staging, &target).unwrap();
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "imported");
+        assert_eq!(std::fs::read_to_string(&staging).unwrap(), "imported");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn herdr_import_copies_default_and_named_snapshots_without_overwrite() {
+        let root = std::env::temp_dir().join(format!(
+            "vqro-session-import-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let herdr_root = root.join("herdr");
+        let vqro_root = root.join("vqro");
+        let snapshot = r#"{"version":4,"workspaces":[],"repositories":[],"space_order":[],"active":null,"selected":0}"#;
+        std::fs::create_dir_all(herdr_root.join("sessions/source")).unwrap();
+        std::fs::write(herdr_root.join("session.json"), snapshot).unwrap();
+        std::fs::write(herdr_root.join("sessions/source/session.json"), snapshot).unwrap();
+
+        let imported =
+            import_herdr_session_from_roots(&herdr_root, &vqro_root, None, "from-default").unwrap();
+        assert_eq!(imported.source, DEFAULT_SESSION_NAME);
+        let imported_snapshot: crate::persist::SessionSnapshot = serde_json::from_slice(
+            &std::fs::read(vqro_root.join("sessions/from-default/session.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(imported_snapshot.version, 6);
+        assert!(imported_snapshot.workspaces.is_empty());
+        let named =
+            import_herdr_session_from_roots(&herdr_root, &vqro_root, Some("source"), "from-named")
+                .unwrap();
+        assert_eq!(named.source, "source");
+        assert_eq!(
+            import_herdr_session_from_roots(&herdr_root, &vqro_root, None, "from-default")
+                .unwrap_err(),
+            "vqro session from-default already exists; choose a new name"
+        );
+        assert_eq!(
+            std::fs::read_to_string(herdr_root.join("session.json")).unwrap(),
+            snapshot
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn herdr_import_strips_terminal_and_agent_runtime_identity() {
+        let mut snapshot = serde_json::json!({
+            "workspaces": [{
+                "tabs": [{
+                    "id": "tab_00000000000000000000000000000001",
+                    "number": 7,
+                    "panes": {
+                        "1": {
+                            "terminal_id": "term_00000000000000000000000000000001",
+                            "cwd": "/tmp",
+                            "label": "manual label",
+                            "agent_name": "reviewer",
+                            "managed_agent_kind": "pi",
+                            "agent_session": { "agent": "pi", "value": "shared" },
+                            "launch_argv": ["pi", "--resume"]
+                        }
+                    }
+                }]
+            }]
+        });
+
+        strip_imported_runtime_identity(&mut snapshot);
+
+        let tab = &snapshot["workspaces"][0]["tabs"][0];
+        assert!(tab.get("id").is_none());
+        assert_eq!(tab["number"], 7);
+        let pane = &tab["panes"]["1"];
+        assert!(pane.get("terminal_id").is_none());
+        assert!(pane.get("agent_name").is_none());
+        assert!(pane.get("managed_agent_kind").is_none());
+        assert!(pane.get("agent_session").is_none());
+        assert!(pane.get("launch_argv").is_none());
+        assert_eq!(pane["cwd"], "/tmp");
+        assert_eq!(pane["label"], "manual label");
+    }
+
+    #[tokio::test]
+    async fn nonempty_herdr_import_restores_structure_without_agent_projection() {
+        let root = std::env::temp_dir().join(format!(
+            "vqro-session-import-restore-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let herdr_root = root.join("herdr");
+        let vqro_root = root.join("vqro");
+        let cwd = root.join("checkout");
+        std::fs::create_dir_all(&cwd).unwrap();
+        std::fs::create_dir_all(&herdr_root).unwrap();
+        let source = serde_json::json!({
+            "version": 5,
+            "workspaces": [{
+                "id": "w-imported",
+                "custom_name": "manual workspace",
+                "identity_cwd": cwd,
+                "checkout": {
+                    "repository_id": "repo-imported",
+                    "checkout_path": cwd,
+                    "kind": "primary"
+                },
+                "public_pane_numbers": {"7": 1},
+                "next_public_pane_number": 2,
+                "public_tab_numbers": [1],
+                "next_public_tab_number": 2,
+                "tabs": [{
+                    "custom_name": "manual tab",
+                    "layout": {"Collection": "collection_77"},
+                    "collections": [{
+                        "id": "collection_77",
+                        "label": "review group",
+                        "members": [7],
+                        "selected": 7,
+                        "archived": []
+                    }],
+                    "panes": {"7": {
+                        "terminal_id": "term_00000000000000000000000000000077",
+                        "cwd": cwd,
+                        "label": "manual pane",
+                        "agent_name": "reviewer",
+                        "managed_agent_kind": "pi",
+                        "agent_session": {
+                            "source": "herdr:pi",
+                            "agent": "pi",
+                            "kind": "path",
+                            "value": "/tmp/shared-agent-session"
+                        },
+                        "launch_argv": ["pi", "--resume"]
+                    }},
+                    "zoomed": false,
+                    "focused": 7,
+                    "focused_leaf": {"type": "collection", "id": "collection_77"},
+                    "root_pane": 7
+                }],
+                "active_tab": 0
+            }],
+            "repositories": [{
+                "id": "repo-imported",
+                "git_common_dir": cwd.join(".git"),
+                "label": "repository label",
+                "custom_name": "manual repository",
+                "preferred_base": "main",
+                "checkout_workspace_ids": ["w-imported"],
+                "last_focused_workspace_id": "w-imported"
+            }],
+            "space_order": [{"kind": "repository", "id": "repo-imported"}],
+            "active": 0,
+            "selected": 0,
+            "delegations": [{
+                "id": "d77",
+                "pane_id": 7,
+                "parent_id": null,
+                "purpose": "preserved purpose",
+                "sibling_rank": 0,
+                "tombstone": false
+            }]
+        });
+        std::fs::write(
+            herdr_root.join("session.json"),
+            serde_json::to_vec_pretty(&source).unwrap(),
+        )
+        .unwrap();
+
+        import_herdr_session_from_roots(&herdr_root, &vqro_root, None, "restored").unwrap();
+        let imported: crate::persist::SessionSnapshot = serde_json::from_slice(
+            &std::fs::read(vqro_root.join("sessions/restored/session.json")).unwrap(),
+        )
+        .unwrap();
+        let pane = &imported.workspaces[0].tabs[0].panes[&7];
+        assert_eq!(pane.cwd, cwd);
+        assert_eq!(pane.label.as_deref(), Some("manual pane"));
+        let imported_terminal_id = crate::persist::terminal_id_for_pane_snapshot(pane).unwrap();
+        assert_ne!(
+            imported_terminal_id.as_str(),
+            "term_00000000000000000000000000000077"
+        );
+        assert!(pane.agent_name.is_none());
+        assert!(pane.managed_agent_kind.is_none());
+        assert!(pane.agent_session.is_none());
+        assert!(pane.launch_argv.is_none());
+        assert_eq!(
+            imported.repositories[0].custom_name.as_deref(),
+            Some("manual repository")
+        );
+        assert_eq!(
+            imported.repositories[0].preferred_base.as_deref(),
+            Some("main")
+        );
+        assert_eq!(
+            imported.delegations[0].purpose.as_deref(),
+            Some("preserved purpose")
+        );
+
+        let (events, _event_rx) = tokio::sync::mpsc::channel(16);
+        let (workspaces, terminals, runtimes) = crate::persist::restore(
+            &imported,
+            None,
+            24,
+            80,
+            1024 * 1024,
+            "/bin/sh",
+            crate::config::ShellModeConfig::NonLogin,
+            true,
+            events,
+            std::sync::Arc::new(tokio::sync::Notify::new()),
+            std::sync::Arc::new(crate::render_signal::RenderSignal::new()),
+        )
+        .unwrap();
+        assert_eq!(
+            workspaces[0].custom_name.as_deref(),
+            Some("manual workspace")
+        );
+        assert_eq!(workspaces[0].identity_cwd, cwd);
+        assert_eq!(
+            workspaces[0].tabs[0].custom_name.as_deref(),
+            Some("manual tab")
+        );
+        assert_eq!(workspaces[0].tabs[0].layout.collection_ids().len(), 1);
+        let restored_pane = *workspaces[0].tabs[0].panes.keys().next().unwrap();
+        let terminal_id = &workspaces[0].tabs[0].panes[&restored_pane].attached_terminal_id;
+        assert_eq!(terminal_id, &imported_terminal_id);
+        let terminal = &terminals[terminal_id];
+        assert_eq!(terminal.cwd, cwd);
+        assert_eq!(terminal.manual_label.as_deref(), Some("manual pane"));
+        assert!(terminal.agent_name.is_none());
+        assert!(terminal.managed_agent_kind().is_none());
+        assert!(terminal.persisted_agent_session.is_none());
+        assert!(terminal.pending_agent_resume_plan.is_none());
+        assert!(terminal.launch_argv.is_none());
+        let delegations = crate::persist::restore_delegations(&imported, &workspaces);
+        assert_eq!(delegations.records().len(), 1);
+        assert_eq!(
+            delegations
+                .records()
+                .values()
+                .next()
+                .unwrap()
+                .purpose
+                .as_deref(),
+            Some("preserved purpose")
+        );
+        drop(runtimes);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn concurrent_herdr_imports_reserve_the_target_without_overwrite() {
+        let root = std::env::temp_dir().join(format!(
+            "vqro-session-import-race-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let herdr_root = root.join("herdr");
+        let vqro_root = root.join("vqro");
+        let snapshot = r#"{"version":4,"workspaces":[],"repositories":[],"space_order":[],"active":null,"selected":0}"#;
+        std::fs::create_dir_all(&herdr_root).unwrap();
+        std::fs::write(herdr_root.join("session.json"), snapshot).unwrap();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+        let mut imports = Vec::new();
+        for _ in 0..8 {
+            let barrier = std::sync::Arc::clone(&barrier);
+            let herdr_root = herdr_root.clone();
+            let vqro_root = vqro_root.clone();
+            imports.push(std::thread::spawn(move || {
+                barrier.wait();
+                import_herdr_session_from_roots(&herdr_root, &vqro_root, None, "shared")
+            }));
+        }
+        let results = imports
+            .into_iter()
+            .map(|import| import.join().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+        assert_eq!(results.iter().filter(|result| result.is_err()).count(), 7);
+        assert!(results
+            .iter()
+            .filter_map(|result| result.as_ref().err())
+            .all(|error| error == "vqro session shared already exists; choose a new name"));
+        crate::persist::validate_snapshot(
+            &std::fs::read_to_string(vqro_root.join("sessions/shared/session.json")).unwrap(),
+        )
+        .unwrap();
+        assert!(std::fs::read_dir(vqro_root.join("sessions"))
+            .unwrap()
+            .all(|entry| {
+                !entry
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".session-import-")
+            }));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn herdr_import_rejects_incompatible_snapshot_before_creating_target() {
+        let root = std::env::temp_dir().join(format!(
+            "vqro-session-import-invalid-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let herdr_root = root.join("herdr");
+        let vqro_root = root.join("vqro");
+        std::fs::create_dir_all(&herdr_root).unwrap();
+        std::fs::write(herdr_root.join("session.json"), r#"{"version":999}"#).unwrap();
+
+        let error = import_herdr_session_from_roots(&herdr_root, &vqro_root, None, "incompatible")
+            .unwrap_err();
+        assert!(error.contains("newer than supported"), "{error}");
+        assert!(!vqro_root.join("sessions/incompatible").exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn stop_wait_timeout_allows_slow_graceful_shutdown() {
         assert_eq!(STOP_WAIT_TIMEOUT, Duration::from_secs(15));
     }
@@ -772,7 +1400,7 @@ mod tests {
             active_api_socket_path(),
             config_home
                 .join(crate::config::app_dir_name())
-                .join("herdr.sock")
+                .join(crate::product::API_SOCKET_FILE)
         );
         std::env::remove_var("XDG_CONFIG_HOME");
         std::env::remove_var(SESSION_ENV_VAR);
@@ -823,7 +1451,7 @@ mod tests {
             active_api_socket_path(),
             config_home
                 .join(crate::config::app_dir_name())
-                .join("herdr.sock")
+                .join(crate::product::API_SOCKET_FILE)
         );
         std::env::remove_var("XDG_CONFIG_HOME");
         std::env::remove_var(SESSION_ENV_VAR);
@@ -836,7 +1464,7 @@ mod tests {
         let _guard = env_lock().lock().unwrap();
         std::env::remove_var(SESSION_ENV_VAR);
 
-        assert_eq!(local_attach_command(), "herdr");
+        assert_eq!(local_attach_command(), "vqro");
     }
 
     #[test]
@@ -844,7 +1472,7 @@ mod tests {
         let _guard = env_lock().lock().unwrap();
         std::env::set_var(SESSION_ENV_VAR, "work");
 
-        assert_eq!(local_attach_command(), "herdr session attach work");
+        assert_eq!(local_attach_command(), "vqro session attach work");
 
         std::env::remove_var(SESSION_ENV_VAR);
     }
@@ -854,7 +1482,7 @@ mod tests {
         let _guard = env_lock().lock().unwrap();
         std::env::remove_var(SESSION_ENV_VAR);
 
-        assert_eq!(local_stop_command(), "herdr server stop");
+        assert_eq!(local_stop_command(), "vqro server stop");
 
         std::env::remove_var(SESSION_ENV_VAR);
     }
@@ -864,7 +1492,7 @@ mod tests {
         let _guard = env_lock().lock().unwrap();
         std::env::set_var(SESSION_ENV_VAR, "work");
 
-        assert_eq!(local_stop_command(), "herdr session stop work");
+        assert_eq!(local_stop_command(), "vqro session stop work");
 
         std::env::remove_var(SESSION_ENV_VAR);
     }
@@ -889,7 +1517,7 @@ mod tests {
 
         assert_eq!(
             active_restart_after_update_guidance(),
-            "Stop the old server to use the new version.\nStopping exits pane processes.\nRun `HERDR_SOCKET_PATH=/tmp/custom-herdr.sock herdr server stop`, then restart Herdr with the same socket override."
+            "Stop the old server to use the new version.\nStopping exits pane processes.\nRun `VQRO_SOCKET_PATH=/tmp/custom-herdr.sock vqro server stop`, then restart vqro with the same socket override."
         );
 
         std::env::remove_var(crate::api::SOCKET_PATH_ENV_VAR);
@@ -913,7 +1541,7 @@ mod tests {
                 .join(crate::config::app_dir_name())
                 .join("sessions")
                 .join("work")
-                .join("herdr.sock")
+                .join(crate::product::API_SOCKET_FILE)
         );
         std::env::remove_var("XDG_CONFIG_HOME");
         std::env::remove_var(SESSION_ENV_VAR);

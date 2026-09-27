@@ -1,0 +1,18 @@
+{
+  "contract": "host.document.v2",
+  "producer": {
+    "package_id": "example.document",
+    "service_id": "navigation",
+    "artifact_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "runtime_generation": 4,
+    "provider_generation": 7,
+    "scope_generation": 9
+  },
+  "scope": {"contract": "host.session.v1", "scope_id": "session_alpha"},
+  "revision": 3,
+  "dependencies": [],
+  "roots": [],
+  "nodes": [
+    {"kind": "text", "id": "orphan", "accessibility": {"name": "Orphan"}, "text": "unreachable"}
+  ]
+}

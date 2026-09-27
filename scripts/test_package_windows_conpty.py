@@ -110,25 +110,39 @@ class WindowsConptyPackageTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
-            herdr = root / "input-herdr.exe"
-            herdr.write_bytes(b"herdr")
+            vqro = root / "input-vqro.exe"
+            vqro.write_bytes(b"vqro")
             stage = root / "stage"
-            package.stage_bundle(metadata_path, "x86_64", nupkg, herdr, stage)
-            package.validate_stage(metadata_path, "x86_64", stage)
+            package.stage_bundle(
+                metadata_path, "x86_64", nupkg, vqro, stage, "vqro.exe"
+            )
+            package.validate_stage(metadata_path, "x86_64", stage, "vqro.exe")
 
-            output = root / "herdr.zip"
-            package.archive_bundle(metadata_path, "x86_64", stage, output)
+            output = root / "vqro.zip"
+            package.archive_bundle(
+                metadata_path, "x86_64", stage, output, "vqro.exe"
+            )
             with zipfile.ZipFile(output) as archive:
                 self.assertEqual(
                     set(archive.namelist()),
                     package.expected_stage_files(
-                        package.load_metadata(metadata_path), "x86_64"
+                        package.load_metadata(metadata_path), "x86_64", "vqro.exe"
                     ),
                 )
 
             (stage / "conpty" / "conpty.dll").write_bytes(b"tampered")
             with self.assertRaisesRegex(ValueError, "staged file hash mismatch"):
-                package.validate_stage(metadata_path, "x86_64", stage)
+                package.validate_stage(metadata_path, "x86_64", stage, "vqro.exe")
+
+    def test_release_workflow_packages_the_cargo_binary_name(self) -> None:
+        workflow = (
+            package.PROJECT_ROOT / ".github/workflows/release.yml"
+        ).read_text(encoding="utf-8")
+        self.assertIn("release/vqro ${{ matrix.name }}", workflow)
+        self.assertIn(r"release\vqro.exe", workflow)
+        self.assertIn("-ExecutableName vqro.exe", workflow)
+        self.assertNotIn("release/herdr ${{ matrix.name }}", workflow)
+        self.assertNotIn(r"release\herdr.exe", workflow)
 
     @staticmethod
     def _pe(machine: int, payload: bytes) -> bytes:

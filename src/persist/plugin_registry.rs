@@ -1,12 +1,22 @@
 use std::fs::OpenOptions;
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use tracing::warn;
 
 use crate::api::schema::InstalledPluginInfo;
 
 pub const MANIFEST_UNAVAILABLE_WARNING_PREFIX: &str = "manifest unavailable: ";
+
+pub fn manifest_available(plugin: &InstalledPluginInfo) -> bool {
+    !plugin
+        .warnings
+        .iter()
+        .any(|warning| warning.starts_with(MANIFEST_UNAVAILABLE_WARNING_PREFIX))
+}
 const REGISTRY_LOCK_FILE: &str = ".plugins.lock";
+static NEXT_REGISTRY_TEMP_ID: AtomicU64 = AtomicU64::new(1);
 
 fn registry_path() -> PathBuf {
     crate::config::config_dir().join("plugins.json")
@@ -16,7 +26,9 @@ fn registry_lock_path() -> PathBuf {
     crate::config::config_dir().join(REGISTRY_LOCK_FILE)
 }
 
-fn with_registry_lock<T>(operation: impl FnOnce() -> std::io::Result<T>) -> std::io::Result<T> {
+fn with_registry_lock<T>(
+    operation: impl FnOnce(&Path) -> std::io::Result<T>,
+) -> std::io::Result<T> {
     let lock_path = registry_lock_path();
     if let Some(parent) = lock_path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -28,30 +40,47 @@ fn with_registry_lock<T>(operation: impl FnOnce() -> std::io::Result<T>) -> std:
         .write(true)
         .open(lock_path)?;
     lock.lock()?;
-    operation()
+    let target = crate::platform::resolve_write_target(&registry_path())?;
+    operation(&target)
 }
 
+#[cfg(test)]
 fn save_json_to_path<T: serde::Serialize + ?Sized>(path: &Path, value: &T) -> std::io::Result<()> {
+    let target = crate::platform::resolve_write_target(path)?;
+    save_json_to_resolved_path(&target, value)
+}
+
+fn save_json_to_resolved_path<T: serde::Serialize + ?Sized>(
+    path: &Path,
+    value: &T,
+) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
     let json = serde_json::to_string_pretty(value)?;
-    let tmp_path = path.with_extension("json.tmp");
-    std::fs::write(&tmp_path, json)?;
-    #[cfg(windows)]
-    if path.exists() {
-        if let Err(err) = std::fs::remove_file(path) {
-            let _ = std::fs::remove_file(&tmp_path);
-            return Err(err);
-        }
-    }
-    if let Err(err) = std::fs::rename(&tmp_path, path) {
+    let tmp_path = path.with_extension(format!(
+        "json.{}.{}.tmp",
+        std::process::id(),
+        NEXT_REGISTRY_TEMP_ID.fetch_add(1, Ordering::Relaxed)
+    ));
+    let mut file = std::fs::File::create(&tmp_path)?;
+    if let Err(error) = file
+        .write_all(json.as_bytes())
+        .and_then(|()| file.sync_all())
+    {
+        drop(file);
         let _ = std::fs::remove_file(&tmp_path);
-        return Err(err);
+        return Err(error);
+    }
+    drop(file);
+    if let Err(error) = crate::platform::durable_replace_file(&tmp_path, path) {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(error);
     }
     Ok(())
 }
 
+#[cfg(test)]
 pub fn save_to_path(path: &Path, plugins: &[InstalledPluginInfo]) -> std::io::Result<()> {
     save_json_to_path(path, plugins)
 }
@@ -59,17 +88,21 @@ pub fn save_to_path(path: &Path, plugins: &[InstalledPluginInfo]) -> std::io::Re
 pub fn update<T>(
     mutation: impl FnOnce(&mut Vec<InstalledPluginInfo>) -> T,
 ) -> std::io::Result<(T, Vec<InstalledPluginInfo>)> {
-    with_registry_lock(|| {
-        let mut plugins = load_from_path_strict(&registry_path())?;
+    with_registry_lock(|path| {
+        let mut plugins = load_from_path_strict(path)?;
         let result = mutation(&mut plugins);
-        plugins.sort_by(|left, right| left.plugin_id.cmp(&right.plugin_id));
-        save_to_path(&registry_path(), &plugins)?;
+        plugins.sort_by(|left, right| {
+            left.load_order
+                .cmp(&right.load_order)
+                .then_with(|| left.plugin_id.cmp(&right.plugin_id))
+        });
+        save_json_to_resolved_path(path, &plugins)?;
         Ok((result, plugins))
     })
 }
 
 pub fn try_load() -> std::io::Result<Vec<InstalledPluginInfo>> {
-    with_registry_lock(|| load_from_path_strict(&registry_path()))
+    with_registry_lock(load_from_path_strict)
 }
 
 /// Load the global registry. Returns an empty vec on failure so a corrupt or
@@ -100,8 +133,26 @@ fn load_from_path_strict(path: &Path) -> std::io::Result<Vec<InstalledPluginInfo
         return Ok(Vec::new());
     }
     let content = std::fs::read_to_string(path)?;
-    serde_json::from_str::<Vec<InstalledPluginInfo>>(&content)
-        .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))
+    let mut entries = serde_json::from_str::<Vec<InstalledPluginInfo>>(&content)
+        .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?;
+    normalize_load_order(&mut entries);
+    Ok(entries)
+}
+
+fn normalize_load_order(entries: &mut [InstalledPluginInfo]) {
+    let mut next = entries
+        .iter()
+        .map(|entry| entry.load_order)
+        .max()
+        .unwrap_or(0);
+    let mut seen = std::collections::BTreeSet::new();
+    for entry in entries {
+        if entry.load_order == 0 || !seen.insert(entry.load_order) {
+            next = next.saturating_add(1).max(1);
+            entry.load_order = next;
+            seen.insert(entry.load_order);
+        }
+    }
 }
 
 /// Re-read each entry's manifest from disk using the provided reload function.
@@ -118,6 +169,7 @@ pub fn reload_manifests(
         match reload_fn(&entry.manifest_path, entry.enabled) {
             Ok(mut fresh) => {
                 fresh.enabled = entry.enabled;
+                fresh.load_order = entry.load_order;
                 fresh.source = entry.source.clone();
                 *entry = fresh;
             }
@@ -158,9 +210,11 @@ mod tests {
             manifest_path: format!("/tmp/{id}/herdr-plugin.toml"),
             plugin_root: format!("/tmp/{id}"),
             enabled: true,
+            load_order: 0,
             platforms: None,
             build: vec![],
             startup: vec![],
+            services: vec![],
             actions: vec![],
             events: vec![],
             panes: vec![],
@@ -182,6 +236,21 @@ mod tests {
         let ids: Vec<_> = loaded.iter().map(|p| p.plugin_id.as_str()).collect();
         assert!(ids.contains(&"example.a"));
         assert!(ids.contains(&"example.b"));
+    }
+
+    #[test]
+    fn legacy_registry_gets_deterministic_load_order() {
+        let path = temp_registry_path("legacy-load-order");
+        let mut first = sample_plugin("example.a");
+        let mut second = sample_plugin("example.b");
+        first.load_order = 0;
+        second.load_order = 0;
+        save_to_path(&path, &[first, second]).unwrap();
+
+        let loaded = load_from_path(&path);
+
+        assert_eq!(loaded[0].load_order, 1);
+        assert_eq!(loaded[1].load_order, 2);
     }
 
     #[test]
@@ -245,9 +314,11 @@ mod tests {
                 manifest_path: "/tmp/example.reload/herdr-plugin.toml".to_string(),
                 plugin_root: "/tmp/example.reload".to_string(),
                 enabled: true, // caller would pass stored enabled; fresh parse returns true
+                load_order: 0,
                 platforms: None,
                 build: vec![],
                 startup: vec![],
+                services: vec![],
                 actions: vec![],
                 events: vec![],
                 panes: vec![],
@@ -267,6 +338,138 @@ mod tests {
         );
         assert_eq!(result[0].source.owner.as_deref(), Some("ogulcancelik"));
         assert!(result[0].warnings.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn save_preserves_relative_registry_symlink() {
+        let path = temp_registry_path("relative-symlink");
+        let root = path.parent().unwrap();
+        let target = root.join("dotfiles/herdr/plugins.json");
+        save_to_path(&target, &[sample_plugin("example.first")]).unwrap();
+        std::os::unix::fs::symlink("dotfiles/herdr/plugins.json", &path).unwrap();
+
+        let result = save_to_path(&path, &[sample_plugin("example.second")]);
+        let preserved = std::fs::symlink_metadata(&path)
+            .unwrap()
+            .file_type()
+            .is_symlink();
+        let link_text = std::fs::read_link(&path);
+        let loaded = load_from_path(&target);
+        let same_content = std::fs::read(&path).unwrap() == std::fs::read(&target).unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+
+        result.unwrap();
+        assert!(preserved, "saving the registry must preserve its symlink");
+        assert_eq!(link_text.unwrap(), Path::new("dotfiles/herdr/plugins.json"));
+        assert!(same_content);
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].plugin_id, "example.second");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn save_follows_absolute_and_relative_links_to_missing_target() {
+        let path = temp_registry_path("dangling-chain");
+        let root = path.parent().unwrap();
+        let middle = root.join("links/registry.json");
+        let target = root.join("dotfiles/herdr/plugins.json");
+        std::fs::create_dir_all(middle.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&middle, &path).unwrap();
+        std::os::unix::fs::symlink("../dotfiles/herdr/plugins.json", &middle).unwrap();
+
+        save_to_path(&path, &[sample_plugin("example.new")]).unwrap();
+
+        assert_eq!(std::fs::read_link(&path).unwrap(), middle);
+        assert_eq!(
+            std::fs::read_link(&middle).unwrap(),
+            Path::new("../dotfiles/herdr/plugins.json")
+        );
+        assert_eq!(load_from_path(&target)[0].plugin_id, "example.new");
+        assert!(!target.with_extension("json.tmp").exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn save_rejects_symlink_cycle_without_replacing_links() {
+        let path = temp_registry_path("cycle");
+        let root = path.parent().unwrap();
+        let other = root.join("other.json");
+        std::fs::create_dir_all(root).unwrap();
+        std::os::unix::fs::symlink("other.json", &path).unwrap();
+        std::os::unix::fs::symlink("plugins.json", &other).unwrap();
+
+        assert!(save_to_path(&path, &[sample_plugin("example.new")]).is_err());
+
+        assert_eq!(std::fs::read_link(&path).unwrap(), Path::new("other.json"));
+        assert_eq!(
+            std::fs::read_link(&other).unwrap(),
+            Path::new("plugins.json")
+        );
+        assert_eq!(std::fs::read_dir(root).unwrap().count(), 2);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn save_failure_preserves_symlink_and_target_directory() {
+        let path = temp_registry_path("invalid-target");
+        let root = path.parent().unwrap();
+        let target = root.join("directory");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(target.join("keep"), "unchanged").unwrap();
+        std::os::unix::fs::symlink("directory", &path).unwrap();
+
+        assert!(save_to_path(&path, &[sample_plugin("example.new")]).is_err());
+
+        assert_eq!(std::fs::read_link(&path).unwrap(), Path::new("directory"));
+        assert_eq!(
+            std::fs::read_to_string(target.join("keep")).unwrap(),
+            "unchanged"
+        );
+        assert!(!target.with_extension("json.tmp").exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn update_preserves_symlink_and_existing_plugin_settings() {
+        let _guard = crate::config::test_config_env_lock().lock().unwrap();
+        let base = temp_registry_path("update");
+        let base = base.parent().unwrap();
+        let previous_config_home = std::env::var_os("XDG_CONFIG_HOME");
+        std::env::set_var("XDG_CONFIG_HOME", base);
+        let path = registry_path();
+        let target = base.join("dotfiles/plugins.json");
+        let mut existing = sample_plugin("example.existing");
+        existing.enabled = false;
+        existing.load_order = 1;
+        existing.source.kind = crate::api::schema::PluginSourceKind::Github;
+        existing.source.owner = Some("example".into());
+        save_to_path(&target, &[existing.clone()]).unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&target, &path).unwrap();
+
+        let result = update(|plugins| plugins.push(sample_plugin("example.added")));
+        match previous_config_home {
+            Some(previous) => std::env::set_var("XDG_CONFIG_HOME", previous),
+            None => std::env::remove_var("XDG_CONFIG_HOME"),
+        }
+
+        let (_, entries) = result.unwrap();
+        assert_eq!(std::fs::read_link(&path).unwrap(), target);
+        assert_eq!(entries[0].plugin_id, "example.added");
+        assert_eq!(
+            serde_json::to_value(&entries[1]).unwrap(),
+            serde_json::to_value(existing).unwrap()
+        );
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            std::fs::read(&target).unwrap()
+        );
+        assert_eq!(load_from_path(&target).len(), 2);
+        std::fs::remove_dir_all(base).unwrap();
     }
 
     #[test]

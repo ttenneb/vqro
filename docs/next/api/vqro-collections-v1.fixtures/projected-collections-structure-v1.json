@@ -1,0 +1,21 @@
+[
+  {
+    "collection_id": "collection_42",
+    "label": "Helpers",
+    "members": [
+      {
+        "archived": false,
+        "index": 0,
+        "pane_id": "pane_1"
+      },
+      {
+        "archived": true,
+        "index": 1,
+        "pane_id": "pane_2"
+      }
+    ],
+    "selected_pane_id": "pane_1",
+    "tab_id": "tab_11111111111111111111111111111111",
+    "workspace_id": "w1"
+  }
+]

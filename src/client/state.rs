@@ -217,6 +217,11 @@ impl ClientState {
         } else {
             self.blit_encoder.encode(&frame_data, self.repaint_pending)
         };
+        if encoded.bytes.is_empty() {
+            self.blit_encoder.commit(frame_data, encoded);
+            self.repaint_pending = false;
+            return;
+        }
         let mut stdout = io::stdout();
         let graphics = if self.kitty_graphics_enabled {
             frame_data.graphics.as_slice()

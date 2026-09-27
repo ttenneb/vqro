@@ -1,32 +1,53 @@
 ---
 title: Plugins
-description: Author local Herdr plugins with manifest actions, event hooks, and panes.
+description: Author vqro extensions with versioned manifests and supervised services.
 ---
 
-Herdr plugins are shareable, executable workflow packages. A plugin can be a
-Bash script, JavaScript app, Lua script, Rust binary, or any other argv command
-your machine can run. Herdr owns the host surface: installation, manifest
-validation, keybindings, terminal panes, events, invocation context, and socket
-access. The plugin owns its implementation language, dependencies, files, and
-durable state.
+Vqro currently has two distinct extension models:
 
-Plugins exist so Herdr can stay lean. The core stays focused on terminal
-workspaces, panes, agents, and a stable CLI/socket API. Plugins turn that
-existing extension surface into reusable workflows that people can build,
-install, and share without adding every workflow to Herdr itself.
+- **Legacy executable plugins** use manifest v1. Their actions, hooks, panes, and
+  protocol-2 services run as trusted same-user processes and may be scripts or
+  binaries in any language.
+- **Component extension packages** use manifest v2 inside deterministic
+  `.vqrox` archives. Git-installed executable packages run as WebAssembly
+  Component Model components under Wasmtime with only the checked-in Vqro WIT
+  world linked, run no repository build commands, and cannot request the native
+  process backend.
 
-A plugin is a directory with a `herdr-plugin.toml` manifest and commands Herdr
-can launch. Herdr validates the manifest, injects runtime context, starts the
-declared commands, and records logs. The commands call back into Herdr through
-the CLI or socket when they need to do more work.
+Vqro owns PTYs, terminal identity, layout, focus, input, accessibility,
+validation, supervision, and host effects. Extensions publish bounded
+contributions rather than receiving PTY handles or renderer internals.
 
-There is no separate plugin SDK or restricted command set. The entire Herdr CLI
-is the plugin API. Every command in the
-[CLI reference](/docs/cli-reference/) is available to a plugin, and a plugin can
-run anything you can run yourself as `herdr ...`. Most plugins should call Herdr
-through `HERDR_BIN_PATH`, which points at the running Herdr binary. That keeps
-plugins portable across Unix sockets and Windows named pipes. Use the
-[socket API](/docs/socket-api/) when you want to send raw JSON requests yourself.
+Legacy plugins use `vqro-extension.toml` with contract
+`vqro.extension-manifest.v1`; supervised process services use
+`vqro.extension-service.v1`; production host documents use `host.document.v1`.
+The `herdr-plugin.toml` and `min_herdr_version` spellings remain read-only
+compatibility aliases.
+
+The additive manifest-v2 and deterministic `.vqrox` package contracts are
+specified in `docs/next/api/vqro-package-v1.md`. Their package lifecycle and
+restricted component runtime are implemented, but installed components do not
+yet receive production host-call leases, provider admission, visible document
+publication, or feature authority. See [Extension platform status](/docs/extension-platform-status/).
+Local package files are installed into immutable content-addressed storage;
+developer-directory links require explicit trust and remain visibly mutable.
+
+Validate the same parser and limits used by the host before publishing:
+
+```bash
+vqro plugin validate ./my-extension
+vqro plugin conformance ./my-extension --json
+```
+
+`validate` is offline and never executes extension code. `conformance` starts
+each declared service through production supervision,
+performs the real protocol-2 hello/welcome capability negotiation, and then
+terminates it. It never grants capabilities absent from the manifest. The `extensions/reference-host-document/` package is the in-tree packaging and conformance reference. Marketplace indexing remains a separate lifecycle concern; this package is not advertised as natively installable until that lifecycle can verify and install its source.
+
+Extensions can call the vqro CLI or the public JSON socket API. `vqro api
+describe --json` reports the native `vqro.api.v1` contract and schema digest;
+`vqro api schema --json` prints that schema. This identity is independent from
+the private runtime protocol and the frozen generation-1 Herdr client bridge.
 
 Runtime action registration and native non-terminal plugin UI are not part of
 plugin v1. Actions, event hooks, panes, and link handlers are all declared in
@@ -34,22 +55,25 @@ the manifest.
 
 ## Trust and security
 
-A plugin is ordinary code that runs on your machine. Its build and runtime
-commands run as your user, inherit your environment, and can call the full Herdr
-CLI. Treat a plugin like any extension you add to an editor, shell, or coding
-agent.
+A legacy executable plugin is ordinary code that runs on your machine. Its build
+and runtime commands run as your user, inherit the documented plugin
+environment, and can call the full Herdr CLI. Treat it like any extension you
+add to an editor, shell, or coding agent. Process supervision and descendant
+containment are lifecycle controls, not an OS sandbox.
 
-Install or link plugins only from authors and repositories you trust. Before
-installing or linking one, skim the `herdr-plugin.toml` manifest and the scripts
-or binaries it runs. `herdr plugin install` shows a preview of the source and
-the commands it will run in interactive terminals, so you can review before
-confirming. Use `--yes` for
-sources you already trust, and pin `--ref` when you want a specific revision.
+Install or link legacy plugins only from authors and repositories you trust.
+Before installing one, inspect the manifest and the scripts or binaries it runs.
+`vqro plugin install` shows the source and commands it will execute, so you can
+review them before confirmation. Use `--yes` only for sources you already trust,
+and pin `--ref` when you need a specific revision.
 
-Herdr validates the manifest and keeps each plugin's config and state in its own
-directory, but it does not review or sandbox plugin code. Third-party plugins
-come from their authors, not Herdr; you are responsible for deciding whether to
-run them.
+Component extension packages have a different trust model. The arbitrary-Git
+package journey accepts only an exact commit containing a deterministic
+`.vqrox`, executes no repository build command, rejects native process services,
+and links no ambient WASI filesystem, network, process, environment, clock, or
+socket interfaces. Curated status does not add capabilities. A component still
+crosses a security boundary implemented by Vqro and Wasmtime; review its source,
+requested capabilities, revision, and digests before installation.
 
 ## Manifest
 
@@ -58,10 +82,11 @@ metadata, supported platforms, optional build commands, and the entrypoints
 Herdr can run.
 
 ```toml
+manifest_version = 1
 id = "example.layout"
 name = "Layout"
 version = "0.1.0"
-min_herdr_version = "0.7.0"
+min_vqro_version = "0.7.0"
 description = "Apply project layouts"
 platforms = ["linux", "macos", "windows"]
 
@@ -98,8 +123,8 @@ pattern = "^https://github\\.com/[^/]+/[^/]+/(issues|pull)/[0-9]+$"
 action = "apply"
 ```
 
-Top-level `id`, `name`, `version`, and `min_herdr_version` are required.
-Set `min_herdr_version` to the oldest Herdr version that supports the plugin
+Top-level `manifest_version = 1`, `id`, `name`, `version`, and `min_vqro_version` are required by the native schema.
+Set `min_vqro_version` to the oldest vqro version that supports the plugin
 APIs, event names, and manifest fields your plugin uses. Herdr refuses to link
 or install a plugin when its minimum version is newer than the current binary.
 `description` is optional. Plugin ids may use ASCII letters, digits, dot,
@@ -122,20 +147,21 @@ language-specific behavior in your script or binary.
 
 ## First plugin
 
-Start with a directory that contains `herdr-plugin.toml` and one executable
+Start with a directory that contains `vqro-extension.toml` and one executable
 script or program:
 
 ```text
 my-plugin/
-  herdr-plugin.toml
+  vqro-extension.toml
   index.js
 ```
 
 ```toml
+manifest_version = 1
 id = "example.workspace-tools"
 name = "Workspace Tools"
 version = "0.1.0"
-min_herdr_version = "0.7.0"
+min_vqro_version = "0.7.0"
 description = "Small workspace helpers"
 platforms = ["linux", "macos", "windows"]
 
@@ -171,21 +197,21 @@ available on the user's machine.
 Install an example plugin:
 
 ```bash
-herdr plugin install ogulcancelik/herdr-plugin-examples/agent-telegram-notify
-herdr plugin config-dir examples.agent-telegram-notify
-herdr plugin list
-herdr plugin action list --plugin examples.agent-telegram-notify
+vqro plugin install ogulcancelik/herdr-plugin-examples/agent-telegram-notify
+vqro plugin config-dir examples.agent-telegram-notify
+vqro plugin list
+vqro plugin action list --plugin examples.agent-telegram-notify
 ```
 
 When you are authoring a local plugin, link the working directory instead:
 
 ```bash
-herdr plugin link /path/to/plugin
-herdr plugin config-dir example.layout
-herdr plugin action list --plugin example.layout
-herdr plugin action invoke example.layout.apply
-herdr plugin pane open --plugin example.layout --entrypoint board
-herdr plugin log list --plugin example.layout
+vqro plugin link /path/to/plugin
+vqro plugin config-dir example.layout
+vqro plugin action list --plugin example.layout
+vqro plugin action invoke example.layout.apply
+vqro plugin pane open --plugin example.layout --entrypoint board
+vqro plugin log list --plugin example.layout
 ```
 
 `plugin install` accepts GitHub shorthand only, such as
@@ -221,7 +247,7 @@ Build commands run during GitHub `plugin install` after confirmation and before
 Herdr registers the plugin. If a build command fails, install aborts and the
 plugin is not registered. `plugin link` does not run build commands; local
 authors build their working tree themselves. Build commands may generate files,
-but changing `herdr-plugin.toml` after the install preview aborts install. Build
+but changing `vqro-extension.toml` after the install preview aborts install. Build
 failures show the plugin id, build index, working directory, command, exit
 status or spawn error, and capped stdout/stderr without interpreting tool output.
 
@@ -247,6 +273,79 @@ and exit. For example, a plugin can save a declarative Agent view under
 Startup hooks receive the normal runtime plugin environment and
 `HERDR_PLUGIN_EVENT=startup`. The install preview lists every startup command so
 users can review code that will run automatically.
+
+## Supervised document services
+
+A plugin can declare a long-running `[[services]]` entry with
+`provides = ["host_document"]`, `capabilities = ["host_document"]`, and
+`document_source = "terminal_groups"` (the default). The command speaks the
+versioned extension-service JSON-lines protocol over stdin/stdout. After its
+protocol-2 `hello`/`welcome` handshake, Herdr sends correlated
+`host.document.render` requests containing a bounded `host.terminal-groups.v1`
+snapshot. The service returns a validated `host.document.v1` semantic document.
+Documents describe roles, labels, hierarchy, stable terminal references, and
+actions; Herdr continues to own terminal processes, geometry, focus, input,
+colors, accessibility, admission, and rendering. Rendering uses the last
+validated cached document rather than making per-frame service calls.
+
+The bundled `vqro.delegation` and `vqro.agent-status` compatibility providers
+use this public process-service and document protocol, but their implementations
+remain compiled into Vqro and their manifests self-spawn the current Vqro binary.
+Their shipped declarations drive runtime service identity, source, priority, and
+capabilities. They are enabled by default and can be disabled independently:
+
+```toml
+[extensions]
+disabled = ["vqro.delegation", "vqro.agent-status"]
+```
+
+Collections and Spaces are not bundled providers. They are independently built,
+exact-Git-pinned component packages shown as **sandboxed packages** in
+Extensions. Their compiled providers and bundled catalog rows have been removed;
+when either exact package is unavailable, its product-specific authority fails
+closed while generic workspace, tab, pane, and PTY access remains available.
+See [Extension platform status](/docs/extension-platform-status/) for their
+production authority boundaries.
+
+The `relationships` and `agent_activity` document sources carry host-derived
+relationship or attributed activity facts and remain restricted to their
+matching bundled providers. Spaces instead receives one complete bounded
+`host.spaces.v1` snapshot as the exact package invocation parameter and has no
+host-call capability. The `host.spaces.v1`, `host.relationships.v1`, and
+`host.agent-activity.v1` JSON contracts remain versioned boundaries. Agent
+activity is neutral
+(`idle`, `working`, `blocked`, or `unknown`); each client still derives `done`
+from its own acknowledgement cursor. User document providers use the public
+terminal-group source. The namespaces `vqro.collections`, `vqro.spaces`,
+`vqro.delegation`, `vqro.agent-status`, and `host.fallback` are reserved.
+
+### Experimental and foundation contracts
+
+The following contracts are available for development and conformance
+experiments, but are not part of the stable third-party authoring surface yet.
+Contract presence in source or a generated schema does not imply a production
+capability lease, provider admission, or client-visible publication.
+
+Supervised services can also request the additive `action_choices` capability.
+Dynamic choices use only the fixed `host.action.choices.v1` and
+`host.action.choice.invoke.v1` service methods. Choice sets are bounded and
+fenced by provider generation, context revision, set identity, and set revision;
+invocation sends only a validated choice ID. A provider cannot declare an
+arbitrary choices subprocess, and choice discovery never runs from rendering.
+Confirmation remains host-owned.
+
+The client-neutral `host.terminal-resource.v1` contract defines transient,
+terminal-owned provider resources. Publications are complete atomic
+replacements fenced by active provider generation, aggregate client-interest
+revision, and publication revision. TTLs use host monotonic time. Client
+connection generations prevent delayed disconnects from clearing a replacement
+connection's interest. Resources are cached data only: providers never own the
+PTY, terminal lifetime, coordinates, focus, input, or per-frame rendering.
+
+`host.acknowledgement.v1` defines a client-local epoch/sequence cursor for
+presentation acknowledgement. It advances only from coherent focused
+presentation evidence. Shared provider documents continue to publish neutral
+activity; each client independently derives Done.
 
 ## Commands and environment
 
@@ -354,21 +453,50 @@ name an action declared by the same plugin. Link handler actions receive
 `HERDR_PLUGIN_CLICKED_URL` and `HERDR_PLUGIN_LINK_HANDLER_ID`. Handlers are
 checked in manifest order inside each plugin.
 
-## Storage
+## Native document API and events
 
-There is no Herdr-managed plugin storage API in v1. Plugins that need durable
-state should own their files or database.
+Non-TUI clients can read the same cached projection with
+`host.document.list`, optionally filtered by `namespace` and `scope_id`.
+Responses contain validated documents, provider priority, and any short-lived
+host-issued confirmation tokens needed by `host.document.action`; providers are
+never called from the list request. Subscribe to `host.document.updated` and
+re-list after each matching event. The event carries namespace, scope,
+generation, revision, and availability, while the list remains the authoritative
+bounded snapshot.
+
+## Durable extension state
+
+Herdr exposes the additive `host.extension-state.v1` contract through
+`extension.state.snapshot.v1`, `extension.state.transact.v1`, and
+`extension.state.events.v1`. State is partitioned by a namespaced owner ID and
+stores bounded opaque JSON values. Transactions require the current store
+generation and namespace revision, include an idempotency key, and commit all
+key updates atomically. A successful response is returned only after the
+candidate store has been atomically persisted. Failed validation or persistence
+leaves the previous store unchanged.
+
+Events have a bounded replay tail and an explicit `gap` result. Successful
+publication also emits `extension.state.committed` through the normal event
+subscription API; the event identifies the store, namespace revision, and
+committed sequence. Consumers must request a new snapshot after a gap or
+store-identity change rather than assuming
+missing events. Rejected persisted bytes remain authoritative and block writes
+until repaired or removed. Namespacing prevents accidental collisions; it is
+not a security boundary between plugins, which already execute as the same OS
+user. Plugin-owned files under `HERDR_PLUGIN_STATE_DIR` remain available for
+formats that do not need shared host transactions.
 
 ## Marketplace
 
-Community plugins are discoverable in the [marketplace](/plugins/), an automatic
-index of public GitHub repositories tagged with `herdr-plugin` that contain one
-or more `herdr-plugin.toml` files whose required metadata can be parsed. Plugins
-stay ordinary GitHub repositories: publish one, then share
-`herdr plugin install owner/repo[/subdir]`.
+The community [marketplace](/plugins/) remains a legacy compatibility surface:
+it indexes public GitHub repositories tagged with `herdr-plugin` that contain
+`herdr-plugin.toml`. The Vqro Extensions marketplace is separate. It uses a
+checked-in curated index and can inspect and install deterministic `.vqrox`
+component packages from exact Git commits without running repository build
+commands.
 
-To get plugins listed, add the GitHub topic `herdr-plugin` and place their
+For legacy listing, add the GitHub topic `herdr-plugin` and place compatibility
 manifests at the root or in subdirectories of the repository's default branch.
 One repository card can contain multiple separately installable plugins. The
 index refreshes every 30 minutes. See
-[Marketplace](/docs/marketplace/) for how discovery works.
+[Marketplace](/docs/marketplace/) for both discovery paths.

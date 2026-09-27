@@ -1,0 +1,58 @@
+{
+  "$defs": {
+    "CollectionsDocumentCollectionV1": {
+      "additionalProperties": false,
+      "properties": {
+        "container_id": {
+          "maxLength": 26,
+          "minLength": 26,
+          "pattern": "^container_[0-9a-f]{16}$",
+          "type": "string"
+        },
+        "label": {
+          "maxLength": 4096,
+          "pattern": "^[^\\u0000-\\u001F\\u007F-\\u009F]*$",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "container_id"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "https://vqro.dev/schema/collections/document-profile/v1",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "contract": "vqro.collections.document-profile.v1",
+  "properties": {
+    "collections": {
+      "items": {
+        "$ref": "#/$defs/CollectionsDocumentCollectionV1"
+      },
+      "maxItems": 512,
+      "type": "array"
+    },
+    "contract": {
+      "const": "vqro.collections.document-profile.v1",
+      "type": "string"
+    },
+    "document": {
+      "$ref": "https://vqro.dev/schema/host-document/v2"
+    }
+  },
+  "required": [
+    "contract",
+    "document",
+    "collections"
+  ],
+  "title": "vqro Collections document profile v1",
+  "type": "object",
+  "validation_authority": {
+    "json_schema": "structural and per-field constraints",
+    "rust_validator": "normative for exact topology coverage, canonical node ids, archive shape, ordering, and synchronized compatibility projection"
+  }
+}

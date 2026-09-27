@@ -1,10 +1,10 @@
 # Agentic multiplexer direction
 
-Status: exploration note
+Status: direction
 
 Vqro is exploring an open, extensible agentic multiplexer: a terminal-native environment in which humans, agents, tools, and automation can share work without being forced into one provider, one workflow, or one hosted service.
 
-This is a direction, not a settled product specification. It describes hypotheses worth preserving while Vqro is built, not claims that the current implementation already satisfies them. Agentic work is new enough that its durable interaction model is not yet known. Vqro should provide a useful opinionated experience while keeping that experience inspectable, replaceable, and open to alternatives.
+This is a direction, not a settled product specification or an implementation mandate. Accepted decisions in this directory remain the binding implementation boundary. This note describes hypotheses worth preserving while Vqro is built, not claims that the current implementation already satisfies them. Agentic work is new enough that its durable interaction model is not yet known. Vqro should provide a useful opinionated experience while keeping that experience inspectable, replaceable, and open to alternatives.
 
 ## What Vqro multiplexes
 
@@ -21,6 +21,8 @@ Participants, including the human, may address intent to Vqro rather than only t
 
 These concerns do not imply that one task model, hierarchy, or coordination policy belongs in the host. PTYs are canonical for execution and recovery, not automatically the source of truth for work, messaging, or authority. These concerns describe the problem space that extensions and users should be able to explore.
 
+Each fact should have exactly one authoritative owner: the host for terminals, sessions, and identity; a package for its declared semantic domain; and an external system such as Git for its own state. Vqro should project and compose those facts into unified views without duplicating their authority.
+
 ## A useful default, not a final ontology
 
 The initial experience is aimed at a solo power user coordinating terminal-native work. It may use workspaces, delegated subtrees, structured messages, bounded authority, attention views, and evidence-based completion. That batteries-included reference composition should be useful without additional assembly, but it is not Vqro's core ontology.
@@ -31,11 +33,11 @@ The communication and responsibility structure of a group influences what it pro
 
 ## Platform boundary
 
-A working hypothesis is that a neutral host should preserve access and integrity when opinionated extensions are absent or broken. Likely host mechanisms include real terminal sessions, stable identities, lifecycle, persistence, recovery, capability enforcement, package execution, and public communication boundaries. The exact boundary remains open.
+A working hypothesis is that a neutral host should preserve access and integrity when opinionated extensions are absent or broken. Likely host mechanisms include real terminal sessions, stable identities, lifecycle, persistence, recovery, capability enforcement, package execution, and public communication boundaries. The exact boundary remains open. A package failure should fail closed for that package's authority, not for the session: generic terminal access and recovery remain usable.
 
 Product meaning and policy should live outside that neutral substrate wherever practical. First-party experiences should converge on the same public contracts available to independently developed extensions; inherited or transitional privileged paths are implementation state, not an intended architectural advantage. Being bundled or curated should describe discovery and distribution rather than grant additional execution authority. Public-contract compatibility makes a package eligible for documented review and admission; it does not itself grant capabilities, namespace ownership, or feature authority.
 
-This boundary will be refined from working vertical slices rather than by designing a universal agent ontology in advance. Extension work should be bounded and event-driven, not coupled to terminal bytes, client count, or render frames.
+This boundary will be refined from working vertical slices rather than by designing a universal agent ontology in advance. Extension work should be bounded and not coupled to terminal bytes, client count, or render frames.
 
 ## Extensible experience
 
@@ -53,9 +55,19 @@ Agents and extensions have different trust boundaries. Sandboxed extension packa
 
 Model intelligence may improve routing, summarization, or policy, but no particular model should be required for the basic environment. Intelligent layers should consume public state, remain inspectable and replaceable, and act only within explicit user authority. Routing decisions should be recorded, visible, and overridable, with an explicit direct path always available. Sharing context does not itself transfer permission to act.
 
+## Coordination hypotheses
+
+Agent coordination is the next area to test. These hypotheses guide its proposals:
+
+- Durable agent messages have their own record of truth. Injecting text into a terminal or editor may be one delivery adapter, but it is never the message of record or evidence of delivery.
+- Durable addressed messages and volatile observations are separate lanes with different guarantees; one mechanism should not be stretched to serve both.
+- Activation is authorized. An agent turn starts only from a human action or an approved, recorded policy; queued state, receipts, or status changes never start one by themselves.
+- Transport receipts, admission, execution, and accepted outcomes are distinct states. A receipt is not acceptance.
+- Agent integrations should sit behind a neutral adapter boundary rather than making any one agent's session model part of the host.
+
 ## Relationship to terminal backends
 
-Vqro currently contains Herdr-derived terminal/session runtime code; it does not yet sit above a separate, replaceable Herdr backend. A future neutral backend boundary may allow another implementation to participate without rebuilding the product experience around backend internals.
+Vqro currently contains Herdr-derived terminal/session runtime code; it does not sit above a separate, replaceable Herdr backend. A future neutral backend boundary may allow another implementation to participate without rebuilding the product experience around backend internals.
 
 This is a direction rather than a near-term compatibility promise. Real PTYs, provider-independent reachability, and recovery remain more important than prematurely generalizing a backend interface.
 
@@ -64,11 +76,12 @@ This is a direction rather than a near-term compatibility promise. Real PTYs, pr
 This note does not freeze:
 
 - a universal task, message, actor, or organization schema;
+- the durable messaging, activation, or agent-adapter contracts;
+- how intent is interpreted, routed, or branched into derived contexts;
 - the final boundary between neutral host services and extension-owned services;
 - one hierarchy, autonomy model, or attention policy;
 - a complete UI toolkit or workspace-lens protocol;
 - multi-human collaboration or synchronization semantics;
-- how intent is interpreted, routed, or branched into derived contexts;
 - a required intelligent router or model provider; or
 - the eventual business or governance structure of the ecosystem.
 

@@ -1,0 +1,23 @@
+{
+  "contract": "vqro.collections.action-invocation.v1",
+  "ticket": "ticket:01HX7M18DB",
+  "idempotency_key": "collection-set-archived:01HX7M18DB",
+  "document_revision": 7,
+  "actions_revision": 9,
+  "action_id": "set-archived:term_11111111111111111111111111111111",
+  "expected_store_generation": 2,
+  "expected_namespace_revision": 3,
+  "dependency": {
+    "kind": "terminal_membership",
+    "container_id": "container_000000000000002a",
+    "terminal_id": "term_11111111111111111111111111111111",
+    "terminal_snapshot_fingerprint_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "provider_generation": 5
+  },
+  "input": {
+    "kind": "set_archived",
+    "container_id": "container_000000000000002a",
+    "terminal_id": "term_11111111111111111111111111111111",
+    "archived": true
+  }
+}

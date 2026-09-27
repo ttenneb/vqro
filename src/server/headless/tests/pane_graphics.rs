@@ -221,11 +221,24 @@ async fn retained_unicode_image_arrives_after_fragmented_upload_without_reupload
     };
     assert_eq!(surface.graphics.placements.len(), 1);
     assert_eq!(surface.graphics.assets[0].data, [255, 0, 0, 255]);
-    // Replacing pixels under the same image ID must invalidate the delivered asset.
+    // Retransmission removes placements; recreating the virtual placement must
+    // invalidate the delivered asset without needing another text update.
     write_shared_test_pane(
         &mut server,
         pane_id,
         b"\x1b_Ga=t,f=32,t=d,i=1193046,s=1,v=1,q=2;AP8A/w==\x1b\\",
+    );
+    assert!(server.render_retained_pane_surface_and_stream(&sources));
+    let ServerMessage::PaneSurface(removed) =
+        read_server_message(receive_render(&client_rx, Duration::from_millis(100)))
+    else {
+        panic!("retransmission must remove the virtual placement");
+    };
+    assert!(removed.graphics.placements.is_empty());
+    write_shared_test_pane(
+        &mut server,
+        pane_id,
+        b"\x1b_Ga=p,U=1,i=1193046,c=1,r=1,q=2\x1b\\",
     );
     assert!(server.render_retained_pane_surface_and_stream(&sources));
     let ServerMessage::PaneSurface(replaced) =
@@ -490,6 +503,7 @@ fn stream_set_message(
     let (respond_to, response_rx) = std::sync::mpsc::channel();
     (
         api::ApiRequestMessage {
+            origin: crate::api::ApiOrigin::LocalSocket,
             request: api::schema::Request {
                 id: id.into(),
                 method: api::schema::Method::PaneGraphicsStreamSet(
@@ -554,6 +568,7 @@ fn direct_stream_message(
     let (respond_to, response_rx) = std::sync::mpsc::channel();
     (
         api::ApiRequestMessage {
+            origin: crate::api::ApiOrigin::LocalSocket,
             request: api::schema::Request {
                 id: id.into(),
                 method: api::schema::Method::PaneGraphicsStreamDirect(
@@ -581,28 +596,22 @@ fn direct_stream_message(
 }
 
 #[tokio::test]
-async fn pixel_mouse_activation_requires_graphics_demand_not_direct_transport() {
-    let (mut server, _client_rx, pane_id) =
+async fn pixel_mouse_activation_follows_child_1016_without_graphics_demand() {
+    let (mut server, _client_rx, _pane_id) =
         retained_test_server(b"\x1b[?1003h\x1b[?1006h\x1b[?1016h");
     let (writer, control_rx, _render_rx) = test_client_writer();
     let client = server.clients.get_mut(&1).unwrap();
     client.writer = Some(writer);
     client.direct_graphics = false;
     client.pixel_mouse = true;
+    client.cell_size = crate::kitty_graphics::HostCellSize {
+        width_px: 10,
+        height_px: 20,
+    };
     client.host_mouse_capture_active = None;
     client.host_sgr_pixels_active = None;
     server.app.direct_graphics_available = false;
 
-    server.stream_host_mouse_capture_mode();
-    assert!(matches!(
-        read_server_message(control_rx.recv_timeout(Duration::from_millis(100)).unwrap()),
-        ServerMessage::MouseCapture {
-            enabled: true,
-            sgr_pixels: false
-        }
-    ));
-
-    set_graphics_layer(&mut server, pane_id, vec![1, 2, 3]);
     server.stream_host_mouse_capture_mode();
     assert!(matches!(
         read_server_message(control_rx.recv_timeout(Duration::from_millis(100)).unwrap()),
@@ -649,6 +658,7 @@ fn stream_open_gate_is_owned_by_the_layer_and_cancels_on_removal() {
     let (respond_to, response_rx) = std::sync::mpsc::channel();
 
     server.handle_api_request_with_shutdown_check(api::ApiRequestMessage {
+        origin: crate::api::ApiOrigin::LocalSocket,
         request: api::schema::Request {
             id: "open-gated".into(),
             method: api::schema::Method::PaneGraphicsStreamOpen(
@@ -754,6 +764,7 @@ fn stream_set_has_graphics_only_render_impact() {
     server.app.pane_graphics.clear();
     let (respond_to, _response_rx) = std::sync::mpsc::channel();
     let impact = server.handle_api_request_with_render_impact(api::ApiRequestMessage {
+        origin: crate::api::ApiOrigin::LocalSocket,
         request: api::schema::Request {
             id: "direct-frame".into(),
             method: api::schema::Method::PaneGraphicsSet(api::schema::PaneGraphicsSetParams {
@@ -789,6 +800,7 @@ fn rejected_or_stale_requests_do_not_schedule_rendering() {
 
     let (respond_to, response_rx) = std::sync::mpsc::channel();
     let changed = server.handle_api_request_with_shutdown_check(api::ApiRequestMessage {
+        origin: crate::api::ApiOrigin::LocalSocket,
         request: api::schema::Request {
             id: "disabled-set".into(),
             method: api::schema::Method::PaneGraphicsSet(api::schema::PaneGraphicsSetParams {
@@ -824,6 +836,7 @@ fn rejected_or_stale_requests_do_not_schedule_rendering() {
     set_stream_owner(&mut server, pane_id, "current-owner");
     let (respond_to, response_rx) = std::sync::mpsc::channel();
     let impact = server.handle_api_request_with_render_impact(api::ApiRequestMessage {
+        origin: crate::api::ApiOrigin::LocalSocket,
         request: api::schema::Request {
             id: "stale-close".into(),
             method: api::schema::Method::PaneGraphicsStreamClose(

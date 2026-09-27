@@ -1,7 +1,9 @@
 use serde::{Deserialize, Serialize};
 
 use super::agents::AgentInfo;
+use super::collections::CollectionInfo;
 use super::common::{ClientWindowTitleReason, NotificationShowReason};
+use super::delegations::{DelegationInfo, DelegationTreeEntry};
 use super::events::EventEnvelope;
 use super::integrations::{
     IntegrationInstallResult, IntegrationTarget, IntegrationUninstallResult,
@@ -9,7 +11,7 @@ use super::integrations::{
 use super::panes::{
     LayoutDescription, PaneEdgesResult, PaneFocusDirectionResult, PaneInfo, PaneLayoutSnapshot,
     PaneMoveResult, PaneNeighborResult, PaneProcessInfo, PaneReadResult, PaneResizeResult,
-    PaneSwapResult, PaneTextPoint, PaneTextRange, PaneZoomResult,
+    PaneSwapResult, PaneTelemetry, PaneTextPoint, PaneTextRange, PaneZoomResult,
 };
 use super::plugins::{
     InstalledPluginInfo, PluginActionInfo, PluginCommandLogInfo, PluginInvocationContext,
@@ -50,6 +52,18 @@ pub enum ResponseResult {
     },
     SessionSnapshot {
         snapshot: Box<SessionSnapshot>,
+    },
+    ExtensionStateSnapshot {
+        snapshot: crate::extension_state::ExtensionStateSnapshotV1,
+    },
+    ExtensionStateCommitted {
+        commit: crate::extension_state::ExtensionStateCommitV1,
+    },
+    ExtensionStateEvents {
+        page: crate::extension_state::ExtensionStateEventPageV1,
+    },
+    HostDocumentList {
+        documents: Vec<super::HostDocumentProjection>,
     },
     WorkspaceInfo {
         workspace: WorkspaceInfo,
@@ -114,6 +128,21 @@ pub enum ResponseResult {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         label: Option<String>,
     },
+    CollectionInfo {
+        collection: CollectionInfo,
+    },
+    CollectionList {
+        collections: Vec<CollectionInfo>,
+    },
+    DelegationInfo {
+        delegation: DelegationInfo,
+    },
+    DelegationTree {
+        delegations: Vec<DelegationTreeEntry>,
+    },
+    DelegationList {
+        delegations: Vec<DelegationInfo>,
+    },
     PaneInfo {
         pane: PaneInfo,
     },
@@ -137,6 +166,9 @@ pub enum ResponseResult {
     },
     PaneProcessInfo {
         process_info: PaneProcessInfo,
+    },
+    PaneTelemetry {
+        telemetry: PaneTelemetry,
     },
     LayoutExport {
         layout: LayoutDescription,
@@ -266,6 +298,41 @@ pub enum ResponseResult {
     PluginDisabled {
         plugin: InstalledPluginInfo,
     },
+    ExtensionList {
+        extensions: Vec<super::extensions::ExtensionInfo>,
+    },
+    ExtensionChanged {
+        extension: super::extensions::ExtensionInfo,
+    },
+    ExtensionDataDeleted {
+        repository: String,
+    },
+    ExtensionPackageInspected {
+        inspection: super::extensions::ExtensionPackageInspection,
+    },
+    ExtensionPackageList {
+        packages: Vec<super::extensions::InstalledExtensionPackageInfo>,
+    },
+    ExtensionPackageChanged {
+        package: super::extensions::InstalledExtensionPackageInfo,
+    },
+    ExtensionServiceBindingInspected {
+        inspection: super::extensions::ExtensionServiceBindingInspection,
+    },
+    ExtensionServiceBindingList {
+        registry_revision: u64,
+        bindings: Vec<super::extensions::ExtensionServiceBindingInfo>,
+    },
+    ExtensionServiceBindingChanged {
+        binding: super::extensions::ExtensionServiceBindingInfo,
+    },
+    ExtensionServiceBindingInvoked {
+        binding_id: String,
+        result: serde_json::Value,
+    },
+    ExtensionDoctorDiagnostic {
+        diagnostic: crate::extension_health::ExtensionDoctorDiagnosticV1,
+    },
     PluginActionList {
         actions: Vec<PluginActionInfo>,
     },
@@ -273,6 +340,9 @@ pub enum ResponseResult {
         action: PluginActionInfo,
         context: PluginInvocationContext,
         log: PluginCommandLogInfo,
+    },
+    PaneLinkResolved {
+        regions: Vec<super::panes::PaneLinkRegion>,
     },
     PaneLinkActivated {
         #[serde(default, skip_serializing_if = "Option::is_none")]

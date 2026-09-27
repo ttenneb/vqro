@@ -7,6 +7,7 @@ use super::{model::LoadedConfig, Config, CONFIG_PATH_ENV_VAR};
 const KNOWN_TOP_LEVEL_CONFIG_KEYS: &[&str] = &[
     "advanced",
     "experimental",
+    "extensions",
     "keys",
     "onboarding",
     "remote",
@@ -20,11 +21,7 @@ const KNOWN_TOP_LEVEL_CONFIG_KEYS: &[&str] = &[
 ];
 
 pub fn app_dir_name() -> &'static str {
-    if cfg!(debug_assertions) {
-        "herdr-dev"
-    } else {
-        "herdr"
-    }
+    crate::product::app_dir_name(cfg!(debug_assertions))
 }
 
 pub fn config_dir() -> PathBuf {
@@ -93,9 +90,35 @@ fn platform_state_dir() -> PathBuf {
     }
 }
 
-fn read_optional_config(path: &Path) -> std::io::Result<Option<String>> {
+/// Normalize UTF-8 byte-order marks in config text.
+///
+/// TOML tolerates a single BOM at the very start of the document, but a BOM at
+/// the start of a later line makes the parser reject the whole file. A
+/// line-oriented edit can displace a leading BOM into the middle of the file,
+/// so drop line-start BOMs that the TOML parser actually rejects. A U+FEFF that
+/// is valid string data is kept, because its parse error would not point at it.
+fn normalize_utf8_bom(content: &str) -> String {
+    let content = content.strip_prefix('\u{feff}').unwrap_or(content);
+    if !content.contains('\u{feff}') {
+        return content.to_owned();
+    }
+
+    let mut normalized = content.to_owned();
+    while let Err(error) = normalized.parse::<toml::Value>() {
+        let Some(span) = error.span() else {
+            break;
+        };
+        if normalized.get(span.clone()) != Some("\u{feff}") {
+            break;
+        }
+        normalized.replace_range(span, "");
+    }
+    normalized
+}
+
+pub(super) fn read_optional_config(path: &Path) -> std::io::Result<Option<String>> {
     match std::fs::read_to_string(path) {
-        Ok(content) => Ok(Some(content)),
+        Ok(content) => Ok(Some(normalize_utf8_bom(&content))),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(err) => Err(err),
     }
@@ -348,6 +371,14 @@ fn load_live_config_from_str(content: &str) -> Result<LoadedConfig, Vec<String>>
         &mut diagnostics,
         &mut invalid_sections,
         |section| config.remote = section,
+    );
+    load_live_section(
+        table,
+        "extensions",
+        "extensions config",
+        &mut diagnostics,
+        &mut invalid_sections,
+        |section| config.extensions = section,
     );
 
     diagnostics.extend(config.theme.diagnostics());
@@ -875,6 +906,25 @@ resume_agents_on_restore = true
     }
 
     #[test]
+    fn load_live_config_preserves_bundled_extension_disables() {
+        let loaded = load_live_config_from_str(
+            r#"
+[extensions]
+disabled = ["vqro.collections"]
+"#,
+        )
+        .unwrap();
+
+        assert!(loaded
+            .config
+            .extensions
+            .disabled
+            .contains("vqro.collections"));
+        assert!(loaded.diagnostics.is_empty());
+        assert!(loaded.invalid_sections.is_empty());
+    }
+
+    #[test]
     fn load_live_config_warns_about_unknown_theme_names() {
         let loaded = load_live_config_from_str(
             r#"
@@ -1107,5 +1157,69 @@ mouse_capture = false
         let (updated, removed) = remove_keybinding_config_sections(content);
         assert!(!removed);
         assert_eq!(updated, content);
+    }
+
+    #[test]
+    fn normalize_utf8_bom_removes_a_leading_bom() {
+        let content = "\u{feff}onboarding = false\n[terminal]\n";
+        assert_eq!(
+            normalize_utf8_bom(content),
+            "onboarding = false\n[terminal]\n"
+        );
+    }
+
+    #[test]
+    fn normalize_utf8_bom_recovers_from_a_displaced_mid_file_bom() {
+        let content = "onboarding = false\n\u{feff}[terminal]\ndefault_shell = \"pwsh.exe\"\n";
+        let normalized = normalize_utf8_bom(content);
+        assert_eq!(
+            normalized,
+            "onboarding = false\n[terminal]\ndefault_shell = \"pwsh.exe\"\n"
+        );
+        assert!(normalized.parse::<toml::Value>().is_ok());
+    }
+
+    #[test]
+    fn normalize_utf8_bom_preserves_boms_in_multiline_basic_strings() {
+        let content = "[theme]\nname = \"\"\"\nfirst\n\u{feff}second\n\"\"\"\n";
+        assert!(content.parse::<toml::Value>().is_ok());
+        assert_eq!(normalize_utf8_bom(content), content);
+    }
+
+    #[test]
+    fn normalize_utf8_bom_preserves_boms_in_multiline_literal_strings() {
+        let content = "[theme]\nname = '''\nfirst\n\u{feff}second\n'''\n";
+        assert!(content.parse::<toml::Value>().is_ok());
+        assert_eq!(normalize_utf8_bom(content), content);
+    }
+
+    #[test]
+    fn normalize_utf8_bom_preserves_string_boms_despite_other_errors() {
+        let content = "[theme]\nname = \"\"\"\nfirst\n\u{feff}second\n\"\"\"\nbroken = \n";
+        assert!(content.parse::<toml::Value>().is_err());
+        assert_eq!(normalize_utf8_bom(content), content);
+    }
+
+    #[test]
+    fn config_load_recovers_from_a_mid_file_bom() {
+        let _guard = crate::config::test_config_env_lock().lock().unwrap();
+        let path = std::env::temp_dir().join(format!(
+            "herdr-config-mid-file-bom-{}.toml",
+            std::process::id()
+        ));
+        std::fs::write(
+            &path,
+            b"onboarding = false\n\xEF\xBB\xBF[terminal]\ndefault_shell = \"pwsh.exe\"\n",
+        )
+        .unwrap();
+        std::env::set_var(CONFIG_PATH_ENV_VAR, &path);
+
+        let loaded = Config::load();
+
+        std::env::remove_var(CONFIG_PATH_ENV_VAR);
+        let _ = std::fs::remove_file(path);
+
+        assert!(loaded.diagnostics.is_empty(), "{:?}", loaded.diagnostics);
+        assert_eq!(loaded.config.terminal.default_shell, "pwsh.exe");
     }
 }

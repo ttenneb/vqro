@@ -186,8 +186,10 @@ impl ClientShellState {
             self.set_local_config_diagnostic(Some(error));
         }
         self.config.startup_onboarding = false;
-        self.open_settings_overlay();
-        self.select_settings_section(ClientSettingsSection::Integrations, outcome);
+        self.open_extensions_overlay(outcome);
+        if let Some(ClientShellOverlay::Extensions(extensions)) = self.overlay.as_mut() {
+            extensions.category = Some("Agents".into());
+        }
     }
 
     pub(super) fn open_navigator_overlay(&mut self) {
@@ -313,11 +315,18 @@ impl ClientShellState {
     }
 
     pub(super) fn workspace_action_id(&self) -> Option<String> {
-        self.navigate_workspace_id.clone().or_else(|| {
-            self.snapshot
-                .as_deref()
-                .and_then(|snapshot| snapshot.focused_workspace_id.clone())
-        })
+        self.navigate_workspace_id
+            .as_ref()
+            .filter(|target| {
+                target.endpoint_id == self.active_endpoint_id
+                    && self.navigation_target_valid(target)
+            })
+            .map(|target| target.workspace_id.clone())
+            .or_else(|| {
+                self.snapshot
+                    .as_deref()
+                    .and_then(|snapshot| snapshot.focused_workspace_id.clone())
+            })
     }
 
     pub(super) fn open_new_workspace_overlay(&mut self) {
@@ -461,6 +470,17 @@ impl ClientShellState {
                 navigator.selected = None;
                 true
             }
+            Some(ClientShellOverlay::Extensions(extensions))
+                if extensions.search_focused
+                    && !extensions.mutating
+                    && extensions.confirmation.is_none() =>
+            {
+                extensions
+                    .query
+                    .extend(text.chars().filter(|character| !character.is_control()));
+                extensions.selected = 0;
+                true
+            }
             _ => false,
         }
     }
@@ -590,6 +610,10 @@ impl ClientShellState {
             return;
         }
 
+        if self.route_extensions_key(key, outcome) {
+            return;
+        }
+
         if self.route_settings_key(key, outcome) {
             return;
         }
@@ -623,6 +647,30 @@ impl ClientShellState {
         if self.route_worktree_overlay_key(key, outcome) {
             return;
         }
+        if matches!(self.overlay, Some(ClientShellOverlay::Recovery(_))) {
+            let (code, modifiers) = crate::config::normalize_key_combo((key.code, key.modifiers));
+            match code {
+                KeyCode::Esc => {
+                    self.overlay = None;
+                    outcome.repaint = true;
+                }
+                KeyCode::Enter => self.activate_recovery_selection(outcome),
+                KeyCode::Up | KeyCode::Char('k') if modifiers.is_empty() => {
+                    self.move_recovery_selection(-1);
+                    outcome.repaint = true;
+                }
+                KeyCode::Down | KeyCode::Char('j') if modifiers.is_empty() => {
+                    self.move_recovery_selection(1);
+                    outcome.repaint = true;
+                }
+                KeyCode::Char('x') | KeyCode::Delete if modifiers.is_empty() => {
+                    self.request_recovery_close(outcome);
+                }
+                _ => {}
+            }
+            return;
+        }
+
         if matches!(self.overlay, Some(ClientShellOverlay::Navigator(_))) {
             let (code, modifiers) = crate::config::normalize_key_combo((key.code, key.modifiers));
             let search_focused = matches!(
@@ -895,28 +943,108 @@ impl ClientShellState {
             return;
         }
 
+        if matches!(
+            self.overlay,
+            Some(ClientShellOverlay::PaneInterruptConfirm(_))
+        ) {
+            if matches!(
+                key.code,
+                KeyCode::Enter | KeyCode::Char('\r') | KeyCode::Char('\n')
+            ) {
+                let Some(ClientShellOverlay::PaneInterruptConfirm(confirm)) = self.overlay.take()
+                else {
+                    return;
+                };
+                if self.pane_interrupt_confirmation_is_current(&confirm) {
+                    let request = crate::protocol::endpoint::ClientPaneViewConfirm {
+                        boot_id: confirm.boot_id,
+                        confirmation_token: confirm.confirmation_token,
+                    };
+                    if let Ok(data) = serde_json::to_string(&request) {
+                        outcome.actions.push(ClientShellAction::EndpointControl {
+                            endpoint_id: self.active_endpoint_id.clone(),
+                            message: ClientMessage::EndpointControl {
+                                kind: crate::protocol::endpoint::PANE_VIEW_CONFIRM_KIND.into(),
+                                data,
+                            },
+                        });
+                    }
+                }
+                outcome.repaint = true;
+            } else if key.code == KeyCode::Esc {
+                self.overlay = None;
+                outcome.repaint = true;
+            }
+            return;
+        }
+
         if matches!(self.overlay, Some(ClientShellOverlay::ConfirmClose(_))) {
             if key.code == KeyCode::Enter {
                 let Some(ClientShellOverlay::ConfirmClose(confirm)) = self.overlay.take() else {
                     return;
                 };
-                self.push_endpoint_method(
-                    crate::api::schema::Method::WorkspaceClose(
-                        crate::api::schema::WorkspaceCloseParams {
-                            workspace_id: confirm.workspace_id,
-                            close_group: true,
-                        },
-                    ),
-                    outcome,
-                );
+                let method = match confirm.target {
+                    ClientConfirmCloseTarget::Workspace { workspace_id } => {
+                        crate::api::schema::Method::WorkspaceClose(
+                            crate::api::schema::WorkspaceCloseParams {
+                                workspace_id,
+                                close_group: true,
+                            },
+                        )
+                    }
+                    ClientConfirmCloseTarget::Collection { collection_id } => {
+                        crate::api::schema::Method::CollectionClose(
+                            crate::api::schema::CollectionCloseParams {
+                                collection_id,
+                                disposition: Some(
+                                    crate::api::schema::CollectionCloseDisposition::CascadeClose,
+                                ),
+                            },
+                        )
+                    }
+                    ClientConfirmCloseTarget::HostDocumentAction(params) => {
+                        crate::api::schema::Method::HostDocumentAction(params)
+                    }
+                    ClientConfirmCloseTarget::RecoveryPane(lease) => {
+                        let endpoint_id = lease.endpoint_id.clone();
+                        if !self.confirm_recovery_close(lease, outcome) {
+                            self.open_recovery_browser_for(&endpoint_id);
+                        }
+                        outcome.repaint = true;
+                        return;
+                    }
+                };
+                self.push_endpoint_method(method, outcome);
                 outcome.repaint = true;
             } else if key.code == KeyCode::Esc {
+                let collection_close = matches!(
+                    self.overlay.as_ref(),
+                    Some(ClientShellOverlay::ConfirmClose(
+                        ClientConfirmCloseOverlay {
+                            target: ClientConfirmCloseTarget::Collection { .. },
+                            ..
+                        }
+                    ))
+                );
+                let recovery_endpoint = self.overlay.as_ref().and_then(|overlay| match overlay {
+                    ClientShellOverlay::ConfirmClose(ClientConfirmCloseOverlay {
+                        target: ClientConfirmCloseTarget::RecoveryPane(lease),
+                        ..
+                    }) => Some(lease.endpoint_id.clone()),
+                    _ => None,
+                });
                 self.overlay = None;
-                self.mode = ClientShellMode::Navigate;
-                self.navigate_workspace_id = self
-                    .snapshot
-                    .as_deref()
-                    .and_then(|snapshot| snapshot.focused_workspace_id.clone());
+                if let Some(endpoint_id) = recovery_endpoint {
+                    self.open_recovery_browser_for(&endpoint_id);
+                } else if collection_close {
+                    self.mode = ClientShellMode::Terminal;
+                    self.navigate_workspace_id = None;
+                    self.reveal_navigation_workspace = false;
+                } else {
+                    self.mode = ClientShellMode::Navigate;
+                    self.navigate_workspace_id = self.focused_navigation_target();
+                    self.reveal_navigation_workspace = true;
+                }
                 outcome.repaint = true;
             }
             return;
@@ -1101,7 +1229,7 @@ impl ClientShellState {
         };
         self.overlay = Some(ClientShellOverlay::ConfirmClose(
             ClientConfirmCloseOverlay {
-                workspace_id,
+                target: ClientConfirmCloseTarget::Workspace { workspace_id },
                 title: if closes_group {
                     "Close worktree group?".to_owned()
                 } else {

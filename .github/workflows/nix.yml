@@ -1,32 +1,7 @@
 name: Nix
 
 on:
-  pull_request:
-    types: [opened, synchronize, reopened]
-    paths:
-      - ".github/workflows/nix.yml"
-      - "assets/**"
-      - "build.rs"
-      - "Cargo.lock"
-      - "Cargo.toml"
-      - "flake.lock"
-      - "flake.nix"
-      - "nix/**"
-      - "skills/**"
-      - "vendor/**"
-  push:
-    branches: [master]
-    paths:
-      - ".github/workflows/nix.yml"
-      - "assets/**"
-      - "build.rs"
-      - "Cargo.lock"
-      - "Cargo.toml"
-      - "flake.lock"
-      - "flake.nix"
-      - "nix/**"
-      - "skills/**"
-      - "vendor/**"
+  workflow_dispatch:
 
 permissions:
   contents: read

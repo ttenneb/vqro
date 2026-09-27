@@ -129,8 +129,14 @@ impl App {
         focus: bool,
         extra_env: Vec<(String, String)>,
     ) -> std::io::Result<usize> {
+        self.admit_new_panes(None, None, 1)
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
+        let tab_id = self.allocate_tab_id()?;
+        let terminal_id = self.allocate_terminal_id()?;
         let (rows, cols) = self.state.estimate_pane_size();
         let (ws, terminal, runtime) = Workspace::new_with_extra_env(
+            tab_id,
+            terminal_id,
             initial_cwd,
             rows,
             cols,
@@ -146,6 +152,7 @@ impl App {
         self.terminal_runtimes.insert(terminal.id.clone(), runtime);
         self.state.terminals.insert(terminal.id.clone(), terminal);
         self.state.workspaces.push(ws);
+        self.state.reconcile_repositories();
         let idx = self.state.workspaces.len() - 1;
         self.state
             .remove_alias_shadowed_by_new_pane(self.state.workspaces[idx].tabs[0].root_pane);
@@ -154,6 +161,7 @@ impl App {
         crate::logging::workspace_created(&workspace_id, root_pane);
         if focus || self.state.active.is_none() {
             self.state.switch_workspace(idx);
+            self.apply_bundled_extension_state();
             self.state.mode = Mode::Terminal;
         }
         self.schedule_session_save();
@@ -390,6 +398,19 @@ impl App {
             }),
             agent_status: pane_agent_status(agg_state, seen),
             tokens: ws.metadata_tokens.values(),
+            repository_id: ws
+                .checkout
+                .as_ref()
+                .map(|checkout| checkout.repository_id.clone()),
+            checkout: ws
+                .checkout
+                .as_ref()
+                .map(|checkout| crate::api::schema::CheckoutInfo {
+                    workspace_id: ws.id.clone(),
+                    repository_id: checkout.repository_id.clone(),
+                    checkout_path: checkout.checkout_path.display().to_string(),
+                    kind: checkout.kind,
+                }),
             worktree: ws
                 .worktree_space()
                 .map(|space| crate::api::schema::WorkspaceWorktreeInfo {
@@ -426,4 +447,108 @@ fn terminal_agent_session_info(
             kind: session.session_ref.kind,
             value: session.session_ref.value.clone(),
         })
+}
+
+#[cfg(test)]
+mod admission_tests {
+    use super::*;
+
+    #[test]
+    fn tab_allocator_collision_then_failure_rejects_before_workspace_pty_spawn() {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &crate::config::Config::default(),
+            crate::app::AppPolicy::TEST,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        app.state.workspaces = vec![crate::workspace::Workspace::test_new("existing")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.ensure_test_terminals();
+        let occupied = app.state.workspaces[0].tabs[0].id.clone();
+        app.inject_tab_id_candidates_for_test([
+            Ok(occupied),
+            Err(std::io::Error::other("injected entropy failure")),
+        ]);
+        let panes_before = crate::layout::PaneId::next_for_test();
+        let runtimes_before = app.terminal_runtimes.len();
+
+        let error = app
+            .create_workspace_with_options(std::path::PathBuf::from("/rejected"), true)
+            .unwrap_err();
+
+        assert_eq!(error.to_string(), "injected entropy failure");
+        assert_eq!(crate::layout::PaneId::next_for_test(), panes_before);
+        assert_eq!(app.terminal_runtimes.len(), runtimes_before);
+        assert_eq!(app.state.workspaces.len(), 1);
+    }
+
+    #[test]
+    fn terminal_allocator_collision_then_failure_rejects_before_workspace_pty_spawn() {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &crate::config::Config::default(),
+            crate::app::AppPolicy::TEST,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        app.state.workspaces = vec![crate::workspace::Workspace::test_new("existing")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.ensure_test_terminals();
+        let occupied = app.state.terminals.keys().next().unwrap().clone();
+        app.inject_terminal_id_candidates_for_test([
+            Ok(occupied),
+            Err(std::io::Error::other("injected entropy failure")),
+        ]);
+        let panes_before = crate::layout::PaneId::next_for_test();
+        let runtimes_before = app.terminal_runtimes.len();
+
+        let error = app
+            .create_workspace_with_options(std::path::PathBuf::from("/rejected"), true)
+            .unwrap_err();
+
+        assert_eq!(error.to_string(), "injected entropy failure");
+        assert_eq!(crate::layout::PaneId::next_for_test(), panes_before);
+        assert_eq!(app.terminal_runtimes.len(), runtimes_before);
+        assert_eq!(app.state.workspaces.len(), 1);
+    }
+
+    #[test]
+    fn session_pane_limit_rejects_before_identity_runtime_or_persistence_allocation() {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &crate::config::Config::default(),
+            crate::app::AppPolicy::TEST,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        app.state.workspaces = (0..crate::admission::MAX_SESSION_PANES)
+            .map(|_| crate::workspace::Workspace::test_new("full"))
+            .collect();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.session_dirty = false;
+        app.session_save_deadline = None;
+        let panes_before = crate::layout::PaneId::next_for_test();
+        let workspace_count = app.state.workspaces.len();
+        let terminal_count = app.state.terminals.len();
+        let runtime_count = app.terminal_runtimes.len();
+
+        let error = app
+            .create_workspace_with_options(std::path::PathBuf::from("/rejected"), true)
+            .unwrap_err();
+
+        assert!(error.to_string().contains("session pane limit"));
+        assert_eq!(app.state.workspaces.len(), workspace_count);
+        assert_eq!(app.state.terminals.len(), terminal_count);
+        assert_eq!(app.terminal_runtimes.len(), runtime_count);
+        assert_eq!(crate::layout::PaneId::next_for_test(), panes_before);
+        assert!(!app.state.session_dirty);
+        assert!(app.session_save_deadline.is_none());
+    }
 }

@@ -143,6 +143,9 @@ impl App {
             canonical_path != crate::worktree::canonical_or_original(&source.source_repo_root),
             !created_workspace,
         );
+        if params.focus {
+            self.apply_bundled_extension_state();
+        }
         if let Some(label) = params.label {
             let workspace_id = self.public_workspace_id(ws_idx);
             if let Some(ws) = self.state.workspaces.get_mut(ws_idx) {
@@ -167,6 +170,7 @@ impl App {
         let tab_idx = self.state.workspaces[ws_idx].active_tab;
         let worktree = self.worktree_info_for_entry(&source, entry);
         self.emit_worktree_opened_event(ws_idx, worktree.clone(), already_open.is_some());
+        self.refresh_spaces_document();
         encode_success(
             id,
             ResponseResult::WorktreeOpened {
@@ -210,7 +214,7 @@ impl App {
             let space = crate::workspace::git_space_metadata(&path).ok_or_else(|| {
                 ApiFailure::new(
                     "not_git_worktree",
-                    "Herdr worktree actions require a path inside a Git work tree",
+                    "vqro worktree actions require a path inside a Git work tree",
                 )
             })?;
             if space.is_linked_worktree {
@@ -271,7 +275,7 @@ impl App {
             let space = crate::workspace::git_space_metadata(&path).ok_or_else(|| {
                 ApiFailure::new(
                     "not_git_worktree",
-                    "Herdr worktree actions require a path inside a Git work tree",
+                    "vqro worktree actions require a path inside a Git work tree",
                 )
             })?;
             let workspace_idx = self.list_source_workspace_idx_for_space(&space, trust_repository);
@@ -328,7 +332,7 @@ impl App {
         let Some(space) = git_space else {
             return Err(ApiFailure::new(
                 "not_git_worktree",
-                "Herdr worktree actions require a workspace inside a Git work tree",
+                "vqro worktree actions require a workspace inside a Git work tree",
             ));
         };
         if space.is_linked_worktree {
@@ -385,7 +389,7 @@ impl App {
         let Some(space) = git_space else {
             return Err(ApiFailure::new(
                 "not_git_worktree",
-                "Herdr worktree actions require a workspace inside a Git work tree",
+                "vqro worktree actions require a workspace inside a Git work tree",
             ));
         };
         let workspace_idx = if space.is_linked_worktree {
@@ -753,6 +757,18 @@ mod tests {
     };
     use crate::{config::Config, workspace::Workspace};
 
+    fn stale_spaces_snapshot() -> crate::extension_contract::HostSpacesV1 {
+        crate::extension_contract::HostSpacesV1 {
+            contract: "host.spaces.v1".into(),
+            generation: 1,
+            revision: 1,
+            scope_id: crate::spaces_extension_contract::SPACES_SCOPE_ID.into(),
+            repositories: Vec::new(),
+            standalone: Vec::new(),
+            order: Vec::new(),
+        }
+    }
+
     fn unique_temp_path(name: &str) -> PathBuf {
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -856,9 +872,11 @@ mod tests {
                 manifest_path: manifest_path.display().to_string(),
                 plugin_root: plugin_root.display().to_string(),
                 enabled: true,
+                load_order: 0,
                 platforms: None,
                 build: Vec::new(),
                 startup: Vec::new(),
+                services: Vec::new(),
                 actions: Vec::new(),
                 events: vec![crate::api::schema::PluginManifestEventHook {
                     on: event.into(),
@@ -1213,6 +1231,7 @@ mod tests {
             is_linked_worktree: false,
         });
         let (respond_to, response_rx) = response_channel();
+        app.host_spaces_last_desired = Some(stale_spaces_snapshot());
 
         app.handle_api_worktree_add_finished(WorktreeAddResult {
             path: checkout.clone(),
@@ -1246,6 +1265,7 @@ mod tests {
             .into_iter()
             .any(|(_, event)| event.event == EventKind::WorktreeCreated));
         assert_eq!(app.state.workspaces.len(), 3);
+        assert!(app.host_spaces_last_desired.is_none());
         assert_eq!(
             app.state.workspaces[0]
                 .worktree_space()
@@ -2319,8 +2339,10 @@ mod tests {
             .pending_worktree_remove_runtime_restores
             .contains_key(&pane_id));
 
-        let pane_updates =
-            app.handle_internal_event_with_pane_updates(AppEvent::PaneDied { pane_id });
+        let pane_updates = app.handle_internal_event_with_pane_updates(AppEvent::PaneDied {
+            pane_id,
+            exit_reason: crate::platform::ChildExitReason::Exited,
+        });
         assert!(matches!(
             pane_updates.as_slice(),
             [update] if update.agent_released && update.suppress_completion

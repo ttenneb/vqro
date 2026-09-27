@@ -9,8 +9,8 @@ use crate::api::schema::{
     InstalledPluginInfo, Method, PluginActionInvokeParams, PluginActionListParams,
     PluginInvocationContext, PluginLinkParams, PluginListParams, PluginLogListParams,
     PluginPaneCloseParams, PluginPaneFocusParams, PluginPaneOpenParams, PluginPanePlacement,
-    PluginPlatform, PluginSetEnabledParams, PluginSourceInfo, PluginSourceKind, PluginUnlinkParams,
-    Request, ResponseResult, SplitDirection, SuccessResponse,
+    PluginPlatform, PluginServiceCapability, PluginSetEnabledParams, PluginSourceInfo,
+    PluginSourceKind, PluginUnlinkParams, Request, ResponseResult, SplitDirection, SuccessResponse,
 };
 use crate::popup_size::PopupSize;
 
@@ -24,6 +24,9 @@ pub(super) fn run_plugin_command(args: &[String]) -> std::io::Result<i32> {
 
     match subcommand {
         "install" => plugin_install(&args[1..]),
+        "schema" => plugin_schema(&args[1..]),
+        "validate" => plugin_validate(&args[1..], false),
+        "conformance" => plugin_validate(&args[1..], true),
         "uninstall" => plugin_uninstall(&args[1..]),
         "link" => plugin_link(&args[1..]),
         "list" => plugin_list(&args[1..]),
@@ -45,9 +48,191 @@ pub(super) fn run_plugin_command(args: &[String]) -> std::io::Result<i32> {
     }
 }
 
+fn plugin_schema(args: &[String]) -> std::io::Result<i32> {
+    let usage =
+        "usage: vqro plugin schema <bundle|manifest|manifest-v2|package|runtime|service> [--output PATH]";
+    let Some(kind) = args.first().map(String::as_str) else {
+        eprintln!("{usage}");
+        return Ok(2);
+    };
+    let schema = match kind {
+        "bundle" => crate::extension_spec::extension_schema_json(),
+        "manifest" => crate::extension_spec::manifest_schema_json(),
+        "manifest-v2" => crate::extension_spec::manifest_v2_schema_json(),
+        "package" => crate::extension_spec::package_schema_json(),
+        "runtime" => crate::extension_spec::runtime_service_schema_json(),
+        "service" => crate::extension_spec::service_schema_json(),
+        _ => {
+            eprintln!("{usage}");
+            return Ok(2);
+        }
+    };
+    match &args[1..] {
+        [] => print!("{schema}"),
+        [flag, path] if flag == "--output" => {
+            std::fs::write(path, schema)?;
+            println!("wrote {kind} extension schema to {path}");
+        }
+        _ => {
+            eprintln!("{usage}");
+            return Ok(2);
+        }
+    }
+    Ok(0)
+}
+
+fn plugin_validation_failure(
+    json: bool,
+    code: &str,
+    service: Option<&str>,
+    message: impl std::fmt::Display,
+) -> std::io::Result<i32> {
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "valid": false,
+                "code": code,
+                "service": service,
+                "message": message.to_string(),
+            })
+        );
+    } else if let Some(service) = service {
+        eprintln!("{code}: service {service}: {message}");
+    } else {
+        eprintln!("{code}: {message}");
+    }
+    Ok(1)
+}
+
+fn plugin_validate(args: &[String], run_services: bool) -> std::io::Result<i32> {
+    let command = if run_services {
+        "conformance"
+    } else {
+        "validate"
+    };
+    let Some(path) = args.first() else {
+        eprintln!("usage: vqro plugin {command} <path> [--json]");
+        return Ok(2);
+    };
+    let json = args.iter().skip(1).any(|arg| arg == "--json");
+    if args.iter().skip(1).any(|arg| arg != "--json") {
+        eprintln!("usage: vqro plugin {command} <path> [--json]");
+        return Ok(2);
+    }
+    let manifest = match crate::app::api_load_plugin_manifest_for_cli(path) {
+        Ok(manifest) => manifest,
+        Err((code, message)) => return plugin_validation_failure(json, code, None, message),
+    };
+
+    let mut checked_services = Vec::new();
+    let mut skipped_services = Vec::new();
+    if run_services {
+        let package_supported =
+            crate::extension_service::supports_current_platform(manifest.platforms.as_deref());
+        for service in &manifest.services {
+            let id = format!("{}.{}", manifest.plugin_id, service.id);
+            if !package_supported
+                || !crate::extension_service::supports_current_platform(
+                    service.platforms.as_deref(),
+                )
+            {
+                skipped_services.push(id);
+                continue;
+            }
+            let check = (|| -> Result<(), String> {
+                let mut supervisor = crate::extension_service::ExtensionServiceSupervisor::new(
+                    crate::extension_service::ExtensionServiceSpec {
+                        id: id.clone(),
+                        command: service.command.clone(),
+                        cwd: PathBuf::from(&manifest.plugin_root),
+                        priority: service.priority,
+                        granted_capabilities: service.granted_capabilities.clone(),
+                    },
+                )
+                .map_err(|error| error.to_string())?;
+                supervisor.start().map_err(|error| error.to_string())?;
+                let result = (|| {
+                    if service
+                        .provides
+                        .contains(&PluginServiceCapability::HostDocument)
+                    {
+                        let fixture = PathBuf::from(&manifest.plugin_root)
+                            .join("fixtures/terminal-groups.json");
+                        if !fixture.is_file() {
+                            return Err(
+                                "host document conformance requires fixtures/terminal-groups.json"
+                                    .into(),
+                            );
+                        }
+                        let bytes = std::fs::read(&fixture).map_err(|error| error.to_string())?;
+                        let params =
+                            serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
+                        let value = supervisor
+                            .conformance_request("host.document.render", params)
+                            .map_err(|error| error.to_string())?;
+                        let document: crate::extension_contract::HostDocumentV1 =
+                            serde_json::from_value(value).map_err(|error| error.to_string())?;
+                        document.validate().map_err(|error| error.to_string())?;
+                        let expected =
+                            PathBuf::from(&manifest.plugin_root).join("fixtures/document.json");
+                        if !expected.is_file() {
+                            return Err(
+                                "host document conformance requires fixtures/document.json".into(),
+                            );
+                        }
+                        let bytes = std::fs::read(expected).map_err(|error| error.to_string())?;
+                        let expected: crate::extension_contract::HostDocumentV1 =
+                            serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
+                        if document != expected {
+                            return Err(
+                                "host document does not match fixtures/document.json".into()
+                            );
+                        }
+                    }
+                    Ok(())
+                })();
+                supervisor.stop();
+                result
+            })();
+            if let Err(message) = check {
+                return plugin_validation_failure(
+                    json,
+                    "extension_conformance_failed",
+                    Some(&id),
+                    message,
+                );
+            }
+            checked_services.push(id);
+        }
+    }
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "valid": true,
+                "contract": crate::extension_spec::EXTENSION_MANIFEST_CONTRACT_V1,
+                "plugin": manifest,
+                "checked_services": checked_services,
+                "skipped_services": skipped_services,
+            }))
+            .map_err(io::Error::other)?
+        );
+    } else {
+        println!("valid {} {}", manifest.plugin_id, manifest.version);
+        for service in checked_services {
+            println!("conformant service {service}");
+        }
+        for service in skipped_services {
+            println!("skipped unsupported-platform service {service}");
+        }
+    }
+    Ok(0)
+}
+
 fn plugin_link(args: &[String]) -> std::io::Result<i32> {
     let Some(path) = args.first() else {
-        eprintln!("usage: herdr plugin link <path> [--disabled]");
+        eprintln!("usage: vqro plugin link <path> [--disabled]");
         return Ok(2);
     };
     let path = normalize_plugin_path_arg(path)?;
@@ -87,11 +272,11 @@ fn plugin_link(args: &[String]) -> std::io::Result<i32> {
 
 fn plugin_config_dir_command(args: &[String]) -> std::io::Result<i32> {
     let Some(plugin_id) = args.first() else {
-        eprintln!("usage: herdr plugin config-dir <plugin_id>");
+        eprintln!("usage: vqro plugin config-dir <plugin_id>");
         return Ok(2);
     };
     if args.len() != 1 {
-        eprintln!("usage: herdr plugin config-dir <plugin_id>");
+        eprintln!("usage: vqro plugin config-dir <plugin_id>");
         return Ok(2);
     }
     let path = crate::plugin_paths::plugin_config_dir(plugin_id);
@@ -139,11 +324,11 @@ fn plugin_list(args: &[String]) -> std::io::Result<i32> {
 
 fn plugin_unlink(args: &[String]) -> std::io::Result<i32> {
     let Some(plugin_id) = args.first() else {
-        eprintln!("usage: herdr plugin unlink <plugin_id>");
+        eprintln!("usage: vqro plugin unlink <plugin_id>");
         return Ok(2);
     };
     if args.len() != 1 {
-        eprintln!("usage: herdr plugin unlink <plugin_id>");
+        eprintln!("usage: vqro plugin unlink <plugin_id>");
         return Ok(2);
     }
     print_plugin_response(Method::PluginUnlink(PluginUnlinkParams {
@@ -153,7 +338,7 @@ fn plugin_unlink(args: &[String]) -> std::io::Result<i32> {
 
 fn plugin_install(args: &[String]) -> std::io::Result<i32> {
     let Some(source_arg) = args.first() else {
-        eprintln!("usage: herdr plugin install <owner>/<repo>[/subdir...] [--ref REF] [--yes]");
+        eprintln!("usage: vqro plugin install <owner>/<repo>[/subdir...] [--ref REF] [--yes]");
         return Ok(2);
     };
     let source = match GithubPluginSource::parse(source_arg) {
@@ -262,11 +447,11 @@ fn plugin_install(args: &[String]) -> std::io::Result<i32> {
 
 fn plugin_uninstall(args: &[String]) -> std::io::Result<i32> {
     let Some(target) = args.first() else {
-        eprintln!("usage: herdr plugin uninstall <plugin_id|owner/repo[/subdir...]>");
+        eprintln!("usage: vqro plugin uninstall <plugin_id|owner/repo[/subdir...]>");
         return Ok(2);
     };
     if args.len() != 1 {
-        eprintln!("usage: herdr plugin uninstall <plugin_id|owner/repo[/subdir...]>");
+        eprintln!("usage: vqro plugin uninstall <plugin_id|owner/repo[/subdir...]>");
         return Ok(2);
     }
 
@@ -328,14 +513,14 @@ fn plugin_uninstall(args: &[String]) -> std::io::Result<i32> {
 fn plugin_set_enabled(args: &[String], enabled: bool) -> std::io::Result<i32> {
     let Some(plugin_id) = args.first() else {
         eprintln!(
-            "usage: herdr plugin {} <plugin_id>",
+            "usage: vqro plugin {} <plugin_id>",
             if enabled { "enable" } else { "disable" }
         );
         return Ok(2);
     };
     if args.len() != 1 {
         eprintln!(
-            "usage: herdr plugin {} <plugin_id>",
+            "usage: vqro plugin {} <plugin_id>",
             if enabled { "enable" } else { "disable" }
         );
         return Ok(2);
@@ -430,7 +615,7 @@ fn plugin_action_list(args: &[String]) -> std::io::Result<i32> {
 
 fn plugin_action_invoke(args: &[String]) -> std::io::Result<i32> {
     let Some(action_id) = args.first() else {
-        eprintln!("usage: herdr plugin action invoke <action_id> [--plugin ID]");
+        eprintln!("usage: vqro plugin action invoke <action_id> [--plugin ID]");
         return Ok(2);
     };
     let mut plugin_id = None;
@@ -640,11 +825,11 @@ fn parse_popup_dimension(value: &str, flag: &str) -> Option<PopupSize> {
 
 fn plugin_pane_focus(args: &[String]) -> std::io::Result<i32> {
     let Some(pane_id) = args.first() else {
-        eprintln!("usage: herdr plugin pane focus <pane_id>");
+        eprintln!("usage: vqro plugin pane focus <pane_id>");
         return Ok(2);
     };
     if args.len() != 1 {
-        eprintln!("usage: herdr plugin pane focus <pane_id>");
+        eprintln!("usage: vqro plugin pane focus <pane_id>");
         return Ok(2);
     }
     print_plugin_response(Method::PluginPaneFocus(PluginPaneFocusParams {
@@ -654,11 +839,11 @@ fn plugin_pane_focus(args: &[String]) -> std::io::Result<i32> {
 
 fn plugin_pane_close(args: &[String]) -> std::io::Result<i32> {
     let Some(pane_id) = args.first() else {
-        eprintln!("usage: herdr plugin pane close <pane_id>");
+        eprintln!("usage: vqro plugin pane close <pane_id>");
         return Ok(2);
     };
     if args.len() != 1 {
-        eprintln!("usage: herdr plugin pane close <pane_id>");
+        eprintln!("usage: vqro plugin pane close <pane_id>");
         return Ok(2);
     }
     print_plugin_response(Method::PluginPaneClose(PluginPaneCloseParams {
@@ -701,6 +886,15 @@ fn parse_split_direction(value: &str) -> Option<SplitDirection> {
 }
 
 fn normalize_plugin_path_arg(value: &str) -> std::io::Result<String> {
+    if super::target::is_remote() {
+        if super::target::remote_path_is_absolute(value) {
+            return Ok(value.to_owned());
+        }
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "remote plugin paths must be absolute",
+        ));
+    }
     let path = crate::worktree::expand_tilde_path(value);
     let absolute = if path.is_absolute() {
         path
@@ -728,7 +922,7 @@ impl GithubPluginSource {
         }
         let parts = value.split('/').collect::<Vec<_>>();
         if parts.len() < 2 {
-            return Err("usage: herdr plugin install <owner>/<repo>[/subdir...]".into());
+            return Err("usage: vqro plugin install <owner>/<repo>[/subdir...]".into());
         }
         let owner = parts[0];
         let repo = parts[1];
@@ -905,8 +1099,36 @@ fn load_cli_plugin_manifest(path: &Path, enabled: bool) -> std::io::Result<Insta
 fn persist_plugin_offline(plugin: &InstalledPluginInfo) -> std::io::Result<()> {
     crate::plugin_paths::ensure_plugin_user_dirs(&plugin.plugin_id)?;
     crate::persist::plugin_registry::update(|plugins| {
-        plugins.retain(|entry| entry.plugin_id != plugin.plugin_id);
-        plugins.push(plugin.clone());
+        let mut plugin = plugin.clone();
+        let repository_identity = plugin.source.repository_identity();
+        let replaced_order = plugins
+            .iter()
+            .find(|entry| {
+                repository_identity.is_some()
+                    && entry.source.repository_identity() == repository_identity
+            })
+            .map(|entry| entry.load_order)
+            .or_else(|| {
+                plugins
+                    .iter()
+                    .find(|entry| entry.plugin_id == plugin.plugin_id)
+                    .map(|entry| entry.load_order)
+            });
+        plugins.retain(|entry| {
+            entry.plugin_id != plugin.plugin_id
+                && repository_identity.as_deref().is_none_or(|identity| {
+                    entry.source.repository_identity().as_deref() != Some(identity)
+                })
+        });
+        plugin.load_order = replaced_order.unwrap_or_else(|| {
+            plugins
+                .iter()
+                .map(|entry| entry.load_order)
+                .max()
+                .unwrap_or(0)
+                .saturating_add(1)
+        });
+        plugins.push(plugin);
     })?;
     Ok(())
 }
@@ -998,7 +1220,7 @@ fn verify_plugin_link_source_response(
         || plugin.source.managed_path != expected.managed_path
     {
         return Err(std::io::Error::other(
-            "running Herdr server did not persist GitHub plugin source metadata",
+            "running vqro server did not persist GitHub plugin source metadata",
         ));
     }
     Ok(())
@@ -1241,6 +1463,9 @@ fn print_install_preview(
     }
     for startup in &plugin.startup {
         eprintln!("    startup: {}", startup.command.join(" "));
+    }
+    for service in &plugin.services {
+        eprintln!("    service {}: {}", service.id, service.command.join(" "));
     }
     for action in &plugin.actions {
         eprintln!("    action {}: {}", action.id, action.command.join(" "));
@@ -1504,16 +1729,16 @@ fn scrub_herdr_runtime_env(command: &mut Command) {
         crate::api::SOCKET_PATH_ENV_VAR,
         crate::server::socket_paths::CLIENT_SOCKET_PATH_ENV_VAR,
         crate::session::SESSION_ENV_VAR,
-        "HERDR_BIN_PATH",
-        "HERDR_ENV",
-        "HERDR_WORKSPACE_ID",
-        "HERDR_TAB_ID",
-        "HERDR_PANE_ID",
+        crate::product::BIN_PATH_ENV,
+        crate::product::ENV_MARKER,
+        crate::product::WORKSPACE_ID_ENV,
+        crate::product::TAB_ID_ENV,
+        crate::product::PANE_ID_ENV,
     ] {
         command.env_remove(key);
     }
     for (key, _) in std::env::vars_os() {
-        if key.to_string_lossy().starts_with("HERDR_PLUGIN_") {
+        if key.to_string_lossy().starts_with("VQRO_PLUGIN_") {
             command.env_remove(key);
         }
     }
@@ -1591,7 +1816,7 @@ fn plugin_checkout_lifecycle_error(operation: &str, path: &Path, err: io::Error)
         return io::Error::new(
             err.kind(),
             format!(
-                "failed to {operation} managed plugin checkout at {}; close any Herdr plugin panes or plugin commands using that checkout, then retry: {err}",
+                "failed to {operation} managed plugin checkout at {}; close any vqro plugin panes or plugin commands using that checkout, then retry: {err}",
                 path.display()
             ),
         );
@@ -1618,6 +1843,9 @@ fn current_unix_ms() -> u64 {
 }
 
 fn is_connection_error(err: &std::io::Error) -> bool {
+    if super::target::is_remote() {
+        return false;
+    }
     // A `server_not_running` marker is a connect failure for recovery purposes:
     // treating it as a connection error lets plugin commands fall back to the
     // offline registry. The marker carries (but does not print) a friendly
@@ -1641,36 +1869,48 @@ fn print_plugin_response(method: Method) -> std::io::Result<i32> {
 }
 
 fn print_plugin_help() {
-    eprintln!("herdr plugin commands:");
-    eprintln!("  herdr plugin install <owner>/<repo>[/subdir...] [--ref REF] [--yes]");
-    eprintln!("  herdr plugin uninstall <plugin_id|owner/repo[/subdir...]>");
-    eprintln!("  herdr plugin link <path> [--disabled]");
-    eprintln!("  herdr plugin list [--plugin ID] [--json]");
-    eprintln!("  herdr plugin config-dir <plugin_id>");
-    eprintln!("  herdr plugin unlink <plugin_id>");
-    eprintln!("  herdr plugin enable <plugin_id>");
-    eprintln!("  herdr plugin disable <plugin_id>");
-    eprintln!("  herdr plugin action <list|invoke>");
-    eprintln!("  herdr plugin log list [--plugin ID] [--limit N]");
-    eprintln!("  herdr plugin pane <open|focus|close>");
+    eprintln!("vqro plugin commands:");
+    eprintln!("  vqro plugin install <owner>/<repo>[/subdir...] [--ref REF] [--yes]");
+    eprintln!("  vqro plugin uninstall <plugin_id|owner/repo[/subdir...]>");
+    eprintln!("  vqro plugin link <path> [--disabled]");
+    eprintln!("  vqro plugin list [--plugin ID] [--json]");
+    eprintln!("  vqro plugin schema <bundle|manifest|service> [--output PATH]");
+    eprintln!("  vqro plugin validate <path> [--json]");
+    eprintln!("  vqro plugin conformance <path> [--json]");
+    eprintln!("  vqro plugin config-dir <plugin_id>");
+    eprintln!("  vqro plugin unlink <plugin_id>");
+    eprintln!("  vqro plugin enable <plugin_id>");
+    eprintln!("  vqro plugin disable <plugin_id>");
+    eprintln!("  vqro plugin action <list|invoke>");
+    eprintln!("  vqro plugin log list [--plugin ID] [--limit N]");
+    eprintln!("  vqro plugin pane <open|focus|close>");
 }
 
 fn print_plugin_action_help() {
-    eprintln!("herdr plugin action commands:");
-    eprintln!("  herdr plugin action list [--plugin ID]");
-    eprintln!("  herdr plugin action invoke <action_id> [--plugin ID]");
+    eprintln!("vqro plugin action commands:");
+    eprintln!("  vqro plugin action list [--plugin ID]");
+    eprintln!("  vqro plugin action invoke <action_id> [--plugin ID]");
 }
 
 fn print_plugin_pane_help() {
-    eprintln!("herdr plugin pane commands:");
-    eprintln!("  herdr plugin pane open --plugin ID --entrypoint ID [--placement overlay|popup|split|tab|zoomed] [--width SIZE] [--height SIZE] [--workspace ID] [--target-pane PANE] [--direction right|down] [--cwd PATH] [--env KEY=VALUE] [--focus|--no-focus]");
-    eprintln!("  herdr plugin pane focus <pane_id>");
-    eprintln!("  herdr plugin pane close <pane_id>");
+    eprintln!("vqro plugin pane commands:");
+    eprintln!("  vqro plugin pane open --plugin ID --entrypoint ID [--placement overlay|popup|split|tab|zoomed] [--width SIZE] [--height SIZE] [--workspace ID] [--target-pane PANE] [--direction right|down] [--cwd PATH] [--env KEY=VALUE] [--focus|--no-focus]");
+    eprintln!("  vqro plugin pane focus <pane_id>");
+    eprintln!("  vqro plugin pane close <pane_id>");
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn machine_plugin_connection_errors_never_use_local_offline_state() {
+        crate::cli::target::with_test_client(crate::api::client::ApiClient::local(), || {
+            assert!(!is_connection_error(&std::io::Error::from(
+                std::io::ErrorKind::ConnectionRefused
+            )));
+        });
+    }
 
     fn unique_plugin_id(label: &str) -> String {
         let nanos = SystemTime::now()
@@ -1695,9 +1935,11 @@ mod tests {
             manifest_path: format!("/tmp/{id}/herdr-plugin.toml"),
             plugin_root: format!("/tmp/{id}"),
             enabled: true,
+            load_order: 0,
             platforms: None,
             build: vec![],
             startup: vec![],
+            services: vec![],
             actions: vec![],
             events: vec![],
             panes: vec![],

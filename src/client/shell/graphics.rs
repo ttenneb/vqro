@@ -31,19 +31,13 @@ impl ClientShellState {
         };
     }
 
-    pub(super) fn compose_graphics(&mut self, frame: &mut FrameData, layout: ClientShellLayout) {
-        let local_cover = self.overlay.is_some()
-            || self.mode != ClientShellMode::Terminal
-            || self.endpoint_error.is_some()
-            || self.config_diagnostic.is_some()
-            || self.visible_endpoint_notice.is_some()
-            || self.visible_notification.is_some()
-            || self.copy_feedback.is_some()
-            || self
-                .selection
-                .as_ref()
-                .is_some_and(|selection| selection.is_visible());
-        let visibility = if local_cover {
+    pub(super) fn compose_graphics(
+        &mut self,
+        frame: &mut FrameData,
+        layout: ClientShellLayout,
+        occlusion: &crate::kitty_graphics::surface::Occlusion,
+    ) {
+        let visibility = if self.endpoint_error.is_some() {
             crate::kitty_graphics::surface::Visibility::Hidden
         } else if self.hits.popup.is_some() {
             crate::kitty_graphics::surface::Visibility::Popup
@@ -55,11 +49,31 @@ impl ClientShellState {
             .popup
             .as_ref()
             .map(|popup| (popup.inner_rect.x, popup.inner_rect.y));
+        let mut suppressed_panes = self
+            .structure
+            .as_deref()
+            .into_iter()
+            .flat_map(|structure| structure.collections.iter())
+            .filter(|collection| {
+                self.collection_list_views
+                    .contains(&collection.collection_id)
+            })
+            .filter_map(|collection| collection.selected_pane_id.as_deref())
+            .collect::<std::collections::HashSet<_>>();
+        if let Some(pane_id) = self
+            .inspector
+            .as_ref()
+            .map(|inspector| inspector.pane_id.as_str())
+        {
+            suppressed_panes.insert(pane_id);
+        }
+        self.graphics.set_suppressed_panes(suppressed_panes);
         frame.graphics = self.graphics.encode(
             visibility,
             (layout.pane_surface.x, layout.pane_surface.y),
             popup_origin,
             self.graphics_cell_size,
+            occlusion,
         );
     }
 }

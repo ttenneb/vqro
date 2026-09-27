@@ -70,7 +70,7 @@ pub(super) fn render_expanded(
         config,
         agent_scroll,
         hits,
-        |row| row.agent.rows.len(),
+        |row| row.agent.rows.len() + usize::from(row.agent.group_label.is_some()),
         |buffer, rect, row, hits| {
             super::agent_sidebar::render_agent_row(buffer, rect, &row.agent, config);
             if row.stale {
@@ -81,8 +81,17 @@ pub(super) fn render_expanded(
                         .add_modifier(Modifier::DIM),
                 );
             }
-            hits.endpoint_agents
-                .push((rect, row.endpoint_id.clone(), row.agent.pane_id.clone()));
+            let header_rows = u16::from(row.agent.group_label.is_some());
+            hits.endpoint_agents.push((
+                Rect::new(
+                    rect.x,
+                    rect.y.saturating_add(header_rows),
+                    rect.width,
+                    rect.height.saturating_sub(header_rows),
+                ),
+                row.endpoint_id.clone(),
+                row.agent.pane_id.clone(),
+            ));
         },
     );
 }
@@ -99,12 +108,45 @@ fn agent_rows(
     active_endpoint_id: &ClientEndpointId,
     config: &ClientShellConfig,
 ) -> Vec<EndpointAgentRow> {
+    let suppress_document_groups = endpoints
+        .iter()
+        .find(|endpoint| &endpoint.endpoint_id == active_endpoint_id)
+        .is_some_and(|endpoint| {
+            endpoint
+                .snapshot
+                .as_deref()
+                .is_some_and(|snapshot| snapshot.agent_view_label.is_some())
+                || ClientShellState::endpoint_agent_view(endpoint)
+                    .is_some_and(|view| matches!(view, Ok(Some(_))))
+        });
+    let navigation = super::aggregate_navigation::agent_navigation_cache(endpoints);
     let mut rendered_rows = endpoints
         .iter()
         .filter_map(|endpoint| {
             endpoint.snapshot.as_deref().map(|snapshot| {
-                super::agent_sidebar::agent_rows(snapshot, config, Some(&endpoint.label))
-                    .into_iter()
+                let documented_by_pane = navigation
+                    .get(&endpoint.endpoint_id)
+                    .and_then(Option::as_ref)
+                    .map(|rows| {
+                        rows.iter()
+                            .map(|row| (row.pane_id.as_str(), row))
+                            .collect::<HashMap<_, _>>()
+                    });
+                snapshot
+                    .agents
+                    .iter()
+                    .filter_map(|agent| {
+                        let documented = documented_by_pane
+                            .as_ref()
+                            .and_then(|rows| rows.get(agent.pane_id.as_str()).copied());
+                        super::agent_sidebar::agent_row_with_document(
+                            snapshot,
+                            &agent.pane_id,
+                            config,
+                            Some(&endpoint.label),
+                            documented,
+                        )
+                    })
                     .map(|agent| ((endpoint.endpoint_id.clone(), agent.pane_id.clone()), agent))
                     .collect::<Vec<_>>()
             })
@@ -112,18 +154,26 @@ fn agent_rows(
         .flatten()
         .collect::<HashMap<_, _>>();
 
-    super::aggregate_navigation::aggregate_agent_rows(endpoints, config.agent_panel_sort)
-        .into_iter()
-        .filter_map(|row| {
-            let key = (row.endpoint.endpoint_id.clone(), row.agent.pane_id.clone());
-            let mut agent = rendered_rows.remove(&key)?;
-            agent.focused &= row.endpoint.endpoint_id == active_endpoint_id;
-            Some(EndpointAgentRow {
-                endpoint_id: row.endpoint.endpoint_id.clone(),
-                machine_label: row.endpoint.label.to_owned(),
-                stale: row.endpoint.stale(),
-                agent,
-            })
+    super::aggregate_navigation::aggregate_agent_rows_cached(
+        endpoints,
+        active_endpoint_id,
+        config.agent_panel_sort,
+        &navigation,
+    )
+    .into_iter()
+    .filter_map(|row| {
+        let key = (row.endpoint.endpoint_id.clone(), row.agent.pane_id.clone());
+        let mut agent = rendered_rows.remove(&key)?;
+        agent.focused &= row.endpoint.endpoint_id == active_endpoint_id;
+        if suppress_document_groups {
+            agent.group_label = None;
+        }
+        Some(EndpointAgentRow {
+            endpoint_id: row.endpoint.endpoint_id.clone(),
+            machine_label: row.endpoint.label.to_owned(),
+            stale: row.endpoint.stale(),
+            agent,
         })
-        .collect()
+    })
+    .collect()
 }

@@ -1,0 +1,25 @@
+{
+  "case": "labeled-create-atomic",
+  "label": "Helpers",
+  "sequence": [
+    "reserve_unpublished_container_and_layout_ids",
+    "capture_base_tab_revision",
+    "obtain_provisional_profile_and_set_label_declaration",
+    "issue_reservation_bound_ticket",
+    "accept_one_state_cas_plan",
+    "revalidate_base_tab_revision_and_reservation",
+    "persist_session_and_extension_state_images",
+    "publish_both_images_in_one_app_turn"
+  ],
+  "expected_success": {
+    "new_visible_containers": 1,
+    "new_package_state_records": 1,
+    "unlabeled_intermediate_publications": 0,
+    "label_only_intermediate_publications": 0
+  },
+  "expected_failure_before_two_image_commit": {
+    "new_visible_containers": 0,
+    "new_package_state_records": 0,
+    "reservation_status": "discarded"
+  }
+}

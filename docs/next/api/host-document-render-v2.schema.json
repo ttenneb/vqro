@@ -1,0 +1,112 @@
+{
+  "$defs": {
+    "DocumentProducerFenceV2": {
+      "additionalProperties": false,
+      "properties": {
+        "artifact_sha256": {
+          "maxLength": 64,
+          "minLength": 64,
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "package_id": {
+          "maxLength": 128,
+          "pattern": "^[a-z0-9-]+(?:\\.[a-z0-9-]+)+$",
+          "type": "string"
+        },
+        "provider_generation": {
+          "format": "uint64",
+          "maximum": 18446744073709551615,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "runtime_generation": {
+          "format": "uint64",
+          "maximum": 18446744073709551615,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "scope_generation": {
+          "format": "uint64",
+          "maximum": 18446744073709551615,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "service_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9._:/-]+$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "package_id",
+        "service_id",
+        "artifact_sha256",
+        "runtime_generation",
+        "provider_generation",
+        "scope_generation"
+      ],
+      "type": "object"
+    },
+    "DocumentScopeV2": {
+      "additionalProperties": false,
+      "properties": {
+        "contract": {
+          "maxLength": 128,
+          "pattern": "^[a-z0-9-]+(?:\\.[a-z0-9-]+)+$",
+          "type": "string"
+        },
+        "scope_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9._:/-]+$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "contract",
+        "scope_id"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "https://vqro.dev/schema/host-document-render/v2",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "contract": "host.document.render.v2",
+  "description": "Host-created parameters for one off-render-loop producer request.\n\nThe DTO deliberately carries no terminal authorization, dependency claims, actions, or\neffects. Those facts are observed and audited independently by the host.",
+  "limits": {
+    "actions": 0,
+    "authorized_terminal_ids": 0,
+    "dependencies": 0,
+    "effects": 0,
+    "max_encoded_bytes": 2048
+  },
+  "properties": {
+    "contract": {
+      "const": "host.document.render.v2",
+      "type": "string"
+    },
+    "producer": {
+      "$ref": "#/$defs/DocumentProducerFenceV2"
+    },
+    "requested_revision": {
+      "format": "uint64",
+      "maximum": 18446744073709551615,
+      "minimum": 1,
+      "type": "integer"
+    },
+    "scope": {
+      "$ref": "#/$defs/DocumentScopeV2"
+    }
+  },
+  "required": [
+    "contract",
+    "producer",
+    "scope",
+    "requested_revision"
+  ],
+  "title": "host document render request v2",
+  "type": "object"
+}

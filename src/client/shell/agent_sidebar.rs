@@ -14,25 +14,21 @@ pub(super) struct AgentRow {
     pub(super) pane_id: String,
     pub(super) status: crate::api::schema::AgentStatus,
     pub(super) focused: bool,
+    pub(super) group_label: Option<String>,
     pub(super) rows: Vec<Vec<crate::ui::ResolvedToken>>,
 }
 
-pub(super) fn ordered_agent_pane_ids(
+pub(super) fn ordered_agent_pane_ids_without_view(
     snapshot: &ClientShellSnapshot,
     sort: crate::config::AgentPanelSortConfig,
+    host_documents: Option<&crate::protocol::endpoint::HostDocumentsProjectionV1>,
 ) -> Vec<String> {
-    if snapshot.agent_view_label.is_some() {
-        return snapshot
-            .agent_order
-            .iter()
-            .filter(|pane_id| {
-                snapshot
-                    .agents
-                    .iter()
-                    .any(|agent| agent.pane_id == pane_id.as_str())
-            })
-            .cloned()
-            .collect();
+    if let Some(host_documents) = host_documents {
+        if let Some(rows) =
+            super::document_navigation::agent_navigation(snapshot, Some(host_documents))
+        {
+            return rows.into_iter().map(|row| row.pane_id).collect();
+        }
     }
     let mut agents = snapshot.agents.iter().collect::<Vec<_>>();
     if sort == crate::config::AgentPanelSortConfig::Priority {
@@ -49,11 +45,33 @@ pub(super) fn ordered_agent_pane_ids(
         .collect()
 }
 
+pub(super) fn ordered_agent_pane_ids_with_documents(
+    snapshot: &ClientShellSnapshot,
+    sort: crate::config::AgentPanelSortConfig,
+    host_documents: Option<&crate::protocol::endpoint::HostDocumentsProjectionV1>,
+) -> Vec<String> {
+    if snapshot.agent_view_label.is_some() {
+        return snapshot
+            .agent_order
+            .iter()
+            .filter(|pane_id| {
+                snapshot
+                    .agents
+                    .iter()
+                    .any(|agent| agent.pane_id == pane_id.as_str())
+            })
+            .cloned()
+            .collect();
+    }
+    ordered_agent_pane_ids_without_view(snapshot, sort, host_documents)
+}
+
 pub(super) fn render_agent_panel(
     buffer: &mut Buffer,
     area: Rect,
     snapshot: &ClientShellSnapshot,
     config: &ClientShellConfig,
+    host_documents: Option<&crate::protocol::endpoint::HostDocumentsProjectionV1>,
     agent_scroll: &mut usize,
     hits: &mut ShellHitMap,
 ) {
@@ -67,7 +85,7 @@ pub(super) fn render_agent_panel(
         return;
     }
 
-    let rows = agent_rows(snapshot, config, None);
+    let rows = agent_rows(snapshot, config, None, host_documents);
     render_agent_list(
         buffer,
         area,
@@ -79,9 +97,18 @@ pub(super) fn render_agent_panel(
         config,
         agent_scroll,
         hits,
-        |row| row.rows.len(),
+        |row| row.rows.len() + usize::from(row.group_label.is_some()),
         |buffer, rect, row, hits| {
-            hits.agents.push((rect, row.pane_id.clone()));
+            let header_rows = u16::from(row.group_label.is_some());
+            hits.agents.push((
+                Rect::new(
+                    rect.x,
+                    rect.y.saturating_add(header_rows),
+                    rect.width,
+                    rect.height.saturating_sub(header_rows),
+                ),
+                row.pane_id.clone(),
+            ));
             render_agent_row(buffer, rect, row, config);
         },
     );
@@ -238,77 +265,110 @@ pub(super) fn agent_rows(
     snapshot: &ClientShellSnapshot,
     config: &ClientShellConfig,
     machine: Option<&str>,
+    host_documents: Option<&crate::protocol::endpoint::HostDocumentsProjectionV1>,
 ) -> Vec<AgentRow> {
-    ordered_agent_pane_ids(snapshot, config.agent_panel_sort)
+    let documented = super::document_navigation::agent_navigation(snapshot, host_documents);
+    let documented_by_pane = documented.as_ref().map(|rows| {
+        rows.iter()
+            .map(|row| (row.pane_id.as_str(), row))
+            .collect::<std::collections::HashMap<_, _>>()
+    });
+    let pane_ids = if snapshot.agent_view_label.is_none() {
+        documented
+            .as_ref()
+            .map(|rows| rows.iter().map(|row| row.pane_id.clone()).collect())
+            .unwrap_or_else(|| {
+                ordered_agent_pane_ids_with_documents(snapshot, config.agent_panel_sort, None)
+            })
+    } else {
+        ordered_agent_pane_ids_with_documents(snapshot, config.agent_panel_sort, None)
+    };
+    pane_ids
         .into_iter()
         .filter_map(|pane_id| {
-            let agent = snapshot
-                .agents
-                .iter()
-                .find(|agent| agent.pane_id == pane_id)?;
-            let workspace = snapshot
-                .workspaces
-                .iter()
-                .find(|workspace| workspace.workspace_id == agent.workspace_id)?;
-            let tab = snapshot.tabs.iter().find(|tab| tab.tab_id == agent.tab_id);
-            let pane = snapshot
-                .panes
-                .iter()
-                .find(|pane| pane.pane_id == agent.pane_id);
-            let tab_count = snapshot
-                .tabs
-                .iter()
-                .filter(|candidate| candidate.workspace_id == agent.workspace_id)
-                .count();
-            let tab_label = tab
-                .filter(|tab| tab_count > 1 || tab.custom_label)
-                .map(|tab| tab.label.as_str());
-            let agent_label = agent
-                .display_agent
-                .as_deref()
-                .or(agent.name.as_deref())
-                .or(agent.agent.as_deref())
-                .or(agent.title.as_deref());
-            let labels = agent
-                .state_labels
-                .iter()
-                .cloned()
-                .collect::<HashMap<_, _>>();
-            let tokens = agent.tokens.iter().cloned().collect::<HashMap<_, _>>();
-            let state_text = labels
-                .get(status_text(agent.agent_status))
-                .map(String::as_str)
-                .unwrap_or_else(|| sidebar_status_text(agent.agent_status));
-            let canonical_agent = agent
-                .agent
-                .as_deref()
-                .and_then(crate::detect::parse_agent_label);
-            let rows = crate::ui::sidebar_agent_rows(
-                &config.agents,
-                crate::ui::AgentTokenContext {
-                    machine,
-                    workspace: &workspace.label,
-                    tab: tab_label,
-                    pane: agent
-                        .title
-                        .as_deref()
-                        .or_else(|| pane.and_then(|pane| pane.label.as_deref())),
-                    agent_label,
-                    terminal_title: agent.terminal_title.as_deref(),
-                    terminal_title_stripped: agent.terminal_title_stripped.as_deref(),
-                    canonical_agent,
-                    tokens: &tokens,
-                },
-                state_text,
-            );
-            Some(AgentRow {
-                pane_id: agent.pane_id.clone(),
-                status: agent.agent_status,
-                focused: agent.focused,
-                rows,
-            })
+            let document_row = documented_by_pane
+                .as_ref()
+                .and_then(|rows| rows.get(pane_id.as_str()).copied());
+            agent_row_with_document(snapshot, &pane_id, config, machine, document_row)
         })
         .collect()
+}
+
+pub(super) fn agent_row_with_document(
+    snapshot: &ClientShellSnapshot,
+    pane_id: &str,
+    config: &ClientShellConfig,
+    machine: Option<&str>,
+    documented: Option<&super::document_navigation::DocumentedAgent>,
+) -> Option<AgentRow> {
+    let agent = snapshot
+        .agents
+        .iter()
+        .find(|agent| agent.pane_id == pane_id)?;
+    let workspace = snapshot
+        .workspaces
+        .iter()
+        .find(|workspace| workspace.workspace_id == agent.workspace_id)?;
+    let tab = snapshot.tabs.iter().find(|tab| tab.tab_id == agent.tab_id);
+    let pane = snapshot
+        .panes
+        .iter()
+        .find(|pane| pane.pane_id == agent.pane_id);
+    let tab_count = snapshot
+        .tabs
+        .iter()
+        .filter(|candidate| candidate.workspace_id == agent.workspace_id)
+        .count();
+    let tab_label = tab
+        .filter(|tab| tab_count > 1 || tab.custom_label)
+        .map(|tab| tab.label.as_str());
+    let agent_label = documented
+        .map(|row| row.label.as_str())
+        .or(agent.display_agent.as_deref())
+        .or(agent.name.as_deref())
+        .or(agent.agent.as_deref())
+        .or(agent.title.as_deref());
+    let labels = agent
+        .state_labels
+        .iter()
+        .cloned()
+        .collect::<HashMap<_, _>>();
+    let tokens = agent.tokens.iter().cloned().collect::<HashMap<_, _>>();
+    let state_text = labels
+        .get(status_text(agent.agent_status))
+        .map(String::as_str)
+        .unwrap_or_else(|| sidebar_status_text(agent.agent_status));
+    let canonical_agent = agent
+        .agent
+        .as_deref()
+        .and_then(crate::detect::parse_agent_label);
+    let rows = crate::ui::sidebar_agent_rows(
+        &config.agents,
+        crate::ui::AgentTokenContext {
+            machine,
+            workspace: &workspace.label,
+            tab: tab_label,
+            pane: agent
+                .title
+                .as_deref()
+                .or_else(|| pane.and_then(|pane| pane.label.as_deref())),
+            agent_label,
+            terminal_title: agent.terminal_title.as_deref(),
+            terminal_title_stripped: agent.terminal_title_stripped.as_deref(),
+            canonical_agent,
+            tokens: &tokens,
+        },
+        state_text,
+    );
+    Some(AgentRow {
+        pane_id: agent.pane_id.clone(),
+        status: agent.agent_status,
+        focused: agent.focused,
+        group_label: documented
+            .filter(|row| row.starts_group && snapshot.agent_view_label.is_none())
+            .map(|row| row.group_label.clone()),
+        rows,
+    })
 }
 
 pub(super) fn render_agent_row(
@@ -318,6 +378,31 @@ pub(super) fn render_agent_row(
     config: &ClientShellConfig,
 ) {
     let palette = &config.palette;
+    let (group_rect, rect) = if let Some(group_label) = row.group_label.as_deref() {
+        let group_rect = Rect::new(rect.x, rect.y, rect.width, 1.min(rect.height));
+        put_text(
+            buffer,
+            group_rect.x,
+            group_rect.y,
+            group_rect.width,
+            &format!(" {group_label}"),
+            Style::default()
+                .fg(palette.overlay0)
+                .add_modifier(Modifier::BOLD),
+        );
+        (
+            Some(group_rect),
+            Rect::new(
+                rect.x,
+                rect.y.saturating_add(1),
+                rect.width,
+                rect.height.saturating_sub(1),
+            ),
+        )
+    } else {
+        (None, rect)
+    };
+    let _ = group_rect;
     let row_style = if row.focused {
         Style::default().bg(palette.active_row_bg)
     } else {
@@ -332,16 +417,8 @@ pub(super) fn render_agent_row(
             .fg(palette.subtext0)
             .add_modifier(Modifier::BOLD)
     };
-    let status_style = Style::default()
-        .fg(status_color(row.status, palette))
-        .add_modifier(if row.focused {
-            Modifier::empty()
-        } else {
-            Modifier::DIM
-        });
-    let secondary = Style::default()
-        .fg(palette.overlay0)
-        .add_modifier(Modifier::DIM);
+    let status_style = Style::default().fg(status_color(row.status, palette));
+    let secondary = Style::default().fg(palette.overlay0);
     let icon = (
         status_icon(row.status, config.status_indicators),
         Style::default().fg(status_color(row.status, palette)),

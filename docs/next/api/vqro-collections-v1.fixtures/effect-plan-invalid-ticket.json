@@ -1,0 +1,17 @@
+{
+  "contract": "vqro.collections.effect-plan.v1",
+  "ticket": "ticket:replayed-or-cross-request",
+  "idempotency_key": "collection-set-label:01HX7KZV3Y",
+  "expected_store_generation": 2,
+  "expected_namespace_revision": 3,
+  "state": {
+    "key": "container_000000000000002a",
+    "value": {
+      "schema": "vqro.collections.policy",
+      "schema_version": 1,
+      "container_id": "container_000000000000002a",
+      "label": "Workers",
+      "archived_terminal_ids": ["term_22222222222222222222222222222222"]
+    }
+  }
+}

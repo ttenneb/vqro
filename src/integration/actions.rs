@@ -2,13 +2,15 @@ use std::io;
 
 use super::registry::{integration_target_label, integration_target_supported};
 use super::targets::{
-    install_antigravity_cli, install_claude, install_codex, install_copilot, install_cursor,
-    install_devin, install_droid, install_grok, install_hermes, install_kilo, install_kimi,
-    install_mastracode, install_omp, install_opencode, install_pi, install_qodercli, install_qwen,
-    uninstall_antigravity_cli, uninstall_claude, uninstall_codex, uninstall_copilot,
-    uninstall_cursor, uninstall_devin, uninstall_droid, uninstall_grok, uninstall_hermes,
-    uninstall_kilo, uninstall_kimi, uninstall_mastracode, uninstall_omp, uninstall_opencode,
-    uninstall_pi, uninstall_qodercli, uninstall_qwen,
+    install_antigravity_cli, install_claude, install_claude_asset, install_codex,
+    install_codex_asset, install_copilot, install_cursor, install_devin, install_droid,
+    install_grok, install_hermes, install_kilo, install_kimi, install_letta, install_mastracode,
+    install_omp, install_opencode, install_pi, install_pi_asset, install_qodercli, install_qwen,
+    uninstall_antigravity_cli, uninstall_claude, uninstall_claude_asset, uninstall_codex,
+    uninstall_codex_asset, uninstall_copilot, uninstall_cursor, uninstall_devin, uninstall_droid,
+    uninstall_grok, uninstall_hermes, uninstall_kilo, uninstall_kimi, uninstall_letta,
+    uninstall_mastracode, uninstall_omp, uninstall_opencode, uninstall_pi, uninstall_pi_asset,
+    uninstall_qodercli, uninstall_qwen,
 };
 use super::version::{agent_version_requirement, enforce_agent_version};
 use super::{KIMI_MIN_VERSION, PI_EXTENSION_INSTALL_NAME};
@@ -16,9 +18,160 @@ use super::{KIMI_MIN_VERSION, PI_EXTENSION_INSTALL_NAME};
 pub(crate) fn install_target(
     target: crate::api::schema::IntegrationTarget,
 ) -> io::Result<Vec<String>> {
+    if !super::integration_mutation_enabled(target) {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "vqro integration changes are disabled until integrations use the vqro namespace",
+        ));
+    }
     let result = install_target_inner(target);
     let outcome = if result.is_ok() { "ok" } else { "error" };
     crate::logging::integration_action("install", integration_target_label(target), outcome);
+    result
+}
+
+pub(crate) fn artifact_asset_path(
+    target: crate::api::schema::IntegrationTarget,
+) -> io::Result<&'static str> {
+    Ok(match target {
+        crate::api::schema::IntegrationTarget::Pi => "assets/vqro-agent-state.ts",
+        crate::api::schema::IntegrationTarget::Claude
+        | crate::api::schema::IntegrationTarget::Codex => {
+            if cfg!(windows) {
+                "assets/vqro-agent-state.ps1"
+            } else {
+                "assets/vqro-agent-state.sh"
+            }
+        }
+        _ => {
+            return Err(io::Error::other(format!(
+                "{} does not support pinned artifact deployment",
+                integration_target_label(target)
+            )));
+        }
+    })
+}
+
+pub(crate) fn validate_vqro_adapter_asset(asset: &[u8]) -> io::Result<()> {
+    let text = std::str::from_utf8(asset)
+        .map_err(|error| io::Error::other(format!("adapter asset is not UTF-8: {error}")))?;
+    let normalized = text.to_ascii_lowercase();
+    if normalized.contains("herdr") || !normalized.contains("vqro") {
+        return Err(io::Error::other(
+            "adapter asset must use only Vqro runtime names and environment variables",
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn install_target_from_artifact(
+    target: crate::api::schema::IntegrationTarget,
+    artifact: &crate::extensions::VerifiedExtensionArtifact,
+) -> io::Result<Vec<String>> {
+    let asset =
+        crate::extension_artifact::read_verified_file(artifact, artifact_asset_path(target)?)
+            .map_err(io::Error::other)?;
+    install_target_from_asset(target, &asset)
+}
+
+pub(crate) fn install_target_from_asset(
+    target: crate::api::schema::IntegrationTarget,
+    asset: &[u8],
+) -> io::Result<Vec<String>> {
+    validate_vqro_adapter_asset(asset)?;
+    match target {
+        crate::api::schema::IntegrationTarget::Pi => {
+            let path = install_pi_asset(asset)?;
+            Ok(vec![format!(
+                "installed pi integration to {}",
+                path.display()
+            )])
+        }
+        crate::api::schema::IntegrationTarget::Claude => {
+            let installed = install_claude_asset(asset)?;
+            Ok(vec![
+                format!(
+                    "installed claude integration hook to {}",
+                    installed.hook_path.display()
+                ),
+                format!(
+                    "ensured claude settings at {}",
+                    installed.settings_path.display()
+                ),
+            ])
+        }
+        crate::api::schema::IntegrationTarget::Codex => {
+            let installed = install_codex_asset(asset)?;
+            Ok(vec![
+                format!(
+                    "installed codex integration hook to {}",
+                    installed.hook_path.display()
+                ),
+                format!("ensured codex hooks at {}", installed.hooks_path.display()),
+                format!(
+                    "ensured codex config at {}",
+                    installed.config_path.display()
+                ),
+            ])
+        }
+        _ => unreachable!("target was restricted above"),
+    }
+}
+
+/// Experimental Letta install that bypasses the frozen client endpoint
+/// `IntegrationTarget` enum. Fold into the agent registry when it lands.
+// Retained from upstream while vqro's alpha product boundary disables integration mutation.
+#[allow(dead_code)]
+pub(crate) fn install_experimental_letta() -> io::Result<Vec<String>> {
+    let result = install_letta().map(|installed| {
+        vec![
+            format!(
+                "installed letta integration hook to {}",
+                installed.hook_path.display()
+            ),
+            format!(
+                "ensured letta settings at {}",
+                installed.settings_path.display()
+            ),
+        ]
+    });
+    let outcome = if result.is_ok() { "ok" } else { "error" };
+    crate::logging::integration_action("install", "letta", outcome);
+    result
+}
+
+/// Experimental Letta uninstall counterpart.
+// Retained from upstream while vqro's alpha product boundary disables integration mutation.
+#[allow(dead_code)]
+pub(crate) fn uninstall_experimental_letta() -> io::Result<Vec<String>> {
+    let result = uninstall_letta().map(|result| {
+        let mut messages = Vec::new();
+        if result.removed_hook_file {
+            messages.push(format!(
+                "removed letta hook at {}",
+                result.hook_path.display()
+            ));
+        } else {
+            messages.push(format!(
+                "no letta hook found at {}",
+                result.hook_path.display()
+            ));
+        }
+        if result.updated_settings {
+            messages.push(format!(
+                "removed herdr letta hook entry from {}",
+                result.settings_path.display()
+            ));
+        } else {
+            messages.push(format!(
+                "no herdr letta hook entry found in {}",
+                result.settings_path.display()
+            ));
+        }
+        messages
+    });
+    let outcome = if result.is_ok() { "ok" } else { "error" };
+    crate::logging::integration_action("uninstall", "letta", outcome);
     result
 }
 
@@ -144,7 +297,7 @@ fn install_target_inner(target: crate::api::schema::IntegrationTarget) -> io::Re
         }
         crate::api::schema::IntegrationTarget::Opencode => {
             let installed = install_opencode()?;
-            vec![
+            let mut messages = vec![
                 format!(
                     "installed opencode integration plugin to {}",
                     installed.plugin_path.display()
@@ -157,7 +310,14 @@ fn install_target_inner(target: crate::api::schema::IntegrationTarget) -> io::Re
                     "ensured opencode tui plugin config at {}",
                     installed.tui_config_path.display()
                 ),
-            ]
+            ];
+            if installed.cli_config_path.is_none() {
+                messages.push(
+                    "to enable OpenCode V2, start opencode2 once, then reinstall this integration"
+                        .to_string(),
+                );
+            }
+            messages
         }
         crate::api::schema::IntegrationTarget::Kilo => {
             let installed = install_kilo()?;
@@ -266,9 +426,32 @@ fn install_target_inner(target: crate::api::schema::IntegrationTarget) -> io::Re
 pub(crate) fn uninstall_target(
     target: crate::api::schema::IntegrationTarget,
 ) -> io::Result<Vec<String>> {
+    if !super::integration_mutation_enabled(target) {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "vqro integration changes are disabled until integrations use the vqro namespace",
+        ));
+    }
+    uninstall_target_inner(target, false)
+}
+
+pub(crate) fn uninstall_target_artifact(
+    target: crate::api::schema::IntegrationTarget,
+) -> io::Result<Vec<String>> {
+    uninstall_target_inner(target, true)
+}
+
+fn uninstall_target_inner(
+    target: crate::api::schema::IntegrationTarget,
+    artifact: bool,
+) -> io::Result<Vec<String>> {
     let messages = match target {
         crate::api::schema::IntegrationTarget::Pi => {
-            let result = uninstall_pi()?;
+            let result = if artifact {
+                uninstall_pi_asset()?
+            } else {
+                uninstall_pi()?
+            };
             if result.removed_extension {
                 vec![format!(
                     "removed pi integration extension at {}",
@@ -296,7 +479,11 @@ pub(crate) fn uninstall_target(
             }
         }
         crate::api::schema::IntegrationTarget::Claude => {
-            let result = uninstall_claude()?;
+            let result = if artifact {
+                uninstall_claude_asset()?
+            } else {
+                uninstall_claude()?
+            };
             let mut messages = Vec::new();
             if result.removed_hook_file {
                 messages.push(format!(
@@ -323,7 +510,11 @@ pub(crate) fn uninstall_target(
             messages
         }
         crate::api::schema::IntegrationTarget::Codex => {
-            let result = uninstall_codex()?;
+            let result = if artifact {
+                uninstall_codex_asset()?
+            } else {
+                uninstall_codex()?
+            };
             let mut messages = Vec::new();
             if result.removed_hook_file {
                 messages.push(format!(

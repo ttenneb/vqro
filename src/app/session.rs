@@ -5,14 +5,15 @@ use super::{App, SESSION_SAVE_DEBOUNCE};
 enum SessionSaveJob {
     Clear,
     Save {
-        snapshot: crate::persist::SessionSnapshot,
+        snapshot: Box<crate::persist::SessionSnapshot>,
         history: Option<crate::persist::SessionHistorySnapshot>,
     },
 }
 
 impl App {
     pub(super) fn schedule_session_save(&mut self) {
-        if self.policy.persist_session {
+        if self.policy.persist_session && !self.session_persistence_blocked {
+            self.pane_exit_checkpoint_pending = false;
             self.session_save_deadline = Some(Instant::now() + SESSION_SAVE_DEBOUNCE);
         }
     }
@@ -33,30 +34,66 @@ impl App {
             if let Some(thread) = self.session_save_thread.take() {
                 let _ = thread.join();
             }
+            if let Err(error) = self.maybe_cutover_collections_authority() {
+                tracing::warn!(%error, "deferred Collections authority cutover failed");
+            }
         }
+    }
+
+    pub(super) fn capture_session_snapshot(&self) -> crate::persist::SessionSnapshot {
+        let mut snapshot = crate::persist::capture(
+            &self.state.workspaces,
+            &self.state.repositories,
+            &self.state.space_order,
+            &self.state.terminals,
+            &self.terminal_runtimes,
+            self.state.active,
+            self.state.selected,
+        );
+        snapshot.delegations = self
+            .state
+            .delegations
+            .preorder()
+            .into_iter()
+            .filter_map(|id| self.state.delegations.get(id).cloned())
+            .collect();
+        snapshot.collections_authority = self.collections_authority.clone();
+        let package_authority = self.collections_authority.phase
+            == crate::collections_extension_contract::CollectionsAuthorityPhaseV1::Package;
+        snapshot.collections_action_sequence = if package_authority {
+            self.next_collections_action_id
+        } else {
+            0
+        };
+        snapshot.version = if package_authority {
+            crate::persist::SNAPSHOT_VERSION
+        } else {
+            crate::persist::LEGACY_SNAPSHOT_WRITER_VERSION
+        };
+        snapshot
     }
 
     fn capture_session_save_job(&self) -> SessionSaveJob {
         if self.state.workspaces.is_empty() {
             SessionSaveJob::Clear
         } else {
-            let snapshot = crate::persist::capture(
-                &self.state.workspaces,
-                &self.state.terminals,
-                &self.terminal_runtimes,
-                self.state.active,
-                self.state.selected,
-            );
             let history = self.persist_pane_history.then(|| {
                 crate::persist::capture_history(&self.state.workspaces, &self.terminal_runtimes)
             });
-            SessionSaveJob::Save { snapshot, history }
+            SessionSaveJob::Save {
+                snapshot: Box::new(self.capture_session_snapshot()),
+                history,
+            }
         }
     }
 
     pub(crate) fn start_background_session_save(&mut self) {
-        if !self.policy.persist_session {
+        if !self.policy.persist_session || self.session_persistence_blocked {
             self.session_save_deadline = None;
+            return;
+        }
+        if self.collections_mutations_blocked {
+            self.session_save_deadline = Some(Instant::now() + Duration::from_millis(250));
             return;
         }
 
@@ -67,6 +104,7 @@ impl App {
         }
 
         let job = self.capture_session_save_job();
+        self.pane_exit_checkpoint_pending = false;
         self.session_save_deadline = None;
         match std::thread::Builder::new()
             .name("herdr-session-save".into())
@@ -85,13 +123,45 @@ impl App {
             let _ = thread.join();
         }
 
-        if !self.policy.persist_session {
+        if !self.policy.persist_session || self.session_persistence_blocked {
             self.session_save_deadline = None;
+            return;
+        }
+        if self.collections_mutations_blocked {
+            self.session_save_deadline = Some(Instant::now() + Duration::from_millis(250));
             return;
         }
 
         run_session_save_job(self.capture_session_save_job());
+        self.pane_exit_checkpoint_pending = false;
         self.session_save_deadline = None;
+    }
+
+    pub(crate) fn checkpoint_session_before_pane_exit(&mut self) {
+        if !self.policy.persist_session
+            || self.session_persistence_blocked
+            || (self.pane_exit_checkpoint_pending && !self.state.session_dirty)
+        {
+            return;
+        }
+        self.save_session_now();
+        self.pane_exit_checkpoint_pending = true;
+        self.state.session_dirty = false;
+    }
+
+    pub(crate) fn finish_checkpointed_pane_exit(&mut self) {
+        if self.pane_exit_checkpoint_pending {
+            self.state.session_dirty = false;
+            self.session_save_deadline = Some(Instant::now() + SESSION_SAVE_DEBOUNCE);
+        }
+    }
+
+    pub(crate) fn save_session_on_shutdown(&mut self) {
+        if self.pane_exit_checkpoint_pending && !self.state.session_dirty {
+            self.session_save_deadline = None;
+            return;
+        }
+        self.save_session_now();
     }
 }
 

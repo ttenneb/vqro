@@ -1,0 +1,132 @@
+{
+  "$defs": {
+    "PackageRuntimeV1": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "component": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "component",
+              "type": "string"
+            },
+            "world": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "component",
+            "world"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "args": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "executables": {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "type": "object"
+            },
+            "kind": {
+              "const": "process",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "executables"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "PackageServiceV1": {
+      "additionalProperties": false,
+      "properties": {
+        "capabilities": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "id": {
+          "type": "string"
+        },
+        "provides": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "runtime": {
+          "$ref": "#/$defs/PackageRuntimeV1"
+        }
+      },
+      "required": [
+        "id",
+        "runtime"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "https://vqro.dev/schema/extension-manifest/v2",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "contract": "vqro.package.v1",
+  "properties": {
+    "id": {
+      "type": "string"
+    },
+    "manifest_version": {
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "min_vqro_version": {
+      "type": "string"
+    },
+    "namespaces": {
+      "default": [],
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "package_contract": {
+      "type": "string"
+    },
+    "services": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/PackageServiceV1"
+      },
+      "type": "array"
+    },
+    "version": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "manifest_version",
+    "package_contract",
+    "id",
+    "version",
+    "min_vqro_version"
+  ],
+  "title": "vqro extension manifest v2",
+  "type": "object"
+}

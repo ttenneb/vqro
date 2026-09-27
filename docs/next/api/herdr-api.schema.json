@@ -79,6 +79,142 @@
           ],
           "type": "string"
         },
+        "CheckoutInfo": {
+          "properties": {
+            "checkout_path": {
+              "type": "string"
+            },
+            "kind": {
+              "$ref": "#/schemas/event/$defs/CheckoutKind"
+            },
+            "repository_id": {
+              "type": "string"
+            },
+            "workspace_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "workspace_id",
+            "repository_id",
+            "checkout_path",
+            "kind"
+          ],
+          "type": "object"
+        },
+        "CheckoutKind": {
+          "enum": [
+            "primary",
+            "linked"
+          ],
+          "type": "string"
+        },
+        "CollectionInfo": {
+          "properties": {
+            "collection_id": {
+              "type": "string"
+            },
+            "focused": {
+              "type": "boolean"
+            },
+            "label": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "members": {
+              "items": {
+                "$ref": "#/schemas/event/$defs/CollectionMemberInfo"
+              },
+              "type": "array"
+            },
+            "selected_pane_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "tab_id": {
+              "type": "string"
+            },
+            "workspace_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "collection_id",
+            "workspace_id",
+            "tab_id",
+            "focused",
+            "members"
+          ],
+          "type": "object"
+        },
+        "CollectionMemberInfo": {
+          "properties": {
+            "archived": {
+              "type": "boolean"
+            },
+            "index": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "pane_id": {
+              "type": "string"
+            },
+            "selected": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "pane_id",
+            "index",
+            "archived",
+            "selected"
+          ],
+          "type": "object"
+        },
+        "DelegationInfo": {
+          "properties": {
+            "delegation_id": {
+              "type": "string"
+            },
+            "pane_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "parent_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "purpose": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "sibling_rank": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "tombstone": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "delegation_id",
+            "sibling_rank",
+            "tombstone"
+          ],
+          "type": "object"
+        },
         "EventData": {
           "oneOf": [
             {
@@ -445,6 +581,46 @@
             },
             {
               "properties": {
+                "action": {
+                  "type": "string"
+                },
+                "collection": {
+                  "$ref": "#/schemas/event/$defs/CollectionInfo"
+                },
+                "type": {
+                  "const": "collection_updated",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "action",
+                "collection"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "action": {
+                  "type": "string"
+                },
+                "delegation": {
+                  "$ref": "#/schemas/event/$defs/DelegationInfo"
+                },
+                "type": {
+                  "const": "delegation_updated",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "action",
+                "delegation"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
                 "pane": {
                   "$ref": "#/schemas/event/$defs/PaneInfo"
                 },
@@ -744,6 +920,8 @@
             "tab_renamed",
             "tab_moved",
             "tab_focused",
+            "collection_updated",
+            "delegation_updated",
             "pane_created",
             "pane_closed",
             "pane_updated",
@@ -1076,6 +1254,16 @@
             "agent_status": {
               "$ref": "#/schemas/event/$defs/AgentStatus"
             },
+            "checkout": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/event/$defs/CheckoutInfo"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "focused": {
               "type": "boolean"
             },
@@ -1091,6 +1279,12 @@
               "format": "uint",
               "minimum": 0,
               "type": "integer"
+            },
+            "repository_id": {
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "tab_count": {
               "format": "uint",
@@ -1712,6 +1906,194 @@
           ],
           "type": "object"
         },
+        "CollectionAddParams": {
+          "properties": {
+            "collection_id": {
+              "type": "string"
+            },
+            "pane_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "collection_id",
+            "pane_id"
+          ],
+          "type": "object"
+        },
+        "CollectionCloseDisposition": {
+          "enum": [
+            "cascade_close",
+            "promote_members"
+          ],
+          "type": "string"
+        },
+        "CollectionCloseParams": {
+          "properties": {
+            "collection_id": {
+              "type": "string"
+            },
+            "disposition": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/request/$defs/CollectionCloseDisposition"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "collection_id"
+          ],
+          "type": "object"
+        },
+        "CollectionCreateParams": {
+          "properties": {
+            "direction": {
+              "$ref": "#/schemas/request/$defs/SplitDirection"
+            },
+            "focus": {
+              "default": false,
+              "type": "boolean"
+            },
+            "label": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "ratio": {
+              "format": "float",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "target_pane_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "target_pane_id",
+            "direction"
+          ],
+          "type": "object"
+        },
+        "CollectionListParams": {
+          "properties": {
+            "tab_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "workspace_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "type": "object"
+        },
+        "CollectionMemberTarget": {
+          "properties": {
+            "collection_id": {
+              "type": "string"
+            },
+            "pane_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "collection_id",
+            "pane_id"
+          ],
+          "type": "object"
+        },
+        "CollectionPromoteParams": {
+          "properties": {
+            "direction": {
+              "$ref": "#/schemas/request/$defs/SplitDirection"
+            },
+            "focus": {
+              "default": false,
+              "type": "boolean"
+            },
+            "pane_id": {
+              "type": "string"
+            },
+            "ratio": {
+              "format": "float",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "target_pane_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "pane_id",
+            "target_pane_id",
+            "direction"
+          ],
+          "type": "object"
+        },
+        "CollectionReorderParams": {
+          "properties": {
+            "collection_id": {
+              "type": "string"
+            },
+            "index": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "pane_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "collection_id",
+            "pane_id",
+            "index"
+          ],
+          "type": "object"
+        },
+        "CollectionSelectParams": {
+          "properties": {
+            "collection_id": {
+              "type": "string"
+            },
+            "focus": {
+              "default": false,
+              "type": "boolean"
+            },
+            "pane_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "collection_id",
+            "pane_id"
+          ],
+          "type": "object"
+        },
+        "CollectionTarget": {
+          "properties": {
+            "collection_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "collection_id"
+          ],
+          "type": "object"
+        },
         "CommandInvokeParams": {
           "properties": {
             "command_id": {
@@ -1750,6 +2132,132 @@
           },
           "required": [
             "command_id"
+          ],
+          "type": "object"
+        },
+        "DelegationCreateParams": {
+          "properties": {
+            "pane_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "parent_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "purpose": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "type": "object"
+        },
+        "DelegationReorderParams": {
+          "properties": {
+            "delegation_id": {
+              "type": "string"
+            },
+            "position": {
+              "$ref": "#/schemas/request/$defs/DelegationSiblingPosition"
+            }
+          },
+          "required": [
+            "delegation_id",
+            "position"
+          ],
+          "type": "object"
+        },
+        "DelegationReparentParams": {
+          "properties": {
+            "delegation_id": {
+              "type": "string"
+            },
+            "parent_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "delegation_id"
+          ],
+          "type": "object"
+        },
+        "DelegationSiblingPosition": {
+          "oneOf": [
+            {
+              "properties": {
+                "type": {
+                  "const": "first",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "type": {
+                  "const": "last",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "delegation_id": {
+                  "type": "string"
+                },
+                "type": {
+                  "const": "before",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "delegation_id"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "delegation_id": {
+                  "type": "string"
+                },
+                "type": {
+                  "const": "after",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "delegation_id"
+              ],
+              "type": "object"
+            }
+          ]
+        },
+        "DelegationTarget": {
+          "properties": {
+            "delegation_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "delegation_id"
           ],
           "type": "object"
         },
@@ -2142,6 +2650,139 @@
           },
           "required": [
             "match_event"
+          ],
+          "type": "object"
+        },
+        "ExtensionStateEventsParams": {
+          "properties": {
+            "after_sequence": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "limit": {
+              "format": "uint",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "store_generation": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "store_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "store_id",
+            "store_generation",
+            "after_sequence"
+          ],
+          "type": "object"
+        },
+        "ExtensionStateOperationV1": {
+          "properties": {
+            "key": {
+              "type": "string"
+            },
+            "value": true
+          },
+          "required": [
+            "key"
+          ],
+          "type": "object"
+        },
+        "ExtensionStateSnapshotParams": {
+          "properties": {
+            "namespace": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "namespace"
+          ],
+          "type": "object"
+        },
+        "ExtensionStateTransactionV1": {
+          "properties": {
+            "contract": {
+              "type": "string"
+            },
+            "expected_revision": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "expected_store_generation": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "idempotency_key": {
+              "type": "string"
+            },
+            "namespace": {
+              "type": "string"
+            },
+            "operations": {
+              "items": {
+                "$ref": "#/schemas/request/$defs/ExtensionStateOperationV1"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "contract",
+            "namespace",
+            "expected_store_generation",
+            "expected_revision",
+            "idempotency_key",
+            "operations"
+          ],
+          "type": "object"
+        },
+        "HostDocumentActionParams": {
+          "properties": {
+            "action_id": {
+              "type": "string"
+            },
+            "confirmation_token": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "confirmed": {
+              "default": false,
+              "type": "boolean"
+            },
+            "generation": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "namespace": {
+              "type": "string"
+            },
+            "revision": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "scope_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "namespace",
+            "scope_id",
+            "generation",
+            "revision",
+            "action_id"
           ],
           "type": "object"
         },
@@ -3382,6 +4023,17 @@
           "required": [
             "pane_id"
           ],
+          "type": "object"
+        },
+        "PaneTelemetryParams": {
+          "properties": {
+            "pane_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
           "type": "object"
         },
         "PaneTextPoint": {
@@ -4974,6 +5626,54 @@
         {
           "properties": {
             "method": {
+              "const": "extension.state.snapshot.v1",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/ExtensionStateSnapshotParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "extension.state.transact.v1",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/ExtensionStateTransactionV1"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "extension.state.events.v1",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/ExtensionStateEventsParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
               "const": "workspace.create",
               "type": "string"
             },
@@ -5486,6 +6186,294 @@
         {
           "properties": {
             "method": {
+              "const": "collection.list",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/CollectionListParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "collection.get",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/CollectionTarget"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "collection.create",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/CollectionCreateParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "collection.add",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/CollectionAddParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "collection.promote",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/CollectionPromoteParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "host.document.action",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/HostDocumentActionParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "collection.select",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/CollectionSelectParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "collection.reorder",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/CollectionReorderParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "collection.archive",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/CollectionMemberTarget"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "collection.restore",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/CollectionMemberTarget"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "collection.close",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/CollectionCloseParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "delegation.create",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/DelegationCreateParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "delegation.get",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/DelegationTarget"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "delegation.tree",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/EmptyParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "delegation.root",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/DelegationTarget"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "delegation.descendants",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/DelegationTarget"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "delegation.reparent",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/DelegationReparentParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "delegation.reorder",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/DelegationReorderParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
               "const": "pane.split",
               "type": "string"
             },
@@ -5571,6 +6559,22 @@
             },
             "params": {
               "$ref": "#/schemas/request/$defs/PaneProcessInfoParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "pane.telemetry",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/PaneTelemetryParams"
             }
           },
           "required": [
@@ -5855,6 +6859,22 @@
           "properties": {
             "method": {
               "const": "pane.link.activate",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/PaneLinkActivateParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "pane.link.resolve",
               "type": "string"
             },
             "params": {
@@ -6833,6 +7853,36 @@
           ],
           "type": "string"
         },
+        "CheckoutInfo": {
+          "properties": {
+            "checkout_path": {
+              "type": "string"
+            },
+            "kind": {
+              "$ref": "#/schemas/success_response/$defs/CheckoutKind"
+            },
+            "repository_id": {
+              "type": "string"
+            },
+            "workspace_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "workspace_id",
+            "repository_id",
+            "checkout_path",
+            "kind"
+          ],
+          "type": "object"
+        },
+        "CheckoutKind": {
+          "enum": [
+            "primary",
+            "linked"
+          ],
+          "type": "string"
+        },
         "ClientWindowTitleReason": {
           "enum": [
             "set",
@@ -6841,6 +7891,73 @@
           ],
           "type": "string"
         },
+        "CollectionInfo": {
+          "properties": {
+            "collection_id": {
+              "type": "string"
+            },
+            "focused": {
+              "type": "boolean"
+            },
+            "label": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "members": {
+              "items": {
+                "$ref": "#/schemas/success_response/$defs/CollectionMemberInfo"
+              },
+              "type": "array"
+            },
+            "selected_pane_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "tab_id": {
+              "type": "string"
+            },
+            "workspace_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "collection_id",
+            "workspace_id",
+            "tab_id",
+            "focused",
+            "members"
+          ],
+          "type": "object"
+        },
+        "CollectionMemberInfo": {
+          "properties": {
+            "archived": {
+              "type": "boolean"
+            },
+            "index": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "pane_id": {
+              "type": "string"
+            },
+            "selected": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "pane_id",
+            "index",
+            "archived",
+            "selected"
+          ],
+          "type": "object"
+        },
         "ConfigReloadStatus": {
           "enum": [
             "applied",
@@ -6848,6 +7965,90 @@
             "failed"
           ],
           "type": "string"
+        },
+        "DelegationInfo": {
+          "properties": {
+            "delegation_id": {
+              "type": "string"
+            },
+            "pane_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "parent_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "purpose": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "sibling_rank": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "tombstone": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "delegation_id",
+            "sibling_rank",
+            "tombstone"
+          ],
+          "type": "object"
+        },
+        "DelegationTreeEntry": {
+          "properties": {
+            "delegation_id": {
+              "type": "string"
+            },
+            "depth": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "pane_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "parent_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "purpose": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "sibling_rank": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "tombstone": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "delegation_id",
+            "sibling_rank",
+            "tombstone",
+            "depth"
+          ],
+          "type": "object"
         },
         "EventData": {
           "oneOf": [
@@ -7215,6 +8416,46 @@
             },
             {
               "properties": {
+                "action": {
+                  "type": "string"
+                },
+                "collection": {
+                  "$ref": "#/schemas/success_response/$defs/CollectionInfo"
+                },
+                "type": {
+                  "const": "collection_updated",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "action",
+                "collection"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "action": {
+                  "type": "string"
+                },
+                "delegation": {
+                  "$ref": "#/schemas/success_response/$defs/DelegationInfo"
+                },
+                "type": {
+                  "const": "delegation_updated",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "action",
+                "delegation"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
                 "pane": {
                   "$ref": "#/schemas/success_response/$defs/PaneInfo"
                 },
@@ -7529,6 +8770,8 @@
             "tab_renamed",
             "tab_moved",
             "tab_focused",
+            "collection_updated",
+            "delegation_updated",
             "pane_created",
             "pane_closed",
             "pane_updated",
@@ -7539,6 +8782,184 @@
             "pane_agent_detected",
             "pane_agent_status_changed",
             "layout_updated"
+          ],
+          "type": "string"
+        },
+        "ExtensionServiceCapability": {
+          "enum": [
+            "view_contribution",
+            "host_document",
+            "action_choices",
+            "focus_terminal",
+            "terminal_interrupt",
+            "unknown"
+          ],
+          "type": "string"
+        },
+        "ExtensionStateCommitV1": {
+          "properties": {
+            "contract": {
+              "type": "string"
+            },
+            "namespace": {
+              "type": "string"
+            },
+            "replayed": {
+              "type": "boolean"
+            },
+            "revision": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "sequence": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "store_generation": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "store_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "contract",
+            "store_id",
+            "store_generation",
+            "namespace",
+            "revision",
+            "sequence",
+            "replayed"
+          ],
+          "type": "object"
+        },
+        "ExtensionStateEventPageV1": {
+          "properties": {
+            "contract": {
+              "type": "string"
+            },
+            "earliest_sequence": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "events": {
+              "items": {
+                "$ref": "#/schemas/success_response/$defs/ExtensionStateEventV1"
+              },
+              "type": "array"
+            },
+            "gap": {
+              "type": "boolean"
+            },
+            "latest_sequence": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "store_generation": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "store_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "contract",
+            "store_id",
+            "store_generation",
+            "earliest_sequence",
+            "latest_sequence",
+            "gap",
+            "events"
+          ],
+          "type": "object"
+        },
+        "ExtensionStateEventV1": {
+          "properties": {
+            "changed_keys": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "namespace": {
+              "type": "string"
+            },
+            "revision": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "sequence": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "sequence",
+            "namespace",
+            "revision",
+            "changed_keys"
+          ],
+          "type": "object"
+        },
+        "ExtensionStateSnapshotV1": {
+          "properties": {
+            "contract": {
+              "type": "string"
+            },
+            "namespace": {
+              "type": "string"
+            },
+            "revision": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "sequence": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "store_generation": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "store_id": {
+              "type": "string"
+            },
+            "values": {
+              "additionalProperties": true,
+              "type": "object"
+            }
+          },
+          "required": [
+            "contract",
+            "store_id",
+            "store_generation",
+            "namespace",
+            "revision",
+            "sequence",
+            "values"
+          ],
+          "type": "object"
+        },
+        "HostDocumentSourceKind": {
+          "enum": [
+            "terminal_groups",
+            "spaces",
+            "relationships",
+            "agent_activity",
+            "unknown"
           ],
           "type": "string"
         },
@@ -7607,6 +9028,12 @@
             },
             "plugin_root": {
               "type": "string"
+            },
+            "services": {
+              "items": {
+                "$ref": "#/schemas/success_response/$defs/PluginManifestService"
+              },
+              "type": "array"
             },
             "source": {
               "$ref": "#/schemas/success_response/$defs/PluginSourceInfo",
@@ -8162,6 +9589,35 @@
           ],
           "type": "object"
         },
+        "PaneLinkRegion": {
+          "description": "Inclusive display-cell columns on a pane's current viewport.",
+          "properties": {
+            "end_col": {
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "row": {
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "start_col": {
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "row",
+            "start_col",
+            "end_col"
+          ],
+          "type": "object"
+        },
         "PaneMoveReason": {
           "enum": [
             "same_tab",
@@ -8514,6 +9970,180 @@
             "source_pane_id",
             "focused_pane_id",
             "layout"
+          ],
+          "type": "object"
+        },
+        "PaneTelemetry": {
+          "properties": {
+            "agent": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "agent_status": {
+              "$ref": "#/schemas/success_response/$defs/AgentStatus"
+            },
+            "availability": {
+              "$ref": "#/schemas/success_response/$defs/PaneTelemetryAvailability"
+            },
+            "cache_age_ms": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "detail": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "display_agent": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "document": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/success_response/$defs/ViewDocument"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "document_owner": {
+              "description": "Optional constrained document supplied by an enabled pane-inspector extension service.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "foreground_process_group_id": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "pane_id": {
+              "type": "string"
+            },
+            "processes": {
+              "items": {
+                "$ref": "#/schemas/success_response/$defs/PaneTelemetryProcess"
+              },
+              "type": "array"
+            },
+            "shell_pid": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "state_labels": {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "type": "object"
+            },
+            "truncated": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "pane_id",
+            "availability",
+            "cache_age_ms",
+            "truncated",
+            "processes",
+            "agent_status"
+          ],
+          "type": "object"
+        },
+        "PaneTelemetryAvailability": {
+          "enum": [
+            "available",
+            "unavailable",
+            "unsupported"
+          ],
+          "type": "string"
+        },
+        "PaneTelemetryProcess": {
+          "description": "Privacy-safe process telemetry. Command arguments and environment variables are deliberately\nnot part of this response; callers must use an explicitly diagnostic API for those values.",
+          "properties": {
+            "cpu_tenths_percent": {
+              "description": "CPU utilization in tenths of a percent, calculated from two interest-driven samples.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "cpu_time_ms": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "name": {
+              "type": "string"
+            },
+            "pid": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "read_bytes": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "resident_bytes": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "state": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "thread_count": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "write_bytes": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "pid",
+            "name"
           ],
           "type": "object"
         },
@@ -9036,6 +10666,62 @@
           ],
           "type": "object"
         },
+        "PluginManifestService": {
+          "properties": {
+            "command": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "document_source": {
+              "$ref": "#/schemas/success_response/$defs/HostDocumentSourceKind",
+              "default": "terminal_groups"
+            },
+            "granted_capabilities": {
+              "description": "Host-allowlisted protocol grants. These are not an OS sandbox.",
+              "items": {
+                "$ref": "#/schemas/success_response/$defs/ExtensionServiceCapability"
+              },
+              "type": "array"
+            },
+            "id": {
+              "type": "string"
+            },
+            "platforms": {
+              "items": {
+                "$ref": "#/schemas/success_response/$defs/PluginPlatform"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
+            },
+            "priority": {
+              "default": 0,
+              "format": "int32",
+              "type": "integer"
+            },
+            "provides": {
+              "items": {
+                "$ref": "#/schemas/success_response/$defs/PluginServiceCapability"
+              },
+              "type": "array"
+            },
+            "requested_capabilities": {
+              "description": "Capabilities requested by trusted same-user service code.",
+              "items": {
+                "$ref": "#/schemas/success_response/$defs/ExtensionServiceCapability"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "id",
+            "command"
+          ],
+          "type": "object"
+        },
         "PluginManifestStartup": {
           "properties": {
             "command": {
@@ -9093,6 +10779,15 @@
             "linux",
             "macos",
             "windows"
+          ],
+          "type": "string"
+        },
+        "PluginServiceCapability": {
+          "enum": [
+            "pane_inspector",
+            "host_document",
+            "action_choices",
+            "unknown"
           ],
           "type": "string"
         },
@@ -9187,6 +10882,43 @@
           ],
           "type": "string"
         },
+        "RepositoryInfo": {
+          "description": "Optional first-class repository projection. Workspace APIs remain available\nfor clients that do not understand this model.",
+          "properties": {
+            "checkout_workspace_ids": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "focused": {
+              "type": "boolean"
+            },
+            "git_common_dir": {
+              "type": "string"
+            },
+            "label": {
+              "type": "string"
+            },
+            "last_focused_workspace_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "repository_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "repository_id",
+            "label",
+            "git_common_dir",
+            "checkout_workspace_ids",
+            "focused"
+          ],
+          "type": "object"
+        },
         "ResponseResult": {
           "oneOf": [
             {
@@ -9235,6 +10967,54 @@
               "required": [
                 "type",
                 "snapshot"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "snapshot": {
+                  "$ref": "#/schemas/success_response/$defs/ExtensionStateSnapshotV1"
+                },
+                "type": {
+                  "const": "extension_state_snapshot",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "snapshot"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "commit": {
+                  "$ref": "#/schemas/success_response/$defs/ExtensionStateCommitV1"
+                },
+                "type": {
+                  "const": "extension_state_committed",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "commit"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "page": {
+                  "$ref": "#/schemas/success_response/$defs/ExtensionStateEventPageV1"
+                },
+                "type": {
+                  "const": "extension_state_events",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "page"
               ],
               "type": "object"
             },
@@ -9563,6 +11343,95 @@
             },
             {
               "properties": {
+                "collection": {
+                  "$ref": "#/schemas/success_response/$defs/CollectionInfo"
+                },
+                "type": {
+                  "const": "collection_info",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "collection"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "collections": {
+                  "items": {
+                    "$ref": "#/schemas/success_response/$defs/CollectionInfo"
+                  },
+                  "type": "array"
+                },
+                "type": {
+                  "const": "collection_list",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "collections"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "delegation": {
+                  "$ref": "#/schemas/success_response/$defs/DelegationInfo"
+                },
+                "type": {
+                  "const": "delegation_info",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "delegation"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "delegations": {
+                  "items": {
+                    "$ref": "#/schemas/success_response/$defs/DelegationTreeEntry"
+                  },
+                  "type": "array"
+                },
+                "type": {
+                  "const": "delegation_tree",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "delegations"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "delegations": {
+                  "items": {
+                    "$ref": "#/schemas/success_response/$defs/DelegationInfo"
+                  },
+                  "type": "array"
+                },
+                "type": {
+                  "const": "delegation_list",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "delegations"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
                 "pane": {
                   "$ref": "#/schemas/success_response/$defs/PaneInfo"
                 },
@@ -9689,6 +11558,22 @@
               "required": [
                 "type",
                 "process_info"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "telemetry": {
+                  "$ref": "#/schemas/success_response/$defs/PaneTelemetry"
+                },
+                "type": {
+                  "const": "pane_telemetry",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "telemetry"
               ],
               "type": "object"
             },
@@ -10376,6 +12261,25 @@
             },
             {
               "properties": {
+                "regions": {
+                  "items": {
+                    "$ref": "#/schemas/success_response/$defs/PaneLinkRegion"
+                  },
+                  "type": "array"
+                },
+                "type": {
+                  "const": "pane_link_resolved",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "regions"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
                 "handled": {
                   "type": "boolean"
                 },
@@ -10565,6 +12469,20 @@
               },
               "type": "array"
             },
+            "collections": {
+              "description": "Authoritative collection organization, omitted when the session has none.",
+              "items": {
+                "$ref": "#/schemas/success_response/$defs/CollectionInfo"
+              },
+              "type": "array"
+            },
+            "delegations": {
+              "description": "Authoritative delegation forest in deterministic preorder, omitted when empty.",
+              "items": {
+                "$ref": "#/schemas/success_response/$defs/DelegationTreeEntry"
+              },
+              "type": "array"
+            },
             "focused_pane_id": {
               "type": [
                 "string",
@@ -10600,6 +12518,18 @@
               "minimum": 0,
               "type": "integer"
             },
+            "repositories": {
+              "items": {
+                "$ref": "#/schemas/success_response/$defs/RepositoryInfo"
+              },
+              "type": "array"
+            },
+            "space_order": {
+              "items": {
+                "$ref": "#/schemas/success_response/$defs/SpaceInfo"
+              },
+              "type": "array"
+            },
             "tabs": {
               "items": {
                 "$ref": "#/schemas/success_response/$defs/TabInfo"
@@ -10626,6 +12556,42 @@
             "agents"
           ],
           "type": "object"
+        },
+        "SpaceInfo": {
+          "oneOf": [
+            {
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "kind": {
+                  "const": "repository",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind",
+                "id"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "kind": {
+                  "const": "standalone_workspace",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind",
+                "id"
+              ],
+              "type": "object"
+            }
+          ]
         },
         "SplitDirection": {
           "enum": [
@@ -10673,6 +12639,220 @@
           ],
           "type": "object"
         },
+        "ViewBlock": {
+          "oneOf": [
+            {
+              "properties": {
+                "text": {
+                  "type": "string"
+                },
+                "tone": {
+                  "$ref": "#/schemas/success_response/$defs/ViewTone",
+                  "default": "default"
+                },
+                "type": {
+                  "const": "text",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "text"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "label": {
+                  "type": "string"
+                },
+                "tone": {
+                  "$ref": "#/schemas/success_response/$defs/ViewTone",
+                  "default": "default"
+                },
+                "type": {
+                  "const": "badge",
+                  "type": "string"
+                },
+                "value": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "label",
+                "value"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "items": {
+                  "items": {
+                    "$ref": "#/schemas/success_response/$defs/ViewKeyValue"
+                  },
+                  "type": "array"
+                },
+                "type": {
+                  "const": "key_value",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "items"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "columns": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "rows": {
+                  "items": {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "type": "array"
+                },
+                "type": {
+                  "const": "table",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "columns",
+                "rows"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "items": {
+                  "items": {
+                    "$ref": "#/schemas/success_response/$defs/ViewTimelineItem"
+                  },
+                  "type": "array"
+                },
+                "type": {
+                  "const": "timeline",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "items"
+              ],
+              "type": "object"
+            }
+          ]
+        },
+        "ViewDocument": {
+          "properties": {
+            "sections": {
+              "default": [],
+              "items": {
+                "$ref": "#/schemas/success_response/$defs/ViewSection"
+              },
+              "type": "array"
+            },
+            "subtitle": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "title": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "title"
+          ],
+          "type": "object"
+        },
+        "ViewKeyValue": {
+          "properties": {
+            "key": {
+              "type": "string"
+            },
+            "tone": {
+              "$ref": "#/schemas/success_response/$defs/ViewTone",
+              "default": "default"
+            },
+            "value": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "key",
+            "value"
+          ],
+          "type": "object"
+        },
+        "ViewSection": {
+          "properties": {
+            "blocks": {
+              "default": [],
+              "items": {
+                "$ref": "#/schemas/success_response/$defs/ViewBlock"
+              },
+              "type": "array"
+            },
+            "id": {
+              "type": "string"
+            },
+            "title": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "id"
+          ],
+          "type": "object"
+        },
+        "ViewTimelineItem": {
+          "properties": {
+            "detail": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "label": {
+              "type": "string"
+            },
+            "tone": {
+              "$ref": "#/schemas/success_response/$defs/ViewTone",
+              "default": "default"
+            }
+          },
+          "required": [
+            "label"
+          ],
+          "type": "object"
+        },
+        "ViewTone": {
+          "enum": [
+            "default",
+            "muted",
+            "accent",
+            "success",
+            "warning",
+            "danger"
+          ],
+          "type": "string"
+        },
         "WorkspaceInfo": {
           "properties": {
             "active_tab_id": {
@@ -10680,6 +12860,16 @@
             },
             "agent_status": {
               "$ref": "#/schemas/success_response/$defs/AgentStatus"
+            },
+            "checkout": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/success_response/$defs/CheckoutInfo"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "focused": {
               "type": "boolean"
@@ -10696,6 +12886,12 @@
               "format": "uint",
               "minimum": 0,
               "type": "integer"
+            },
+            "repository_id": {
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "tab_count": {
               "format": "uint",

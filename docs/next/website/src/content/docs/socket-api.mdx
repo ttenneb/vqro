@@ -1,9 +1,9 @@
 ---
 title: Socket API
-description: Control a running Herdr server from scripts, tools, and coding agents.
+description: Control a running vqro server from scripts, tools, and coding agents.
 ---
 
-Herdr exposes a local socket API for scripts and agents that need to inspect or control a running session.
+vqro exposes a local socket API for scripts and agents that need to inspect or control a running session.
 
 Most automation should start with the CLI wrappers. Use the raw socket API only when you need direct request/response control or long-lived event subscriptions.
 
@@ -19,19 +19,21 @@ The layers share the same control surface.
 
 ## Schema
 
-The installed CLI can print the socket protocol schema bundled with that Herdr
-binary:
+The installed CLI reports and prints the native `vqro.api.v1` schema bundled
+with that vqro binary:
 
 ```bash
-herdr api schema
-herdr api schema --json
-herdr api schema --output herdr-api.schema.json
+vqro api describe --json
+vqro api schema
+vqro api schema --json
+vqro api schema --output vqro-api.schema.json
 ```
 
-Plain `herdr api schema` prints a short summary. `--json` prints the full JSON
+Plain `vqro api schema` prints a short summary. `--json` prints the full JSON
 Schema document for tools, and `--output PATH` writes that document to a file.
 The schema covers raw requests, success responses, error responses, emitted
-events, and subscription events.
+events, and subscription events. Its API major is independent from the private
+runtime protocol number and the frozen generation-1 Herdr bridge.
 
 ## What you can control
 
@@ -461,9 +463,13 @@ Built-in filter fields are `status`, `workspace_id`, `tab_id`, `pane_id`,
 `agent`, `seen`, and `state_change_seq`. Use `{"token":"name"}` as a field to
 filter plugin-reported pane metadata. Values are strings, booleans, unsigned
 numbers, or a context object. Context values are `current_workspace_id` and
-`current_tab_id`, and may only be compared to the matching ID field. Effective
-status values are `idle`, `working`, `blocked`, `done`, and `unknown`; `done`
-means idle and not yet seen.
+`current_tab_id`, and may only be compared to the matching ID field. In a
+saved-machine client, the selected server's view applies to the combined agent
+list. Current workspace and tab context includes that selected machine, so an
+identical ID on another machine does not match; independent filter branches,
+such as `status` being `blocked`, still match agents on any connected machine.
+Effective status values are `idle`, `working`, `blocked`, `done`, and `unknown`;
+`done` means idle and not yet seen.
 
 Sort fields are `workspace_order`, `tab_order`, `pane_order`, `attention`,
 `status`, `agent`, `seen`, `state_change_seq`, or `{"token":"name"}`. Sorts are
@@ -492,10 +498,12 @@ A source mismatch leaves the active view unchanged. Set and clear responses use
 
 ## Plugin APIs
 
-The plugin API is an early interface for executable workflow tools. A plugin is
-a package with a `herdr-plugin.toml` manifest. The manifest declares startup
-hooks, shareable actions, event hooks, terminal pane entrypoints, and link
-handlers. Startup hooks run once after restore when the API is ready.
+The plugin API is the compatibility interface for legacy manifest-v1 executable
+workflow tools. A plugin uses `vqro-extension.toml`; `herdr-plugin.toml` remains
+a compatibility alias. Its commands and services run as trusted same-user code,
+not in the component-package sandbox. The manifest declares startup hooks,
+shareable actions, event hooks, terminal pane entrypoints, and link handlers.
+Startup hooks run once after restore when the API is ready.
 Actions and panes are manifest-only; runtime action registration and runtime
 argv pane creation are not part of v1.
 
@@ -821,6 +829,9 @@ that workspace.
 Pane event subscriptions include `pane.created`, `pane.updated`, `pane.closed`, `pane.focused`,
 `pane.moved`, `pane.exited`, `pane.agent_detected`,
 `pane.output_matched`, `pane.agent_status_changed`, and `pane.scroll_changed`.
+`pane.focused` also reports manual pane selection changes from any client attached
+to this server. It does not move other clients' views, and its payload does not
+identify the client. Selecting an already-selected pane does not emit it again.
 Terminal-title changes can emit `pane.updated`, but spinner-only raw-title changes do not emit it when `terminal_title_stripped` is unchanged.
 `pane.scroll_changed` is scoped to one `pane_id` and emits `pane_id`,
 `workspace_id`, and the current `scroll` metrics whenever Herdr observes a

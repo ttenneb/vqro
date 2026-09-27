@@ -40,7 +40,8 @@ use self::status::copy_feedback_rect;
 pub(crate) use self::status::{render_config_diagnostic_buffer, render_copy_feedback_buffer};
 pub(crate) use self::tab_surface::{
     compute_tab_surface, compute_tab_surface_for, render_tab_surface, resize_tab_surface,
-    tab_surface_cursor, tab_surface_hyperlinks, TabSurfaceLayout, TabSurfaceTarget, TabSurfaceView,
+    resize_tab_surface_except, tab_surface_cursor, tab_surface_hyperlinks, TabSurfaceLayout,
+    TabSurfaceTarget, TabSurfaceView,
 };
 pub(crate) use self::text::truncate_end;
 pub(crate) use self::widgets::{centered_popup_rect, modal_stack_areas};

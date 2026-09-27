@@ -712,11 +712,16 @@ mod tests {
         let _ = std::fs::remove_file(&survived);
         assert!(!descendant_survived, "status command descendant survived");
 
-        assert!(
-            tokio::time::timeout(Duration::from_millis(100), app.event_rx.recv())
-                .await
-                .is_err()
-        );
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(100);
+        loop {
+            match tokio::time::timeout_at(deadline, app.event_rx.recv()).await {
+                Ok(Some(AppEvent::TabBarCommandFinished { .. })) => {
+                    panic!("canceled tab status command published a completion")
+                }
+                Ok(Some(_)) => continue,
+                Ok(None) | Err(_) => break,
+            }
+        }
     }
 
     #[tokio::test]

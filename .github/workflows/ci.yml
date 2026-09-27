@@ -1,6 +1,7 @@
 name: CI
 
 on:
+  workflow_dispatch:
   pull_request:
     types: [opened, synchronize, reopened]
   push:
@@ -11,6 +12,14 @@ permissions:
 
 env:
   RUST_TOOLCHAIN_VERSION: 1.96.1
+  # Keep file/line backtraces without generating type and variable debug information.
+  CARGO_PROFILE_DEV_DEBUG: "1"
+  CARGO_PROFILE_TEST_DEBUG: "1"
+  # vercel-labs/setup-zig does not cache the Zig global cache, so redirect it into the
+  # workspace .zig-cache that the Zig build cache steps persist. Remove this (and the
+  # widened condition on "Restore Zig build cache") if we switch to a setup action that
+  # owns Zig caching, e.g. step-security/setup-zig. See PR #4023.
+  ZIG_GLOBAL_CACHE_DIR: ${{ github.workspace }}/.zig-cache
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -18,7 +27,7 @@ concurrency:
 
 jobs:
   conventional-commits:
-    if: github.event_name != 'push' || github.ref_name == 'master'
+    if: github.event_name != 'workflow_dispatch' && (github.event_name != 'push' || github.ref_name == 'master')
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -38,8 +47,32 @@ jobs:
           PR_TITLE: ${{ github.event.pull_request.title }}
         run: python3 scripts/conventional_commits.py "$PR_TITLE"
 
+  smoke:
+    name: advisory smoke
+    if: github.event_name != 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install Rust formatter
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # v1
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN_VERSION }}
+          components: rustfmt
+
+      - name: Check formatting and preview docs
+        run: |
+          cargo fmt --check
+          node scripts/docs/preview.mjs check
+
   check:
     name: check (${{ matrix.os }})
+    if: github.event_name == 'workflow_dispatch'
     strategy:
       fail-fast: false
       matrix:
@@ -53,7 +86,7 @@ jobs:
           - os: windows-latest
             kind: windows
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 15
+    timeout-minutes: ${{ matrix.kind == 'windows' && 30 || 15 }}
     steps:
       - name: Checkout
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
@@ -86,42 +119,36 @@ jobs:
           bun-version: 1.3.14
 
       - name: Install Zig
-        if: runner.os != 'macOS'
-        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        uses: vercel-labs/setup-zig@83c1594f26b86da8a9a8ddd9b5ee5f3af0f96943 # v1.0.2
         with:
-          version: 0.15.2
-          use-cache: ${{ matrix.kind != 'windows' }}
+          version: 0.16.0
 
-      - name: Restore Homebrew Zig cache
-        if: runner.os == 'macOS'
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
-        with:
-          path: ~/Library/Caches/Homebrew/downloads
-          key: homebrew-zig-0.15-${{ runner.os }}-${{ runner.arch }}
-          restore-keys: |
-            homebrew-zig-0.15-${{ runner.os }}-
-
-      - name: Install patched Zig on macOS
-        if: runner.os == 'macOS'
+      # Zig's C-header cache keys include the compiler installation path.
+      - name: Stabilize Zig installation path on Unix
+        if: matrix.kind == 'unix'
         run: |
-          HOMEBREW_NO_AUTO_UPDATE=1 brew install zig@0.15
-          echo "$(brew --prefix zig@0.15)/bin" >> "$GITHUB_PATH"
-          echo "ZIG_GLOBAL_CACHE_DIR=$GITHUB_WORKSPACE/.zig-cache" >> "$GITHUB_ENV"
-          echo "ZIG_LOCAL_CACHE_DIR=$GITHUB_WORKSPACE/.zig-cache" >> "$GITHUB_ENV"
-          "$(brew --prefix zig@0.15)/bin/zig" version
+          stable_zig="$RUNNER_TEMP/herdr-zig-0.16.0"
+          mv "$(dirname "$(command -v zig)")" "$stable_zig"
+          echo "$stable_zig" >> "$GITHUB_PATH"
+          echo "ZIG=$stable_zig/zig" >> "$GITHUB_ENV"
+
+      - name: Stabilize Zig installation path on Windows
+        if: matrix.kind == 'windows'
+        shell: pwsh
+        run: |
+          $source = Split-Path (Get-Command zig).Source
+          $stable = Join-Path $env:RUNNER_TEMP "herdr-zig-0.16.0"
+          Move-Item -LiteralPath $source -Destination $stable
+          $stable | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          "ZIG=$(Join-Path $stable 'zig.exe')" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Restore Zig build cache
-        if: runner.os == 'macOS' || matrix.kind == 'windows'
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .zig-cache
-          key: zig-build-v1-${{ runner.os }}-${{ runner.arch }}-0.15.2-${{ github.run_id }}-${{ github.run_attempt }}
+          key: zig-build-v1-${{ runner.os }}-${{ runner.arch }}-0.16.0-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
-            zig-build-v1-${{ runner.os }}-${{ runner.arch }}-0.15.2-
-
-      - name: Install macOS build tools
-        if: runner.os == 'macOS'
-        run: HOMEBREW_NO_AUTO_UPDATE=1 brew install cmake ninja
+            zig-build-v1-${{ runner.os }}-${{ runner.arch }}-0.16.0-
 
       - name: Restore cargo cache
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
@@ -129,25 +156,103 @@ jobs:
           cache-bin: false
           key: ${{ matrix.os }}
 
-      - name: Run checks
-        if: matrix.kind == 'unix'
+      # Save before rust-cache's post-step removes incremental state. Cargo still
+      # rebuilds workspace targets; only rustc's validated query state is retained.
+      - name: Restore Windows incremental compiler state
+        if: matrix.kind == 'windows'
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: target/debug/incremental
+          key: ci-incremental-v1-${{ runner.os }}-${{ runner.arch }}-${{ env.RUST_TOOLCHAIN_VERSION }}-${{ env.CARGO_PROFILE_DEV_DEBUG }}-${{ env.CARGO_PROFILE_TEST_DEBUG }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', '.cargo/config.toml', 'build.rs') }}-${{ github.sha }}
+          restore-keys: |
+            ci-incremental-v1-${{ runner.os }}-${{ runner.arch }}-${{ env.RUST_TOOLCHAIN_VERSION }}-${{ env.CARGO_PROFILE_DEV_DEBUG }}-${{ env.CARGO_PROFILE_TEST_DEBUG }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', '.cargo/config.toml', 'build.rs') }}-
+
+      - name: Run Linux lint
+        if: runner.os == 'Linux'
+        run: just lint
+
+      - name: Run Linux tests
+        if: runner.os == 'Linux'
+        run: CARGO_INCREMENTAL=1 just ci-tests '${{ matrix.nextest_filter }}'
+
+      - name: Run macOS checks
+        if: runner.os == 'macOS'
         run: just ci '${{ matrix.nextest_filter }}'
+
+      - name: Check scalar libghostty with runtime safety
+        if: runner.os == 'Linux'
+        env:
+          LIBGHOSTTY_VT_SIMD: "false"
+          LIBGHOSTTY_VT_OPTIMIZE: ReleaseSafe
+        run: CARGO_INCREMENTAL=1 just test-one ghostty
 
       - name: Run Windows checks
         if: matrix.kind == 'windows'
         shell: pwsh
-        run: just check
+        run: |
+          $env:CARGO_INCREMENTAL = "1"
+          just check
 
       - name: Smoke ConPTY pane
         if: matrix.kind == 'windows'
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          $exe = Join-Path $PWD "target\debug\herdr.exe"
-          .\scripts\windows_smoke_conpty_path.ps1 -ExePath $exe -Session "ci-windows-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          $exe = Join-Path $PWD "target\debug\vqro.exe"
+          $session = "ci-windows-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          $env:VQRO_SESSION = $session
+          Remove-Item Env:VQRO_SOCKET_PATH, Env:VQRO_CLIENT_SOCKET_PATH -ErrorAction SilentlyContinue
+          .\scripts\windows_smoke_conpty_path.ps1 -ExePath $exe -Session $session
+
+  collections-package-conformance:
+    name: Collections package conformance
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout host
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
+
+      - name: Checkout exact Collections candidate
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          repository: ttenneb/vqro-extension-collections
+          ref: f3f4d2f8ce1dce8c319bf4c4d0e7224850afa868
+          path: .candidate/collections
+          persist-credentials: false
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # v1
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN_VERSION }}
+          targets: wasm32-unknown-unknown
+
+      - name: Install Rust tools
+        uses: taiki-e/install-action@fd2f5e3d644b484055ebf4268f474c565f148f25 # v2.81.9
+        with:
+          tool: just,cargo-nextest
+
+      - name: Install Zig
+        uses: vercel-labs/setup-zig@83c1594f26b86da8a9a8ddd9b5ee5f3af0f96943 # v1.0.2
+        with:
+          version: 0.16.0
+
+      - name: Restore cargo cache
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          cache-bin: false
+          key: collections-package-conformance
+
+      - name: Run host-owned Collections gate
+        env:
+          VQRO_COLLECTIONS_CHECKOUT: ${{ github.workspace }}/.candidate/collections
+        run: just collections-package-conformance
 
   windows-conpty-package:
     name: Windows ConPTY package
+    if: github.event_name == 'workflow_dispatch'
     runs-on: windows-2022
     timeout-minutes: 25
     steps:
@@ -163,10 +268,26 @@ jobs:
           targets: x86_64-pc-windows-msvc
 
       - name: Install Zig
-        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        uses: vercel-labs/setup-zig@83c1594f26b86da8a9a8ddd9b5ee5f3af0f96943 # v1.0.2
         with:
-          version: 0.15.2
-          use-cache: false
+          version: 0.16.0
+
+      - name: Stabilize Zig installation path
+        shell: pwsh
+        run: |
+          $source = Split-Path (Get-Command zig).Source
+          $stable = Join-Path $env:RUNNER_TEMP "herdr-zig-0.16.0"
+          Move-Item -LiteralPath $source -Destination $stable
+          $stable | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          "ZIG=$(Join-Path $stable 'zig.exe')" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Restore Zig build cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .zig-cache
+          key: zig-build-v1-conpty-package-windows-2022-${{ runner.arch }}-0.16.0-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            zig-build-v1-conpty-package-windows-2022-${{ runner.arch }}-0.16.0-
 
       - name: Restore Cargo cache
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
@@ -174,15 +295,15 @@ jobs:
           cache-bin: false
           key: conpty-package-windows-2022
 
-      - name: Build Herdr
+      - name: Build Vqro
         run: cargo build --locked --target x86_64-pc-windows-msvc
 
       - name: Verify invalid bundle is rejected and system override recovers
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          Remove-Item Env:HERDR_SOCKET_PATH, Env:HERDR_CLIENT_SOCKET_PATH -ErrorAction SilentlyContinue
-          $exe = Join-Path $PWD "target\x86_64-pc-windows-msvc\debug\herdr.exe"
+          Remove-Item Env:HERDR_SOCKET_PATH, Env:HERDR_CLIENT_SOCKET_PATH, Env:VQRO_SOCKET_PATH, Env:VQRO_CLIENT_SOCKET_PATH -ErrorAction SilentlyContinue
+          $exe = Join-Path $PWD "target\x86_64-pc-windows-msvc\debug\vqro.exe"
           $bundle = Join-Path (Split-Path -Parent $exe) "conpty"
           New-Item -ItemType Directory -Force -Path (Join-Path $bundle "x64"), (Join-Path $bundle "arm64") | Out-Null
           Set-Content -LiteralPath (Join-Path $bundle "herdr-conpty.json") -Value "{}" -Encoding ascii
@@ -192,9 +313,10 @@ jobs:
           try {
             $rejected = $false
             try {
+              $env:VQRO_SESSION = "ci-conpty-invalid-windows-2022-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
               .\scripts\windows_smoke_conpty_path.ps1 `
                 -ExePath $exe `
-                -Session "ci-conpty-invalid-windows-2022-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+                -Session $env:VQRO_SESSION
             } catch {
               if ($_.Exception.Message -notlike "workspace create failed with exit code*") {
                 throw
@@ -202,13 +324,14 @@ jobs:
               $rejected = $true
             }
             if (-not $rejected) {
-              throw "Herdr accepted a tampered app-local ConPTY bundle"
+              throw "Vqro accepted a tampered app-local ConPTY bundle"
             }
 
             $env:HERDR_WINDOWS_CONPTY = "system"
+            $env:VQRO_SESSION = "ci-conpty-system-windows-2022-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
             .\scripts\windows_smoke_conpty_path.ps1 `
               -ExePath $exe `
-              -Session "ci-conpty-system-windows-2022-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+              -Session $env:VQRO_SESSION
           } finally {
             Remove-Item Env:HERDR_WINDOWS_CONPTY -ErrorAction SilentlyContinue
             Remove-Item -LiteralPath $bundle -Recurse -Force -ErrorAction SilentlyContinue
@@ -219,32 +342,29 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           $package = Join-Path $env:RUNNER_TEMP "Microsoft.Windows.Console.ConPTY.nupkg"
-          $stage = Join-Path $env:RUNNER_TEMP "herdr-windows-x86_64"
+          $stage = Join-Path $env:RUNNER_TEMP "vqro-windows-x86_64"
           New-Item -ItemType Directory -Force -Path artifacts | Out-Null
           .\scripts\package_windows_conpty.ps1 `
-            -HerdrExe target\x86_64-pc-windows-msvc\debug\herdr.exe `
+            -HerdrExe target\x86_64-pc-windows-msvc\debug\vqro.exe `
+            -ExecutableName vqro.exe `
             -PackagePath $package `
             -StageDir $stage `
-            -OutputPath artifacts\herdr-windows-x86_64.zip
-          "HERDR_CONPTY_PACKAGE_DIR=$stage" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+            -OutputPath artifacts\vqro-windows-x86_64.zip
+          "VQRO_CONPTY_PACKAGE_DIR=$stage" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Probe enhanced pane input with bundled ConPTY
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          $exe = Join-Path $env:HERDR_CONPTY_PACKAGE_DIR "herdr.exe"
-          $consoleHost = Join-Path $env:HERDR_CONPTY_PACKAGE_DIR "conpty\x64\OpenConsole.exe"
+          $exe = Join-Path $env:VQRO_CONPTY_PACKAGE_DIR "vqro.exe"
+          $consoleHost = Join-Path $env:VQRO_CONPTY_PACKAGE_DIR "conpty\x64\OpenConsole.exe"
+          $env:VQRO_SESSION = "ci-conpty-bundled-windows-2022-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          Remove-Item Env:VQRO_SOCKET_PATH, Env:VQRO_CLIENT_SOCKET_PATH -ErrorAction SilentlyContinue
           .\scripts\windows_conpty_enhanced_input_probe.ps1 `
             -ExePath $exe `
-            -Session "ci-conpty-bundled-windows-2022-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT" `
+            -Session $env:VQRO_SESSION `
             -ExpectedConsoleHostPath $consoleHost
 
-      - name: Test packaged installer and repair with Windows PowerShell 5.1
-        shell: pwsh
-        run: |
-          & powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
-            .\scripts\windows_install_conpty_package_test.ps1 `
-            -ArchivePath artifacts\herdr-windows-x86_64.zip
-          if ($LASTEXITCODE -ne 0) {
-            throw "Windows PowerShell installer test failed with exit code $LASTEXITCODE"
-          }
+      # The inherited installer/repair test invokes Herdr install paths and
+      # commands, not Vqro's. Keep the invalid-bundle, signed-package and
+      # enhanced-input gates above; add Vqro installer coverage with its design.

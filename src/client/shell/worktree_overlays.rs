@@ -94,6 +94,7 @@ pub(super) fn render_worktree_create_overlay(
             .add_modifier(Modifier::BOLD),
     );
     Some(OverlayRender {
+        area: popup,
         primary: *primary,
         clear: Rect::default(),
         cancel: *cancel,
@@ -280,6 +281,7 @@ pub(super) fn render_worktree_open_overlay(
             .add_modifier(Modifier::BOLD),
     );
     Some(OverlayRender {
+        area: popup,
         primary: *primary,
         clear: Rect::default(),
         cancel: *cancel,
@@ -337,7 +339,7 @@ pub(super) fn render_worktree_remove_overlay(
         inner.x,
         inner.y + 3,
         inner.width,
-        " The branch is not deleted. The Herdr workspace will close.",
+        " The branch is not deleted. The vqro workspace will close.",
         Style::default().fg(p.text).bg(p.panel_bg),
     );
     if remove.force_confirmation {
@@ -396,6 +398,7 @@ pub(super) fn render_worktree_remove_overlay(
             .add_modifier(Modifier::BOLD),
     );
     Some(OverlayRender {
+        area: popup,
         primary: *primary,
         clear: Rect::default(),
         cancel: *cancel,

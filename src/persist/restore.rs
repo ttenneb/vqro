@@ -8,14 +8,19 @@ use tracing::{error, warn};
 
 use crate::detect::AgentState;
 use crate::events::AppEvent;
-use crate::layout::{Node, PaneId, TileLayout};
+#[cfg(test)]
+use crate::layout::Node;
+use crate::layout::{CollectionId, LayoutLeaf, PaneId, TileLayout, TypedNode};
+use crate::legacy_collection_snapshot::LegacyCollectionSnapshot;
 use crate::pane::{PaneLaunchEnv, PaneState};
 use crate::render_signal::RenderSignal;
 use crate::terminal::{TerminalId, TerminalRuntime, TerminalState};
+use crate::terminal_container::{TerminalContainer, TerminalContainerId};
 use crate::workspace::Workspace;
 
 use super::snapshot::{
-    PaneAgentSessionSnapshot, PaneHistorySnapshot, TabHistorySnapshot, WorkspaceHistorySnapshot,
+    CollectionSnapshot, LayoutLeafSnapshot, PaneAgentSessionSnapshot, PaneHistorySnapshot,
+    TabHistorySnapshot, WorkspaceHistorySnapshot,
 };
 use super::{
     DirectionSnapshot, LayoutSnapshot, SessionHistorySnapshot, SessionSnapshot, TabSnapshot,
@@ -61,6 +66,226 @@ type RestoredTab = (
 );
 type RestoreFailures<T> = (T, usize);
 
+struct RecoveredTabLayout {
+    layout: TileLayout,
+    legacy_collection_snapshots: HashMap<TerminalContainerId, LegacyCollectionSnapshot>,
+}
+
+/// Restore delegation provenance while remapping persisted pane IDs to fresh runtime IDs.
+pub fn restore_delegations(
+    snapshot: &SessionSnapshot,
+    workspaces: &[Workspace],
+) -> crate::delegation::Delegations {
+    let mut pane_map = HashMap::new();
+    for (workspace_snapshot, workspace) in snapshot.workspaces.iter().zip(workspaces) {
+        for (&old, &public_number) in &workspace_snapshot.public_pane_numbers {
+            if let Some((&pane, _)) = workspace
+                .public_pane_numbers
+                .iter()
+                .find(|(_, number)| **number == public_number)
+            {
+                pane_map.insert(old, pane);
+            }
+        }
+        // Pre-public-ID snapshots are deterministic when every pane survived restore.
+        for (tab_snapshot, tab) in workspace_snapshot.tabs.iter().zip(&workspace.tabs) {
+            let mut old: Vec<_> = tab_snapshot
+                .panes
+                .keys()
+                .copied()
+                .filter(|id| !pane_map.contains_key(id))
+                .collect();
+            old.sort_unstable();
+            let mut new: Vec<_> = tab
+                .panes
+                .keys()
+                .copied()
+                .filter(|pane| !pane_map.values().any(|mapped| mapped == pane))
+                .collect();
+            new.sort_by_key(|pane| pane.raw());
+            if old.len() == new.len() {
+                pane_map.extend(old.into_iter().zip(new));
+            }
+        }
+    }
+    let mut records = snapshot
+        .delegations
+        .iter()
+        .cloned()
+        .map(|mut record| {
+            if let Some(old) = record.pane_id {
+                record.pane_id = pane_map.get(&old.raw()).copied();
+                record.tombstone |= record.pane_id.is_none();
+            }
+            record
+        })
+        .collect::<Vec<_>>();
+    records.sort_by_key(|record| (record.id, record.sibling_rank));
+    records.truncate(crate::admission::MAX_RELATIONSHIPS);
+
+    // Semantic relationship corruption must not prevent PTY restoration. Keep
+    // a deterministic bounded prefix and root links that exceed current
+    // fan-out/depth limits; repair_records handles duplicates and cycles.
+    let repaired = crate::delegation::Delegations::repair_records(records);
+    let mut records = repaired.records().values().cloned().collect::<Vec<_>>();
+    records.sort_by_key(|record| record.id);
+    let mut accepted_parents = HashMap::new();
+    let mut child_counts = HashMap::new();
+    for record in &mut records {
+        let valid_parent = record.parent_id.filter(|parent| {
+            if !accepted_parents.contains_key(parent)
+                || child_counts.get(parent).copied().unwrap_or(0)
+                    >= crate::admission::MAX_RELATIONSHIP_FAN_OUT
+            {
+                return false;
+            }
+            let mut depth = 1usize;
+            let mut current = Some(*parent);
+            while let Some(id) = current {
+                if depth > crate::admission::MAX_RELATIONSHIP_DEPTH {
+                    return false;
+                }
+                current = accepted_parents.get(&id).copied().flatten();
+                depth += 1;
+            }
+            true
+        });
+        record.parent_id = valid_parent;
+        if let Some(parent) = valid_parent {
+            *child_counts.entry(parent).or_insert(0usize) += 1;
+        }
+        accepted_parents.insert(record.id, valid_parent);
+    }
+    let repaired = crate::delegation::Delegations::repair_records(records);
+    debug_assert!(crate::admission::relationships(&repaired).is_ok());
+    repaired
+}
+
+pub(crate) fn validate_snapshot_pane_admission(snapshot: &SessionSnapshot) -> Result<(), String> {
+    let mut session_panes = 0usize;
+    for workspace in &snapshot.workspaces {
+        let mut workspace_panes = 0usize;
+        for tab in &workspace.tabs {
+            let tab_panes = restored_tab_identity_count(tab);
+            crate::admission::panes(session_panes, workspace_panes, 0, tab_panes)
+                .map_err(|error| error.to_string())?;
+            session_panes = session_panes
+                .checked_add(tab_panes)
+                .ok_or_else(|| "session pane count overflow".to_string())?;
+            workspace_panes = workspace_panes
+                .checked_add(tab_panes)
+                .ok_or_else(|| "workspace pane count overflow".to_string())?;
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_snapshot_admission(snapshot: &SessionSnapshot) -> Result<(), String> {
+    validate_snapshot_pane_admission(snapshot)?;
+    let mut workspace_ids = HashSet::new();
+    let mut tab_ids = HashSet::new();
+    let mut terminal_ids = HashSet::new();
+    for workspace in &snapshot.workspaces {
+        let workspace_id = workspace
+            .id
+            .as_deref()
+            .ok_or_else(|| "snapshot workspace has no identity".to_string())?;
+        let workspace_number = crate::workspace::public_workspace_number(workspace_id)
+            .filter(|number| *number > 0)
+            .ok_or_else(|| "snapshot workspace identity is invalid".to_string())?;
+        if workspace_id
+            != format!(
+                "w{}",
+                crate::workspace::encode_public_number(workspace_number)
+            )
+            || !workspace_ids.insert(workspace_id)
+        {
+            return Err("snapshot contains noncanonical or duplicate workspace identities".into());
+        }
+        if workspace.public_tab_numbers.len() != workspace.tabs.len() {
+            return Err("snapshot public tab-number projection is incomplete".into());
+        }
+        let mut public_tab_numbers = HashSet::new();
+        for number in &workspace.public_tab_numbers {
+            if *number == 0 || !public_tab_numbers.insert(*number) {
+                return Err("snapshot contains invalid or duplicate public tab numbers".into());
+            }
+        }
+        let maximum_tab_number = public_tab_numbers.iter().copied().max().unwrap_or(0);
+        if workspace.next_public_tab_number <= maximum_tab_number
+            || workspace.next_public_tab_number == 0
+        {
+            return Err("snapshot next public tab number is reusable or invalid".into());
+        }
+        for tab in &workspace.tabs {
+            let tab_id = super::snapshot::tab_id_for_snapshot(tab)?;
+            if !tab_ids.insert(tab_id) {
+                return Err("snapshot contains duplicate tab identities".into());
+            }
+            for pane in tab.panes.values() {
+                let terminal_id = super::snapshot::terminal_id_for_pane_snapshot(pane)?;
+                if !terminal_ids.insert(terminal_id) {
+                    return Err("snapshot contains duplicate terminal identities".into());
+                }
+            }
+        }
+    }
+    // Collection and relationship records are semantic projections. They are
+    // repaired after pane identities/runtimes have been admitted so corrupt or
+    // over-limit feature state cannot make otherwise valid terminals vanish.
+    Ok(())
+}
+
+fn reserve_restored_collection_ids(snapshot: &SessionSnapshot) {
+    fn reserve_layout(layout: &LayoutSnapshot) {
+        match layout {
+            LayoutSnapshot::Pane(_) => {}
+            LayoutSnapshot::Collection(id) => {
+                let _ = CollectionId::from_raw(id.raw());
+            }
+            LayoutSnapshot::Split { first, second, .. } => {
+                reserve_layout(first);
+                reserve_layout(second);
+            }
+        }
+    }
+
+    for tab in snapshot
+        .workspaces
+        .iter()
+        .flat_map(|workspace| &workspace.tabs)
+    {
+        // Deserialization already reserves IDs, but restore also accepts
+        // programmatically assembled snapshots in tests and handoff paths.
+        reserve_layout(&tab.layout);
+        for collection in &tab.collections {
+            let _ = CollectionId::from_raw(collection.id.raw());
+        }
+        if let Some(LayoutLeafSnapshot::Collection(id)) = tab.focused_leaf {
+            let _ = CollectionId::from_raw(id.raw());
+        }
+    }
+}
+
+fn restored_tab_identity_count(tab: &super::snapshot::TabSnapshot) -> usize {
+    fn collect_layout_ids(layout: &super::snapshot::LayoutSnapshot, ids: &mut HashSet<u32>) {
+        match layout {
+            super::snapshot::LayoutSnapshot::Pane(id) => {
+                ids.insert(*id);
+            }
+            super::snapshot::LayoutSnapshot::Collection(_) => {}
+            super::snapshot::LayoutSnapshot::Split { first, second, .. } => {
+                collect_layout_ids(first, ids);
+                collect_layout_ids(second, ids);
+            }
+        }
+    }
+
+    let mut ids = tab.panes.keys().copied().collect::<HashSet<_>>();
+    collect_layout_ids(&tab.layout, &mut ids);
+    ids.len()
+}
+
 /// Restore workspaces from a snapshot. Each pane gets a fresh shell in its saved cwd.
 pub fn restore(
     snapshot: &SessionSnapshot,
@@ -74,10 +299,14 @@ pub fn restore(
     events: mpsc::Sender<AppEvent>,
     render_notify: Arc<Notify>,
     render_dirty: Arc<RenderSignal>,
-) -> RestoredSession {
+) -> Result<RestoredSession, String> {
+    validate_snapshot_pane_admission(snapshot)?;
+    let mut normalized = snapshot.clone();
+    super::snapshot::normalize_terminal_identities(&mut normalized, false)?;
+    validate_snapshot_admission(&normalized)?;
     let mut imported_panes = HashMap::new();
-    restore_with_imports(
-        snapshot,
+    Ok(restore_with_imports(
+        &normalized,
         history,
         rows,
         cols,
@@ -88,7 +317,7 @@ pub fn restore(
         events,
         render_notify,
         render_dirty,
-    )
+    ))
 }
 
 #[cfg(unix)]
@@ -102,8 +331,15 @@ pub fn restore_handoff(
     render_notify: Arc<Notify>,
     render_dirty: Arc<RenderSignal>,
 ) -> std::io::Result<RestoredSession> {
+    validate_snapshot_pane_admission(snapshot)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    let mut normalized = snapshot.clone();
+    super::snapshot::normalize_terminal_identities(&mut normalized, false)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    validate_snapshot_admission(&normalized)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
     restore_with_imports_strict(
-        snapshot,
+        &normalized,
         None,
         24,
         80,
@@ -148,6 +384,7 @@ fn collect_snapshot_pane_ids(node: &LayoutSnapshot) -> Vec<u32> {
 fn collect_snapshot_ids_inner(node: &LayoutSnapshot, ids: &mut Vec<u32>) {
     match node {
         LayoutSnapshot::Pane(id) => ids.push(*id),
+        LayoutSnapshot::Collection(_) => {}
         LayoutSnapshot::Split { first, second, .. } => {
             collect_snapshot_ids_inner(first, ids);
             collect_snapshot_ids_inner(second, ids);
@@ -161,8 +398,10 @@ fn migrated_public_pane_numbers_by_old_raw(
 ) -> HashMap<u32, usize> {
     let mut public_numbers = snap.public_pane_numbers.clone();
     for tab in &snap.tabs {
-        let mut pane_ids = Vec::new();
+        let mut pane_ids: Vec<_> = tab.panes.keys().copied().collect();
         collect_layout_snapshot_pane_ids(&tab.layout, &mut pane_ids);
+        pane_ids.sort_unstable();
+        pane_ids.dedup();
         for old_raw in pane_ids {
             public_numbers.entry(old_raw).or_insert_with(|| {
                 let number = *next_public_pane_number;
@@ -177,6 +416,7 @@ fn migrated_public_pane_numbers_by_old_raw(
 fn collect_layout_snapshot_pane_ids(node: &LayoutSnapshot, ids: &mut Vec<u32>) {
     match node {
         LayoutSnapshot::Pane(id) => ids.push(*id),
+        LayoutSnapshot::Collection(_) => {}
         LayoutSnapshot::Split { first, second, .. } => {
             collect_layout_snapshot_pane_ids(first, ids);
             collect_layout_snapshot_pane_ids(second, ids);
@@ -272,6 +512,8 @@ fn restore_with_imports_and_failures(
     let mut terminal_runtimes = HashMap::new();
     let mut resumed_agent_sessions = HashSet::new();
     let mut failed_imports = 0;
+    let mut restored_collection_ids = HashSet::new();
+    reserve_restored_collection_ids(snapshot);
     for (idx, ws_snap) in snapshot.workspaces.iter().enumerate() {
         let runtime_context = RestoreRuntimeContext {
             scrollback_limit_bytes,
@@ -289,6 +531,7 @@ fn restore_with_imports_and_failures(
             &runtime_context,
             &mut resumed_agent_sessions,
             imported_panes,
+            &mut restored_collection_ids,
         );
         failed_imports += workspace_failed_imports;
         if let Some((workspace, restored_terminals, restored_runtimes)) = restored {
@@ -311,6 +554,7 @@ fn restore_workspace(
     runtime_context: &RestoreRuntimeContext<'_>,
     resumed_agent_sessions: &mut HashSet<String>,
     imported_panes: &mut HashMap<u32, crate::handoff_runtime::ImportedHandoffRuntime>,
+    restored_collection_ids: &mut HashSet<TerminalContainerId>,
 ) -> RestoreFailures<Option<RestoredWorkspace>> {
     let mut tabs = Vec::new();
     let mut terminals = Vec::new();
@@ -354,7 +598,11 @@ fn restore_workspace(
     let mut failed_imports = 0;
 
     for (idx, tab_snap) in snap.tabs.iter().enumerate() {
-        let tab_number = snap.public_tab_numbers.get(idx).copied().unwrap_or(idx + 1);
+        let tab_number = snap
+            .public_tab_numbers
+            .get(idx)
+            .copied()
+            .unwrap_or_else(|| idx.saturating_add(1));
         let (restored_tab, tab_failed_imports) = restore_tab(
             tab_snap,
             history.and_then(|history| history.tabs.get(idx)),
@@ -366,6 +614,7 @@ fn restore_workspace(
             resumed_agent_sessions,
             imported_panes,
             &public_pane_ids_by_old_raw,
+            restored_collection_ids,
         );
         failed_imports += tab_failed_imports;
         let Some((mut tab, restored_terminals, restored_runtimes, reverse_id_map)) = restored_tab
@@ -375,7 +624,9 @@ fn restore_workspace(
         if let Some(public_tab_number) = snap.public_tab_numbers.get(idx).copied() {
             tab.number = public_tab_number;
         }
-        next_public_tab_number = next_public_tab_number.max(tab.number + 1);
+        if let Some(following_number) = tab.number.checked_add(1) {
+            next_public_tab_number = next_public_tab_number.max(following_number);
+        }
         for pane_id in tab.layout.pane_ids() {
             let public_number = public_pane_numbers_by_old_raw
                 .get(
@@ -417,6 +668,7 @@ fn restore_workspace(
             cached_git_branch: crate::workspace::git_branch(&snap.identity_cwd),
             cached_git_ahead_behind: None,
             cached_git_space,
+            checkout: snap.checkout.clone(),
             worktree_space,
             metadata_tokens: crate::metadata_tokens::MetadataTokens::default(),
             metadata_token_sequences: HashMap::new(),
@@ -454,13 +706,23 @@ fn restore_tab(
     resumed_agent_sessions: &mut HashSet<String>,
     imported_panes: &mut HashMap<u32, crate::handoff_runtime::ImportedHandoffRuntime>,
     public_pane_ids_by_old_raw: &HashMap<u32, String>,
+    restored_collection_ids: &mut HashSet<TerminalContainerId>,
 ) -> RestoreFailures<Option<RestoredTab>> {
-    let (node, id_map) = restore_node_remapped(&snap.layout);
+    let tab_id = match super::snapshot::tab_id_for_snapshot(snap) {
+        Ok(id) => id,
+        Err(error) => {
+            error!(%error, "restored tab identity is invalid");
+            return (None, 0);
+        }
+    };
+    let (typed_node, id_map) = restore_typed_node_remapped(snap);
     let reverse_id_map: HashMap<PaneId, u32> = id_map
         .iter()
         .map(|(&old_id, &new_id)| (new_id, old_id))
         .collect();
-    let pane_ids = collect_pane_ids(&node);
+    let mut pane_ids: Vec<_> = id_map.iter().map(|(old, new)| (*old, *new)).collect();
+    pane_ids.sort_by_key(|(old, _)| *old);
+    let pane_ids: Vec<_> = pane_ids.into_iter().map(|(_, new)| new).collect();
 
     let mut panes = HashMap::new();
     let mut terminals = Vec::new();
@@ -469,6 +731,23 @@ fn restore_tab(
     for id in &pane_ids {
         let old_id = reverse_id_map.get(id);
         let saved_pane = old_id.and_then(|old_id| snap.panes.get(old_id));
+        let terminal_id = match saved_pane
+            .map(super::snapshot::terminal_id_for_pane_snapshot)
+            .transpose()
+        {
+            Ok(Some(terminal_id)) => terminal_id,
+            Ok(None) => {
+                error!(
+                    pane_id = id.raw(),
+                    "restored pane has no persisted terminal identity"
+                );
+                return (None, failed_imports);
+            }
+            Err(error) => {
+                error!(pane_id = id.raw(), %error, "restored pane terminal identity is invalid");
+                return (None, failed_imports);
+            }
+        };
         let saved_cwd = saved_pane
             .map(|p| p.cwd.clone())
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| "/".into()));
@@ -534,7 +813,6 @@ fn restore_tab(
             startup.restore_plan.clone()
         };
         if let Some(plan) = pending_native_agent_restore {
-            let terminal_id = TerminalId::alloc();
             let mut terminal = TerminalState::new(terminal_id.clone(), cwd.clone())
                 .with_pending_agent_resume_plan(plan);
             if let Some(label) = saved_label {
@@ -627,7 +905,6 @@ fn restore_tab(
 
         match runtime_result {
             Ok(runtime) => {
-                let terminal_id = TerminalId::alloc();
                 let mut terminal = TerminalState::new(terminal_id.clone(), cwd.clone());
                 if was_imported {
                     if let Some(argv) = saved_launch_argv {
@@ -696,37 +973,39 @@ fn restore_tab(
     }
 
     let surviving: HashSet<PaneId> = panes.keys().copied().collect();
-    let Some(node) = prune_restored_node(node, &surviving) else {
-        warn!(
-            tab = ?snap.custom_name,
-            "restored tab lost all panes after pruning missing layout nodes"
-        );
+    let Some(recovered) = recover_typed_layout(
+        snap,
+        typed_node,
+        &id_map,
+        &surviving,
+        restored_collection_ids,
+    ) else {
+        warn!(tab = ?snap.custom_name, "restored tab lost all panes while recovering collection placement");
         return (None, failed_imports);
     };
-    let pane_ids = collect_pane_ids(&node);
-    let Some(focus) = resolve_restored_pane(snap.focused, &id_map, &surviving, &pane_ids) else {
-        return (None, failed_imports);
-    };
+    let pane_ids = recovered.layout.pane_ids();
     let Some(root_pane) = resolve_restored_pane(snap.root_pane, &id_map, &surviving, &pane_ids)
     else {
         return (None, failed_imports);
     };
-    let layout = TileLayout::from_saved(node, focus);
 
     (
         Some((
-            crate::workspace::Tab {
-                custom_name: snap.custom_name.clone(),
+            match crate::workspace::Tab::from_restored(
+                tab_id,
+                snap.custom_name.clone(),
                 number,
                 root_pane,
-                layout,
+                recovered.layout,
+                recovered.legacy_collection_snapshots,
                 panes,
-                #[cfg(test)]
-                runtimes: HashMap::new(),
-                zoomed: snap.zoomed,
-                events: runtime_context.events.clone(),
-                render_notify: runtime_context.render_notify.clone(),
-                render_dirty: runtime_context.render_dirty.clone(),
+                snap.zoomed,
+                runtime_context.events.clone(),
+                runtime_context.render_notify.clone(),
+                runtime_context.render_dirty.clone(),
+            ) {
+                Some(tab) => tab,
+                None => return (None, failed_imports),
             },
             terminals,
             terminal_runtimes,
@@ -789,14 +1068,20 @@ fn restore_plan_for_snapshot(
         return None;
     }
     let persisted = persisted_agent_session_from_snapshot(session)?;
-    crate::agent_resume::plan(&session.source, &session.agent, &persisted.session_ref)
+    crate::agent_resume::plan(&persisted.source, &persisted.agent, &persisted.session_ref)
 }
 
 fn persisted_agent_session_from_snapshot(
     session: &PaneAgentSessionSnapshot,
 ) -> Option<crate::agent_resume::PersistedAgentSession> {
+    let source = match (session.source.as_str(), session.agent.as_str()) {
+        ("herdr:pi", "pi") => "vqro:pi",
+        ("herdr:claude", "claude") => "vqro:claude",
+        ("herdr:codex", "codex") => "vqro:codex",
+        _ => &session.source,
+    };
     crate::agent_resume::session_ref_from_snapshot(
-        &session.source,
+        source,
         &session.agent,
         session.kind,
         &session.value,
@@ -823,6 +1108,7 @@ fn take_restore_plan_for_snapshot(
         .filter(|plan| resumed_agent_sessions.insert(plan.dedupe_key.clone()))
 }
 
+#[cfg(test)]
 pub(super) fn prune_restored_node(node: Node, surviving: &HashSet<PaneId>) -> Option<Node> {
     match node {
         Node::Pane(id) => surviving.contains(&id).then_some(Node::Pane(id)),
@@ -860,14 +1146,272 @@ pub(super) fn resolve_restored_pane(
         .or_else(|| pane_ids.first().copied())
 }
 
+fn restore_typed_node_remapped(snap: &TabSnapshot) -> (TypedNode, HashMap<u32, PaneId>) {
+    let mut old_ids: HashSet<u32> = snap.panes.keys().copied().collect();
+    fn collect(node: &LayoutSnapshot, ids: &mut HashSet<u32>) {
+        match node {
+            LayoutSnapshot::Pane(id) => {
+                ids.insert(*id);
+            }
+            LayoutSnapshot::Collection(_) => {}
+            LayoutSnapshot::Split { first, second, .. } => {
+                collect(first, ids);
+                collect(second, ids);
+            }
+        }
+    }
+    collect(&snap.layout, &mut old_ids);
+    let mut ordered: Vec<_> = old_ids.into_iter().collect();
+    ordered.sort_unstable();
+    let id_map: HashMap<_, _> = ordered
+        .into_iter()
+        .map(|old| (old, PaneId::alloc()))
+        .collect();
+    fn remap(node: &LayoutSnapshot, ids: &HashMap<u32, PaneId>) -> TypedNode {
+        match node {
+            LayoutSnapshot::Pane(old) => TypedNode::Leaf(LayoutLeaf::Pane(ids[old])),
+            LayoutSnapshot::Collection(id) => TypedNode::Leaf(LayoutLeaf::Collection((*id).into())),
+            LayoutSnapshot::Split {
+                direction,
+                ratio,
+                first,
+                second,
+            } => TypedNode::Split {
+                direction: match direction {
+                    DirectionSnapshot::Horizontal => Direction::Horizontal,
+                    DirectionSnapshot::Vertical => Direction::Vertical,
+                },
+                ratio: *ratio,
+                first: Box::new(remap(first, ids)),
+                second: Box::new(remap(second, ids)),
+            },
+        }
+    }
+    (remap(&snap.layout, &id_map), id_map)
+}
+
+fn recover_typed_layout(
+    snap: &TabSnapshot,
+    node: TypedNode,
+    id_map: &HashMap<u32, PaneId>,
+    surviving: &HashSet<PaneId>,
+    restored_collection_ids: &mut HashSet<TerminalContainerId>,
+) -> Option<RecoveredTabLayout> {
+    fn count_collection_leaves(node: &TypedNode, counts: &mut HashMap<TerminalContainerId, usize>) {
+        match node {
+            TypedNode::Leaf(LayoutLeaf::Pane(_)) => {}
+            TypedNode::Leaf(LayoutLeaf::Collection(id)) => {
+                *counts.entry(*id).or_default() += 1;
+            }
+            TypedNode::Split { first, second, .. } => {
+                count_collection_leaves(first, counts);
+                count_collection_leaves(second, counts);
+            }
+        }
+    }
+    let mut leaf_counts = HashMap::new();
+    count_collection_leaves(&node, &mut leaf_counts);
+    let valid_leaf_ids: HashSet<_> = leaf_counts
+        .into_iter()
+        .filter_map(|(id, count)| (count == 1).then_some(id))
+        .collect();
+
+    let mut saved_records = snap.collections.iter().collect::<Vec<_>>();
+    saved_records.sort_by_key(|record| record.id.raw());
+    saved_records.dedup_by_key(|record| record.id);
+    let candidates: Vec<_> = saved_records
+        .into_iter()
+        .filter_map(|record| {
+            let id = TerminalContainerId::from(record.id);
+            (valid_leaf_ids.contains(&id) && !restored_collection_ids.contains(&id))
+                .then_some((id, record))
+        })
+        .take(crate::admission::MAX_GROUPS_PER_TAB)
+        .collect();
+    for (id, _) in &candidates {
+        restored_collection_ids.insert(*id);
+    }
+    let records: HashMap<TerminalContainerId, &CollectionSnapshot> =
+        candidates.into_iter().collect();
+    fn prune(
+        node: TypedNode,
+        surviving: &HashSet<PaneId>,
+        records: &HashMap<TerminalContainerId, &CollectionSnapshot>,
+        seen: &mut HashSet<TerminalContainerId>,
+    ) -> Option<TypedNode> {
+        match node {
+            TypedNode::Leaf(LayoutLeaf::Pane(id)) => surviving
+                .contains(&id)
+                .then_some(TypedNode::Leaf(LayoutLeaf::Pane(id))),
+            TypedNode::Leaf(LayoutLeaf::Collection(id)) => (records.contains_key(&id)
+                && seen.insert(id))
+            .then_some(TypedNode::Leaf(LayoutLeaf::Collection(id))),
+            TypedNode::Split {
+                direction,
+                ratio,
+                first,
+                second,
+            } => match (
+                prune(*first, surviving, records, seen),
+                prune(*second, surviving, records, seen),
+            ) {
+                (Some(first), Some(second)) => Some(TypedNode::Split {
+                    direction,
+                    ratio,
+                    first: Box::new(first),
+                    second: Box::new(second),
+                }),
+                (Some(node), None) | (None, Some(node)) => Some(node),
+                (None, None) => None,
+            },
+        }
+    }
+    let mut collection_ids = HashSet::new();
+    let mut root = prune(node, surviving, &records, &mut collection_ids);
+    let mut placed = HashSet::new();
+    fn collect_tiled(node: &TypedNode, placed: &mut HashSet<PaneId>) {
+        match node {
+            TypedNode::Leaf(LayoutLeaf::Pane(id)) => {
+                placed.insert(*id);
+            }
+            TypedNode::Leaf(LayoutLeaf::Collection(_)) => {}
+            TypedNode::Split { first, second, .. } => {
+                collect_tiled(first, placed);
+                collect_tiled(second, placed);
+            }
+        }
+    }
+    if let Some(node) = root.as_ref() {
+        collect_tiled(node, &mut placed);
+    }
+    let mut collections = Vec::new();
+    let mut legacy_collection_snapshots = HashMap::new();
+    let mut ids: Vec<_> = collection_ids.into_iter().collect();
+    ids.sort_by_key(|id| id.raw());
+    for id in ids {
+        let saved = records[&id];
+        let mut members_seen = HashSet::new();
+        let members: Vec<_> = saved
+            .members
+            .iter()
+            .filter_map(|old| id_map.get(old).copied())
+            .filter(|pane| {
+                surviving.contains(pane) && !placed.contains(pane) && members_seen.insert(*pane)
+            })
+            .take(crate::admission::MAX_GROUP_MEMBERS)
+            .collect();
+        placed.extend(members.iter().copied());
+        let selected = saved
+            .selected
+            .and_then(|old| id_map.get(&old).copied())
+            .filter(|pane| members.contains(pane))
+            .or_else(|| members.first().copied());
+        let archived = saved
+            .archived
+            .iter()
+            .filter_map(|old| id_map.get(old).copied())
+            .filter(|pane| members.contains(pane))
+            .collect();
+        if let Some(collection) = TerminalContainer::from_legacy(id, members, selected) {
+            legacy_collection_snapshots.insert(
+                id,
+                LegacyCollectionSnapshot::from_legacy(saved.label.clone(), archived),
+            );
+            collections.push(collection);
+        }
+    }
+    let mut unplaced: Vec<_> = surviving
+        .iter()
+        .copied()
+        .filter(|pane| !placed.contains(pane))
+        .collect();
+    unplaced.sort_by_key(|pane| pane.raw());
+    for pane in unplaced {
+        let leaf = TypedNode::Leaf(LayoutLeaf::Pane(pane));
+        root = Some(match root {
+            Some(existing) => TypedNode::Split {
+                direction: Direction::Horizontal,
+                ratio: 0.5,
+                first: Box::new(existing),
+                second: Box::new(leaf),
+            },
+            None => leaf,
+        });
+    }
+    let root = root?;
+    let saved_focus = snap
+        .focused_leaf
+        .and_then(|leaf| match leaf {
+            LayoutLeafSnapshot::Pane(old) => id_map.get(&old).copied().map(LayoutLeaf::Pane),
+            LayoutLeafSnapshot::Collection(id) => Some(LayoutLeaf::Collection(id.into())),
+        })
+        .or_else(|| {
+            snap.focused
+                .and_then(|old| id_map.get(&old).copied())
+                .map(LayoutLeaf::Pane)
+        });
+    let mut leaves = Vec::new();
+    fn collect_leaves(node: &TypedNode, leaves: &mut Vec<LayoutLeaf>) {
+        match node {
+            TypedNode::Leaf(leaf) => leaves.push(*leaf),
+            TypedNode::Split { first, second, .. } => {
+                collect_leaves(first, leaves);
+                collect_leaves(second, leaves);
+            }
+        }
+    }
+    collect_leaves(&root, &mut leaves);
+    let focus = saved_focus
+        .filter(|focus| leaves.contains(focus))
+        .or_else(|| leaves.first().copied())?;
+    let layout = TileLayout::from_typed_saved(root, focus, collections);
+    let exact_survivors = |layout: &TileLayout| {
+        let placed = layout.pane_ids();
+        let unique: HashSet<_> = placed.iter().copied().collect();
+        placed.len() == unique.len() && unique == *surviving
+    };
+    if let Some(layout) = layout.filter(exact_survivors) {
+        return Some(RecoveredTabLayout {
+            layout,
+            legacy_collection_snapshots,
+        });
+    }
+
+    // Semantic recovery must never discard an already restored runtime. If a
+    // repaired container projection is still inconsistent, dissolve all
+    // containers and place every survivor exactly once in raw-ID order.
+    let mut panes: Vec<_> = surviving.iter().copied().collect();
+    panes.sort_by_key(|pane| pane.raw());
+    let first = panes.first().copied()?;
+    let root =
+        panes
+            .into_iter()
+            .skip(1)
+            .fold(TypedNode::Leaf(LayoutLeaf::Pane(first)), |root, pane| {
+                TypedNode::Split {
+                    direction: Direction::Horizontal,
+                    ratio: 0.5,
+                    first: Box::new(root),
+                    second: Box::new(TypedNode::Leaf(LayoutLeaf::Pane(pane))),
+                }
+            });
+    let layout = TileLayout::from_typed_saved(root, LayoutLeaf::Pane(first), Vec::new())?;
+    exact_survivors(&layout).then_some(RecoveredTabLayout {
+        layout,
+        legacy_collection_snapshots: HashMap::new(),
+    })
+}
+
 /// Restore a layout tree, remapping every pane ID to a fresh globally unique one.
 /// Returns the new tree and a map of old_raw_id → new PaneId.
+#[cfg(test)]
 pub(super) fn restore_node_remapped(snap: &LayoutSnapshot) -> (Node, HashMap<u32, PaneId>) {
     let mut id_map = HashMap::new();
     let node = remap_inner(snap, &mut id_map);
     (node, id_map)
 }
 
+#[cfg(test)]
 fn remap_inner(snap: &LayoutSnapshot, id_map: &mut HashMap<u32, PaneId>) -> Node {
     match snap {
         LayoutSnapshot::Pane(old_id) => {
@@ -875,6 +1419,7 @@ fn remap_inner(snap: &LayoutSnapshot, id_map: &mut HashMap<u32, PaneId>) -> Node
             id_map.insert(*old_id, new_id);
             Node::Pane(new_id)
         }
+        LayoutSnapshot::Collection(_) => Node::Pane(PaneId::alloc()),
         LayoutSnapshot::Split {
             direction,
             ratio,
@@ -897,12 +1442,14 @@ fn remap_inner(snap: &LayoutSnapshot, id_map: &mut HashMap<u32, PaneId>) -> Node
     }
 }
 
+#[cfg(test)]
 pub(super) fn collect_pane_ids(node: &Node) -> Vec<PaneId> {
     let mut ids = Vec::new();
     collect_ids_inner(node, &mut ids);
     ids
 }
 
+#[cfg(test)]
 fn collect_ids_inner(node: &Node, ids: &mut Vec<PaneId>) {
     match node {
         Node::Pane(id) => ids.push(*id),
@@ -1013,7 +1560,7 @@ mod tests {
     fn restore_plan_respects_opt_in_and_allowlist() {
         let pi_session_path = test_session_path("pi-session.jsonl");
         let session = super::super::snapshot::PaneAgentSessionSnapshot {
-            source: "herdr:pi".into(),
+            source: "vqro:pi".into(),
             agent: "pi".into(),
             kind: crate::agent_resume::AgentSessionRefKind::Path,
             value: pi_session_path.clone(),
@@ -1024,9 +1571,20 @@ mod tests {
             restore_plan_for_snapshot(&session, true).unwrap().argv,
             vec!["pi", "--session", pi_session_path.as_str()]
         );
+        let inherited_session = super::super::snapshot::PaneAgentSessionSnapshot {
+            source: "herdr:pi".into(),
+            ..session.clone()
+        };
+        let migrated = restore_plan_for_snapshot(&inherited_session, true)
+            .expect("legacy snapshot source should migrate during restore");
+        assert_eq!(
+            migrated.argv,
+            vec!["pi", "--session", pi_session_path.as_str()]
+        );
+        assert!(migrated.dedupe_key.starts_with("vqro:pi\0"));
 
         let unsupported_path = super::super::snapshot::PaneAgentSessionSnapshot {
-            source: "herdr:claude".into(),
+            source: "vqro:claude".into(),
             agent: "claude".into(),
             kind: crate::agent_resume::AgentSessionRefKind::Path,
             value: test_session_path("claude-session"),
@@ -1038,7 +1596,7 @@ mod tests {
     fn restore_plan_selection_suppresses_duplicates() {
         let pi_session_path = test_session_path("pi-session.jsonl");
         let session = super::super::snapshot::PaneAgentSessionSnapshot {
-            source: "herdr:pi".into(),
+            source: "vqro:pi".into(),
             agent: "pi".into(),
             kind: crate::agent_resume::AgentSessionRefKind::Path,
             value: pi_session_path.clone(),
@@ -1060,7 +1618,7 @@ mod tests {
     #[test]
     fn pane_restore_startup_suppresses_history_for_native_agent_resume() {
         let session = super::super::snapshot::PaneAgentSessionSnapshot {
-            source: "herdr:pi".into(),
+            source: "vqro:pi".into(),
             agent: "pi".into(),
             kind: crate::agent_resume::AgentSessionRefKind::Path,
             value: test_session_path("pi-session.jsonl"),
@@ -1085,7 +1643,7 @@ mod tests {
     #[test]
     fn pane_restore_startup_suppresses_history_for_duplicate_native_agent_session() {
         let session = super::super::snapshot::PaneAgentSessionSnapshot {
-            source: "herdr:pi".into(),
+            source: "vqro:pi".into(),
             agent: "pi".into(),
             kind: crate::agent_resume::AgentSessionRefKind::Path,
             value: test_session_path("pi-session.jsonl"),
@@ -1111,9 +1669,423 @@ mod tests {
     }
 
     #[test]
+    fn restore_admission_is_pty_first_and_defers_semantic_overflow_for_repair() {
+        use super::super::snapshot::{
+            CollectionSnapshot, LayoutSnapshot, PaneSnapshot, TabSnapshot, WorkspaceSnapshot,
+        };
+
+        let collection = CollectionId::from_raw(6_000_001).unwrap();
+        let collections = (0..=crate::admission::MAX_GROUPS_PER_TAB)
+            .map(|offset| CollectionSnapshot {
+                id: CollectionId::from_raw(collection.raw() + offset as u64).unwrap(),
+                label: None,
+                members: vec![1; crate::admission::MAX_GROUP_MEMBERS + 1],
+                selected: Some(1),
+                archived: Vec::new(),
+            })
+            .collect();
+        let mut snapshot = SessionSnapshot {
+            version: super::super::snapshot::SNAPSHOT_VERSION,
+            workspaces: vec![WorkspaceSnapshot {
+                id: Some("pty-first".into()),
+                custom_name: None,
+                identity_cwd: std::path::PathBuf::from("/tmp"),
+                checkout: None,
+                worktree_space: None,
+                public_pane_numbers: HashMap::new(),
+                next_public_pane_number: 2,
+                public_tab_numbers: vec![1],
+                next_public_tab_number: 2,
+                tabs: vec![TabSnapshot {
+                    id: None,
+                    custom_name: None,
+                    layout: LayoutSnapshot::Collection(collection),
+                    collections,
+                    panes: HashMap::from([(
+                        1,
+                        PaneSnapshot {
+                            terminal_id: None,
+                            cwd: std::path::PathBuf::from("/tmp"),
+                            label: None,
+                            agent_name: None,
+                            managed_agent_kind: None,
+                            agent_session: None,
+                            launch_argv: None,
+                        },
+                    )]),
+                    zoomed: false,
+                    focused: Some(1),
+                    focused_leaf: Some(LayoutLeafSnapshot::Collection(collection)),
+                    root_pane: Some(1),
+                }],
+                active_tab: 0,
+            }],
+            repositories: Vec::new(),
+            space_order: Vec::new(),
+            active: Some(0),
+            selected: 0,
+            sidebar_width: None,
+            sidebar_section_split: None,
+            collapsed_space_keys: HashSet::new(),
+            delegations: Vec::new(),
+            collections_authority: Default::default(),
+            collections_action_sequence: 0,
+        };
+
+        super::super::snapshot::normalize_terminal_identities(&mut snapshot, false)
+            .expect("identity normalization");
+        validate_snapshot_admission(&snapshot).expect("semantic overflow is repaired after PTYs");
+    }
+
+    #[test]
+    fn legacy_collection_restore_repairs_duplicate_missing_and_over_limit_members_without_losing_panes(
+    ) {
+        use super::super::snapshot::{CollectionSnapshot, LayoutSnapshot, TabSnapshot};
+
+        let collection = CollectionId::from_raw(7_000_001).unwrap();
+        let first = PaneId::from_raw(101);
+        let second = PaneId::from_raw(102);
+        let unplaced = PaneId::from_raw(103);
+        let id_map = HashMap::from([(1, first), (2, second), (3, unplaced)]);
+        let surviving = HashSet::from([first, second, unplaced]);
+        let mut members = Vec::new();
+        for _ in 0..=crate::admission::MAX_GROUP_MEMBERS {
+            members.extend([1, 2, 999]);
+        }
+        let mut collections = vec![CollectionSnapshot {
+            id: collection,
+            label: Some("legacy".into()),
+            members,
+            selected: Some(999),
+            archived: vec![2, 999],
+        }];
+        for offset in 1..=crate::admission::MAX_GROUPS_PER_TAB {
+            collections.push(CollectionSnapshot {
+                id: CollectionId::from_raw(collection.raw() + offset as u64).unwrap(),
+                label: None,
+                members: vec![3],
+                selected: Some(3),
+                archived: Vec::new(),
+            });
+        }
+        let snap = TabSnapshot {
+            id: None,
+            custom_name: None,
+            layout: LayoutSnapshot::Collection(collection),
+            collections,
+            panes: HashMap::new(),
+            zoomed: false,
+            focused: None,
+            focused_leaf: Some(LayoutLeafSnapshot::Collection(collection)),
+            root_pane: Some(1),
+        };
+        let typed = TypedNode::Leaf(LayoutLeaf::Collection(collection.into()));
+
+        let mut restored_ids = HashSet::new();
+        let recovered =
+            recover_typed_layout(&snap, typed, &id_map, &surviving, &mut restored_ids).unwrap();
+        let container_id = TerminalContainerId::from(collection);
+        let restored = recovered
+            .layout
+            .collection(container_id)
+            .expect("valid members retain the legacy container");
+        assert_eq!(restored.members(), &[first, second]);
+        assert_eq!(restored.selected(), Some(first));
+        let policy = &recovered.legacy_collection_snapshots[&container_id];
+        assert_eq!(policy.label.as_deref(), Some("legacy"));
+        assert_eq!(policy.archived(), &HashSet::from([second]));
+        assert_eq!(
+            recovered.layout.placement(unplaced),
+            Some(crate::layout::PanePlacement::Tiled)
+        );
+        for pane in [first, second, unplaced] {
+            assert_eq!(
+                recovered
+                    .layout
+                    .pane_ids()
+                    .iter()
+                    .filter(|candidate| **candidate == pane)
+                    .count(),
+                1
+            );
+        }
+    }
+
+    #[test]
+    fn orphan_record_does_not_claim_session_global_container_id() {
+        use super::super::snapshot::{CollectionSnapshot, LayoutSnapshot, TabSnapshot};
+
+        let id = CollectionId::from_raw(7_050_001).unwrap();
+        let pane = PaneId::from_raw(151);
+        let record = CollectionSnapshot {
+            id,
+            label: None,
+            members: vec![1],
+            selected: Some(1),
+            archived: Vec::new(),
+        };
+        let snapshot = |collections| TabSnapshot {
+            id: None,
+            custom_name: None,
+            layout: LayoutSnapshot::Collection(id),
+            collections,
+            panes: HashMap::new(),
+            zoomed: false,
+            focused: Some(1),
+            focused_leaf: Some(LayoutLeafSnapshot::Collection(id)),
+            root_pane: Some(1),
+        };
+        let id_map = HashMap::from([(1, pane)]);
+        let surviving = HashSet::from([pane]);
+        let mut restored_ids = HashSet::new();
+
+        recover_typed_layout(
+            &snapshot(vec![record.clone()]),
+            TypedNode::Leaf(LayoutLeaf::Pane(pane)),
+            &id_map,
+            &surviving,
+            &mut restored_ids,
+        )
+        .unwrap();
+        let recovered = recover_typed_layout(
+            &snapshot(vec![record]),
+            TypedNode::Leaf(LayoutLeaf::Collection(id.into())),
+            &id_map,
+            &surviving,
+            &mut restored_ids,
+        )
+        .unwrap();
+
+        assert!(recovered.layout.collection(id.into()).is_some());
+    }
+
+    #[test]
+    fn over_limit_orphan_records_do_not_consume_container_capacity() {
+        use super::super::snapshot::{CollectionSnapshot, LayoutSnapshot, TabSnapshot};
+
+        let valid_id = CollectionId::from_raw(7_060_000).unwrap();
+        let pane = PaneId::from_raw(161);
+        let mut collections = (1..=crate::admission::MAX_GROUPS_PER_TAB)
+            .map(|raw| CollectionSnapshot {
+                id: CollectionId::from_raw(raw as u64).unwrap(),
+                label: None,
+                members: vec![1],
+                selected: Some(1),
+                archived: Vec::new(),
+            })
+            .collect::<Vec<_>>();
+        collections.push(CollectionSnapshot {
+            id: valid_id,
+            label: None,
+            members: vec![1],
+            selected: Some(1),
+            archived: Vec::new(),
+        });
+        let snap = TabSnapshot {
+            id: None,
+            custom_name: None,
+            layout: LayoutSnapshot::Collection(valid_id),
+            collections,
+            panes: HashMap::new(),
+            zoomed: false,
+            focused: Some(1),
+            focused_leaf: Some(LayoutLeafSnapshot::Collection(valid_id)),
+            root_pane: Some(1),
+        };
+
+        let recovered = recover_typed_layout(
+            &snap,
+            TypedNode::Leaf(LayoutLeaf::Collection(valid_id.into())),
+            &HashMap::from([(1, pane)]),
+            &HashSet::from([pane]),
+            &mut HashSet::new(),
+        )
+        .unwrap();
+
+        assert!(recovered.layout.collection(valid_id.into()).is_some());
+    }
+
+    #[test]
+    fn session_global_duplicate_collection_ids_are_dissolved_after_first_placement() {
+        use super::super::snapshot::{CollectionSnapshot, LayoutSnapshot, TabSnapshot};
+
+        let id = CollectionId::from_raw(7_100_001).unwrap();
+        let make_tab = |old_pane| TabSnapshot {
+            id: None,
+            custom_name: None,
+            layout: LayoutSnapshot::Collection(id),
+            collections: vec![CollectionSnapshot {
+                id,
+                label: Some("duplicate".into()),
+                members: vec![old_pane],
+                selected: Some(old_pane),
+                archived: Vec::new(),
+            }],
+            panes: HashMap::new(),
+            zoomed: false,
+            focused: Some(old_pane),
+            focused_leaf: Some(LayoutLeafSnapshot::Collection(id)),
+            root_pane: Some(old_pane),
+        };
+        let mut restored_ids = HashSet::new();
+        let first_pane = PaneId::from_raw(201);
+        let first = recover_typed_layout(
+            &make_tab(1),
+            TypedNode::Leaf(LayoutLeaf::Collection(id.into())),
+            &HashMap::from([(1, first_pane)]),
+            &HashSet::from([first_pane]),
+            &mut restored_ids,
+        )
+        .unwrap();
+        assert!(first.layout.collection(id.into()).is_some());
+
+        let second_pane = PaneId::from_raw(202);
+        let second = recover_typed_layout(
+            &make_tab(2),
+            TypedNode::Leaf(LayoutLeaf::Collection(id.into())),
+            &HashMap::from([(2, second_pane)]),
+            &HashSet::from([second_pane]),
+            &mut restored_ids,
+        )
+        .unwrap();
+        assert!(second.layout.collection(id.into()).is_none());
+        assert_eq!(second.layout.pane_ids(), vec![second_pane]);
+        assert_eq!(
+            second.layout.placement(second_pane),
+            Some(crate::layout::PanePlacement::Tiled)
+        );
+    }
+
+    #[test]
+    fn every_restored_runtime_survivor_is_placed_exactly_once_after_semantic_repair() {
+        use super::super::snapshot::{CollectionSnapshot, LayoutSnapshot, TabSnapshot};
+
+        let id = CollectionId::from_raw(7_200_001).unwrap();
+        let panes = [
+            PaneId::from_raw(301),
+            PaneId::from_raw(302),
+            PaneId::from_raw(303),
+        ];
+        let snap = TabSnapshot {
+            id: None,
+            custom_name: None,
+            layout: LayoutSnapshot::Collection(id),
+            collections: vec![CollectionSnapshot {
+                id,
+                label: None,
+                members: vec![1, 1, 999],
+                selected: Some(999),
+                archived: vec![999],
+            }],
+            panes: HashMap::new(),
+            zoomed: false,
+            focused: None,
+            focused_leaf: Some(LayoutLeafSnapshot::Collection(id)),
+            root_pane: Some(1),
+        };
+        let recovered = recover_typed_layout(
+            &snap,
+            TypedNode::Leaf(LayoutLeaf::Collection(id.into())),
+            &HashMap::from([(1, panes[0]), (2, panes[1]), (3, panes[2])]),
+            &HashSet::from(panes),
+            &mut HashSet::new(),
+        )
+        .unwrap();
+        let placed = recovered.layout.pane_ids();
+        assert_eq!(placed.len(), panes.len());
+        assert_eq!(
+            placed.iter().copied().collect::<HashSet<_>>(),
+            HashSet::from(panes)
+        );
+    }
+
+    #[test]
+    fn oversized_snapshot_is_rejected_before_restore() {
+        use super::super::snapshot::{PaneSnapshot, TabSnapshot, WorkspaceSnapshot};
+
+        let panes = HashMap::from([(
+            1,
+            PaneSnapshot {
+                terminal_id: None,
+                cwd: std::path::PathBuf::from("/tmp"),
+                label: None,
+                agent_name: None,
+                managed_agent_kind: None,
+                agent_session: None,
+                launch_argv: None,
+            },
+        )]);
+        let mut layout = super::super::snapshot::LayoutSnapshot::Pane(1);
+        for id in 2..=crate::admission::MAX_TAB_PANES as u32 + 1 {
+            layout = super::super::snapshot::LayoutSnapshot::Split {
+                direction: super::super::snapshot::DirectionSnapshot::Horizontal,
+                ratio: 0.5,
+                first: Box::new(layout),
+                second: Box::new(super::super::snapshot::LayoutSnapshot::Pane(id)),
+            };
+        }
+        let snapshot = SessionSnapshot {
+            version: super::super::snapshot::SNAPSHOT_VERSION,
+            workspaces: vec![WorkspaceSnapshot {
+                id: Some("oversized".into()),
+                custom_name: None,
+                identity_cwd: std::path::PathBuf::from("/tmp"),
+                checkout: None,
+                worktree_space: None,
+                public_pane_numbers: HashMap::new(),
+                next_public_pane_number: 1,
+                public_tab_numbers: vec![1],
+                next_public_tab_number: 2,
+                tabs: vec![TabSnapshot {
+                    id: None,
+                    custom_name: None,
+                    layout,
+                    collections: Vec::new(),
+                    panes,
+                    zoomed: false,
+                    focused: Some(1),
+                    focused_leaf: None,
+                    root_pane: Some(1),
+                }],
+                active_tab: 0,
+            }],
+            repositories: Vec::new(),
+            space_order: Vec::new(),
+            active: Some(0),
+            selected: 0,
+            sidebar_width: None,
+            sidebar_section_split: None,
+            collapsed_space_keys: HashSet::new(),
+            delegations: Vec::new(),
+            collections_authority: Default::default(),
+            collections_action_sequence: 0,
+        };
+        let (events, _event_rx) = mpsc::channel(4);
+
+        let error = match restore(
+            &snapshot,
+            None,
+            24,
+            80,
+            0,
+            test_restore_shell(),
+            crate::config::ShellModeConfig::NonLogin,
+            false,
+            events,
+            Arc::new(Notify::new()),
+            Arc::new(RenderSignal::new()),
+        ) {
+            Err(error) => error,
+            Ok(_) => panic!("oversized restore unexpectedly succeeded"),
+        };
+
+        assert!(error.contains("pane limit"));
+    }
+
+    #[test]
     fn pane_restore_startup_keeps_history_without_native_agent_resume() {
         let session = super::super::snapshot::PaneAgentSessionSnapshot {
-            source: "herdr:pi".into(),
+            source: "vqro:pi".into(),
             agent: "pi".into(),
             kind: crate::agent_resume::AgentSessionRefKind::Path,
             value: test_session_path("pi-session.jsonl"),
@@ -1155,7 +2127,7 @@ mod tests {
     #[test]
     fn restore_does_not_rehydrate_duplicate_agent_session_metadata() {
         let session = super::super::snapshot::PaneAgentSessionSnapshot {
-            source: "herdr:pi".into(),
+            source: "vqro:pi".into(),
             agent: "pi".into(),
             kind: crate::agent_resume::AgentSessionRefKind::Path,
             value: test_session_path("pi-session.jsonl"),
@@ -1171,22 +2143,32 @@ mod tests {
     async fn restore_carries_persisted_agent_session_metadata() {
         let cwd = std::env::current_dir().unwrap();
         let snapshot = SessionSnapshot {
+            delegations: Vec::new(),
+            collections_authority: Default::default(),
+            collections_action_sequence: 0,
             version: super::super::snapshot::SNAPSHOT_VERSION,
+            repositories: Vec::new(),
+            space_order: Vec::new(),
             workspaces: vec![WorkspaceSnapshot {
                 id: Some("workspace".into()),
                 custom_name: None,
                 identity_cwd: cwd.clone(),
+                checkout: None,
                 worktree_space: None,
                 public_pane_numbers: HashMap::new(),
                 next_public_pane_number: 0,
                 public_tab_numbers: Vec::new(),
                 next_public_tab_number: 0,
                 tabs: vec![TabSnapshot {
+                    id: None,
+                    collections: Vec::new(),
+                    focused_leaf: None,
                     custom_name: None,
                     layout: LayoutSnapshot::Pane(0),
                     panes: HashMap::from([(
                         0,
                         super::super::snapshot::PaneSnapshot {
+                            terminal_id: None,
                             cwd,
                             label: Some("reviewer".into()),
                             agent_name: Some("reviewer".into()),
@@ -1226,7 +2208,8 @@ mod tests {
             events,
             Arc::new(Notify::new()),
             Arc::new(RenderSignal::new()),
-        );
+        )
+        .unwrap();
 
         let terminal = terminals
             .values()
@@ -1248,20 +2231,29 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn restore_preserves_public_id_mapping_after_pane_id_remap() {
+    async fn restore_preserves_public_id_mapping_and_terminal_identity_after_pane_id_remap() {
         let cwd = std::env::current_dir().unwrap();
-        let snapshot = SessionSnapshot {
+        let mut snapshot = SessionSnapshot {
+            delegations: Vec::new(),
+            collections_authority: Default::default(),
+            collections_action_sequence: 0,
             version: super::super::snapshot::SNAPSHOT_VERSION,
+            repositories: Vec::new(),
+            space_order: Vec::new(),
             workspaces: vec![WorkspaceSnapshot {
                 id: Some("w1".into()),
                 custom_name: None,
                 identity_cwd: cwd.clone(),
+                checkout: None,
                 worktree_space: None,
                 public_pane_numbers: HashMap::from([(10, 1), (20, 3)]),
                 next_public_pane_number: 4,
                 public_tab_numbers: vec![5],
                 next_public_tab_number: 6,
                 tabs: vec![TabSnapshot {
+                    id: None,
+                    collections: Vec::new(),
+                    focused_leaf: None,
                     custom_name: None,
                     layout: LayoutSnapshot::Split {
                         direction: super::super::snapshot::DirectionSnapshot::Horizontal,
@@ -1273,6 +2265,7 @@ mod tests {
                         (
                             10,
                             super::super::snapshot::PaneSnapshot {
+                                terminal_id: None,
                                 cwd: cwd.clone(),
                                 label: None,
                                 agent_name: None,
@@ -1284,6 +2277,7 @@ mod tests {
                         (
                             20,
                             super::super::snapshot::PaneSnapshot {
+                                terminal_id: None,
                                 cwd: cwd.clone(),
                                 label: None,
                                 agent_name: None,
@@ -1305,6 +2299,19 @@ mod tests {
             sidebar_section_split: None,
             collapsed_space_keys: Default::default(),
         };
+        super::super::snapshot::normalize_terminal_identities(&mut snapshot, false).unwrap();
+        let expected_tab_id =
+            super::super::snapshot::tab_id_for_snapshot(&snapshot.workspaces[0].tabs[0]).unwrap();
+        let expected = snapshot.workspaces[0].tabs[0]
+            .panes
+            .iter()
+            .map(|(&pane, saved)| {
+                (
+                    pane,
+                    super::super::snapshot::terminal_id_for_pane_snapshot(saved).unwrap(),
+                )
+            })
+            .collect::<HashMap<_, _>>();
         let (events, _event_rx) = mpsc::channel(4);
 
         let (workspaces, _terminals, _runtimes) = restore(
@@ -1319,24 +2326,38 @@ mod tests {
             events,
             Arc::new(Notify::new()),
             Arc::new(RenderSignal::new()),
-        );
+        )
+        .unwrap();
 
         let workspace = workspaces.first().expect("workspace should restore");
         let mut public_numbers: Vec<_> = workspace.public_pane_numbers.values().copied().collect();
         public_numbers.sort_unstable();
         assert_eq!(public_numbers, vec![1, 3]);
         assert_eq!(workspace.next_public_pane_number, 4);
+        assert_eq!(workspace.tabs[0].id, expected_tab_id);
         assert_eq!(workspace.tabs[0].number, 5);
         assert_eq!(workspace.next_public_tab_number, 6);
+        for (old_pane, public_number) in [(10, 1), (20, 3)] {
+            let restored_pane = workspace
+                .public_pane_numbers
+                .iter()
+                .find_map(|(pane, number)| (*number == public_number).then_some(*pane))
+                .unwrap();
+            assert_eq!(
+                workspace.terminal_id(restored_pane),
+                Some(&expected[&old_pane])
+            );
+        }
     }
 
     #[tokio::test]
-    async fn cold_restore_with_gapped_public_tab_numbers_drops_unmanaged_agent_name() {
+    async fn cold_restore_uses_persisted_repaired_public_tab_numbers() {
         let cwd = std::env::current_dir().unwrap();
         let pane_snap = |id: &str| {
             (
                 id.parse::<u32>().unwrap(),
                 super::super::snapshot::PaneSnapshot {
+                    terminal_id: None,
                     cwd: cwd.clone(),
                     label: None,
                     agent_name: None,
@@ -1347,31 +2368,41 @@ mod tests {
             )
         };
         let final_pane = super::super::snapshot::PaneSnapshot {
+            terminal_id: None,
             cwd: cwd.clone(),
             label: Some("planner".into()),
             agent_name: Some("planner".into()),
             managed_agent_kind: None,
             agent_session: Some(super::super::snapshot::PaneAgentSessionSnapshot {
-                source: "herdr:codex".into(),
+                source: "vqro:codex".into(),
                 agent: "codex".into(),
                 kind: crate::agent_resume::AgentSessionRefKind::Id,
                 value: "codex-session".into(),
             }),
             launch_argv: None,
         };
-        let snapshot = SessionSnapshot {
+        let mut snapshot = SessionSnapshot {
+            delegations: Vec::new(),
+            collections_authority: Default::default(),
+            collections_action_sequence: 0,
             version: super::super::snapshot::SNAPSHOT_VERSION,
+            repositories: Vec::new(),
+            space_order: Vec::new(),
             workspaces: vec![WorkspaceSnapshot {
                 id: Some("w1".into()),
                 custom_name: None,
                 identity_cwd: cwd.clone(),
+                checkout: None,
                 worktree_space: None,
                 public_pane_numbers: HashMap::from([(10, 1), (11, 2), (12, 3), (13, 4)]),
                 next_public_pane_number: 5,
-                public_tab_numbers: vec![1, 3, 4, 5],
-                next_public_tab_number: 6,
+                public_tab_numbers: vec![7, 0, 7],
+                next_public_tab_number: 2,
                 tabs: vec![
                     TabSnapshot {
+                        id: None,
+                        collections: Vec::new(),
+                        focused_leaf: None,
                         custom_name: None,
                         layout: LayoutSnapshot::Pane(10),
                         panes: HashMap::from([pane_snap("10")]),
@@ -1380,6 +2411,9 @@ mod tests {
                         root_pane: Some(10),
                     },
                     TabSnapshot {
+                        id: None,
+                        collections: Vec::new(),
+                        focused_leaf: None,
                         custom_name: None,
                         layout: LayoutSnapshot::Pane(11),
                         panes: HashMap::from([pane_snap("11")]),
@@ -1388,6 +2422,9 @@ mod tests {
                         root_pane: Some(11),
                     },
                     TabSnapshot {
+                        id: None,
+                        collections: Vec::new(),
+                        focused_leaf: None,
                         custom_name: None,
                         layout: LayoutSnapshot::Pane(12),
                         panes: HashMap::from([pane_snap("12")]),
@@ -1396,6 +2433,9 @@ mod tests {
                         root_pane: Some(12),
                     },
                     TabSnapshot {
+                        id: None,
+                        collections: Vec::new(),
+                        focused_leaf: None,
                         custom_name: None,
                         layout: LayoutSnapshot::Pane(13),
                         panes: HashMap::from([(13, final_pane)]),
@@ -1412,6 +2452,11 @@ mod tests {
             sidebar_section_split: None,
             collapsed_space_keys: Default::default(),
         };
+        super::super::snapshot::normalize_terminal_identities(&mut snapshot, false).unwrap();
+        let persisted_numbers = snapshot.workspaces[0].public_tab_numbers.clone();
+        let persisted_next = snapshot.workspaces[0].next_public_tab_number;
+        assert_eq!(persisted_numbers, [7, 1, 2, 3]);
+        assert_eq!(persisted_next, 8);
         let (events, _event_rx) = mpsc::channel(4);
 
         let (workspaces, terminals, _runtimes) = restore(
@@ -1426,11 +2471,21 @@ mod tests {
             events,
             Arc::new(Notify::new()),
             Arc::new(RenderSignal::new()),
-        );
+        )
+        .unwrap();
 
         let workspace = workspaces.first().expect("workspace should restore");
         assert_eq!(workspace.active_tab, 3);
-        assert_eq!(workspace.tabs[3].number, 5);
+        assert_eq!(
+            workspace
+                .tabs
+                .iter()
+                .map(|tab| tab.number)
+                .collect::<Vec<_>>(),
+            persisted_numbers
+        );
+        assert_eq!(workspace.next_public_tab_number, persisted_next);
+        assert_eq!(workspace.tabs[3].number, 3);
         let agent_pane = workspace.tabs[3].root_pane;
         let terminal_id = &workspace.tabs[3].panes[&agent_pane].attached_terminal_id;
         assert!(terminals[terminal_id].agent_name.is_none());
@@ -1448,12 +2503,16 @@ mod tests {
             id: Some("w1".into()),
             custom_name: None,
             identity_cwd: cwd,
+            checkout: None,
             worktree_space: None,
             public_pane_numbers: HashMap::new(),
             next_public_pane_number: 0,
             public_tab_numbers: Vec::new(),
             next_public_tab_number: 0,
             tabs: vec![TabSnapshot {
+                id: None,
+                collections: Vec::new(),
+                focused_leaf: None,
                 custom_name: None,
                 layout: LayoutSnapshot::Split {
                     direction: super::super::snapshot::DirectionSnapshot::Horizontal,
@@ -1482,28 +2541,38 @@ mod tests {
     async fn native_agent_restore_defers_runtime_launch() {
         let cwd = std::env::current_dir().unwrap();
         let snapshot = SessionSnapshot {
+            delegations: Vec::new(),
+            collections_authority: Default::default(),
+            collections_action_sequence: 0,
             version: super::super::snapshot::SNAPSHOT_VERSION,
+            repositories: Vec::new(),
+            space_order: Vec::new(),
             workspaces: vec![WorkspaceSnapshot {
                 id: Some("workspace".into()),
                 custom_name: None,
                 identity_cwd: cwd.clone(),
+                checkout: None,
                 worktree_space: None,
                 public_pane_numbers: HashMap::new(),
                 next_public_pane_number: 0,
                 public_tab_numbers: Vec::new(),
                 next_public_tab_number: 0,
                 tabs: vec![TabSnapshot {
+                    id: None,
+                    collections: Vec::new(),
+                    focused_leaf: None,
                     custom_name: None,
                     layout: LayoutSnapshot::Pane(0),
                     panes: HashMap::from([(
                         0,
                         super::super::snapshot::PaneSnapshot {
+                            terminal_id: None,
                             cwd,
                             label: None,
                             agent_name: None,
                             managed_agent_kind: None,
                             agent_session: Some(super::super::snapshot::PaneAgentSessionSnapshot {
-                                source: "herdr:codex".into(),
+                                source: "vqro:codex".into(),
                                 agent: "codex".into(),
                                 kind: crate::agent_resume::AgentSessionRefKind::Id,
                                 value: "codex-session".into(),
@@ -1537,7 +2606,8 @@ mod tests {
             events,
             Arc::new(Notify::new()),
             Arc::new(RenderSignal::new()),
-        );
+        )
+        .unwrap();
 
         let terminal = terminals
             .values()
@@ -1600,7 +2670,8 @@ mod tests {
             events,
             render_notify,
             render_dirty,
-        );
+        )
+        .unwrap();
         let runtime = runtimes
             .values()
             .next()
@@ -1638,7 +2709,8 @@ mod tests {
             events,
             render_notify,
             render_dirty,
-        );
+        )
+        .unwrap();
         let runtime = runtimes
             .values()
             .next()
@@ -1664,6 +2736,7 @@ mod tests {
         panes.insert(
             0,
             super::super::snapshot::PaneSnapshot {
+                terminal_id: None,
                 cwd: cwd.clone(),
                 label: None,
                 agent_name: None,
@@ -1691,17 +2764,26 @@ mod tests {
             }],
         };
         let snapshot = SessionSnapshot {
+            delegations: Vec::new(),
+            collections_authority: Default::default(),
+            collections_action_sequence: 0,
             version: super::super::snapshot::SNAPSHOT_VERSION,
+            repositories: Vec::new(),
+            space_order: Vec::new(),
             workspaces: vec![WorkspaceSnapshot {
                 id: Some("workspace".into()),
                 custom_name: None,
                 identity_cwd: cwd,
+                checkout: None,
                 worktree_space: None,
                 public_pane_numbers: HashMap::new(),
                 next_public_pane_number: 0,
                 public_tab_numbers: Vec::new(),
                 next_public_tab_number: 0,
                 tabs: vec![TabSnapshot {
+                    id: None,
+                    collections: Vec::new(),
+                    focused_leaf: None,
                     custom_name: None,
                     layout: LayoutSnapshot::Pane(0),
                     panes,

@@ -1,5 +1,84 @@
 use super::*;
 
+fn percent_encode_uri_path(path: &str) -> String {
+    let mut encoded = String::with_capacity(path.len());
+    for byte in path.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b':' | b'-' | b'_' | b'.' | b'~') {
+            encoded.push(char::from(byte));
+        } else {
+            use std::fmt::Write;
+            let _ = write!(encoded, "%{byte:02X}");
+        }
+    }
+    encoded
+}
+
+fn local_directory_uri(path: &str) -> Option<String> {
+    if !std::path::Path::new(path).is_absolute() {
+        return None;
+    }
+    #[cfg(windows)]
+    let normalized = path.replace('\\', "/");
+    #[cfg(windows)]
+    let path = normalized.as_str();
+    let encoded = percent_encode_uri_path(path);
+    #[cfg(windows)]
+    let uri = if encoded.starts_with("//") {
+        format!("file:{encoded}")
+    } else {
+        format!("file:///{encoded}")
+    };
+    #[cfg(not(windows))]
+    let uri = format!("file://{encoded}");
+    Some(uri)
+}
+
+fn apply_space_link_hyperlinks(frame: &mut FrameData, hits: &[SpaceLinkHit]) {
+    for hit in hits {
+        let uri = match &hit.target {
+            SpaceLinkTarget::LocalDirectory(path) => local_directory_uri(path),
+            SpaceLinkTarget::WebUrl(url)
+                if url.starts_with("https://") || url.starts_with("http://") =>
+            {
+                Some(url.clone())
+            }
+            SpaceLinkTarget::WebUrl(_) => None,
+        };
+        let Some(uri) = uri else {
+            continue;
+        };
+        let hyperlink = frame
+            .hyperlinks
+            .iter()
+            .position(|existing| existing == &uri)
+            .map(|index| index as u32)
+            .unwrap_or_else(|| {
+                let index = frame.hyperlinks.len() as u32;
+                frame.hyperlinks.push(uri);
+                index
+            });
+        let right = hit.rect.right().min(frame.width);
+        let bottom = hit.rect.bottom().min(frame.height);
+        for y in hit.rect.y..bottom {
+            for x in hit.rect.x..right {
+                let index = usize::from(y) * usize::from(frame.width) + usize::from(x);
+                if let Some(cell) = frame.cells.get_mut(index) {
+                    cell.hyperlink = Some(hyperlink);
+                }
+            }
+        }
+    }
+}
+
+fn clip_rect(rect: Rect, bounds: Rect) -> Rect {
+    let clipped = rect.intersection(bounds);
+    if clipped.is_empty() {
+        Rect::default()
+    } else {
+        clipped
+    }
+}
+
 fn restore_mode_bar(
     frame: &mut FrameData,
     bar: Option<Rect>,
@@ -35,30 +114,60 @@ impl ClientShellState {
         } else {
             Rect::new(0, 1, cols, rows.saturating_sub(2))
         };
-        super::endpoint_sidebar::render_expanded(
-            &mut buffer,
-            sidebar,
-            self.snapshot.as_deref(),
-            &self.config,
-            &mut render::ShellRenderState {
-                endpoints: &self.endpoints,
-                active_endpoint_id: &self.active_endpoint_id,
-                collapsed_endpoints: &self.collapsed_endpoints,
-                collapsed_groups: &self.collapsed_groups,
-                workspace_scroll: &mut self.workspace_scroll,
-                agent_scroll: &mut self.agent_scroll,
-                tab_scroll: &mut self.tab_scroll,
-                reveal_focused_workspace: &mut self.reveal_focused_workspace,
-                reveal_focused_tab: &mut self.reveal_focused_tab,
-                sidebar_collapsed: false,
-                sidebar_section_split: self.sidebar_section_split,
-                tab_drag_insert_index: None,
-                selected_workspace_id: self.navigate_workspace_id.as_deref(),
-                dragged_workspace_id: None,
-                workspace_drop_indicator_row: None,
-            },
-            &mut self.hits,
-        );
+        let valid_navigation_target = self.mode == ClientShellMode::Navigate
+            && self
+                .navigate_workspace_id
+                .as_ref()
+                .is_some_and(|target| self.navigation_target_valid(target));
+        // A resize invalidates pane geometry, not the healthy Local workspace chrome.
+        let local_snapshot = self.snapshot.as_deref().filter(|_| {
+            self.endpoints.len() == 1
+                && !self.sidebar_collapsed
+                && layout.sidebar.width > 0
+                && self.endpoint_status(&self.active_endpoint_id)
+                    == Some(ClientEndpointStatus::Online)
+        });
+        let mut render_state = render::ShellRenderState {
+            endpoints: &self.endpoints,
+            active_endpoint_id: &self.active_endpoint_id,
+            collapsed_endpoints: &self.collapsed_endpoints,
+            collapsed_groups: &self.collapsed_groups,
+            remote_collapsed_groups: &self.remote_collapsed_groups,
+            workspace_scroll: &mut self.workspace_scroll,
+            agent_scroll: &mut self.agent_scroll,
+            tab_scroll: &mut self.tab_scroll,
+            reveal_focused_workspace: &mut self.reveal_focused_workspace,
+            reveal_focused_tab: &mut self.reveal_focused_tab,
+            sidebar_collapsed: false,
+            sidebar_section_split: self.sidebar_section_split,
+            tab_drag_insert_index: None,
+            selected_workspace_id: self
+                .navigate_workspace_id
+                .as_ref()
+                .filter(|_| valid_navigation_target),
+            reveal_navigation_workspace: &mut self.reveal_navigation_workspace,
+            dragged_workspace_id: None,
+            workspace_drop_indicator_row: None,
+        };
+        if let Some(snapshot) = local_snapshot {
+            render::render_sidebar(
+                &mut buffer,
+                sidebar,
+                snapshot,
+                &self.config,
+                &mut render_state,
+                &mut self.hits,
+            );
+        } else {
+            super::endpoint_sidebar::render_expanded(
+                &mut buffer,
+                sidebar,
+                self.snapshot.as_deref(),
+                &self.config,
+                &mut render_state,
+                &mut self.hits,
+            );
+        }
         if !self.config.mouse_capture {
             self.hits = ShellHitMap::default();
         }
@@ -77,14 +186,16 @@ impl ClientShellState {
         } else {
             Rect::new(0, 0, cols, 1)
         };
-        render::put_text(
-            &mut buffer,
-            message_area.x,
-            message_area.y,
-            message_area.width,
-            &message,
-            Style::default().fg(self.config.palette.overlay0),
-        );
+        if local_snapshot.is_none() || self.endpoint_error.is_some() {
+            render::put_text(
+                &mut buffer,
+                message_area.x,
+                message_area.y,
+                message_area.width,
+                &message,
+                Style::default().fg(self.config.palette.overlay0),
+            );
+        }
         render::render_mode_bar(
             &mut buffer,
             Rect::new(0, 0, cols, rows),
@@ -99,7 +210,18 @@ impl ClientShellState {
     }
 
     pub(crate) fn compose(&mut self, cols: u16, rows: u16) -> Option<FrameData> {
+        self.last_composed_at = Some(std::time::Instant::now());
+        self.selection_repaint_deadline = None;
+        if self.last_composed_size != Some((cols, rows)) && self.mode == ClientShellMode::Navigate {
+            self.reveal_navigation_workspace = true;
+            self.reveal_mobile_workspace = true;
+        }
         self.last_composed_size = Some((cols, rows));
+        let valid_navigation_target = self.mode == ClientShellMode::Navigate
+            && self
+                .navigate_workspace_id
+                .as_ref()
+                .is_some_and(|target| self.navigation_target_valid(target));
         if self.snapshot.is_none() || self.pane_surface.is_none() {
             return Some(self.compose_unavailable(cols, rows));
         }
@@ -143,6 +265,7 @@ impl ClientShellState {
                 active_endpoint_id: &self.active_endpoint_id,
                 collapsed_endpoints: &self.collapsed_endpoints,
                 collapsed_groups: &self.collapsed_groups,
+                remote_collapsed_groups: &self.remote_collapsed_groups,
                 workspace_scroll: &mut self.workspace_scroll,
                 agent_scroll: &mut self.agent_scroll,
                 tab_scroll: &mut self.tab_scroll,
@@ -151,52 +274,100 @@ impl ClientShellState {
                 sidebar_collapsed: self.sidebar_collapsed,
                 sidebar_section_split: self.sidebar_section_split,
                 tab_drag_insert_index,
-                selected_workspace_id: (self.mode == ClientShellMode::Navigate)
-                    .then_some(self.navigate_workspace_id.as_deref())
-                    .flatten(),
+                selected_workspace_id: self
+                    .navigate_workspace_id
+                    .as_ref()
+                    .filter(|_| valid_navigation_target),
+                reveal_navigation_workspace: &mut self.reveal_navigation_workspace,
                 dragged_workspace_id,
                 workspace_drop_indicator_row,
             },
         );
+        let frame_bounds = Rect::new(0, 0, cols, rows);
         self.hits.panes = surface
             .panes
             .iter()
-            .map(|pane| PaneHit {
-                rect: Rect::new(
-                    layout.pane_surface.x.saturating_add(pane.rect.x),
-                    layout.pane_surface.y.saturating_add(pane.rect.y),
-                    pane.rect.width,
-                    pane.rect.height,
-                ),
-                inner_rect: Rect::new(
-                    layout.pane_surface.x.saturating_add(pane.inner_rect.x),
-                    layout.pane_surface.y.saturating_add(pane.inner_rect.y),
-                    pane.inner_rect.width,
-                    pane.inner_rect.height,
-                ),
-                scrollbar_rect: pane.scrollbar_rect.map(|rect| {
+            .map(|pane| {
+                let inner_rect = clip_rect(
                     Rect::new(
-                        layout.pane_surface.x.saturating_add(rect.x),
-                        layout.pane_surface.y.saturating_add(rect.y),
-                        rect.width,
-                        rect.height,
-                    )
-                }),
-                scroll: pane.scroll.map(|metrics| crate::pane::ScrollMetrics {
-                    offset_from_bottom: usize::try_from(metrics.offset_from_bottom)
-                        .unwrap_or(usize::MAX),
-                    max_offset_from_bottom: usize::try_from(metrics.max_offset_from_bottom)
-                        .unwrap_or(usize::MAX),
-                    viewport_rows: usize::try_from(metrics.viewport_rows).unwrap_or(usize::MAX),
-                }),
-                pane_id: pane.pane_id.clone(),
-                popup: false,
-                mouse_reporting: pane.mouse_reporting,
-                sgr_pixel_mouse: pane.sgr_pixel_mouse,
-                pixel_width: pane.pixel_width,
-                pixel_height: pane.pixel_height,
+                        layout.pane_surface.x.saturating_add(pane.inner_rect.x),
+                        layout.pane_surface.y.saturating_add(pane.inner_rect.y),
+                        pane.inner_rect.width,
+                        pane.inner_rect.height,
+                    ),
+                    frame_bounds,
+                );
+                PaneHit {
+                    rect: clip_rect(
+                        Rect::new(
+                            layout.pane_surface.x.saturating_add(pane.rect.x),
+                            layout.pane_surface.y.saturating_add(pane.rect.y),
+                            pane.rect.width,
+                            pane.rect.height,
+                        ),
+                        frame_bounds,
+                    ),
+                    inner_rect,
+                    projected_inner_rect: inner_rect,
+                    scrollbar_rect: pane.scrollbar_rect.and_then(|rect| {
+                        let clipped = clip_rect(
+                            Rect::new(
+                                layout.pane_surface.x.saturating_add(rect.x),
+                                layout.pane_surface.y.saturating_add(rect.y),
+                                rect.width,
+                                rect.height,
+                            ),
+                            frame_bounds,
+                        );
+                        (!clipped.is_empty()).then_some(clipped)
+                    }),
+                    scroll: pane.scroll.map(|metrics| crate::pane::ScrollMetrics {
+                        offset_from_bottom: usize::try_from(metrics.offset_from_bottom)
+                            .unwrap_or(usize::MAX),
+                        max_offset_from_bottom: usize::try_from(metrics.max_offset_from_bottom)
+                            .unwrap_or(usize::MAX),
+                        viewport_rows: usize::try_from(metrics.viewport_rows).unwrap_or(usize::MAX),
+                    }),
+                    pane_id: pane.pane_id.clone(),
+                    popup: false,
+                    mouse_reporting: pane.mouse_reporting,
+                    sgr_pixel_mouse: pane.sgr_pixel_mouse,
+                    pixel_width: pane.pixel_width,
+                    pixel_height: pane.pixel_height,
+                }
             })
             .collect();
+        let collection_surfaces = surface
+            .collections
+            .iter()
+            .map(|collection| collections::CollectionSurface {
+                collection_id: collection.collection_id.clone(),
+                rect: clip_rect(
+                    Rect::new(
+                        layout.pane_surface.x.saturating_add(collection.rect.x),
+                        layout.pane_surface.y.saturating_add(collection.rect.y),
+                        collection.rect.width,
+                        collection.rect.height,
+                    ),
+                    frame_bounds,
+                ),
+                inner_rect: clip_rect(
+                    Rect::new(
+                        layout
+                            .pane_surface
+                            .x
+                            .saturating_add(collection.inner_rect.x),
+                        layout
+                            .pane_surface
+                            .y
+                            .saturating_add(collection.inner_rect.y),
+                        collection.inner_rect.width,
+                        collection.inner_rect.height,
+                    ),
+                    frame_bounds,
+                ),
+            })
+            .collect::<Vec<_>>();
         let topology_signature = pane_surface_topology_signature(surface);
         self.hits.pane_splits = surface
             .splits
@@ -211,17 +382,23 @@ impl ClientShellState {
                         layout.pane_surface.y.saturating_add(split.pos)
                     }
                 },
-                area: Rect::new(
-                    layout.pane_surface.x.saturating_add(split.area.x),
-                    layout.pane_surface.y.saturating_add(split.area.y),
-                    split.area.width,
-                    split.area.height,
+                area: clip_rect(
+                    Rect::new(
+                        layout.pane_surface.x.saturating_add(split.area.x),
+                        layout.pane_surface.y.saturating_add(split.area.y),
+                        split.area.width,
+                        split.area.height,
+                    ),
+                    frame_bounds,
                 ),
-                hit_rect: Rect::new(
-                    layout.pane_surface.x.saturating_add(split.hit_rect.x),
-                    layout.pane_surface.y.saturating_add(split.hit_rect.y),
-                    split.hit_rect.width,
-                    split.hit_rect.height,
+                hit_rect: clip_rect(
+                    Rect::new(
+                        layout.pane_surface.x.saturating_add(split.hit_rect.x),
+                        layout.pane_surface.y.saturating_add(split.hit_rect.y),
+                        split.hit_rect.width,
+                        split.hit_rect.height,
+                    ),
+                    frame_bounds,
                 ),
                 path: split.path.clone(),
                 topology_signature,
@@ -262,12 +439,295 @@ impl ClientShellState {
             self.hits.tab_scroll_right = Rect::default();
         }
         let mut frame = FrameData::from_ratatui_buffer_with_hyperlinks(&buffer, None, &[]);
+        apply_space_link_hyperlinks(&mut frame, &self.hits.space_links);
         let mode_bar_cells = mode_bar.map(|bar| {
             let start = usize::from(bar.y) * usize::from(frame.width) + usize::from(bar.x);
             frame.cells[start..start + usize::from(bar.width)].to_vec()
         });
         blit_pane_surface(&mut frame, &surface.frame, layout.pane_surface);
         restore_mode_bar(&mut frame, mode_bar, mode_bar_cells.as_deref());
+        let mut occlusion = crate::kitty_graphics::surface::Occlusion::default();
+        let mut composed = frame.to_ratatui_buffer()?;
+        let host_documents = self
+            .endpoints
+            .iter()
+            .find(|endpoint| endpoint.endpoint_id == self.active_endpoint_id)
+            .and_then(ClientShellEndpoint::current_host_documents);
+        let documented_delegations = self.structure.as_deref().and_then(|structure| {
+            super::document_navigation::delegation_navigation(snapshot, structure, host_documents)
+        });
+        self.hits.collections = collections::render_collection_chrome(
+            &mut composed,
+            snapshot,
+            self.structure.as_deref(),
+            documented_delegations.as_ref(),
+            &self.hits.panes,
+            &collection_surfaces,
+            &self.collection_list_views,
+            self.collection_maximized_pane.as_ref(),
+            &self.config.palette,
+        );
+        self.hits.collection_members = collections::render_collection_lists(
+            &mut composed,
+            snapshot,
+            collections::CollectionProjection {
+                structure: self.structure.as_deref(),
+                host_documents,
+                documented_delegations: documented_delegations.as_ref(),
+                surfaces: &collection_surfaces,
+            },
+            &self.hits.panes,
+            &self.collection_list_views,
+            &self.collection_expanded_members,
+            &self.collection_preview_heights,
+            self.collection_maximized_pane.as_ref(),
+            self.collection_entered_pane.as_deref(),
+            &self.terminal_view_surfaces,
+            &self.config.palette,
+        );
+        if self.supports_endpoint_capability(crate::protocol::endpoint::TERMINAL_VIEWS_CAPABILITY) {
+            let mut total_cells = 0usize;
+            let views = self
+                .hits
+                .collection_members
+                .iter()
+                .filter(|member| !member.preview.is_empty())
+                .filter_map(|member| {
+                    let cells = usize::from(member.preview.width)
+                        .saturating_mul(usize::from(member.preview.height));
+                    if total_cells.saturating_add(cells)
+                        > crate::protocol::endpoint::MAX_TERMINAL_VIEW_CELLS
+                    {
+                        return None;
+                    }
+                    total_cells = total_cells.saturating_add(cells);
+                    Some(crate::protocol::endpoint::ClientTerminalViewInterest {
+                        pane_id: member.pane_id.clone(),
+                        size: crate::protocol::ClientSurfaceSize {
+                            cols: member.preview.width,
+                            rows: member.preview.height,
+                        },
+                    })
+                })
+                .take(crate::protocol::endpoint::MAX_TERMINAL_VIEWS)
+                .collect::<Vec<_>>();
+            let interest = crate::protocol::endpoint::ClientTerminalViewsInterest {
+                boot_id: snapshot.boot_id.clone(),
+                projection_revision: snapshot.revision,
+                views,
+            };
+            if (!interest.views.is_empty() || self.last_terminal_views_interest.is_some())
+                && self.last_terminal_views_interest.as_ref() != Some(&interest)
+            {
+                self.terminal_view_surfaces.retain(|pane_id, surface| {
+                    interest.views.iter().any(|view| {
+                        &view.pane_id == pane_id
+                            && view.size.cols == surface.frame.width
+                            && view.size.rows == surface.frame.height
+                    })
+                });
+                if let Ok(data) = serde_json::to_string(&interest) {
+                    self.pending_endpoint_controls.push((
+                        self.active_endpoint_id.clone(),
+                        ClientMessage::EndpointControl {
+                            kind: crate::protocol::endpoint::TERMINAL_VIEWS_INTEREST_KIND.into(),
+                            data,
+                        },
+                    ));
+                    self.last_terminal_views_interest = Some(interest);
+                }
+            }
+        }
+        let list_pane_ids = self
+            .structure
+            .as_deref()
+            .into_iter()
+            .flat_map(|structure| structure.collections.iter())
+            .filter(|collection| {
+                self.collection_list_views
+                    .contains(&collection.collection_id)
+            })
+            .filter_map(|collection| collection.selected_pane_id.as_deref())
+            .collect::<HashSet<_>>();
+        let mut cursor = frame.cursor.clone().filter(|cursor| {
+            !self.hits.panes.iter().any(|pane| {
+                list_pane_ids.contains(pane.pane_id.as_str())
+                    && contains(pane.inner_rect, (cursor.x, cursor.y))
+            })
+        });
+        for pane in &mut self.hits.panes {
+            if list_pane_ids.contains(pane.pane_id.as_str()) {
+                // The collection list replaces this leaf. Retire the original full-leaf hit
+                // rectangle before installing bounded preview hits below so it cannot shadow a
+                // sibling preview during first-match mouse routing.
+                pane.rect = Rect::default();
+                pane.inner_rect = Rect::default();
+                pane.scrollbar_rect = None;
+                pane.mouse_reporting = false;
+            }
+        }
+        for member in &self.hits.collection_members {
+            if member.preview.is_empty() {
+                continue;
+            }
+            let surface = self.terminal_view_surfaces.get(&member.pane_id);
+            if self.collection_entered_pane.as_deref() == Some(member.pane_id.as_str()) {
+                cursor = surface
+                    .and_then(|surface| surface.frame.cursor.as_ref())
+                    .filter(|surface_cursor| {
+                        surface_cursor.x < member.preview.width
+                            && surface_cursor.y < member.preview.height
+                    })
+                    .map(|surface_cursor| crate::protocol::CursorState {
+                        x: member.preview.x.saturating_add(surface_cursor.x),
+                        y: member.preview.y.saturating_add(surface_cursor.y),
+                        visible: surface_cursor.visible,
+                        shape: surface_cursor.shape,
+                    });
+            }
+            let preview_hit = PaneHit {
+                rect: member.preview,
+                inner_rect: member.preview,
+                projected_inner_rect: member.preview,
+                scrollbar_rect: member.scrollbar,
+                scroll: member.scroll,
+                pane_id: member.pane_id.clone(),
+                popup: false,
+                mouse_reporting: surface.is_some_and(|surface| surface.mouse_reporting),
+                sgr_pixel_mouse: surface.is_some_and(|surface| surface.sgr_pixel_mouse),
+                pixel_width: surface.map_or(0, |surface| surface.pixel_width),
+                pixel_height: surface.map_or(0, |surface| surface.pixel_height),
+            };
+            if let Some(pane) = self
+                .hits
+                .panes
+                .iter_mut()
+                .find(|pane| pane.pane_id == member.pane_id)
+            {
+                pane.rect = preview_hit.rect;
+                pane.inner_rect = preview_hit.inner_rect;
+                pane.scrollbar_rect = preview_hit.scrollbar_rect;
+                pane.scroll = preview_hit.scroll;
+                pane.mouse_reporting = preview_hit.mouse_reporting;
+                pane.sgr_pixel_mouse = preview_hit.sgr_pixel_mouse;
+                pane.pixel_width = preview_hit.pixel_width;
+                pane.pixel_height = preview_hit.pixel_height;
+            } else {
+                self.hits.panes.push(preview_hit);
+            }
+        }
+        frame.replace_from_ratatui_buffer_preserving_effects(&composed, cursor.clone());
+        frame.cursor = cursor;
+        self.hits.inspector_body = Rect::default();
+        self.hits.inspector_close = Rect::default();
+        self.hits.inspector_refresh = Rect::default();
+        self.hits.contribution_actions.clear();
+        if let Some(inspector) = self.inspector.as_ref() {
+            if let Some(index) = self
+                .hits
+                .panes
+                .iter()
+                .position(|hit| hit.pane_id == inspector.pane_id)
+            {
+                let area = clip_rect(
+                    self.hits.panes[index].projected_inner_rect,
+                    Rect::new(0, 0, frame.width, frame.height),
+                );
+                // Accessory geometry cannot yet remap and clip target-pane Kitty placements.
+                // Fall back to replacement only for that target; unrelated panes remain visible.
+                let effective_placement = if inspector.placement
+                    == crate::pane_contribution::PaneContributionPlacement::Accessory
+                    && self.graphics.pane_has_graphics(&inspector.pane_id)
+                {
+                    crate::pane_contribution::PaneContributionPlacement::Replacement
+                } else {
+                    inspector.placement
+                };
+                let geometry = contributions::contribution_geometry(area, effective_placement);
+                if self.supports_endpoint_capability(
+                    crate::protocol::endpoint::PANE_VIEWPORT_CAPABILITY,
+                ) {
+                    let request = contributions::viewport_request(
+                        &snapshot.boot_id,
+                        snapshot.revision,
+                        &inspector.pane_id,
+                        geometry.terminal,
+                    );
+                    if self.last_pane_viewport_request.as_ref() != Some(&request) {
+                        if let Ok(data) = serde_json::to_string(&request) {
+                            self.last_pane_viewport_request = Some(request);
+                            self.pending_endpoint_controls.push((
+                                self.active_endpoint_id.clone(),
+                                ClientMessage::EndpointControl {
+                                    kind: crate::protocol::endpoint::PANE_VIEWPORT_KIND.into(),
+                                    data,
+                                },
+                            ));
+                        }
+                    }
+                }
+                if let Some(terminal) = geometry.terminal {
+                    self.hits.panes[index].inner_rect = terminal;
+                    self.hits.panes[index].scrollbar_rect = None;
+                    if self.graphics_cell_size.is_known() {
+                        self.hits.panes[index].pixel_width =
+                            u32::from(terminal.width) * self.graphics_cell_size.width_px;
+                        self.hits.panes[index].pixel_height =
+                            u32::from(terminal.height) * self.graphics_cell_size.height_px;
+                    }
+                } else {
+                    self.hits.panes[index].inner_rect = Rect::new(area.x, area.y, 0, 0);
+                    self.hits.panes[index].scrollbar_rect = None;
+                    self.hits.panes[index].mouse_reporting = false;
+                    self.hits.panes[index].sgr_pixel_mouse = false;
+                    self.hits.panes[index].pixel_width = 0;
+                    self.hits.panes[index].pixel_height = 0;
+                }
+                let mut composed = frame.to_ratatui_buffer()?;
+                if let Some(divider) = geometry.divider {
+                    render::render_pane_contribution_divider(
+                        &mut composed,
+                        divider,
+                        &self.config.palette,
+                    );
+                }
+                let rendered = if let Some(contribution) = inspector.contribution.as_ref() {
+                    render::render_pane_contribution(
+                        &mut composed,
+                        geometry.contribution,
+                        contribution,
+                        &self.config.palette,
+                    )
+                } else {
+                    render::render_terminal_inspector_pending(
+                        &mut composed,
+                        geometry.contribution,
+                        inspector,
+                        &self.config.palette,
+                    )
+                };
+                if let Some(rendered) = rendered {
+                    self.hits.inspector_body = geometry.contribution;
+                    self.hits.inspector_close = rendered.cancel;
+                    self.hits.inspector_refresh = rendered.primary;
+                    self.hits.contribution_actions = rendered.contribution_actions;
+                }
+                let cursor = if inspector.focused || geometry.terminal.is_none() {
+                    None
+                } else {
+                    frame.cursor.clone().filter(|cursor| {
+                        geometry.terminal.is_some_and(|terminal| {
+                            cursor.x >= terminal.x
+                                && cursor.x < terminal.right()
+                                && cursor.y >= terminal.y
+                                && cursor.y < terminal.bottom()
+                        })
+                    })
+                };
+                frame.replace_from_ratatui_buffer_preserving_effects(&composed, cursor.clone());
+                frame.cursor = cursor;
+            }
+        }
         let has_selection = self
             .selection
             .as_ref()
@@ -289,6 +749,7 @@ impl ClientShellState {
                         hit,
                         &self.config.palette,
                         false,
+                        &mut occlusion,
                     );
                 }
                 let selection_is_stale_copy_projection = !copy_surface_coherent
@@ -300,6 +761,13 @@ impl ClientShellState {
                                 .is_some_and(|selection| selection.pane_id == hit.pane_id)
                     });
                 if !selection_is_stale_copy_projection {
+                    if let Some(selection) =
+                        self.selection.as_ref().filter(|s| s.pane_id == hit.pane_id)
+                    {
+                        for rect in selection.visible_rects(hit.inner_rect, hit.scroll) {
+                            occlusion.cover(rect);
+                        }
+                    }
                     crate::ui::render_selection_highlight(
                         self.selection.as_ref(),
                         &mut composed,
@@ -307,7 +775,10 @@ impl ClientShellState {
                         hit.inner_rect,
                         hit.scroll,
                         &self.config.palette,
-                        crate::terminal_theme::TerminalTheme::default(),
+                        crate::terminal_theme::TerminalTheme {
+                            background: self.host_background,
+                            ..Default::default()
+                        },
                     );
                 }
                 if copy_surface_coherent {
@@ -317,11 +788,13 @@ impl ClientShellState {
                         hit,
                         &self.config.palette,
                         true,
+                        &mut occlusion,
                     );
                 }
             }
             frame.replace_from_ratatui_buffer_preserving_effects(&composed, cursor);
         }
+        self.render_link_hover(&mut frame, &mut occlusion);
         if self.mode == ClientShellMode::Copy {
             frame.cursor = None;
             if let Some(copy_mode) = self.copy_mode.as_ref() {
@@ -340,6 +813,7 @@ impl ClientShellState {
                         let mut composed = frame.to_ratatui_buffer()?;
                         let x = hit.inner_rect.x + copy_mode.cursor.col;
                         let y = hit.inner_rect.y + viewport_row as u16;
+                        occlusion.cover(Rect::new(x, y, 1, 1));
                         composed[(x, y)].set_style(
                             Style::default()
                                 .fg(match self.config.palette.panel_bg {
@@ -383,17 +857,18 @@ impl ClientShellState {
                     diagnostic_area,
                     diagnostic,
                     &self.config.palette,
+                    |rect| occlusion.cover(rect),
                 );
             }
             let lifecycle_offset = active_lifecycle.as_ref().map_or(0, |(label, status)| {
-                let _ = endpoint_notices::render_lifecycle_banner(
+                occlusion.cover(endpoint_notices::render_lifecycle_banner(
                     &mut composed,
                     Rect::new(0, 0, cols, rows),
                     label,
                     *status,
                     u16::from(has_config_diagnostic) + layout.mobile_header.height,
                     &self.config.palette,
-                );
+                ));
                 1
             });
             if let Some(notice) = self.visible_endpoint_notice.as_ref() {
@@ -434,6 +909,7 @@ impl ClientShellState {
                     )
                 };
             }
+            occlusion.cover(self.hits.notification_toast);
             frame.replace_from_ratatui_buffer_preserving_effects(&composed, cursor);
         }
         if let Some(feedback) = self.copy_feedback.as_ref() {
@@ -452,14 +928,14 @@ impl ClientShellState {
                 self.config.clipboard_toast_position,
                 self.hits.notification_toast,
             );
-            crate::ui::render_copy_feedback_buffer(
+            occlusion.cover(crate::ui::render_copy_feedback_buffer(
                 &mut composed,
                 feedback_area,
                 feedback,
                 offset,
                 self.config.clipboard_toast_position,
                 &self.config.palette,
-            );
+            ));
             frame.replace_from_ratatui_buffer_preserving_effects(&composed, cursor);
         }
         self.hits.popup = None;
@@ -469,6 +945,7 @@ impl ClientShellState {
             if let Some(geometry) =
                 crate::popup_size::resolve_popup_geometry(width, height, layout.pane_surface)
             {
+                occlusion.start_popup(geometry.outer);
                 let mut composed = frame.to_ratatui_buffer()?;
                 let block = ratatui::widgets::Block::default()
                     .borders(ratatui::widgets::Borders::ALL)
@@ -486,6 +963,7 @@ impl ClientShellState {
                 self.hits.popup = Some(PaneHit {
                     rect: geometry.outer,
                     inner_rect: geometry.inner,
+                    projected_inner_rect: geometry.inner,
                     scrollbar_rect: None,
                     scroll: None,
                     pane_id: popup.terminal_id.clone(),
@@ -502,6 +980,7 @@ impl ClientShellState {
             && self.overlay.is_none()
         {
             let mut composed = frame.to_ratatui_buffer()?;
+            occlusion.cover(composed.area);
             super::mobile::render_mobile_switcher(
                 &mut composed,
                 Rect::new(0, 0, cols, rows),
@@ -509,7 +988,9 @@ impl ClientShellState {
                 &self.endpoints,
                 &self.active_endpoint_id,
                 &self.config,
-                self.navigate_workspace_id.as_deref(),
+                self.navigate_workspace_id
+                    .as_ref()
+                    .filter(|_| valid_navigation_target),
                 &mut self.mobile_switcher_scroll,
                 &mut self.reveal_mobile_workspace,
                 &mut self.hits,
@@ -539,37 +1020,55 @@ impl ClientShellState {
             self.hits.popup = None;
         }
         restore_mode_bar(&mut frame, mode_bar, mode_bar_cells.as_deref());
+        if let Some(bar) = mode_bar {
+            occlusion.cover(bar);
+        }
         if let Some(overlay) = self.overlay.as_ref() {
             let mut composed = frame.to_ratatui_buffer()?;
             let cursor = if let ClientShellOverlay::ContextMenu(menu) = overlay {
-                self.hits.context_menu_rows =
+                let rendered =
                     render::render_context_menu(&mut composed, menu, &self.config.palette)?;
+                occlusion.cover(rendered.area);
+                self.hits.context_menu_rows = rendered.menu_rows;
                 None
             } else if let ClientShellOverlay::GlobalMenu(menu) = overlay {
-                self.hits.global_menu_rows = render::render_global_menu(
+                let rendered = render::render_global_menu(
                     &mut composed,
                     self.hits.global_launcher,
                     menu,
                     snapshot,
                     &self.config.palette,
                 )?;
+                occlusion.cover(rendered.area);
+                self.hits.global_menu_rows = rendered.menu_rows;
                 None
             } else {
+                let recovery_presentation = match overlay {
+                    ClientShellOverlay::Recovery(recovery) => {
+                        self.recovery_presentations.get(&recovery.endpoint_id)
+                    }
+                    _ => None,
+                };
                 let rendered = render::render_client_overlay(
                     &mut composed,
                     overlay,
                     snapshot,
                     &self.endpoints,
                     &self.active_endpoint_id,
+                    recovery_presentation,
                     &self.config.keybinds,
                     &self.config.palette,
                 )?;
+                occlusion.cover(rendered.area);
                 self.hits.overlay_primary = rendered.primary;
                 self.hits.overlay_clear = rendered.clear;
                 self.hits.overlay_cancel = rendered.cancel;
                 self.hits.navigator_popup = rendered.navigator_popup;
                 self.hits.navigator_search = rendered.navigator_search;
                 self.hits.navigator_rows = rendered.navigator_rows;
+                self.hits.recovery_popup = rendered.recovery_popup;
+                self.hits.recovery_projection_token = rendered.recovery_projection_token;
+                self.hits.recovery_rows = rendered.recovery_rows;
                 self.hits.worktree_search = rendered.worktree_search;
                 self.hits.worktree_rows = rendered.worktree_rows;
                 self.hits.help_popup = rendered.help_popup;
@@ -579,6 +1078,11 @@ impl ClientShellState {
                 self.hits.settings_popup = rendered.settings_popup;
                 self.hits.settings_tabs = rendered.settings_tabs;
                 self.hits.settings_choices = rendered.settings_choices;
+                self.hits.extensions_popup = rendered.extensions_popup;
+                self.hits.extensions_tabs = rendered.extensions_tabs;
+                self.hits.extensions_categories = rendered.extensions_categories;
+                self.hits.extensions_rows = rendered.extensions_rows;
+                self.hits.extensions_search = rendered.extensions_search;
                 self.hits.product_announcement_scrollbar = rendered.product_announcement_scrollbar;
                 self.hits.product_announcement_scroll_metrics =
                     rendered.product_announcement_scroll_metrics;
@@ -609,8 +1113,13 @@ impl ClientShellState {
             self.hits.panes.clear();
             self.hits.pane_splits.clear();
             self.hits.popup = None;
+            self.hits.collections.clear();
+            self.hits.inspector_body = Rect::default();
+            self.hits.inspector_close = Rect::default();
+            self.hits.inspector_refresh = Rect::default();
+            self.hits.contribution_actions.clear();
         }
-        self.compose_graphics(&mut frame, layout);
+        self.compose_graphics(&mut frame, layout, &occlusion);
         Some(frame)
     }
 }
@@ -633,6 +1142,7 @@ fn render_client_copy_search_highlights(
     hit: &PaneHit,
     palette: &Palette,
     current_only: bool,
+    occlusion: &mut crate::kitty_graphics::surface::Occlusion,
 ) {
     let Some(copy_mode) = copy_mode.filter(|copy_mode| copy_mode.pane_id == hit.pane_id) else {
         return;
@@ -674,7 +1184,14 @@ fn render_client_copy_search_highlights(
             } else {
                 hit.inner_rect.width.saturating_sub(1)
             };
-            for col in start_col..=end_col.min(hit.inner_rect.width.saturating_sub(1)) {
+            let end_col = end_col.min(hit.inner_rect.width.saturating_sub(1));
+            occlusion.cover(Rect::new(
+                hit.inner_rect.x.saturating_add(start_col),
+                hit.inner_rect.y.saturating_add(viewport_row),
+                end_col.saturating_add(1).saturating_sub(start_col),
+                1,
+            ));
+            for col in start_col..=end_col {
                 buffer[(
                     hit.inner_rect.x.saturating_add(col),
                     hit.inner_rect.y.saturating_add(viewport_row),

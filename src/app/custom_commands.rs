@@ -147,6 +147,7 @@ impl App {
             };
             self.validate_client_shell_command_parent_ids(params, workspace_index, tab_index)?;
             self.state.focus_pane_in_workspace(workspace_index, pane);
+            self.apply_bundled_extension_state();
             return Ok(());
         }
 
@@ -156,6 +157,7 @@ impl App {
             };
             self.validate_client_shell_command_workspace_id(params, workspace_index)?;
             self.state.switch_workspace_tab(workspace_index, tab_index);
+            self.apply_bundled_extension_state();
             return Ok(());
         }
 
@@ -167,6 +169,7 @@ impl App {
                 ));
             };
             self.state.switch_workspace(workspace_index);
+            self.apply_bundled_extension_state();
         }
         Ok(())
     }
@@ -248,7 +251,7 @@ impl App {
         )];
         if let Ok(current_exe) = std::env::current_exe() {
             env.push((
-                "HERDR_BIN_PATH".to_string(),
+                "VQRO_BIN_PATH".to_string(),
                 current_exe.display().to_string(),
             ));
         }
@@ -256,23 +259,23 @@ impl App {
         let mut cwd = None;
         if let Some(ws_idx) = self.state.active {
             env.push((
-                "HERDR_ACTIVE_WORKSPACE_ID".to_string(),
+                "VQRO_ACTIVE_WORKSPACE_ID".to_string(),
                 self.public_workspace_id(ws_idx),
             ));
             if let Some(workspace) = self.state.workspaces.get(ws_idx) {
                 let tab_idx = workspace.active_tab_index();
                 if let Some(tab_id) = self.public_tab_id(ws_idx, tab_idx) {
-                    env.push(("HERDR_ACTIVE_TAB_ID".to_string(), tab_id));
+                    env.push(("VQRO_ACTIVE_TAB_ID".to_string(), tab_id));
                 }
                 if let Some(pane_id) = workspace.focused_pane_id() {
                     if let Some(public_pane_id) = self.public_pane_id(ws_idx, pane_id) {
-                        env.push(("HERDR_ACTIVE_PANE_ID".to_string(), public_pane_id));
+                        env.push(("VQRO_ACTIVE_PANE_ID".to_string(), public_pane_id));
                     }
                     if let Some(pane_cwd) = workspace.active_tab().and_then(|tab| {
                         tab.cwd_for_pane(pane_id, &self.state.terminals, &self.terminal_runtimes)
                     }) {
                         env.push((
-                            "HERDR_ACTIVE_PANE_CWD".to_string(),
+                            "VQRO_ACTIVE_PANE_CWD".to_string(),
                             pane_cwd.display().to_string(),
                         ));
                         if pane_cwd.is_dir() {
@@ -373,6 +376,15 @@ impl App {
         let new_rows = rows.max(4);
         let new_cols = cols.max(10);
         let (env, _) = self.custom_command_env();
+        let tab_idx = self
+            .state
+            .workspaces
+            .get(ws_idx)
+            .map(|workspace| workspace.active_tab_index())
+            .ok_or_else(|| std::io::Error::other("active workspace disappeared"))?;
+        self.admit_new_panes(Some(ws_idx), Some(tab_idx), 1)
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
+        let terminal_id = self.allocate_terminal_id()?;
 
         let ws = self
             .state
@@ -392,6 +404,7 @@ impl App {
             )
         });
         let new_pane = ws.split_focused_command(
+            terminal_id,
             Direction::Horizontal,
             new_rows,
             new_cols,
@@ -451,6 +464,14 @@ impl App {
         let (rows, cols) = self.state.estimate_pane_size();
         let new_rows = rows.max(4);
         let new_cols = cols.max(10);
+        let tab_idx = self
+            .state
+            .workspaces
+            .get(ws_idx)
+            .map(|workspace| workspace.active_tab_index())
+            .ok_or_else(|| std::io::Error::other("active workspace disappeared"))?;
+        self.admit_new_panes(Some(ws_idx), Some(tab_idx), 1)
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
 
         let ws = self
             .state
@@ -470,6 +491,7 @@ impl App {
             })
         });
 
+        let terminal_id = self.allocate_terminal_id()?;
         let (tab_idx, new_pane, workspace_id) = {
             let ws = self
                 .state
@@ -478,6 +500,7 @@ impl App {
                 .ok_or_else(|| std::io::Error::other("active workspace disappeared"))?;
             let previous_zoomed = ws.active_tab().map(|tab| tab.zoomed).unwrap_or(false);
             let result = ws.split_pane_argv_command(
+                terminal_id,
                 previous_focus,
                 Direction::Horizontal,
                 new_rows,
@@ -520,6 +543,7 @@ impl App {
             self.state.previous_pane_focus = previous_focus_target;
         }
         self.state.switch_workspace_tab(ws_idx, tab_idx);
+        self.apply_bundled_extension_state();
         self.state.mode = Mode::Terminal;
         Ok((ws_idx, new_pane))
     }

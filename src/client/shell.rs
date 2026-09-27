@@ -3,10 +3,15 @@ use std::collections::{HashMap, HashSet, VecDeque};
 mod actions;
 mod agent_sidebar;
 mod aggregate_navigation;
+mod workspace_navigation;
+use workspace_navigation::WorkspaceNavigationTarget;
+mod collections;
 mod composition;
 mod config;
 mod context_menu;
+mod contributions;
 mod copy_mode;
+mod document_navigation;
 mod endpoint_agent_state;
 mod endpoint_agents;
 mod endpoint_navigation;
@@ -14,22 +19,27 @@ mod endpoint_notices;
 mod endpoint_sidebar;
 mod endpoints;
 pub(super) use endpoints::*;
+mod extensions;
 mod global_menu;
 mod graphics;
 mod input;
 mod input_source;
+mod link_hover;
 mod mobile;
 mod mouse;
 mod notification_policy;
 mod notifications;
 mod overlay_input;
 mod preferences;
+mod recovery_browser;
 mod render;
 mod scroll;
 mod settings;
 mod state;
 mod surface_patch;
+mod word_selection;
 mod worktrees;
+use word_selection::ClientWordSelection;
 
 pub(in crate::client::shell) use render::sidebar;
 pub(crate) use state::*;
@@ -168,6 +178,19 @@ fn pane_surface_topology_signature(surface: &PaneSurfaceFrame) -> u64 {
     let mut hash = OFFSET;
     for pane_id in pane_ids {
         write(&mut hash, pane_id);
+    }
+    let mut collections = surface.collections.iter().collect::<Vec<_>>();
+    collections.sort_by(|left, right| left.collection_id.cmp(&right.collection_id));
+    for collection in collections {
+        write(&mut hash, collection.collection_id.as_bytes());
+        for value in [
+            collection.rect.x,
+            collection.rect.y,
+            collection.rect.width,
+            collection.rect.height,
+        ] {
+            write(&mut hash, &value.to_le_bytes());
+        }
     }
     let mut splits = surface.splits.iter().collect::<Vec<_>>();
     splits.sort_by(|left, right| left.path.cmp(&right.path));

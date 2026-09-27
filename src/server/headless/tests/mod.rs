@@ -13,6 +13,16 @@ fn client_shell_snapshot(message: ServerMessage) -> Box<crate::protocol::ClientS
     Box::new(serde_json::from_str(&data).expect("decode client shell snapshot"))
 }
 
+fn client_agent_view_projection(
+    message: ServerMessage,
+) -> crate::protocol::endpoint::EndpointAgentViewProjection {
+    let ServerMessage::EndpointControl { kind, data } = message else {
+        panic!("expected client agent view projection");
+    };
+    assert_eq!(kind, crate::protocol::endpoint::AGENT_VIEW_PROJECTION_KIND);
+    serde_json::from_str(&data).expect("decode client agent view projection")
+}
+
 fn test_headless_server() -> HeadlessServer {
     test_headless_server_with_event_hub(api::EventHub::default())
 }
@@ -200,6 +210,7 @@ async fn headless_api_reads_latest_title_without_spinner_event_flooding() {
 fn headless_pane_list(server: &mut HeadlessServer) -> Vec<api::schema::PaneInfo> {
     let (respond_to, response_rx) = std::sync::mpsc::channel();
     server.handle_api_request_with_shutdown_check(api::ApiRequestMessage {
+        origin: crate::api::ApiOrigin::LocalSocket,
         request: api::schema::Request {
             id: "list-titles".into(),
             method: api::schema::Method::PaneList(api::schema::PaneListParams::default()),
@@ -258,6 +269,7 @@ fn headless_api_request_drains_all_pending_internal_events_before_reading_state(
     let (respond_to, response_rx) = std::sync::mpsc::channel();
     assert!(
         server.handle_api_request_with_shutdown_check(api::ApiRequestMessage {
+            origin: crate::api::ApiOrigin::LocalSocket,
             request: api::schema::Request {
                 id: "headless_stop_after_events".into(),
                 method: api::schema::Method::ServerStop(api::schema::EmptyParams::default()),
@@ -610,6 +622,11 @@ async fn client_shell_attach_seeds_workspace() {
             endpoint_keybindings: false,
             mouse_capture: false,
             surface_active: true,
+            structure_enabled: false,
+            host_documents_enabled: false,
+            pane_viewport_enabled: false,
+            pane_view_enabled: false,
+            terminal_views_enabled: false,
             writer,
         })
     );
@@ -640,6 +657,11 @@ async fn client_shell_endpoint_request_uses_the_selected_connection() {
             endpoint_keybindings: false,
             mouse_capture: false,
             surface_active: true,
+            structure_enabled: false,
+            host_documents_enabled: false,
+            pane_viewport_enabled: false,
+            pane_view_enabled: false,
+            terminal_views_enabled: false,
             writer,
         })
     );
@@ -709,6 +731,74 @@ async fn client_shell_endpoint_request_uses_the_selected_connection() {
     shutdown_test_runtimes(&mut server);
 }
 
+#[tokio::test]
+async fn native_endpoint_lane_dispatches_methods_outside_the_frozen_bridge() {
+    let mut server = test_headless_server();
+    server.app.state.workspaces = vec![crate::workspace::Workspace::test_new("endpoint")];
+    server.app.state.ensure_test_terminals();
+    server.app.state.active = Some(0);
+    let (writer, control_rx, _render_rx) = test_client_writer();
+    let client_id = 142;
+    assert!(
+        server.handle_server_event(ServerEvent::ClientShellConnected {
+            client_id,
+            surface_cols: 80,
+            surface_rows: 23,
+            cell_width_px: 0,
+            cell_height_px: 0,
+            pixel_mouse: false,
+            direct_graphics: false,
+            endpoint_keybindings: false,
+            mouse_capture: false,
+            surface_active: true,
+            structure_enabled: false,
+            host_documents_enabled: false,
+            pane_viewport_enabled: false,
+            pane_view_enabled: false,
+            terminal_views_enabled: false,
+            writer,
+        })
+    );
+    let _initial_snapshot = control_rx.recv().expect("initial shell snapshot");
+    let boot_id = server.client_shell_boot_id.clone();
+    let method = api::schema::Method::CollectionList(Default::default());
+    assert!(!crate::protocol::endpoint_bridge_v1::supports(&method));
+
+    assert!(
+        !server.handle_server_event(ServerEvent::NativeEndpointRequest {
+            client_id,
+            boot_id: boot_id.clone(),
+            request: Box::new(api::schema::Request {
+                id: "native:1".into(),
+                method,
+            }),
+        })
+    );
+    let response_ready = server
+        .server_event_rx
+        .recv()
+        .await
+        .expect("native response ready");
+    assert!(!server.handle_server_event(response_ready));
+
+    let ServerMessage::EndpointControl { kind, data } =
+        read_server_message(control_rx.recv().expect("native endpoint response"))
+    else {
+        panic!("expected native endpoint response");
+    };
+    assert_eq!(kind, crate::native_api::NATIVE_API_RESPONSE_KIND_V1);
+    let chunk: crate::native_api::NativeEndpointResponseChunkV1 =
+        serde_json::from_str(&data).unwrap();
+    assert_eq!(chunk.boot_id, boot_id);
+    assert_eq!(chunk.request_id, "native:1");
+    assert!(chunk.final_chunk);
+    let response: api::schema::ErrorResponse =
+        serde_json::from_slice(&chunk.decode_data().unwrap()).unwrap();
+    assert_eq!(response.id, "native:1");
+    assert_eq!(response.error.code, "collections_authority_unavailable");
+    shutdown_test_runtimes(&mut server);
+}
+
 #[test]
 fn terminal_client_endpoint_request_error_removes_client() {
     let mut server = test_headless_server();
@@ -734,6 +824,146 @@ fn terminal_client_endpoint_request_error_removes_client() {
         })
     );
     assert!(!server.clients.contains_key(&client_id));
+}
+
+#[tokio::test]
+async fn client_shell_pairs_agent_view_set_replacement_and_clear_with_snapshots() {
+    use crate::api::schema::{
+        AgentViewBuiltinField, AgentViewField, AgentViewFilter, AgentViewSetParams, AgentViewValue,
+    };
+
+    let mut server = test_headless_server();
+    let (writer, control_rx, _render_rx) = test_client_writer();
+    assert!(
+        server.handle_server_event(ServerEvent::ClientShellConnected {
+            client_id: 77,
+            surface_cols: 80,
+            surface_rows: 23,
+            cell_width_px: 0,
+            cell_height_px: 0,
+            pixel_mouse: false,
+            direct_graphics: false,
+            endpoint_keybindings: false,
+            mouse_capture: false,
+            surface_active: false,
+            structure_enabled: false,
+            host_documents_enabled: false,
+            pane_viewport_enabled: false,
+            pane_view_enabled: false,
+            terminal_views_enabled: false,
+            writer,
+        })
+    );
+    let initial = client_shell_snapshot(read_server_message(
+        control_rx.recv().expect("initial snapshot"),
+    ));
+
+    let mut view = AgentViewSetParams {
+        source: "example.views".into(),
+        label: Some("focus".into()),
+        filter: Some(AgentViewFilter::Eq {
+            field: AgentViewField::Builtin(AgentViewBuiltinField::Status),
+            value: AgentViewValue::String("working".into()),
+        }),
+        sort: Vec::new(),
+    };
+    server.app.state.agent_view_override = Some(view.clone());
+    server.render_and_stream();
+    let set = client_agent_view_projection(read_server_message(
+        control_rx.recv().expect("set projection"),
+    ));
+    let set_snapshot = client_shell_snapshot(read_server_message(
+        control_rx.recv().expect("set snapshot"),
+    ));
+    assert!(set.revision > initial.revision);
+    assert_eq!(set.revision, set_snapshot.revision);
+    assert_eq!(
+        set.view.map(serde_json::from_value).transpose().unwrap(),
+        Some(view.clone())
+    );
+
+    view.filter = Some(AgentViewFilter::Eq {
+        field: AgentViewField::Builtin(AgentViewBuiltinField::Status),
+        value: AgentViewValue::String("blocked".into()),
+    });
+    server.app.state.agent_view_override = Some(view.clone());
+    server.render_and_stream();
+    let replacement = client_agent_view_projection(read_server_message(
+        control_rx.recv().expect("replacement projection"),
+    ));
+    let replacement_snapshot = client_shell_snapshot(read_server_message(
+        control_rx.recv().expect("replacement snapshot"),
+    ));
+    assert!(replacement.revision > set.revision);
+    assert_eq!(replacement.revision, replacement_snapshot.revision);
+    assert_eq!(
+        replacement
+            .view
+            .map(serde_json::from_value)
+            .transpose()
+            .unwrap(),
+        Some(view)
+    );
+
+    server.app.state.agent_view_override = None;
+    server.render_and_stream();
+    let cleared = client_agent_view_projection(read_server_message(
+        control_rx.recv().expect("clear projection"),
+    ));
+    let cleared_snapshot = client_shell_snapshot(read_server_message(
+        control_rx.recv().expect("clear snapshot"),
+    ));
+    assert!(cleared.revision > replacement.revision);
+    assert_eq!(cleared.revision, cleared_snapshot.revision);
+    assert!(cleared.view.is_none());
+    assert!(cleared_snapshot.agent_view_label.is_none());
+}
+
+#[tokio::test]
+async fn host_documents_control_is_sent_only_when_negotiated() {
+    for (client_id, negotiated) in [(70, false), (71, true)] {
+        let mut server = test_headless_server();
+        server.app.state.workspaces = vec![crate::workspace::Workspace::test_new("docs")];
+        server.app.state.active = Some(0);
+        server.app.state.selected = 0;
+        server.app.refresh_collection_documents();
+        let (writer, control_rx, _render_rx) = test_client_writer();
+        assert!(
+            server.handle_server_event(ServerEvent::ClientShellConnected {
+                client_id,
+                surface_cols: 80,
+                surface_rows: 23,
+                cell_width_px: 10,
+                cell_height_px: 20,
+                pixel_mouse: true,
+                direct_graphics: false,
+                endpoint_keybindings: false,
+                mouse_capture: false,
+                surface_active: true,
+                structure_enabled: false,
+                host_documents_enabled: negotiated,
+                pane_viewport_enabled: false,
+                pane_view_enabled: false,
+                terminal_views_enabled: false,
+                writer,
+            })
+        );
+        let _snapshot = client_shell_snapshot(read_server_message(
+            control_rx.recv().expect("shell snapshot"),
+        ));
+        server.render_and_stream();
+        let sent_host_documents = control_rx.try_iter().any(|message| {
+            matches!(
+                read_server_message(message),
+                ServerMessage::EndpointControl { kind, .. }
+                    if kind == crate::protocol::endpoint::HOST_DOCUMENTS_KIND
+            )
+        });
+        assert!(!sent_host_documents);
+        if !negotiated {
+            assert!(server.clients[&client_id].shell_host_documents.is_empty());
+        }
+    }
 }
 
 #[tokio::test]
@@ -776,12 +1006,27 @@ async fn client_shell_receives_metadata_then_shell_free_pane_surface() {
             endpoint_keybindings: false,
             mouse_capture: false,
             surface_active: true,
+            structure_enabled: true,
+            host_documents_enabled: false,
+            pane_viewport_enabled: false,
+            pane_view_enabled: false,
+            terminal_views_enabled: false,
             writer,
         })
     );
     let snapshot = client_shell_snapshot(read_server_message(
         control_rx.recv().expect("shell snapshot"),
     ));
+    let ServerMessage::EndpointControl { kind, data } =
+        read_server_message(control_rx.recv().expect("structure projection"))
+    else {
+        panic!("expected structure projection");
+    };
+    assert_eq!(kind, crate::protocol::endpoint::SESSION_STRUCTURE_KIND);
+    let structure: crate::protocol::endpoint::ClientShellStructureProjection =
+        serde_json::from_str(&data).expect("decode structure projection");
+    assert_eq!(structure.boot_id, snapshot.boot_id);
+    assert_eq!(structure.revision, snapshot.revision);
     assert_eq!(snapshot.workspaces.len(), 1);
     assert_eq!(snapshot.workspaces[0].label, "shell-only-label");
     assert_eq!(
@@ -821,6 +1066,13 @@ async fn client_shell_receives_metadata_then_shell_free_pane_surface() {
         other => panic!("expected pane surface, got {other:?}"),
     };
 
+    let baseline = server.clients[&7]
+        .render_state
+        .last_pane_surface()
+        .expect("initial baseline");
+    let cells_ptr = baseline.frame.cells.as_ptr();
+    let untouched_symbol_ptr = baseline.frame.cells.last().unwrap().symbol.as_ptr();
+
     server
         .app
         .state
@@ -846,6 +1098,15 @@ async fn client_shell_receives_metadata_then_shell_free_pane_surface() {
         }
         other => panic!("expected pane surface patch, got {other:?}"),
     }
+    let patched = server.clients[&7].render_state.last_pane_surface().unwrap();
+    assert_eq!(
+        (
+            patched.frame.cells.as_ptr(),
+            patched.frame.cells.last().unwrap().symbol.as_ptr()
+        ),
+        (cells_ptr, untouched_symbol_ptr),
+        "a text patch must preserve the frame and unchanged cell storage"
+    );
     server
         .app
         .state
@@ -855,6 +1116,7 @@ async fn client_shell_receives_metadata_then_shell_free_pane_surface() {
     assert!(server.render_retained_pane_surface_and_stream(&sources));
     match read_server_message(render_rx.recv().expect("metadata-only pane surface patch")) {
         ServerMessage::PaneSurfacePatch(patch) => {
+            assert!(patch.rows.is_empty(), "mouse modes only change metadata");
             assert_eq!(patch.panes.len(), 1);
             assert!(!patch.panes[0].mouse_reporting);
             assert!(!patch.panes[0].sgr_pixel_mouse);
@@ -864,8 +1126,14 @@ async fn client_shell_receives_metadata_then_shell_free_pane_surface() {
     let retained = server.clients[&7]
         .render_state
         .last_pane_surface()
-        .expect("committed retained surface")
-        .clone();
+        .expect("committed retained surface");
+    assert_eq!(retained.frame.cells.as_ptr(), cells_ptr);
+    assert_eq!(
+        retained.frame.cells.last().unwrap().symbol.as_ptr(),
+        untouched_symbol_ptr,
+        "retained updates must not copy unchanged screen cells"
+    );
+    let retained = retained.clone();
     server
         .clients
         .get_mut(&7)
@@ -920,6 +1188,11 @@ fn connect_test_shell(
             endpoint_keybindings: false,
             mouse_capture: false,
             surface_active: true,
+            structure_enabled: false,
+            host_documents_enabled: false,
+            pane_viewport_enabled: false,
+            pane_view_enabled: false,
+            terminal_views_enabled: false,
             writer,
         })
     );
@@ -978,6 +1251,81 @@ fn recv_pane_surface_patch(
 }
 
 #[tokio::test]
+async fn retained_snapshot_survives_a_writer_waiting_for_the_terminal_core() {
+    let mut server = test_headless_server();
+    let pane_id = install_shared_view_test_runtime(&mut server);
+    let (control, render) = connect_matching_test_shell(&mut server, 7);
+    let _ = control.recv().expect("snapshot");
+    server.render_and_stream();
+    let _ = recv_pane_surface(&render, "initial surface");
+
+    let (release, writer, revision) = {
+        let runtime = server
+            .app
+            .state
+            .runtime_for_pane_in_workspace(&server.app.terminal_runtimes, 0, pane_id)
+            .expect("runtime");
+        runtime.test_process_pty_bytes(b"\rAAAA\x1b[?1003h");
+        let revision = runtime.content_seq();
+        let (release, writer) =
+            runtime.test_contend_during_dirty_collection(b"\rBBBB\x1b[?1003l".to_vec());
+        (release, writer, revision)
+    };
+    let retained = server.render_retained_pane_surface_and_stream(&HashSet::from([pane_id]));
+    release.send(()).expect("release waiting writer");
+    let announced = writer.join().expect("writer completed");
+
+    assert!(
+        retained,
+        "a waiting writer must not invalidate the collected snapshot"
+    );
+    assert!(
+        !announced,
+        "writer must wait before announcing a new revision"
+    );
+    let patch = recv_pane_surface_patch(&render, "snapshot before waiting write");
+    assert_eq!(patch.panes[0].content_revision, revision);
+    assert!(revision.is_multiple_of(2));
+    assert!(patch.panes[0].mouse_reporting);
+    let surface = server.clients[&7]
+        .render_state
+        .last_pane_surface()
+        .expect("surface");
+    assert!(frame_text(&surface.frame).contains("AAAA"));
+    assert!(!frame_text(&surface.frame).contains("BBBB"));
+
+    assert!(server.render_retained_pane_surface_and_stream(&HashSet::from([pane_id])));
+    let next = recv_pane_surface_patch(&render, "waiting write remains dirty");
+    assert_eq!(next.panes[0].content_revision, revision + 2);
+    assert!(!next.panes[0].mouse_reporting);
+    let surface = server.clients[&7]
+        .render_state
+        .last_pane_surface()
+        .expect("next surface");
+    assert!(frame_text(&surface.frame).contains("BBBB"));
+    shutdown_test_runtimes(&mut server);
+}
+
+#[tokio::test]
+async fn first_shell_surface_resizes_a_pane_that_entered_alternate_screen() {
+    let mut server = test_headless_server();
+    let pane_id = install_shared_view_test_runtime(&mut server);
+    let (_control, render) = connect_test_shell(&mut server, 7, 80, 23);
+    let initial_size = server.app.state.workspaces[0].test_runtimes[&pane_id].current_size();
+
+    write_shared_test_pane(&mut server, pane_id, b"\x1b[?1049hALT");
+    server.render_and_stream();
+
+    let surface = recv_pane_surface(&render, "first alternate-screen surface");
+    assert!(surface.panes[0].alternate_screen_active);
+    assert_eq!(
+        server.app.state.workspaces[0].test_runtimes[&pane_id].current_size(),
+        (initial_size.0, initial_size.1 + 1)
+    );
+    shutdown_test_runtimes(&mut server);
+}
+
+#[tokio::test]
 async fn different_size_shells_receive_geometry_specific_patches_from_one_dirty_collection() {
     let mut server = test_headless_server();
     let pane_id = install_shared_view_test_runtime(&mut server);
@@ -988,6 +1336,7 @@ async fn different_size_shells_receive_geometry_specific_patches_from_one_dirty_
     server.render_and_stream();
     let large_initial = recv_pane_surface(&large_render, "large initial surface");
     let small_initial = recv_pane_surface(&small_render, "small initial surface");
+    let initial_size = server.app.state.workspaces[0].test_runtimes[&pane_id].current_size();
     assert_eq!(
         (large_initial.frame.width, large_initial.frame.height),
         (80, 23)
@@ -1056,6 +1405,10 @@ async fn different_size_shells_receive_geometry_specific_patches_from_one_dirty_
     assert!(large_alt.panes[0].alternate_screen_active);
     assert!(small_alt.panes[0].alternate_screen_active);
     assert_eq!(
+        server.app.state.workspaces[0].test_runtimes[&pane_id].current_size(),
+        (initial_size.0, initial_size.1 + 1)
+    );
+    assert_eq!(
         large_alt.panes[0].inner_rect.width,
         large_initial.panes[0].inner_rect.width + 1
     );
@@ -1071,6 +1424,10 @@ async fn different_size_shells_receive_geometry_specific_patches_from_one_dirty_
     let small_main = recv_pane_surface(&small_render, "small restored main-screen surface");
     assert!(!large_main.panes[0].alternate_screen_active);
     assert!(!small_main.panes[0].alternate_screen_active);
+    assert_eq!(
+        server.app.state.workspaces[0].test_runtimes[&pane_id].current_size(),
+        initial_size
+    );
     assert_eq!(
         large_main.panes[0].inner_rect,
         large_initial.panes[0].inner_rect
@@ -1135,6 +1492,47 @@ async fn retained_patches_only_reach_shells_viewing_the_dirty_tab() {
 }
 
 #[tokio::test]
+async fn late_retained_fallback_leaves_all_client_baselines_unchanged() {
+    let mut server = test_headless_server();
+    let pane_id = install_shared_view_test_runtime(&mut server);
+    let (_first_control, first_render) = connect_matching_test_shell(&mut server, 7);
+    let (_second_control, second_render) = connect_matching_test_shell(&mut server, 8);
+    server.render_and_stream();
+    let _ = recv_pane_surface(&first_render, "first baseline");
+    let _ = recv_pane_surface(&second_render, "second baseline");
+
+    // Foreground renders last. Its old hyperlink forces a fallback after the first plan.
+    server.foreground_client_id = Some(8);
+    let crate::server::render_stream::ClientRenderState::Semantic { last_surface, .. } =
+        &mut server.clients.get_mut(&8).unwrap().render_state
+    else {
+        panic!("semantic client");
+    };
+    let linked = last_surface.as_mut().unwrap();
+    linked.frame.hyperlinks.push("https://example.com".into());
+    linked.frame.cells[0].hyperlink = Some(0);
+    let before = [7, 8].map(|id| {
+        server.clients[&id]
+            .render_state
+            .last_pane_surface()
+            .unwrap()
+            .clone()
+    });
+
+    write_shared_test_pane(&mut server, pane_id, b"\rNEXT\x1b[?1003h");
+    assert!(!server.render_retained_pane_surface_and_stream(&HashSet::from([pane_id])));
+    assert!(first_render.try_recv().is_err());
+    assert!(second_render.try_recv().is_err());
+    for (id, expected) in [7, 8].into_iter().zip(before) {
+        assert_eq!(
+            server.clients[&id].render_state.last_pane_surface(),
+            Some(&expected)
+        );
+    }
+    shutdown_test_runtimes(&mut server);
+}
+
+#[tokio::test]
 async fn backpressured_shell_does_not_disable_retained_patches_for_responsive_peer() {
     let mut server = test_headless_server();
     let pane_id = install_shared_view_test_runtime(&mut server);
@@ -1156,13 +1554,23 @@ async fn backpressured_shell_does_not_disable_retained_patches_for_responsive_pe
         ServerMessage::PaneSurfacePatch(_)
     ));
 
-    write_shared_test_pane(&mut server, pane_id, b"\rTWO");
+    let slow_baseline = server.clients[&8]
+        .render_state
+        .last_pane_surface()
+        .unwrap()
+        .clone();
+    write_shared_test_pane(&mut server, pane_id, b"\rTWO\x1b[?1003h");
     assert!(server.render_retained_pane_surface_and_stream(&sources));
     assert!(matches!(
         read_server_message(responsive_render.recv().expect("responsive second patch")),
         ServerMessage::PaneSurfacePatch(_)
     ));
     assert_eq!(server.clients[&8].deferred_render(), DeferredRender::Full);
+    assert_eq!(
+        server.clients[&8].render_state.last_pane_surface(),
+        Some(&slow_baseline),
+        "queue-full must not advance cells, metadata, cursor, or revision"
+    );
 
     write_shared_test_pane(&mut server, pane_id, b"\rTHREE");
     assert!(server.render_retained_pane_surface_and_stream(&sources));
@@ -1246,6 +1654,11 @@ async fn client_shell_config_diagnostics_follow_keybinding_ownership() {
             endpoint_keybindings: false,
             mouse_capture: false,
             surface_active: true,
+            structure_enabled: false,
+            host_documents_enabled: false,
+            pane_viewport_enabled: false,
+            pane_view_enabled: false,
+            terminal_views_enabled: false,
             writer: local_writer,
         })
     );
@@ -1270,6 +1683,11 @@ async fn client_shell_config_diagnostics_follow_keybinding_ownership() {
             endpoint_keybindings: true,
             mouse_capture: false,
             surface_active: true,
+            structure_enabled: false,
+            host_documents_enabled: false,
+            pane_viewport_enabled: false,
+            pane_view_enabled: false,
+            terminal_views_enabled: false,
             writer: endpoint_writer,
         })
     );
@@ -1503,6 +1921,7 @@ async fn client_local_navigation_does_not_emit_global_focus_transitions() {
     server.handle_client_shell_api_request(
         62,
         crate::api::ApiRequestMessage {
+            origin: crate::api::ApiOrigin::LocalSocket,
             request: crate::api::schema::Request {
                 id: "focus-own-tab".into(),
                 method: crate::api::schema::Method::TabFocus(crate::api::schema::TabTarget {
@@ -1517,6 +1936,120 @@ async fn client_local_navigation_does_not_emit_global_focus_transitions() {
     server.app.sync_focus_events();
     assert!(first_input.try_recv().is_err());
     assert!(second_input.try_recv().is_err());
+    shutdown_test_runtimes(&mut server);
+}
+
+#[tokio::test]
+async fn client_local_navigation_emits_pane_focused_only_when_that_client_moves() {
+    use api::schema::{EventData, Method, PaneTarget, TabTarget};
+
+    let event_hub = api::EventHub::default();
+    let mut server = test_headless_server_with_event_hub(event_hub.clone());
+    let mut workspace = crate::workspace::Workspace::test_new("plugin-focus-events");
+    let first_pane = workspace.tabs[0].root_pane;
+    let second_tab = workspace.test_add_tab(Some("second"));
+    let second_pane = workspace.tabs[second_tab].root_pane;
+    server.app.state.workspaces = vec![workspace];
+    server.app.state.ensure_test_terminals();
+    server.app.state.active = Some(0);
+    server.app.state.selected = 0;
+    server.app.state.mode = crate::app::Mode::Terminal;
+    let first_tab_id = server.app.public_tab_id(0, 0).unwrap();
+    let second_tab_id = server.app.public_tab_id(0, second_tab).unwrap();
+    let first_pane_id = server.app.public_pane_id(0, first_pane).unwrap();
+    let second_pane_id = server.app.public_pane_id(0, second_pane).unwrap();
+    let workspace_id = server.app.public_workspace_id(0);
+
+    let (first_control, _) = connect_matching_test_shell(&mut server, 61);
+    let (second_control, _) = connect_matching_test_shell(&mut server, 62);
+    let _ = first_control.recv().expect("first snapshot");
+    let _ = second_control.recv().expect("second snapshot");
+
+    let first_tab = TabTarget {
+        tab_id: first_tab_id,
+    };
+    let second_tab = TabTarget {
+        tab_id: second_tab_id,
+    };
+    let cases = [
+        (
+            61,
+            Method::TabFocus(second_tab.clone()),
+            Some(&second_pane_id),
+        ),
+        // Both clients selecting the same destination must each notify plugins.
+        (
+            62,
+            Method::TabFocus(second_tab.clone()),
+            Some(&second_pane_id),
+        ),
+        (61, Method::TabFocus(second_tab.clone()), None),
+        (61, Method::TabFocus(first_tab), Some(&first_pane_id)),
+        // Switching the server's default to this client's unchanged tab is not navigation.
+        (
+            62,
+            Method::PaneFocus(PaneTarget {
+                pane_id: second_pane_id.clone(),
+            }),
+            None,
+        ),
+        (
+            62,
+            Method::PaneFocus(PaneTarget {
+                pane_id: first_pane_id.clone(),
+            }),
+            Some(&first_pane_id),
+        ),
+        (
+            61,
+            Method::TabFocus(second_tab.clone()),
+            Some(&second_pane_id),
+        ),
+        (61, Method::TabClose(second_tab), Some(&first_pane_id)),
+    ];
+    for (client_id, method, expected_pane) in cases {
+        let other_client = if client_id == 61 { 62 } else { 61 };
+        let other_focus = server.shell_focus_target(other_client);
+        let sequence = event_hub.current_sequence();
+        let (respond_to, response_rx) = std::sync::mpsc::channel();
+        server.handle_client_shell_api_request(
+            client_id,
+            api::ApiRequestMessage {
+                origin: crate::api::ApiOrigin::LocalSocket,
+                request: api::schema::Request {
+                    id: "navigate".into(),
+                    method,
+                },
+                respond_to,
+                response_write_complete: None,
+                stream_active: None,
+            },
+        );
+        let response = response_rx.recv().expect("navigation response");
+        assert!(
+            serde_json::from_str::<api::schema::SuccessResponse>(&response).is_ok(),
+            "{response}"
+        );
+        server.app.sync_focus_events();
+
+        let focused = event_hub
+            .events_after(sequence)
+            .into_iter()
+            .filter_map(|(_, event)| match event.data {
+                EventData::PaneFocused {
+                    pane_id,
+                    workspace_id,
+                } => Some((pane_id, workspace_id)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let expected = expected_pane
+            .map(|pane_id| (pane_id.clone(), workspace_id.clone()))
+            .into_iter()
+            .collect::<Vec<_>>();
+        assert_eq!(focused, expected, "client {client_id}");
+        assert_eq!(server.shell_focus_target(other_client), other_focus);
+    }
     shutdown_test_runtimes(&mut server);
 }
 
@@ -1608,6 +2141,7 @@ async fn repeated_layout_action_reapplies_controller_geometry() {
     assert!(server.handle_client_shell_api_request(
         65,
         crate::api::ApiRequestMessage {
+            origin: crate::api::ApiOrigin::LocalSocket,
             request: crate::api::schema::Request {
                 id: "resize-layout".into(),
                 method: crate::api::schema::Method::LayoutSetSplitRatio(
@@ -1627,6 +2161,1099 @@ async fn repeated_layout_action_reapplies_controller_geometry() {
 
     let after = server.app.state.workspaces[0].test_runtimes[&first_pane].current_size();
     assert_ne!(after, before);
+    shutdown_test_runtimes(&mut server);
+}
+
+#[tokio::test]
+async fn pane_viewport_is_revision_bound_controller_local_and_restores_on_clear() {
+    let mut server = test_headless_server();
+    let mut workspace = crate::workspace::Workspace::test_new("pane-viewport");
+    let pane = workspace.tabs[0].root_pane;
+    workspace.insert_test_runtime(
+        pane,
+        crate::terminal::TerminalRuntime::test_with_screen_bytes(80, 24, b"ready"),
+    );
+    server.app.state.workspaces = vec![workspace];
+    server.app.state.active = Some(0);
+    server.app.state.selected = 0;
+    server.app.state.mode = crate::app::Mode::Terminal;
+
+    let (control, _) = connect_test_shell(&mut server, 165, 100, 30);
+    let _ = control.recv().expect("snapshot");
+    server
+        .clients
+        .get_mut(&165)
+        .unwrap()
+        .shell_pane_viewport_enabled = true;
+    let public_pane = server.app.public_pane_id(0, pane).unwrap();
+    let revision = server.clients[&165].shell_projection_revision;
+    let boot_id = server.client_shell_boot_id.clone();
+
+    assert!(
+        server.handle_server_event(ServerEvent::ClientShellPaneViewport {
+            client_id: 165,
+            viewport: crate::protocol::endpoint::ClientPaneViewportRequest {
+                boot_id: boot_id.clone(),
+                projection_revision: revision,
+                pane_id: public_pane.clone(),
+                size: Some(crate::protocol::ClientSurfaceSize { cols: 40, rows: 10 }),
+            },
+        })
+    );
+    assert_eq!(
+        server.app.state.workspaces[0].test_runtimes[&pane].current_size(),
+        (10, 40)
+    );
+
+    assert!(
+        !server.handle_server_event(ServerEvent::ClientShellPaneViewport {
+            client_id: 165,
+            viewport: crate::protocol::endpoint::ClientPaneViewportRequest {
+                boot_id: boot_id.clone(),
+                projection_revision: revision.saturating_sub(1),
+                pane_id: public_pane.clone(),
+                size: Some(crate::protocol::ClientSurfaceSize { cols: 20, rows: 5 }),
+            },
+        })
+    );
+    assert_eq!(
+        server.app.state.workspaces[0].test_runtimes[&pane].current_size(),
+        (10, 40)
+    );
+
+    let (other_control, _) = connect_test_shell(&mut server, 166, 80, 20);
+    let _ = other_control.recv().expect("other snapshot");
+    server
+        .clients
+        .get_mut(&166)
+        .unwrap()
+        .shell_pane_viewport_enabled = true;
+    let other_revision = server.clients[&166].shell_projection_revision;
+    assert!(
+        server.handle_server_event(ServerEvent::ClientShellPaneViewport {
+            client_id: 166,
+            viewport: crate::protocol::endpoint::ClientPaneViewportRequest {
+                boot_id: boot_id.clone(),
+                projection_revision: other_revision,
+                pane_id: public_pane.clone(),
+                size: Some(crate::protocol::ClientSurfaceSize { cols: 30, rows: 8 }),
+            },
+        })
+    );
+
+    assert!(
+        server.handle_server_event(ServerEvent::ClientShellPaneViewport {
+            client_id: 165,
+            viewport: crate::protocol::endpoint::ClientPaneViewportRequest {
+                boot_id,
+                projection_revision: revision,
+                pane_id: public_pane,
+                size: None,
+            },
+        })
+    );
+    assert_ne!(
+        server.app.state.workspaces[0].test_runtimes[&pane].current_size(),
+        (10, 40)
+    );
+
+    assert!(
+        server.handle_server_event(ServerEvent::ClientShellPaneViewport {
+            client_id: 165,
+            viewport: crate::protocol::endpoint::ClientPaneViewportRequest {
+                boot_id: server.client_shell_boot_id.clone(),
+                projection_revision: revision,
+                pane_id: server.app.public_pane_id(0, pane).unwrap(),
+                size: Some(crate::protocol::ClientSurfaceSize { cols: 40, rows: 10 }),
+            },
+        })
+    );
+    assert!(server.handle_server_event(ServerEvent::ClientDisconnected { client_id: 165 }));
+    assert_eq!(
+        server.app.state.workspaces[0].test_runtimes[&pane].current_size(),
+        (8, 30),
+        "the next controller must apply its retained desired geometry"
+    );
+    shutdown_test_runtimes(&mut server);
+}
+
+#[tokio::test]
+async fn terminal_views_interest_is_bounded_revision_bound_and_controller_owned_for_geometry() {
+    let mut server = test_headless_server();
+    let mut workspace = crate::workspace::Workspace::test_new("terminal-views");
+    let pane = workspace.tabs[0].root_pane;
+    workspace.insert_test_runtime(
+        pane,
+        crate::terminal::TerminalRuntime::test_with_screen_bytes(80, 24, b"child preview"),
+    );
+    server.app.state.workspaces = vec![workspace];
+    server.app.state.active = Some(0);
+    server.app.state.selected = 0;
+    server.app.state.mode = crate::app::Mode::Terminal;
+    let (control, render) = connect_test_shell(&mut server, 174, 100, 30);
+    let _ = control.recv().expect("snapshot");
+    server
+        .clients
+        .get_mut(&174)
+        .unwrap()
+        .shell_terminal_views_enabled = true;
+    let public_pane = server.app.public_pane_id(0, pane).unwrap();
+    let revision = server.clients[&174].shell_projection_revision;
+    let boot_id = server.client_shell_boot_id.clone();
+    assert!(
+        server.handle_server_event(ServerEvent::ClientShellTerminalViewsInterest {
+            client_id: 174,
+            interest: crate::protocol::endpoint::ClientTerminalViewsInterest {
+                boot_id: boot_id.clone(),
+                projection_revision: revision,
+                views: vec![crate::protocol::endpoint::ClientTerminalViewInterest {
+                    pane_id: public_pane.clone(),
+                    size: crate::protocol::ClientSurfaceSize { cols: 30, rows: 8 },
+                }],
+            },
+        })
+    );
+    assert_eq!(
+        server.app.state.workspaces[0].test_runtimes[&pane].current_size(),
+        (8, 30)
+    );
+    let ServerMessage::EndpointControl { kind, data } =
+        read_server_message(control.recv().expect("initial terminal views surface"))
+    else {
+        panic!("terminal views control");
+    };
+    assert_eq!(kind, crate::protocol::endpoint::TERMINAL_VIEWS_SURFACE_KIND);
+    let initial_surface: crate::protocol::endpoint::ServerTerminalViewsSurface =
+        serde_json::from_str(&data).unwrap();
+    assert_eq!(initial_surface.views.len(), 1);
+
+    let preview_content_seq = server.app.state.workspaces[0].test_runtimes[&pane].content_seq();
+    server.app.state.workspaces[0].custom_name = Some("renamed while previewing".into());
+    server.render_and_stream();
+    let revision = server.clients[&174].shell_projection_revision;
+    assert!(revision > initial_surface.projection_revision);
+    assert_eq!(
+        server.clients[&174]
+            .shell_terminal_views_interest
+            .as_ref()
+            .map(|interest| interest.projection_revision),
+        Some(revision),
+        "a valid preview claim follows projection-only updates"
+    );
+    assert_eq!(
+        server.app.state.workspaces[0].test_runtimes[&pane].current_size(),
+        (8, 30),
+        "updating collection chrome must not restore full-leaf geometry"
+    );
+    assert_eq!(
+        server.app.state.workspaces[0].test_runtimes[&pane].content_seq(),
+        preview_content_seq,
+        "projection-only updates must not resize the preview PTY"
+    );
+
+    server
+        .clients
+        .get_mut(&174)
+        .unwrap()
+        .shell_pane_viewport_enabled = true;
+    assert!(
+        server.handle_server_event(ServerEvent::ClientShellPaneViewport {
+            client_id: 174,
+            viewport: crate::protocol::endpoint::ClientPaneViewportRequest {
+                boot_id: boot_id.clone(),
+                projection_revision: revision,
+                pane_id: public_pane.clone(),
+                size: Some(crate::protocol::ClientSurfaceSize { cols: 20, rows: 6 }),
+            },
+        })
+    );
+    assert_eq!(
+        server.app.state.workspaces[0].test_runtimes[&pane].current_size(),
+        (6, 20),
+        "the narrower accessory viewport wins over its enclosing preview"
+    );
+    let viewport_content_seq = server.app.state.workspaces[0].test_runtimes[&pane].content_seq();
+    assert!(server.resize_shell_tab_if_controller(174, false));
+    assert_eq!(
+        server.app.state.workspaces[0].test_runtimes[&pane].current_size(),
+        (6, 20),
+        "controller geometry replay preserves viewport precedence"
+    );
+    assert_eq!(
+        server.app.state.workspaces[0].test_runtimes[&pane].content_seq(),
+        viewport_content_seq,
+        "geometry replay must not resize to the full leaf before restoring the viewport"
+    );
+    assert!(
+        server.handle_server_event(ServerEvent::ClientShellPaneViewport {
+            client_id: 174,
+            viewport: crate::protocol::endpoint::ClientPaneViewportRequest {
+                boot_id: boot_id.clone(),
+                projection_revision: revision,
+                pane_id: public_pane.clone(),
+                size: None,
+            },
+        })
+    );
+    assert_eq!(
+        server.app.state.workspaces[0].test_runtimes[&pane].current_size(),
+        (8, 30),
+        "clearing the accessory viewport restores retained preview geometry"
+    );
+    let (observer_control, _observer_render) = connect_test_shell(&mut server, 175, 80, 20);
+    let _ = observer_control.recv().expect("observer snapshot");
+    server
+        .clients
+        .get_mut(&175)
+        .unwrap()
+        .shell_terminal_views_enabled = true;
+    let observer_revision = server.clients[&175].shell_projection_revision;
+    assert!(
+        server.handle_server_event(ServerEvent::ClientShellTerminalViewsInterest {
+            client_id: 175,
+            interest: crate::protocol::endpoint::ClientTerminalViewsInterest {
+                boot_id: boot_id.clone(),
+                projection_revision: observer_revision,
+                views: vec![crate::protocol::endpoint::ClientTerminalViewInterest {
+                    pane_id: public_pane.clone(),
+                    size: crate::protocol::ClientSurfaceSize { cols: 10, rows: 5 },
+                }],
+            },
+        })
+    );
+    assert_eq!(
+        server.app.state.workspaces[0].test_runtimes[&pane].current_size(),
+        (8, 30),
+        "non-controller view must clip without resizing the shared PTY"
+    );
+    assert!(
+        !server.handle_server_event(ServerEvent::ClientShellTerminalViewsInterest {
+            client_id: 174,
+            interest: crate::protocol::endpoint::ClientTerminalViewsInterest {
+                boot_id: boot_id.clone(),
+                projection_revision: revision.saturating_sub(1),
+                views: Vec::new(),
+            },
+        })
+    );
+    let too_many = (0..=crate::protocol::endpoint::MAX_TERMINAL_VIEWS)
+        .map(|_| crate::protocol::endpoint::ClientTerminalViewInterest {
+            pane_id: public_pane.clone(),
+            size: crate::protocol::ClientSurfaceSize { cols: 1, rows: 1 },
+        })
+        .collect();
+    assert!(
+        !server.handle_server_event(ServerEvent::ClientShellTerminalViewsInterest {
+            client_id: 174,
+            interest: crate::protocol::endpoint::ClientTerminalViewsInterest {
+                boot_id,
+                projection_revision: revision,
+                views: too_many,
+            },
+        })
+    );
+    assert_eq!(
+        server.clients[&174]
+            .shell_terminal_views_interest
+            .as_ref()
+            .map(|interest| interest.views.len()),
+        Some(1)
+    );
+    let target = server.shell_target_for_client(174).unwrap();
+    let rendered = server.render_terminal_views(
+        target,
+        revision,
+        server.clients[&174]
+            .shell_terminal_views_interest
+            .as_ref()
+            .unwrap(),
+        crate::kitty_graphics::HostCellSize::default(),
+        None,
+    );
+    assert_eq!(rendered.views.len(), 1);
+    assert_eq!(
+        (
+            rendered.views[0].frame.width,
+            rendered.views[0].frame.height
+        ),
+        (30, 8)
+    );
+    assert!(rendered.views[0]
+        .frame
+        .cells
+        .iter()
+        .map(|cell| cell.symbol.as_str())
+        .collect::<String>()
+        .contains("child preview"));
+    server.render_and_stream();
+    let mut streamed_terminal_views = None;
+    for _ in 0..3 {
+        let Ok(bytes) = render.recv_timeout(Duration::from_millis(200)) else {
+            break;
+        };
+        if let ServerMessage::EndpointControl { kind, data } = read_server_message(bytes) {
+            if kind == crate::protocol::endpoint::TERMINAL_VIEWS_SURFACE_KIND {
+                streamed_terminal_views = serde_json::from_str::<
+                    crate::protocol::endpoint::ServerTerminalViewsSurface,
+                >(&data)
+                .ok();
+                break;
+            }
+        }
+    }
+    assert_eq!(
+        streamed_terminal_views
+            .as_ref()
+            .map(|surface| surface.views.len()),
+        Some(1)
+    );
+    assert_eq!(
+        server.clients[&175]
+            .shell_terminal_views_interest
+            .as_ref()
+            .map(|interest| interest.views[0].size),
+        Some(crate::protocol::ClientSurfaceSize { cols: 10, rows: 5 })
+    );
+    assert!(server.handle_server_event(ServerEvent::ClientDisconnected { client_id: 174 }));
+    assert_eq!(
+        server.app.state.workspaces[0].test_runtimes[&pane].current_size(),
+        (5, 10),
+        "controller transfer must apply the retained terminal-view geometry"
+    );
+    assert!(
+        server.handle_server_event(ServerEvent::ClientShellTerminalViewsInterest {
+            client_id: 175,
+            interest: crate::protocol::endpoint::ClientTerminalViewsInterest {
+                boot_id: server.client_shell_boot_id.clone(),
+                projection_revision: observer_revision,
+                views: Vec::new(),
+            },
+        })
+    );
+    assert_ne!(
+        server.app.state.workspaces[0].test_runtimes[&pane].current_size(),
+        (5, 10),
+        "clearing the final preview restores ordinary tab geometry"
+    );
+    shutdown_test_runtimes(&mut server);
+}
+
+#[tokio::test]
+async fn projection_change_immediately_restores_stale_pane_viewport() {
+    let mut server = test_headless_server();
+    let mut workspace = crate::workspace::Workspace::test_new("viewport-invalidation");
+    let pane = workspace.tabs[0].root_pane;
+    workspace.insert_test_runtime(
+        pane,
+        crate::terminal::TerminalRuntime::test_with_screen_bytes(80, 24, b"ready"),
+    );
+    server.app.state.workspaces = vec![workspace];
+    server.app.state.active = Some(0);
+    server.app.state.selected = 0;
+    server.app.state.mode = crate::app::Mode::Terminal;
+    let (control, _render) = connect_test_shell(&mut server, 168, 100, 30);
+    let _ = control.recv().unwrap();
+    server
+        .clients
+        .get_mut(&168)
+        .unwrap()
+        .shell_pane_viewport_enabled = true;
+    let revision = server.clients[&168].shell_projection_revision;
+    assert!(
+        server.handle_server_event(ServerEvent::ClientShellPaneViewport {
+            client_id: 168,
+            viewport: crate::protocol::endpoint::ClientPaneViewportRequest {
+                boot_id: server.client_shell_boot_id.clone(),
+                projection_revision: revision,
+                pane_id: server.app.public_pane_id(0, pane).unwrap(),
+                size: Some(crate::protocol::ClientSurfaceSize { cols: 40, rows: 10 }),
+            },
+        })
+    );
+    assert_eq!(
+        server.app.state.workspaces[0].test_runtimes[&pane].current_size(),
+        (10, 40)
+    );
+
+    server.app.state.workspaces[0].custom_name = Some("changed".into());
+    server.render_and_stream();
+
+    assert!(server.clients[&168].shell_pane_viewport.is_none());
+    assert_ne!(
+        server.app.state.workspaces[0].test_runtimes[&pane].current_size(),
+        (10, 40),
+        "projection invalidation must restore PTY geometry immediately"
+    );
+    shutdown_test_runtimes(&mut server);
+}
+
+#[tokio::test]
+async fn valid_view_control_gets_explicit_error_when_provider_admission_fails() {
+    let mut server = test_headless_server();
+    let mut workspace = crate::workspace::Workspace::test_new("extension-admission");
+    let pane = workspace.tabs[0].root_pane;
+    workspace.insert_test_runtime(
+        pane,
+        crate::terminal::TerminalRuntime::test_with_screen_bytes(80, 24, b"ready"),
+    );
+    server.app.state.workspaces = vec![workspace];
+    server.app.state.ensure_test_terminals();
+    server.app.state.active = Some(0);
+    server.app.state.selected = 0;
+    server.app.state.mode = crate::app::Mode::Terminal;
+    let (control, _render) = connect_test_shell(&mut server, 171, 100, 30);
+    let _ = control.recv().expect("snapshot");
+    let client = server.clients.get_mut(&171).unwrap();
+    client.shell_pane_view_enabled = true;
+    let projection_revision = client.shell_projection_revision;
+    let pane_id = server.app.public_pane_id(0, pane).unwrap();
+    assert!(
+        !server.handle_server_event(ServerEvent::ClientShellPaneViewRequest {
+            client_id: 171,
+            request: crate::protocol::endpoint::ClientPaneViewRequest {
+                boot_id: server.client_shell_boot_id.clone(),
+                projection_revision,
+                request_id: "admission-failure".into(),
+                pane_id,
+                contribution_revision: 1,
+            },
+        })
+    );
+    let ServerMessage::EndpointControl { kind, data } =
+        read_server_message(control.recv().expect("admission error"))
+    else {
+        panic!("view result");
+    };
+    assert_eq!(kind, crate::protocol::endpoint::PANE_VIEW_RESULT_KIND);
+    let result: crate::protocol::endpoint::ServerPaneViewResult =
+        serde_json::from_str(&data).unwrap();
+    assert!(result.error.is_some());
+    assert!(server.clients[&171].pending_pane_view.is_none());
+}
+
+#[test]
+fn retired_service_generation_completion_releases_owning_manager_admission() {
+    let mut server = test_headless_server();
+    let identity = crate::extension_service::ExtensionRequestIdentity {
+        client_id: 912,
+        boot_id: "boot-retired".into(),
+        projection_revision: 4,
+        request_id: "retired-result".into(),
+        target_pane_id: "w1:p1".into(),
+        contribution_revision: 7,
+    };
+    server
+        .app
+        .extension_services
+        .admit_for_test(identity.clone());
+    assert!(server
+        .app
+        .extension_services
+        .is_admitted_for_test(&identity));
+    server.handle_extension_service_result(crate::extension_service::ExtensionAsyncResult {
+        manager_generation: server.app.extension_services.manager_generation(),
+        holds_work_slot: true,
+        service_id: "retired.service".into(),
+        service_generation: u64::MAX,
+        granted_capabilities: Vec::new(),
+        identity: identity.clone(),
+        kind: crate::extension_service::ExtensionAsyncResultKind::Render(Err(
+            "provider retired".into()
+        )),
+    });
+    assert!(!server
+        .app
+        .extension_services
+        .is_admitted_for_test(&identity));
+}
+
+#[tokio::test]
+async fn retiring_extension_failure_reaches_exact_request_and_clears_pending_state() {
+    let mut server = test_headless_server();
+    let mut workspace = crate::workspace::Workspace::test_new("extension-failure");
+    let pane = workspace.tabs[0].root_pane;
+    workspace.insert_test_runtime(
+        pane,
+        crate::terminal::TerminalRuntime::test_with_screen_bytes(80, 24, b"ready"),
+    );
+    server.app.state.workspaces = vec![workspace];
+    server.app.state.ensure_test_terminals();
+    server.app.state.active = Some(0);
+    server.app.state.selected = 0;
+    server.app.state.mode = crate::app::Mode::Terminal;
+    let script = r#"
+printf '%s\n' '{"type":"hello","protocol":2,"service_id":"test.failure","requested_capabilities":["view_contribution"],"methods":["view.render"]}'
+IFS= read -r welcome
+IFS= read -r request
+exit 7
+"#;
+    server.app.extension_services = crate::extension_service::manager_for_test_spec(
+        crate::extension_service::ExtensionServiceSpec {
+            id: "test.failure".into(),
+            command: vec!["sh".into(), "-c".into(), script.into()],
+            cwd: std::path::PathBuf::from("."),
+            priority: 100,
+            granted_capabilities: vec![
+                crate::api::schema::ExtensionServiceCapability::ViewContribution,
+            ],
+        },
+        server.app.event_tx.clone(),
+    );
+    let (control, _render) = connect_test_shell(&mut server, 166, 100, 30);
+    let _ = control.recv().expect("snapshot");
+    let client = server.clients.get_mut(&166).unwrap();
+    client.shell_pane_view_enabled = true;
+    let projection_revision = client.shell_projection_revision;
+    let pane_id = server.app.public_pane_id(0, pane).unwrap();
+    assert!(server.clients[&166].is_active_shell_client());
+    assert!(server.clients[&166].shell_pane_view_enabled);
+    let parsed = server.app.parse_pane_id(&pane_id).expect("parse pane id");
+    assert!(
+        server
+            .app
+            .state
+            .terminal_id_for_pane(parsed.0, parsed.1)
+            .is_some(),
+        "terminal id"
+    );
+    let telemetry = server.app.handle_pane_telemetry(
+        "test".into(),
+        crate::api::schema::PaneTelemetryParams {
+            pane_id: Some(pane_id.clone()),
+        },
+    );
+    assert!(
+        matches!(
+            serde_json::from_str::<crate::api::schema::SuccessResponse>(&telemetry),
+            Ok(crate::api::schema::SuccessResponse {
+                result: crate::api::schema::ResponseResult::PaneTelemetry { .. },
+                ..
+            })
+        ),
+        "telemetry context failed: {telemetry}"
+    );
+    let request = crate::protocol::endpoint::ClientPaneViewRequest {
+        boot_id: server.client_shell_boot_id.clone(),
+        projection_revision,
+        request_id: "failure-view".into(),
+        pane_id,
+        contribution_revision: 1,
+    };
+    assert!(
+        !server.handle_server_event(ServerEvent::ClientShellPaneViewRequest {
+            client_id: 166,
+            request,
+        })
+    );
+    let retired_generation = server.clients[&166]
+        .pending_pane_view
+        .as_ref()
+        .unwrap_or_else(|| {
+            let response = control.try_recv().ok().map(read_server_message);
+            panic!("request was not admitted: {response:?}")
+        })
+        .service_generation;
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    let response = loop {
+        server.drain_internal_events_with_forwarding();
+        if let Ok(bytes) = control.try_recv() {
+            break read_server_message(bytes);
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "failure result timed out"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    };
+    let ServerMessage::EndpointControl { kind, data } = response else {
+        panic!("expected failure control");
+    };
+    assert_eq!(kind, crate::protocol::endpoint::PANE_VIEW_RESULT_KIND);
+    let result: crate::protocol::endpoint::ServerPaneViewResult =
+        serde_json::from_str(&data).unwrap();
+    assert_eq!(result.service_generation, retired_generation);
+    assert!(result.error.is_some());
+    assert!(server.clients[&166].pending_pane_view.is_none());
+    assert!(!server
+        .app
+        .extension_services
+        .matches_generation("test.failure", retired_generation));
+}
+
+#[tokio::test]
+async fn catalog_retirement_sends_terminal_result_and_clears_pending_view() {
+    let mut server = test_headless_server();
+    let (control, _render) = connect_test_shell(&mut server, 913, 100, 30);
+    let _ = control.recv().expect("snapshot");
+    let boot_id = server.client_shell_boot_id.clone();
+    let revision = server.clients[&913].shell_projection_revision;
+    server.clients.get_mut(&913).unwrap().pending_pane_view =
+        Some(crate::server::clients::PendingPaneView {
+            request: crate::protocol::endpoint::ClientPaneViewRequest {
+                boot_id,
+                projection_revision: revision,
+                request_id: "catalog-retired".into(),
+                pane_id: "w1:p1".into(),
+                contribution_revision: 2,
+            },
+            service_id: "old.service".into(),
+            service_generation: 41,
+        });
+    server.retire_client_extension_requests("extension catalog was replaced");
+    let crate::protocol::ServerMessage::EndpointControl { kind, data } =
+        read_server_message(control.recv().expect("terminal result"))
+    else {
+        panic!("pane view result");
+    };
+    assert_eq!(kind, crate::protocol::endpoint::PANE_VIEW_RESULT_KIND);
+    let result: crate::protocol::endpoint::ServerPaneViewResult =
+        serde_json::from_str(&data).unwrap();
+    assert_eq!(
+        result.error.as_deref(),
+        Some("extension catalog was replaced")
+    );
+    assert!(server.clients[&913].pending_pane_view.is_none());
+}
+
+#[tokio::test]
+async fn accepted_stale_generation_completions_clear_exact_render_and_action_pending_state() {
+    let mut server = test_headless_server();
+    let (control, _render) = connect_test_shell(&mut server, 170, 100, 30);
+    let _ = control.recv().expect("snapshot");
+    let boot_id = server.client_shell_boot_id.clone();
+    let revision = server.clients[&170].shell_projection_revision;
+    let identity = crate::extension_service::ExtensionRequestIdentity {
+        client_id: 170,
+        boot_id: boot_id.clone(),
+        projection_revision: revision,
+        request_id: "stale-view".into(),
+        target_pane_id: "w1:p1".into(),
+        contribution_revision: 1,
+    };
+    server.clients.get_mut(&170).unwrap().pending_pane_view =
+        Some(crate::server::clients::PendingPaneView {
+            request: crate::protocol::endpoint::ClientPaneViewRequest {
+                boot_id: boot_id.clone(),
+                projection_revision: revision,
+                request_id: identity.request_id.clone(),
+                pane_id: identity.target_pane_id.clone(),
+                contribution_revision: 1,
+            },
+            service_id: "old.service".into(),
+            service_generation: 41,
+        });
+    server.handle_extension_service_result(crate::extension_service::ExtensionAsyncResult {
+        manager_generation: server.app.extension_services.manager_generation(),
+        holds_work_slot: false,
+        service_id: "old.service".into(),
+        service_generation: 41,
+        granted_capabilities: vec![
+            crate::api::schema::ExtensionServiceCapability::ViewContribution,
+        ],
+        identity: identity.clone(),
+        kind: crate::extension_service::ExtensionAsyncResultKind::Render(Ok(
+            crate::extension_service::ExtensionView {
+                document: crate::view_document::ViewDocument {
+                    title: "stale success".into(),
+                    subtitle: None,
+                    sections: Vec::new(),
+                },
+                actions: Vec::new(),
+            },
+        )),
+    });
+    let ServerMessage::EndpointControl { kind, data } =
+        read_server_message(control.recv().expect("stale render result"))
+    else {
+        panic!("render result");
+    };
+    assert_eq!(kind, crate::protocol::endpoint::PANE_VIEW_RESULT_KIND);
+    let render: crate::protocol::endpoint::ServerPaneViewResult =
+        serde_json::from_str(&data).unwrap();
+    assert!(render
+        .error
+        .as_deref()
+        .is_some_and(|error| error.contains("retry")));
+    assert!(server.clients[&170].pending_pane_view.is_none());
+    assert!(server.clients[&170].pane_contribution_lease.is_none());
+
+    let lease = crate::server::clients::PaneContributionLease {
+        identity: identity.clone(),
+        service_id: "old.service".into(),
+        service_generation: 41,
+        actions: vec![crate::view_document::ViewAction {
+            id: "terminal.interrupt".into(),
+            label: "Interrupt".into(),
+            destructive: true,
+        }],
+    };
+    server
+        .clients
+        .get_mut(&170)
+        .unwrap()
+        .pane_contribution_lease = Some(lease);
+    let action_identity = crate::extension_service::ExtensionRequestIdentity {
+        request_id: "stale-action".into(),
+        ..identity
+    };
+    server.clients.get_mut(&170).unwrap().pending_pane_action =
+        Some(crate::protocol::endpoint::ClientPaneViewActionRequest {
+            boot_id,
+            projection_revision: revision,
+            request_id: action_identity.request_id.clone(),
+            pane_id: action_identity.target_pane_id.clone(),
+            contribution_revision: 1,
+            owner_service_id: "old.service".into(),
+            service_generation: 41,
+            action_id: "terminal.interrupt".into(),
+        });
+    server.handle_extension_service_result(crate::extension_service::ExtensionAsyncResult {
+        manager_generation: server.app.extension_services.manager_generation(),
+        holds_work_slot: false,
+        service_id: "old.service".into(),
+        service_generation: 41,
+        granted_capabilities: vec![
+            crate::api::schema::ExtensionServiceCapability::TerminalInterrupt,
+        ],
+        identity: action_identity,
+        kind: crate::extension_service::ExtensionAsyncResultKind::Action(Ok(
+            crate::extension_service::ExtensionHostEffect::TerminalInterrupt,
+        )),
+    });
+    let ServerMessage::EndpointControl { kind, data } =
+        read_server_message(control.recv().expect("stale action result"))
+    else {
+        panic!("action result");
+    };
+    assert_eq!(
+        kind,
+        crate::protocol::endpoint::PANE_VIEW_ACTION_RESULT_KIND
+    );
+    let action: crate::protocol::endpoint::ServerPaneViewActionResult =
+        serde_json::from_str(&data).unwrap();
+    assert!(action
+        .error
+        .as_deref()
+        .is_some_and(|error| error.contains("retry")));
+    assert!(server.clients[&170].pending_pane_action.is_none());
+    assert!(server.clients[&170].pending_pane_confirmation.is_none());
+}
+
+#[tokio::test]
+async fn stale_contribution_action_receives_terminal_error_response() {
+    let mut server = test_headless_server();
+    let (control, _render) = connect_test_shell(&mut server, 169, 100, 30);
+    let _ = control.recv().expect("snapshot");
+    let boot_id = server.client_shell_boot_id.clone();
+    server
+        .clients
+        .get_mut(&169)
+        .unwrap()
+        .shell_pane_view_enabled = true;
+    let revision = server.clients[&169].shell_projection_revision;
+    let current_generation = server
+        .app
+        .extension_services
+        .provider_identity()
+        .map(|(_, generation)| generation)
+        .unwrap_or(2);
+    let stale_generation = current_generation.saturating_sub(1);
+    server
+        .clients
+        .get_mut(&169)
+        .unwrap()
+        .pane_contribution_lease = Some(crate::server::clients::PaneContributionLease {
+        identity: crate::extension_service::ExtensionRequestIdentity {
+            client_id: 169,
+            boot_id: boot_id.clone(),
+            projection_revision: revision,
+            request_id: "view".into(),
+            target_pane_id: "w1:p1".into(),
+            contribution_revision: 1,
+        },
+        service_id: "missing.service".into(),
+        service_generation: stale_generation,
+        actions: vec![crate::view_document::ViewAction {
+            id: "terminal.interrupt".into(),
+            label: "Interrupt".into(),
+            destructive: true,
+        }],
+    });
+    assert!(
+        !server.handle_server_event(ServerEvent::ClientShellPaneViewAction {
+            client_id: 169,
+            request: crate::protocol::endpoint::ClientPaneViewActionRequest {
+                boot_id,
+                projection_revision: revision,
+                request_id: "action".into(),
+                pane_id: "w1:p1".into(),
+                contribution_revision: 1,
+                owner_service_id: "missing.service".into(),
+                service_generation: stale_generation,
+                action_id: "terminal.interrupt".into(),
+            },
+        })
+    );
+    let ServerMessage::EndpointControl { kind, data } =
+        read_server_message(control.recv().expect("stale action result"))
+    else {
+        panic!("expected action result");
+    };
+    assert_eq!(
+        kind,
+        crate::protocol::endpoint::PANE_VIEW_ACTION_RESULT_KIND
+    );
+    let result: crate::protocol::endpoint::ServerPaneViewActionResult =
+        serde_json::from_str(&data).unwrap();
+    assert!(result
+        .error
+        .as_deref()
+        .is_some_and(|error| error.contains("stale")));
+}
+
+#[tokio::test]
+async fn async_contribution_action_requires_current_lease_and_confirmation() {
+    let mut server = test_headless_server();
+    let mut workspace = crate::workspace::Workspace::test_new("extension-action");
+    let pane = workspace.tabs[0].root_pane;
+    let other_pane = workspace.test_split(ratatui::layout::Direction::Horizontal);
+    let (target_runtime, mut target_input) =
+        crate::terminal::TerminalRuntime::test_with_channel(80, 24);
+    let (other_runtime, mut other_input) =
+        crate::terminal::TerminalRuntime::test_with_channel(80, 24);
+    workspace.insert_test_runtime(pane, target_runtime);
+    workspace.insert_test_runtime(other_pane, other_runtime);
+    server.app.state.workspaces = vec![workspace];
+    server.app.state.ensure_test_terminals();
+    server.app.state.active = Some(0);
+    server.app.state.selected = 0;
+    server.app.state.mode = crate::app::Mode::Terminal;
+    let script = r#"
+printf '%s\n' '{"type":"hello","protocol":2,"service_id":"test.actions","requested_capabilities":["view_contribution","terminal_interrupt"],"methods":["view.render","view.action"]}'
+IFS= read -r welcome
+while IFS= read -r request; do
+  id=$(printf '%s' "$request" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
+  if printf '%s' "$request" | grep -q 'view.render'; then
+    printf '{"type":"response","id":%s,"result":{"document":{"title":"Processes","sections":[]},"actions":[{"id":"terminal.interrupt","label":"Interrupt process","destructive":true}]}}\n' "$id"
+  else
+    printf '{"type":"response","id":%s,"result":{"effect":{"type":"terminal_interrupt"}}}\n' "$id"
+  fi
+done
+"#;
+    server.app.extension_services = crate::extension_service::manager_for_test_spec(
+        crate::extension_service::ExtensionServiceSpec {
+            id: "test.actions".into(),
+            command: vec!["sh".into(), "-c".into(), script.into()],
+            cwd: std::path::PathBuf::from("."),
+            priority: 100,
+            granted_capabilities: vec![
+                crate::api::schema::ExtensionServiceCapability::ViewContribution,
+                crate::api::schema::ExtensionServiceCapability::TerminalInterrupt,
+            ],
+        },
+        server.app.event_tx.clone(),
+    );
+
+    let (control, _render) = connect_test_shell(&mut server, 167, 100, 30);
+    let _ = control.recv().expect("snapshot");
+    let client = server.clients.get_mut(&167).unwrap();
+    client.shell_pane_view_enabled = true;
+    let projection_revision = client.shell_projection_revision;
+    let pane_id = server.app.public_pane_id(0, pane).unwrap();
+    let boot_id = server.client_shell_boot_id.clone();
+    assert!(server.clients[&167].is_active_shell_client());
+    assert!(server.clients[&167].shell_pane_view_enabled);
+    let view_request = crate::protocol::endpoint::ClientPaneViewRequest {
+        boot_id: boot_id.clone(),
+        projection_revision,
+        request_id: "view-1".into(),
+        pane_id: pane_id.clone(),
+        contribution_revision: 1,
+    };
+    assert!(
+        !server.handle_server_event(ServerEvent::ClientShellPaneViewRequest {
+            client_id: 167,
+            request: view_request,
+        })
+    );
+    for _ in 0..100 {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        if server.drain_internal_events_with_forwarding() {
+            break;
+        }
+    }
+    let ServerMessage::EndpointControl { kind, data } = read_server_message(
+        control
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .unwrap(),
+    ) else {
+        panic!("view result control");
+    };
+    assert_eq!(kind, crate::protocol::endpoint::PANE_VIEW_RESULT_KIND);
+    let view: crate::protocol::endpoint::ServerPaneViewResult =
+        serde_json::from_str(&data).unwrap();
+    assert_eq!(view.actions[0].id, "terminal.interrupt");
+
+    let action = crate::protocol::endpoint::ClientPaneViewActionRequest {
+        boot_id: boot_id.clone(),
+        projection_revision,
+        request_id: "action-1".into(),
+        pane_id: pane_id.clone(),
+        contribution_revision: 1,
+        owner_service_id: view.owner_service_id,
+        service_generation: view.service_generation,
+        action_id: "terminal.interrupt".into(),
+    };
+    assert!(
+        !server.handle_server_event(ServerEvent::ClientShellPaneViewAction {
+            client_id: 167,
+            request: action,
+        })
+    );
+    for _ in 0..100 {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        if server.drain_internal_events_with_forwarding() {
+            break;
+        }
+    }
+    server.render_and_stream();
+    let ServerMessage::EndpointControl { kind, data } = read_server_message(
+        control
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .unwrap(),
+    ) else {
+        panic!("action result control");
+    };
+    assert_eq!(
+        kind,
+        crate::protocol::endpoint::PANE_VIEW_ACTION_RESULT_KIND
+    );
+    let action_result: crate::protocol::endpoint::ServerPaneViewActionResult =
+        serde_json::from_str(&data).unwrap();
+    let token = action_result
+        .confirmation_token
+        .expect("confirmation token");
+    assert!(token.len() >= 43);
+    assert!(!token.contains("action-1"));
+    assert!(!token.contains("test.actions"));
+    assert!(server.clients[&167].pending_pane_confirmation.is_some());
+    let confirmation = server.clients[&167]
+        .pending_pane_confirmation
+        .clone()
+        .unwrap();
+    assert!(server.clients[&167].pane_contribution_lease.is_some());
+    assert_eq!(
+        server.clients[&167]
+            .pane_contribution_lease
+            .as_ref()
+            .unwrap()
+            .identity
+            .projection_revision,
+        server.clients[&167].shell_projection_revision
+    );
+    assert!(
+        server.handle_server_event(ServerEvent::ClientShellPaneViewConfirm {
+            client_id: 167,
+            confirm: crate::protocol::endpoint::ClientPaneViewConfirm {
+                boot_id,
+                confirmation_token: token.clone(),
+            },
+        })
+    );
+    assert_eq!(
+        target_input.try_recv().unwrap(),
+        bytes::Bytes::from_static(&[0x03])
+    );
+    assert!(other_input.try_recv().is_err());
+
+    assert!(
+        !server.handle_server_event(ServerEvent::ClientShellPaneViewConfirm {
+            client_id: 167,
+            confirm: crate::protocol::endpoint::ClientPaneViewConfirm {
+                boot_id: server.client_shell_boot_id.clone(),
+                confirmation_token: token.clone(),
+            },
+        })
+    );
+    assert!(target_input.try_recv().is_err());
+    assert!(other_input.try_recv().is_err());
+
+    let mut stale = confirmation.clone();
+    stale.token = "stale".into();
+    server
+        .clients
+        .get_mut(&167)
+        .unwrap()
+        .pending_pane_confirmation = Some(stale);
+    server
+        .clients
+        .get_mut(&167)
+        .unwrap()
+        .shell_projection_revision = projection_revision.saturating_add(1);
+    assert!(
+        !server.handle_server_event(ServerEvent::ClientShellPaneViewConfirm {
+            client_id: 167,
+            confirm: crate::protocol::endpoint::ClientPaneViewConfirm {
+                boot_id: server.client_shell_boot_id.clone(),
+                confirmation_token: "stale".into(),
+            },
+        })
+    );
+    assert!(target_input.try_recv().is_err());
+    assert!(other_input.try_recv().is_err());
+
+    let denied_script = r#"
+printf '%s\n' '{"type":"hello","protocol":2,"service_id":"test.actions","requested_capabilities":["view_contribution"],"methods":["view.render"]}'
+IFS= read -r welcome
+sleep 1
+"#;
+    server.app.extension_services = crate::extension_service::manager_for_test_spec(
+        crate::extension_service::ExtensionServiceSpec {
+            id: "test.actions".into(),
+            command: vec!["sh".into(), "-c".into(), denied_script.into()],
+            cwd: std::path::PathBuf::from("."),
+            priority: 100,
+            granted_capabilities: vec![
+                crate::api::schema::ExtensionServiceCapability::ViewContribution,
+            ],
+        },
+        server.app.event_tx.clone(),
+    );
+    let denied_generation = server
+        .app
+        .extension_services
+        .generation_for_test("test.actions")
+        .unwrap();
+    let mut denied = confirmation;
+    denied.token = "denied".into();
+    denied.lease.service_generation = denied_generation;
+    server
+        .clients
+        .get_mut(&167)
+        .unwrap()
+        .shell_projection_revision = projection_revision;
+    server
+        .clients
+        .get_mut(&167)
+        .unwrap()
+        .pane_contribution_lease = Some(denied.lease.clone());
+    server
+        .clients
+        .get_mut(&167)
+        .unwrap()
+        .pending_pane_confirmation = Some(denied);
+    assert!(
+        !server.handle_server_event(ServerEvent::ClientShellPaneViewConfirm {
+            client_id: 167,
+            confirm: crate::protocol::endpoint::ClientPaneViewConfirm {
+                boot_id: server.client_shell_boot_id.clone(),
+                confirmation_token: "denied".into(),
+            },
+        })
+    );
+    assert!(target_input.try_recv().is_err());
+    assert!(other_input.try_recv().is_err());
     shutdown_test_runtimes(&mut server);
 }
 
@@ -1658,6 +3285,7 @@ async fn public_close_reapplies_controller_geometry() {
     let (respond_to, _response_rx) = std::sync::mpsc::channel();
     assert!(
         server.handle_api_request_with_shutdown_check(crate::api::ApiRequestMessage {
+            origin: crate::api::ApiOrigin::LocalSocket,
             request: crate::api::schema::Request {
                 id: "public-close-geometry".into(),
                 method: crate::api::schema::Method::PaneClose(crate::api::schema::PaneTarget {
@@ -1858,6 +3486,7 @@ async fn public_background_tab_create_preserves_client_locations() {
 
     let (respond_to, _response_rx) = std::sync::mpsc::channel();
     server.handle_api_request_with_shutdown_check(crate::api::ApiRequestMessage {
+        origin: crate::api::ApiOrigin::LocalSocket,
         request: crate::api::schema::Request {
             id: "create-background-tab".into(),
             method: crate::api::schema::Method::TabCreate(crate::api::schema::TabCreateParams {
@@ -1908,6 +3537,7 @@ async fn public_workspace_focus_preserves_each_clients_remembered_tabs() {
 
     let (respond_to, _response_rx) = std::sync::mpsc::channel();
     server.handle_api_request_with_shutdown_check(crate::api::ApiRequestMessage {
+        origin: crate::api::ApiOrigin::LocalSocket,
         request: crate::api::schema::Request {
             id: "focus-second-workspace".into(),
             method: crate::api::schema::Method::WorkspaceFocus(
@@ -1943,6 +3573,97 @@ async fn public_workspace_focus_preserves_each_clients_remembered_tabs() {
 }
 
 #[tokio::test]
+async fn public_agent_focus_replaces_a_diverged_client_shell_projection() {
+    let mut server = test_headless_server();
+    let mut first = crate::workspace::Workspace::test_new("first");
+    let first_pane = first.tabs[0].root_pane;
+    first.insert_test_runtime(
+        first_pane,
+        crate::terminal::TerminalRuntime::test_with_screen_bytes(80, 24, b"FIRST_AGENT"),
+    );
+    let mut second = crate::workspace::Workspace::test_new("second");
+    let second_pane = second.tabs[0].root_pane;
+    second.insert_test_runtime(
+        second_pane,
+        crate::terminal::TerminalRuntime::test_with_screen_bytes(80, 24, b"SECOND_WORKSPACE"),
+    );
+    server.app.state.workspaces = vec![first, second];
+    server.app.state.ensure_test_terminals();
+    server.app.state.active = Some(0);
+    server.app.state.selected = 0;
+    server.app.state.mode = crate::app::Mode::Terminal;
+    let first_workspace_id = server.app.public_workspace_id(0);
+    let first_tab_id = server.app.public_tab_id(0, 0).unwrap();
+    let first_pane_id = server.app.public_pane_id(0, first_pane).unwrap();
+    let second_tab_id = server.app.public_tab_id(1, 0).unwrap();
+
+    let (control_rx, render_rx) = connect_test_shell(&mut server, 9, 80, 23);
+    let _ = control_rx.recv().expect("initial snapshot");
+    assert!(server.focus_shell_client_on_tab(9, &second_tab_id));
+    assert!(server.claim_shell_tab_geometry(9, false));
+    server.render_and_stream();
+    let diverged = client_shell_snapshot(read_server_message(
+        control_rx.recv().expect("diverged snapshot"),
+    ));
+    assert_eq!(
+        diverged.focused_workspace_id.as_deref(),
+        Some(server.app.public_workspace_id(1).as_str())
+    );
+    let diverged_surface = recv_pane_surface(&render_rx, "diverged surface");
+    assert!(frame_text(&diverged_surface.frame).contains("SECOND_WORKSPACE"));
+
+    server
+        .app
+        .event_tx
+        .try_send(AppEvent::AgentProcessDetected {
+            pane_id: first_pane,
+            agent: crate::detect::Agent::Claude,
+            observed_at: Instant::now(),
+        })
+        .unwrap();
+    let (respond_to, response_rx) = std::sync::mpsc::channel();
+    server.handle_api_request_with_shutdown_check(crate::api::ApiRequestMessage {
+        origin: crate::api::ApiOrigin::LocalSocket,
+        request: crate::api::schema::Request {
+            id: "focus-first-agent".into(),
+            method: crate::api::schema::Method::AgentFocus(crate::api::schema::AgentTarget {
+                target: first_pane_id.clone(),
+            }),
+        },
+        respond_to,
+        response_write_complete: None,
+        stream_active: None,
+    });
+    let response: crate::api::schema::SuccessResponse =
+        serde_json::from_str(&response_rx.recv().expect("agent focus response")).unwrap();
+    let crate::api::schema::ResponseResult::AgentInfo { agent } = response.result else {
+        panic!("expected agent info");
+    };
+    assert_eq!(agent.pane_id, first_pane_id);
+    assert!(agent.focused);
+    assert_eq!(server.app.state.active, Some(0));
+    let location = server.clients[&9].shell_location.as_ref().unwrap();
+    assert_eq!(
+        location.focused_workspace_id.as_deref(),
+        Some(first_workspace_id.as_str())
+    );
+    assert_eq!(location.focused_tab_id(), Some(first_tab_id.as_str()));
+
+    server.render_and_stream();
+    let replacement = client_shell_snapshot(read_server_message(
+        control_rx.recv().expect("agent focus replacement snapshot"),
+    ));
+    assert_eq!(
+        replacement.focused_workspace_id.as_deref(),
+        Some(first_workspace_id.as_str())
+    );
+    let replacement_surface = recv_pane_surface(&render_rx, "agent focus replacement surface");
+    assert!(frame_text(&replacement_surface.frame).contains("FIRST_AGENT"));
+    assert!(!frame_text(&replacement_surface.frame).contains("SECOND_WORKSPACE"));
+    shutdown_test_runtimes(&mut server);
+}
+
+#[tokio::test]
 async fn public_api_focus_replaces_every_client_shell_projection() {
     let mut server = test_headless_server();
     let first = crate::workspace::Workspace::test_new("first");
@@ -1969,6 +3690,11 @@ async fn public_api_focus_replaces_every_client_shell_projection() {
             endpoint_keybindings: false,
             mouse_capture: false,
             surface_active: true,
+            structure_enabled: false,
+            host_documents_enabled: false,
+            pane_viewport_enabled: false,
+            pane_view_enabled: false,
+            terminal_views_enabled: false,
             writer,
         })
     );
@@ -1979,6 +3705,7 @@ async fn public_api_focus_replaces_every_client_shell_projection() {
 
     let (respond_to, _response_rx) = std::sync::mpsc::channel();
     server.handle_api_request_with_shutdown_check(crate::api::ApiRequestMessage {
+        origin: crate::api::ApiOrigin::LocalSocket,
         request: crate::api::schema::Request {
             id: "test.client.shell.workspace.focus".into(),
             method: crate::api::schema::Method::WorkspaceFocus(
@@ -2219,6 +3946,11 @@ async fn client_shell_streams_and_targets_popup_terminal_content() {
             endpoint_keybindings: false,
             mouse_capture: false,
             surface_active: true,
+            structure_enabled: false,
+            host_documents_enabled: false,
+            pane_viewport_enabled: false,
+            pane_view_enabled: false,
+            terminal_views_enabled: false,
             writer,
         })
     );
@@ -3148,6 +4880,53 @@ fn terminal_attach_disconnect_restores_client_shell_pane_size() {
     rt.shutdown_timeout(Duration::from_millis(100));
 }
 
+#[cfg(unix)]
+#[test]
+fn backpressured_observer_skips_runtime_access_and_recovers_without_new_output() {
+    with_terminal_session_test_server(|server, terminal_id, target, _| {
+        let (writer, control, frames) = test_client_writer();
+        server.handle_server_event(ServerEvent::ClientConnected {
+            client_id: 7,
+            cols: 80,
+            rows: 24,
+            cell_width_px: 0,
+            cell_height_px: 0,
+            pixel_mouse: false,
+            writer,
+        });
+        server.handle_server_event(ServerEvent::ClientObserveTerminal {
+            client_id: 7,
+            target,
+        });
+        server.render_and_stream();
+        server.app.terminal_runtimes.insert(
+            terminal_id.clone(),
+            crate::terminal::TerminalRuntime::test_with_screen_bytes(80, 24, b"LATEST"),
+        );
+        server.render_and_stream();
+        assert_eq!(server.clients[&7].deferred_render(), DeferredRender::Full);
+
+        // An absent runtime makes any attempted rendering observable without timing a lock.
+        let runtime = server.app.terminal_runtimes.remove(&terminal_id).unwrap();
+        server.render_and_stream();
+        server.app.terminal_runtimes.insert(terminal_id, runtime);
+        assert!(
+            server.clients.contains_key(&7),
+            "backpressure must skip runtime access"
+        );
+        assert!(control.try_recv().is_err());
+
+        let _ = frames.recv().expect("previously accepted frame");
+        assert!(server.handle_server_event(ServerEvent::ClientWriterDrained { client_id: 7 }));
+        server.render_and_stream();
+        let ServerMessage::Terminal(frame) = read_server_message(frames.recv().unwrap()) else {
+            panic!("terminal update");
+        };
+        assert!(String::from_utf8_lossy(&frame.bytes).contains("LATEST"));
+        assert_eq!(server.clients[&7].deferred_render(), DeferredRender::None);
+    });
+}
+
 #[test]
 fn terminal_observe_allows_multiple_clients_without_attach_ownership() {
     with_terminal_session_test_server(|server, terminal_id, terminal_id_string, _| {
@@ -3188,6 +4967,66 @@ fn terminal_observe_allows_multiple_clients_without_attach_ownership() {
             2
         );
     });
+}
+
+#[test]
+fn collection_hidden_members_parse_but_do_not_trigger_presentation_work() {
+    let mut server = test_headless_server();
+    let mut workspace = crate::workspace::Workspace::test_new("nested-visibility");
+    let root = workspace.tabs[0].root_pane;
+    let selected = workspace.test_split(ratatui::layout::Direction::Horizontal);
+    let hidden = workspace.test_split(ratatui::layout::Direction::Horizontal);
+    let collection = workspace.tabs[0]
+        .create_collection_near(
+            crate::layout::LayoutLeaf::Pane(root),
+            ratatui::layout::Direction::Vertical,
+            0.5,
+            Some("helpers".into()),
+        )
+        .unwrap();
+    workspace.tabs[0]
+        .collect_tiled_pane(selected, collection)
+        .unwrap();
+    workspace.tabs[0]
+        .collect_tiled_pane(hidden, collection)
+        .unwrap();
+    server.app.state.workspaces = vec![workspace];
+    server.app.state.active = Some(0);
+    server.app.state.selected = 0;
+    server.app.state.ensure_test_terminals();
+    let (writer, _control, _render) = test_client_writer();
+    let mut client = ClientConnection::new(
+        (120, 40),
+        crate::kitty_graphics::HostCellSize::default(),
+        1,
+        RenderEncoding::SemanticFrame,
+        Some(writer),
+    );
+    client.shell_terminal_views_enabled = true;
+    client.shell_projection_revision = 1;
+    server.clients.insert(1, client);
+    assert!(server.pty_sources_visible_to_any_render_target(&HashSet::from([selected])));
+    assert!(!server.pty_sources_visible_to_any_render_target(&HashSet::from([hidden])));
+    let _ = server.app.render_dirty.take();
+    server.sync_immediate_pty_sources();
+    assert!(server.app.render_dirty.request_pty(hidden));
+    assert!(!server.app.render_dirty.has_immediate_work());
+    server
+        .clients
+        .get_mut(&1)
+        .unwrap()
+        .shell_terminal_views_interest =
+        Some(crate::protocol::endpoint::ClientTerminalViewsInterest {
+            boot_id: server.client_shell_boot_id.clone(),
+            projection_revision: 1,
+            views: vec![crate::protocol::endpoint::ClientTerminalViewInterest {
+                pane_id: server.app.public_pane_id(0, hidden).unwrap(),
+                size: crate::protocol::ClientSurfaceSize { cols: 40, rows: 8 },
+            }],
+        });
+    assert!(server.pty_sources_visible_to_any_render_target(&HashSet::from([hidden])));
+    server.sync_immediate_pty_sources();
+    assert!(server.app.render_dirty.has_immediate_work());
 }
 
 #[test]
@@ -3614,7 +5453,12 @@ async fn pane_death_reconciles_each_client_view_and_focus() {
     server.clients.get_mut(&71).unwrap().outer_terminal_focus = Some(true);
     server.clients.get_mut(&72).unwrap().outer_terminal_focus = Some(false);
 
-    assert!(server.handle_internal_event_with_forwarding(AppEvent::PaneDied { pane_id: dead_pane }));
+    assert!(
+        server.handle_internal_event_with_forwarding(AppEvent::PaneDied {
+            pane_id: dead_pane,
+            exit_reason: crate::platform::ChildExitReason::Exited
+        })
+    );
 
     assert_eq!(
         server.shell_tab_id_for_client(71).as_deref(),
@@ -3678,7 +5522,12 @@ async fn pane_death_reapplies_controller_geometry() {
     let shrunk = server.app.state.workspaces[0].test_runtimes[&first_pane].current_size();
     assert!(shrunk.0 < 46);
 
-    assert!(server.handle_internal_event_with_forwarding(AppEvent::PaneDied { pane_id: dead_pane }));
+    assert!(
+        server.handle_internal_event_with_forwarding(AppEvent::PaneDied {
+            pane_id: dead_pane,
+            exit_reason: crate::platform::ChildExitReason::Exited
+        })
+    );
 
     let runtime = &server.app.state.workspaces[0].test_runtimes[&first_pane];
     let grown = runtime.current_size();
@@ -3858,7 +5707,12 @@ fn expected_worktree_runtime_exit_does_not_release_agent() {
         .pending_worktree_remove_runtime_exits
         .insert(pane_id, 1);
 
-    assert!(server.handle_internal_event_with_forwarding(AppEvent::PaneDied { pane_id }));
+    assert!(
+        server.handle_internal_event_with_forwarding(AppEvent::PaneDied {
+            pane_id,
+            exit_reason: crate::platform::ChildExitReason::Exited
+        })
+    );
 
     assert_eq!(
         server.app.state.terminals[&terminal_id].state,
@@ -4619,7 +6473,7 @@ async fn headless_scheduled_tasks_start_pending_agent_resume_without_foreground_
         .pending_agent_resume_plan = Some(crate::agent_resume::AgentResumePlan {
         agent: "codex".into(),
         argv: vec!["/bin/sh".into(), "-c".into(), "sleep 5".into()],
-        dedupe_key: "herdr:codex\0codex\0Id\0codex-session".into(),
+        dedupe_key: "vqro:codex\0codex\0Id\0codex-session".into(),
     });
 
     server.render_and_stream();
@@ -5841,6 +7695,7 @@ fn notification_show_api_forwards_one_semantic_client_notification() {
 
     let (respond_to, response_rx) = std::sync::mpsc::channel();
     let changed = server.handle_api_request_with_shutdown_check(api::ApiRequestMessage {
+        origin: crate::api::ApiOrigin::LocalSocket,
         request: api::schema::Request {
             id: "notify".into(),
             method: api::schema::Method::NotificationShow(api::schema::NotificationShowParams {
@@ -5904,6 +7759,7 @@ fn notification_show_api_preserves_colon_in_forwarded_title() {
 
     let (respond_to, response_rx) = std::sync::mpsc::channel();
     let changed = server.handle_api_request_with_shutdown_check(api::ApiRequestMessage {
+        origin: crate::api::ApiOrigin::LocalSocket,
         request: api::schema::Request {
             id: "notify".into(),
             method: api::schema::Method::NotificationShow(api::schema::NotificationShowParams {
@@ -5950,6 +7806,7 @@ fn notification_show_api_validates_empty_title_before_disabled_delivery() {
 
     let (respond_to, response_rx) = std::sync::mpsc::channel();
     let changed = server.handle_api_request_with_shutdown_check(api::ApiRequestMessage {
+        origin: crate::api::ApiOrigin::LocalSocket,
         request: api::schema::Request {
             id: "notify".into(),
             method: api::schema::Method::NotificationShow(api::schema::NotificationShowParams {
@@ -5981,6 +7838,7 @@ fn notification_show_api_reports_no_foreground_client() {
 
     let (respond_to, response_rx) = std::sync::mpsc::channel();
     let changed = server.handle_api_request_with_shutdown_check(api::ApiRequestMessage {
+        origin: crate::api::ApiOrigin::LocalSocket,
         request: api::schema::Request {
             id: "notify".into(),
             method: api::schema::Method::NotificationShow(api::schema::NotificationShowParams {
@@ -6030,6 +7888,7 @@ fn notification_show_api_includes_sound_in_semantic_event() {
     let (respond_to, response_rx) = std::sync::mpsc::channel();
     assert!(
         server.handle_api_request_with_shutdown_check(api::ApiRequestMessage {
+            origin: crate::api::ApiOrigin::LocalSocket,
             request: api::schema::Request {
                 id: "notify".into(),
                 method: api::schema::Method::NotificationShow(
@@ -6162,7 +8021,7 @@ fn stale_api_agent_report_does_not_forward_done_sound() {
         .get_mut(&terminal_id)
         .unwrap()
         .set_persisted_agent_session(crate::agent_resume::PersistedAgentSession {
-            source: "herdr:pi".into(),
+            source: "vqro:pi".into(),
             agent: "pi".into(),
             session_ref: crate::agent_resume::AgentSessionRef::path(
                 std::env::current_dir()
@@ -6180,7 +8039,7 @@ fn stale_api_agent_report_does_not_forward_done_sound() {
         .get_mut(&terminal_id)
         .unwrap()
         .set_hook_authority(
-            "herdr:pi".into(),
+            "vqro:pi".into(),
             "pi".into(),
             crate::detect::AgentState::Working,
             None,
@@ -6206,11 +8065,12 @@ fn stale_api_agent_report_does_not_forward_done_sound() {
 
     let (respond_to, response_rx) = std::sync::mpsc::channel();
     let changed = server.handle_api_request_with_shutdown_check(api::ApiRequestMessage {
+        origin: crate::api::ApiOrigin::LocalSocket,
         request: api::schema::Request {
             id: "stale".into(),
             method: api::schema::Method::PaneReportAgent(api::schema::PaneReportAgentParams {
                 pane_id: public_pane_id,
-                source: "herdr:pi".into(),
+                source: "vqro:pi".into(),
                 agent: "pi".into(),
                 state: api::schema::PaneAgentState::Idle,
                 message: None,

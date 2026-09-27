@@ -4,7 +4,9 @@ use crate::app::{App, Mode};
 use crate::layout::PaneId;
 use crate::pane::PaneLaunchEnv;
 use crate::popup_size::{resolve_popup_geometry, PopupSize};
-use crate::terminal::{TerminalId, TerminalRuntime, TerminalState};
+#[cfg(test)]
+use crate::terminal::TerminalId;
+use crate::terminal::{TerminalRuntime, TerminalState};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) struct PopupGeometry {
@@ -116,6 +118,8 @@ impl App {
         if self.state.popup_pane.is_some() {
             return Err(std::io::Error::other("popup already open"));
         }
+        self.admit_new_panes(None, None, 1)
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
         let Some(ws_idx) = self.state.active else {
             return Err(std::io::Error::other("no active workspace"));
         };
@@ -134,8 +138,8 @@ impl App {
             active_tab.cwd_for_pane(focused_pane, &self.state.terminals, &self.terminal_runtimes)
         });
         let cwd = cwd.unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| "/".into()));
+        let terminal_id = self.allocate_terminal_id()?;
         let pane_id = PaneId::alloc();
-        let terminal_id = TerminalId::alloc();
         let launch_env = PaneLaunchEnv::from_extra(extra_env).without_pane_identity();
         let terminal_area = if self.state.view.terminal_area.width >= 4
             && self.state.view.terminal_area.height >= 4
@@ -177,7 +181,7 @@ impl App {
         runtime: TerminalRuntime,
     ) -> (PaneId, TerminalId) {
         let pane_id = PaneId::alloc();
-        let terminal_id = TerminalId::alloc();
+        let terminal_id = TerminalId::alloc().expect("test terminal identity");
         self.terminal_runtimes.insert(terminal_id.clone(), runtime);
         self.state.terminals.insert(
             terminal_id.clone(),
@@ -209,7 +213,7 @@ mod tests {
         app.state.workspaces = vec![crate::workspace::Workspace::test_new("popup")];
         app.state.active = Some(0);
         app.state.selected = 0;
-        let terminal_id = TerminalId::alloc();
+        let terminal_id = TerminalId::alloc().expect("test terminal identity");
         app.state.terminals.insert(
             terminal_id.clone(),
             TerminalState::new(terminal_id.clone(), PathBuf::from("/popup")),
@@ -221,6 +225,43 @@ mod tests {
             height: None,
         });
         app
+    }
+
+    #[test]
+    fn popup_allocator_collision_then_failure_rejects_before_pty_spawn() {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &crate::config::Config::default(),
+            crate::app::AppPolicy::TEST,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        app.state.workspaces = vec![crate::workspace::Workspace::test_new("popup")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.ensure_test_terminals();
+        let occupied = app.state.terminals.keys().next().unwrap().clone();
+        app.inject_terminal_id_candidates_for_test([
+            Ok(occupied),
+            Err(std::io::Error::other("injected popup entropy failure")),
+        ]);
+        let panes_before = PaneId::next_for_test();
+        let runtimes_before = app.terminal_runtimes.len();
+
+        let error = app
+            .spawn_popup_argv_command(
+                &["ignored".into()],
+                None,
+                Vec::new(),
+                PopupGeometry::default(),
+            )
+            .unwrap_err();
+
+        assert_eq!(error.to_string(), "injected popup entropy failure");
+        assert_eq!(PaneId::next_for_test(), panes_before);
+        assert_eq!(app.terminal_runtimes.len(), runtimes_before);
+        assert!(app.state.popup_pane.is_none());
     }
 
     #[test]

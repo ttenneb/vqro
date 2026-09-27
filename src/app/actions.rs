@@ -10,7 +10,6 @@ use crate::events::AppEvent;
 use crate::layout::PaneId;
 #[cfg(test)]
 use crate::layout::{find_in_direction, NavDirection};
-use crate::selection::Selection;
 use crate::terminal::{EffectiveStateChange, TerminalStateMutation};
 use crate::workspace::WorkspaceGitStatus;
 
@@ -315,7 +314,7 @@ impl AppState {
             .get_mut(ws_idx)
             .and_then(|ws| ws.tabs.get_mut(tab_idx))
         {
-            tab.layout.focus_pane(pane_id);
+            tab.focus_pane(pane_id);
             self.previous_pane_focus = previous;
             self.mark_session_dirty();
             return true;
@@ -460,6 +459,19 @@ impl AppState {
             self.active = Some(idx);
             self.selected = idx;
             let workspace_id = self.workspaces[idx].id.clone();
+            if let Some(repository_id) = self.workspaces[idx]
+                .checkout
+                .as_ref()
+                .map(|checkout| checkout.repository_id.clone())
+            {
+                if let Some(repository) = self
+                    .repositories
+                    .iter_mut()
+                    .find(|repo| repo.id == repository_id)
+                {
+                    repository.last_focused_workspace_id = Some(workspace_id.clone());
+                }
+            }
             crate::logging::workspace_focused(&workspace_id);
             self.mark_session_dirty();
             if let Some(ws) = self.workspaces.get_mut(idx) {
@@ -490,6 +502,19 @@ impl AppState {
         self.active = Some(ws_idx);
         self.selected = ws_idx;
         let workspace_id = self.workspaces[ws_idx].id.clone();
+        if let Some(repository_id) = self.workspaces[ws_idx]
+            .checkout
+            .as_ref()
+            .map(|checkout| checkout.repository_id.clone())
+        {
+            if let Some(repository) = self
+                .repositories
+                .iter_mut()
+                .find(|repo| repo.id == repository_id)
+            {
+                repository.last_focused_workspace_id = Some(workspace_id.clone());
+            }
+        }
         if workspace_changed {
             crate::logging::workspace_focused(&workspace_id);
         }
@@ -571,6 +596,11 @@ impl AppState {
         self.selected = selected_id
             .and_then(|id| self.workspaces.iter().position(|ws| ws.id == id))
             .unwrap_or(0);
+        crate::repository::project_workspace_order(
+            &self.workspaces,
+            &mut self.repositories,
+            &mut self.space_order,
+        );
         true
     }
 
@@ -637,6 +667,11 @@ impl AppState {
         self.selected = selected_id
             .and_then(|id| self.workspaces.iter().position(|ws| ws.id == id))
             .unwrap_or(0);
+        crate::repository::project_workspace_order(
+            &self.workspaces,
+            &mut self.repositories,
+            &mut self.space_order,
+        );
         true
     }
 
@@ -753,6 +788,10 @@ impl AppState {
             .active
             .and_then(|idx| self.workspaces.get(idx))
             .map(|ws| ws.id.clone());
+        for pane_id in &pane_ids {
+            self.delegations.tombstone_pane(*pane_id);
+        }
+        self.delegations.gc_tombstones();
         self.remove_plugin_pane_records(pane_ids);
         for idx in close_indices.iter().rev() {
             self.workspaces.remove(*idx);
@@ -773,6 +812,7 @@ impl AppState {
             }
             self.active = Some(self.selected);
         }
+        self.reconcile_repositories();
     }
 }
 
@@ -852,7 +892,7 @@ impl AppState {
         else {
             return false;
         };
-        if tab.layout.swap_panes(source, target) {
+        if tab.swap_panes(source, target) {
             self.mark_session_dirty();
             true
         } else {
@@ -873,7 +913,7 @@ impl AppState {
                 .and_then(|i| self.workspaces.get_mut(i))
                 .and_then(|ws| ws.active_tab_mut())
             {
-                tab.layout.resize_focused(direction, 0.05, area);
+                tab.resize_focused(direction, 0.05, area);
                 self.mark_session_dirty();
             }
         }
@@ -1093,65 +1133,13 @@ impl AppState {
     }
 }
 
-impl AppState {
-    pub(crate) fn url_at_pane_surface_cell(
-        &self,
-        terminal_runtimes: &crate::terminal::TerminalRuntimeRegistry,
-        ws_idx: usize,
-        pane_id: crate::layout::PaneId,
-        viewport_row: u16,
-        col: u16,
-    ) -> Option<String> {
-        let rt = self.runtime_for_pane_in_workspace(terminal_runtimes, ws_idx, pane_id)?;
-        let (height, width) = rt.current_size();
-        url_at_runtime_cell(
-            rt,
-            pane_id,
-            ratatui::layout::Rect::new(0, 0, width, height),
-            viewport_row,
-            col,
-            rt.scroll_metrics(),
-        )
+pub(super) fn url_from_link_target(target: crate::ghostty::LinkTarget) -> Option<String> {
+    match target {
+        crate::ghostty::LinkTarget::Uri(uri) => Some(uri),
+        crate::ghostty::LinkTarget::Text { text, clicked_byte } => {
+            url_at_byte(&text, clicked_byte).map(str::to_owned)
+        }
     }
-}
-
-fn url_at_runtime_cell(
-    runtime: &crate::terminal::TerminalRuntime,
-    pane_id: crate::layout::PaneId,
-    area: ratatui::layout::Rect,
-    viewport_row: u16,
-    col: u16,
-    metrics: Option<crate::pane::ScrollMetrics>,
-) -> Option<String> {
-    if viewport_row >= area.height || col >= area.width {
-        return None;
-    }
-    let screen_col = area.x.saturating_add(col);
-    let screen_row = area.y.saturating_add(viewport_row);
-    if let Some((_, _, uri)) = runtime
-        .visible_hyperlinks(area)
-        .into_iter()
-        .find(|((x, y), _, _)| *x == screen_col && *y == screen_row)
-    {
-        return Some(uri);
-    }
-
-    let visible_selection = Selection::line_range(
-        pane_id,
-        crate::selection::absolute_row_for_viewport(0, metrics),
-        crate::selection::absolute_row_for_viewport(area.height.saturating_sub(1), metrics),
-        area.width.saturating_sub(1),
-    );
-    let visible_text = runtime.extract_selection(&visible_selection)?;
-    let logical_cell = logical_cell_for_visible_cell(&visible_text, area.width, viewport_row, col)?;
-    let line_start = visible_text[..logical_cell.byte_index]
-        .rfind('\n')
-        .map_or(0, |idx| idx + 1);
-    let line_end = visible_text[logical_cell.byte_index..]
-        .find('\n')
-        .map_or(visible_text.len(), |idx| logical_cell.byte_index + idx);
-    let line = visible_text.get(line_start..line_end)?;
-    url_at_column(line, logical_cell.logical_col).map(str::to_owned)
 }
 
 pub(crate) fn safe_web_url(url: &str) -> Option<&str> {
@@ -1201,113 +1189,19 @@ pub(crate) fn word_bounds_at_column(row: &str, col: u16) -> Option<(u16, u16)> {
     Some(span.columns(&cells))
 }
 
-pub(crate) fn url_at_column(row: &str, col: u16) -> Option<&str> {
-    let cells = text_cells(row);
-    let clicked_idx = cell_index_at_column(&cells, col)?;
-    let span = url_spans(&cells)
-        .into_iter()
-        .find(|span| span.contains(clicked_idx))?;
-    let start_byte = byte_index_for_cell(row, span.start);
-    let end_byte = byte_index_after_cell(row, span.end);
-    safe_web_url(row.get(start_byte..end_byte)?)
+fn url_at_byte(text: &str, clicked_byte: usize) -> Option<&str> {
+    let range = url_byte_range(text, clicked_byte)?;
+    text.get(range)
 }
 
-fn url_spans(cells: &[TextCell]) -> Vec<CellSpan> {
-    let mut spans = Vec::new();
-    let mut start = 0;
-    while start < cells.len() {
-        if starts_with_chars(&cells[start..], "http://")
-            || starts_with_chars(&cells[start..], "https://")
-        {
-            let mut end = start;
-            while end + 1 < cells.len() && !cells[end + 1].ch.is_whitespace() {
-                end += 1;
-            }
-            if let Some(span) = trim_url_edges(cells, CellSpan { start, end }) {
-                spans.push(span);
-            }
-            start = end + 1;
-        } else {
-            start += 1;
-        }
-    }
-    spans
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct VisibleTextCell {
-    pub(crate) byte_index: usize,
-    pub(crate) ch: char,
-    pub(crate) logical_col: u16,
-    pub(crate) screen_row: u16,
-    pub(crate) screen_col: u16,
-}
-
-pub(crate) fn visible_text_cells(text: &str, pane_width: u16) -> Vec<VisibleTextCell> {
-    if pane_width == 0 {
-        return Vec::new();
-    }
-
-    let mut cells = Vec::new();
-    let mut screen_row = 0u16;
-    let mut screen_col = 0u16;
-    let mut logical_col = 0u16;
-    let mut pending_wrap = false;
-    for (byte_index, ch) in text.char_indices() {
-        if ch == '\n' {
-            screen_row = screen_row.saturating_add(1);
-            screen_col = 0;
-            logical_col = 0;
-            pending_wrap = false;
-            continue;
-        }
-        if pending_wrap {
-            screen_row = screen_row.saturating_add(1);
-            screen_col = 0;
-            pending_wrap = false;
-        }
-
-        let width = u16::from(crate::ghostty::unicode_codepoint_width(ch as u32));
-        cells.push(VisibleTextCell {
-            byte_index,
-            ch,
-            logical_col,
-            screen_row,
-            screen_col,
-        });
-
-        logical_col = logical_col.saturating_add(width);
-        screen_col = screen_col.saturating_add(width);
-        while screen_col > pane_width {
-            screen_col -= pane_width;
-            screen_row = screen_row.saturating_add(1);
-        }
-        if width > 0 && screen_col == pane_width {
-            pending_wrap = true;
-            screen_col = pane_width.saturating_sub(1);
-        }
-    }
-    cells
-}
-
-pub(crate) fn logical_cell_for_visible_cell(
-    text: &str,
-    pane_width: u16,
-    target_row: u16,
-    target_col: u16,
-) -> Option<VisibleTextCell> {
-    visible_text_cells(text, pane_width)
-        .into_iter()
-        .find(|cell| {
-            let width = u16::from(crate::ghostty::unicode_codepoint_width(cell.ch as u32));
-            cell.screen_row == target_row
-                && if width == 0 {
-                    target_col == cell.screen_col
-                } else {
-                    target_col >= cell.screen_col
-                        && target_col < cell.screen_col.saturating_add(width)
-                }
-        })
+pub(super) fn url_byte_range(text: &str, clicked_byte: usize) -> Option<std::ops::Range<usize>> {
+    let clicked_idx = text.get(..clicked_byte)?.chars().count();
+    let cells = text_cells(text);
+    let span = url_span_at_column(&cells, clicked_idx)?;
+    let start = byte_index_for_cell(text, span.start);
+    let end = byte_index_after_cell(text, span.end);
+    safe_web_url(text.get(start..end)?)?;
+    Some(start..end)
 }
 
 fn token_span_at_column(cells: &[TextCell], clicked_idx: usize) -> Option<CellSpan> {
@@ -1485,7 +1379,21 @@ fn is_word_separator(ch: char) -> bool {
     ch.is_whitespace()
         || matches!(
             ch,
-            '|' | '(' | ')' | '[' | ']' | '{' | '}' | ',' | ';' | '!'
+            '|' | '('
+                | ')'
+                | '['
+                | ']'
+                | '{'
+                | '}'
+                | ','
+                | ';'
+                | '!'
+                | '（'
+                | '）'
+                | '：'
+                | '、'
+                | '。'
+                | '，'
         )
 }
 
@@ -1529,6 +1437,7 @@ impl AppState {
         results: Vec<WorkspaceGitStatus>,
     ) -> bool {
         let mut changed = false;
+        let mut repository_changed = false;
         for result in results {
             let Some(ws_idx) = self
                 .workspaces
@@ -1539,7 +1448,7 @@ impl AppState {
             };
 
             if self.workspaces[ws_idx]
-                .resolved_identity_cwd_from(&self.terminals, terminal_runtimes)
+                .repository_identity_cwd_from(&self.terminals, terminal_runtimes)
                 .as_ref()
                 != Some(&result.resolved_identity_cwd)
             {
@@ -1549,6 +1458,7 @@ impl AppState {
             let ws = &mut self.workspaces[ws_idx];
             if ws.cached_identity_cwd != result.resolved_identity_cwd {
                 ws.cached_identity_cwd = result.resolved_identity_cwd;
+                repository_changed = true;
             }
             if ws.cached_auto_label != result.auto_label {
                 ws.cached_auto_label = result.auto_label;
@@ -1568,14 +1478,18 @@ impl AppState {
             if ws.cached_git_space != result.space {
                 ws.cached_git_space = result.space;
                 changed = true;
+                repository_changed = true;
             }
+        }
+        if repository_changed {
+            changed |= self.reconcile_repositories();
         }
         changed
     }
 
     pub fn handle_app_event(&mut self, event: AppEvent) -> Vec<PaneStateUpdate> {
         match event {
-            AppEvent::PaneDied { pane_id } => {
+            AppEvent::PaneDied { pane_id, .. } => {
                 self.handle_pane_died(pane_id);
                 Vec::new()
             }
@@ -1807,7 +1721,25 @@ impl AppState {
             AppEvent::WorktreeAddFinished(_) => Vec::new(),
             AppEvent::WorktreeRemoveFinished(_) => Vec::new(),
             AppEvent::TabBarCommandFinished { .. } => Vec::new(),
-            AppEvent::PluginCommandFinished { .. } => Vec::new(),
+            AppEvent::PluginCommandFinished { .. }
+            | AppEvent::ExtensionArtifactStaged(_)
+            | AppEvent::ExtensionGitPackageFinished(_)
+            | AppEvent::ExtensionPackageCandidateReady(_)
+            | AppEvent::ExtensionPackageCandidateFinished(_)
+            | AppEvent::ExtensionServiceFabricTimeout { .. }
+            | AppEvent::ExtensionCatalogCapacityAvailable
+            | AppEvent::ExtensionHostStateCall(_)
+            | AppEvent::ExtensionHostTerminalsCall(_)
+            | AppEvent::ExtensionStatePersisted(_)
+            | AppEvent::CollectionsCheckpointPersisted(_)
+            | AppEvent::CollectionsCreateCheckpointPersisted(_)
+            | AppEvent::ExtensionServiceFinished(_)
+            | AppEvent::HostDocumentFinished(_)
+            | AppEvent::HostRelationshipsDocumentFinished(_)
+            | AppEvent::HostAgentActivityDocumentFinished(_)
+            | AppEvent::HostDocumentRetryDue { .. }
+            | AppEvent::HostSemanticDocumentRetryDue { .. }
+            | AppEvent::HostDocumentProviderActionFinished { .. } => Vec::new(),
         }
     }
 
@@ -2187,6 +2119,10 @@ impl AppState {
 
         let pane_terminal_id = self.terminal_id_for_pane(ws_idx, pane_id);
         let workspace_terminal_ids = self.terminal_ids_for_workspace(ws_idx);
+        // Relationships retain pane-less ancestry so descendant completion can still escalate
+        // through a closed intermediate node without making the dead PTY actionable.
+        self.delegations.tombstone_pane(pane_id);
+        self.delegations.gc_tombstones();
         self.pane_id_aliases.retain(|_, alias| *alias != pane_id);
         self.public_pane_id_aliases
             .retain(|_, alias| *alias != pane_id);
@@ -2300,7 +2236,7 @@ mod tests {
     }
 
     fn selected_url<'a>(row: &'a str, click: &str) -> Option<&'a str> {
-        url_at_column(row, col_of(row, click))
+        url_at_byte(row, row.find(click)?)
     }
 
     fn text_in_cell_range(row: &str, start_col: u16, end_col: u16) -> String {
@@ -2397,6 +2333,11 @@ mod tests {
                 "/Users/me/Library/Application Support/app/config.json",
             ),
             ("echo 你好-world done", "好", "你好-world"),
+            (
+                "註解已補（slice 4 5b5fcc0715）：整合原本",
+                "5b5fcc0715",
+                "5b5fcc0715",
+            ),
             ("先跑 cargo test", "cargo", "cargo"),
             (
                 "export PATH=$HOME/.cargo/bin:$PATH",
@@ -2452,6 +2393,21 @@ mod tests {
     }
 
     #[test]
+    fn double_click_word_bounds_treat_cjk_punctuation_as_delimiters() {
+        for delimiter in ['（', '）', '：', '、', '。', '，'] {
+            let row = format!("left{delimiter}right");
+            assert_selects(&row, "left", "left");
+            assert_selects(&row, "right", "right");
+            assert_selects_nothing(&row, &delimiter.to_string());
+            assert_eq!(
+                selected_word(&row, col_of(&row, &delimiter.to_string()) + 1),
+                None,
+                "second display cell of {delimiter:?} should not select"
+            );
+        }
+    }
+
+    #[test]
     fn double_click_word_bounds_ignore_delimiters() {
         for (row, click) in [
             (
@@ -2472,7 +2428,182 @@ mod tests {
     }
 
     #[test]
-    fn url_at_column_returns_safe_visible_url_only() {
+    fn link_resolution_regions_unicode_punctuation_and_explicit_links() {
+        let mut terminal = crate::ghostty::Terminal::new(80, 4, 1024).unwrap();
+        terminal.write("[文档](https://example.com/路径?q=a(b)), next".as_bytes());
+        let regions = terminal
+            .viewport_link_regions(7, 0, url_byte_range)
+            .unwrap();
+        assert_eq!(
+            regions
+                .iter()
+                .map(|r| (r.row, r.start_col, r.end_col))
+                .collect::<Vec<_>>(),
+            vec![(0, 7, 37)]
+        );
+        assert!(terminal
+            .viewport_link_regions(1, 0, url_byte_range)
+            .unwrap()
+            .is_empty());
+        terminal.resize(20, 4, 0, 0).unwrap();
+        assert_eq!(
+            terminal
+                .viewport_link_regions(9, 1, url_byte_range)
+                .unwrap()
+                .iter()
+                .map(|r| (r.row, r.start_col, r.end_col))
+                .collect::<Vec<_>>(),
+            vec![(0, 7, 19), (1, 0, 17)]
+        );
+        for text in [
+            "file:///tmp/a",
+            "javascript:alert(1)",
+            "\x1b]8;;https://example.com\x1b\\https://example.com\x1b]8;;\x1b\\",
+        ] {
+            let mut terminal = crate::ghostty::Terminal::new(80, 4, 1024).unwrap();
+            terminal.write(text.as_bytes());
+            assert!(terminal
+                .viewport_link_regions(0, 0, url_byte_range)
+                .unwrap()
+                .is_empty());
+        }
+        let mut terminal = crate::ghostty::Terminal::new(80, 4, 1024 * 1024).unwrap();
+        terminal.write(format!("https://example.com/{}", "a".repeat(9000)).as_bytes());
+        assert!(terminal
+            .viewport_link_regions(0, 0, url_byte_range)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn link_resolution_regions_keep_grapheme_byte_offsets() {
+        let mut terminal = crate::ghostty::Terminal::new(40, 3, 1024).unwrap();
+        terminal.write("e\u{301}(https://example.com/路e\u{301}),".as_bytes());
+        let expected = vec![crate::api::schema::PaneLinkRegion {
+            row: 0,
+            start_col: 2,
+            end_col: 24,
+        }];
+        for col in 2..=24 {
+            assert_eq!(
+                terminal
+                    .viewport_link_regions(col, 0, url_byte_range)
+                    .unwrap(),
+                expected,
+                "column {col}"
+            );
+        }
+        assert!(terminal
+            .viewport_link_regions(0, 0, url_byte_range)
+            .unwrap()
+            .is_empty());
+        assert!(terminal
+            .viewport_link_regions(25, 0, url_byte_range)
+            .unwrap()
+            .is_empty());
+        terminal.resize(21, 1, 0, 0).unwrap();
+        let regions = terminal
+            .viewport_link_regions(1, 0, url_byte_range)
+            .unwrap();
+        assert_eq!(
+            regions,
+            vec![crate::api::schema::PaneLinkRegion {
+                row: 0,
+                start_col: 0,
+                end_col: 3
+            }]
+        );
+    }
+
+    #[test]
+    fn link_resolution_regions_clip_wraps_and_wide_padding() {
+        let mut terminal = crate::ghostty::Terminal::new(21, 3, 1024).unwrap();
+        terminal.write("https://example.com/路径".as_bytes());
+        let regions = terminal
+            .viewport_link_regions(1, 1, url_byte_range)
+            .unwrap();
+        assert_eq!(
+            regions
+                .iter()
+                .map(|r| (r.row, r.start_col, r.end_col))
+                .collect::<Vec<_>>(),
+            vec![(0, 0, 19), (1, 0, 3)]
+        );
+        assert!(terminal
+            .viewport_link_regions(19, 2, url_byte_range)
+            .unwrap()
+            .is_empty());
+        let mut terminal = crate::ghostty::Terminal::new(20, 2, 1024).unwrap();
+        terminal.write(b"https://example.com/abcdefghijklmnopqrstuv");
+        assert_eq!(
+            terminal
+                .viewport_link_regions(0, 0, url_byte_range)
+                .unwrap()
+                .iter()
+                .map(|r| (r.row, r.start_col, r.end_col))
+                .collect::<Vec<_>>(),
+            vec![(0, 0, 19), (1, 0, 1)]
+        );
+        terminal.scroll_viewport_row(0);
+        assert_eq!(
+            terminal
+                .viewport_link_regions(0, 0, url_byte_range)
+                .unwrap()
+                .iter()
+                .map(|r| (r.row, r.start_col, r.end_col))
+                .collect::<Vec<_>>(),
+            vec![(0, 0, 19), (1, 0, 19)]
+        );
+        assert!(terminal
+            .viewport_link_regions(0, 2, url_byte_range)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn link_activation_resolves_full_url_with_either_end_offscreen() {
+        let url = "https://example.com/abcdefghijklmnopqrstuv";
+        let mut terminal = crate::ghostty::Terminal::new(20, 2, 1024 * 1024).unwrap();
+        terminal.write(url.as_bytes());
+        let target = terminal.viewport_link_target(0, 0).unwrap().unwrap();
+        assert_eq!(url_from_link_target(target).as_deref(), Some(url));
+        terminal.scroll_viewport_row(0);
+        let target = terminal.viewport_link_target(5, 1).unwrap().unwrap();
+        assert_eq!(url_from_link_target(target).as_deref(), Some(url));
+    }
+
+    #[test]
+    fn link_activation_preserves_unicode_and_click_boundaries_after_resize() {
+        let mut terminal = crate::ghostty::Terminal::new(80, 5, 1024 * 1024).unwrap();
+        terminal.write("[文档](https://example.com/路径?q=a(b)), next".as_bytes());
+        assert!(
+            url_from_link_target(terminal.viewport_link_target(1, 0).unwrap().unwrap()).is_none()
+        );
+        assert_eq!(
+            url_from_link_target(terminal.viewport_link_target(7, 0).unwrap().unwrap()).as_deref(),
+            Some("https://example.com/路径?q=a(b)")
+        );
+        terminal.resize(20, 5, 0, 0).unwrap();
+        assert_eq!(
+            url_from_link_target(terminal.viewport_link_target(9, 1).unwrap().unwrap()).as_deref(),
+            Some("https://example.com/路径?q=a(b)")
+        );
+        assert!(terminal.viewport_link_target(19, 4).unwrap().is_none());
+    }
+
+    #[test]
+    fn link_activation_skips_wide_character_wrap_padding() {
+        let url = "https://example.com/路径";
+        let mut terminal = crate::ghostty::Terminal::new(20, 3, 1024).unwrap();
+        terminal.write(url.as_bytes());
+        for col in 0..4 {
+            let target = terminal.viewport_link_target(col, 1).unwrap().unwrap();
+            assert_eq!(url_from_link_target(target).as_deref(), Some(url));
+        }
+    }
+
+    #[test]
+    fn url_at_byte_returns_safe_visible_url_only() {
         assert_eq!(
             selected_url("see https://example.com/a(b)c.", "example"),
             Some("https://example.com/a(b)c")
@@ -2562,6 +2693,7 @@ mod tests {
                 demand: crate::workspace::GitStatusRefreshDemand {
                     branch: false,
                     ahead_behind: true,
+                    upstream: true,
                 },
                 auto_label: "one".into(),
                 branch: Some("new".into()),
@@ -2603,7 +2735,7 @@ mod tests {
     }
 
     #[test]
-    fn apply_workspace_git_statuses_does_not_change_worktree_membership() {
+    fn apply_workspace_git_statuses_reconciles_changed_repository_membership() {
         let mut state = app_with_workspaces(&["one"]);
         mark_linked_worktree(&mut state, 0);
         let workspace_id = state.workspaces[0].id.clone();
@@ -2632,7 +2764,13 @@ mod tests {
         );
 
         assert!(changed);
-        assert_eq!(state.workspaces[0].worktree_space().cloned(), membership);
+        assert_ne!(state.workspaces[0].worktree_space().cloned(), membership);
+        assert_eq!(
+            state.workspaces[0]
+                .worktree_space()
+                .map(|membership| membership.key.as_str()),
+            Some("other-repo-key")
+        );
     }
 
     #[test]
@@ -3298,11 +3436,46 @@ mod tests {
         let deadline = state.next_pending_agent_notification_deadline().unwrap();
         state.handle_app_event(AppEvent::PaneDied {
             pane_id: bg_pane_id,
+            exit_reason: crate::platform::ChildExitReason::Exited,
         });
 
         assert!(state.pending_agent_notifications.is_empty());
         assert!(state.drain_due_agent_notifications(deadline).is_empty());
         assert!(state.toast.is_none());
+    }
+
+    #[test]
+    fn pane_death_collects_leaf_delegation() {
+        let mut state = app_with_workspaces(&["active"]);
+        let pane_id = *state.workspaces[0].panes.keys().next().unwrap();
+        let leaf = state.delegations.create(Some(pane_id), None, None).unwrap();
+        state.handle_app_event(AppEvent::PaneDied {
+            pane_id,
+            exit_reason: crate::platform::ChildExitReason::Exited,
+        });
+        assert!(state.delegations.get(leaf).is_none());
+    }
+
+    #[test]
+    fn pane_death_retains_tombstoned_delegation_ancestry() {
+        let mut state = app_with_workspaces(&["active"]);
+        let pane_id = *state.workspaces[0].panes.keys().next().unwrap();
+        let root = state
+            .delegations
+            .create(Some(pane_id), None, Some("root".into()))
+            .unwrap();
+        let child = state
+            .delegations
+            .create(None, Some(root), Some("child".into()))
+            .unwrap();
+        state.handle_app_event(AppEvent::PaneDied {
+            pane_id,
+            exit_reason: crate::platform::ChildExitReason::Exited,
+        });
+        let root_record = state.delegations.get(root).unwrap();
+        assert!(root_record.tombstone);
+        assert!(root_record.pane_id.is_none());
+        assert_eq!(state.delegations.get(child).unwrap().parent_id, Some(root));
     }
 
     #[test]
@@ -3352,7 +3525,7 @@ mod tests {
         });
         state.handle_app_event(AppEvent::HookStateReported {
             pane_id: bg_pane_id,
-            source: "herdr:codex".into(),
+            source: "vqro:codex".into(),
             agent_label: "codex".into(),
             state: AgentState::Working,
             message: None,
@@ -3400,7 +3573,7 @@ mod tests {
         });
         state.handle_app_event(AppEvent::HookStateReported {
             pane_id,
-            source: "herdr:claude".into(),
+            source: "vqro:claude".into(),
             agent_label: "claude".into(),
             state: AgentState::Blocked,
             message: None,
@@ -3449,7 +3622,7 @@ mod tests {
         });
         let terminal = state.terminals.get_mut(&terminal_id).unwrap();
         terminal.set_persisted_agent_session(crate::agent_resume::PersistedAgentSession {
-            source: "herdr:pi".into(),
+            source: "vqro:pi".into(),
             agent: "pi".into(),
             session_ref: crate::agent_resume::AgentSessionRef::path(
                 std::env::current_dir()
@@ -3461,7 +3634,7 @@ mod tests {
             .unwrap(),
         });
         terminal.set_hook_authority(
-            "herdr:pi".into(),
+            "vqro:pi".into(),
             "pi".into(),
             AgentState::Working,
             None,
@@ -3472,7 +3645,7 @@ mod tests {
 
         let updates = state.handle_app_event(AppEvent::HookAgentReleased {
             pane_id,
-            source: "herdr:pi".into(),
+            source: "vqro:pi".into(),
             agent_label: "pi".into(),
             known_agent: Some(Agent::Pi),
             seq: Some(2),

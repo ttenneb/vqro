@@ -38,6 +38,61 @@ pub(crate) enum Visibility {
 }
 
 #[derive(Debug, Default)]
+pub(crate) struct Occlusion {
+    regions: Vec<Rect>,
+    popup_start: usize,
+}
+
+impl Occlusion {
+    pub(crate) fn cover(&mut self, rect: Rect) {
+        if !rect.is_empty() {
+            self.regions.push(rect);
+        }
+    }
+
+    pub(crate) fn start_popup(&mut self, rect: Rect) {
+        self.cover(rect);
+        self.popup_start = self.regions.len();
+    }
+
+    fn covers(
+        &self,
+        placement: &SurfaceGraphicsPlacement,
+        origin: (u16, u16),
+        cell: HostCellSize,
+    ) -> bool {
+        let regions = if matches!(
+            placement.asset.source,
+            SurfaceGraphicsSource::Terminal {
+                target: SurfaceGraphicsTarget::Popup { .. },
+                ..
+            }
+        ) {
+            &self.regions[self.popup_start..]
+        } else {
+            &self.regions
+        };
+        if regions.is_empty() {
+            return false;
+        }
+        let width = u64::from(cell.width_px);
+        let height = u64::from(cell.height_px);
+        let x =
+            u64::from(origin.0.saturating_add(placement.x)) * width + u64::from(placement.x_offset);
+        let y = u64::from(origin.1.saturating_add(placement.y)) * height
+            + u64::from(placement.y_offset);
+        let right = x + u64::from(placement.cols) * width;
+        let bottom = y + u64::from(placement.rows) * height;
+        regions.iter().any(|rect| {
+            x < u64::from(rect.right()) * width
+                && right > u64::from(rect.x) * width
+                && y < u64::from(rect.bottom()) * height
+                && bottom > u64::from(rect.y) * height
+        })
+    }
+}
+
+#[derive(Debug, Default)]
 pub(crate) struct ClientState {
     scope: String,
     scene: SurfaceGraphicsScene,
@@ -47,11 +102,25 @@ pub(crate) struct ClientState {
     reset_pending: bool,
     stale_images: Vec<u32>,
     forced_delete_images: Vec<u32>,
+    suppressed_pane_ids: HashSet<String>,
 }
 
 impl ClientState {
     pub(crate) fn scope(&self) -> &str {
         &self.scope
+    }
+
+    pub(crate) fn pane_has_graphics(&self, pane_id: &str) -> bool {
+        self.scene
+            .placements
+            .iter()
+            .any(|placement| source_pane_id(&placement.asset.source) == Some(pane_id))
+    }
+
+    pub(crate) fn set_suppressed_panes<'a>(&mut self, pane_ids: impl IntoIterator<Item = &'a str>) {
+        self.suppressed_pane_ids.clear();
+        self.suppressed_pane_ids
+            .extend(pane_ids.into_iter().map(str::to_owned));
     }
 
     pub(crate) fn set_scope(&mut self, scope: &str) {
@@ -166,6 +235,7 @@ impl ClientState {
         main_origin: (u16, u16),
         popup_origin: Option<(u16, u16)>,
         cell_size: HostCellSize,
+        occlusion: &Occlusion,
     ) -> Vec<u8> {
         let mut bytes = self.take_pending_cleanup();
         self.stale_images.sort_unstable();
@@ -189,6 +259,10 @@ impl ClientState {
             .scene
             .placements
             .iter()
+            .filter(|placement| {
+                source_pane_id(&placement.asset.source)
+                    .is_none_or(|pane_id| !self.suppressed_pane_ids.contains(pane_id))
+            })
             .filter_map(|placement| {
                 client_host_placement(
                     &self.scope,
@@ -198,6 +272,7 @@ impl ClientState {
                     main_origin,
                     popup_origin,
                     cell_size,
+                    occlusion,
                 )
             })
             .collect::<Vec<_>>();
@@ -215,6 +290,20 @@ impl ClientState {
                 return bytes;
             }
         }
+    }
+}
+
+fn source_pane_id(source: &SurfaceGraphicsSource) -> Option<&str> {
+    match source {
+        SurfaceGraphicsSource::Terminal {
+            target: SurfaceGraphicsTarget::Pane { pane_id },
+            ..
+        }
+        | SurfaceGraphicsSource::PaneLayer { pane_id, .. } => Some(pane_id),
+        SurfaceGraphicsSource::Terminal {
+            target: SurfaceGraphicsTarget::Popup { .. },
+            ..
+        } => None,
     }
 }
 
@@ -550,6 +639,7 @@ fn client_host_placement(
     main_origin: (u16, u16),
     popup_origin: Option<(u16, u16)>,
     cell_size: HostCellSize,
+    occlusion: &Occlusion,
 ) -> Option<HostPlacement> {
     let origin = match (&placement.asset.source, visibility) {
         (
@@ -571,6 +661,9 @@ fn client_host_placement(
         }
         _ => return None,
     };
+    if occlusion.covers(placement, origin, cell_size) {
+        return None;
+    }
     let source_key = HostSourceKey::ClientSurface {
         scope: scope.to_owned(),
         source: placement.asset.source.clone(),
@@ -692,6 +785,182 @@ mod tests {
     }
 
     #[test]
+    fn occlusion_uses_final_pixel_bounds_and_strict_overlap() {
+        let cell = HostCellSize {
+            width_px: 8,
+            height_px: 16,
+        };
+        let image = asset(
+            SurfaceGraphicsTarget::Pane {
+                pane_id: "pane".into(),
+            },
+            1,
+            vec![1, 2, 3, 4],
+        );
+        let mut placement = scene(image, 1, 2).placements.remove(0);
+        let mut cover = Occlusion::default();
+        cover.cover(Rect::new(12, 8, 1, 1));
+        // The image at (11, 7) just touches the cover's top-left corner.
+        assert!(!cover.covers(&placement, (10, 5), cell));
+        placement.x_offset = 1;
+        assert!(!cover.covers(&placement, (10, 5), cell));
+        placement.y_offset = 1;
+        assert!(cover.covers(&placement, (10, 5), cell));
+        placement.x_offset = 0;
+        assert!(!cover.covers(&placement, (10, 5), cell));
+        placement.cols = 2;
+        assert!(cover.covers(&placement, (10, 5), cell));
+        assert!(!cover.covers(&placement, (0, 0), cell));
+        cover = Occlusion::default();
+        cover.cover(Rect::new(11, 7, 0, 1));
+        assert!(!cover.covers(&placement, (10, 5), cell));
+    }
+
+    #[test]
+    fn occlusion_keeps_shared_asset_placements_and_restores_without_upload() {
+        for direct in [false, true] {
+            let mut state = ClientState::default();
+            state.set_scope("occlusion");
+            let _ = state.take_pending_cleanup();
+            let image = asset(
+                SurfaceGraphicsTarget::Pane {
+                    pane_id: "pane".into(),
+                },
+                1,
+                vec![1, 2, 3, 4],
+            );
+            let id = host_image_id("occlusion", &image.key);
+            let mut graphics = scene(image.clone(), 0, 0);
+            let mut second = graphics.placements[0].clone();
+            second.logical_placement_id = 4;
+            second.x = 5;
+            graphics.placements.push(second);
+            if direct {
+                // Model an already uploaded asset, including on hosts without direct transport.
+                graphics.assets.clear();
+                state.host.images.insert(
+                    id,
+                    ImageSignature {
+                        image_width: 1,
+                        image_height: 1,
+                        format_code: 32,
+                        data_len: 4,
+                        data_fingerprint: 1,
+                    },
+                );
+            }
+            state.set_scene(graphics);
+            let cell = HostCellSize {
+                width_px: 8,
+                height_px: 16,
+            };
+            let _ = state.encode(Visibility::Main, (10, 5), None, cell, &Occlusion::default());
+            assert_eq!(state.host.placements.len(), 2);
+            let mut cover = Occlusion::default();
+            cover.cover(Rect::new(10, 5, 1, 1));
+            let hidden = state.encode(Visibility::Main, (10, 5), None, cell, &cover);
+            let hidden = String::from_utf8_lossy(&hidden);
+            assert!(hidden.contains("a=d,d=i"), "{hidden}");
+            assert!(!hidden.contains("a=d,d=I"), "{hidden}");
+            assert!(hidden.contains("\u{1b}[6;16H"), "{hidden}");
+            assert_eq!(state.host.placements.len(), 1);
+            cover.cover(Rect::new(15, 5, 1, 1));
+            let _ = state.encode(Visibility::Main, (10, 5), None, cell, &cover);
+            assert!(state.host.placements.is_empty());
+            assert!(state.host.images.contains_key(&id));
+            let restored =
+                state.encode(Visibility::Main, (10, 5), None, cell, &Occlusion::default());
+            let restored = String::from_utf8_lossy(&restored);
+            assert!(restored.contains("a=p"), "{restored}");
+            assert!(!restored.contains("a=t"), "{restored}");
+            assert_eq!(state.host.placements.len(), 2);
+        }
+    }
+
+    #[test]
+    fn popup_occlusion_respects_draw_order_and_its_own_images() {
+        let cell = HostCellSize {
+            width_px: 8,
+            height_px: 16,
+        };
+        let image = asset(
+            SurfaceGraphicsTarget::Pane {
+                pane_id: "pane".into(),
+            },
+            1,
+            vec![1, 2, 3, 4],
+        );
+        let main = scene(image, 0, 0).placements.remove(0);
+        let image = asset(
+            SurfaceGraphicsTarget::Popup {
+                terminal_id: "popup".into(),
+            },
+            2,
+            vec![4, 3, 2, 1],
+        );
+        let popup = scene(image, 0, 0).placements.remove(0);
+        let mut cover = Occlusion::default();
+        cover.cover(Rect::new(10, 5, 3, 3));
+        cover.start_popup(Rect::new(9, 4, 5, 5));
+        assert!(cover.covers(&main, (10, 5), cell));
+        assert!(!cover.covers(&main, (0, 0), cell));
+        assert!(!cover.covers(&popup, (10, 5), cell));
+        cover.cover(Rect::new(10, 5, 1, 1));
+        assert!(cover.covers(&popup, (10, 5), cell));
+    }
+
+    #[test]
+    #[ignore = "manual image placement overlap scaling profile"]
+    fn graphics_occlusion_render_scale_profile() {
+        let cell = HostCellSize {
+            width_px: 8,
+            height_px: 16,
+        };
+        for count in [1, 15] {
+            let mut graphics = SurfaceGraphicsScene::default();
+            for index in 0..count {
+                let image = asset(
+                    SurfaceGraphicsTarget::Pane {
+                        pane_id: format!("pane-{index}"),
+                    },
+                    index as u64,
+                    vec![1, 2, 3, 4],
+                );
+                let pane = scene(image, index * 4, 0);
+                graphics.assets.extend(pane.assets);
+                graphics.placements.extend(pane.placements);
+            }
+            for covered in [false, true] {
+                let mut state = ClientState::default();
+                state.set_scope("profile");
+                state.set_scene(graphics.clone());
+                let mut cover = Occlusion::default();
+                if covered {
+                    cover.cover(Rect::new(0, 10, 80, 3));
+                    cover.cover(Rect::new(60, 0, 20, 5));
+                }
+                let _ = state.encode(Visibility::Main, (0, 0), None, cell, &cover);
+                let mut samples = Vec::new();
+                for _ in 0..101 {
+                    let start = std::time::Instant::now();
+                    for _ in 0..20 {
+                        std::hint::black_box(state.encode(
+                            Visibility::Main,
+                            (0, 0),
+                            None,
+                            cell,
+                            &cover,
+                        ));
+                    }
+                    samples.push(start.elapsed().as_nanos() / 20);
+                }
+                samples.sort_unstable();
+                eprintln!("graphics occlusion panes={count} disjoint_overlays={covered} median_ns={} p95_ns={}", samples[50], samples[95]);
+            }
+        }
+    }
+
+    #[test]
     fn client_encodes_final_main_origin_upload_once_and_replays_placement() {
         let mut state = ClientState::default();
         state.set_scope("endpoint-a:boot-1");
@@ -712,6 +981,7 @@ mod tests {
                 width_px: 8,
                 height_px: 16,
             },
+            &Occlusion::default(),
         );
         assert!(String::from_utf8_lossy(&first).contains("a=t,t=d"));
         assert!(String::from_utf8_lossy(&first).contains("\u{1b}[8;12H"));
@@ -724,11 +994,79 @@ mod tests {
                 width_px: 8,
                 height_px: 16,
             },
+            &Occlusion::default(),
         );
         let second = String::from_utf8_lossy(&second);
         assert!(!second.contains("a=t,t=d"));
         assert!(second.contains("a=p"));
         assert!(second.contains("\u{1b}[8;12H"));
+    }
+
+    #[test]
+    fn client_suppresses_only_the_inspected_pane_graphics() {
+        let mut state = ClientState::default();
+        state.set_scope("endpoint-a:boot-1");
+        let first = asset(
+            SurfaceGraphicsTarget::Pane {
+                pane_id: "w1:p1".into(),
+            },
+            11,
+            vec![1, 2, 3, 4],
+        );
+        let second = asset(
+            SurfaceGraphicsTarget::Pane {
+                pane_id: "w1:p2".into(),
+            },
+            12,
+            vec![5, 6, 7, 8],
+        );
+        let mut first_scene = scene(first, 1, 1);
+        let second_scene = scene(second, 5, 1);
+        first_scene.placements.extend(second_scene.placements);
+        first_scene.assets.extend(second_scene.assets);
+        state.set_scene(first_scene);
+        assert!(state.pane_has_graphics("w1:p1"));
+        assert!(state.pane_has_graphics("w1:p2"));
+
+        let occlusion = Occlusion::default();
+        state.set_suppressed_panes(["w1:p1"]);
+        state.encode(
+            Visibility::Main,
+            (0, 0),
+            None,
+            HostCellSize {
+                width_px: 8,
+                height_px: 16,
+            },
+            &occlusion,
+        );
+        assert_eq!(state.host.placements.len(), 1);
+
+        state.set_suppressed_panes(["w1:p1", "w1:p2"]);
+        state.encode(
+            Visibility::Main,
+            (0, 0),
+            None,
+            HostCellSize {
+                width_px: 8,
+                height_px: 16,
+            },
+            &occlusion,
+        );
+        assert!(state.host.placements.is_empty());
+
+        state.set_suppressed_panes(std::iter::empty());
+        state.encode(
+            Visibility::Main,
+            (0, 0),
+            None,
+            HostCellSize {
+                width_px: 8,
+                height_px: 16,
+            },
+            &occlusion,
+        );
+        assert_eq!(state.host.placements.len(), 2);
     }
 
     #[test]
@@ -747,12 +1085,18 @@ mod tests {
             width_px: 8,
             height_px: 16,
         };
-        let _ = state.encode(Visibility::Main, (4, 2), None, cell);
+        let _ = state.encode(Visibility::Main, (4, 2), None, cell, &Occlusion::default());
 
-        let hidden = state.encode(Visibility::Hidden, (4, 2), None, cell);
+        let hidden = state.encode(
+            Visibility::Hidden,
+            (4, 2),
+            None,
+            cell,
+            &Occlusion::default(),
+        );
         assert!(String::from_utf8_lossy(&hidden).contains("a=d,d=i"));
 
-        let restored = state.encode(Visibility::Main, (4, 2), None, cell);
+        let restored = state.encode(Visibility::Main, (4, 2), None, cell, &Occlusion::default());
         let restored = String::from_utf8_lossy(&restored);
         assert!(restored.contains("a=p"));
         assert!(!restored.contains("a=t,t=d"));
@@ -779,6 +1123,7 @@ mod tests {
                 width_px: 8,
                 height_px: 16,
             },
+            &Occlusion::default(),
         );
         assert!(String::from_utf8_lossy(&bytes).contains("\u{1b}[12;33H"));
     }
@@ -796,6 +1141,7 @@ mod tests {
                 width_px: 8,
                 height_px: 16,
             },
+            &Occlusion::default(),
         );
         let image = asset(
             SurfaceGraphicsTarget::Pane {
@@ -818,6 +1164,7 @@ mod tests {
                 width_px: 8,
                 height_px: 16,
             },
+            &Occlusion::default(),
         );
         let bytes = String::from_utf8_lossy(&bytes);
         assert!(bytes.contains("a=p"));
@@ -851,6 +1198,7 @@ mod tests {
                 width_px: 8,
                 height_px: 16,
             },
+            &Occlusion::default(),
         );
         let bytes = String::from_utf8_lossy(&bytes);
         assert!(bytes.contains("a=p"), "{bytes}");
@@ -883,6 +1231,7 @@ mod tests {
                 width_px: 8,
                 height_px: 16,
             },
+            &Occlusion::default(),
         );
 
         state.set_scene(SurfaceGraphicsScene {
@@ -897,6 +1246,7 @@ mod tests {
                 width_px: 8,
                 height_px: 16,
             },
+            &Occlusion::default(),
         ))
         .unwrap();
         assert!(!hidden.contains(&format!("a=d,d=I,i={image_id}")));
@@ -911,6 +1261,7 @@ mod tests {
                 width_px: 8,
                 height_px: 16,
             },
+            &Occlusion::default(),
         ))
         .unwrap();
         assert!(restored.contains("a=p"), "{restored}");
@@ -925,6 +1276,7 @@ mod tests {
                 width_px: 8,
                 height_px: 16,
             },
+            &Occlusion::default(),
         ))
         .unwrap();
         assert!(removed.contains(&format!("a=d,d=I,i={image_id}")));
@@ -962,6 +1314,7 @@ mod tests {
                 width_px: 8,
                 height_px: 16,
             },
+            &Occlusion::default(),
         ))
         .unwrap();
         assert!(bytes.contains("\u{1b}[2;3H"), "{bytes}");
@@ -1004,6 +1357,7 @@ mod tests {
                 width_px: 8,
                 height_px: 16,
             },
+            &Occlusion::default(),
         );
         let bytes = String::from_utf8_lossy(&bytes);
         assert!(bytes.contains(&format!("a=d,d=I,i={image_id}")), "{bytes}");
@@ -1029,6 +1383,7 @@ mod tests {
                 width_px: 8,
                 height_px: 16,
             },
+            &Occlusion::default(),
         );
 
         state.set_scope("endpoint-a:boot-2");
@@ -1062,6 +1417,7 @@ mod tests {
                 width_px: 8,
                 height_px: 16,
             },
+            &Occlusion::default(),
         );
         assert!(String::from_utf8_lossy(&bytes).contains("a=t,t=d"));
     }

@@ -254,15 +254,40 @@ fn git_status_fingerprint_reads_case_insensitive_config_keys() {
     write_fake_tracked_repo(&root);
     std::fs::write(
             root.join(".git/config"),
-            "[Remote \"origin\"] # remote section\n\tFetch = +refs/heads/*:refs/remotes/origin/*\n[Branch \"main\"] ; branch section\n\tRemote = origin\n\tMerge = refs/heads/main\n",
+            "[Remote \"origin\"] # remote section\n\tURL = git@github.com:owner/repo.git\n\tFetch = +refs/heads/*:refs/remotes/origin/*\n[Branch \"main\"] ; branch section\n\tRemote = origin\n\tMerge = refs/heads/main\n",
         )
         .unwrap();
 
     let fingerprint = git_status_fingerprint(&root).unwrap();
 
+    assert_eq!(
+        fingerprint.preferred_repository_remote_url(),
+        Some("git@github.com:owner/repo.git")
+    );
     let upstream = fingerprint.upstream.unwrap();
     assert_eq!(upstream.remote, "origin");
     assert_eq!(upstream.full_ref, "refs/remotes/origin/main");
+
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn git_status_fingerprint_prefers_origin_url_over_tracking_remote() {
+    let root = temp_test_dir("preferred-repository-remote");
+    write_fake_tracked_repo(&root);
+    std::fs::write(
+        root.join(".git/config"),
+        "[remote \"origin\"]\n\turl = https://github.com/owner/product.git\n[remote \"upstream\"]\n\turl = https://github.com/vendor/upstream.git\n\tfetch = +refs/heads/*:refs/remotes/upstream/*\n[branch \"main\"]\n\tremote = upstream\n\tmerge = refs/heads/main\n",
+    )
+    .unwrap();
+
+    let fingerprint = git_status_fingerprint(&root).unwrap();
+
+    assert_eq!(
+        fingerprint.preferred_repository_remote_url(),
+        Some("https://github.com/owner/product.git")
+    );
+    assert_eq!(fingerprint.upstream.unwrap().remote, "upstream");
 
     std::fs::remove_dir_all(root).unwrap();
 }

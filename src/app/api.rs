@@ -2,7 +2,21 @@ use std::time::{Duration, Instant};
 
 mod agent_view;
 mod agents;
+mod collections;
+pub(crate) mod collections_authority;
+pub(crate) mod collections_create;
+pub(crate) use collections::DeferredHostDocumentSnapshot;
+pub(crate) use collections::HostDocumentConfirmationGrant;
+pub(crate) use collections::COLLECTIONS_ACTION_IDEMPOTENCY_PREFIXES;
+pub(crate) mod collections_candidate;
+mod delegations;
+#[cfg(test)]
+pub(crate) mod document_shadow_audit;
 mod env;
+mod extension_invocation;
+pub(crate) mod extension_state;
+mod extension_terminals;
+mod extensions;
 mod integrations;
 mod layouts;
 mod pane_graphics;
@@ -10,6 +24,7 @@ mod panes;
 pub(crate) mod plugins;
 pub(super) mod responses;
 mod session;
+pub(crate) mod spaces_candidate;
 mod tabs;
 mod workspaces;
 mod worktrees;
@@ -56,6 +71,25 @@ impl App {
         cache_updates: Vec<(std::path::PathBuf, crate::workspace::GitStatusCacheEntry)>,
     ) -> bool {
         self.git_refresh_in_flight = false;
+        let projected_identity = |entry: &crate::workspace::GitStatusCacheEntry| {
+            let fingerprint = entry.fingerprint.as_ref();
+            let upstream = fingerprint
+                .and_then(|fingerprint| fingerprint.upstream.as_ref())
+                .map(|upstream| upstream.full_ref.clone());
+            let detached = fingerprint.and_then(|fingerprint| match &fingerprint.head {
+                crate::workspace::GitHeadIdentity::Detached { oid } => Some(oid.clone()),
+                crate::workspace::GitHeadIdentity::Branch { .. } => None,
+            });
+            let preferred_remote = fingerprint
+                .and_then(|fingerprint| fingerprint.preferred_repository_remote_url())
+                .map(str::to_owned);
+            (upstream, detached, preferred_remote)
+        };
+        let projected_identity_changed = cache_updates.iter().any(|(key, entry)| {
+            self.git_status_cache
+                .get(key)
+                .is_none_or(|current| projected_identity(current) != projected_identity(entry))
+        });
         for (key, entry) in cache_updates {
             self.git_status_cache.insert(key, entry);
         }
@@ -67,8 +101,13 @@ impl App {
         }
         let changed = self
             .state
-            .apply_workspace_git_statuses(&self.terminal_runtimes, results);
+            .apply_workspace_git_statuses(&self.terminal_runtimes, results)
+            || projected_identity_changed;
+        // Git identity changes can make a previously unavailable durable
+        // repository scope usable by extension documents.
+        self.apply_bundled_extension_state();
         if changed {
+            self.refresh_collection_documents();
             self.render_dirty.request_generic();
             self.render_notify.notify_one();
         }
@@ -93,10 +132,170 @@ impl App {
                     return Vec::new();
                 }
                 worktree_restore_failed = true;
-                AppEvent::PaneDied { pane_id }
+                AppEvent::PaneDied {
+                    pane_id,
+                    exit_reason: crate::platform::ChildExitReason::Exited,
+                }
             }
             ev => ev,
         };
+        let ev = match ev {
+            AppEvent::ExtensionArtifactStaged(result) => {
+                self.handle_extension_artifact_staged(*result);
+                return Vec::new();
+            }
+            AppEvent::ExtensionGitPackageFinished(result) => {
+                self.handle_extension_git_package_finished(*result);
+                return Vec::new();
+            }
+            AppEvent::ExtensionPackageCandidateReady(result) => {
+                self.handle_extension_package_candidate_ready(*result);
+                return Vec::new();
+            }
+            AppEvent::ExtensionPackageCandidateFinished(result) => {
+                self.handle_extension_package_candidate_finished(*result);
+                return Vec::new();
+            }
+            AppEvent::ExtensionServiceFabricTimeout { attempt_id } => {
+                self.handle_extension_service_fabric_timeout(attempt_id);
+                return Vec::new();
+            }
+            AppEvent::ExtensionCatalogCapacityAvailable => {
+                if self.extension_catalog_rebuild_pending {
+                    self.rebuild_extension_catalogs();
+                }
+                return Vec::new();
+            }
+            AppEvent::ExtensionHostStateCall(request) => {
+                self.handle_extension_host_state_call(*request);
+                return Vec::new();
+            }
+            AppEvent::ExtensionHostTerminalsCall(request) => {
+                self.handle_extension_host_terminals_call(*request);
+                return Vec::new();
+            }
+            AppEvent::ExtensionStatePersisted(result) => {
+                self.handle_extension_state_persisted(*result);
+                return Vec::new();
+            }
+            AppEvent::CollectionsCheckpointPersisted(result) => {
+                self.finish_collections_checkpoint(*result);
+                return Vec::new();
+            }
+            AppEvent::CollectionsCreateCheckpointPersisted(result) => {
+                self.finish_collections_create_checkpoint(*result);
+                return Vec::new();
+            }
+            AppEvent::HostDocumentProviderActionFinished {
+                request_id,
+                namespace,
+                scope_id,
+                generation,
+                revision,
+                holds_action_slot,
+                result,
+                respond_to,
+            } => {
+                if holds_action_slot {
+                    crate::extension_service::complete_host_document_provider_action();
+                }
+                let still_current = self.host_document_services.generation(&namespace)
+                    == Some(generation)
+                    && self
+                        .host_document_request_watermarks
+                        .get(&(namespace, scope_id))
+                        .is_some_and(|watermark| *watermark == (generation, revision));
+                let result = if still_current {
+                    result
+                } else {
+                    Err("document provider action was retired".into())
+                };
+                if result.is_ok() {
+                    self.refresh_collection_documents();
+                }
+                let response = match result {
+                    Ok(()) => responses::encode_success(
+                        request_id,
+                        crate::api::schema::ResponseResult::Ok {},
+                    ),
+                    Err(error) => {
+                        responses::encode_error(request_id, "host_document_action_rejected", &error)
+                    }
+                };
+                let _ = respond_to.send(response);
+                return Vec::new();
+            }
+            AppEvent::HostRelationshipsDocumentFinished(result) => {
+                self.handle_host_relationships_document_result(*result);
+                return Vec::new();
+            }
+            AppEvent::HostAgentActivityDocumentFinished(result) => {
+                self.handle_host_agent_activity_document_result(*result);
+                return Vec::new();
+            }
+            AppEvent::HostDocumentRetryDue {
+                namespace,
+                scope_id,
+                generation,
+                revision,
+            } => {
+                let retry = (namespace.clone(), scope_id.clone(), generation, revision);
+                if self.host_document_retry_scheduled.remove(&retry) {
+                    let key = (namespace, scope_id);
+                    let snapshot = self.host_document_retry_snapshots.get(&key).cloned();
+                    match snapshot {
+                        Some(crate::app::api::DeferredHostDocumentSnapshot::TerminalGroups(
+                            snapshot,
+                        )) if (snapshot.generation, snapshot.revision)
+                            == (generation, revision) =>
+                        {
+                            self.host_document_retry_order
+                                .retain(|queued| queued != &key);
+                            self.host_document_retry_order.push_front(key);
+                            self.retry_one_host_document_render();
+                        }
+                        Some(crate::app::api::DeferredHostDocumentSnapshot::TerminalGroups(
+                            snapshot,
+                        )) => {
+                            self.schedule_host_document_render_retry(key, snapshot);
+                        }
+                        Some(_) | None => {}
+                    }
+                }
+                return Vec::new();
+            }
+            AppEvent::HostSemanticDocumentRetryDue { namespace, epoch } => {
+                if self.host_semantic_retry_epochs.get(&namespace) == Some(&epoch) {
+                    self.host_semantic_retry_scheduled.remove(&namespace);
+                    if namespace == crate::first_party::delegation::NAMESPACE {
+                        self.refresh_relationships_document();
+                    } else if namespace == crate::first_party::agent_status::NAMESPACE {
+                        self.refresh_agent_activity_document();
+                    }
+                }
+                return Vec::new();
+            }
+            // HeadlessServer consumes service completions before entering App. The standalone
+            // App loop has no client-shell request owner, so there is nothing to fold here.
+            AppEvent::ExtensionServiceFinished(_) | AppEvent::HostDocumentFinished(_) => {
+                return Vec::new()
+            }
+            ev => ev,
+        };
+
+        let refresh_host_documents = matches!(
+            &ev,
+            AppEvent::PaneDied { .. }
+                | AppEvent::StateChanged { .. }
+                | AppEvent::AgentProcessDetected { .. }
+                | AppEvent::AgentSessionReported { .. }
+                | AppEvent::HookMetadataReported { .. }
+                | AppEvent::HookStateReported { .. }
+                | AppEvent::HookAuthorityCleared { .. }
+                | AppEvent::HookAgentReleased { .. }
+                | AppEvent::TerminalCwdReported { .. }
+        );
+
         if matches!(
             &ev,
             AppEvent::TerminalBell { .. } | AppEvent::ClipboardWrite { .. }
@@ -164,7 +363,7 @@ impl App {
         }
 
         let mut worktree_restore_updates = Vec::new();
-        if let AppEvent::PaneDied { pane_id } = &ev {
+        if let AppEvent::PaneDied { pane_id, .. } = &ev {
             if self
                 .state
                 .popup_pane
@@ -201,6 +400,7 @@ impl App {
                         false
                     };
                     if !restore_failed {
+                        self.refresh_agent_activity_document();
                         return worktree_restore_updates;
                     }
                 }
@@ -219,12 +419,24 @@ impl App {
                     self.overlay_panes.remove(pane_id);
                     self.render_dirty.request_generic();
                     self.render_notify.notify_one();
+                    self.refresh_agent_activity_document();
                     return worktree_restore_updates;
                 }
             }
         }
 
-        let overlay_state = if let AppEvent::PaneDied { pane_id } = &ev {
+        let checkpointed_pane_exit = matches!(
+            &ev,
+            AppEvent::PaneDied {
+                pane_id,
+                exit_reason,
+            } if exit_reason.requires_session_checkpoint() && self.find_pane(*pane_id).is_some() && !self.overlay_panes.contains_key(pane_id)
+        );
+        if checkpointed_pane_exit {
+            self.checkpoint_session_before_pane_exit();
+        }
+
+        let overlay_state = if let AppEvent::PaneDied { pane_id, .. } = &ev {
             self.overlay_panes.remove(pane_id).map(|overlay| {
                 let was_overlay_active =
                     self.state
@@ -248,7 +460,7 @@ impl App {
             None
         };
 
-        if let AppEvent::PaneDied { pane_id } = &ev {
+        if let AppEvent::PaneDied { pane_id, .. } = &ev {
             if let Some((ws_idx, _)) = self.find_pane(*pane_id) {
                 if let Some(public_pane_id) = self.public_pane_id(ws_idx, *pane_id) {
                     self.emit_event(crate::api::schema::EventEnvelope {
@@ -261,7 +473,7 @@ impl App {
                 }
             }
         }
-        let pane_exit_layout_target = if let AppEvent::PaneDied { pane_id } = &ev {
+        let pane_exit_layout_target = if let AppEvent::PaneDied { pane_id, .. } = &ev {
             self.find_pane(*pane_id).and_then(|(ws_idx, _)| {
                 self.layout_update_target_after_pane_removal(ws_idx, *pane_id)
             })
@@ -300,6 +512,9 @@ impl App {
         let mut pane_updates = self.state.handle_app_event(ev);
         if update_ready.is_some() {
             self.state.latest_release_notes = crate::release_notes::load_latest();
+        }
+        if checkpointed_pane_exit {
+            self.finish_checkpointed_pane_exit();
         }
         if let Some(agents) = manifest_update_agents {
             self.reset_agent_detection_for_agents(&agents);
@@ -348,6 +563,9 @@ impl App {
 
         self.sync_toast_deadline(previous_toast);
         self.shutdown_detached_terminal_runtimes();
+        if refresh_host_documents {
+            self.refresh_collection_documents();
+        }
         pane_updates.extend(worktree_restore_updates);
         pane_updates
     }
@@ -468,7 +686,7 @@ impl App {
         }
         let tab = &mut ws.tabs[overlay.tab_idx];
         if tab.panes.contains_key(&overlay.previous_focus) {
-            tab.layout.focus_pane(overlay.previous_focus);
+            tab.focus_pane(overlay.previous_focus);
         }
         tab.zoomed = overlay.previous_zoomed;
 
@@ -782,7 +1000,7 @@ impl App {
         }
     }
 
-    fn emit_focus_api_events(&mut self, ws_idx: usize, pane_id: crate::layout::PaneId) {
+    pub(crate) fn emit_focus_api_events(&mut self, ws_idx: usize, pane_id: crate::layout::PaneId) {
         self.emit_event(crate::api::schema::EventEnvelope {
             event: crate::api::schema::EventKind::WorkspaceFocused,
             data: crate::api::schema::EventData::WorkspaceFocused {
@@ -873,6 +1091,50 @@ impl App {
         use crate::api::schema::{
             ErrorBody, ErrorResponse, Method, ResponseResult, SuccessResponse,
         };
+
+        let collection_method = matches!(
+            &request.method,
+            Method::CollectionList(_)
+                | Method::CollectionGet(_)
+                | Method::CollectionCreate(_)
+                | Method::CollectionAdd(_)
+                | Method::CollectionPromote(_)
+                | Method::CollectionSelect(_)
+                | Method::CollectionReorder(_)
+                | Method::CollectionArchive(_)
+                | Method::CollectionRestore(_)
+                | Method::CollectionClose(_)
+        );
+        if collection_method && !self.collections_package_runtime_available() {
+            return responses::encode_error(
+                request.id,
+                "collections_authority_unavailable",
+                "the authoritative Collections package is unavailable",
+            );
+        }
+
+        let required_provider = match &request.method {
+            Method::DelegationCreate(_)
+            | Method::DelegationGet(_)
+            | Method::DelegationTree(_)
+            | Method::DelegationRoot(_)
+            | Method::DelegationDescendants(_)
+            | Method::DelegationReparent(_)
+            | Method::DelegationReorder(_) => Some("delegation"),
+            Method::AgentList(_)
+            | Method::AgentGet(_)
+            | Method::AgentViewSet(_)
+            | Method::AgentViewClear(_) => Some("agent-status"),
+            _ => None,
+        };
+        if required_provider.is_some_and(|provider| !self.bundled_extension_enabled(provider, None))
+        {
+            return responses::encode_error(
+                request.id,
+                "extension_disabled",
+                "the required built-in extension is disabled or removed",
+            );
+        }
 
         let response = match request.method {
             Method::ServerStop(_) => {
@@ -988,13 +1250,22 @@ impl App {
                 );
             }
             Method::SessionSnapshot(_) => return self.handle_session_snapshot(request.id),
+            Method::ExtensionStateSnapshotV1(params) => {
+                return self.handle_extension_state_snapshot(request.id, params.namespace);
+            }
+            Method::ExtensionStateTransactV1(transaction) => {
+                return self.handle_extension_state_transact(request.id, transaction);
+            }
+            Method::ExtensionStateEventsV1(params) => {
+                return self.handle_extension_state_events(request.id, params);
+            }
             Method::WorkspaceList(_) => return self.handle_workspace_list(request.id),
             Method::WorkspaceGet(target) => return self.handle_workspace_get(request.id, target),
             Method::WorkspaceCreate(params) => {
                 return self.handle_workspace_create(request.id, params);
             }
             Method::WorkspaceFocus(target) => {
-                return self.handle_workspace_focus(request.id, target)
+                return self.handle_workspace_focus(request.id, target);
             }
             Method::WorkspaceRename(params) => {
                 return self.handle_workspace_rename(request.id, params);
@@ -1009,7 +1280,7 @@ impl App {
                 return self.handle_workspace_report_metadata(request.id, params);
             }
             Method::WorkspaceClose(target) => {
-                return self.handle_workspace_close(request.id, target)
+                return self.handle_workspace_close(request.id, target);
             }
             Method::WorktreeList(params) => return self.handle_worktree_list(request.id, params),
             Method::WorktreeCreate(params) => {
@@ -1042,7 +1313,7 @@ impl App {
             Method::AgentRename(params) => return self.handle_agent_rename(request.id, params),
             Method::AgentViewSet(params) => return self.handle_agent_view_set(request.id, params),
             Method::AgentViewClear(params) => {
-                return self.handle_agent_view_clear(request.id, params)
+                return self.handle_agent_view_clear(request.id, params);
             }
             Method::AgentStart(params) => return self.handle_agent_start(request.id, params),
             Method::AgentPrompt(_) => {
@@ -1062,15 +1333,105 @@ impl App {
             Method::AgentRead(params) => return self.handle_agent_read(request.id, params),
             Method::AgentExplain(target) => return self.handle_agent_explain(request.id, target),
             Method::AgentSendKeys(params) => {
-                return self.handle_agent_send_keys(request.id, params)
+                return self.handle_agent_send_keys(request.id, params);
             }
-            Method::PaneSplit(params) => return self.handle_pane_split(request.id, params),
+            Method::CollectionList(params) => {
+                return self.handle_collection_list(request.id, params)
+            }
+            Method::CollectionGet(params) => return self.handle_collection_get(request.id, params),
+            Method::CollectionCreate(params) => {
+                return self.handle_collection_create(request.id, params)
+            }
+            Method::CollectionAdd(params) => return self.handle_collection_add(request.id, params),
+            Method::CollectionPromote(params) => {
+                return self.handle_collection_promote(request.id, params)
+            }
+            Method::HostDocumentList(params) => {
+                return self.handle_host_document_list(request.id, params)
+            }
+            Method::HostDocumentAction(params) => {
+                let action = match self.authorize_host_document_action(&params) {
+                    Ok(action) => action,
+                    Err(error) => {
+                        return responses::encode_error(
+                            request.id,
+                            "host_document_action_rejected",
+                            &error,
+                        )
+                    }
+                };
+                return match action {
+                    collections::AuthorizedHostDocumentAction::Focus(pane) => {
+                        self.handle_pane_focus(request.id, pane)
+                    }
+                    collections::AuthorizedHostDocumentAction::Interrupt(pane) => self
+                        .handle_pane_send_keys(
+                            request.id,
+                            crate::api::schema::PaneSendKeysParams {
+                                pane_id: pane.pane_id,
+                                keys: vec!["ctrl+c".into()],
+                            },
+                        ),
+                    collections::AuthorizedHostDocumentAction::Provider(_) => {
+                        responses::encode_error(
+                            request.id,
+                            "host_document_action_requires_async_dispatch",
+                            "provider-owned document actions require the server dispatcher",
+                        )
+                    }
+                };
+            }
+            Method::CollectionSelect(params) => {
+                return self.handle_collection_select(request.id, params)
+            }
+            Method::CollectionReorder(params) => {
+                return self.handle_collection_reorder(request.id, params)
+            }
+            Method::CollectionArchive(params) => {
+                return self.handle_collection_archive(request.id, params, true)
+            }
+            Method::CollectionRestore(params) => {
+                return self.handle_collection_archive(request.id, params, false)
+            }
+            Method::CollectionClose(params) => {
+                return self.handle_collection_close(request.id, params)
+            }
+            Method::DelegationCreate(params) => {
+                return self.handle_delegation_create(request.id, params)
+            }
+            Method::DelegationGet(params) => return self.handle_delegation_get(request.id, params),
+            Method::DelegationTree(_) => return self.handle_delegation_tree(request.id),
+            Method::DelegationRoot(params) => {
+                return self.handle_delegation_root(request.id, params)
+            }
+            Method::DelegationDescendants(params) => {
+                return self.handle_delegation_descendants(request.id, params)
+            }
+            Method::DelegationReparent(params) => {
+                return self.handle_delegation_reparent(request.id, params)
+            }
+            Method::DelegationReorder(params) => {
+                return self.handle_delegation_reorder(request.id, params)
+            }
+            Method::PaneSplit(params) => {
+                if let Err(error) = self.admit_new_panes(None, None, 1) {
+                    return responses::encode_error(
+                        request.id,
+                        "resource_limit",
+                        error.to_string(),
+                    );
+                }
+                return self.handle_pane_split(request.id, params);
+            }
             Method::PaneSwap(params) => return self.handle_pane_swap(request.id, params),
             Method::PaneMove(params) => return self.handle_pane_move(request.id, params),
             Method::PaneZoom(params) => return self.handle_pane_zoom(request.id, params),
             Method::PaneLayout(params) => return self.handle_pane_layout(request.id, params),
             Method::PaneProcessInfo(params) => {
                 return self.handle_pane_process_info(request.id, params);
+            }
+            Method::PaneTelemetry(params) => {
+                return self.handle_pane_telemetry(request.id, params);
             }
             Method::LayoutExport(params) => return self.handle_layout_export(request.id, params),
             Method::LayoutApply(params) => return self.handle_layout_apply(request.id, params),
@@ -1101,6 +1462,9 @@ impl App {
             Method::PaneGet(target) => return self.handle_pane_get(request.id, target),
             Method::PaneFocus(target) => return self.handle_pane_focus(request.id, target),
             Method::PaneInputSet(params) => return self.handle_pane_input_set(request.id, params),
+            Method::PaneLinkResolve(params) => {
+                return self.handle_pane_link_resolve(request.id, params);
+            }
             Method::PaneLinkActivate(params) => {
                 return self.handle_pane_link_activate(request.id, params);
             }
@@ -1151,7 +1515,7 @@ impl App {
             }
             Method::PaneSendText(params) => return self.handle_pane_send_text(request.id, params),
             Method::PaneSendInput(params) => {
-                return self.handle_pane_send_input(request.id, params)
+                return self.handle_pane_send_input(request.id, params);
             }
             Method::PaneClose(target) => return self.handle_pane_close(request.id, target),
             Method::PopupClose(_) => {
@@ -1203,6 +1567,76 @@ impl App {
             }
             Method::PluginPaneClose(params) => {
                 return self.handle_plugin_pane_close(request.id, params);
+            }
+            Method::ExtensionList(params) => {
+                return self.handle_extension_list(request.id, params);
+            }
+            Method::ExtensionInstall(params) => {
+                return self.handle_extension_install(request.id, params);
+            }
+            Method::ExtensionEnable(params) => {
+                return self.handle_extension_enable(request.id, params);
+            }
+            Method::ExtensionRemove(params) => {
+                return self.handle_extension_remove(request.id, params);
+            }
+            Method::ExtensionDataDelete(params) => {
+                return self.handle_extension_data_delete(request.id, params);
+            }
+            Method::ExtensionReorder(params) => {
+                return self.handle_extension_reorder(request.id, params);
+            }
+            Method::ExtensionRepositoryOverrideSet(params) => {
+                return self.handle_extension_repository_override_set(request.id, params);
+            }
+            Method::ExtensionUpdate(params) => {
+                return self.handle_extension_update(request.id, params);
+            }
+            Method::ExtensionRollback(params) => {
+                return self.handle_extension_rollback(request.id, params);
+            }
+            Method::ExtensionPackageList(_) => {
+                return self.handle_extension_package_list(request.id);
+            }
+            Method::ExtensionPackageEnable(params) => {
+                return self.handle_extension_package_enable(request.id, params, true);
+            }
+            Method::ExtensionPackageDisable(params) => {
+                return self.handle_extension_package_enable(request.id, params, false);
+            }
+            Method::ExtensionPackageRemove(params) => {
+                return self.handle_extension_package_remove(request.id, params);
+            }
+            Method::ExtensionPackageRollback(params) => {
+                return self.handle_extension_package_rollback(request.id, params);
+            }
+            Method::ExtensionServiceBindingInspect(params) => {
+                return self.handle_extension_service_binding_inspect(request.id, params);
+            }
+            Method::ExtensionServiceBindingApprove(params) => {
+                return self.handle_extension_service_binding_approve(request.id, params);
+            }
+            Method::ExtensionServiceBindingList(_) => {
+                return self.handle_extension_service_binding_list(request.id);
+            }
+            Method::ExtensionServiceBindingRevoke(params) => {
+                return self.handle_extension_service_binding_revoke(request.id, params);
+            }
+            Method::ExtensionServiceBindingInvoke(_) | Method::ExtensionDoctor(_) => {
+                return responses::encode_error(
+                    request.id,
+                    crate::service_fabric::stable_r1_error_code("service_binding_unavailable"),
+                    "extension service invocation requires deferred API dispatch",
+                );
+            }
+            Method::ExtensionPackageInspect(_)
+            | Method::ExtensionPackageInstall(_)
+            | Method::ExtensionPackageUpdate(_) => {
+                return responses::encode_error(
+                    request.id,
+                    "deferred_request_required",
+                    "Git package inspection and activation must run off the server event loop",
+                );
             }
             _ => {
                 return responses::encode_error(
@@ -1724,6 +2158,45 @@ mod tests {
         assert_eq!(response["result"]["process_info"]["pane_id"], target);
     }
 
+    #[tokio::test]
+    async fn pane_telemetry_reports_unavailable_without_conflating_it_with_zero() {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &crate::config::Config::default(),
+            crate::app::AppPolicy::TEST,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        app.state.workspaces = vec![crate::workspace::Workspace::test_new("telemetry")];
+        app.state.ensure_test_terminals();
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let target = app.public_pane_id(0, pane_id).unwrap();
+
+        let response = app.handle_api_request(crate::api::schema::Request {
+            id: "telemetry".into(),
+            method: crate::api::schema::Method::PaneTelemetry(
+                crate::api::schema::PaneTelemetryParams {
+                    pane_id: Some(target.clone()),
+                },
+            ),
+        });
+        let response: serde_json::Value = serde_json::from_str(&response).unwrap();
+
+        assert_eq!(response["result"]["type"], "pane_telemetry");
+        assert_eq!(response["result"]["telemetry"]["pane_id"], target);
+        assert_eq!(
+            response["result"]["telemetry"]["availability"],
+            "unavailable"
+        );
+        assert_eq!(
+            response["result"]["telemetry"]["processes"],
+            serde_json::json!([])
+        );
+        assert!(response.to_string().find("argv").is_none());
+        assert!(response.to_string().find("environ").is_none());
+    }
+
     #[test]
     fn client_window_title_api_reports_no_foreground_client_in_app_mode() {
         let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -1968,6 +2441,7 @@ mod tests {
 
         app.handle_internal_event(AppEvent::PaneDied {
             pane_id: overlay_pane,
+            exit_reason: crate::platform::ChildExitReason::Exited,
         });
 
         let overlay_tab = &app.state.workspaces[0].tabs[0];
@@ -1994,7 +2468,10 @@ mod tests {
         app.state.ensure_test_terminals();
         let tab_id = app.public_tab_id(0, 0).unwrap();
 
-        app.handle_internal_event(AppEvent::PaneDied { pane_id: dead_pane });
+        app.handle_internal_event(AppEvent::PaneDied {
+            pane_id: dead_pane,
+            exit_reason: crate::platform::ChildExitReason::Exited,
+        });
 
         let events = event_hub.events_after(0);
         let pane_exited = events
@@ -2046,7 +2523,13 @@ mod tests {
                 observed_at: std::time::Instant::now(),
             });
 
-            assert!(app.state.terminals[&terminal_id].agent_name.is_none());
+            // The release event is this test's subject; the name outliving the
+            // observation is pinned by
+            // `a_process_exit_observation_alone_does_not_free_the_name`.
+            assert_eq!(
+                app.state.terminals[&terminal_id].agent_name.as_deref(),
+                agent_name
+            );
             assert!(event_hub.events_after(0).iter().any(|(_, event)| matches!(
                 &event.data,
                 crate::api::schema::EventData::PaneAgentDetected {
@@ -2079,7 +2562,7 @@ mod tests {
         terminal.set_detected_state(Some(Agent::Codex), AgentState::Working);
         terminal
             .set_hook_authority_at(
-                "herdr:codex".into(),
+                "vqro:codex".into(),
                 "codex".into(),
                 AgentState::Working,
                 None,
@@ -2102,7 +2585,9 @@ mod tests {
 
         let terminal = &app.state.terminals[&terminal_id];
         assert_eq!(terminal.state, AgentState::Idle);
-        assert!(terminal.agent_name.is_none());
+        // Releasing the registration does not free the name yet; a wrong
+        // observation must not cost a live agent the handle its owner gave it.
+        assert_eq!(terminal.agent_name.as_deref(), Some("reviewer"));
         assert!(event_hub.events_after(0).iter().any(|(_, event)| matches!(
             event.data,
             crate::api::schema::EventData::PaneAgentDetected { released: true, .. }
@@ -2143,6 +2628,7 @@ mod tests {
 
         app.handle_internal_event(AppEvent::PaneDied {
             pane_id: overlay_pane,
+            exit_reason: crate::platform::ChildExitReason::Exited,
         });
 
         let events = event_hub.events_after(0);
@@ -2168,6 +2654,7 @@ mod tests {
 
         app.handle_internal_event(AppEvent::PaneDied {
             pane_id: overlay_pane,
+            exit_reason: crate::platform::ChildExitReason::Exited,
         });
 
         let tab = &app.state.workspaces[0].tabs[0];
@@ -2187,6 +2674,7 @@ mod tests {
 
         app.handle_internal_event(AppEvent::PaneDied {
             pane_id: overlay_pane,
+            exit_reason: crate::platform::ChildExitReason::Exited,
         });
 
         let tab = &app.state.workspaces[0].tabs[0];
@@ -2218,15 +2706,31 @@ mod tests {
             .get_mut(&terminal_id)
             .expect("test terminal should exist");
         terminal.respawn_shell_on_exit = true;
+        terminal.set_detected_state(Some(crate::detect::Agent::Codex), AgentState::Working);
         terminal.set_agent_name("codex".into());
         terminal.set_persisted_agent_session(crate::agent_resume::PersistedAgentSession {
-            source: "herdr:codex".into(),
+            source: "vqro:codex".into(),
             agent: "codex".into(),
             session_ref: crate::agent_resume::AgentSessionRef::id("codex-session")
                 .expect("test session id should be valid"),
         });
+        app.host_document_services =
+            crate::extension_service::HostDocumentServiceCatalog::with_test_document_source_provider(
+                crate::first_party::agent_status::NAMESPACE,
+                1,
+                crate::api::schema::HostDocumentSourceKind::AgentActivity,
+            );
+        app.refresh_agent_activity_document();
+        let previous_revision = app
+            .host_agent_activity_last_desired
+            .as_ref()
+            .expect("initial activity snapshot")
+            .revision;
 
-        app.handle_internal_event(AppEvent::PaneDied { pane_id });
+        app.handle_internal_event(AppEvent::PaneDied {
+            pane_id,
+            exit_reason: crate::platform::ChildExitReason::Exited,
+        });
 
         assert!(
             app.find_pane(pane_id).is_some(),
@@ -2240,6 +2744,14 @@ mod tests {
         assert!(!terminal.respawn_shell_on_exit);
         assert!(terminal.persisted_agent_session.is_none());
         assert!(terminal.agent_name.is_none());
+        let activity = app
+            .host_agent_activity_last_desired
+            .as_ref()
+            .expect("respawn activity snapshot");
+        assert!(activity.revision > previous_revision);
+        assert!(activity.activities.iter().all(|record| {
+            record.activity != crate::extension_contract::HostAgentActivityState::Working
+        }));
 
         for (_, runtime) in app.terminal_runtimes.drain() {
             runtime.shutdown();

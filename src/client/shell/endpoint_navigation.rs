@@ -12,22 +12,42 @@ impl ClientShellState {
     }
 
     pub(super) fn endpoint_workspace_is_draggable(&self, press: &ClientWorkspacePress) -> bool {
-        press.endpoint_id == self.active_endpoint_id
-            && self
-                .snapshot
-                .as_deref()
-                .and_then(|snapshot| {
-                    snapshot
-                        .workspaces
-                        .iter()
-                        .find(|workspace| workspace.workspace_id == press.workspace_id)
-                })
-                .is_some_and(|workspace| {
-                    !workspace
-                        .worktree
-                        .as_ref()
-                        .is_some_and(|worktree| worktree.is_linked_worktree)
-                })
+        if press.endpoint_id != self.active_endpoint_id {
+            return false;
+        }
+        let Some(snapshot) = self.snapshot.as_deref() else {
+            return false;
+        };
+        if let Some(structure) = self.structure.as_deref().filter(|structure| {
+            structure.boot_id == snapshot.boot_id
+                && structure.revision == snapshot.revision
+                && (!structure.repositories.is_empty() || !structure.space_order.is_empty())
+        }) {
+            let host_documents = self
+                .endpoints
+                .iter()
+                .find(|endpoint| endpoint.endpoint_id == self.active_endpoint_id)
+                .and_then(ClientShellEndpoint::current_host_documents);
+            return super::sidebar::workspace_entries_with_structure(
+                snapshot,
+                Some(structure),
+                host_documents,
+                &HashSet::new(),
+            )
+            .into_iter()
+            .filter(|entry| !entry.indented)
+            .any(|entry| snapshot.workspaces[entry.index].workspace_id == press.move_workspace_id);
+        }
+        snapshot
+            .workspaces
+            .iter()
+            .find(|workspace| workspace.workspace_id == press.move_workspace_id)
+            .is_some_and(|workspace| {
+                !workspace
+                    .worktree
+                    .as_ref()
+                    .is_some_and(|worktree| worktree.is_linked_worktree)
+            })
     }
 
     pub(super) fn finish_endpoint_workspace_press(
@@ -59,16 +79,16 @@ impl ClientShellState {
         point: (u16, u16),
         outcome: &mut ClientShellInput,
     ) -> bool {
-        let Some(endpoint_id) = self
+        let Some(hit) = self
             .hits
             .machines
             .iter()
             .find(|hit| super::contains(hit.rect, point))
-            .map(|hit| hit.endpoint_id.clone())
         else {
             return false;
         };
-        if endpoint_id == self.active_endpoint_id {
+        let endpoint_id = hit.endpoint_id.clone();
+        if super::contains(hit.collapse_toggle, point) || endpoint_id == self.active_endpoint_id {
             if !self.collapsed_endpoints.remove(&endpoint_id) {
                 self.collapsed_endpoints.insert(endpoint_id);
             }
@@ -140,17 +160,52 @@ impl ClientShellState {
                         .snapshot
                         .as_deref()
                         .map_or_else(Vec::new, |snapshot| {
-                            render::workspace_entries(snapshot, &HashSet::new())
-                                .into_iter()
-                                .filter_map(|entry| {
-                                    snapshot.workspaces.get(entry.index).map(|workspace| {
-                                        (
-                                            endpoint.endpoint_id.clone(),
-                                            workspace.workspace_id.clone(),
-                                        )
-                                    })
+                            let empty_collapsed_groups = HashSet::new();
+                            let collapsed_groups = self
+                                .collapsed_groups_for_endpoint(&endpoint.endpoint_id)
+                                .unwrap_or(&empty_collapsed_groups);
+                            let collapsed_repositories =
+                                super::endpoint_sidebar::collapsed_repository_ids(
+                                    endpoint,
+                                    collapsed_groups,
+                                );
+                            let structured =
+                                endpoint.current_structure().is_some_and(|structure| {
+                                    !structure.repositories.is_empty()
+                                        || !structure.space_order.is_empty()
+                                });
+                            render::workspace_entries_with_structure(
+                                snapshot,
+                                endpoint.current_structure(),
+                                endpoint.current_host_documents(),
+                                if structured {
+                                    &collapsed_repositories
+                                } else {
+                                    collapsed_groups
+                                },
+                            )
+                            .into_iter()
+                            .filter_map(|entry| {
+                                snapshot.workspaces.get(entry.index).map(|workspace| {
+                                    let repository_collapsed =
+                                        super::endpoint_sidebar::repository_entry_is_collapsed(
+                                            endpoint,
+                                            &entry,
+                                            collapsed_groups,
+                                        );
+                                    (
+                                        endpoint.endpoint_id.clone(),
+                                        super::sidebar::projected_workspace_target(
+                                            snapshot,
+                                            workspace,
+                                            &entry,
+                                            endpoint.current_structure(),
+                                            repository_collapsed,
+                                        ),
+                                    )
                                 })
-                                .collect()
+                            })
+                            .collect()
                         })
                 })
                 .collect::<Vec<_>>();
@@ -187,6 +242,7 @@ impl ClientShellState {
         ) {
             let agents = super::aggregate_navigation::online_agent_targets(
                 &self.endpoints,
+                &self.active_endpoint_id,
                 self.config.agent_panel_sort,
             );
             if agents.is_empty() {

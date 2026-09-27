@@ -1,0 +1,233 @@
+{
+  "contract": "vqro.service-contract.v1",
+  "contract_id": "vqro.extension-health",
+  "contract_version": "1.0.0",
+  "methods": [
+    {
+      "id": "evaluate",
+      "max_request_bytes": 16384,
+      "max_response_bytes": 4096,
+      "request_information": [
+        "vqro.extension.aggregate-health",
+        "vqro.extension.binding-authority",
+        "vqro.extension.package-lifecycle"
+      ],
+      "request_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "bindings": {
+            "additionalProperties": false,
+            "properties": {
+              "ready": {
+                "maximum": 4096,
+                "minimum": 0,
+                "type": "integer"
+              },
+              "revoked": {
+                "maximum": 4096,
+                "minimum": 0,
+                "type": "integer"
+              },
+              "suspended": {
+                "maximum": 4096,
+                "minimum": 0,
+                "type": "integer"
+              },
+              "total": {
+                "maximum": 4096,
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "ready",
+              "revoked",
+              "suspended",
+              "total"
+            ],
+            "type": "object"
+          },
+          "contract": {
+            "const": "vqro.extension-health-observation.v1",
+            "type": "string"
+          },
+          "doctor_edge": {
+            "additionalProperties": false,
+            "properties": {
+              "binding_id": {
+                "maxLength": 128,
+                "minLength": 1,
+                "type": "string"
+              },
+              "binding_revision": {
+                "maximum": 18446744073709551615,
+                "minimum": 1,
+                "type": "integer"
+              },
+              "consumer_manifest_sha256": {
+                "pattern": "^[0-9a-f]{64}$",
+                "type": "string"
+              },
+              "consumer_package_sha256": {
+                "pattern": "^[0-9a-f]{64}$",
+                "type": "string"
+              },
+              "provider_manifest_sha256": {
+                "pattern": "^[0-9a-f]{64}$",
+                "type": "string"
+              },
+              "provider_package_sha256": {
+                "pattern": "^[0-9a-f]{64}$",
+                "type": "string"
+              }
+            },
+            "required": [
+              "binding_id",
+              "binding_revision",
+              "consumer_package_sha256",
+              "consumer_manifest_sha256",
+              "provider_package_sha256",
+              "provider_manifest_sha256"
+            ],
+            "type": "object"
+          },
+          "packages": {
+            "additionalProperties": false,
+            "properties": {
+              "disabled": {
+                "maximum": 1024,
+                "minimum": 0,
+                "type": "integer"
+              },
+              "enabled_ready": {
+                "maximum": 1024,
+                "minimum": 0,
+                "type": "integer"
+              },
+              "enabled_unavailable": {
+                "maximum": 1024,
+                "minimum": 0,
+                "type": "integer"
+              },
+              "total": {
+                "maximum": 1024,
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "disabled",
+              "enabled_ready",
+              "enabled_unavailable",
+              "total"
+            ],
+            "type": "object"
+          },
+          "registry_revision": {
+            "maximum": 18446744073709551615,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "services": {
+            "additionalProperties": false,
+            "properties": {
+              "ready": {
+                "maximum": 32768,
+                "minimum": 0,
+                "type": "integer"
+              },
+              "total": {
+                "maximum": 32768,
+                "minimum": 0,
+                "type": "integer"
+              },
+              "unavailable": {
+                "maximum": 32768,
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "ready",
+              "total",
+              "unavailable"
+            ],
+            "type": "object"
+          }
+        },
+        "required": [
+          "contract",
+          "registry_revision",
+          "packages",
+          "services",
+          "bindings",
+          "doctor_edge"
+        ],
+        "type": "object"
+      },
+      "response_information": [
+        "vqro.extension.normalized-health-findings"
+      ],
+      "response_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "contract": {
+            "const": "vqro.extension-health-findings.v1",
+            "type": "string"
+          },
+          "findings": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "code": {
+                  "enum": [
+                    "binding_revoked",
+                    "binding_suspended",
+                    "package_disabled",
+                    "package_unavailable",
+                    "service_unavailable"
+                  ],
+                  "type": "string"
+                },
+                "count": {
+                  "maximum": 32768,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "severity": {
+                  "enum": [
+                    "error",
+                    "warning"
+                  ],
+                  "type": "string"
+                }
+              },
+              "required": [
+                "code",
+                "severity",
+                "count"
+              ],
+              "type": "object"
+            },
+            "maxItems": 5,
+            "type": "array"
+          },
+          "status": {
+            "enum": [
+              "healthy",
+              "degraded",
+              "unhealthy"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "contract",
+          "status",
+          "findings"
+        ],
+        "type": "object"
+      }
+    }
+  ]
+}

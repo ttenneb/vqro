@@ -489,7 +489,7 @@ mod tests {
         let (_, initial) = runtime.screen_text_snapshot().expect("initial snapshot");
         let (respond_to, response_rx) = mpsc::channel();
         let pending = PendingAltScreenRead::start(
-            TerminalId::alloc(),
+            TerminalId::alloc().expect("test terminal identity"),
             "read".into(),
             respond_to,
             "fallback".into(),

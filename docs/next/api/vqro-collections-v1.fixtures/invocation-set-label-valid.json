@@ -1,0 +1,19 @@
+{
+  "contract": "vqro.collections.action-invocation.v1",
+  "ticket": "ticket:01HX7KZV3Y",
+  "idempotency_key": "collection-set-label:01HX7KZV3Y",
+  "document_revision": 7,
+  "actions_revision": 9,
+  "action_id": "set-label:container_000000000000002a",
+  "expected_store_generation": 2,
+  "expected_namespace_revision": 3,
+  "dependency": {
+    "kind": "container",
+    "container_id": "container_000000000000002a"
+  },
+  "input": {
+    "kind": "set_label",
+    "container_id": "container_000000000000002a",
+    "label": "Workers"
+  }
+}

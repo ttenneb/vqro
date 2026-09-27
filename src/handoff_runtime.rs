@@ -1,5 +1,7 @@
 #[cfg(unix)]
 use serde::{Deserialize, Serialize};
+#[cfg(unix)]
+use std::os::fd::OwnedFd;
 
 /// Long-lived pane runtime transferred during server replacement.
 ///
@@ -12,6 +14,10 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct HandoffRuntimeState {
     pub pane_id: u32,
+    /// Present in handoff v2. Kept raw until the bounded manifest and snapshot
+    /// bijection have been validated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_id: Option<String>,
     pub child_pid: u32,
     pub rows: u16,
     pub cols: u16,
@@ -35,12 +41,17 @@ impl HandoffRuntimeState {
         self.pane_id = pane_id.raw();
         self
     }
+
+    pub fn with_terminal_id(mut self, terminal_id: &crate::terminal::TerminalId) -> Self {
+        self.terminal_id = Some(terminal_id.as_str().to_owned());
+        self
+    }
 }
 
 #[derive(Debug)]
 pub(crate) struct ImportedHandoffRuntime {
     #[cfg(unix)]
-    pub master_fd: std::os::fd::RawFd,
+    pub master_fd: OwnedFd,
     #[cfg(unix)]
     pub state: HandoffRuntimeState,
 }

@@ -185,6 +185,17 @@ impl App {
                     context.focused_pane_id = Some(pane_id.clone());
                     context
                 }),
+            EventData::CollectionUpdated { collection, .. } => self
+                .plugin_context_for_workspace_id(&collection.workspace_id, correlation_id)
+                .unwrap_or_else(|| empty_plugin_context(correlation_id)),
+            EventData::DelegationUpdated { delegation, .. } => delegation
+                .pane_id
+                .as_deref()
+                .and_then(|pane_id| self.plugin_context_for_public_pane_id(pane_id, correlation_id))
+                .unwrap_or_else(|| empty_plugin_context(correlation_id)),
+            EventData::HostDocumentUpdated { .. } | EventData::ExtensionStateCommitted { .. } => {
+                empty_plugin_context(correlation_id)
+            }
         }
     }
 

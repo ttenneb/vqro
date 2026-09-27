@@ -1,0 +1,10 @@
+manifest_version = 1
+id = "example.unknown"
+name = "Unknown"
+version = "1.0.0"
+min_vqro_version = "0.9.0"
+[[services]]
+id = "bad"
+command = ["false"]
+provides = ["future_capability"]
+capabilities = ["future_capability"]

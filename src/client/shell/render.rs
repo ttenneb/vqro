@@ -7,10 +7,15 @@ pub(in crate::client::shell) mod sidebar;
 #[path = "../shell/tabs.rs"]
 mod tabs;
 
-pub(super) use super::agent_sidebar::{ordered_agent_pane_ids, render_agent_panel};
+pub(super) use super::agent_sidebar::{ordered_agent_pane_ids_with_documents, render_agent_panel};
 pub(super) use super::aggregate_navigation::navigator_rows as client_navigator_rows;
-pub(super) use overlays::{render_client_overlay, render_context_menu, render_global_menu};
-pub(super) use sidebar::{render_collapsed_sidebar, render_sidebar, workspace_entries};
+pub(super) use overlays::{
+    render_client_overlay, render_context_menu, render_global_menu, render_pane_contribution,
+    render_pane_contribution_divider, render_terminal_inspector_pending,
+};
+pub(super) use sidebar::{
+    render_collapsed_sidebar, render_sidebar, workspace_entries_with_structure,
+};
 pub(super) use tabs::{render_tab_bar, tab_bar_status_width};
 
 pub(in crate::client::shell) fn render_sidebar_background(
@@ -215,6 +220,7 @@ pub(super) struct ShellRenderState<'a> {
     pub(super) active_endpoint_id: &'a ClientEndpointId,
     pub(super) collapsed_endpoints: &'a HashSet<ClientEndpointId>,
     pub(super) collapsed_groups: &'a HashSet<String>,
+    pub(super) remote_collapsed_groups: &'a HashMap<ClientEndpointId, HashSet<String>>,
     pub(super) workspace_scroll: &'a mut usize,
     pub(super) agent_scroll: &'a mut usize,
     pub(super) tab_scroll: &'a mut usize,
@@ -223,7 +229,8 @@ pub(super) struct ShellRenderState<'a> {
     pub(super) sidebar_collapsed: bool,
     pub(super) sidebar_section_split: f32,
     pub(super) tab_drag_insert_index: Option<usize>,
-    pub(super) selected_workspace_id: Option<&'a str>,
+    pub(super) selected_workspace_id: Option<&'a WorkspaceNavigationTarget>,
+    pub(super) reveal_navigation_workspace: &'a mut bool,
     pub(super) dragged_workspace_id: Option<&'a str>,
     pub(super) workspace_drop_indicator_row: Option<u16>,
 }
@@ -266,12 +273,22 @@ pub(super) fn render_shell(
                 );
             }
         } else if state.sidebar_collapsed {
+            let endpoint = state
+                .endpoints
+                .iter()
+                .find(|endpoint| &endpoint.endpoint_id == state.active_endpoint_id);
+            let structure = endpoint.and_then(|endpoint| endpoint.current_structure());
+            let host_documents = endpoint.and_then(|endpoint| endpoint.current_host_documents());
             render_collapsed_sidebar(
                 buffer,
                 layout.sidebar,
                 snapshot,
+                structure,
+                host_documents,
                 config,
-                state.selected_workspace_id,
+                state
+                    .selected_workspace_id
+                    .map(|target| target.workspace_id.as_str()),
                 &mut hits,
             );
         } else {
@@ -342,9 +359,15 @@ pub(super) fn put_segment(
 }
 
 pub(super) fn put_text(buffer: &mut Buffer, x: u16, y: u16, width: u16, text: &str, style: Style) {
-    if width == 0 || y >= buffer.area.bottom() || x >= buffer.area.right() {
+    if width == 0
+        || y < buffer.area.y
+        || y >= buffer.area.bottom()
+        || x < buffer.area.x
+        || x >= buffer.area.right()
+    {
         return;
     }
+    let width = width.min(buffer.area.right().saturating_sub(x));
     buffer.set_stringn(x, y, text, width as usize, style);
 }
 

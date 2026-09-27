@@ -41,6 +41,9 @@ const MIN_CLIENT_ROWS: u16 = 1;
 /// and cleanup overhead.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(4);
 
+#[cfg(unix)]
+const OBSERVER_WRITE_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// Maximum input payload size (bytes) for a single `ClientMessage::Input`.
 const MAX_INPUT_PAYLOAD: usize = 1024 * 1024; // 1 MB
 const MAX_CLIENT_SHELL_DIMENSION: u16 = 4096;
@@ -91,6 +94,15 @@ fn write_endpoint_rejection(stream: &mut LocalStream, code: &str, message: impl 
     let _ = protocol::write_message(stream, &response);
 }
 
+const MAX_OPTIONAL_CONTROL_BYTES: usize = 64 * 1024;
+
+fn decode_optional_control<T: serde::de::DeserializeOwned>(data: &str) -> Result<T, String> {
+    if data.len() > MAX_OPTIONAL_CONTROL_BYTES {
+        return Err("optional endpoint control exceeds size limit".into());
+    }
+    serde_json::from_str(data).map_err(|error| error.to_string())
+}
+
 fn decode_endpoint_request(request: &str) -> serde_json::Result<DecodedEndpointRequest> {
     let head = serde_json::from_str::<EndpointRequestHead>(request)?;
     if !crate::server::client_commands::supports_client_shell_method_name(&head.method) {
@@ -113,6 +125,8 @@ fn decode_endpoint_request(request: &str) -> serde_json::Result<DecodedEndpointR
 }
 /// Maximum structured input events accepted in one client message.
 const MAX_INPUT_EVENT_BATCH: usize = 4096;
+const MAX_QUEUED_CONTROL_MESSAGES: usize = 256;
+const MAX_QUEUED_CONTROL_BYTES: usize = 8 * 1024 * 1024;
 
 /// Channels owned by the server side of a client writer thread.
 #[derive(Clone, Debug)]
@@ -252,6 +266,7 @@ struct ClientWriterQueue {
 #[derive(Debug, Default)]
 struct ClientWriterQueueState {
     control: VecDeque<Vec<u8>>,
+    control_bytes: usize,
     ordered: VecDeque<Vec<u8>>,
     render: Option<Vec<u8>>,
     senders: usize,
@@ -291,6 +306,18 @@ impl ClientWriterQueue {
         if !state.writer_alive {
             return Err(SendError(data));
         }
+        let exceeds_bound = state.control.len() >= MAX_QUEUED_CONTROL_MESSAGES
+            || state.control_bytes.saturating_add(data.len()) > MAX_QUEUED_CONTROL_BYTES;
+        if exceeds_bound {
+            state.writer_alive = false;
+            state.control.clear();
+            state.control_bytes = 0;
+            state.ordered.clear();
+            state.render = None;
+            self.ready.notify_all();
+            return Err(SendError(data));
+        }
+        state.control_bytes = state.control_bytes.saturating_add(data.len());
         state.control.push_back(data);
         self.ready.notify_one();
         Ok(())
@@ -336,6 +363,7 @@ impl ClientWriterQueue {
         let mut state = self.lock_state();
         loop {
             if let Some(data) = state.control.pop_front() {
+                state.control_bytes = state.control_bytes.saturating_sub(data.len());
                 return Some(ClientWriteItem::Control(data));
             }
             if let Some(data) = state.ordered.pop_front() {
@@ -345,7 +373,7 @@ impl ClientWriterQueue {
             if let Some(data) = state.render.take() {
                 return Some(ClientWriteItem::Render(data));
             }
-            if state.senders == 0 {
+            if !state.writer_alive || state.senders == 0 {
                 return None;
             }
             state = self
@@ -358,6 +386,8 @@ impl ClientWriterQueue {
     fn close_writer(&self) {
         let mut state = self.lock_state();
         state.writer_alive = false;
+        state.control.clear();
+        state.control_bytes = 0;
         state.render = None;
         state.ordered.clear();
         self.ready.notify_all();
@@ -395,6 +425,11 @@ pub(crate) enum ServerEvent {
         endpoint_keybindings: bool,
         mouse_capture: bool,
         surface_active: bool,
+        structure_enabled: bool,
+        host_documents_enabled: bool,
+        pane_viewport_enabled: bool,
+        pane_view_enabled: bool,
+        terminal_views_enabled: bool,
         writer: ClientWriter,
     },
     /// A client sent an input message.
@@ -498,8 +533,38 @@ pub(crate) enum ServerEvent {
     ClientShellMouseCapture { client_id: u64, enabled: bool },
     /// The committed shell asks the server to replay presentation effects before input resumes.
     ClientShellPresentationSync { client_id: u64, token: String },
+    ClientShellPaneViewport {
+        client_id: u64,
+        viewport: crate::protocol::endpoint::ClientPaneViewportRequest,
+    },
+    ClientShellTerminalViewsInterest {
+        client_id: u64,
+        interest: crate::protocol::endpoint::ClientTerminalViewsInterest,
+    },
+    ClientShellPaneViewRequest {
+        client_id: u64,
+        request: crate::protocol::endpoint::ClientPaneViewRequest,
+    },
+    ClientShellPaneViewCancel {
+        client_id: u64,
+        cancel: crate::protocol::endpoint::ClientPaneViewCancel,
+    },
+    ClientShellPaneViewAction {
+        client_id: u64,
+        request: crate::protocol::endpoint::ClientPaneViewActionRequest,
+    },
+    ClientShellPaneViewConfirm {
+        client_id: u64,
+        confirm: crate::protocol::endpoint::ClientPaneViewConfirm,
+    },
     /// A client-owned shell invoked one endpoint operation through this connection.
     ClientShellEndpointRequest {
+        client_id: u64,
+        boot_id: String,
+        request: Box<crate::api::schema::Request>,
+    },
+    /// A negotiated vqro-native API request, separate from the frozen bridge.
+    NativeEndpointRequest {
         client_id: u64,
         boot_id: String,
         request: Box<crate::api::schema::Request>,
@@ -514,6 +579,13 @@ pub(crate) enum ServerEvent {
     },
     /// One chunk of a deferred endpoint operation's final response is ready.
     ClientShellEndpointResponseChunkReady {
+        client_id: u64,
+        boot_id: String,
+        request_id: String,
+        final_chunk: bool,
+        data: Vec<u8>,
+    },
+    NativeEndpointResponseChunkReady {
         client_id: u64,
         boot_id: String,
         request_id: String,
@@ -639,6 +711,58 @@ fn set_client_recv_timeout(
     stream.set_recv_timeout(timeout)
 }
 
+struct ClientShellHandshakeOptions {
+    pixel_mouse: bool,
+    direct_graphics: bool,
+    endpoint_keybindings: bool,
+    mouse_capture: bool,
+    surface_active: bool,
+    structure_enabled: bool,
+    host_documents_enabled: bool,
+    pane_viewport_enabled: bool,
+    pane_view_enabled: bool,
+    terminal_views_enabled: bool,
+    native_api_enabled: bool,
+}
+
+fn client_shell_handshake_options(
+    hello: &crate::protocol::endpoint::EndpointClientHello,
+) -> ClientShellHandshakeOptions {
+    let has = |required: &str| hello.control_kinds.iter().any(|kind| kind == required);
+    ClientShellHandshakeOptions {
+        pixel_mouse: hello.pixel_mouse,
+        direct_graphics: hello.direct_graphics,
+        endpoint_keybindings: hello.endpoint_keybindings,
+        mouse_capture: hello.mouse_capture,
+        surface_active: hello.surface_active,
+        structure_enabled: has(crate::protocol::endpoint::SESSION_STRUCTURE_KIND),
+        host_documents_enabled: has(crate::protocol::endpoint::HOST_DOCUMENTS_KIND),
+        pane_viewport_enabled: has(crate::protocol::endpoint::PANE_VIEWPORT_KIND),
+        pane_view_enabled: [
+            crate::protocol::endpoint::PANE_VIEW_REQUEST_KIND,
+            crate::protocol::endpoint::PANE_VIEW_CANCEL_KIND,
+            crate::protocol::endpoint::PANE_VIEW_RESULT_KIND,
+            crate::protocol::endpoint::PANE_VIEW_ACTION_KIND,
+            crate::protocol::endpoint::PANE_VIEW_ACTION_RESULT_KIND,
+            crate::protocol::endpoint::PANE_VIEW_CONFIRM_KIND,
+        ]
+        .iter()
+        .all(|required| has(required)),
+        terminal_views_enabled: [
+            crate::protocol::endpoint::TERMINAL_VIEWS_INTEREST_KIND,
+            crate::protocol::endpoint::TERMINAL_VIEWS_SURFACE_KIND,
+        ]
+        .iter()
+        .all(|required| has(required)),
+        native_api_enabled: [
+            crate::native_api::NATIVE_API_REQUEST_KIND_V1,
+            crate::native_api::NATIVE_API_RESPONSE_KIND_V1,
+        ]
+        .iter()
+        .all(|required| has(required)),
+    }
+}
+
 /// Handles the client handshake on a blocking thread.
 ///
 /// Reads the `TerminalHello` or `ClientShellHello` message, validates the version,
@@ -754,13 +878,7 @@ pub(crate) fn handle_client_handshake(
                 hello.cell_width_px,
                 hello.cell_height_px,
                 false,
-                Some((
-                    hello.pixel_mouse,
-                    hello.direct_graphics,
-                    hello.endpoint_keybindings,
-                    hello.mouse_capture,
-                    hello.surface_active,
-                )),
+                Some(client_shell_handshake_options(&hello)),
             )
         }
         ClientMessage::ClientShellHello { .. } => {
@@ -801,12 +919,60 @@ pub(crate) fn handle_client_handshake(
         RenderEncoding::TerminalAnsi
     };
     let welcome = if shell_options.is_some() {
-        let welcome = EndpointServerWelcome::compatible(
+        let native_api_enabled = shell_options
+            .as_ref()
+            .is_some_and(|options| options.native_api_enabled);
+        let methods = if native_api_enabled {
             crate::server::client_commands::supported_client_shell_method_names()
                 .iter()
-                .map(|method| (*method).to_owned())
-                .collect(),
-        );
+                .chain(crate::server::client_commands::optional_client_shell_method_names())
+                .copied()
+                .collect::<Vec<_>>()
+        } else {
+            crate::protocol::endpoint_bridge_v1::METHODS.to_vec()
+        };
+        let mut welcome =
+            EndpointServerWelcome::compatible(methods.into_iter().map(str::to_owned).collect());
+        if shell_options
+            .as_ref()
+            .is_some_and(|options| options.structure_enabled)
+        {
+            welcome
+                .capabilities
+                .push(crate::protocol::endpoint::SESSION_STRUCTURE_CAPABILITY.into());
+        }
+        if shell_options
+            .as_ref()
+            .is_some_and(|options| options.pane_viewport_enabled)
+        {
+            welcome
+                .capabilities
+                .push(crate::protocol::endpoint::PANE_VIEWPORT_CAPABILITY.into());
+        }
+        if shell_options
+            .as_ref()
+            .is_some_and(|options| options.pane_view_enabled)
+        {
+            welcome
+                .capabilities
+                .push(crate::protocol::endpoint::PANE_VIEW_CAPABILITY.into());
+        }
+        if shell_options
+            .as_ref()
+            .is_some_and(|options| options.terminal_views_enabled)
+        {
+            welcome
+                .capabilities
+                .push(crate::protocol::endpoint::TERMINAL_VIEWS_CAPABILITY.into());
+        }
+        if shell_options
+            .as_ref()
+            .is_some_and(|options| options.native_api_enabled)
+        {
+            welcome
+                .capabilities
+                .push(crate::native_api::NATIVE_API_CAPABILITY_V1.into());
+        }
         ServerMessage::EndpointControl {
             kind: ENDPOINT_WELCOME_KIND.into(),
             data: serde_json::to_string(&welcome).map_err(io::Error::other)?,
@@ -848,25 +1014,26 @@ pub(crate) fn handle_client_handshake(
 
     // Notify the main loop about the new client.
     let endpoint_control_writer = shell_options.as_ref().map(|_| writer.control.clone());
-    let connected = if let Some((
-        pixel_mouse,
-        direct_graphics,
-        endpoint_keybindings,
-        mouse_capture,
-        surface_active,
-    )) = shell_options
-    {
+    let native_api_enabled = shell_options
+        .as_ref()
+        .is_some_and(|options| options.native_api_enabled);
+    let connected = if let Some(options) = shell_options {
         ServerEvent::ClientShellConnected {
             client_id,
             surface_cols: client_cols,
             surface_rows: client_rows,
             cell_width_px,
             cell_height_px,
-            pixel_mouse,
-            direct_graphics,
-            endpoint_keybindings,
-            mouse_capture,
-            surface_active,
+            pixel_mouse: options.pixel_mouse,
+            direct_graphics: options.direct_graphics,
+            endpoint_keybindings: options.endpoint_keybindings,
+            mouse_capture: options.mouse_capture,
+            surface_active: options.surface_active,
+            structure_enabled: options.structure_enabled,
+            host_documents_enabled: options.host_documents_enabled,
+            pane_viewport_enabled: options.pane_viewport_enabled,
+            pane_view_enabled: options.pane_view_enabled,
+            terminal_views_enabled: options.terminal_views_enabled,
             writer,
         }
     } else {
@@ -897,6 +1064,7 @@ pub(crate) fn handle_client_handshake(
         server_event_tx,
         should_quit,
         endpoint_control_writer.as_ref(),
+        native_api_enabled,
     )
 }
 
@@ -940,7 +1108,11 @@ fn client_writer_loop(
 }
 
 fn write_framed_bytes(stream: &mut LocalStream, data: &[u8]) -> bool {
-    if let Err(err) = stream.write_all(data) {
+    #[cfg(unix)]
+    let result = crate::platform::write_client_stream(stream, data);
+    #[cfg(windows)]
+    let result = stream.write_all(data);
+    if let Err(err) = result {
         debug!(err = %err, "client write failed, closing writer");
         return false;
     }
@@ -959,7 +1131,14 @@ fn client_read_loop(
     server_event_tx: &mpsc::Sender<ServerEvent>,
     should_quit: &Arc<AtomicBool>,
 ) -> io::Result<()> {
-    client_read_loop_with_endpoint_controls(stream, client_id, server_event_tx, should_quit, None)
+    client_read_loop_with_endpoint_controls(
+        stream,
+        client_id,
+        server_event_tx,
+        should_quit,
+        None,
+        false,
+    )
 }
 
 fn client_read_loop_with_endpoint_controls(
@@ -968,10 +1147,17 @@ fn client_read_loop_with_endpoint_controls(
     server_event_tx: &mpsc::Sender<ServerEvent>,
     should_quit: &Arc<AtomicBool>,
     endpoint_control_writer: Option<&ClientControlWriter>,
+    native_api_enabled: bool,
 ) -> io::Result<()> {
     while !should_quit.load(Ordering::Acquire) {
-        let msg: ClientMessage = match protocol::read_message(&mut stream, MAX_GRAPHICS_FRAME_SIZE)
-        {
+        #[cfg(unix)]
+        let message = protocol::read_message(
+            &mut crate::platform::ClientStreamReader(&mut stream),
+            MAX_GRAPHICS_FRAME_SIZE,
+        );
+        #[cfg(windows)]
+        let message = protocol::read_message(&mut stream, MAX_GRAPHICS_FRAME_SIZE);
+        let msg: ClientMessage = match message {
             Ok(msg) => msg,
             Err(protocol::FramingError::UnexpectedEof) => {
                 // Client disconnected.
@@ -1027,6 +1213,20 @@ fn client_read_loop_with_endpoint_controls(
                 }
             }
             ClientMessage::ObserveTerminal { target } => {
+                #[cfg(unix)]
+                {
+                    // macOS Unix sockets can block even with per-send MSG_DONTWAIT.
+                    // ClientStreamReader preserves blocking reads on the shared socket.
+                    let configured = stream
+                        .set_send_timeout(Some(OBSERVER_WRITE_TIMEOUT))
+                        .and_then(|()| stream.set_nonblocking(true));
+                    if let Err(err) = configured {
+                        let _ = crate::platform::shutdown_client_stream(&stream);
+                        let _ = server_event_tx
+                            .blocking_send(ServerEvent::ClientDisconnected { client_id });
+                        return Err(err);
+                    }
+                }
                 ServerEvent::ClientObserveTerminal { client_id, target }
             }
             ClientMessage::ControlTerminal { target, takeover } => {
@@ -1282,6 +1482,184 @@ fn client_read_loop_with_endpoint_controls(
                 }
             }
             ClientMessage::EndpointControl { kind, data }
+                if kind == crate::native_api::NATIVE_API_REQUEST_KIND_V1 && native_api_enabled =>
+            {
+                if data.len() > crate::server::client_commands::MAX_ENDPOINT_COMMAND_BYTES {
+                    warn!(client_id, "oversized native API endpoint request");
+                    let head = serde_json::from_str::<serde_json::Value>(&data).ok();
+                    let boot_id = head
+                        .as_ref()
+                        .and_then(|value| value.get("boot_id"))
+                        .and_then(serde_json::Value::as_str);
+                    let request_id = head
+                        .as_ref()
+                        .and_then(|value| value.pointer("/request/id"))
+                        .and_then(serde_json::Value::as_str);
+                    if let (Some(boot_id), Some(request_id), Some(writer)) =
+                        (boot_id, request_id, endpoint_control_writer)
+                    {
+                        if boot_id.len()
+                            > crate::server::client_commands::MAX_ENDPOINT_BOOT_ID_BYTES
+                            || request_id.len()
+                                > crate::server::client_commands::MAX_ENDPOINT_REQUEST_ID_BYTES
+                        {
+                            continue;
+                        }
+                        let response = crate::server::client_commands::error_response(
+                            request_id.to_owned(),
+                            "request_too_large",
+                            "native API endpoint request exceeds the byte limit",
+                        );
+                        if let Ok(message) = crate::native_api::response_chunk_message(
+                            boot_id.to_owned(),
+                            request_id.to_owned(),
+                            true,
+                            response.as_bytes(),
+                        ) {
+                            let mut framed = Vec::new();
+                            if protocol::write_message(&mut framed, &message).is_ok() {
+                                let _ = writer.send(framed);
+                            }
+                        }
+                    }
+                    continue;
+                }
+                let envelope: crate::native_api::NativeEndpointRequestV1 =
+                    match serde_json::from_str(&data) {
+                        Ok(envelope) => envelope,
+                        Err(error) => {
+                            warn!(client_id, %error, "invalid native API endpoint request");
+                            let head = serde_json::from_str::<serde_json::Value>(&data).ok();
+                            let boot_id = head
+                                .as_ref()
+                                .and_then(|value| value.get("boot_id"))
+                                .and_then(serde_json::Value::as_str);
+                            let request_id = head
+                                .as_ref()
+                                .and_then(|value| value.pointer("/request/id"))
+                                .and_then(serde_json::Value::as_str);
+                            if let (Some(boot_id), Some(request_id), Some(writer)) =
+                                (boot_id, request_id, endpoint_control_writer)
+                            {
+                                if boot_id.len()
+                                    <= crate::server::client_commands::MAX_ENDPOINT_BOOT_ID_BYTES
+                                    && request_id.len()
+                                        <= crate::server::client_commands::MAX_ENDPOINT_REQUEST_ID_BYTES
+                                {
+                                    let response = crate::server::client_commands::error_response(
+                                        request_id.to_owned(),
+                                        "invalid_request",
+                                        error.to_string(),
+                                    );
+                                    if let Ok(message) = crate::native_api::response_chunk_message(
+                                        boot_id.to_owned(),
+                                        request_id.to_owned(),
+                                        true,
+                                        response.as_bytes(),
+                                    ) {
+                                        let mut framed = Vec::new();
+                                        if protocol::write_message(&mut framed, &message).is_ok() {
+                                            let _ = writer.send(framed);
+                                        }
+                                    }
+                                }
+                            }
+                            continue;
+                        }
+                    };
+                if envelope.boot_id.len()
+                    > crate::server::client_commands::MAX_ENDPOINT_BOOT_ID_BYTES
+                    || envelope.request.id.len()
+                        > crate::server::client_commands::MAX_ENDPOINT_REQUEST_ID_BYTES
+                {
+                    warn!(client_id, "oversized native API endpoint identity");
+                    continue;
+                }
+                ServerEvent::NativeEndpointRequest {
+                    client_id,
+                    boot_id: envelope.boot_id,
+                    request: Box::new(envelope.request),
+                }
+            }
+            ClientMessage::EndpointControl { kind, data }
+                if kind == crate::protocol::endpoint::PANE_VIEW_REQUEST_KIND =>
+            {
+                let request = match decode_optional_control(&data) {
+                    Ok(request) => request,
+                    Err(error) => {
+                        warn!(client_id, %error, "invalid pane view request");
+                        continue;
+                    }
+                };
+                ServerEvent::ClientShellPaneViewRequest { client_id, request }
+            }
+            ClientMessage::EndpointControl { kind, data }
+                if kind == crate::protocol::endpoint::PANE_VIEW_CANCEL_KIND =>
+            {
+                let cancel = match decode_optional_control(&data) {
+                    Ok(cancel) => cancel,
+                    Err(error) => {
+                        warn!(client_id, %error, "invalid pane view cancellation");
+                        continue;
+                    }
+                };
+                ServerEvent::ClientShellPaneViewCancel { client_id, cancel }
+            }
+            ClientMessage::EndpointControl { kind, data }
+                if kind == crate::protocol::endpoint::PANE_VIEW_ACTION_KIND =>
+            {
+                let request = match decode_optional_control(&data) {
+                    Ok(request) => request,
+                    Err(error) => {
+                        warn!(client_id, %error, "invalid pane view action");
+                        continue;
+                    }
+                };
+                ServerEvent::ClientShellPaneViewAction { client_id, request }
+            }
+            ClientMessage::EndpointControl { kind, data }
+                if kind == crate::protocol::endpoint::PANE_VIEW_CONFIRM_KIND =>
+            {
+                let confirm = match decode_optional_control(&data) {
+                    Ok(confirm) => confirm,
+                    Err(error) => {
+                        warn!(client_id, %error, "invalid pane view confirmation");
+                        continue;
+                    }
+                };
+                ServerEvent::ClientShellPaneViewConfirm { client_id, confirm }
+            }
+            ClientMessage::EndpointControl { kind, data }
+                if kind == crate::protocol::endpoint::TERMINAL_VIEWS_INTEREST_KIND =>
+            {
+                let interest = match decode_optional_control(&data) {
+                    Ok(interest) => interest,
+                    Err(error) => {
+                        warn!(client_id, %error, "invalid terminal views interest");
+                        continue;
+                    }
+                };
+                ServerEvent::ClientShellTerminalViewsInterest {
+                    client_id,
+                    interest,
+                }
+            }
+            ClientMessage::EndpointControl { kind, data }
+                if kind == crate::protocol::endpoint::PANE_VIEWPORT_KIND =>
+            {
+                let viewport = match decode_optional_control(&data) {
+                    Ok(viewport) => viewport,
+                    Err(error) => {
+                        warn!(client_id, %error, "invalid pane contribution viewport");
+                        continue;
+                    }
+                };
+                ServerEvent::ClientShellPaneViewport {
+                    client_id,
+                    viewport,
+                }
+            }
+            ClientMessage::EndpointControl { kind, data }
                 if kind == crate::protocol::endpoint::PRESENTATION_EFFECTS_SYNC_KIND =>
             {
                 ServerEvent::ClientShellPresentationSync {
@@ -1421,6 +1799,7 @@ mod tests {
             surface_codecs: vec![crate::protocol::endpoint::SURFACE_CODEC_V1.into()],
             input_codecs: vec![crate::protocol::endpoint::INPUT_CODEC_V1.into()],
             blob_codecs: vec![crate::protocol::endpoint::BLOB_CODEC_V1.into()],
+            control_kinds: Vec::new(),
         };
         ClientMessage::EndpointControl {
             kind: ENDPOINT_HELLO_KIND.into(),
@@ -1491,6 +1870,19 @@ mod tests {
             writer.render.try_send(second),
             Err(TrySendError::Full(_))
         ));
+    }
+
+    #[test]
+    fn client_writer_disconnects_instead_of_growing_control_queue_without_bound() {
+        let (writer, queue) = test_queue_writer();
+        for _ in 0..MAX_QUEUED_CONTROL_MESSAGES {
+            writer.control.send(vec![1]).unwrap();
+        }
+        assert!(writer.control.send(vec![2]).is_err());
+        let state = queue.lock_state();
+        assert!(!state.writer_alive);
+        assert!(state.control.is_empty());
+        assert_eq!(state.control_bytes, 0);
     }
 
     #[test]
@@ -1639,6 +2031,109 @@ mod tests {
             writer.render.try_send(vec![b'z']),
             Err(TrySendError::Disconnected(_))
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn observer_write_timeout_resets_when_sending_makes_progress() {
+        use std::io::Read as _;
+
+        let (mut client, mut server, _path) = local_stream_pair("slow-observer");
+        server
+            .set_send_timeout(Some(Duration::from_millis(100)))
+            .unwrap();
+        server.set_nonblocking(true).unwrap();
+        let worker = std::thread::spawn(move || {
+            assert!(write_framed_bytes(&mut server, &vec![b'x'; 1024 * 1024]));
+        });
+        client
+            .set_recv_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+        let mut received = 0;
+        let mut buffer = [0; 16 * 1024];
+        while received < 1024 * 1024 {
+            let count = client.read(&mut buffer).unwrap();
+            assert_ne!(count, 0, "observer disconnected while making progress");
+            received += count;
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        worker.join().unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stalled_observer_timeout_releases_writer_and_reader() {
+        let (mut client, server, _path) = local_stream_pair("stalled-observer");
+        let writer_stream = server.try_clone().expect("clone writer stream");
+        let (writer, queue) = test_queue_writer();
+        let (events, event_rx) = mpsc::channel(8);
+        let reader_events = events.clone();
+        let (reader_done_tx, reader_done) = std::sync::mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            let result = client_read_loop(
+                server,
+                14,
+                &reader_events,
+                &Arc::new(AtomicBool::new(false)),
+            );
+            let _ = reader_done_tx.send(result);
+        });
+        protocol::write_message(
+            &mut client,
+            &ClientMessage::ObserveTerminal {
+                target: "w1:p1".into(),
+            },
+        )
+        .expect("observe request");
+        let mut event_rx = event_rx;
+        assert!(matches!(
+            event_rx.blocking_recv(),
+            Some(ServerEvent::ClientObserveTerminal { client_id: 14, .. })
+        ));
+        let LocalStream::UdSocket(socket) = &writer_stream;
+        assert_eq!(
+            socket.inner().write_timeout().unwrap(),
+            Some(Duration::from_secs(30))
+        );
+        assert_eq!(socket.inner().read_timeout().unwrap(), None);
+        let mut resize = Vec::new();
+        protocol::write_message(
+            &mut resize,
+            &ClientMessage::Resize {
+                cols: 80,
+                rows: 24,
+                cell_width_px: 0,
+                cell_height_px: 0,
+                pixel_mouse: false,
+            },
+        )
+        .unwrap();
+        client.write_all(&resize[..2]).unwrap();
+        std::thread::sleep(Duration::from_millis(20));
+        client.write_all(&resize[2..]).unwrap();
+        assert!(matches!(
+            event_rx.blocking_recv(),
+            Some(ServerEvent::ClientResize { client_id: 14, .. })
+        ));
+        writer_stream
+            .set_send_timeout(Some(Duration::from_millis(200)))
+            .unwrap();
+        let (writer_done_tx, writer_done) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            client_writer_loop(writer_stream, 14, queue, events);
+            let _ = writer_done_tx.send(());
+        });
+        writer.render.try_send(vec![0; 4 * 1024 * 1024]).unwrap();
+        writer_done
+            .recv_timeout(Duration::from_millis(350))
+            .expect("writer timed out");
+        reader_done
+            .recv_timeout(Duration::from_secs(2))
+            .expect("reader released")
+            .unwrap();
+        worker.join().unwrap();
+        reader.join().unwrap();
+        assert!(writer.control.send(vec![1]).is_err());
     }
 
     #[test]
@@ -1797,6 +2292,32 @@ mod tests {
     }
 
     #[test]
+    fn pane_view_negotiation_requires_every_action_confirmation_and_cancel_control() {
+        let ClientMessage::EndpointControl { data, .. } = endpoint_hello(80, 29) else {
+            unreachable!()
+        };
+        let mut hello: EndpointClientHello = serde_json::from_str(&data).unwrap();
+        hello.control_kinds.extend(
+            [
+                crate::protocol::endpoint::PANE_VIEW_REQUEST_KIND,
+                crate::protocol::endpoint::PANE_VIEW_RESULT_KIND,
+                crate::protocol::endpoint::PANE_VIEW_ACTION_RESULT_KIND,
+            ]
+            .map(str::to_owned),
+        );
+        assert!(!client_shell_handshake_options(&hello).pane_view_enabled);
+        hello.control_kinds.extend(
+            [
+                crate::protocol::endpoint::PANE_VIEW_CANCEL_KIND,
+                crate::protocol::endpoint::PANE_VIEW_ACTION_KIND,
+                crate::protocol::endpoint::PANE_VIEW_CONFIRM_KIND,
+            ]
+            .map(str::to_owned),
+        );
+        assert!(client_shell_handshake_options(&hello).pane_view_enabled);
+    }
+
+    #[test]
     fn dedicated_client_shell_handshake_uses_surface_viewport() {
         let (mut client_stream, server_stream, _path) = local_stream_pair("client-shell-handshake");
         let (server_event_tx, mut server_event_rx) = mpsc::channel(4);
@@ -1806,14 +2327,28 @@ mod tests {
             handle_client_handshake(server_stream, 43, &server_event_tx, &handshake_quit)
         });
 
-        protocol::write_message(&mut client_stream, &endpoint_hello(80, 29))
-            .expect("write shell hello");
+        let mut hello = endpoint_hello(80, 29);
+        let ClientMessage::EndpointControl { data, .. } = &mut hello else {
+            unreachable!("endpoint hello helper always returns endpoint control");
+        };
+        let mut payload: EndpointClientHello = serde_json::from_str(data).unwrap();
+        payload.control_kinds.extend([
+            crate::protocol::endpoint::HOST_DOCUMENTS_KIND.into(),
+            crate::native_api::NATIVE_API_REQUEST_KIND_V1.into(),
+            crate::native_api::NATIVE_API_RESPONSE_KIND_V1.into(),
+        ]);
+        *data = serde_json::to_string(&payload).unwrap();
+        protocol::write_message(&mut client_stream, &hello).expect("write shell hello");
 
         let welcome: ServerMessage =
             protocol::read_message(&mut client_stream, MAX_FRAME_SIZE).expect("read welcome");
         let welcome = endpoint_welcome(welcome);
         assert_eq!(welcome.generation, ENDPOINT_PROTOCOL_GENERATION);
         assert!(welcome.error.is_none());
+        assert!(welcome
+            .capabilities
+            .iter()
+            .any(|capability| capability == crate::native_api::NATIVE_API_CAPABILITY_V1));
         match server_event_rx
             .blocking_recv()
             .expect("client shell connected event")
@@ -1829,6 +2364,11 @@ mod tests {
                 endpoint_keybindings,
                 mouse_capture,
                 surface_active,
+                structure_enabled,
+                host_documents_enabled,
+                pane_viewport_enabled,
+                pane_view_enabled,
+                terminal_views_enabled,
                 writer,
             } => {
                 assert_eq!(client_id, 43);
@@ -1839,6 +2379,11 @@ mod tests {
                 assert!(endpoint_keybindings);
                 assert!(mouse_capture);
                 assert!(surface_active);
+                assert!(!structure_enabled);
+                assert!(host_documents_enabled);
+                assert!(!terminal_views_enabled);
+                assert!(!pane_viewport_enabled);
+                assert!(!pane_view_enabled);
                 drop(writer);
             }
             other => panic!("expected ClientShellConnected, got {other:?}"),
@@ -1944,6 +2489,127 @@ mod tests {
             .join()
             .expect("read thread join")
             .expect("read thread result");
+    }
+
+    #[test]
+    fn client_read_loop_decodes_pane_contribution_controls() {
+        let (mut client_stream, server_stream, _path) =
+            local_stream_pair("client-read-pane-contribution-controls");
+        let (server_event_tx, mut server_event_rx) = mpsc::channel(8);
+        let should_quit = Arc::new(AtomicBool::new(false));
+        let read_quit = should_quit.clone();
+        let handle = std::thread::spawn(move || {
+            client_read_loop(server_stream, 7, &server_event_tx, &read_quit)
+        });
+
+        let controls = [
+            (
+                crate::protocol::endpoint::PANE_VIEW_REQUEST_KIND,
+                serde_json::to_string(&crate::protocol::endpoint::ClientPaneViewRequest {
+                    boot_id: "boot".into(),
+                    projection_revision: 2,
+                    request_id: "view".into(),
+                    pane_id: "w1:p1".into(),
+                    contribution_revision: 3,
+                })
+                .unwrap(),
+            ),
+            (
+                crate::protocol::endpoint::PANE_VIEW_CANCEL_KIND,
+                serde_json::to_string(&crate::protocol::endpoint::ClientPaneViewCancel {
+                    boot_id: "boot".into(),
+                    request_id: "view".into(),
+                    pane_id: "w1:p1".into(),
+                    contribution_revision: 3,
+                })
+                .unwrap(),
+            ),
+            (
+                crate::protocol::endpoint::PANE_VIEW_ACTION_KIND,
+                serde_json::to_string(&crate::protocol::endpoint::ClientPaneViewActionRequest {
+                    boot_id: "boot".into(),
+                    projection_revision: 2,
+                    request_id: "action".into(),
+                    pane_id: "w1:p1".into(),
+                    contribution_revision: 3,
+                    owner_service_id: "test.service".into(),
+                    service_generation: 4,
+                    action_id: "terminal.interrupt".into(),
+                })
+                .unwrap(),
+            ),
+            (
+                crate::protocol::endpoint::PANE_VIEW_CONFIRM_KIND,
+                serde_json::to_string(&crate::protocol::endpoint::ClientPaneViewConfirm {
+                    boot_id: "boot".into(),
+                    confirmation_token: "token".into(),
+                })
+                .unwrap(),
+            ),
+            (
+                crate::protocol::endpoint::PANE_VIEWPORT_KIND,
+                serde_json::to_string(&crate::protocol::endpoint::ClientPaneViewportRequest {
+                    boot_id: "boot".into(),
+                    projection_revision: 2,
+                    pane_id: "w1:p1".into(),
+                    size: Some(crate::protocol::ClientSurfaceSize { cols: 40, rows: 20 }),
+                })
+                .unwrap(),
+            ),
+            (
+                crate::protocol::endpoint::TERMINAL_VIEWS_INTEREST_KIND,
+                serde_json::to_string(&crate::protocol::endpoint::ClientTerminalViewsInterest {
+                    boot_id: "boot".into(),
+                    projection_revision: 2,
+                    views: vec![crate::protocol::endpoint::ClientTerminalViewInterest {
+                        pane_id: "w1:p1".into(),
+                        size: crate::protocol::ClientSurfaceSize { cols: 40, rows: 10 },
+                    }],
+                })
+                .unwrap(),
+            ),
+        ];
+        for (kind, data) in controls {
+            protocol::write_message(
+                &mut client_stream,
+                &ClientMessage::EndpointControl {
+                    kind: kind.into(),
+                    data,
+                },
+            )
+            .unwrap();
+        }
+        protocol::write_message(&mut client_stream, &ClientMessage::Detach).unwrap();
+
+        assert!(matches!(
+            recv_server_event(&mut server_event_rx, "pane view request"),
+            ServerEvent::ClientShellPaneViewRequest { client_id: 7, .. }
+        ));
+        assert!(matches!(
+            recv_server_event(&mut server_event_rx, "pane view cancel"),
+            ServerEvent::ClientShellPaneViewCancel { client_id: 7, .. }
+        ));
+        assert!(matches!(
+            recv_server_event(&mut server_event_rx, "pane view action"),
+            ServerEvent::ClientShellPaneViewAction { client_id: 7, .. }
+        ));
+        assert!(matches!(
+            recv_server_event(&mut server_event_rx, "pane view confirm"),
+            ServerEvent::ClientShellPaneViewConfirm { client_id: 7, .. }
+        ));
+        assert!(matches!(
+            recv_server_event(&mut server_event_rx, "pane viewport"),
+            ServerEvent::ClientShellPaneViewport { client_id: 7, .. }
+        ));
+        assert!(matches!(
+            recv_server_event(&mut server_event_rx, "terminal views interest"),
+            ServerEvent::ClientShellTerminalViewsInterest { client_id: 7, .. }
+        ));
+        assert!(matches!(
+            recv_server_event(&mut server_event_rx, "detach"),
+            ServerEvent::ClientDetach { client_id: 7 }
+        ));
+        handle.join().unwrap().unwrap();
     }
 
     #[test]

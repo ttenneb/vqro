@@ -721,7 +721,7 @@ impl HeadlessServer {
 
         // Save session on exit.
         if self.app.policy.persist_session {
-            self.app.save_session_now();
+            self.app.save_session_on_shutdown();
         }
 
         info!("headless server exiting");
@@ -992,7 +992,98 @@ impl HeadlessServer {
         self.app_client_count() > 0
     }
 
+    fn cancel_client_extension_work(&mut self, client_id: u64) {
+        let identities = self.clients.get(&client_id).into_iter().flat_map(|client| {
+            let view = client.pending_pane_view.as_ref().map(|pending| {
+                crate::extension_service::ExtensionRequestIdentity {
+                    client_id,
+                    boot_id: pending.request.boot_id.clone(),
+                    projection_revision: pending.request.projection_revision,
+                    request_id: pending.request.request_id.clone(),
+                    target_pane_id: pending.request.pane_id.clone(),
+                    contribution_revision: pending.request.contribution_revision,
+                }
+            });
+            let action = client.pending_pane_action.as_ref().map(|pending| {
+                crate::extension_service::ExtensionRequestIdentity {
+                    client_id,
+                    boot_id: pending.boot_id.clone(),
+                    projection_revision: pending.projection_revision,
+                    request_id: pending.request_id.clone(),
+                    target_pane_id: pending.pane_id.clone(),
+                    contribution_revision: pending.contribution_revision,
+                }
+            });
+            view.into_iter().chain(action)
+        });
+        for identity in identities.collect::<Vec<_>>() {
+            self.app.extension_services.cancel(&identity);
+        }
+    }
+
+    fn retire_client_extension_requests(&mut self, reason: &str) {
+        let client_ids = self.clients.keys().copied().collect::<Vec<_>>();
+        for client_id in client_ids {
+            let (pending_view, pending_action) = self
+                .clients
+                .get_mut(&client_id)
+                .map(|client| {
+                    client.pending_pane_confirmation = None;
+                    client.pane_contribution_lease = None;
+                    (
+                        client.pending_pane_view.take(),
+                        client.pending_pane_action.take(),
+                    )
+                })
+                .unwrap_or((None, None));
+            if let Some(pending) = pending_view {
+                let request = pending.request;
+                let response = crate::protocol::endpoint::ServerPaneViewResult {
+                    boot_id: request.boot_id,
+                    projection_revision: request.projection_revision,
+                    request_id: request.request_id,
+                    pane_id: request.pane_id,
+                    contribution_revision: request.contribution_revision,
+                    owner_service_id: pending.service_id,
+                    service_generation: pending.service_generation,
+                    document: None,
+                    actions: Vec::new(),
+                    error: Some(reason.into()),
+                };
+                if let Ok(data) = serde_json::to_string(&response) {
+                    self.send_to_client(
+                        client_id,
+                        crate::protocol::ServerMessage::EndpointControl {
+                            kind: crate::protocol::endpoint::PANE_VIEW_RESULT_KIND.into(),
+                            data,
+                        },
+                    );
+                }
+            }
+            if let Some(request) = pending_action {
+                let response = crate::protocol::endpoint::ServerPaneViewActionResult {
+                    request_id: request.request_id,
+                    pane_id: request.pane_id,
+                    contribution_revision: request.contribution_revision,
+                    action_id: request.action_id,
+                    confirmation_token: None,
+                    error: Some(reason.into()),
+                };
+                if let Ok(data) = serde_json::to_string(&response) {
+                    self.send_to_client(
+                        client_id,
+                        crate::protocol::ServerMessage::EndpointControl {
+                            kind: crate::protocol::endpoint::PANE_VIEW_ACTION_RESULT_KIND.into(),
+                            data,
+                        },
+                    );
+                }
+            }
+        }
+    }
+
     fn remove_client(&mut self, client_id: u64) -> bool {
+        self.cancel_client_extension_work(client_id);
         self.retire_direct_graphics_for_client(client_id);
         let disconnected_focus = self
             .clients
@@ -1946,6 +2037,11 @@ impl HeadlessServer {
                 endpoint_keybindings,
                 mouse_capture,
                 surface_active,
+                structure_enabled,
+                host_documents_enabled,
+                pane_viewport_enabled,
+                pane_view_enabled,
+                terminal_views_enabled,
                 writer,
             } => {
                 if self.handoff_in_progress {
@@ -1990,6 +2086,11 @@ impl HeadlessServer {
                 connection.direct_graphics = direct_graphics;
                 connection.shell_uses_endpoint_keybindings = endpoint_keybindings;
                 connection.shell_mouse_capture = mouse_capture;
+                connection.shell_structure_enabled = structure_enabled;
+                connection.shell_host_documents_enabled = host_documents_enabled;
+                connection.shell_pane_viewport_enabled = pane_viewport_enabled;
+                connection.shell_pane_view_enabled = pane_view_enabled;
+                connection.shell_terminal_views_enabled = terminal_views_enabled;
                 connection.shell_surface_active = surface_active;
                 connection.shell_projection_revision = 1;
                 let config_diagnostic = if endpoint_keybindings {
@@ -2006,6 +2107,39 @@ impl HeadlessServer {
                 );
                 let location =
                     crate::server::clients::ClientShellLocation::from_snapshot(&seed_snapshot);
+                let agent_view = self.app.state.agent_view_override.clone();
+                let projection_message = match agent_view.as_ref() {
+                    Some(view) => match crate::protocol::endpoint::agent_view_projection_message(
+                        &seed_snapshot.boot_id,
+                        seed_snapshot.revision,
+                        Some(view),
+                    ) {
+                        Ok(message) => Some(message),
+                        Err(err) => {
+                            warn!(client_id, err = %err, "failed to encode endpoint agent view");
+                            return false;
+                        }
+                    },
+                    None => None,
+                };
+                let seed_structure = structure_enabled.then(|| {
+                    crate::server::client_shell::structure_projection(
+                        &self.app,
+                        &self.client_shell_boot_id,
+                        connection.shell_projection_revision,
+                    )
+                });
+                let structure_message = seed_structure
+                    .as_ref()
+                    .map(crate::protocol::endpoint::structure_message)
+                    .transpose();
+                let structure_message = match structure_message {
+                    Ok(message) => message,
+                    Err(err) => {
+                        warn!(client_id, err = %err, "failed to encode endpoint structure");
+                        return false;
+                    }
+                };
                 let snapshot_message =
                     match crate::protocol::endpoint::snapshot_message(&seed_snapshot) {
                         Ok(message) => message,
@@ -2016,11 +2150,19 @@ impl HeadlessServer {
                     };
                 connection.shell_location = Some(location);
                 connection.shell_snapshot = Some(seed_snapshot);
+                connection.shell_agent_view = agent_view;
+                connection.shell_structure = seed_structure;
                 self.clients.insert(client_id, connection);
                 if self.app.state.popup_pane.is_some() && self.popup_owner_tab_id.is_none() {
                     self.popup_owner_tab_id = self.shell_tab_id_for_client(client_id);
                 }
+                if let Some(message) = projection_message {
+                    self.send_to_client(client_id, message);
+                }
                 self.send_to_client(client_id, snapshot_message);
+                if let Some(structure_message) = structure_message {
+                    self.send_to_client(client_id, structure_message);
+                }
                 if surface_active {
                     self.foreground_client_id = Some(client_id);
                 }
@@ -2331,6 +2473,511 @@ impl HeadlessServer {
                 client.host_mouse_capture_active = None;
                 true
             }
+            ServerEvent::ClientShellPaneViewRequest { client_id, request } => {
+                let valid_client = self.clients.get(&client_id).is_some_and(|client| {
+                    client.is_active_shell_client()
+                        && client.shell_pane_view_enabled
+                        && request.boot_id == self.client_shell_boot_id
+                        && request.projection_revision == client.shell_projection_revision
+                        && request.request_id.len() <= 120
+                        && request.pane_id.len() <= 128
+                });
+                if !valid_client {
+                    return false;
+                }
+                let telemetry_json = self.app.handle_pane_telemetry(
+                    "extension.context".into(),
+                    crate::api::schema::PaneTelemetryParams {
+                        pane_id: Some(request.pane_id.clone()),
+                    },
+                );
+                let Ok(response) =
+                    serde_json::from_str::<crate::api::schema::SuccessResponse>(&telemetry_json)
+                else {
+                    return false;
+                };
+                let crate::api::schema::ResponseResult::PaneTelemetry { telemetry } =
+                    response.result
+                else {
+                    return false;
+                };
+                let identity = crate::extension_service::ExtensionRequestIdentity {
+                    client_id,
+                    boot_id: request.boot_id.clone(),
+                    projection_revision: request.projection_revision,
+                    request_id: request.request_id.clone(),
+                    target_pane_id: request.pane_id.clone(),
+                    contribution_revision: request.contribution_revision,
+                };
+                let (service_id, service_generation) =
+                    match self.app.extension_services.request_view(
+                        identity,
+                        serde_json::to_value(telemetry).unwrap_or_default(),
+                    ) {
+                        Ok(accepted) => accepted,
+                        Err(error) => {
+                            let (owner_service_id, service_generation) = self
+                                .app
+                                .extension_services
+                                .provider_identity()
+                                .unwrap_or_else(|| ("vqro.extension-host".into(), 0));
+                            let response = crate::protocol::endpoint::ServerPaneViewResult {
+                                boot_id: request.boot_id,
+                                projection_revision: request.projection_revision,
+                                request_id: request.request_id,
+                                pane_id: request.pane_id,
+                                contribution_revision: request.contribution_revision,
+                                owner_service_id,
+                                service_generation,
+                                document: None,
+                                actions: Vec::new(),
+                                error: Some(error),
+                            };
+                            if let Ok(data) = serde_json::to_string(&response) {
+                                self.send_to_client(
+                                    client_id,
+                                    crate::protocol::ServerMessage::EndpointControl {
+                                        kind: crate::protocol::endpoint::PANE_VIEW_RESULT_KIND
+                                            .into(),
+                                        data,
+                                    },
+                                );
+                            }
+                            return false;
+                        }
+                    };
+                let Some(client) = self.clients.get_mut(&client_id) else {
+                    return false;
+                };
+                client.pending_pane_view = Some(crate::server::clients::PendingPaneView {
+                    request,
+                    service_id,
+                    service_generation,
+                });
+                client.pane_contribution_lease = None;
+                client.pending_pane_action = None;
+                client.pending_pane_confirmation = None;
+                false
+            }
+            ServerEvent::ClientShellPaneViewCancel { client_id, cancel } => {
+                if cancel.boot_id != self.client_shell_boot_id {
+                    return false;
+                }
+                let matches = self.clients.get(&client_id).is_some_and(|client| {
+                    client.pending_pane_view.as_ref().is_some_and(|pending| {
+                        pending.request.request_id == cancel.request_id
+                            && pending.request.pane_id == cancel.pane_id
+                            && pending.request.contribution_revision == cancel.contribution_revision
+                    }) || client
+                        .pane_contribution_lease
+                        .as_ref()
+                        .is_some_and(|lease| {
+                            lease.identity.request_id == cancel.request_id
+                                && lease.identity.target_pane_id == cancel.pane_id
+                                && lease.identity.contribution_revision
+                                    == cancel.contribution_revision
+                        })
+                });
+                if !matches {
+                    return false;
+                }
+                self.cancel_client_extension_work(client_id);
+                let Some(client) = self.clients.get_mut(&client_id) else {
+                    return false;
+                };
+                client.pending_pane_view = None;
+                client.pane_contribution_lease = None;
+                client.pending_pane_action = None;
+                client.pending_pane_confirmation = None;
+                true
+            }
+            ServerEvent::ClientShellPaneViewAction { client_id, request } => {
+                if !self
+                    .clients
+                    .get(&client_id)
+                    .is_some_and(|client| client.shell_pane_view_enabled)
+                {
+                    let response = crate::protocol::endpoint::ServerPaneViewActionResult {
+                        request_id: request.request_id,
+                        pane_id: request.pane_id,
+                        contribution_revision: request.contribution_revision,
+                        action_id: request.action_id,
+                        confirmation_token: None,
+                        error: Some("pane view actions were not negotiated".into()),
+                    };
+                    if let Ok(data) = serde_json::to_string(&response) {
+                        self.send_to_client(
+                            client_id,
+                            crate::protocol::ServerMessage::EndpointControl {
+                                kind: crate::protocol::endpoint::PANE_VIEW_ACTION_RESULT_KIND
+                                    .into(),
+                                data,
+                            },
+                        );
+                    }
+                    return false;
+                }
+                let Some(lease) = self
+                    .clients
+                    .get(&client_id)
+                    .and_then(|client| client.pane_contribution_lease.clone())
+                else {
+                    return false;
+                };
+                let declared = lease
+                    .actions
+                    .iter()
+                    .find(|action| action.id == request.action_id);
+                let identity_is_valid = request.boot_id == self.client_shell_boot_id
+                    && request.projection_revision == lease.identity.projection_revision
+                    && request.pane_id == lease.identity.target_pane_id
+                    && request.contribution_revision == lease.identity.contribution_revision
+                    && request.owner_service_id == lease.service_id
+                    && request.service_generation == lease.service_generation
+                    && request.action_id == "terminal.interrupt"
+                    && declared.is_some_and(|action| action.destructive);
+                if !identity_is_valid {
+                    return false;
+                }
+                if !self
+                    .app
+                    .extension_services
+                    .matches_generation(&lease.service_id, lease.service_generation)
+                {
+                    let response = crate::protocol::endpoint::ServerPaneViewActionResult {
+                        request_id: request.request_id,
+                        pane_id: request.pane_id,
+                        contribution_revision: request.contribution_revision,
+                        action_id: request.action_id,
+                        confirmation_token: None,
+                        error: Some("extension service generation is stale".into()),
+                    };
+                    if let Ok(data) = serde_json::to_string(&response) {
+                        self.send_to_client(
+                            client_id,
+                            crate::protocol::ServerMessage::EndpointControl {
+                                kind: crate::protocol::endpoint::PANE_VIEW_ACTION_RESULT_KIND
+                                    .into(),
+                                data,
+                            },
+                        );
+                    }
+                    return false;
+                }
+                let identity = crate::extension_service::ExtensionRequestIdentity {
+                    client_id,
+                    boot_id: request.boot_id.clone(),
+                    projection_revision: request.projection_revision,
+                    request_id: request.request_id.clone(),
+                    target_pane_id: request.pane_id.clone(),
+                    contribution_revision: request.contribution_revision,
+                };
+                if let Err(error) = self.app.extension_services.request_action(
+                    &lease.service_id,
+                    lease.service_generation,
+                    identity,
+                    request.action_id.clone(),
+                ) {
+                    let response = crate::protocol::endpoint::ServerPaneViewActionResult {
+                        request_id: request.request_id,
+                        pane_id: request.pane_id,
+                        contribution_revision: request.contribution_revision,
+                        action_id: request.action_id,
+                        confirmation_token: None,
+                        error: Some(error),
+                    };
+                    if let Ok(data) = serde_json::to_string(&response) {
+                        self.send_to_client(
+                            client_id,
+                            crate::protocol::ServerMessage::EndpointControl {
+                                kind: crate::protocol::endpoint::PANE_VIEW_ACTION_RESULT_KIND
+                                    .into(),
+                                data,
+                            },
+                        );
+                    }
+                    return false;
+                }
+                if let Some(client) = self.clients.get_mut(&client_id) {
+                    client.pending_pane_action = Some(request);
+                }
+                false
+            }
+            ServerEvent::ClientShellPaneViewConfirm { client_id, confirm } => {
+                let pending = self
+                    .clients
+                    .get_mut(&client_id)
+                    .and_then(|client| client.pending_pane_confirmation.take());
+                let Some(pending) = pending else {
+                    return false;
+                };
+                let lease_is_current = self.clients.get(&client_id).is_some_and(|client| {
+                    client.shell_projection_revision == pending.lease.identity.projection_revision
+                        && client
+                            .pane_contribution_lease
+                            .as_ref()
+                            .is_some_and(|current| {
+                                current.identity.client_id == client_id
+                                    && current.identity.boot_id == pending.lease.identity.boot_id
+                                    && current.identity.projection_revision
+                                        == pending.lease.identity.projection_revision
+                                    && current.identity.request_id
+                                        == pending.lease.identity.request_id
+                                    && current.identity.target_pane_id
+                                        == pending.lease.identity.target_pane_id
+                                    && current.identity.contribution_revision
+                                        == pending.lease.identity.contribution_revision
+                                    && current.service_id == pending.lease.service_id
+                                    && current.service_generation
+                                        == pending.lease.service_generation
+                            })
+                });
+                if confirm.boot_id != self.client_shell_boot_id
+                    || pending.lease.identity.boot_id != self.client_shell_boot_id
+                    || pending.lease.identity.client_id != client_id
+                    || confirm.confirmation_token != pending.token
+                    || std::time::Instant::now() > pending.expires_at
+                    || pending.action_id != "terminal.interrupt"
+                    || pending.effect
+                        != crate::extension_service::ExtensionHostEffect::TerminalInterrupt
+                    || !lease_is_current
+                    || !self.app.extension_services.has_grant(
+                        &pending.lease.service_id,
+                        pending.lease.service_generation,
+                        crate::api::schema::ExtensionServiceCapability::TerminalInterrupt,
+                    )
+                {
+                    return false;
+                }
+                let Some((workspace_index, pane_id)) = self
+                    .app
+                    .parse_pane_id(&pending.lease.identity.target_pane_id)
+                else {
+                    return false;
+                };
+                let same_terminal = self
+                    .app
+                    .state
+                    .terminal_id_for_pane(workspace_index, pane_id)
+                    .is_some_and(|terminal_id| terminal_id == pending.terminal_id);
+                if !same_terminal {
+                    return false;
+                }
+                let Some(runtime) = self.app.state.runtime_for_pane_in_workspace(
+                    &self.app.terminal_runtimes,
+                    workspace_index,
+                    pane_id,
+                ) else {
+                    return false;
+                };
+                runtime
+                    .try_send_bytes(bytes::Bytes::from_static(&[0x03]))
+                    .is_ok()
+            }
+            ServerEvent::ClientShellTerminalViewsInterest {
+                client_id,
+                mut interest,
+            } => {
+                let Some(client) = self.clients.get(&client_id) else {
+                    return false;
+                };
+                if !client.is_active_shell_client()
+                    || !client.shell_terminal_views_enabled
+                    || interest.boot_id != self.client_shell_boot_id
+                    || interest.projection_revision != client.shell_projection_revision
+                    || interest.views.len() > crate::protocol::endpoint::MAX_TERMINAL_VIEWS
+                {
+                    return false;
+                }
+                let client_size = client.terminal_size;
+                let Some(target) = self.shell_target_for_client(client_id) else {
+                    return false;
+                };
+                let Some(tab) = self
+                    .app
+                    .state
+                    .workspaces
+                    .get(target.workspace_index)
+                    .and_then(|workspace| workspace.tabs.get(target.tab_index))
+                else {
+                    return false;
+                };
+                let allowed = tab
+                    .layout
+                    .pane_ids()
+                    .into_iter()
+                    .filter_map(|pane_id| {
+                        self.app
+                            .public_pane_id(target.workspace_index, pane_id)
+                            .map(|public_id| (public_id, pane_id))
+                    })
+                    .collect::<HashMap<_, _>>();
+                let mut seen = HashSet::new();
+                let mut total_cells = 0usize;
+                for view in &mut interest.views {
+                    if view.pane_id.len() > 128
+                        || !allowed.contains_key(&view.pane_id)
+                        || !seen.insert(view.pane_id.clone())
+                    {
+                        return false;
+                    }
+                    view.size.cols = view.size.cols.clamp(1, client_size.0.max(1));
+                    view.size.rows = view.size.rows.clamp(1, client_size.1.max(1));
+                    total_cells = total_cells
+                        .saturating_add(usize::from(view.size.cols) * usize::from(view.size.rows));
+                }
+                if total_cells > crate::protocol::endpoint::MAX_TERMINAL_VIEW_CELLS {
+                    return false;
+                }
+                let controller = self
+                    .tab_id_for_target(target)
+                    .and_then(|tab_id| self.tab_geometry_controllers.get(&tab_id).copied())
+                    == Some(client_id);
+                let changed = self.clients.get(&client_id).is_some_and(|client| {
+                    client.shell_terminal_views_interest.as_ref() != Some(&interest)
+                });
+                if !changed {
+                    return false;
+                }
+                let Some(client) = self.clients.get_mut(&client_id) else {
+                    return false;
+                };
+                client.shell_terminal_views_interest = Some(interest.clone());
+                let cell_size = self.clients[&client_id].cell_size;
+                let viewport_pane_id = self.clients.get(&client_id).and_then(|client| {
+                    client.shell_pane_viewport.as_ref().and_then(|viewport| {
+                        (viewport.boot_id == self.client_shell_boot_id
+                            && viewport.projection_revision == client.shell_projection_revision
+                            && viewport.size.is_some())
+                        .then(|| viewport.pane_id.clone())
+                    })
+                });
+                if controller {
+                    for view in &interest.views {
+                        // An accessory contribution's terminal viewport is the narrower geometry
+                        // claim for this pane and therefore wins over its enclosing list preview.
+                        if viewport_pane_id.as_deref() == Some(view.pane_id.as_str()) {
+                            continue;
+                        }
+                        let Some(&pane_id) = allowed.get(&view.pane_id) else {
+                            continue;
+                        };
+                        let Some(terminal_id) = tab.terminal_id(pane_id) else {
+                            continue;
+                        };
+                        if self
+                            .app
+                            .state
+                            .direct_attach_resize_locks
+                            .contains(terminal_id)
+                        {
+                            continue;
+                        }
+                        if let Some(runtime) = self.app.state.runtime_for_pane_in_workspace(
+                            &self.app.terminal_runtimes,
+                            target.workspace_index,
+                            pane_id,
+                        ) {
+                            runtime.resize(
+                                view.size.rows,
+                                view.size.cols,
+                                cell_size.width_px,
+                                cell_size.height_px,
+                            );
+                        }
+                    }
+                }
+                if let Some(client) = self.clients.get_mut(&client_id) {
+                    client.request_repaint();
+                }
+                self.sync_immediate_pty_sources();
+                if controller && interest.views.is_empty() {
+                    let _ = self.resize_shell_tab_if_controller(client_id, true);
+                }
+                let surface = self.render_terminal_views(
+                    target,
+                    interest.projection_revision,
+                    &interest,
+                    if cell_size.is_known() {
+                        cell_size
+                    } else {
+                        crate::kitty_graphics::HostCellSize::default()
+                    },
+                    None,
+                );
+                if let Ok(data) = serde_json::to_string(&surface) {
+                    self.send_to_client(
+                        client_id,
+                        ServerMessage::EndpointControl {
+                            kind: crate::protocol::endpoint::TERMINAL_VIEWS_SURFACE_KIND.into(),
+                            data,
+                        },
+                    );
+                }
+                true
+            }
+            ServerEvent::ClientShellPaneViewport {
+                client_id,
+                mut viewport,
+            } => {
+                if !self.clients.get(&client_id).is_some_and(|client| {
+                    client.is_active_shell_client() && client.shell_pane_viewport_enabled
+                }) || viewport.boot_id != self.client_shell_boot_id
+                    || viewport.pane_id.len() > 128
+                {
+                    return false;
+                }
+                let Some((workspace_index, pane_id)) = self.app.parse_pane_id(&viewport.pane_id)
+                else {
+                    return false;
+                };
+                let Some(target) = self.shell_target_for_client(client_id) else {
+                    return false;
+                };
+                let visible = target.workspace_index == workspace_index
+                    && self
+                        .app
+                        .state
+                        .workspaces
+                        .get(workspace_index)
+                        .and_then(|workspace| workspace.tabs.get(target.tab_index))
+                        .is_some_and(|tab| {
+                            tab.layout
+                                .panes(Rect::new(0, 0, 100, 100))
+                                .iter()
+                                .any(|pane| pane.id == pane_id)
+                        });
+                let controller = self
+                    .tab_id_for_target(target)
+                    .and_then(|tab_id| self.tab_geometry_controllers.get(&tab_id).copied())
+                    == Some(client_id);
+                if !visible {
+                    return false;
+                }
+                let Some(client) = self.clients.get_mut(&client_id) else {
+                    return false;
+                };
+                if !client.shell_pane_viewport_enabled
+                    || viewport.projection_revision != client.shell_projection_revision
+                {
+                    return false;
+                }
+                if let Some(size) = viewport.size.as_mut() {
+                    size.cols = size.cols.clamp(1, client.terminal_size.0.max(1));
+                    size.rows = size.rows.clamp(1, client.terminal_size.1.max(1));
+                }
+                let next = viewport.size.map(|_| viewport);
+                if client.shell_pane_viewport == next {
+                    return false;
+                }
+                client.shell_pane_viewport = next;
+                client.request_repaint();
+                if controller {
+                    self.resize_shell_tab_if_controller(client_id, true)
+                } else {
+                    true
+                }
+            }
             ServerEvent::ClientShellPresentationSync { client_id, token } => {
                 let Some(client) = self.clients.get_mut(&client_id) else {
                     return false;
@@ -2543,74 +3190,39 @@ impl HeadlessServer {
                 boot_id,
                 request,
             } => self.handle_client_shell_endpoint_request(client_id, boot_id, request),
+            ServerEvent::NativeEndpointRequest {
+                client_id,
+                boot_id,
+                request,
+            } => self.handle_native_endpoint_request(client_id, boot_id, request),
             ServerEvent::ClientShellEndpointResponseChunkReady {
                 client_id,
                 boot_id,
                 request_id,
                 final_chunk,
                 data,
-            } => {
-                let command_surface_revision = self.clients.get(&client_id).and_then(|client| {
-                    (matches!(client.mode, ClientConnectionMode::ClientShell)
-                        && client.shell_endpoint_command_in_flight
-                        && boot_id == self.client_shell_boot_id)
-                        .then_some(client.shell_endpoint_command_surface_revision)
-                        .flatten()
-                });
-                let Some(command_surface_revision) = command_surface_revision else {
-                    return false;
-                };
-                let completed_deferred_response =
-                    self.clients.get_mut(&client_id).and_then(|client| {
-                        let response = client.shell_deferred_navigation_response.as_mut()?;
-                        response.extend_from_slice(&data);
-                        final_chunk
-                            .then(|| client.shell_deferred_navigation_response.take())
-                            .flatten()
-                    });
-                if final_chunk {
-                    if let Some(client) = self.clients.get_mut(&client_id) {
-                        client.shell_endpoint_command_in_flight = false;
-                        client.shell_endpoint_command_surface_revision = None;
-                        client.shell_deferred_navigation_request_id = None;
-                    }
-                }
-                let deferred_tab_id = completed_deferred_response
-                    .as_deref()
-                    .and_then(Self::deferred_endpoint_navigation_tab_id);
-                let focus_before = self.shell_focus_target(client_id);
-                let focused_tabs_before = self.focused_shell_tabs();
-                let navigation_changed = self.clients.get(&client_id).is_some_and(|client| {
-                    client.is_active_shell_client()
-                        && client.shell_projection_revision == command_surface_revision
-                }) && deferred_tab_id
-                    .as_deref()
-                    .is_some_and(|tab_id| self.focus_shell_client_on_tab(client_id, tab_id));
-                let geometry_changed =
-                    navigation_changed && self.claim_shell_tab_geometry(client_id, false);
-                if navigation_changed {
-                    self.reconcile_client_shell_locations();
-                    let focus_after = self.shell_focus_target(client_id);
-                    let focused_tabs_after = self.focused_shell_tabs();
-                    self.app.accept_current_focus_without_events();
-                    self.send_shell_navigation_focus_events(
-                        focus_before.as_ref(),
-                        focus_after.as_ref(),
-                        &focused_tabs_before,
-                        &focused_tabs_after,
-                    );
-                }
-                self.send_to_client(
-                    client_id,
-                    ServerMessage::ClientShellEndpointResponseChunk {
-                        boot_id,
-                        request_id,
-                        final_chunk,
-                        data,
-                    },
-                );
-                navigation_changed | geometry_changed
-            }
+            } => self.handle_endpoint_api_response_chunk(
+                client_id,
+                boot_id,
+                request_id,
+                final_chunk,
+                data,
+                false,
+            ),
+            ServerEvent::NativeEndpointResponseChunkReady {
+                client_id,
+                boot_id,
+                request_id,
+                final_chunk,
+                data,
+            } => self.handle_endpoint_api_response_chunk(
+                client_id,
+                boot_id,
+                request_id,
+                final_chunk,
+                data,
+                true,
+            ),
             ServerEvent::ClientDetach { client_id } => {
                 info!(client_id, "client detached");
                 self.send_terminal_stream_detach_shutdown(client_id);
@@ -2650,6 +3262,7 @@ impl HeadlessServer {
             ServerEvent::ClientConnected { .. }
                 | ServerEvent::ClientShellConnected { .. }
                 | ServerEvent::ClientShellEndpointResponseChunkReady { .. }
+                | ServerEvent::NativeEndpointResponseChunkReady { .. }
                 | ServerEvent::ClientDisconnected { .. }
                 | ServerEvent::ClientWriterDrained { .. }
                 | ServerEvent::QuitSignal
@@ -2896,6 +3509,30 @@ impl HeadlessServer {
         msg: api::ApiRequestMessage,
         skip_default_workspace_for_request: bool,
     ) -> bool {
+        let origin = match &msg.origin {
+            api::ApiOrigin::LocalSocket => "local_socket",
+            api::ApiOrigin::NativeEndpoint { client_id, boot_id } => {
+                tracing::trace!(
+                    client_id,
+                    boot_id,
+                    "dispatching native endpoint API request"
+                );
+                "native_endpoint"
+            }
+            api::ApiOrigin::LegacyEndpointV1 { client_id, boot_id } => {
+                tracing::trace!(
+                    client_id,
+                    boot_id,
+                    "dispatching legacy endpoint bridge request"
+                );
+                "legacy_endpoint_v1"
+            }
+        };
+        tracing::trace!(
+            origin,
+            method = crate::api::api_method_name(&msg.request.method),
+            "dispatching API request"
+        );
         if self.shutting_down {
             // During shutdown, respond with server_unavailable.
             let response = serde_json::to_string(&api::schema::ErrorResponse {
@@ -2930,7 +3567,14 @@ impl HeadlessServer {
         let stream_active = msg.stream_active.clone();
 
         if let api::schema::Method::ServerLiveHandoff(params) = &msg.request.method {
-            let handoff_result = self.perform_live_handoff(params.clone());
+            let handoff_result = if self.app.collections_mutations_blocked {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::WouldBlock,
+                    "Collections authority checkpoint is in progress",
+                ))
+            } else {
+                self.perform_live_handoff(params.clone())
+            };
             let handoff_succeeded = handoff_result.is_ok();
             let response = match handoff_result {
                 Ok(()) => serde_json::to_string(&api::schema::SuccessResponse {
@@ -3031,6 +3675,19 @@ impl HeadlessServer {
         };
 
         self.sync_foreground_client_state();
+        if self.app.collections_mutations_blocked && crate::api::request_changes_ui(&msg.request) {
+            let _ = msg.respond_to.send(
+                serde_json::to_string(&api::schema::ErrorResponse {
+                    id: msg.request.id,
+                    error: api::schema::ErrorBody {
+                        code: "collections_checkpoint_busy".into(),
+                        message: "an atomic Collections checkpoint is in progress".into(),
+                    },
+                })
+                .unwrap_or_else(|_| "{}".into()),
+            );
+            return changed;
+        }
         if let Some(error) = self.agent_read_not_idle_error(&msg.request) {
             let response = serde_json::to_string(&api::schema::ErrorResponse {
                 id: msg.request.id.clone(),
@@ -3040,12 +3697,71 @@ impl HeadlessServer {
             let _ = msg.respond_to.send(response);
             return changed;
         }
+        if self
+            .app
+            .extension_artifact_request_requires_staging(&msg.request)
+        {
+            self.app
+                .start_deferred_extension_artifact_request(msg.request, msg.respond_to);
+            return changed;
+        }
         let alt_screen_read_spec = self.alt_screen_read_spec(&msg.request);
         if matches!(&msg.request.method, api::schema::Method::AgentPrompt(_)) {
             let deferred_changed = self
                 .app
                 .handle_deferred_agent_api_request(msg.request, msg.respond_to);
             return changed | deferred_changed;
+        }
+        if let api::schema::Method::HostDocumentAction(params) = msg.request.method.clone() {
+            return changed
+                | self.app.handle_deferred_host_document_api_request(
+                    msg.request.id,
+                    params,
+                    msg.respond_to,
+                );
+        }
+        if self.app.collections_authority.phase
+            == crate::collections_extension_contract::CollectionsAuthorityPhaseV1::Package
+        {
+            match msg.request.method.clone() {
+                api::schema::Method::CollectionCreate(params) => {
+                    return changed
+                        | self.app.defer_collections_labeled_create(
+                            msg.request.id,
+                            params,
+                            msg.respond_to,
+                        );
+                }
+                api::schema::Method::CollectionArchive(params) => {
+                    return changed
+                        | self.app.defer_collections_archive(
+                            msg.request.id,
+                            params,
+                            true,
+                            msg.respond_to,
+                        );
+                }
+                api::schema::Method::CollectionRestore(params) => {
+                    return changed
+                        | self.app.defer_collections_archive(
+                            msg.request.id,
+                            params,
+                            false,
+                            msg.respond_to,
+                        );
+                }
+                _ => {}
+            }
+        }
+        if let api::schema::Method::ExtensionStateTransactV1(transaction) =
+            msg.request.method.clone()
+        {
+            return changed
+                | self.app.handle_deferred_extension_state_transact(
+                    msg.request.id,
+                    transaction,
+                    msg.respond_to,
+                );
         }
         if matches!(
             &msg.request.method,
@@ -3090,6 +3806,9 @@ impl HeadlessServer {
             self.app
                 .handle_api_request_after_internal_events_drained(msg.request)
         };
+        if std::mem::take(&mut self.app.extension_catalog_rebuilt) {
+            self.retire_client_extension_requests("extension catalog was replaced");
+        }
         if let Some(snapshot) = frozen_alt_screen_read {
             if let Ok(mut success) = serde_json::from_str::<api::schema::SuccessResponse>(&response)
             {
@@ -3333,6 +4052,8 @@ impl HeadlessServer {
         if self.has_app_client() {
             self.app.start_git_status_refresh_if_due(now);
         }
+
+        changed |= self.app.refresh_external_extension_state_if_due(now);
 
         if self
             .app

@@ -1,6 +1,6 @@
 use ratatui::layout::Rect;
 
-pub(crate) const ONBOARDING_TITLE: &str = "  herdr";
+pub(crate) const ONBOARDING_TITLE: &str = "  vqro";
 pub(crate) const ONBOARDING_SUBTITLE: &str = "  terminal workspace manager for coding agents";
 pub(crate) const ONBOARDING_DESCRIPTION: [&str; 3] = [
     "  this is a mouse-first terminal.",
@@ -12,7 +12,7 @@ pub(crate) const ONBOARDING_PREFIX_SUFFIX: &str = " enters prefix mode · ";
 pub(crate) const ONBOARDING_HELP_LABEL: &str = "?";
 pub(crate) const ONBOARDING_HELP_SUFFIX: &str = " shows keybinds and settings";
 pub(crate) const ONBOARDING_NEXT: &str =
-    "  next: install optional agent integrations for more reliable state";
+    "  next: browse optional agent extensions for more reliable state";
 
 pub(crate) fn onboarding_welcome_continue_rect(area: Rect) -> Rect {
     super::widgets::continue_button_rect(area)

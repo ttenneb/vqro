@@ -3,9 +3,10 @@
 pub mod support;
 
 use std::fs;
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::os::unix::net::UnixStream;
+use std::os::fd::AsRawFd;
+use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, MutexGuard, OnceLock};
@@ -61,10 +62,10 @@ fn spawn_server_with_env(
     api_socket: &Path,
     extra_env: &[(&str, &str)],
 ) -> SpawnedHerdr {
-    fs::create_dir_all(config_home.join("herdr")).unwrap();
+    fs::create_dir_all(config_home.join("vqro-dev")).unwrap();
     fs::create_dir_all(runtime_dir).unwrap();
     fs::write(
-        config_home.join("herdr/config.toml"),
+        config_home.join("vqro-dev/config.toml"),
         "onboarding = false\n",
     )
     .unwrap();
@@ -77,13 +78,13 @@ fn spawn_server_with_env(
             pixel_height: 0,
         })
         .unwrap();
-    let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_herdr"));
+    let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_vqro"));
     cmd.arg("server");
     cmd.env("XDG_CONFIG_HOME", config_home);
     cmd.env("XDG_RUNTIME_DIR", runtime_dir);
-    cmd.env("HERDR_SOCKET_PATH", api_socket);
+    cmd.env("VQRO_SOCKET_PATH", api_socket);
     cmd.env(
-        "HERDR_CLIENT_SOCKET_PATH",
+        "VQRO_CLIENT_SOCKET_PATH",
         runtime_dir.join("herdr-client.sock"),
     );
     cmd.env("SHELL", "/bin/sh");
@@ -104,10 +105,10 @@ fn spawn_named_session_server(
     runtime_dir: &Path,
     session_name: &str,
 ) -> SpawnedHerdr {
-    fs::create_dir_all(config_home.join("herdr-dev")).unwrap();
+    fs::create_dir_all(config_home.join("vqro-dev")).unwrap();
     fs::create_dir_all(runtime_dir).unwrap();
     fs::write(
-        config_home.join("herdr-dev/config.toml"),
+        config_home.join("vqro-dev/config.toml"),
         "onboarding = false\n",
     )
     .unwrap();
@@ -120,13 +121,13 @@ fn spawn_named_session_server(
             pixel_height: 0,
         })
         .unwrap();
-    let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_herdr"));
+    let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_vqro"));
     cmd.arg("server");
     cmd.env("XDG_CONFIG_HOME", config_home);
     cmd.env("XDG_RUNTIME_DIR", runtime_dir);
-    cmd.env("HERDR_SESSION", session_name);
-    cmd.env_remove("HERDR_SOCKET_PATH");
-    cmd.env_remove("HERDR_CLIENT_SOCKET_PATH");
+    cmd.env("VQRO_SESSION", session_name);
+    cmd.env_remove("VQRO_SOCKET_PATH");
+    cmd.env_remove("VQRO_CLIENT_SOCKET_PATH");
     cmd.env("SHELL", "/bin/sh");
 
     let child = pair.slave.spawn_command(cmd).unwrap();
@@ -138,10 +139,10 @@ fn spawn_named_session_server(
 }
 
 fn spawn_default_session_server(config_home: &Path, runtime_dir: &Path) -> SpawnedHerdr {
-    fs::create_dir_all(config_home.join("herdr-dev")).unwrap();
+    fs::create_dir_all(config_home.join("vqro-dev")).unwrap();
     fs::create_dir_all(runtime_dir).unwrap();
     fs::write(
-        config_home.join("herdr-dev/config.toml"),
+        config_home.join("vqro-dev/config.toml"),
         "onboarding = false\n",
     )
     .unwrap();
@@ -154,14 +155,14 @@ fn spawn_default_session_server(config_home: &Path, runtime_dir: &Path) -> Spawn
             pixel_height: 0,
         })
         .unwrap();
-    let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_herdr"));
+    let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_vqro"));
     cmd.arg("server");
     cmd.env("XDG_CONFIG_HOME", config_home);
     cmd.env("XDG_RUNTIME_DIR", runtime_dir);
     cmd.env("XDG_STATE_HOME", runtime_dir.join("state"));
-    cmd.env_remove("HERDR_SESSION");
-    cmd.env_remove("HERDR_SOCKET_PATH");
-    cmd.env_remove("HERDR_CLIENT_SOCKET_PATH");
+    cmd.env_remove("VQRO_SESSION");
+    cmd.env_remove("VQRO_SOCKET_PATH");
+    cmd.env_remove("VQRO_CLIENT_SOCKET_PATH");
     cmd.env("SHELL", "/bin/sh");
 
     let child = pair.slave.spawn_command(cmd).unwrap();
@@ -179,10 +180,10 @@ fn spawn_server_with_args_and_socket_env(
     api_socket_env: Option<&Path>,
     client_socket_env: Option<&Path>,
 ) -> SpawnedHerdr {
-    fs::create_dir_all(config_home.join("herdr-dev")).unwrap();
+    fs::create_dir_all(config_home.join("vqro-dev")).unwrap();
     fs::create_dir_all(runtime_dir).unwrap();
     fs::write(
-        config_home.join("herdr-dev/config.toml"),
+        config_home.join("vqro-dev/config.toml"),
         "onboarding = false\n",
     )
     .unwrap();
@@ -195,7 +196,7 @@ fn spawn_server_with_args_and_socket_env(
             pixel_height: 0,
         })
         .unwrap();
-    let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_herdr"));
+    let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_vqro"));
     if let Some(session_name) = session_name {
         cmd.arg("--session");
         cmd.arg(session_name);
@@ -203,16 +204,16 @@ fn spawn_server_with_args_and_socket_env(
     cmd.arg("server");
     cmd.env("XDG_CONFIG_HOME", config_home);
     cmd.env("XDG_RUNTIME_DIR", runtime_dir);
-    cmd.env_remove("HERDR_SESSION");
+    cmd.env_remove("VQRO_SESSION");
     if let Some(api_socket_env) = api_socket_env {
-        cmd.env("HERDR_SOCKET_PATH", api_socket_env);
+        cmd.env("VQRO_SOCKET_PATH", api_socket_env);
     } else {
-        cmd.env_remove("HERDR_SOCKET_PATH");
+        cmd.env_remove("VQRO_SOCKET_PATH");
     }
     if let Some(client_socket_env) = client_socket_env {
-        cmd.env("HERDR_CLIENT_SOCKET_PATH", client_socket_env);
+        cmd.env("VQRO_CLIENT_SOCKET_PATH", client_socket_env);
     } else {
-        cmd.env_remove("HERDR_CLIENT_SOCKET_PATH");
+        cmd.env_remove("VQRO_CLIENT_SOCKET_PATH");
     }
     cmd.env("SHELL", "/bin/sh");
 
@@ -281,6 +282,23 @@ fn assert_ok(response: serde_json::Value) {
         response.get("result").is_some(),
         "api request failed: {response}"
     );
+}
+
+fn terminal_id_for_pane(socket_path: &Path, pane_id: &str) -> String {
+    let panes = request(
+        socket_path,
+        serde_json::json!({"id":"test:terminal-identity","method":"pane.list","params":{}}),
+    );
+    panes["result"]["panes"]
+        .as_array()
+        .and_then(|panes| {
+            panes
+                .iter()
+                .find(|pane| pane["pane_id"].as_str() == Some(pane_id))
+        })
+        .and_then(|pane| pane["terminal_id"].as_str())
+        .expect("pane terminal identity")
+        .to_owned()
 }
 
 fn wait_for_api(socket_path: &Path, timeout: Duration) {
@@ -612,15 +630,178 @@ fn live_server_holds_one_pty_master_fd_per_pane() {
     cleanup_test_base(&base);
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn live_handoff_unknown_pane_exit_preserves_session_on_shutdown() {
+    let _lock = test_lock();
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let api_socket = runtime_dir.join("herdr.sock");
+
+    let spawned = spawn_server(&config_home, &runtime_dir, &api_socket);
+    wait_for_socket(&api_socket, Duration::from_secs(10));
+    register_runtime_dir(&runtime_dir);
+
+    let created = request(
+        &api_socket,
+        serde_json::json!({
+            "id": "test:workspace:create",
+            "method": "workspace.create",
+            "params": {"cwd": "/tmp", "focus": true}
+        }),
+    );
+    let pane_id = created["result"]["root_pane"]["pane_id"]
+        .as_str()
+        .expect("root pane id")
+        .to_string();
+    let old_pid = spawned.child.process_id().expect("old server pid");
+
+    assert_ok(request(
+        &api_socket,
+        serde_json::json!({"id":"test:handoff","method":"server.live_handoff","params":{}}),
+    ));
+    let replacement_pid =
+        wait_for_replacement_server_pid(&runtime_dir, old_pid, Duration::from_secs(10));
+    drop(spawned);
+    wait_for_api(&api_socket, Duration::from_secs(10));
+
+    let process_info = request(
+        &api_socket,
+        serde_json::json!({
+            "id": "test:process-info",
+            "method": "pane.process_info",
+            "params": {"pane_id": pane_id}
+        }),
+    );
+    let shell_pid = process_info["result"]["process_info"]["shell_pid"]
+        .as_u64()
+        .expect("shell pid") as libc::pid_t;
+    assert_eq!(unsafe { libc::kill(shell_pid, libc::SIGHUP) }, 0);
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let panes = request(
+            &api_socket,
+            serde_json::json!({"id":"test:panes","method":"pane.list","params":{}}),
+        );
+        if panes["result"]["panes"]
+            .as_array()
+            .is_some_and(Vec::is_empty)
+        {
+            break;
+        }
+        assert!(Instant::now() < deadline, "handoff pane was not removed");
+        thread::sleep(Duration::from_millis(20));
+    }
+
+    assert_ok(request(
+        &api_socket,
+        serde_json::json!({"id":"test:stop","method":"server.stop","params":{}}),
+    ));
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Path::new(&format!("/proc/{replacement_pid}")).exists() {
+        assert!(Instant::now() < deadline, "replacement server did not stop");
+        thread::sleep(Duration::from_millis(20));
+    }
+
+    let session: serde_json::Value = serde_json::from_slice(
+        &fs::read(config_home.join("vqro-dev/session.json")).expect("saved session"),
+    )
+    .expect("valid session json");
+    assert_eq!(session["workspaces"].as_array().map(Vec::len), Some(1));
+    assert_eq!(
+        session["workspaces"][0]["tabs"][0]["panes"]
+            .as_object()
+            .map(serde_json::Map::len),
+        Some(1)
+    );
+
+    cleanup_test_base(&base);
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn live_handoff_carries_more_panes_than_one_scm_rights_message() {
+    const PANES: usize = 70;
+
+    let _lock = test_lock();
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let api_socket = runtime_dir.join("herdr.sock");
+
+    let spawned = spawn_server(&config_home, &runtime_dir, &api_socket);
+    wait_for_socket(&api_socket, Duration::from_secs(10));
+    register_runtime_dir(&runtime_dir);
+    let server_pid = spawned
+        .child
+        .process_id()
+        .expect("test server should expose pid");
+
+    let created = request(
+        &api_socket,
+        serde_json::json!({
+            "id": "test:workspace:create",
+            "method": "workspace.create",
+            "params": {"cwd": "/tmp", "focus": true}
+        }),
+    );
+    let workspace_id = created["result"]["workspace"]["workspace_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // One pane per tab keeps the layout shallow, so this exercises the fd
+    // transfer rather than the depth of a single split tree.
+    for index in 1..PANES {
+        assert_ok(request(
+            &api_socket,
+            serde_json::json!({
+                "id": format!("test:tab:create-{index}"),
+                "method": "tab.create",
+                "params": {"workspace_id": workspace_id, "focus": false}
+            }),
+        ));
+    }
+    wait_for_server_ptmx_fd_count(server_pid, PANES, Duration::from_secs(60));
+
+    assert_ok(request(
+        &api_socket,
+        serde_json::json!({"id":"test:handoff","method":"server.live_handoff","params":{}}),
+    ));
+    let replacement_pid =
+        wait_for_replacement_server_pid(&runtime_dir, server_pid, Duration::from_secs(30));
+    wait_for_api(&api_socket, Duration::from_secs(30));
+    wait_for_server_ptmx_fd_count(replacement_pid, PANES, Duration::from_secs(30));
+
+    let panes = request(
+        &api_socket,
+        serde_json::json!({"id":"test:pane:list","method":"pane.list","params":{}}),
+    );
+    assert_eq!(
+        panes["result"]["panes"].as_array().map(Vec::len),
+        Some(PANES),
+        "replacement server should report every pane after handoff"
+    );
+
+    let _ = request(
+        &api_socket,
+        serde_json::json!({"id":"test:stop","method":"server.stop","params":{}}),
+    );
+    drop(spawned);
+    cleanup_test_base(&base);
+}
+
 #[test]
 fn live_handoff_preserves_named_session_socket_paths() {
     let _lock = test_lock();
     let base = unique_test_dir();
     let config_home = base.join("config");
     let runtime_dir = base.join("runtime");
-    let session_dir = config_home.join("herdr-dev/sessions/work");
-    let api_socket = session_dir.join("herdr.sock");
-    let client_socket = session_dir.join("herdr-client.sock");
+    let session_dir = config_home.join("vqro-dev/sessions/work");
+    let api_socket = session_dir.join("vqro.sock");
+    let client_socket = session_dir.join("vqro-client.sock");
 
     let spawned = spawn_named_session_server(&config_home, &runtime_dir, "work");
     wait_for_socket(&api_socket, Duration::from_secs(10));
@@ -634,7 +815,7 @@ fn live_handoff_preserves_named_session_socket_paths() {
     wait_for_api(&api_socket, Duration::from_secs(10));
     wait_for_socket(&client_socket, Duration::from_secs(5));
     assert!(
-        !config_home.join("herdr-dev/herdr.sock").exists(),
+        !config_home.join("vqro-dev/vqro.sock").exists(),
         "named handoff unexpectedly bound the default session API socket"
     );
 
@@ -651,12 +832,12 @@ fn live_handoff_ignores_leaked_default_socket_env_for_named_session() {
     let base = unique_test_dir();
     let config_home = base.join("config");
     let runtime_dir = base.join("runtime");
-    let default_session_dir = config_home.join("herdr-dev");
-    let default_api_socket = default_session_dir.join("herdr.sock");
-    let default_client_socket = default_session_dir.join("herdr-client.sock");
-    let work_session_dir = config_home.join("herdr-dev/sessions/work");
-    let work_api_socket = work_session_dir.join("herdr.sock");
-    let work_client_socket = work_session_dir.join("herdr-client.sock");
+    let default_session_dir = config_home.join("vqro-dev");
+    let default_api_socket = default_session_dir.join("vqro.sock");
+    let default_client_socket = default_session_dir.join("vqro-client.sock");
+    let work_session_dir = config_home.join("vqro-dev/sessions/work");
+    let work_api_socket = work_session_dir.join("vqro.sock");
+    let work_client_socket = work_session_dir.join("vqro-client.sock");
 
     let default_spawned = spawn_default_session_server(&config_home, &runtime_dir);
     wait_for_socket(&default_api_socket, Duration::from_secs(10));
@@ -698,7 +879,7 @@ fn live_handoff_preserves_client_socket_env_without_api_socket_env() {
     let base = unique_test_dir();
     let config_home = base.join("config");
     let runtime_dir = base.join("runtime");
-    let api_socket = config_home.join("herdr-dev/herdr.sock");
+    let api_socket = config_home.join("vqro-dev/vqro.sock");
     let client_socket = runtime_dir.join("custom-client.sock");
 
     let spawned = spawn_server_with_args_and_socket_env(
@@ -733,8 +914,8 @@ fn live_handoff_preserves_installed_plugins() {
     let base = unique_test_dir();
     let config_home = base.join("config");
     let runtime_dir = base.join("runtime");
-    let api_socket = config_home.join("herdr-dev/herdr.sock");
-    let registry_path = config_home.join("herdr-dev/plugins.json");
+    let api_socket = config_home.join("vqro-dev/vqro.sock");
+    let registry_path = config_home.join("vqro-dev/plugins.json");
     let existing_plugin = base.join("plugins/existing");
     let added_plugin = base.join("plugins/added");
     write_plugin_manifest(&existing_plugin, "test.live-handoff-existing");
@@ -822,6 +1003,9 @@ fn live_handoff_preserves_pane_process_io() {
         .as_str()
         .unwrap()
         .to_string();
+    let terminal_id_before = terminal_id_for_pane(&api_socket, &pane_id);
+    let second_terminal_id_before = terminal_id_for_pane(&api_socket, &second_pane_id);
+    assert_ne!(terminal_id_before, second_terminal_id_before);
 
     let command = format!(
         "sh -c 'echo READY $$ > {}; trap \"echo HUP >> {}\" HUP; while read line; do echo got:$line; echo got:$line >> {}; done'",
@@ -895,7 +1079,6 @@ fn live_handoff_preserves_pane_process_io() {
         &api_socket,
         serde_json::json!({"id":"test:handoff","method":"server.live_handoff","params":{}}),
     ));
-    drop(spawned);
     assert!(
         wait_for_message_variant(
             &mut client_stream,
@@ -905,9 +1088,18 @@ fn live_handoff_preserves_pane_process_io() {
         .unwrap(),
         "connected client shell should receive live-handoff shutdown"
     );
+    drop(spawned);
     thread::sleep(Duration::from_millis(300));
     wait_for_api(&api_socket, Duration::from_secs(10));
     wait_for_socket(&client_socket, Duration::from_secs(5));
+    assert_eq!(
+        terminal_id_for_pane(&api_socket, &pane_id),
+        terminal_id_before
+    );
+    assert_eq!(
+        terminal_id_for_pane(&api_socket, &second_pane_id),
+        second_terminal_id_before
+    );
     assert_eq!(unsafe { libc::kill(child_pid as libc::pid_t, 0) }, 0);
     assert_eq!(unsafe { libc::kill(second_child_pid as libc::pid_t, 0) }, 0);
     assert!(
@@ -1199,7 +1391,7 @@ fn live_handoff_accepts_canonical_pane_id_from_child_env() {
         serde_json::json!({
             "id": "test:pane:print-id",
             "method": "pane.send_input",
-            "params": {"pane_id": pane_id, "text": format!("printf '%s' \"$HERDR_PANE_ID\" > {}", pane_id_marker.display()), "keys": ["Enter"]}
+            "params": {"pane_id": pane_id, "text": format!("printf '%s' \"$VQRO_PANE_ID\" > {}", pane_id_marker.display()), "keys": ["Enter"]}
         }),
     ));
     let old_pane_id = wait_for_file_contains(&pane_id_marker, &pane_id, Duration::from_secs(5));
@@ -1269,7 +1461,7 @@ fn live_handoff_keeps_unmanaged_agent_name_bound_to_saved_session() {
     fs::write(
         &fake_pi,
         format!(
-            "#!/bin/sh\nexport HERDR_AGENT=pi\necho started > {}\nexec /bin/sleep 30\n",
+            "#!/bin/sh\nexport HERDR_AGENT=pi\necho started > {}\n/bin/sleep 30\n:\n",
             started_marker.display()
         ),
     )
@@ -1307,7 +1499,7 @@ fn live_handoff_keeps_unmanaged_agent_name_bound_to_saved_session() {
             "method": "pane.report_agent_session",
             "params": {
                 "pane_id": pane_id,
-                "source": "herdr:pi",
+                "source": "vqro:pi",
                 "agent": "pi",
                 "seq": 1,
                 "agent_session_path": old_session,
@@ -1322,7 +1514,7 @@ fn live_handoff_keeps_unmanaged_agent_name_bound_to_saved_session() {
             "method": "pane.report_agent",
             "params": {
                 "pane_id": pane_id,
-                "source": "herdr:pi",
+                "source": "vqro:pi",
                 "agent": "pi",
                 "state": "idle",
                 "seq": 2,
@@ -1372,7 +1564,7 @@ fn live_handoff_keeps_unmanaged_agent_name_bound_to_saved_session() {
             "method": "pane.report_agent_session",
             "params": {
                 "pane_id": pane_id,
-                "source": "herdr:pi",
+                "source": "vqro:pi",
                 "agent": "pi",
                 "seq": 3,
                 "agent_session_path": new_session,
@@ -1644,10 +1836,10 @@ fn live_handoff_preserves_http_servers_across_multiple_sessions() {
     let config_home = base.join("config");
     let runtime_dir = base.join("runtime");
     let sessions = [
-        (None, config_home.join("herdr-dev/herdr.sock")),
+        (None, config_home.join("vqro-dev/vqro.sock")),
         (
             Some("work"),
-            config_home.join("herdr-dev/sessions/work/herdr.sock"),
+            config_home.join("vqro-dev/sessions/work/vqro.sock"),
         ),
     ];
     let mut spawned = Vec::new();
@@ -1811,6 +2003,420 @@ fn live_handoff_bad_expected_protocol_rolls_back_old_server() {
     cleanup_test_base(&base);
 }
 
+struct HandoffLineReader {
+    stream: UnixStream,
+    buffered: Vec<u8>,
+    timeout: Duration,
+}
+
+impl HandoffLineReader {
+    fn new(stream: &UnixStream, timeout: Duration) -> io::Result<Self> {
+        Ok(Self {
+            stream: stream.try_clone()?,
+            buffered: Vec::new(),
+            timeout,
+        })
+    }
+
+    fn read_line(&mut self) -> io::Result<String> {
+        let deadline = Instant::now() + self.timeout;
+        loop {
+            if let Some(newline) = self.buffered.iter().position(|byte| *byte == b'\n') {
+                let bytes: Vec<_> = self.buffered.drain(..=newline).collect();
+                let line = String::from_utf8(bytes).map_err(|err| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("handoff peer sent a non-UTF-8 line: {err}"),
+                    )
+                })?;
+                return Ok(line.trim_end().to_string());
+            }
+
+            let now = Instant::now();
+            if now >= deadline {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    format!(
+                        "timed out after {:?} waiting for a handoff line ({} partial bytes)",
+                        self.timeout,
+                        self.buffered.len()
+                    ),
+                ));
+            }
+            let remaining = deadline.saturating_duration_since(now);
+            let timeout_ms = remaining
+                .as_millis()
+                .saturating_add(u128::from(
+                    !remaining.subsec_nanos().is_multiple_of(1_000_000),
+                ))
+                .min(i32::MAX as u128) as i32;
+            let mut poll_fd = libc::pollfd {
+                fd: self.stream.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            let ready = unsafe { libc::poll(&mut poll_fd, 1, timeout_ms) };
+            if ready == 0 {
+                continue;
+            }
+            if ready < 0 {
+                let err = io::Error::last_os_error();
+                if err.kind() == io::ErrorKind::Interrupted {
+                    continue;
+                }
+                return Err(io::Error::new(
+                    err.kind(),
+                    format!("polling the handoff socket failed: {err}"),
+                ));
+            }
+            if poll_fd.revents & libc::POLLNVAL != 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "handoff socket became invalid while reading a line",
+                ));
+            }
+
+            let mut chunk = [0_u8; 1024];
+            match self.stream.read(&mut chunk) {
+                Ok(0) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::UnexpectedEof,
+                        format!(
+                            "handoff peer closed before completing a line ({} partial bytes)",
+                            self.buffered.len()
+                        ),
+                    ));
+                }
+                Ok(read) => self.buffered.extend_from_slice(&chunk[..read]),
+                Err(err)
+                    if matches!(
+                        err.kind(),
+                        io::ErrorKind::Interrupted | io::ErrorKind::WouldBlock
+                    ) => {}
+                Err(err) => {
+                    return Err(io::Error::new(
+                        err.kind(),
+                        format!("reading from the handoff socket failed: {err}"),
+                    ));
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn handoff_line_reader_preserves_partial_and_complete_buffered_lines() {
+    let (reader_stream, mut writer_stream) = UnixStream::pair().unwrap();
+    reader_stream.set_nonblocking(true).unwrap();
+    writer_stream.write_all(b"tial\nnext\n").unwrap();
+
+    let mut reader = HandoffLineReader::new(&reader_stream, Duration::from_secs(1)).unwrap();
+    reader.buffered.extend_from_slice(b"par");
+    assert_eq!(reader.read_line().unwrap(), "partial");
+    assert_eq!(reader.read_line().unwrap(), "next");
+
+    reader.buffered.extend_from_slice(b"first\nsecond\n");
+    assert_eq!(reader.read_line().unwrap(), "first");
+    assert_eq!(reader.read_line().unwrap(), "second");
+}
+
+fn set_fd_nonblocking(fd: std::os::fd::RawFd) -> io::Result<()> {
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+fn read_until_contains(
+    reader: &mut impl Read,
+    needle: &[u8],
+    timeout: Duration,
+) -> io::Result<Vec<u8>> {
+    assert!(!needle.is_empty());
+    let deadline = Instant::now() + timeout;
+    let mut output = Vec::new();
+    let mut chunk = [0_u8; 1024];
+    loop {
+        if output.windows(needle.len()).any(|window| window == needle) {
+            return Ok(output);
+        }
+        if Instant::now() >= deadline {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!(
+                    "timed out after {timeout:?} waiting for {:?} in PTY output ({} bytes read)",
+                    String::from_utf8_lossy(needle),
+                    output.len()
+                ),
+            ));
+        }
+
+        match reader.read(&mut chunk) {
+            Ok(0) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    format!(
+                        "PTY closed before {:?} appeared ({} bytes read)",
+                        String::from_utf8_lossy(needle),
+                        output.len()
+                    ),
+                ));
+            }
+            Ok(read) => output.extend_from_slice(&chunk[..read]),
+            Err(err) if err.kind() == io::ErrorKind::Interrupted => {}
+            Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                thread::sleep(remaining.min(Duration::from_millis(10)));
+            }
+            Err(err) => {
+                return Err(io::Error::new(
+                    err.kind(),
+                    format!("reading rollback PTY output failed: {err}"),
+                ));
+            }
+        }
+    }
+}
+
+#[test]
+fn read_until_contains_retries_nonblocking_errors_and_preserves_output() {
+    struct RetryReader {
+        step: usize,
+    }
+
+    impl Read for RetryReader {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            self.step += 1;
+            match self.step {
+                1 => {
+                    buffer[..7].copy_from_slice(b"legacy-");
+                    Ok(7)
+                }
+                2 => Err(io::Error::from(io::ErrorKind::WouldBlock)),
+                3 => Err(io::Error::from(io::ErrorKind::Interrupted)),
+                _ => {
+                    buffer[..11].copy_from_slice(b"rollback-ok");
+                    Ok(11)
+                }
+            }
+        }
+    }
+
+    let output = read_until_contains(
+        &mut RetryReader { step: 0 },
+        b"legacy-rollback-ok",
+        Duration::from_secs(1),
+    )
+    .unwrap();
+    assert_eq!(output, b"legacy-rollback-ok");
+}
+
+fn send_legacy_handoff_fd(stream: &UnixStream, fd: std::os::fd::RawFd) {
+    let mut byte = [1_u8];
+    let mut iov = libc::iovec {
+        iov_base: byte.as_mut_ptr().cast(),
+        iov_len: byte.len(),
+    };
+    let control_len = unsafe { libc::CMSG_SPACE(std::mem::size_of::<libc::c_int>() as _) } as usize;
+    let mut control = vec![0_u8; control_len];
+    let mut message: libc::msghdr = unsafe { std::mem::zeroed() };
+    message.msg_iov = &mut iov;
+    message.msg_iovlen = 1;
+    message.msg_control = control.as_mut_ptr().cast();
+    message.msg_controllen = control.len() as _;
+    unsafe {
+        let header = libc::CMSG_FIRSTHDR(&message);
+        (*header).cmsg_level = libc::SOL_SOCKET;
+        (*header).cmsg_type = libc::SCM_RIGHTS;
+        (*header).cmsg_len = libc::CMSG_LEN(std::mem::size_of::<libc::c_int>() as _) as _;
+        std::ptr::copy_nonoverlapping(
+            (&fd as *const std::os::fd::RawFd).cast::<u8>(),
+            libc::CMSG_DATA(header),
+            std::mem::size_of::<libc::c_int>(),
+        );
+        message.msg_controllen = (*header).cmsg_len;
+        assert_eq!(libc::sendmsg(stream.as_raw_fd(), &message, 0), 1);
+    }
+}
+
+fn run_legacy_v1_source_harness(commit: bool) {
+    let _lock = test_lock();
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let api_socket = runtime_dir.join("herdr.sock");
+    let client_socket = runtime_dir.join("herdr-client.sock");
+    let handoff_socket = runtime_dir.join("legacy-handoff.sock");
+    fs::create_dir_all(config_home.join("vqro-dev")).unwrap();
+    fs::create_dir_all(&runtime_dir).unwrap();
+    fs::write(
+        config_home.join("vqro-dev/config.toml"),
+        "onboarding = false\n",
+    )
+    .unwrap();
+
+    let pair = native_pty_system()
+        .openpty(PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .unwrap();
+    let mut shell = CommandBuilder::new("/bin/sh");
+    shell.env("TERM", "xterm-256color");
+    let mut shell_child = pair.slave.spawn_command(shell).unwrap();
+    drop(pair.slave);
+    let master_fd = pair.master.as_raw_fd().unwrap();
+    let mut source_reader = pair.master.try_clone_reader().unwrap();
+    let mut source_writer = pair.master.take_writer().unwrap();
+
+    let snapshot = if commit {
+        serde_json::json!({
+            "version": 4,
+            "workspaces": [],
+            "repositories": [],
+            "space_order": [],
+            "active": null,
+            "selected": 0
+        })
+    } else {
+        serde_json::json!({
+            "version": 4,
+            "workspaces": [{
+                "id": "w1",
+                "custom_name": "legacy",
+                "identity_cwd": "/tmp",
+                "public_pane_numbers": {"1": 1},
+                "next_public_pane_number": 2,
+                "public_tab_numbers": [1],
+                "next_public_tab_number": 2,
+                "tabs": [{
+                    "custom_name": null,
+                    "layout": {"Pane": 1},
+                    "panes": {"1": {"cwd": "/tmp"}},
+                    "zoomed": false,
+                    "focused": 1,
+                    "root_pane": 1
+                }],
+                "active_tab": 0
+            }],
+            "repositories": [],
+            "space_order": [],
+            "active": 0,
+            "selected": 0
+        })
+    };
+    let panes = if commit {
+        serde_json::json!([])
+    } else {
+        serde_json::json!([{
+            "pane_id": 1,
+            "child_pid": shell_child.process_id(),
+            "rows": 24,
+            "cols": 80,
+            "cell_width_px": 0,
+            "cell_height_px": 0,
+            "keyboard_protocol_flags": 0
+        }])
+    };
+    let manifest = serde_json::json!({
+        "version": 1,
+        "source_version": "legacy-harness",
+        "source_protocol": 22,
+        "expected_version": null,
+        "expected_protocol": null,
+        "snapshot": snapshot,
+        "panes": panes
+    });
+    let session_path = config_home.join("vqro-dev/session.json");
+    let mut legacy_bytes = serde_json::to_vec_pretty(&manifest["snapshot"]).unwrap();
+    legacy_bytes.push(b'\n');
+    fs::write(&session_path, &legacy_bytes).unwrap();
+
+    let listener = UnixListener::bind(&handoff_socket).unwrap();
+    let token = "legacy-token";
+    let mut target = std::process::Command::new(env!("CARGO_BIN_EXE_vqro"))
+        .arg("server")
+        .arg("--handoff-import")
+        .arg(&handoff_socket)
+        .arg(token)
+        .env("XDG_CONFIG_HOME", &config_home)
+        .env("XDG_RUNTIME_DIR", &runtime_dir)
+        .env("VQRO_SOCKET_PATH", &api_socket)
+        .env("VQRO_CLIENT_SOCKET_PATH", &client_socket)
+        .env("SHELL", "/bin/sh")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let (mut stream, _) = listener.accept().unwrap();
+    let mut handoff_reader = HandoffLineReader::new(&stream, Duration::from_secs(30)).unwrap();
+    assert_eq!(handoff_reader.read_line().unwrap(), token);
+    serde_json::to_writer(&mut stream, &manifest).unwrap();
+    stream.write_all(b"\n").unwrap();
+    stream.flush().unwrap();
+    assert_eq!(handoff_reader.read_line().unwrap(), "validated");
+    if !commit {
+        send_legacy_handoff_fd(&stream, master_fd);
+    }
+    assert_eq!(handoff_reader.read_line().unwrap(), "restored");
+    assert_eq!(handoff_reader.read_line().unwrap(), "ready");
+    assert!(
+        !api_socket.exists(),
+        "legacy ready must not expose target API"
+    );
+    assert_eq!(fs::read(&session_path).unwrap(), legacy_bytes);
+
+    if commit {
+        stream.write_all(b"committed\n").unwrap();
+        stream.flush().unwrap();
+        drop(source_reader);
+        drop(source_writer);
+        drop(pair.master);
+        assert_eq!(handoff_reader.read_line().unwrap(), "owned");
+        wait_for_api(&api_socket, Duration::from_secs(10));
+        let published: serde_json::Value =
+            serde_json::from_slice(&fs::read(&session_path).unwrap()).unwrap();
+        assert_eq!(published["version"], 6);
+        assert!(published["workspaces"].as_array().unwrap().is_empty());
+        let _ = request(
+            &api_socket,
+            serde_json::json!({"id":"legacy:stop","method":"server.stop","params":{}}),
+        );
+    } else {
+        drop(handoff_reader);
+        drop(stream);
+        assert!(support::wait_until(
+            Duration::from_secs(5),
+            Duration::from_millis(25),
+            || target.try_wait().unwrap().is_some()
+        ));
+        source_writer
+            .write_all(b"echo legacy-rollback-ok\n")
+            .unwrap();
+        source_writer.flush().unwrap();
+        set_fd_nonblocking(master_fd).unwrap();
+        read_until_contains(
+            &mut source_reader,
+            b"legacy-rollback-ok",
+            Duration::from_secs(5),
+        )
+        .unwrap();
+        assert_eq!(fs::read(&session_path).unwrap(), legacy_bytes);
+    }
+
+    let _ = shell_child.kill();
+    let _ = target.kill();
+    let _ = target.wait();
+    cleanup_test_base(&base);
+}
+
 fn live_handoff_import_failure_rolls_back_old_server_at(failure_point: &str) {
     let _lock = test_lock();
     let base = unique_test_dir();
@@ -1820,13 +2426,48 @@ fn live_handoff_import_failure_rolls_back_old_server_at(failure_point: &str) {
     let client_socket = runtime_dir.join("herdr-client.sock");
     let marker = base.join("child.pid");
     let received_marker = base.join("received");
+    let v1_harness = (failure_point == "v1-only").then(|| {
+        use std::os::unix::fs::PermissionsExt;
 
-    let spawned = spawn_server_with_env(
-        &config_home,
-        &runtime_dir,
-        &api_socket,
-        &[("HERDR_TEST_HANDOFF_IMPORT_FAIL", failure_point)],
-    );
+        fs::create_dir_all(&base).unwrap();
+        let path = base.join("v1-handoff-receiver.py");
+        fs::write(
+            &path,
+            r#"#!/usr/bin/env python3
+import json
+import socket
+import sys
+
+connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+connection.connect(sys.argv[3])
+connection.sendall((sys.argv[4] + "\n").encode())
+line = b""
+while not line.endswith(b"\n"):
+    chunk = connection.recv(4096)
+    if not chunk:
+        raise RuntimeError("source closed before manifest")
+    line += chunk
+manifest = json.loads(line)
+if manifest.get("version") != 3:
+    raise RuntimeError(f"expected handoff v3, got {manifest.get('version')}")
+connection.sendall(b"unsupported handoff version 3\n")
+"#,
+        )
+        .unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    });
+
+    let spawned = if v1_harness.is_some() {
+        spawn_server(&config_home, &runtime_dir, &api_socket)
+    } else {
+        spawn_server_with_env(
+            &config_home,
+            &runtime_dir,
+            &api_socket,
+            &[("VQRO_TEST_HANDOFF_IMPORT_FAIL", failure_point)],
+        )
+    };
     wait_for_socket(&api_socket, Duration::from_secs(10));
     register_runtime_dir(&runtime_dir);
 
@@ -1859,9 +2500,13 @@ fn live_handoff_import_failure_rolls_back_old_server_at(failure_point: &str) {
     let pid_text = fs::read_to_string(&marker).unwrap();
     let child_pid: u32 = pid_text.split_whitespace().last().unwrap().parse().unwrap();
 
+    let params = v1_harness.as_ref().map_or_else(
+        || serde_json::json!({}),
+        |path| serde_json::json!({"import_exe": path}),
+    );
     let failed = request(
         &api_socket,
-        serde_json::json!({"id":"test:handoff-fail","method":"server.live_handoff","params":{}}),
+        serde_json::json!({"id":"test:handoff-fail","method":"server.live_handoff","params":params}),
     );
     assert!(
         failed.get("error").is_some(),
@@ -1884,11 +2529,96 @@ fn live_handoff_import_failure_rolls_back_old_server_at(failure_point: &str) {
         &format!("got:{failure_point}"),
         Duration::from_secs(5),
     );
-
     let _ = request(
         &api_socket,
         serde_json::json!({"id":"test:stop","method":"server.stop","params":{}}),
     );
+    drop(spawned);
+    cleanup_test_base(&base);
+}
+
+#[test]
+fn live_handoff_v3_to_v1_rejection_rolls_back_source_and_preserves_pty() {
+    live_handoff_import_failure_rolls_back_old_server_at("v1-only");
+}
+
+#[test]
+fn legacy_v1_source_precommit_rollback_preserves_v4_and_source_pty() {
+    run_legacy_v1_source_harness(false);
+}
+
+#[test]
+fn legacy_v1_source_commit_publishes_v6_before_target_exposure() {
+    run_legacy_v1_source_harness(true);
+}
+
+#[test]
+fn postcommit_publication_failure_fails_closed_without_source_resume() {
+    let _lock = test_lock();
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let api_socket = runtime_dir.join("herdr.sock");
+    let marker = base.join("child.pid");
+    let spawned = spawn_server_with_env(
+        &config_home,
+        &runtime_dir,
+        &api_socket,
+        &[("VQRO_TEST_HANDOFF_IMPORT_FAIL", "publish_after_commit")],
+    );
+    wait_for_socket(&api_socket, Duration::from_secs(10));
+    register_runtime_dir(&runtime_dir);
+
+    let created = request(
+        &api_socket,
+        serde_json::json!({
+            "id": "test:workspace:create",
+            "method": "workspace.create",
+            "params": {"cwd": "/tmp", "focus": true}
+        }),
+    );
+    let pane_id = created["result"]["root_pane"]["pane_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_ok(request(
+        &api_socket,
+        serde_json::json!({
+            "id": "test:pane:run",
+            "method": "pane.send_input",
+            "params": {
+                "pane_id": pane_id,
+                "text": format!("sh -c 'echo $$ > {}; sleep 30'", marker.display()),
+                "keys": ["Enter"]
+            }
+        }),
+    ));
+    support::wait_for_file(&marker, Duration::from_secs(5));
+    let child_pid: u32 = fs::read_to_string(&marker).unwrap().trim().parse().unwrap();
+    let session_path = config_home.join("vqro-dev/session.json");
+    let legacy = b"{\"version\":4,\"workspaces\":[],\"repositories\":[],\"space_order\":[],\"active\":null,\"selected\":0}\n";
+    fs::write(&session_path, legacy).unwrap();
+
+    let failed = request(
+        &api_socket,
+        serde_json::json!({"id":"test:handoff","method":"server.live_handoff","params":{}}),
+    );
+    assert!(
+        failed.get("error").is_some(),
+        "handoff should fail closed: {failed}"
+    );
+    assert!(support::wait_until(
+        Duration::from_secs(5),
+        Duration::from_millis(25),
+        || UnixStream::connect(&api_socket).is_err()
+    ));
+    assert!(support::wait_until(
+        Duration::from_secs(5),
+        Duration::from_millis(25),
+        || unsafe { libc::kill(child_pid as libc::pid_t, 0) } != 0
+    ));
+    assert_eq!(fs::read(&session_path).unwrap(), legacy);
+
     drop(spawned);
     cleanup_test_base(&base);
 }

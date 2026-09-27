@@ -13,8 +13,8 @@ use crate::api::schema::{
     PaneReportMetadataParams, PaneResizeParams, PaneResizeReason, PaneResizeResult,
     PaneScrollParams, PaneSelectionReadParams, PaneSendInputParams, PaneSendKeysParams,
     PaneSendTextParams, PaneSplitParams, PaneSwapParams, PaneSwapReason, PaneSwapResult,
-    PaneTarget, PaneTextPoint, PaneTextRange, PaneZoomMode, PaneZoomParams, PaneZoomReason,
-    PaneZoomResult, ResponseResult,
+    PaneTarget, PaneTelemetry, PaneTelemetryParams, PaneTextPoint, PaneTextRange, PaneZoomMode,
+    PaneZoomParams, PaneZoomReason, PaneZoomResult, ResponseResult,
 };
 use crate::app::actions::{PaneZoomCommand, PaneZoomNoopReason};
 use crate::app::App;
@@ -62,6 +62,10 @@ impl App {
         let host_terminal_theme = self.state.host_terminal_theme;
         let host_terminal_appearance = self.state.host_terminal_appearance;
         let previous_focus = self.state.current_pane_focus_target();
+        let terminal_id = match self.allocate_terminal_id() {
+            Ok(id) => id,
+            Err(error) => return encode_error(id, "pane_split_failed", error.to_string()),
+        };
         let Some(ws) = self.state.workspaces.get_mut(ws_idx) else {
             return encode_error(id, "pane_not_found", "pane not found");
         };
@@ -72,6 +76,7 @@ impl App {
         let shell_config = crate::pane::PaneShellConfig::new(&default_shell, self.state.shell_mode);
         let split_result = match params.ratio {
             Some(ratio) => ws.split_pane_with_ratio(
+                terminal_id,
                 target_pane_id,
                 direction,
                 ratio,
@@ -86,6 +91,7 @@ impl App {
                 params.focus,
             ),
             None => ws.split_pane(
+                terminal_id,
                 target_pane_id,
                 direction,
                 rows,
@@ -112,6 +118,7 @@ impl App {
         }
         if params.focus {
             self.state.switch_workspace_tab(ws_idx, target_tab_idx);
+            self.apply_bundled_extension_state();
             self.state
                 .record_pane_focus_change(previous_focus, ws_idx, new_pane.pane_id);
             self.state.mode = crate::app::Mode::Terminal;
@@ -130,6 +137,7 @@ impl App {
             data: EventData::PaneCreated { pane: pane.clone() },
         });
         self.emit_layout_updated_event(ws_idx, target_tab_idx);
+        self.refresh_collection_documents();
 
         encode_success(id, ResponseResult::PaneInfo { pane })
     }
@@ -473,9 +481,16 @@ impl App {
             return pane_not_found(id, &target.pane_id);
         };
 
-        self.state.focus_pane_in_workspace(ws_idx, pane_id);
+        let previous_workspace = self.state.active;
+        let focus_changed = self.state.focus_pane_in_workspace(ws_idx, pane_id);
+        if self.state.active != previous_workspace {
+            self.apply_bundled_extension_state();
+        }
         self.state.mark_active_tab_seen();
         self.state.mode = crate::app::Mode::Terminal;
+        if focus_changed {
+            self.refresh_collection_documents();
+        }
 
         let Some(pane) = self.pane_info(ws_idx, pane_id) else {
             return pane_not_found(id, &target.pane_id);
@@ -546,6 +561,47 @@ impl App {
                 },
             },
         )
+    }
+
+    pub(crate) fn handle_pane_telemetry(
+        &mut self,
+        id: String,
+        params: PaneTelemetryParams,
+    ) -> String {
+        let Some((ws_idx, pane_id)) = self.resolve_optional_pane(params.pane_id.as_deref()) else {
+            return encode_error(id, "pane_not_found", "pane not found");
+        };
+        let Some(public_pane_id) = self.public_pane_id(ws_idx, pane_id) else {
+            return encode_error(id, "pane_not_found", "pane not found");
+        };
+        let Some(terminal_id) = self.state.terminal_id_for_pane(ws_idx, pane_id) else {
+            return encode_error(id, "pane_not_found", "pane not found");
+        };
+        let shell_pid = self
+            .terminal_runtimes
+            .get(&terminal_id)
+            .and_then(|runtime| runtime.child_pid());
+        let Some(pane) = self.pane_info(ws_idx, pane_id) else {
+            return encode_error(id, "pane_not_found", "pane not found");
+        };
+        let sample = self.terminal_telemetry(&terminal_id, shell_pid, std::time::Instant::now());
+        let telemetry = PaneTelemetry {
+            pane_id: public_pane_id,
+            availability: sample.availability,
+            detail: sample.detail,
+            cache_age_ms: sample.cache_age_ms,
+            shell_pid,
+            foreground_process_group_id: sample.process_group_id,
+            truncated: sample.truncated,
+            processes: sample.processes,
+            agent: pane.agent,
+            display_agent: pane.display_agent,
+            agent_status: pane.agent_status,
+            state_labels: pane.state_labels,
+            document_owner: None,
+            document: None,
+        };
+        encode_success(id, ResponseResult::PaneTelemetry { telemetry })
     }
 
     pub(super) fn handle_pane_neighbor(
@@ -667,6 +723,7 @@ impl App {
         if let Some(target_pane_id) = target {
             self.state.focus_pane_in_workspace(ws_idx, target_pane_id);
             self.state.switch_workspace_tab(ws_idx, tab_idx);
+            self.apply_bundled_extension_state();
             self.state.mode = crate::app::Mode::Terminal;
         }
         let focused_pane_id = self
@@ -721,7 +778,7 @@ impl App {
             .workspaces
             .get_mut(ws_idx)
             .and_then(|ws| ws.tabs.get_mut(tab_idx))
-            .is_some_and(|tab| tab.layout.resize_pane(pane_id, direction, amount, area));
+            .is_some_and(|tab| tab.resize_pane(pane_id, direction, amount, area));
         if changed {
             self.schedule_session_save();
         }
@@ -857,10 +914,11 @@ impl App {
                     .get_mut(ws_idx)
                     .and_then(|ws| ws.tabs.get_mut(tab_idx))
                 {
-                    changed = tab.layout.swap_panes(source_pane_id, target_pane_id);
-                    tab.layout.focus_pane(source_pane_id);
+                    changed = tab.swap_panes(source_pane_id, target_pane_id);
+                    tab.focus_pane(source_pane_id);
                     if changed {
                         self.state.switch_workspace_tab(ws_idx, tab_idx);
+                        self.apply_bundled_extension_state();
                         self.state
                             .record_pane_focus_change(previous_focus, ws_idx, source_pane_id);
                         self.state.mark_session_dirty();
@@ -871,8 +929,8 @@ impl App {
         }
 
         let source_public_id = match params.source_pane_id {
-            Some(raw) => self
-                .parse_pane_id(&raw)
+            Some(raw_id) => self
+                .parse_pane_id(&raw_id)
                 .and_then(|(idx, pane_id)| {
                     self.state
                         .workspaces
@@ -880,14 +938,14 @@ impl App {
                         .find_tab_index_for_pane(pane_id)?;
                     self.public_pane_id(idx, pane_id)
                 })
-                .unwrap_or(raw),
+                .unwrap_or(raw_id),
             None => self
                 .public_pane_id(ws_idx, source_pane_id)
                 .unwrap_or_default(),
         };
         let target_public_id = match params.target_pane_id {
-            Some(raw) => self
-                .parse_pane_id(&raw)
+            Some(raw_id) => self
+                .parse_pane_id(&raw_id)
                 .and_then(|(idx, pane_id)| {
                     self.state
                         .workspaces
@@ -895,7 +953,7 @@ impl App {
                         .find_tab_index_for_pane(pane_id)?;
                     self.public_pane_id(idx, pane_id)
                 })
-                .or(Some(raw)),
+                .or(Some(raw_id)),
             None => target_pane_id.and_then(|pane_id| self.public_pane_id(ws_idx, pane_id)),
         };
         let Some(layout) = self.pane_layout_snapshot(ws_idx, tab_idx) else {
@@ -952,6 +1010,10 @@ impl App {
         else {
             return encode_error(id, "pane_not_found", "source pane not found");
         };
+        let source_tab_will_remain = self.state.workspaces[source_ws_idx].tabs[source_tab_idx]
+            .layout
+            .pane_count()
+            > 1;
         let recovery_context = PaneMoveRecoveryContext {
             source_ws_idx,
             previous_workspace_id: previous_workspace_id.clone(),
@@ -959,6 +1021,16 @@ impl App {
             previous_tab_label: self.state.workspaces[source_ws_idx].tabs[source_tab_idx]
                 .custom_name
                 .clone(),
+            previous_internal_tab_id: self.state.workspaces[source_ws_idx].tabs[source_tab_idx]
+                .id
+                .clone(),
+            previous_public_tab_number: self.state.workspaces[source_ws_idx].tabs[source_tab_idx]
+                .number,
+            previous_next_public_tab_number: self.state.workspaces[source_ws_idx]
+                .next_public_tab_number,
+            previous_public_pane_number: self.state.workspaces[source_ws_idx]
+                .public_pane_number(source_pane_id)
+                .unwrap_or(1),
             previous_worktree_space: self.state.workspaces[source_ws_idx].worktree_space.clone(),
             identity_cwd: self.state.workspaces[source_ws_idx].identity_cwd.clone(),
         };
@@ -1049,12 +1121,12 @@ impl App {
                     );
                 }
                 let target_pane_id = match target_pane_id {
-                    Some(raw) => {
-                        let Some((pane_ws_idx, pane_id)) = self.parse_pane_id(&raw) else {
+                    Some(raw_id) => {
+                        let Some((pane_ws_idx, pane_id)) = self.parse_pane_id(&raw_id) else {
                             return encode_error(
                                 id,
                                 "target_pane_not_found",
-                                format!("target pane {raw} not found"),
+                                format!("target pane {raw_id} not found"),
                             );
                         };
                         let pane_tab_idx =
@@ -1063,7 +1135,7 @@ impl App {
                             return encode_error(
                                 id,
                                 "target_pane_not_found",
-                                format!("target pane {raw} is not in tab {tab_id}"),
+                                format!("target pane {raw_id} is not in tab {tab_id}"),
                             );
                         }
                         pane_id
@@ -1108,6 +1180,48 @@ impl App {
                 ResolvedPaneMoveDestination::NewWorkspace { label, tab_label }
             }
         };
+
+        let preflight_workspace_ids = match &resolved {
+            ResolvedPaneMoveDestination::ExistingTab { .. } if source_tab_will_remain => {
+                vec![previous_workspace_id.clone()]
+            }
+            ResolvedPaneMoveDestination::NewTab { workspace_id, .. } => {
+                let mut ids = vec![workspace_id.clone()];
+                if source_tab_will_remain && workspace_id != &previous_workspace_id {
+                    ids.push(previous_workspace_id.clone());
+                }
+                ids
+            }
+            _ => Vec::new(),
+        };
+        for workspace_id in preflight_workspace_ids {
+            let Some(ws_idx) = self.parse_workspace_id(&workspace_id) else {
+                return encode_error(id, "pane_move_failed", "workspace disappeared");
+            };
+            if let Err(error) = self.state.workspaces[ws_idx].ensure_public_tab_numbers_available(1)
+            {
+                return encode_error(id, "pane_move_failed", error.to_string());
+            }
+        }
+
+        // A removed source tab can reuse its original identity during
+        // rollback. If the source tab remains, reserve a distinct fallback in
+        // case adversarial state prevents reinsertion into that live tab.
+        let move_tab_id =
+            if matches!(
+                resolved,
+                ResolvedPaneMoveDestination::NewTab { .. }
+                    | ResolvedPaneMoveDestination::NewWorkspace { .. }
+            ) || (matches!(resolved, ResolvedPaneMoveDestination::ExistingTab { .. })
+                && source_tab_will_remain)
+            {
+                match self.allocate_tab_id() {
+                    Ok(tab_id) => Some(tab_id),
+                    Err(error) => return encode_error(id, "pane_move_failed", error.to_string()),
+                }
+            } else {
+                None
+            };
 
         let previous_focus = self.state.current_pane_focus_target();
         let taken = match self
@@ -1175,7 +1289,7 @@ impl App {
                 cross_workspace: _,
             } => {
                 let Some((target_ws_idx, target_tab_idx)) = self.parse_tab_id(&tab_id) else {
-                    self.recover_failed_pane_move(recovery_context, moved);
+                    self.recover_failed_pane_move(recovery_context, move_tab_id, moved);
                     return encode_error(id, "pane_move_failed", "target tab disappeared");
                 };
                 let direction = split_direction_to_layout(split);
@@ -1190,7 +1304,7 @@ impl App {
                     ) {
                     Ok(pane_id) => pane_id,
                     Err(moved) => {
-                        self.recover_failed_pane_move(recovery_context, moved);
+                        self.recover_failed_pane_move(recovery_context, move_tab_id, moved);
                         return encode_error(
                             id,
                             "pane_move_failed",
@@ -1205,22 +1319,45 @@ impl App {
                 label,
             } => {
                 let Some(target_ws_idx) = self.parse_workspace_id(&workspace_id) else {
-                    self.recover_failed_pane_move(recovery_context, moved);
+                    self.recover_failed_pane_move(recovery_context, move_tab_id, moved);
                     return encode_error(id, "pane_move_failed", "target workspace disappeared");
                 };
+                let Some(move_tab_id) = move_tab_id else {
+                    self.recover_failed_pane_move(recovery_context, None, moved);
+                    return encode_error(id, "pane_move_failed", "new tab identity is unavailable");
+                };
                 let moved_pane_id = moved.pane_id;
-                let target_tab_idx = self.state.workspaces[target_ws_idx]
+                let target_tab_idx = match self.state.workspaces[target_ws_idx]
                     .create_tab_from_existing_pane(
+                        move_tab_id,
                         moved,
                         label,
                         self.event_tx.clone(),
                         self.render_notify.clone(),
                         self.render_dirty.clone(),
-                    );
+                    ) {
+                    Ok(tab_idx) => tab_idx,
+                    Err((error, fallback_tab_id, moved)) => {
+                        self.recover_failed_pane_move(
+                            recovery_context,
+                            Some(fallback_tab_id),
+                            moved,
+                        );
+                        return encode_error(id, "pane_move_failed", error.to_string());
+                    }
+                };
                 created_tab = true;
                 (target_ws_idx, target_tab_idx, moved_pane_id)
             }
             ResolvedPaneMoveDestination::NewWorkspace { label, tab_label } => {
+                let Some(move_tab_id) = move_tab_id else {
+                    self.recover_failed_pane_move(recovery_context, None, moved);
+                    return encode_error(
+                        id,
+                        "pane_move_failed",
+                        "new workspace tab identity is unavailable",
+                    );
+                };
                 let identity_cwd = self
                     .state
                     .terminals
@@ -1229,6 +1366,7 @@ impl App {
                     .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| "/".into()));
                 let moved_pane_id = moved.pane_id;
                 let workspace = crate::workspace::Workspace::from_existing_pane(
+                    move_tab_id,
                     label,
                     tab_label,
                     identity_cwd,
@@ -1248,6 +1386,7 @@ impl App {
         if focus || self.state.active.is_none() {
             self.state
                 .switch_workspace_tab(target_ws_idx, target_tab_idx);
+            self.apply_bundled_extension_state();
             self.state
                 .record_pane_focus_change(previous_focus, target_ws_idx, moved_pane_id);
             self.state.mode = crate::app::Mode::Terminal;
@@ -1339,6 +1478,7 @@ impl App {
             self.emit_layout_updated_snapshot(source_layout);
         }
         self.emit_layout_updated_snapshot((*move_result.target_layout).clone());
+        self.refresh_collection_documents();
 
         encode_success(id, ResponseResult::PaneMove { move_result })
     }
@@ -1346,18 +1486,90 @@ impl App {
     fn recover_failed_pane_move(
         &mut self,
         context: PaneMoveRecoveryContext,
+        fallback_tab_id: Option<crate::workspace::TabId>,
         moved: crate::workspace::MovedPane,
     ) {
-        if let Some(ws_idx) = self.parse_workspace_id(&context.previous_workspace_id) {
-            self.state.workspaces[ws_idx].create_tab_from_existing_pane(
+        let moved = if let Some((ws_idx, tab_idx)) = self
+            .state
+            .workspaces
+            .iter()
+            .enumerate()
+            .find_map(|(ws_idx, workspace)| {
+                workspace
+                    .tabs
+                    .iter()
+                    .position(|tab| tab.id == context.previous_internal_tab_id)
+                    .map(|tab_idx| (ws_idx, tab_idx))
+            }) {
+            let target_pane_id = self.state.workspaces[ws_idx].tabs[tab_idx].root_pane;
+            match self.state.workspaces[ws_idx].insert_moved_pane_into_tab(
+                tab_idx,
+                target_pane_id,
                 moved,
-                context.previous_tab_label,
-                self.event_tx.clone(),
-                self.render_notify.clone(),
-                self.render_dirty.clone(),
-            );
+                ratatui::layout::Direction::Horizontal,
+                0.5,
+                true,
+            ) {
+                Ok(pane_id) => {
+                    self.state.workspaces[ws_idx]
+                        .public_pane_numbers
+                        .insert(pane_id, context.previous_public_pane_number);
+                    self.state.mark_session_dirty();
+                    self.schedule_session_save();
+                    return;
+                }
+                Err(moved) => moved,
+            }
+        } else {
+            moved
+        };
+        let original_still_live = self.state.workspaces.iter().any(|workspace| {
+            workspace
+                .tabs
+                .iter()
+                .any(|tab| tab.id == context.previous_internal_tab_id)
+        });
+        let recovery_tab_id = if original_still_live {
+            let Some(fallback_tab_id) = fallback_tab_id else {
+                tracing::error!(
+                    tab_id = %context.previous_internal_tab_id,
+                    "pane move rollback lacked a distinct fallback tab identity"
+                );
+                return;
+            };
+            fallback_tab_id
+        } else {
+            context.previous_internal_tab_id.clone()
+        };
+        if let Some(ws_idx) = self.parse_workspace_id(&context.previous_workspace_id) {
+            if original_still_live {
+                if let Err((error, _tab_id, _moved)) = self.state.workspaces[ws_idx]
+                    .create_tab_from_existing_pane(
+                        recovery_tab_id,
+                        moved,
+                        context.previous_tab_label,
+                        self.event_tx.clone(),
+                        self.render_notify.clone(),
+                        self.render_dirty.clone(),
+                    )
+                {
+                    tracing::error!(%error, "preflighted pane move rollback tab creation failed");
+                    return;
+                }
+            } else {
+                self.state.workspaces[ws_idx].restore_tab_from_existing_pane(
+                    recovery_tab_id,
+                    context.previous_public_tab_number,
+                    moved,
+                    context.previous_tab_label,
+                    self.event_tx.clone(),
+                    self.render_notify.clone(),
+                    self.render_dirty.clone(),
+                );
+            }
         } else {
             let mut workspace = crate::workspace::Workspace::from_existing_pane(
+                recovery_tab_id,
                 context.previous_workspace_label,
                 context.previous_tab_label,
                 context.identity_cwd,
@@ -1367,6 +1579,8 @@ impl App {
                 self.render_dirty.clone(),
             );
             workspace.id = context.previous_workspace_id;
+            workspace.tabs[0].number = context.previous_public_tab_number;
+            workspace.next_public_tab_number = context.previous_next_public_tab_number;
             workspace.worktree_space = context.previous_worktree_space;
             let insert_idx = context.source_ws_idx.min(self.state.workspaces.len());
             if let Some(active) = self.state.active {
@@ -1482,6 +1696,7 @@ impl App {
         }
         self.state.mark_session_dirty();
         let pane = self.pane_info(ws_idx, pane_id).unwrap();
+        self.refresh_collection_documents();
 
         encode_success(id, ResponseResult::PaneInfo { pane })
     }
@@ -1876,10 +2091,13 @@ impl App {
             };
             ws.close_pane(pane_id)
         };
+        self.state.delegations.tombstone_pane(pane_id);
+        self.state.delegations.gc_tombstones();
         self.state.remove_plugin_pane_records([pane_id]);
         if should_close_workspace {
             self.state.selected = ws_idx;
             self.state.close_selected_workspace();
+            self.apply_bundled_extension_state();
             self.shutdown_detached_terminal_runtimes();
             self.emit_event(EventEnvelope {
                 event: EventKind::PaneClosed,
@@ -1910,6 +2128,7 @@ impl App {
                 self.emit_layout_updated_event(ws_idx, tab_idx);
             }
         }
+        self.refresh_collection_documents();
 
         Ok(())
     }
@@ -2009,7 +2228,8 @@ impl App {
         let ws = self.state.workspaces.get(ws_idx)?;
         let tab = ws.tabs.get(tab_idx)?;
         let area = self.state.view.terminal_area;
-        let focused_pane_id = self.public_pane_id(ws_idx, tab.layout.focused())?;
+        let focused = tab.layout.focused();
+        let focused_pane_id = self.public_pane_id(ws_idx, focused)?;
         let panes = crate::ui::apply_pane_chrome(
             tab.layout.panes(area),
             self.state.pane_borders,
@@ -2125,6 +2345,10 @@ struct PaneMoveRecoveryContext {
     previous_workspace_id: String,
     previous_workspace_label: Option<String>,
     previous_tab_label: Option<String>,
+    previous_internal_tab_id: crate::workspace::TabId,
+    previous_public_tab_number: usize,
+    previous_next_public_tab_number: usize,
+    previous_public_pane_number: usize,
     previous_worktree_space: Option<crate::workspace::WorktreeSpaceMembership>,
     identity_cwd: std::path::PathBuf,
 }
@@ -2200,6 +2424,7 @@ fn invalid_agent(id: String) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::super::test_support::{exiting_test_command, shutdown_test_runtimes};
     use super::*;
     use crate::{
         api::schema::{ErrorResponse, SplitDirection, SuccessResponse},
@@ -2222,6 +2447,32 @@ mod tests {
         let pane_id = app.state.workspaces[0].tabs[0].root_pane;
         let public_pane_id = app.public_pane_id(0, pane_id).unwrap();
         (app, public_pane_id)
+    }
+
+    #[tokio::test]
+    async fn pane_split_does_not_publish_a_host_collections_fallback() {
+        let (mut app, public_pane_id) = app_with_test_workspace();
+        app.state.default_shell = exiting_test_command().into();
+        let response = app.handle_pane_split(
+            "req".into(),
+            PaneSplitParams {
+                workspace_id: None,
+                target_pane_id: Some(public_pane_id),
+                direction: SplitDirection::Right,
+                ratio: None,
+                cwd: None,
+                focus: false,
+                right_click: Default::default(),
+                env: Default::default(),
+            },
+        );
+        let response: SuccessResponse = serde_json::from_str(&response).unwrap();
+        assert!(matches!(response.result, ResponseResult::PaneInfo { .. }));
+        assert!(app.host_documents().iter().all(|document| {
+            document.document.namespace
+                != crate::collections_extension_contract::COLLECTIONS_NAMESPACE
+        }));
+        shutdown_test_runtimes(&mut app);
     }
 
     #[test]
@@ -2696,6 +2947,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn api_pane_send_keys_preserves_super_chord_in_legacy_pane() {
+        let (mut app, pane_id, mut rx) = app_with_send_key_runtime(1);
+        let internal_pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        assert_eq!(
+            app.lookup_runtime_sender(0, internal_pane_id)
+                .unwrap()
+                .keyboard_protocol(),
+            crate::input::KeyboardProtocol::Legacy
+        );
+
+        let response = app.handle_api_request(crate::api::schema::Request {
+            id: "req".into(),
+            method: crate::api::schema::Method::PaneSendKeys(PaneSendKeysParams {
+                pane_id,
+                keys: vec!["cmd+c".into()],
+            }),
+        });
+
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(success.id, "req");
+        assert_eq!(success.result, ResponseResult::Ok {});
+        assert_eq!(
+            rx.try_recv().unwrap(),
+            bytes::Bytes::from_static(b"\x1b[99;9u")
+        );
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
     async fn api_pane_send_keys_accepts_literal_plus() {
         let (mut app, pane_id, mut rx) = app_with_send_key_runtime(1);
 
@@ -2871,6 +3151,11 @@ mod tests {
         let mut app = app_with_linked_worktree();
         let pane_id = app.state.workspaces[0].tabs[0].root_pane;
         let public_pane_id = app.public_pane_id(0, pane_id).unwrap();
+        app.refresh_collection_documents();
+        assert!(app.host_documents().iter().all(|document| {
+            document.document.namespace
+                != crate::collections_extension_contract::COLLECTIONS_NAMESPACE
+        }));
 
         let response = app.handle_pane_close(
             "req".into(),
@@ -2882,6 +3167,67 @@ mod tests {
         let success: SuccessResponse = serde_json::from_str(&response).unwrap();
         assert_eq!(success.id, "req");
         assert!(app.state.workspaces.is_empty());
+        assert!(app.host_document_caches.is_empty());
+        assert!(app.host_documents().is_empty());
+    }
+
+    #[test]
+    fn api_pane_close_retains_delegation_ancestry_for_live_descendant() {
+        let mut app = app_with_linked_worktree();
+        let root_pane = app.state.workspaces[0].tabs[0].root_pane;
+        let child_pane = app.state.workspaces[0].test_split(ratatui::layout::Direction::Horizontal);
+        app.state.ensure_test_terminals();
+        let parent = app
+            .state
+            .delegations
+            .create(Some(root_pane), None, Some("parent".into()))
+            .unwrap();
+        let child = app
+            .state
+            .delegations
+            .create(Some(child_pane), Some(parent), Some("child".into()))
+            .unwrap();
+        let public_pane_id = app.public_pane_id(0, root_pane).unwrap();
+
+        let response = app.handle_pane_close(
+            "req".into(),
+            PaneTarget {
+                pane_id: public_pane_id,
+            },
+        );
+
+        let _: SuccessResponse = serde_json::from_str(&response).unwrap();
+        let retained = app.state.delegations.get(parent).unwrap();
+        assert!(retained.tombstone);
+        assert_eq!(retained.pane_id, None);
+        assert_eq!(
+            app.state.delegations.get(child).unwrap().parent_id,
+            Some(parent)
+        );
+    }
+
+    #[test]
+    fn reparenting_a_restored_leaf_tombstone_is_rejected_without_gc_panic() {
+        let mut app = app_with_linked_worktree();
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let retained = app
+            .state
+            .delegations
+            .create(Some(pane_id), None, Some("retained".into()))
+            .unwrap();
+        app.state.delegations.tombstone_pane(pane_id);
+
+        let response = app.handle_delegation_reparent(
+            "req".into(),
+            crate::api::schema::DelegationReparentParams {
+                delegation_id: retained.to_string(),
+                parent_id: None,
+            },
+        );
+
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(value["error"]["code"], "invalid_delegation");
+        assert!(app.state.delegations.get(retained).is_some());
     }
 
     #[test]
@@ -3150,6 +3496,10 @@ mod tests {
         let source_tab_public = app.public_tab_id(0, 0).unwrap();
         let target_public = app.public_pane_id(0, target).unwrap();
         let target_tab_public = app.public_tab_id(0, target_tab).unwrap();
+        let revision_before_move = app.next_host_document_revision;
+        app.inject_tab_id_candidates_for_test([Err(std::io::Error::other(
+            "existing-tab moves must not consume entropy",
+        ))]);
 
         let response = app.handle_pane_move(
             "req".into(),
@@ -3185,7 +3535,62 @@ mod tests {
             app.state.workspaces[0].tabs[0].terminal_id(source),
             Some(&source_terminal)
         );
+        assert!(app.next_host_document_revision > revision_before_move);
+        assert!(app.host_documents().iter().all(|document| {
+            document.document.namespace
+                != crate::collections_extension_contract::COLLECTIONS_NAMESPACE
+        }));
+
+        let tabs_before = app.state.workspaces[0].tabs.len();
+        let rejected = app.handle_pane_move(
+            "req:new-tab".into(),
+            PaneMoveParams {
+                pane_id: app.public_pane_id(0, source).unwrap(),
+                destination: PaneMoveDestination::NewTab {
+                    workspace_id: None,
+                    label: None,
+                },
+                focus: false,
+            },
+        );
+        assert!(rejected.contains("existing-tab moves must not consume entropy"));
+        assert_eq!(app.state.workspaces[0].tabs.len(), tabs_before);
     }
+    #[test]
+    fn existing_tab_move_with_live_source_reserves_rollback_identity_before_mutation() {
+        let mut app = app_with_linked_worktree();
+        let source = app.state.workspaces[0].test_split(ratatui::layout::Direction::Horizontal);
+        let target_tab = app.state.workspaces[0].test_add_tab(Some("target"));
+        let target = app.state.workspaces[0].tabs[target_tab].root_pane;
+        seed_terminal_states(&mut app);
+        let source_public = app.public_pane_id(0, source).unwrap();
+        let target_tab_public = app.public_tab_id(0, target_tab).unwrap();
+        let target_public = app.public_pane_id(0, target).unwrap();
+        let source_tab_id = app.state.workspaces[0].tabs[0].id.clone();
+        app.inject_tab_id_candidates_for_test([Err(std::io::Error::other(
+            "injected rollback identity failure",
+        ))]);
+
+        let response = app.handle_pane_move(
+            "req".into(),
+            PaneMoveParams {
+                pane_id: source_public,
+                destination: PaneMoveDestination::Tab {
+                    tab_id: target_tab_public,
+                    target_pane_id: Some(target_public),
+                    split: SplitDirection::Right,
+                    ratio: None,
+                },
+                focus: false,
+            },
+        );
+
+        assert!(response.contains("injected rollback identity failure"));
+        assert_eq!(app.state.workspaces[0].tabs.len(), 2);
+        assert_eq!(app.state.workspaces[0].tabs[0].id, source_tab_id);
+        assert!(app.state.workspaces[0].tabs[0].panes.contains_key(&source));
+    }
+
     #[test]
     fn api_pane_move_to_existing_tab_across_workspace_reassigns_public_pane_id() {
         let mut app = app_with_linked_worktree();
@@ -3620,6 +4025,44 @@ mod tests {
     }
 
     #[test]
+    fn pane_move_recovery_uses_distinct_fallback_when_live_tab_reinsertion_fails() {
+        let mut app = app_with_linked_worktree();
+        let moved_pane = app.state.workspaces[0].test_split(ratatui::layout::Direction::Horizontal);
+        let original_tab_id = app.state.workspaces[0].tabs[0].id.clone();
+        let context = PaneMoveRecoveryContext {
+            source_ws_idx: 0,
+            previous_workspace_id: app.public_workspace_id(0),
+            previous_workspace_label: app.state.workspaces[0].custom_name.clone(),
+            previous_tab_label: app.state.workspaces[0].tabs[0].custom_name.clone(),
+            previous_internal_tab_id: original_tab_id.clone(),
+            previous_public_tab_number: app.state.workspaces[0].tabs[0].number,
+            previous_next_public_tab_number: app.state.workspaces[0].next_public_tab_number,
+            previous_public_pane_number: app.state.workspaces[0]
+                .public_pane_number(moved_pane)
+                .unwrap(),
+            previous_worktree_space: app.state.workspaces[0].worktree_space.clone(),
+            identity_cwd: app.state.workspaces[0].identity_cwd.clone(),
+        };
+        let taken = app.state.workspaces[0]
+            .take_pane_for_move(moved_pane)
+            .expect("source pane should be movable");
+        // Force the preferred reinsertion path to reject the target while the
+        // original tab identity remains live.
+        app.state.workspaces[0].tabs[0].root_pane = moved_pane;
+        let fallback = crate::workspace::TabId::alloc().unwrap();
+
+        app.recover_failed_pane_move(context, Some(fallback.clone()), taken.moved);
+
+        assert_eq!(app.state.workspaces[0].tabs.len(), 2);
+        assert_eq!(app.state.workspaces[0].tabs[0].id, original_tab_id);
+        assert_eq!(app.state.workspaces[0].tabs[1].id, fallback);
+        assert_ne!(
+            app.state.workspaces[0].tabs[0].id,
+            app.state.workspaces[0].tabs[1].id
+        );
+    }
+
+    #[test]
     fn api_pane_move_recovery_restores_removed_source_workspace() {
         let mut app = app_with_linked_worktree();
         let source = app.state.workspaces[0].tabs[0].root_pane;
@@ -3633,6 +4076,12 @@ mod tests {
             previous_workspace_id: previous_workspace_id.clone(),
             previous_workspace_label: app.state.workspaces[0].custom_name.clone(),
             previous_tab_label: app.state.workspaces[0].tabs[0].custom_name.clone(),
+            previous_internal_tab_id: app.state.workspaces[0].tabs[0].id.clone(),
+            previous_public_tab_number: app.state.workspaces[0].tabs[0].number,
+            previous_next_public_tab_number: app.state.workspaces[0].next_public_tab_number,
+            previous_public_pane_number: app.state.workspaces[0]
+                .public_pane_number(source)
+                .unwrap(),
             previous_worktree_space: app.state.workspaces[0].worktree_space.clone(),
             identity_cwd: app.state.workspaces[0].identity_cwd.clone(),
         };
@@ -3643,7 +4092,7 @@ mod tests {
         app.state.active = None;
         app.state.selected = 0;
 
-        app.recover_failed_pane_move(context, taken.moved);
+        app.recover_failed_pane_move(context, None, taken.moved);
 
         assert_eq!(app.state.workspaces.len(), 1);
         assert_eq!(app.state.workspaces[0].id, previous_workspace_id);
@@ -4372,7 +4821,7 @@ mod tests {
         let _: SuccessResponse = serde_json::from_str(&response).unwrap();
 
         let mut official = metadata_params(pane_id.clone());
-        official.source = "herdr:pi".into();
+        official.source = "vqro:pi".into();
         official.seq = Some(200);
         let response = app.handle_pane_report_metadata("official".into(), official);
         let _: SuccessResponse = serde_json::from_str(&response).unwrap();
@@ -4380,7 +4829,7 @@ mod tests {
         let terminal = &app.state.terminals[&terminal_id];
         assert!(terminal.metadata_report_sequence_is_fresh("custom:pi-metadata", Some(1)));
         assert!(terminal.metadata_report_sequence_is_fresh("custom:pi-tokens", Some(1)));
-        assert!(terminal.metadata_report_sequence_is_fresh("herdr:pi", Some(1)));
+        assert!(terminal.metadata_report_sequence_is_fresh("vqro:pi", Some(1)));
 
         app.state
             .terminals

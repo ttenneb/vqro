@@ -1,6 +1,7 @@
 use std::fs;
-use std::io;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde_json::{json, Map, Value};
 
@@ -21,14 +22,15 @@ use super::config_edit::{
 };
 use super::env::{
     antigravity_cli_dir, claude_dir, codex_dir, copilot_dir, cursor_dir, devin_dir, droid_dir,
-    grok_dir, hermes_dir, hermes_plugin_dir, kilo_dir, kimi_dir, mastracode_dir, omp_extension_dir,
-    opencode_dir, pi_extension_dir, qodercli_dir, qwen_dir,
+    grok_dir, hermes_dir, hermes_plugin_dir, kilo_dir, kimi_dir, letta_dir, mastracode_dir,
+    omp_extension_dir, opencode_dir, opencode_state_dir, pi_extension_dir, qodercli_dir, qwen_dir,
 };
 use super::file_ops::{
     make_executable, remove_dir_all_if_exists, remove_file_if_exists, remove_legacy_bash_hook_file,
 };
 use super::opencode_config::{
-    add_tui_plugin, remove_tui_plugin, tui_config_path, validate_tui_plugin_config,
+    add_cli_plugin, add_tui_plugin, remove_cli_plugin, remove_tui_plugin, tui_config_path,
+    validate_tui_plugin_config,
 };
 use super::types::{
     AntigravityCliInstallPaths, AntigravityCliUninstallResult, ClaudeInstallPaths,
@@ -36,10 +38,10 @@ use super::types::{
     CopilotUninstallResult, CursorInstallPaths, CursorUninstallResult, DevinInstallPaths,
     DevinUninstallResult, DroidInstallPaths, DroidUninstallResult, GrokInstallPaths,
     GrokUninstallResult, HermesInstallPaths, HermesUninstallResult, KiloInstallPaths,
-    KiloUninstallResult, KimiInstallPaths, KimiUninstallResult, MastracodeInstallPaths,
-    MastracodeUninstallResult, OmpInstallPaths, OmpUninstallResult, OpenCodeInstallPaths,
-    OpenCodeUninstallResult, PiUninstallResult, QodercliInstallPaths, QodercliUninstallResult,
-    QwenInstallPaths, QwenUninstallResult,
+    KiloUninstallResult, KimiInstallPaths, KimiUninstallResult, LettaInstallPaths,
+    LettaUninstallResult, MastracodeInstallPaths, MastracodeUninstallResult, OmpInstallPaths,
+    OmpUninstallResult, OpenCodeInstallPaths, OpenCodeUninstallResult, PiUninstallResult,
+    QodercliInstallPaths, QodercliUninstallResult, QwenInstallPaths, QwenUninstallResult,
 };
 use super::{
     ANTIGRAVITY_CLI_HOOK_ASSET, ANTIGRAVITY_CLI_HOOK_BLOCK_NAME, ANTIGRAVITY_CLI_HOOK_EVENTS,
@@ -52,14 +54,59 @@ use super::{
     GROK_HOOK_ASSET, GROK_HOOK_CONFIG_INSTALL_NAME, GROK_HOOK_INSTALL_NAME,
     HERMES_PLUGIN_INIT_ASSET, HERMES_PLUGIN_INIT_INSTALL_NAME, HERMES_PLUGIN_MANIFEST_ASSET,
     HERMES_PLUGIN_MANIFEST_INSTALL_NAME, KILO_PLUGIN_ASSET, KILO_PLUGIN_INSTALL_NAME,
-    KIMI_HOOK_ASSET, KIMI_HOOK_INSTALL_NAME, MASTRACODE_HOOK_ASSET, MASTRACODE_HOOK_EVENTS,
-    MASTRACODE_HOOK_INSTALL_NAME, MASTRACODE_HOOK_TIMEOUT_MS, MASTRACODE_REMOVED_HOOK_EVENTS,
-    OMP_EXTENSION_ASSET, OMP_EXTENSION_INSTALL_NAME, OPENCODE_PLUGIN_ASSET,
-    OPENCODE_PLUGIN_INSTALL_NAME, OPENCODE_TUI_PLUGIN_ASSET, OPENCODE_TUI_PLUGIN_INSTALL_NAME,
-    OPENCODE_TUI_PLUGIN_SPEC, PI_EXTENSION_ASSET, PI_EXTENSION_INSTALL_NAME, QODERCLI_HOOK_ASSET,
-    QODERCLI_HOOK_EVENTS, QODERCLI_HOOK_INSTALL_NAME, QODERCLI_REMOVED_LIFECYCLE_HOOK_EVENTS,
-    QWEN_HOOK_ASSET, QWEN_HOOK_EVENTS, QWEN_HOOK_INSTALL_NAME,
+    KIMI_HOOK_ASSET, KIMI_HOOK_INSTALL_NAME, LEGACY_PI_EXTENSION_INSTALL_NAME, LETTA_HOOK_ASSET,
+    LETTA_HOOK_INSTALL_NAME, LETTA_HOOK_TIMEOUT_MS, MARKETPLACE_CLAUDE_HOOK_INSTALL_NAME,
+    MARKETPLACE_CODEX_HOOK_INSTALL_NAME, MARKETPLACE_PI_EXTENSION_INSTALL_NAME,
+    MASTRACODE_HOOK_ASSET, MASTRACODE_HOOK_EVENTS, MASTRACODE_HOOK_INSTALL_NAME,
+    MASTRACODE_HOOK_TIMEOUT_MS, MASTRACODE_REMOVED_HOOK_EVENTS, OMP_EXTENSION_ASSET,
+    OMP_EXTENSION_INSTALL_NAME, OPENCODE_PLUGIN_ASSET, OPENCODE_PLUGIN_INSTALL_NAME,
+    OPENCODE_TUI_PLUGIN_ASSET, OPENCODE_TUI_PLUGIN_INSTALL_NAME, OPENCODE_TUI_PLUGIN_SPEC,
+    PI_EXTENSION_ASSET, PI_EXTENSION_INSTALL_NAME, QODERCLI_HOOK_ASSET, QODERCLI_HOOK_EVENTS,
+    QODERCLI_HOOK_INSTALL_NAME, QODERCLI_REMOVED_LIFECYCLE_HOOK_EVENTS, QWEN_HOOK_ASSET,
+    QWEN_HOOK_EVENTS, QWEN_HOOK_INSTALL_NAME,
 };
+
+static NEXT_DURABLE_WRITE_ID: AtomicU64 = AtomicU64::new(1);
+
+fn durable_write(path: &Path, contents: impl AsRef<[u8]>) -> io::Result<()> {
+    let path = crate::platform::resolve_write_target(path)?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| io::Error::other("integration file has no parent directory"))?;
+    fs::create_dir_all(parent)?;
+    let temporary = parent.join(format!(
+        ".vqro-integration.{}.{}.tmp",
+        std::process::id(),
+        NEXT_DURABLE_WRITE_ID.fetch_add(1, Ordering::Relaxed)
+    ));
+    let existing_permissions = match fs::metadata(&path) {
+        Ok(metadata) => Some(metadata.permissions()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error),
+    };
+    let result = (|| {
+        let mut file = fs::File::create(&temporary)?;
+        if let Some(permissions) = existing_permissions {
+            file.set_permissions(permissions)?;
+        }
+        file.write_all(contents.as_ref())?;
+        file.sync_all()?;
+        drop(file);
+        crate::platform::durable_replace_file(&temporary, &path)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result
+}
+
+fn durable_remove_file_if_exists(path: &Path) -> io::Result<bool> {
+    let removed = remove_file_if_exists(path)?;
+    if removed {
+        crate::platform::sync_containing_directory(path)?;
+    }
+    Ok(removed)
+}
 
 fn ensure_extension_dir(dir: &Path, agent: &str) -> io::Result<()> {
     if dir.is_dir() {
@@ -75,11 +122,19 @@ fn ensure_extension_dir(dir: &Path, agent: &str) -> io::Result<()> {
 }
 
 pub(crate) fn install_pi() -> io::Result<PathBuf> {
+    install_pi_asset_named(PI_EXTENSION_ASSET.as_bytes(), PI_EXTENSION_INSTALL_NAME)
+}
+
+pub(crate) fn install_pi_asset(asset: &[u8]) -> io::Result<PathBuf> {
+    install_pi_asset_named(asset, MARKETPLACE_PI_EXTENSION_INSTALL_NAME)
+}
+
+fn install_pi_asset_named(asset: &[u8], install_name: &str) -> io::Result<PathBuf> {
     let dir = pi_extension_dir()?;
     ensure_extension_dir(&dir, "pi")?;
 
-    let path = dir.join(PI_EXTENSION_INSTALL_NAME);
-    fs::write(&path, PI_EXTENSION_ASSET)?;
+    let path = dir.join(install_name);
+    durable_write(&path, asset)?;
     Ok(path)
 }
 
@@ -104,7 +159,7 @@ pub(crate) fn install_omp() -> io::Result<OmpInstallPaths> {
 }
 
 pub(crate) fn remove_legacy_pi_extension_from_omp_dir(dir: &Path) -> io::Result<bool> {
-    let legacy_path = dir.join(PI_EXTENSION_INSTALL_NAME);
+    let legacy_path = dir.join(LEGACY_PI_EXTENSION_INSTALL_NAME);
     if !legacy_path.is_file() {
         return Ok(false);
     }
@@ -119,6 +174,14 @@ pub(crate) fn remove_legacy_pi_extension_from_omp_dir(dir: &Path) -> io::Result<
 }
 
 pub(crate) fn install_claude() -> io::Result<ClaudeInstallPaths> {
+    install_claude_asset_named(CLAUDE_HOOK_ASSET.as_bytes(), CLAUDE_HOOK_INSTALL_NAME)
+}
+
+pub(crate) fn install_claude_asset(asset: &[u8]) -> io::Result<ClaudeInstallPaths> {
+    install_claude_asset_named(asset, MARKETPLACE_CLAUDE_HOOK_INSTALL_NAME)
+}
+
+fn install_claude_asset_named(asset: &[u8], install_name: &str) -> io::Result<ClaudeInstallPaths> {
     let dir = claude_dir()?;
     if !dir.is_dir() {
         return Err(io::Error::other(format!(
@@ -130,9 +193,13 @@ pub(crate) fn install_claude() -> io::Result<ClaudeInstallPaths> {
     let hooks_dir = dir.join("hooks");
     fs::create_dir_all(&hooks_dir)?;
 
-    let hook_path = hooks_dir.join(CLAUDE_HOOK_INSTALL_NAME);
-    fs::write(&hook_path, CLAUDE_HOOK_ASSET)?;
+    let hook_path = hooks_dir.join(install_name);
+    durable_write(&hook_path, asset)?;
     make_executable(&hook_path)?;
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&hook_path)?
+        .sync_all()?;
 
     let settings_path = dir.join("settings.json");
     let existing_settings = if settings_path.is_file() {
@@ -141,10 +208,9 @@ pub(crate) fn install_claude() -> io::Result<ClaudeInstallPaths> {
         "{}".to_string()
     };
     let updated_settings = install_claude_settings(&existing_settings, &settings_path, &hook_path)?;
-    remove_legacy_bash_hook_file(&hook_path)?;
 
     if updated_settings != existing_settings {
-        fs::write(&settings_path, updated_settings)?;
+        durable_write(&settings_path, updated_settings)?;
     }
 
     Ok(ClaudeInstallPaths {
@@ -154,6 +220,14 @@ pub(crate) fn install_claude() -> io::Result<ClaudeInstallPaths> {
 }
 
 pub(crate) fn install_codex() -> io::Result<CodexInstallPaths> {
+    install_codex_asset_named(CODEX_HOOK_ASSET.as_bytes(), CODEX_HOOK_INSTALL_NAME)
+}
+
+pub(crate) fn install_codex_asset(asset: &[u8]) -> io::Result<CodexInstallPaths> {
+    install_codex_asset_named(asset, MARKETPLACE_CODEX_HOOK_INSTALL_NAME)
+}
+
+fn install_codex_asset_named(asset: &[u8], install_name: &str) -> io::Result<CodexInstallPaths> {
     let dir = codex_dir()?;
     if !dir.is_dir() {
         return Err(io::Error::other(format!(
@@ -162,9 +236,13 @@ pub(crate) fn install_codex() -> io::Result<CodexInstallPaths> {
         )));
     }
 
-    let hook_path = dir.join(CODEX_HOOK_INSTALL_NAME);
-    fs::write(&hook_path, CODEX_HOOK_ASSET)?;
+    let hook_path = dir.join(install_name);
+    durable_write(&hook_path, asset)?;
     make_executable(&hook_path)?;
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&hook_path)?
+        .sync_all()?;
 
     let hooks_path = dir.join("hooks.json");
     let mut hooks_file = if hooks_path.is_file() {
@@ -194,9 +272,8 @@ pub(crate) fn install_codex() -> io::Result<CodexInstallPaths> {
         10,
         None,
     )?;
-    remove_legacy_bash_hook_file(&hook_path)?;
 
-    fs::write(&hooks_path, serde_json::to_string_pretty(&hooks_file)?)?;
+    durable_write(&hooks_path, serde_json::to_string_pretty(&hooks_file)?)?;
 
     let config_path = dir.join("config.toml");
     let existing_config = if config_path.is_file() {
@@ -206,7 +283,7 @@ pub(crate) fn install_codex() -> io::Result<CodexInstallPaths> {
     };
     let new_config = build_codex_config_with_hooks(&existing_config);
     if new_config != existing_config {
-        fs::write(&config_path, new_config)?;
+        durable_write(&config_path, new_config)?;
     }
 
     Ok(CodexInstallPaths {
@@ -468,11 +545,20 @@ pub(crate) fn install_opencode() -> io::Result<OpenCodeInstallPaths> {
     let tui_plugin_path = dir.join(OPENCODE_TUI_PLUGIN_INSTALL_NAME);
     fs::write(&tui_plugin_path, OPENCODE_TUI_PLUGIN_ASSET)?;
     let tui_config_path = add_tui_plugin(&dir, OPENCODE_TUI_PLUGIN_SPEC)?;
+    let v2_dir = dir.join(super::OPENCODE_V2_TUI_PLUGIN_DIR);
+    fs::create_dir_all(&v2_dir)?;
+    fs::write(v2_dir.join("tui.js"), super::OPENCODE_V2_TUI_PLUGIN_ASSET)?;
+    let cli_config_path = add_cli_plugin(
+        &dir,
+        &opencode_state_dir()?,
+        super::OPENCODE_V2_TUI_PLUGIN_SPEC,
+    )?;
 
     Ok(OpenCodeInstallPaths {
         plugin_path,
         tui_plugin_path,
         tui_config_path,
+        cli_config_path,
     })
 }
 
@@ -532,8 +618,16 @@ pub(crate) fn install_hermes() -> io::Result<HermesInstallPaths> {
 }
 
 pub(crate) fn uninstall_pi() -> io::Result<PiUninstallResult> {
-    let extension_path = pi_extension_dir()?.join(PI_EXTENSION_INSTALL_NAME);
-    let removed_extension = remove_file_if_exists(&extension_path)?;
+    uninstall_pi_named(PI_EXTENSION_INSTALL_NAME)
+}
+
+pub(crate) fn uninstall_pi_asset() -> io::Result<PiUninstallResult> {
+    uninstall_pi_named(MARKETPLACE_PI_EXTENSION_INSTALL_NAME)
+}
+
+fn uninstall_pi_named(install_name: &str) -> io::Result<PiUninstallResult> {
+    let extension_path = pi_extension_dir()?.join(install_name);
+    let removed_extension = durable_remove_file_if_exists(&extension_path)?;
 
     Ok(PiUninstallResult {
         extension_path,
@@ -552,7 +646,15 @@ pub(crate) fn uninstall_omp() -> io::Result<OmpUninstallResult> {
 }
 
 pub(crate) fn uninstall_claude() -> io::Result<ClaudeUninstallResult> {
-    let hook_path = claude_dir()?.join("hooks").join(CLAUDE_HOOK_INSTALL_NAME);
+    uninstall_claude_named(CLAUDE_HOOK_INSTALL_NAME)
+}
+
+pub(crate) fn uninstall_claude_asset() -> io::Result<ClaudeUninstallResult> {
+    uninstall_claude_named(MARKETPLACE_CLAUDE_HOOK_INSTALL_NAME)
+}
+
+fn uninstall_claude_named(install_name: &str) -> io::Result<ClaudeUninstallResult> {
+    let hook_path = claude_dir()?.join("hooks").join(install_name);
     let settings_path = claude_dir()?.join("settings.json");
     let mut updated_settings = false;
 
@@ -562,12 +664,11 @@ pub(crate) fn uninstall_claude() -> io::Result<ClaudeUninstallResult> {
             uninstall_claude_settings(&existing_settings, &settings_path, &hook_path)?;
         updated_settings = new_settings != existing_settings;
         if updated_settings {
-            fs::write(&settings_path, new_settings)?;
+            durable_write(&settings_path, new_settings)?;
         }
     }
 
-    let removed_hook_file =
-        remove_file_if_exists(&hook_path)? | remove_legacy_bash_hook_file(&hook_path)?;
+    let removed_hook_file = durable_remove_file_if_exists(&hook_path)?;
 
     Ok(ClaudeUninstallResult {
         hook_path,
@@ -578,8 +679,16 @@ pub(crate) fn uninstall_claude() -> io::Result<ClaudeUninstallResult> {
 }
 
 pub(crate) fn uninstall_codex() -> io::Result<CodexUninstallResult> {
+    uninstall_codex_named(CODEX_HOOK_INSTALL_NAME)
+}
+
+pub(crate) fn uninstall_codex_asset() -> io::Result<CodexUninstallResult> {
+    uninstall_codex_named(MARKETPLACE_CODEX_HOOK_INSTALL_NAME)
+}
+
+fn uninstall_codex_named(install_name: &str) -> io::Result<CodexUninstallResult> {
     let codex_dir = codex_dir()?;
-    let hook_path = codex_dir.join(CODEX_HOOK_INSTALL_NAME);
+    let hook_path = codex_dir.join(install_name);
     let hooks_path = codex_dir.join("hooks.json");
     let config_path = codex_dir.join("config.toml");
     let mut updated_hooks = false;
@@ -609,12 +718,11 @@ pub(crate) fn uninstall_codex() -> io::Result<CodexUninstallResult> {
         }
 
         if updated_hooks {
-            fs::write(&hooks_path, serde_json::to_string_pretty(&hooks_file)?)?;
+            durable_write(&hooks_path, serde_json::to_string_pretty(&hooks_file)?)?;
         }
     }
 
-    let removed_hook_file =
-        remove_file_if_exists(&hook_path)? | remove_legacy_bash_hook_file(&hook_path)?;
+    let removed_hook_file = durable_remove_file_if_exists(&hook_path)?;
 
     Ok(CodexUninstallResult {
         hook_path,
@@ -821,6 +929,15 @@ pub(crate) fn uninstall_opencode() -> io::Result<OpenCodeUninstallResult> {
     let plugin_path = dir.join("plugins").join(OPENCODE_PLUGIN_INSTALL_NAME);
     let tui_plugin_path = dir.join(OPENCODE_TUI_PLUGIN_INSTALL_NAME);
     let mut errors = Vec::new();
+    remove_cli_plugin(&dir, super::OPENCODE_V2_TUI_PLUGIN_SPEC).unwrap_or_else(|err| {
+        errors.push(err.to_string());
+        false
+    });
+    let v2_dir = dir.join(super::OPENCODE_V2_TUI_PLUGIN_DIR);
+    remove_dir_all_if_exists(&v2_dir).unwrap_or_else(|err| {
+        errors.push(format!("failed to remove {}: {err}", v2_dir.display()));
+        false
+    });
     let updated_tui_config =
         remove_tui_plugin(&dir, OPENCODE_TUI_PLUGIN_SPEC).unwrap_or_else(|err| {
             errors.push(err.to_string());
@@ -1002,6 +1119,207 @@ pub(crate) fn install_qwen() -> io::Result<QwenInstallPaths> {
     })
 }
 
+fn letta_install_artifact_path(path: &Path, role: &str) -> io::Result<PathBuf> {
+    let file_name = path
+        .file_name()
+        .ok_or_else(|| io::Error::other(format!("invalid install path: {}", path.display())))?;
+    let mut artifact_name = file_name.to_os_string();
+    artifact_name.push(format!(".herdr-install-{}-{role}", std::process::id()));
+    Ok(path.with_file_name(artifact_name))
+}
+
+pub(super) fn prepare_letta_install_file(
+    target: &Path,
+    contents: &[u8],
+    executable: bool,
+    preserve_permissions: bool,
+) -> io::Result<(PathBuf, PathBuf)> {
+    if target.try_exists()? && !target.is_file() {
+        return Err(io::Error::other(format!(
+            "install target is not a file: {}",
+            target.display()
+        )));
+    }
+
+    let staged = letta_install_artifact_path(target, "staged")?;
+    let backup = letta_install_artifact_path(target, "backup")?;
+    if staged.try_exists()? || backup.try_exists()? {
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            format!("stale install artifact exists for {}", target.display()),
+        ));
+    }
+
+    let prepare_result = (|| {
+        fs::write(&staged, contents)?;
+        if preserve_permissions && target.is_file() {
+            fs::set_permissions(&staged, fs::metadata(target)?.permissions())?;
+        }
+        if executable {
+            make_executable(&staged)?;
+        }
+        Ok(())
+    })();
+    if let Err(err) = prepare_result {
+        let _ = remove_file_if_exists(&staged);
+        return Err(err);
+    }
+
+    Ok((staged, backup))
+}
+
+fn combine_letta_install_errors(primary: io::Error, rollback: io::Result<()>) -> io::Error {
+    match rollback {
+        Ok(()) => primary,
+        Err(rollback_err) => io::Error::new(
+            primary.kind(),
+            format!("{primary}; rollback failed: {rollback_err}"),
+        ),
+    }
+}
+
+pub(super) fn publish_letta_install_file(
+    target: &Path,
+    staged: &Path,
+    backup: &Path,
+) -> io::Result<bool> {
+    let had_original = target.try_exists()?;
+    if had_original {
+        fs::rename(target, backup)?;
+    }
+
+    if let Err(err) = fs::rename(staged, target) {
+        let rollback = if had_original {
+            fs::rename(backup, target)
+        } else {
+            Ok(())
+        };
+        return Err(combine_letta_install_errors(err, rollback));
+    }
+
+    Ok(had_original)
+}
+
+pub(super) fn rollback_letta_install_file(
+    target: &Path,
+    backup: &Path,
+    had_original: bool,
+) -> io::Result<()> {
+    remove_file_if_exists(target)?;
+    if had_original {
+        fs::rename(backup, target)?;
+    }
+    Ok(())
+}
+
+fn cleanup_letta_install_artifact(path: &Path) {
+    if let Err(err) = remove_file_if_exists(path) {
+        tracing::warn!(path = %path.display(), %err, "failed to remove Letta install artifact");
+    }
+}
+
+fn ensure_letta_session_hook(hooks: &mut Map<String, Value>, command: String) -> io::Result<()> {
+    let entries = hooks
+        .entry("SessionStart".to_string())
+        .or_insert_with(|| Value::Array(Vec::new()))
+        .as_array_mut()
+        .ok_or_else(|| io::Error::other("hook entries for SessionStart must be an array"))?;
+
+    entries.push(json!({
+        "hooks": [{
+            "type": "command",
+            "command": command,
+            "timeout": LETTA_HOOK_TIMEOUT_MS,
+            "quiet": true,
+        }],
+    }));
+    Ok(())
+}
+
+pub(crate) fn install_letta() -> io::Result<LettaInstallPaths> {
+    let dir = letta_dir()?;
+    if !dir.is_dir() {
+        return Err(io::Error::other(format!(
+            "letta code config directory not found at {}. install letta code first",
+            dir.display()
+        )));
+    }
+
+    let hooks_dir = dir.join("hooks");
+    fs::create_dir_all(&hooks_dir)?;
+
+    let hook_path = hooks_dir.join(LETTA_HOOK_INSTALL_NAME);
+
+    let settings_path = dir.join("settings.json");
+    let mut settings = if settings_path.is_file() {
+        serde_json::from_str::<Value>(&fs::read_to_string(&settings_path)?).map_err(|err| {
+            io::Error::other(format!(
+                "failed to parse {}: {err}",
+                settings_path.display()
+            ))
+        })?
+    } else {
+        json!({})
+    };
+
+    let hooks = ensure_hooks_object(
+        &mut settings,
+        &settings_path,
+        "letta settings",
+        "letta settings hooks",
+    )?;
+    remove_hook_commands(hooks, "SessionStart", &hook_path, Some("session"))?;
+    ensure_letta_session_hook(hooks, hook_command(&hook_path, Some("session")))?;
+
+    let settings_contents = serde_json::to_string_pretty(&settings)?;
+    let (hook_staged, hook_backup) =
+        prepare_letta_install_file(&hook_path, LETTA_HOOK_ASSET.as_bytes(), true, false)?;
+    let (settings_staged, settings_backup) =
+        match prepare_letta_install_file(&settings_path, settings_contents.as_bytes(), false, true)
+        {
+            Ok(paths) => paths,
+            Err(err) => {
+                cleanup_letta_install_artifact(&hook_staged);
+                return Err(err);
+            }
+        };
+
+    let hook_had_original = match publish_letta_install_file(&hook_path, &hook_staged, &hook_backup)
+    {
+        Ok(had_original) => had_original,
+        Err(err) => {
+            cleanup_letta_install_artifact(&hook_staged);
+            cleanup_letta_install_artifact(&settings_staged);
+            return Err(err);
+        }
+    };
+
+    let settings_had_original =
+        match publish_letta_install_file(&settings_path, &settings_staged, &settings_backup) {
+            Ok(had_original) => had_original,
+            Err(err) => {
+                let err = combine_letta_install_errors(
+                    err,
+                    rollback_letta_install_file(&hook_path, &hook_backup, hook_had_original),
+                );
+                cleanup_letta_install_artifact(&settings_staged);
+                return Err(err);
+            }
+        };
+
+    if hook_had_original {
+        cleanup_letta_install_artifact(&hook_backup);
+    }
+    if settings_had_original {
+        cleanup_letta_install_artifact(&settings_backup);
+    }
+
+    Ok(LettaInstallPaths {
+        hook_path,
+        settings_path,
+    })
+}
+
 pub(crate) fn install_cursor() -> io::Result<CursorInstallPaths> {
     let dir = cursor_dir()?;
     if !dir.is_dir() {
@@ -1137,6 +1455,46 @@ pub(crate) fn uninstall_qwen() -> io::Result<QwenUninstallResult> {
     let removed_hook_file = remove_file_if_exists(&hook_path)?;
 
     Ok(QwenUninstallResult {
+        hook_path,
+        settings_path,
+        removed_hook_file,
+        updated_settings,
+    })
+}
+
+pub(crate) fn uninstall_letta() -> io::Result<LettaUninstallResult> {
+    let dir = letta_dir()?;
+    let hook_path = dir.join("hooks").join(LETTA_HOOK_INSTALL_NAME);
+    let settings_path = dir.join("settings.json");
+    let mut updated_settings = false;
+
+    if settings_path.is_file() {
+        let mut settings = serde_json::from_str::<Value>(&fs::read_to_string(&settings_path)?)
+            .map_err(|err| {
+                io::Error::other(format!(
+                    "failed to parse {}: {err}",
+                    settings_path.display()
+                ))
+            })?;
+
+        if let Some(hooks) = hooks_object_if_present(
+            &mut settings,
+            &settings_path,
+            "letta settings",
+            "letta settings hooks",
+        )? {
+            updated_settings |=
+                remove_hook_commands(hooks, "SessionStart", &hook_path, Some("session"))?;
+        }
+
+        if updated_settings {
+            fs::write(&settings_path, serde_json::to_string_pretty(&settings)?)?;
+        }
+    }
+
+    let removed_hook_file = remove_file_if_exists(&hook_path)?;
+
+    Ok(LettaUninstallResult {
         hook_path,
         settings_path,
         removed_hook_file,

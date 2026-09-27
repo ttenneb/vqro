@@ -1,0 +1,83 @@
+{
+  "$defs": {
+    "CollectionsActionDeclarationV1": {
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "$ref": "#/$defs/CollectionsActionKindV1"
+        },
+        "id": {
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9._:/-]+$",
+          "type": "string"
+        },
+        "label": {
+          "maxLength": 512,
+          "minLength": 1,
+          "pattern": "^[^\\u0000-\\u001F\\u007F-\\u009F]*$",
+          "type": "string"
+        },
+        "subject_node_id": {
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9._:/-]+$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "subject_node_id",
+        "label",
+        "action"
+      ],
+      "type": "object"
+    },
+    "CollectionsActionKindV1": {
+      "enum": [
+        "set_label",
+        "set_archived"
+      ],
+      "type": "string"
+    }
+  },
+  "$id": "https://vqro.dev/schema/collections/actions/v1",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "contract": "vqro.collections.actions.v1",
+  "properties": {
+    "actions": {
+      "items": {
+        "$ref": "#/$defs/CollectionsActionDeclarationV1"
+      },
+      "maxItems": 1024,
+      "type": "array"
+    },
+    "contract": {
+      "const": "vqro.collections.actions.v1",
+      "type": "string"
+    },
+    "document_revision": {
+      "format": "uint64",
+      "minimum": 1,
+      "type": "integer"
+    },
+    "revision": {
+      "format": "uint64",
+      "minimum": 1,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "contract",
+    "document_revision",
+    "revision",
+    "actions"
+  ],
+  "title": "vqro Collections action declarations v1",
+  "type": "object",
+  "validation_authority": {
+    "json_schema": "structural and per-field constraints",
+    "rust_validator": "normative for unique ids, typed subjects, and profile/document revision binding"
+  }
+}

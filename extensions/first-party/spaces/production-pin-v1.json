@@ -1,0 +1,15 @@
+{
+  "schema": "vqro.spaces.production-pin.v1",
+  "schema_version": 1,
+  "package_id": "vqro.spaces",
+  "version": "1.0.0",
+  "source_url": "https://github.com/ttenneb/vqro-extension-spaces.git",
+  "source_commit": "41d80debcdd39ac26a0032be82f5ca5002e6efc7",
+  "package_path": "dist/vqro-spaces.vqrox",
+  "package_sha256": "4a095db4b25ddf904d4cc50b2023e9509b74a67b443440010e081e94fd13e373",
+  "manifest_sha256": "6b0690e66e427a427b800f7afbd344c8d64e99a9ce87f5b61e4365c23023da0b",
+  "component_sha256": "75d6c5a8235cacab4d38aaf19c1ecbca9ba5baa3a978b87af9c0bdb9b0926d0c",
+  "service_id": "spaces",
+  "namespace": "vqro.spaces",
+  "method": "vqro.spaces.document.render.v1"
+}

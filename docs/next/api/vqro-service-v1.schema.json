@@ -1,0 +1,283 @@
+{
+  "$id": "https://vqro.dev/schema/service/v1",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "contract": "vqro.service.v1",
+  "limits": {
+    "max_frame_bytes": 262144,
+    "max_host_call_depth": 1,
+    "max_host_calls_per_invocation": 8,
+    "max_outstanding_host_calls": 1,
+    "max_queue_depth": 8
+  },
+  "schemas": {
+    "error": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "code": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "message"
+      ],
+      "title": "RuntimeErrorBodyV1",
+      "type": "object"
+    },
+    "event": {
+      "$defs": {
+        "RuntimeIdentityV1": {
+          "properties": {
+            "generation": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "namespace": {
+              "type": "string"
+            },
+            "package_id": {
+              "type": "string"
+            },
+            "service_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "package_id",
+            "namespace",
+            "service_id",
+            "generation"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "contract": {
+          "type": "string"
+        },
+        "event_id": {
+          "type": "string"
+        },
+        "identity": {
+          "$ref": "#/schemas/event/$defs/RuntimeIdentityV1"
+        },
+        "method": {
+          "type": "string"
+        },
+        "params": true
+      },
+      "required": [
+        "contract",
+        "event_id",
+        "identity",
+        "method",
+        "params"
+      ],
+      "title": "RuntimeEventV1",
+      "type": "object"
+    },
+    "host_call": {
+      "$defs": {
+        "RuntimeIdentityV1": {
+          "properties": {
+            "generation": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "namespace": {
+              "type": "string"
+            },
+            "package_id": {
+              "type": "string"
+            },
+            "service_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "package_id",
+            "namespace",
+            "service_id",
+            "generation"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "call_id": {
+          "type": "string"
+        },
+        "capability": {
+          "type": "string"
+        },
+        "depth": {
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "identity": {
+          "$ref": "#/schemas/host_call/$defs/RuntimeIdentityV1"
+        },
+        "method": {
+          "type": "string"
+        },
+        "namespace": {
+          "type": "string"
+        },
+        "params": true,
+        "type": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "call_id",
+        "identity",
+        "depth",
+        "capability",
+        "method",
+        "namespace",
+        "params"
+      ],
+      "title": "RuntimeHostCallV1",
+      "type": "object"
+    },
+    "host_call_response": {
+      "$defs": {
+        "RuntimeErrorBodyV1": {
+          "properties": {
+            "code": {
+              "type": "string"
+            },
+            "message": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "code",
+            "message"
+          ],
+          "type": "object"
+        },
+        "RuntimeIdentityV1": {
+          "properties": {
+            "generation": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "namespace": {
+              "type": "string"
+            },
+            "package_id": {
+              "type": "string"
+            },
+            "service_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "package_id",
+            "namespace",
+            "service_id",
+            "generation"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "call_id": {
+          "type": "string"
+        },
+        "error": {
+          "anyOf": [
+            {
+              "$ref": "#/schemas/host_call_response/$defs/RuntimeErrorBodyV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "identity": {
+          "$ref": "#/schemas/host_call_response/$defs/RuntimeIdentityV1"
+        },
+        "result": true,
+        "type": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "call_id",
+        "identity"
+      ],
+      "title": "RuntimeHostCallResponseV1",
+      "type": "object"
+    },
+    "request": {
+      "$defs": {
+        "RuntimeIdentityV1": {
+          "properties": {
+            "generation": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "namespace": {
+              "type": "string"
+            },
+            "package_id": {
+              "type": "string"
+            },
+            "service_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "package_id",
+            "namespace",
+            "service_id",
+            "generation"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "contract": {
+          "type": "string"
+        },
+        "identity": {
+          "$ref": "#/schemas/request/$defs/RuntimeIdentityV1"
+        },
+        "method": {
+          "type": "string"
+        },
+        "params": true,
+        "request_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "contract",
+        "request_id",
+        "identity",
+        "method",
+        "params"
+      ],
+      "title": "RuntimeRequestV1",
+      "type": "object"
+    }
+  },
+  "title": "vqro runtime-neutral service contract v1"
+}

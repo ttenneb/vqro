@@ -54,6 +54,29 @@ pub(crate) fn pane_inner_rect(area: Rect, borders: Borders) -> Rect {
     }
 }
 
+/// Collections reserve their first inner row for structural chrome. The server
+/// owns this geometry even while clients choose not to render the header.
+fn collection_content_rect(
+    tab: &crate::workspace::Tab,
+    pane_id: crate::layout::PaneId,
+    area: Rect,
+) -> Rect {
+    if !tab
+        .layout
+        .collections()
+        .any(|collection| collection.selected() == Some(pane_id))
+        || area.height == 0
+    {
+        return area;
+    }
+    Rect::new(
+        area.x,
+        area.y.saturating_add(1),
+        area.width,
+        area.height.saturating_sub(1),
+    )
+}
+
 fn ranges_overlap(a_start: u16, a_len: u16, b_start: u16, b_len: u16) -> bool {
     a_start < b_start.saturating_add(b_len) && b_start < a_start.saturating_add(a_len)
 }
@@ -91,11 +114,12 @@ fn shrink_for_one_cell_gap(size: u16) -> u16 {
 
 pub(crate) fn apply_pane_chrome(
     panes: Vec<PaneInfo>,
-    pane_borders: bool,
+    pane_borders: crate::config::PaneBordersConfig,
     pane_gaps: bool,
     pane_outer_borders: bool,
 ) -> Vec<PaneInfo> {
     let multi_pane = panes.len() > 1;
+    let bordered = pane_borders.shows_borders(multi_pane);
     let outer_left = panes.iter().map(|info| info.rect.x).min().unwrap_or(0);
     let outer_top = panes.iter().map(|info| info.rect.y).min().unwrap_or(0);
     let outer_right = panes
@@ -115,7 +139,7 @@ pub(crate) fn apply_pane_chrome(
             let right_neighbor = multi_pane.then(|| pane_to_right(&info, &panes)).flatten();
             let below_neighbor = multi_pane.then(|| pane_below(&info, &panes)).flatten();
 
-            if multi_pane && pane_gaps && !pane_borders {
+            if multi_pane && pane_gaps && !pane_borders.draws_borders() {
                 if right_neighbor.is_some() {
                     info.rect.width = shrink_for_one_cell_gap(info.rect.width);
                 }
@@ -124,7 +148,7 @@ pub(crate) fn apply_pane_chrome(
                 }
             }
 
-            info.borders = if !multi_pane || !pane_borders {
+            info.borders = if !bordered {
                 Borders::NONE
             } else {
                 let mut borders = Borders::ALL;
@@ -212,6 +236,27 @@ pub(super) fn resize_tab_panes(
     area: Rect,
     cell_size: crate::kitty_graphics::HostCellSize,
 ) {
+    resize_tab_panes_except(
+        app,
+        terminal_runtimes,
+        workspace_index,
+        tab,
+        area,
+        cell_size,
+        &std::collections::HashSet::new(),
+    );
+}
+
+/// Resize ordinary layout panes while preserving narrower client-owned viewport claims.
+pub(super) fn resize_tab_panes_except(
+    app: &AppState,
+    terminal_runtimes: &TerminalRuntimeRegistry,
+    workspace_index: usize,
+    tab: &crate::workspace::Tab,
+    area: Rect,
+    cell_size: crate::kitty_graphics::HostCellSize,
+    excluded_panes: &std::collections::HashSet<crate::layout::PaneId>,
+) {
     let multi_pane = tab.layout.pane_count() > 1;
 
     if tab.zoomed {
@@ -219,14 +264,17 @@ pub(super) fn resize_tab_panes(
         if let Some((terminal_id, rt)) =
             runtime_for_tab_pane(app, terminal_runtimes, workspace_index, tab, focused_id)
         {
-            let borders = if multi_pane && app.pane_borders && app.pane_outer_borders {
+            let borders = if app.pane_borders.shows_borders(multi_pane) && app.pane_outer_borders {
                 Borders::ALL
             } else {
                 Borders::NONE
             };
-            let pane_inner = pane_inner_rect(area, borders);
+            let pane_inner =
+                collection_content_rect(tab, focused_id, pane_inner_rect(area, borders));
             let inner_rect = terminal_inner_rect(rt, pane_inner, app.pane_scrollbars);
-            if !app.direct_attach_resize_locks.contains(terminal_id) {
+            if !excluded_panes.contains(&focused_id)
+                && !app.direct_attach_resize_locks.contains(terminal_id)
+            {
                 rt.resize(
                     inner_rect.height,
                     inner_rect.width,
@@ -244,13 +292,16 @@ pub(super) fn resize_tab_panes(
         app.pane_gaps,
         app.pane_outer_borders,
     ) {
-        let pane_inner = pane_inner_rect(info.rect, info.borders);
+        let pane_inner =
+            collection_content_rect(tab, info.id, pane_inner_rect(info.rect, info.borders));
 
         if let Some((terminal_id, rt)) =
             runtime_for_tab_pane(app, terminal_runtimes, workspace_index, tab, info.id)
         {
             let inner_rect = terminal_inner_rect(rt, pane_inner, app.pane_scrollbars);
-            if !app.direct_attach_resize_locks.contains(terminal_id) {
+            if !excluded_panes.contains(&info.id)
+                && !app.direct_attach_resize_locks.contains(terminal_id)
+            {
                 rt.resize(
                     inner_rect.height,
                     inner_rect.width,
@@ -284,12 +335,12 @@ pub(super) fn compute_pane_infos_for_tab(
 
     if tab.zoomed {
         let focused_id = tab.layout.focused();
-        let borders = if multi_pane && app.pane_borders && app.pane_outer_borders {
+        let borders = if app.pane_borders.shows_borders(multi_pane) && app.pane_outer_borders {
             Borders::ALL
         } else {
             Borders::NONE
         };
-        let pane_inner = pane_inner_rect(area, borders);
+        let pane_inner = collection_content_rect(tab, focused_id, pane_inner_rect(area, borders));
         let mut inner_rect = pane_inner;
         let mut scrollbar_rect = None;
         if let Some(rt) = app.runtime_for_pane_in_workspace(terminal_runtimes, ws_idx, focused_id) {
@@ -326,7 +377,8 @@ pub(super) fn compute_pane_infos_for_tab(
     );
 
     for info in &mut pane_infos {
-        let pane_inner = pane_inner_rect(info.rect, info.borders);
+        let pane_inner =
+            collection_content_rect(tab, info.id, pane_inner_rect(info.rect, info.borders));
 
         let mut inner_rect = pane_inner;
         let mut scrollbar_rect = None;
@@ -457,7 +509,7 @@ fn render_pane_borders(
     split_borders: &[crate::layout::SplitBorder],
     frame: &mut Frame,
 ) {
-    if !app.pane_borders || pane_infos.iter().all(|info| info.borders.is_empty()) {
+    if !app.pane_borders.draws_borders() || pane_infos.iter().all(|info| info.borders.is_empty()) {
         return;
     }
 
@@ -830,6 +882,7 @@ fn color_to_rgb(color: Color) -> Option<Rgb> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::PaneBordersConfig;
     use crate::layout::PaneId;
     use crate::selection::Selection;
     use crate::terminal::TerminalRuntime;
@@ -916,7 +969,7 @@ mod tests {
 
         let infos = apply_pane_chrome(
             workspace.tabs[0].layout.panes(Rect::new(0, 0, 100, 20)),
-            true,
+            PaneBordersConfig::Auto,
             false,
             true,
         );
@@ -937,7 +990,7 @@ mod tests {
 
         let infos = apply_pane_chrome(
             workspace.tabs[0].layout.panes(Rect::new(0, 0, 100, 20)),
-            true,
+            PaneBordersConfig::Auto,
             false,
             true,
         );
@@ -958,7 +1011,7 @@ mod tests {
 
         let infos = apply_pane_chrome(
             workspace.tabs[0].layout.panes(Rect::new(0, 0, 100, 20)),
-            true,
+            PaneBordersConfig::Auto,
             false,
             false,
         );
@@ -978,7 +1031,7 @@ mod tests {
 
         let infos = apply_pane_chrome(
             workspace.tabs[0].layout.panes(Rect::new(0, 0, 100, 20)),
-            true,
+            PaneBordersConfig::Auto,
             true,
             true,
         );
@@ -999,7 +1052,7 @@ mod tests {
 
         let infos = apply_pane_chrome(
             workspace.tabs[0].layout.panes(Rect::new(0, 0, 100, 20)),
-            false,
+            PaneBordersConfig::Off,
             true,
             true,
         );
@@ -1019,7 +1072,7 @@ mod tests {
 
         let infos = apply_pane_chrome(
             workspace.tabs[0].layout.panes(Rect::new(0, 0, 100, 20)),
-            false,
+            PaneBordersConfig::Off,
             false,
             true,
         );
@@ -1028,6 +1081,36 @@ mod tests {
             assert!(info.borders.is_empty());
             assert_eq!(pane_inner_rect(info.rect, info.borders), info.rect);
         }
+    }
+
+    #[test]
+    fn always_pane_borders_frame_lone_pane() {
+        let workspace = Workspace::test_new("test");
+        let area = Rect::new(0, 0, 100, 20);
+
+        let default_infos = apply_pane_chrome(
+            workspace.tabs[0].layout.panes(area),
+            PaneBordersConfig::Auto,
+            false,
+            true,
+        );
+        assert_eq!(default_infos[0].borders, Borders::NONE);
+
+        let framed_infos = apply_pane_chrome(
+            workspace.tabs[0].layout.panes(area),
+            PaneBordersConfig::Always,
+            false,
+            true,
+        );
+        assert_eq!(framed_infos[0].borders, Borders::ALL);
+
+        let no_outer_infos = apply_pane_chrome(
+            workspace.tabs[0].layout.panes(area),
+            PaneBordersConfig::Always,
+            false,
+            false,
+        );
+        assert_eq!(no_outer_infos[0].borders, Borders::NONE);
     }
 
     #[test]
@@ -1133,6 +1216,64 @@ mod tests {
         let buffer = terminal.backend().buffer();
         assert_eq!(buffer[(1, 1)].style().fg, Some(app.palette.accent));
         assert_eq!(buffer[(2, 1)].style().fg, Some(app.palette.overlay0));
+    }
+
+    #[tokio::test]
+    async fn collection_preview_reserves_one_header_row_from_terminal_geometry() {
+        let mut app = AppState::test_new();
+        app.pane_borders = PaneBordersConfig::Off;
+        app.pane_scrollbars = false;
+        let mut workspace = Workspace::test_new("test");
+        let root = workspace.tabs[0].root_pane;
+        let member = workspace.test_split(ratatui::layout::Direction::Horizontal);
+        let collection = workspace.tabs[0]
+            .create_collection_near(
+                crate::layout::LayoutLeaf::Pane(root),
+                ratatui::layout::Direction::Vertical,
+                0.5,
+                Some("reviewers".into()),
+            )
+            .expect("create collection");
+        workspace.tabs[0]
+            .collect_tiled_pane(member, collection)
+            .expect("collect member");
+        workspace.tabs[0].runtimes.insert(
+            member,
+            TerminalRuntime::test_with_scrollback_bytes(40, 8, 1024, b"ready\n"),
+        );
+        app.workspaces = vec![workspace];
+        app.active = Some(0);
+
+        let infos = compute_pane_infos(
+            &app,
+            &TerminalRuntimeRegistry::new(),
+            Rect::new(0, 0, 80, 20),
+            true,
+            crate::kitty_graphics::HostCellSize::default(),
+        );
+        let tiled = infos.iter().find(|info| info.id == root).unwrap();
+        let preview = infos.iter().find(|info| info.id == member).unwrap();
+
+        assert_eq!(tiled.inner_rect, tiled.rect);
+        assert_eq!(preview.inner_rect.y, preview.rect.y + 1);
+        assert_eq!(preview.inner_rect.height, preview.rect.height - 1);
+        assert_eq!(
+            app.workspaces[0].tabs[0].runtimes[&member].current_size(),
+            (preview.inner_rect.height, preview.inner_rect.width)
+        );
+
+        app.workspaces[0].tabs[0].zoomed = true;
+        assert!(app.workspaces[0].tabs[0]
+            .layout
+            .focus_leaf(crate::layout::LayoutLeaf::Collection(collection.into())));
+        let zoomed = compute_pane_infos(
+            &app,
+            &TerminalRuntimeRegistry::new(),
+            Rect::new(0, 0, 80, 20),
+            true,
+            crate::kitty_graphics::HostCellSize::default(),
+        );
+        assert_eq!(zoomed[0].inner_rect, Rect::new(0, 1, 80, 19));
     }
 
     #[tokio::test]

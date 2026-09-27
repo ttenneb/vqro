@@ -3,6 +3,8 @@ use super::*;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ClientGlobalMenuAction {
     Binding(crate::input::KeybindAction),
+    Extensions,
+    TerminalRecovery,
     WhatsNew,
 }
 
@@ -15,8 +17,7 @@ pub(super) fn global_menu_item_has_badge(
     action: ClientGlobalMenuAction,
 ) -> bool {
     (action == ClientGlobalMenuAction::WhatsNew && snapshot.update_available.is_some())
-        || (action == ClientGlobalMenuAction::Binding(crate::input::KeybindAction::Settings)
-            && snapshot.integration_updates_available)
+        || (action == ClientGlobalMenuAction::Extensions && snapshot.integration_updates_available)
 }
 
 pub(super) fn global_menu_items(
@@ -46,6 +47,8 @@ pub(super) fn global_menu_items(
             ClientGlobalMenuAction::WhatsNew,
         ));
     }
+    items.push(("extensions", ClientGlobalMenuAction::Extensions));
+    items.push(("terminals", ClientGlobalMenuAction::TerminalRecovery));
     items.push((
         "detach",
         ClientGlobalMenuAction::Binding(crate::input::KeybindAction::Detach),
@@ -103,6 +106,8 @@ impl ClientShellState {
             ClientGlobalMenuAction::Binding(binding) => {
                 self.record_binding(crate::input::KeybindMatch::Action(binding), outcome)
             }
+            ClientGlobalMenuAction::Extensions => self.open_extensions_overlay(outcome),
+            ClientGlobalMenuAction::TerminalRecovery => self.open_recovery_browser(),
             ClientGlobalMenuAction::WhatsNew => self.open_release_notes(),
         }
         outcome.repaint = true;

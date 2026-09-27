@@ -60,6 +60,8 @@ fn fast_path_blocker(
 ) -> Option<&'static str> {
     if state.mode != ClientShellMode::Terminal {
         Some("client_surface_patch.fallback.mode")
+    } else if state.inspector.is_some() {
+        Some("client_surface_patch.fallback.inspector")
     } else if state.overlay.is_some() {
         Some("client_surface_patch.fallback.overlay")
     } else if state.endpoint_error.is_some() {
@@ -72,6 +74,8 @@ fn fast_path_blocker(
         Some("client_surface_patch.fallback.notification")
     } else if state.copy_feedback.is_some() {
         Some("client_surface_patch.fallback.copy_feedback")
+    } else if state.link_hover_blocks_patch(patch) {
+        Some("client_surface_patch.fallback.link_hover")
     } else if state.selection.is_some() {
         Some("client_surface_patch.fallback.selection")
     } else if state.copy_mode.is_some() {
@@ -240,6 +244,7 @@ impl ClientShellState {
                     }
                 }
             }
+            self.invalidate_link_hover();
             self.reconcile_input_source();
         } else {
             let mut next = current.clone();

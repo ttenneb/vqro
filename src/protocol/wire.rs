@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 // ---------------------------------------------------------------------------
 
 /// Current protocol version. Bumped when wire format changes incompatibly.
-pub const PROTOCOL_VERSION: u32 = 22;
+pub const PROTOCOL_VERSION: u32 = 23;
 
 /// Maximum allowed frame payload size (2 MB). Frames larger than this are
 /// rejected to prevent denial-of-service via oversized length prefixes.
@@ -1100,6 +1100,16 @@ pub struct PaneSurfaceScrollMetrics {
     pub viewport_rows: u64,
 }
 
+/// Origin-relative geometry for one package-owned collection leaf.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PaneSurfaceCollection {
+    pub collection_id: String,
+    pub rect: SurfaceRect,
+    /// Content below the collection-owned structural header.
+    pub inner_rect: SurfaceRect,
+    pub focused: bool,
+}
+
 /// One draggable BSP split handle relative to a pane surface.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PaneSurfaceSplit {
@@ -1219,6 +1229,7 @@ pub struct PaneSurfaceFrame {
     pub surface_revision: u64,
     pub frame: FrameData,
     pub panes: Vec<PaneSurfacePane>,
+    pub collections: Vec<PaneSurfaceCollection>,
     pub splits: Vec<PaneSurfaceSplit>,
     pub popup: Option<Box<ClientShellPopupSurface>>,
     pub graphics: SurfaceGraphicsScene,
@@ -2066,13 +2077,60 @@ mod tests {
         else {
             panic!("pane dead key should remain a key");
         };
-        assert!(key.is_windows_shift_dead_key());
+        assert!(key.is_windows_dead_key());
         assert_eq!(key.windows_record(), None);
         assert!(crate::input::encode_terminal_key(
             key,
             crate::input::KeyboardProtocol::Kitty { flags: 1 },
         )
         .is_empty());
+    }
+
+    #[tokio::test]
+    async fn client_shell_remote_altgr_dead_key_emits_only_composed_text() {
+        // Spanish ISO AltGr+4, then Space, captured in #3948:
+        // https://github.com/herdrdev/herdr/issues/3948#issuecomment-5633222390
+        let records = [
+            ('4', ClientKeyKind::Press, 52, 5, 0, 9),
+            ('4', ClientKeyKind::Release, 52, 5, 0, 9),
+            ('~', ClientKeyKind::Press, 32, 57, 126, 0),
+            (' ', ClientKeyKind::Release, 32, 57, 32, 0),
+        ];
+        let (runtime, _rx) = crate::terminal::TerminalRuntime::test_with_channel(80, 24);
+        let mut output = Vec::new();
+        for (ch, kind, virtual_key_code, virtual_scan_code, unicode, control_key_state) in records {
+            let event = ClientInputEvent::Key {
+                code: ClientKeyCode::Char(ch),
+                modifiers: 0,
+                kind,
+                repeat_count: 1,
+                generated_text: None,
+                source: ClientKeySource::WindowsConsole {
+                    record: crate::input::WindowsKeyRecord {
+                        key_down: kind == ClientKeyKind::Press,
+                        repeat_count: 1,
+                        virtual_key_code,
+                        virtual_scan_code,
+                        unicode,
+                        control_key_state,
+                    },
+                },
+            };
+            let crate::raw_input::RawInputEvent::Key(key) = event.to_raw_input_event() else {
+                panic!("captured input should remain a key");
+            };
+            let pane_event = ClientPaneInputEvent::from_terminal_key(key).expect("pane key");
+            let crate::raw_input::RawInputEvent::Key(key) =
+                pane_event.to_raw_input_event_with_windows_source(false)
+            else {
+                panic!("remote input should remain a key");
+            };
+            let bytes = runtime.encode_terminal_key(key);
+            let expected: &[u8] = if ch == '~' { b"~" } else { b"" };
+            assert_eq!(bytes, expected, "captured {ch:?} {kind:?}");
+            output.extend(bytes);
+        }
+        assert_eq!(output, b"~", "dead key must not insert its base character");
     }
 
     #[test]
@@ -2396,6 +2454,7 @@ mod tests {
             surface_revision: 1,
             frame: frame.clone(),
             panes: Vec::new(),
+            collections: Vec::new(),
             splits: Vec::new(),
             popup: None,
             graphics: SurfaceGraphicsScene::default(),
@@ -2406,7 +2465,7 @@ mod tests {
         assert_eq!(msg, decoded);
         assert_eq!(
             encoded_sha256(&msg),
-            "7c016f7b21ddb5ac79212cf65a968b93eb292b5305b941263e89ffaa40158ee3"
+            "3b0136ffaeb7420c1a7be7a2a487e5499e26d1486b9daf6d4c06161993a238b1"
         );
         match decoded {
             ServerMessage::PaneSurface(surface) => {
@@ -2485,6 +2544,7 @@ mod tests {
                 graphics: Vec::new(),
             },
             panes: Vec::new(),
+            collections: Vec::new(),
             splits: Vec::new(),
             popup: None,
             graphics: SurfaceGraphicsScene {
@@ -2514,7 +2574,7 @@ mod tests {
 
         assert_eq!(
             encoded_sha256(&message),
-            "49c4efec0f1456c8ca4112ddf6ead1ab75d0224007576c2ccc18c3fca55a69f0"
+            "e37dc1a2e75d4f97ad3593b75d30371f62721fb606028d56f1a34340056699e6"
         );
     }
 
@@ -2564,6 +2624,7 @@ mod tests {
                 graphics: Vec::new(),
             },
             panes: Vec::new(),
+            collections: Vec::new(),
             splits: Vec::new(),
             popup: None,
             graphics: SurfaceGraphicsScene::default(),
@@ -2930,6 +2991,7 @@ mod tests {
             surface_revision: 1,
             frame,
             panes: Vec::new(),
+            collections: Vec::new(),
             splits: Vec::new(),
             popup: None,
             graphics: SurfaceGraphicsScene::default(),

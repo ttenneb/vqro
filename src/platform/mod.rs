@@ -18,11 +18,81 @@ pub struct ForegroundJob {
     pub processes: Vec<ForegroundProcess>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ProcessTelemetry {
+    pub(crate) pid: u32,
+    pub(crate) name: String,
+    pub(crate) state: Option<String>,
+    pub(crate) cpu_time_ms: Option<u64>,
+    pub(crate) resident_bytes: Option<u64>,
+    pub(crate) thread_count: Option<u32>,
+    pub(crate) read_bytes: Option<u64>,
+    pub(crate) write_bytes: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum TerminalTelemetrySample {
+    // Process telemetry is implemented only by the Linux platform module.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    Available {
+        process_group_id: u32,
+        processes: Vec<ProcessTelemetry>,
+        truncated: bool,
+    },
+    Unavailable(&'static str),
+    // This variant is produced by non-Linux platform implementations.
+    #[cfg_attr(target_os = "linux", allow(dead_code))]
+    Unsupported,
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn sample_terminal_telemetry(
+    _shell_pid: u32,
+    _max_processes: usize,
+) -> TerminalTelemetrySample {
+    TerminalTelemetrySample::Unsupported
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Signal {
     Hangup,
     Terminate,
     Kill,
+}
+
+/// Why a pane runtime ended, before application persistence policy is applied.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChildExitReason {
+    Exited,
+    Interrupted,
+    /// Imported runtimes have no child wait handle in the replacement server.
+    #[cfg(unix)]
+    Handoff,
+    WaitFailed,
+}
+
+impl ChildExitReason {
+    pub(crate) fn requires_session_checkpoint(self) -> bool {
+        match self {
+            Self::Interrupted => true,
+            #[cfg(unix)]
+            Self::Handoff => true,
+            _ => false,
+        }
+    }
+}
+
+#[cfg(unix)]
+pub(crate) use unix_common::classify_child_exit;
+
+#[cfg(not(any(unix, windows)))]
+pub(crate) fn classify_child_exit(_status: &portable_pty::ExitStatus) -> ChildExitReason {
+    ChildExitReason::Exited
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn launch_executable() -> std::io::Result<std::path::PathBuf> {
+    std::env::current_exe()
 }
 
 pub(crate) fn detached_custom_command_process(command: &str) -> std::process::Command {
@@ -231,13 +301,33 @@ pub(crate) struct RemoteSshConfigPaths {
     pub(crate) multiplexing: bool,
 }
 
+pub(crate) const REMOTE_BRIDGE_IDLE_TIMEOUT_SUPPORTED: bool =
+    cfg!(any(target_os = "linux", target_os = "macos"));
+
+#[cfg(unix)]
+mod remote_bridge;
+#[cfg(all(test, unix))]
+mod remote_bridge_tests;
 #[cfg(unix)]
 mod unix_common;
 #[cfg(unix)]
-pub(crate) use unix_common::{begin_cli_output, end_cli_output};
+pub(crate) use unix_common::{
+    begin_cli_output, configure_package_nofollow, create_private_package_directory, end_cli_output,
+    forward_remote_bridge_stdio, open_package_staging, write_package_staging_file,
+    PackageStagingBackend, RemoteBridgeWake,
+};
 
 mod client_state;
-pub(crate) use client_state::{create_private_state_file, replace_file, sync_parent_directory};
+mod package_fs;
+mod persistence_lock;
+pub(crate) use client_state::{
+    create_private_state_file, durable_replace_file, replace_file, resolve_write_target,
+    sync_containing_directory, sync_parent_directory,
+};
+pub(crate) use package_fs::{read_bounded_regular_nofollow, SecurePackageStaging};
+pub(crate) use persistence_lock::{
+    try_lock_persistence, PersistenceLockError, PersistenceLockGuard,
+};
 
 #[cfg(not(unix))]
 pub(crate) fn begin_cli_output() {}
@@ -329,6 +419,35 @@ pub(crate) fn quote_powershell_arg(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
 }
 
+pub(crate) fn quote_windows_command_line_arg(value: &str) -> String {
+    if !value.is_empty()
+        && !value
+            .chars()
+            .any(|ch| matches!(ch, ' ' | '\t' | '\n' | '\x0b' | '"'))
+    {
+        return value.to_string();
+    }
+
+    let mut quoted = String::from("\"");
+    let mut backslashes = 0;
+    for ch in value.chars() {
+        if ch == '\\' {
+            backslashes += 1;
+            continue;
+        }
+        if ch == '"' {
+            quoted.push_str(&"\\".repeat(backslashes * 2 + 1));
+        } else {
+            quoted.push_str(&"\\".repeat(backslashes));
+        }
+        backslashes = 0;
+        quoted.push(ch);
+    }
+    quoted.push_str(&"\\".repeat(backslashes * 2));
+    quoted.push('"');
+    quoted
+}
+
 pub(crate) fn is_pane_shell_process_name(name: &str) -> bool {
     let normalized = normalized_process_name(name);
     matches!(
@@ -413,6 +532,25 @@ impl PrefixInputSource for RealPrefixInputSource {
     fn restore(&mut self) {
         let _ = self.restore.take();
     }
+}
+
+#[cfg(all(test, any(unix, windows)))]
+#[test]
+fn child_exit_classification_only_checkpoints_interruptions() {
+    for code in [0, 1, 130, 255, 0xC0000005] {
+        let reason = classify_child_exit(&portable_pty::ExitStatus::with_exit_code(code));
+        assert_eq!(reason, ChildExitReason::Exited, "exit code {code:#x}");
+        assert!(!reason.requires_session_checkpoint());
+    }
+    #[cfg(windows)]
+    let status = portable_pty::ExitStatus::with_exit_code(0xC000013A);
+    #[cfg(not(windows))]
+    let status = portable_pty::ExitStatus::with_signal("Terminated: 15");
+    assert_eq!(classify_child_exit(&status), ChildExitReason::Interrupted);
+    assert!(classify_child_exit(&status).requires_session_checkpoint());
+    #[cfg(unix)]
+    assert!(ChildExitReason::Handoff.requires_session_checkpoint());
+    assert!(!ChildExitReason::WaitFailed.requires_session_checkpoint());
 }
 
 #[cfg(all(test, unix))]

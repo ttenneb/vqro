@@ -56,9 +56,15 @@ pub struct WorktreeRemoveResult {
 #[derive(Debug)]
 pub enum AppEvent {
     /// A pane's child process exited.
-    PaneDied { pane_id: PaneId },
+    PaneDied {
+        pane_id: PaneId,
+        exit_reason: crate::platform::ChildExitReason,
+    },
     /// A worktree-removal runtime could not be restored normally.
-    WorktreeRuntimeRestoreFailed { pane_id: PaneId, operation_id: u64 },
+    WorktreeRuntimeRestoreFailed {
+        pane_id: PaneId,
+        operation_id: u64,
+    },
     /// Process detection identified an agent before its screen state was confirmed.
     AgentProcessDetected {
         pane_id: PaneId,
@@ -136,10 +142,15 @@ pub enum AppEvent {
     },
     /// A pane child emitted one or more executable BEL characters.
     /// The host-facing process forwards them to its outer terminal.
-    TerminalBell { pane_id: PaneId, count: u16 },
+    TerminalBell {
+        pane_id: PaneId,
+        count: u16,
+    },
     /// A pane child emitted a valid OSC 52 clipboard write. The main loop
     /// re-emits it through herdr's own clipboard writer.
-    ClipboardWrite { content: Vec<u8> },
+    ClipboardWrite {
+        content: Vec<u8>,
+    },
     /// A pane child reported its shell current directory through terminal
     /// metadata such as OSC 7.
     TerminalCwdReported {
@@ -156,6 +167,64 @@ pub enum AppEvent {
         generation: u64,
         segment_index: usize,
         result: Result<Option<String>, String>,
+    },
+    /// Pinned extension source staging completed off the server event loop.
+    ExtensionArtifactStaged(Box<crate::extension_artifact::ExtensionArtifactStageResult>),
+    /// A pinned Git package inspection or approved staging job completed off-loop.
+    ExtensionGitPackageFinished(Box<crate::extension_git_package::GitPackageWorkResult>),
+    /// A package candidate completed validation and started its bounded service workers.
+    ExtensionPackageCandidateReady(
+        Box<crate::extension_candidate::PackageCandidateBootstrapResult>,
+    ),
+    /// A non-publishing package candidate invocation completed on its service worker.
+    ExtensionPackageCandidateFinished(
+        Box<crate::extension_candidate::PackageCandidateInvocationResult>,
+    ),
+    /// Backstop for one host-started Service Fabric consumer invocation.
+    ExtensionServiceFabricTimeout {
+        attempt_id: u64,
+    },
+    /// A bounded extension service job completed on its worker thread.
+    ExtensionServiceFinished(Box<crate::extension_service::ExtensionAsyncResult>),
+    // Unit-test executables cannot recursively host the bundled service binary.
+    #[cfg_attr(test, allow(dead_code))]
+    HostDocumentFinished(Box<crate::extension_service::HostDocumentAsyncResult>),
+    // Production bundled providers construct these; unit tests install explicit sources.
+    #[cfg_attr(test, allow(dead_code))]
+    HostRelationshipsDocumentFinished(
+        Box<crate::extension_service::HostRelationshipsDocumentAsyncResult>,
+    ),
+    #[cfg_attr(test, allow(dead_code))]
+    HostAgentActivityDocumentFinished(
+        Box<crate::extension_service::HostAgentActivityDocumentAsyncResult>,
+    ),
+    HostDocumentRetryDue {
+        namespace: String,
+        scope_id: String,
+        generation: u64,
+        revision: u64,
+    },
+    HostSemanticDocumentRetryDue {
+        namespace: String,
+        epoch: u64,
+    },
+    ExtensionCatalogCapacityAvailable,
+    /// Staged package-v1 host-state request. The App actor remains the sole state authority.
+    ExtensionHostStateCall(Box<crate::extension_host_state::HostStateActorRequest>),
+    /// Staged read-only package-v1 terminal snapshot request.
+    ExtensionHostTerminalsCall(Box<crate::extension_host_terminals::HostTerminalsActorRequest>),
+    ExtensionStatePersisted(Box<crate::app::ExtensionStatePersistResult>),
+    CollectionsCheckpointPersisted(Box<crate::app::CollectionsCheckpointResult>),
+    CollectionsCreateCheckpointPersisted(Box<crate::app::CollectionsCreateCheckpointResult>),
+    HostDocumentProviderActionFinished {
+        request_id: String,
+        namespace: String,
+        scope_id: String,
+        generation: u64,
+        revision: u64,
+        holds_action_slot: bool,
+        result: Result<(), String>,
+        respond_to: std::sync::mpsc::Sender<String>,
     },
     /// A plugin action or event command finished.
     PluginCommandFinished {

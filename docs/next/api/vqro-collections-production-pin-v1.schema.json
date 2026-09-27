@@ -1,0 +1,88 @@
+{
+  "$id": "https://vqro.dev/schema/collections/production-pin/v1",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "contract": "vqro.collections.production-pin.v1",
+  "properties": {
+    "capabilities": {
+      "const": [
+        "host.state.read",
+        "host.terminals.read"
+      ],
+      "type": "array"
+    },
+    "component_sha256": {
+      "maxLength": 64,
+      "minLength": 64,
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "contract": {
+      "const": "vqro.collections.production-pin.v1",
+      "type": "string"
+    },
+    "manifest_sha256": {
+      "maxLength": 64,
+      "minLength": 64,
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "package_id": {
+      "const": "vqro.collections",
+      "type": "string"
+    },
+    "package_path": {
+      "pattern": "^[A-Za-z0-9._/-]+\\.vqrox$",
+      "type": "string"
+    },
+    "package_sha256": {
+      "maxLength": 64,
+      "minLength": 64,
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "profile_contract": {
+      "const": "vqro.collections.document-profile.v1",
+      "type": "string"
+    },
+    "service_id": {
+      "const": "collections",
+      "type": "string"
+    },
+    "source_commit": {
+      "maxLength": 40,
+      "minLength": 40,
+      "pattern": "^[0-9a-f]{40}$",
+      "type": "string"
+    },
+    "source_url": {
+      "format": "uri",
+      "pattern": "^https://[^@]+$",
+      "type": "string"
+    },
+    "world": {
+      "const": "vqro:extension/service@1.0.0",
+      "type": "string"
+    }
+  },
+  "required": [
+    "contract",
+    "package_id",
+    "service_id",
+    "source_url",
+    "source_commit",
+    "package_path",
+    "package_sha256",
+    "manifest_sha256",
+    "component_sha256",
+    "world",
+    "capabilities",
+    "profile_contract"
+  ],
+  "title": "vqro Collections production pin v1",
+  "type": "object",
+  "validation_authority": {
+    "json_schema": "structural and canonical field forms",
+    "rust_validator": "normative for credential-free source URLs, relative package paths, exact capabilities, and digest syntax"
+  }
+}

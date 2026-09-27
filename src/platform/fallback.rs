@@ -1,6 +1,94 @@
 use std::path::PathBuf;
 use std::process::Command;
 
+#[derive(Debug)]
+pub(crate) struct PlatformPersistenceLock;
+
+#[allow(dead_code)] // Used when the staged persistence coordinator is wired into production.
+pub(crate) fn try_lock_platform_persistence(
+    _path: &std::path::Path,
+) -> Result<PlatformPersistenceLock, super::PersistenceLockError> {
+    Err(super::PersistenceLockError::Io(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "persistence ownership locks are unavailable on this platform",
+    )))
+}
+
+pub(crate) fn local_listener_accept_error_is_resource_exhaustion(_error: &std::io::Error) -> bool {
+    false
+}
+
+pub(crate) struct PackageStagingBackend {
+    root: PathBuf,
+    canonical_root: PathBuf,
+}
+
+pub(crate) fn configure_package_nofollow(_options: &mut std::fs::OpenOptions) {}
+
+pub(crate) fn create_private_package_directory(path: &std::path::Path) -> std::io::Result<()> {
+    std::fs::create_dir(path)
+}
+
+pub(crate) fn open_package_staging(
+    path: &std::path::Path,
+) -> std::io::Result<PackageStagingBackend> {
+    Ok(PackageStagingBackend {
+        root: path.to_path_buf(),
+        canonical_root: std::fs::canonicalize(path)?,
+    })
+}
+
+pub(crate) fn write_package_staging_file(
+    staging: &PackageStagingBackend,
+    components: &[std::ffi::OsString],
+    bytes: &[u8],
+    _mode: u32,
+) -> std::io::Result<()> {
+    use std::io::Write;
+
+    let mut parent = staging.root.clone();
+    for component in &components[..components.len() - 1] {
+        parent.push(component);
+        std::fs::create_dir_all(&parent)?;
+        if !std::fs::canonicalize(&parent)?.starts_with(&staging.canonical_root) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "package staging path escaped its root",
+            ));
+        }
+    }
+    let output = parent.join(&components[components.len() - 1]);
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(output)?;
+    file.write_all(bytes)?;
+    file.sync_all()
+}
+
+pub(crate) fn fill_secure_random(_bytes: &mut [u8]) -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "secure randomness is unavailable on this platform",
+    ))
+}
+
+#[derive(Debug)]
+pub(crate) struct ExtensionServiceContainment;
+
+impl ExtensionServiceContainment {
+    pub(crate) fn new(_child: &std::process::Child) -> std::io::Result<Self> {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "extension service containment is unavailable on this platform",
+        ))
+    }
+}
+
+pub(crate) fn configure_extension_service_command(_command: &mut std::process::Command) {}
+
+pub(crate) fn terminate_extension_service_process_group(_child: &std::process::Child) {}
+
 use super::{ClipboardImage, ForegroundJob, Signal};
 
 #[cfg(unix)]
@@ -11,6 +99,25 @@ pub(crate) fn set_default_plugin_pane_pwd(
     _env: &mut Vec<(String, String)>,
     _cwd: &std::path::Path,
 ) {
+}
+
+#[cfg(unix)]
+pub(super) const REMOTE_BRIDGE_CLOCK: libc::clockid_t = libc::CLOCK_MONOTONIC;
+
+pub(crate) fn forward_remote_bridge_stdio(
+    stream: crate::ipc::LocalStream,
+    _idle_timeout: bool,
+) -> std::io::Result<()> {
+    use interprocess::TryClone as _;
+
+    let mut stdout = std::io::stdout().lock();
+    let mut socket_to_stdout = stream.try_clone()?;
+    let mut stdin_to_socket = stream;
+    let _upload = std::thread::spawn(move || {
+        let mut stdin = std::io::stdin();
+        let _ = std::io::copy(&mut stdin, &mut stdin_to_socket);
+    });
+    std::io::copy(&mut socket_to_stdout, &mut stdout).map(|_| ())
 }
 
 #[cfg(not(unix))]
@@ -30,7 +137,7 @@ pub(crate) fn remote_ssh_config_paths() -> super::RemoteSshConfigPaths {
 
 pub(crate) fn create_remote_ssh_config_dir(_control_socket_name: &str) -> std::io::Result<PathBuf> {
     for attempt in 0..100 {
-        let dir = std::env::temp_dir().join(format!("herdr-ssh-{}-{attempt}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("vqro-ssh-{}-{attempt}", std::process::id()));
         match create_remote_private_dir(&dir) {
             Ok(()) => return Ok(dir),
             Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
@@ -214,6 +321,14 @@ pub fn write_clipboard(_bytes: &[u8]) -> bool {
 /// Unsupported platform stub.
 pub fn read_clipboard_text() -> Option<String> {
     None
+}
+
+/// Unsupported platform stub.
+pub fn open_path(_path: &std::path::Path) -> std::io::Result<Option<std::process::Child>> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "opening paths is not supported on this platform",
+    ))
 }
 
 /// Unsupported platform stub.

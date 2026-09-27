@@ -315,7 +315,7 @@ fn startup_onboarding_is_client_rendered_and_modal() {
     assert!(text.contains("terminal workspace manager for coding agents"));
     assert!(text.contains("this is a mouse-first terminal"));
     assert!(text.contains("ctrl+b enters prefix mode"));
-    assert!(text.contains("install optional agent integrations"));
+    assert!(text.contains("browse optional agent extensions"));
     assert_eq!(state.hits.overlay_primary.width, 12);
 
     let ignored = state.handle_input_bytes(b"x");
@@ -350,7 +350,7 @@ fn startup_onboarding_is_client_rendered_and_modal() {
 }
 
 #[test]
-fn onboarding_completion_persists_and_opens_endpoint_integrations() {
+fn onboarding_completion_persists_and_opens_agent_extensions() {
     let path = std::env::temp_dir().join(format!(
         "herdr-client-onboarding-{}-{}.toml",
         std::process::id(),
@@ -367,48 +367,50 @@ fn onboarding_completion_persists_and_opens_endpoint_integrations() {
         config.local_config_path = path.clone();
         config
     };
+    let assert_agent_extensions = |state: &ClientShellState| {
+        assert!(matches!(
+            state.overlay,
+            Some(ClientShellOverlay::Extensions(ClientExtensionsOverlay {
+                tab: ClientExtensionsTab::Browse,
+                category: Some(ref category),
+                ..
+            })) if category == "Agents"
+        ));
+    };
+    let assert_extension_requests = |outcome: &ClientShellInput| {
+        assert_eq!(outcome.actions.len(), 2);
+        assert!(outcome.actions.iter().any(|action| matches!(
+            action,
+            ClientShellAction::Endpoint { request, .. }
+                if matches!(request.method, crate::api::schema::Method::ExtensionList(_))
+        )));
+        assert!(outcome.actions.iter().any(|action| matches!(
+            action,
+            ClientShellAction::Endpoint { request, .. }
+                if matches!(request.method, crate::api::schema::Method::ExtensionPackageList(_))
+        )));
+    };
 
-    let config = onboarding_config();
-    let mut state = ClientShellState::new(config);
+    let mut state = ClientShellState::new(onboarding_config());
     state.set_snapshot(Box::new(snapshot()));
     state.set_pane_surface(surface());
     let outcome = state.handle_input_bytes(b"\r");
-
-    assert!(matches!(
-        state.overlay,
-        Some(ClientShellOverlay::Settings(ClientSettingsOverlay {
-            section: ClientSettingsSection::Integrations,
-            loading_integrations: true,
-            ..
-        }))
-    ));
-    assert!(matches!(
-        &outcome.actions[..],
-        [ClientShellAction::Endpoint { request, .. }]
-            if matches!(request.method, crate::api::schema::Method::IntegrationList(_))
-    ));
+    assert_agent_extensions(&state);
+    assert_extension_requests(&outcome);
     let persisted = std::fs::read_to_string(&path).expect("read onboarding config");
     assert!(persisted.contains("onboarding = false"));
     assert!(persisted.contains("default_shell = \"fish\""));
 
     for input in [b"\x1b[C".as_slice(), b"l".as_slice()] {
-        let config = onboarding_config();
-        let mut state = ClientShellState::new(config);
+        let mut state = ClientShellState::new(onboarding_config());
         state.set_snapshot(Box::new(snapshot()));
         state.set_pane_surface(surface());
         let outcome = state.handle_input_bytes(input);
-        assert!(matches!(
-            state.overlay,
-            Some(ClientShellOverlay::Settings(ClientSettingsOverlay {
-                section: ClientSettingsSection::Integrations,
-                ..
-            }))
-        ));
-        assert_eq!(outcome.actions.len(), 1);
+        assert_agent_extensions(&state);
+        assert_extension_requests(&outcome);
     }
 
-    let config = onboarding_config();
-    let mut state = ClientShellState::new(config);
+    let mut state = ClientShellState::new(onboarding_config());
     state.set_snapshot(Box::new(snapshot()));
     state.set_pane_surface(surface());
     state.compose(106, 20).expect("onboarding mouse frame");
@@ -419,14 +421,8 @@ fn onboarding_completion_persists_and_opens_endpoint_integrations() {
         row: button.y,
         modifiers: KeyModifiers::NONE,
     })]);
-    assert!(matches!(
-        state.overlay,
-        Some(ClientShellOverlay::Settings(ClientSettingsOverlay {
-            section: ClientSettingsSection::Integrations,
-            ..
-        }))
-    ));
-    assert_eq!(click.actions.len(), 1);
+    assert_agent_extensions(&state);
+    assert_extension_requests(&click);
 
     let unreadable_path = path.with_extension("dir");
     std::fs::create_dir(&unreadable_path).expect("create unreadable config path");
@@ -436,14 +432,8 @@ fn onboarding_completion_persists_and_opens_endpoint_integrations() {
     state.set_snapshot(Box::new(snapshot()));
     state.set_pane_surface(surface());
     let failed_write = state.handle_input_bytes(b"\r");
-    assert!(matches!(
-        state.overlay,
-        Some(ClientShellOverlay::Settings(ClientSettingsOverlay {
-            section: ClientSettingsSection::Integrations,
-            ..
-        }))
-    ));
-    assert_eq!(failed_write.actions.len(), 1);
+    assert_agent_extensions(&state);
+    assert_extension_requests(&failed_write);
     assert!(state
         .config_diagnostic
         .as_deref()
@@ -455,7 +445,7 @@ fn onboarding_completion_persists_and_opens_endpoint_integrations() {
 }
 
 #[test]
-fn unavailable_integration_list_does_not_wedge_settings() {
+fn unavailable_extensions_do_not_wedge_onboarding() {
     let mut config =
         ClientShellConfig::from_config(&Config::default()).with_startup_onboarding(true);
     config.local_config_path = std::env::temp_dir().join(format!(
@@ -476,16 +466,13 @@ fn unavailable_integration_list_does_not_wedge_settings() {
     assert!(outcome.actions.is_empty());
     assert!(matches!(
         state.overlay,
-        Some(ClientShellOverlay::Settings(ClientSettingsOverlay {
-            section: ClientSettingsSection::Integrations,
-            loading_integrations: false,
+        Some(ClientShellOverlay::Extensions(ClientExtensionsOverlay {
+            category: Some(ref category),
+            loading: false,
+            message: Some(ref message),
             ..
-        }))
+        })) if category == "Agents" && message == "Extensions are unavailable on this server."
     ));
-    assert!(state
-        .visible_endpoint_notice
-        .as_ref()
-        .is_some_and(|notice| notice.key.code == "integration.list"));
     let _ = std::fs::remove_file(&state.config.local_config_path);
 }
 
@@ -1017,7 +1004,7 @@ fn coalesced_release_notes_open_and_mouse_uses_current_geometry() {
 }
 
 #[test]
-fn outdated_integration_badges_launcher_settings_and_settings_tab() {
+fn outdated_integration_badges_launcher_and_extensions() {
     let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
     let mut endpoint_snapshot = snapshot();
     endpoint_snapshot.integration_updates_available = true;
@@ -1039,33 +1026,20 @@ fn outdated_integration_badges_launcher_settings_and_settings_tab() {
         .iter()
         .map(|cell| cell.symbol.as_str())
         .collect::<String>();
-    assert!(menu_text.contains("● settings"));
+    assert!(menu_text.contains("● extensions"));
+    assert!(!menu_text.contains("● settings"));
     assert!(!menu_text.contains("update ready"));
 
     state.activate_global_menu_item(0, &mut ClientShellInput::default());
-    let settings = state.compose(106, 30).expect("settings integration badge");
+    let settings = state
+        .compose(106, 30)
+        .expect("settings without integrations");
     let settings_text = settings
         .cells
         .iter()
         .map(|cell| cell.symbol.as_str())
         .collect::<String>();
-    assert!(settings_text.contains("● integrations"));
-    let integrations_tab = state
-        .hits
-        .settings_tabs
-        .iter()
-        .find(|(_, section)| *section == ClientSettingsSection::Integrations)
-        .map(|(rect, _)| *rect)
-        .expect("integrations tab");
-    let settings_buffer = settings.to_ratatui_buffer().expect("settings buffer");
-    assert_eq!(
-        settings_buffer[(integrations_tab.x + 1, integrations_tab.y)].fg,
-        state.config.palette.accent
-    );
-    assert_eq!(
-        settings_buffer[(integrations_tab.x + 3, integrations_tab.y)].fg,
-        state.config.palette.overlay1
-    );
+    assert!(!settings_text.contains("integrations"));
 }
 
 #[test]
@@ -1092,9 +1066,9 @@ fn combined_update_and_integration_attention_preserves_both_badges() {
         .iter()
         .map(|cell| cell.symbol.as_str())
         .collect::<String>();
-    let settings = text.find("● settings").expect("settings badge");
     let update = text.find("● update ready").expect("update badge");
-    assert!(settings < update);
+    let extensions = text.find("● extensions").expect("extensions badge");
+    assert!(update < extensions);
 
     state.overlay = None;
     state.mode = ClientShellMode::Navigate;
@@ -1132,7 +1106,7 @@ fn current_release_notes_use_whats_new_without_attention_badge() {
 }
 
 #[test]
-fn client_settings_preview_restore_and_endpoint_integrations_are_owned_by_overlay() {
+fn client_settings_preview_restore_and_sections_are_owned_by_overlay() {
     let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
     state.set_snapshot(Box::new(snapshot()));
     state.set_pane_surface(surface());
@@ -1175,122 +1149,25 @@ fn client_settings_preview_restore_and_endpoint_integrations_are_owned_by_overla
     assert_eq!(state.config.palette.accent, original_palette.accent);
 
     state.open_settings_overlay();
-    state.compose(106, 30).expect("settings overlay");
-    for _ in 0..3 {
-        let next = state.handle_input_bytes(b"\t");
-        assert!(next.actions.is_empty());
-    }
-    let integrations = state.handle_input_bytes(b"\t");
-    let [ClientShellAction::Endpoint { request, .. }] = &integrations.actions[..] else {
-        panic!("integration section should request endpoint status");
-    };
-    assert!(matches!(
-        request.method,
-        crate::api::schema::Method::IntegrationList(_)
-    ));
-    let request_id = request.id.clone();
-    assert!(
-        state
-            .handle_endpoint_result(
-                "boot-1",
-                &request_id,
-                Ok(crate::api::schema::ResponseResult::IntegrationList {
-                    integrations: vec![
-                        crate::api::schema::IntegrationInfo {
-                            target: crate::api::schema::IntegrationTarget::Codex,
-                            label: "codex".into(),
-                            command: "codex".into(),
-                            available: true,
-                            state: crate::api::schema::IntegrationState::Outdated,
-                        },
-                        crate::api::schema::IntegrationInfo {
-                            target: crate::api::schema::IntegrationTarget::Claude,
-                            label: "claude".into(),
-                            command: "claude".into(),
-                            available: false,
-                            state: crate::api::schema::IntegrationState::NotInstalled,
-                        },
-                    ],
-                }),
-            )
-            .0
-    );
-    let frame = state.compose(106, 30).expect("loaded integrations");
+    let frame = state.compose(106, 30).expect("settings overlay");
     let text = frame
         .cells
-        .chunks(frame.width as usize)
-        .map(|row| {
-            row.iter()
-                .map(|cell| cell.symbol.as_str())
-                .collect::<String>()
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-    assert!(text.contains("update available"));
-    assert!(text.contains("not found"));
-    assert!(!text.contains("pane labels"));
-
-    let popup = state.hits.settings_popup;
-    let blank_click =
-        state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
-            kind: MouseEventKind::Down(MouseButton::Left),
-            column: popup.right().saturating_sub(2),
-            row: popup.y + 3,
-            modifiers: KeyModifiers::empty(),
-        })]);
-    assert!(!blank_click.repaint);
-    assert!(matches!(
-        state.overlay,
-        Some(ClientShellOverlay::Settings(_))
-    ));
-
-    let install = state.handle_input_bytes(b"\r");
-    assert_eq!(install.actions.len(), 1);
-    assert!(matches!(
-        &install.actions[0],
-        ClientShellAction::Endpoint { request, .. }
-            if matches!(
-                request.method,
-                crate::api::schema::Method::IntegrationInstall(
-                    crate::api::schema::IntegrationInstallParams {
-                        target: crate::api::schema::IntegrationTarget::Codex
-                    }
-                )
-            )
-    ));
-    let escape = state.handle_input_bytes(b"\x1b");
-    assert!(!escape.repaint);
-    assert!(matches!(
-        state.overlay,
-        Some(ClientShellOverlay::Settings(_))
-    ));
-    let install_request_id = match &install.actions[0] {
-        ClientShellAction::Endpoint { request, .. } => request.id.clone(),
-        _ => unreachable!("integration install action"),
-    };
-    let (repaint, refresh_actions) = state.handle_endpoint_result(
-        "boot-1",
-        &install_request_id,
-        Ok(crate::api::schema::ResponseResult::IntegrationInstall {
-            target: crate::api::schema::IntegrationTarget::Codex,
-            details: crate::api::schema::IntegrationInstallResult {
-                messages: vec!["installed codex".into()],
-            },
-        }),
-    );
-    assert!(repaint);
-    assert!(matches!(
-        refresh_actions.as_slice(),
-        [ClientShellAction::Endpoint { request, .. }]
-            if matches!(request.method, crate::api::schema::Method::IntegrationList(_))
-    ));
-    assert!(matches!(
-        state.overlay,
-        Some(ClientShellOverlay::Settings(ClientSettingsOverlay {
-            loading_integrations: true,
-            installing_integrations: false,
-            ref integration_messages,
-            ..
-        })) if integration_messages == &["installed codex"]
-    ));
+        .iter()
+        .map(|cell| cell.symbol.as_str())
+        .collect::<String>();
+    assert!(!text.contains("integrations"));
+    for expected in [
+        ClientSettingsSection::Indicators,
+        ClientSettingsSection::Sound,
+        ClientSettingsSection::Toast,
+        ClientSettingsSection::Theme,
+    ] {
+        let next = state.handle_input_bytes(b"\t");
+        assert!(next.actions.is_empty());
+        assert!(matches!(
+            state.overlay,
+            Some(ClientShellOverlay::Settings(ClientSettingsOverlay { section, .. }))
+                if section == expected
+        ));
+    }
 }

@@ -1,0 +1,80 @@
+{
+  "contract": "host.document.v1",
+  "namespace": "vqro.collections",
+  "generation": 3,
+  "revision": 11,
+  "surface": "navigation",
+  "target": { "kind": "tab", "tab_id": "w1:t2" },
+  "items": [
+    {
+      "id": "group:collection_7",
+      "role": "group",
+      "label": "Review",
+      "detail": "2 terminals",
+      "action_ids": [],
+      "flags": { "selected": false, "expanded": true, "disabled": false, "attention": false }
+    },
+    {
+      "id": "terminal:term_a",
+      "parent_id": "group:collection_7",
+      "role": "terminal",
+      "label": "API",
+      "detail": "live",
+      "terminal": {
+        "terminal_id": "term_a",
+        "placement": { "pane_id": "w1:p4", "workspace_id": "w1", "tab_id": "w1:t2" }
+      },
+      "action_ids": ["focus:term_a"],
+      "flags": { "selected": false, "expanded": false, "disabled": false, "attention": false }
+    },
+    {
+      "id": "terminal:term_b",
+      "parent_id": "group:collection_7",
+      "role": "terminal",
+      "label": "UX",
+      "detail": "exited",
+      "terminal": {
+        "terminal_id": "term_b",
+        "placement": { "pane_id": "w1:p7", "workspace_id": "w1", "tab_id": "w1:t2" }
+      },
+      "action_ids": ["focus:term_b"],
+      "flags": { "selected": true, "expanded": false, "disabled": false, "attention": false }
+    },
+    {
+      "id": "terminal:term_c",
+      "role": "terminal",
+      "label": "Shell",
+      "detail": "live",
+      "terminal": {
+        "terminal_id": "term_c",
+        "placement": { "pane_id": "w1:p9", "workspace_id": "w1", "tab_id": "w1:t2" }
+      },
+      "action_ids": ["focus:term_c"],
+      "flags": { "selected": false, "expanded": false, "disabled": false, "attention": false }
+    }
+  ],
+  "actions": [
+    {
+      "id": "focus:term_a",
+      "label": "Focus terminal",
+      "operation": { "kind": "host", "effect": { "kind": "focus_terminal", "terminal_id": "term_a" } },
+      "subject_id": "terminal:term_a",
+      "confirmation": "none"
+    },
+    {
+      "id": "focus:term_b",
+      "label": "Focus terminal",
+      "operation": { "kind": "host", "effect": { "kind": "focus_terminal", "terminal_id": "term_b" } },
+      "subject_id": "terminal:term_b",
+      "confirmation": "none"
+    },
+    {
+      "id": "focus:term_c",
+      "label": "Focus terminal",
+      "operation": { "kind": "host", "effect": { "kind": "focus_terminal", "terminal_id": "term_c" } },
+      "subject_id": "terminal:term_c",
+      "confirmation": "none"
+    }
+  ],
+  "required_capabilities": ["focus_terminal"]
+}
