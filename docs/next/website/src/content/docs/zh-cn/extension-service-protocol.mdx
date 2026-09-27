@@ -1,0 +1,26 @@
+---
+title: 扩展服务协议
+description: Vqro 扩展的版本化 stdio 帧格式与一致性规则。
+---
+
+本页说明由宿主 protocol `2` 实现的旧版 manifest-v1 进程服务契约 `vqro.extension-service.v1`。生成的架构位于 `docs/next/api/vqro-extension-service.schema.json`。
+
+Manifest-v2 组件软件包使用独立的运行时中立契约 `vqro.service.v1` 和仓库中的 WIT world。其已验证运行时可在生产环境实例化,但宿主调用租约、document-v2 提供程序接纳、可见发布和功能权威仍处于分阶段实现状态。参见[扩展平台状态](/zh-cn/docs/extension-platform-status/)。
+
+## 传输与生命周期
+
+服务是以同一用户身份运行的受信任进程,不是操作系统安全沙箱。Vqro 在监督约束下启动服务,收发有界的换行分隔 JSON 帧,排空 stderr,执行握手和请求超时,并在禁用、替换或关闭时终止进程树。
+
+服务首先写入 `hello`,其中包含 protocol `2`、精确服务 ID、请求的能力和支持的固定方法。宿主拒绝不匹配内容,然后用 `welcome` 返回精确授权的能力和支持的方法。请求包含宿主发出的 ID,响应必须回显该 ID,并且只能包含 `result` 或 `error` 之一。
+
+## 支持的方法
+
+稳定的旧版进程服务编写面包括 `view.render`、`view.action`、`host.document.render` 和 `host.document.action`。第三方宿主文档目前只能使用 `terminal_groups`。这些方法名称不会启用仍在分阶段实现的 document-v2 或组件软件包贡献路径。
+
+动态动作选项、终端资源和确认契约在其他规范明确标记为稳定之前,均属于基础或实验接口。
+
+## 验证
+
+`vqro plugin validate PATH` 在不执行代码且不需要服务器的情况下解析并进行语义验证。`vqro plugin conformance PATH` 会通过生产监督器和握手明确运行声明的服务。成功返回 0,验证失败返回 1,用法错误返回 2;`--json` 生成机器可读输出。
+
+不兼容更改需要新的具名契约或协议编号。现有 protocol-2 帧含义不会被重新解释。

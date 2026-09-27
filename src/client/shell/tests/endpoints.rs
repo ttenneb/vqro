@@ -74,6 +74,171 @@ fn state_with_remote() -> (ClientShellState, ClientEndpointId) {
 }
 
 #[test]
+fn remote_repository_rows_expose_web_links_but_not_local_directory_links() {
+    fn structure(
+        boot_id: &str,
+        path: &str,
+        url: &str,
+    ) -> Box<crate::protocol::endpoint::ClientShellStructureProjection> {
+        Box::new(crate::protocol::endpoint::ClientShellStructureProjection {
+            session_id: "alpha".into(),
+            boot_id: boot_id.into(),
+            revision: 1,
+            collections: Vec::new(),
+            delegations: Vec::new(),
+            repositories: vec![crate::protocol::endpoint::ClientShellRepository {
+                repository_id: "repo_1".into(),
+                label: "repo".into(),
+                repository_path: Some(path.into()),
+                web_url: Some(url.into()),
+                durable_identity: Some(url.into()),
+                checkouts: vec![crate::protocol::endpoint::ClientShellRepositoryCheckout {
+                    workspace_id: "ws_1".into(),
+                    checkout_path: Some(path.into()),
+                    kind: crate::protocol::endpoint::ClientShellCheckoutKind::Primary,
+                    upstream: Some("origin/main".into()),
+                    upstream_web_url: Some(format!("{url}/tree/main")),
+                    detached_head: None,
+                }],
+                last_focused_workspace_id: Some("ws_1".into()),
+            }],
+            space_order: vec![crate::protocol::endpoint::ClientShellSpaceRef {
+                kind: crate::protocol::endpoint::ClientShellSpaceKind::Repository,
+                id: "repo_1".into(),
+            }],
+        })
+    }
+
+    let (mut state, remote) = state_with_remote();
+    for endpoint in &mut state.endpoints {
+        let Some(snapshot) = endpoint.snapshot.as_deref_mut() else {
+            continue;
+        };
+        snapshot.workspaces[0].branch = Some("main".into());
+        let projected = if endpoint.endpoint_id.is_local() {
+            structure("boot-1", "/local/repo", "https://github.com/local/repo")
+        } else {
+            structure(
+                "remote-boot",
+                "/remote/repo",
+                "https://github.com/remote/repo",
+            )
+        };
+        endpoint.structure = Some(projected.clone());
+        if endpoint.endpoint_id.is_local() {
+            state.structure = Some(projected);
+        }
+    }
+    state
+        .compose(120, 30)
+        .expect("multi-endpoint repository rows");
+
+    let directory_targets = state
+        .hits
+        .space_links
+        .iter()
+        .filter_map(|hit| match &hit.target {
+            SpaceLinkTarget::LocalDirectory(path) => Some(path.as_str()),
+            SpaceLinkTarget::WebUrl(_) => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(directory_targets, vec!["/local/repo", "/local/repo"]);
+    let web_targets = state
+        .hits
+        .space_links
+        .iter()
+        .filter_map(|hit| match &hit.target {
+            SpaceLinkTarget::WebUrl(url) => Some(url.as_str()),
+            SpaceLinkTarget::LocalDirectory(_) => None,
+        })
+        .collect::<Vec<_>>();
+    assert!(web_targets.contains(&"https://github.com/local/repo/tree/main"));
+    assert!(web_targets.contains(&"https://github.com/remote/repo/tree/main"));
+    assert!(state
+        .endpoints
+        .iter()
+        .any(|endpoint| endpoint.endpoint_id == remote));
+}
+
+#[test]
+fn endpoint_switch_and_rollback_restore_matching_cached_structure() {
+    fn structure(
+        session_id: &str,
+        boot_id: &str,
+    ) -> Box<crate::protocol::endpoint::ClientShellStructureProjection> {
+        Box::new(crate::protocol::endpoint::ClientShellStructureProjection {
+            session_id: session_id.into(),
+            boot_id: boot_id.into(),
+            revision: 1,
+            collections: Vec::new(),
+            delegations: Vec::new(),
+            repositories: Vec::new(),
+            space_order: Vec::new(),
+        })
+    }
+
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    let profile = remote_profile();
+    let remote = ClientEndpointId::Ssh(profile.id.clone());
+    state.set_endpoint_catalog(&[profile]);
+    state.set_endpoint_status(&remote, ClientEndpointStatus::Online);
+    let local = ClientEndpointId::Local;
+    state.set_endpoint_structure_for_generation(&local, 1, structure("local", "boot-1"));
+    state.set_endpoint_snapshot_for_generation(&local, 1, Box::new(snapshot()));
+
+    let mut remote_snapshot = snapshot();
+    remote_snapshot.boot_id = "remote-boot".into();
+    state.set_endpoint_structure_for_generation(&remote, 1, structure("remote", "remote-boot"));
+    state.set_endpoint_snapshot_for_generation(&remote, 1, Box::new(remote_snapshot));
+
+    assert!(state.activate_endpoint_projection(&remote));
+    assert_eq!(
+        state
+            .structure
+            .as_ref()
+            .map(|value| value.session_id.as_str()),
+        Some("remote")
+    );
+    assert!(state.activate_endpoint_projection(&local));
+    assert_eq!(
+        state
+            .structure
+            .as_ref()
+            .map(|value| value.session_id.as_str()),
+        Some("local")
+    );
+}
+
+#[test]
+fn switching_endpoints_closes_endpoint_local_extensions_overlay() {
+    let (mut state, remote) = state_with_remote();
+    let mut outcome = ClientShellInput::default();
+    state.open_extensions_overlay(&mut outcome);
+    assert!(matches!(
+        state.overlay,
+        Some(ClientShellOverlay::Extensions(_))
+    ));
+    let generation = match state.overlay.as_ref().unwrap() {
+        ClientShellOverlay::Extensions(extensions) => extensions.generation,
+        _ => unreachable!(),
+    };
+    state.pending_requests.insert(
+        "old-extension-list".into(),
+        PendingEndpointRequest {
+            boot_id: "boot-1".into(),
+            method_name: "extension.list".into(),
+            confirmation_workspace_id: None,
+            kind: PendingEndpointKind::ExtensionList(generation),
+        },
+    );
+
+    assert!(state.activate_endpoint_projection(&remote));
+
+    assert!(state.overlay.is_none());
+    assert!(!state.pending_requests.contains_key("old-extension-list"));
+}
+
+#[test]
 fn switching_machines_from_copy_mode_restores_terminal_input() {
     let (mut state, remote) = state_with_remote();
     let mut local_surface = surface();
@@ -781,6 +946,63 @@ fn current_workspace_or_blocked_keeps_foreign_attention_only() {
         ..remote.panes[0].clone()
     });
     state.set_endpoint_snapshot(&endpoint_id, Box::new(remote));
+    let terminal_item =
+        |id: &str, pane_id: &str, label: &str| crate::extension_contract::HostDocumentItem {
+            id: format!("terminal:{id}"),
+            parent_id: Some("activity:blocked".into()),
+            role: crate::extension_contract::HostItemRole::Terminal,
+            label: label.into(),
+            detail: None,
+            terminal: Some(crate::extension_contract::HostTerminalRef {
+                terminal_id: id.into(),
+                placement: Some(crate::extension_contract::HostTerminalPlacement {
+                    pane_id: pane_id.into(),
+                    workspace_id: "ws_1".into(),
+                    tab_id: "tab_1".into(),
+                }),
+            }),
+            action_ids: Vec::new(),
+            flags: Default::default(),
+        };
+    state.set_endpoint_host_documents_for_generation(
+        &endpoint_id,
+        1,
+        Box::new(crate::protocol::endpoint::HostDocumentsProjectionV1 {
+            boot_id: "remote-boot".into(),
+            revision: 1,
+            documents: vec![crate::protocol::endpoint::HostDocumentProjectionEntryV1 {
+                provider_priority: 100,
+                document: crate::extension_contract::HostDocumentV1 {
+                    contract: crate::extension_contract::HOST_DOCUMENT_CONTRACT_V1.into(),
+                    namespace: crate::first_party::agent_status::NAMESPACE.into(),
+                    generation: 1,
+                    revision: 1,
+                    surface: crate::extension_contract::HostSurface::Navigation,
+                    target: crate::extension_contract::HostTarget::Session,
+                    items: vec![
+                        crate::extension_contract::HostDocumentItem {
+                            id: "activity:blocked".into(),
+                            parent_id: None,
+                            role: crate::extension_contract::HostItemRole::Group,
+                            label: "Provider blocked".into(),
+                            detail: None,
+                            terminal: None,
+                            action_ids: Vec::new(),
+                            flags: crate::extension_contract::HostDocumentItemFlags {
+                                expanded: true,
+                                ..Default::default()
+                            },
+                        },
+                        terminal_item("remote-1", "pane_1", "remote idle"),
+                        terminal_item("remote-2", "pane_2", "remote blocked"),
+                    ],
+                    actions: Vec::new(),
+                    required_capabilities: Vec::new(),
+                },
+                confirmation_tokens: Default::default(),
+            }],
+        }),
+    );
 
     let mut view = current_workspace_view();
     view.label = Some("focus".into());
@@ -809,6 +1031,7 @@ fn current_workspace_or_blocked_keeps_foreign_attention_only() {
     assert!(text.contains("Local · local agent"), "frame: {text}");
     assert!(!text.contains("Build · remote idle"), "frame: {text}");
     assert!(text.contains("Build · remote blocked"), "frame: {text}");
+    assert!(!text.contains("Provider blocked"), "frame: {text}");
 }
 
 #[test]
@@ -851,7 +1074,13 @@ fn selected_default_view_ignores_inactive_endpoint_projection() {
         }),
     );
 
+    super::super::document_navigation::reset_agent_navigation_call_count();
     let frame = state.compose(100, 28).expect("combined endpoint frame");
+    assert_eq!(
+        super::super::document_navigation::agent_navigation_call_count(),
+        2,
+        "each endpoint document must be joined exactly once per frame"
+    );
     let text = frame
         .cells
         .chunks(frame.width as usize)
@@ -1418,6 +1647,105 @@ fn new_connection_generation_accepts_a_lower_same_boot_projection_revision() {
 }
 
 #[test]
+fn newer_active_connection_generation_accepts_lower_same_boot_revision_coherently() {
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    let endpoint_id = ClientEndpointId::Local;
+    let mut old = snapshot();
+    old.boot_id = "shared-boot".into();
+    old.revision = 9;
+    old.workspaces[0].label = "old".into();
+    state.set_endpoint_snapshot_for_generation(&endpoint_id, 4, Box::new(old));
+    let mut new = snapshot();
+    new.boot_id = "shared-boot".into();
+    new.revision = 1;
+    new.workspaces[0].label = "new".into();
+    state.set_endpoint_snapshot_for_generation(&endpoint_id, 5, Box::new(new));
+
+    assert_eq!(state.snapshot.as_ref().unwrap().revision, 1);
+    assert_eq!(state.snapshot.as_ref().unwrap().workspaces[0].label, "new");
+    assert!(state.endpoint_snapshot_matches(&endpoint_id, 5, "shared-boot", 1));
+}
+
+#[test]
+fn delayed_older_connection_generation_cannot_replace_snapshot_or_structure() {
+    let (mut state, endpoint_id) = state_with_remote();
+    let mut current = snapshot();
+    current.boot_id = "current-boot".into();
+    current.workspaces[0].label = "current".into();
+    state.cache_endpoint_snapshot_inactive_for_generation(&endpoint_id, 5, Box::new(current));
+    state.set_endpoint_structure_for_generation(
+        &endpoint_id,
+        5,
+        Box::new(crate::protocol::endpoint::ClientShellStructureProjection {
+            session_id: "current".into(),
+            boot_id: "current-boot".into(),
+            revision: 1,
+            collections: Vec::new(),
+            delegations: Vec::new(),
+            repositories: Vec::new(),
+            space_order: Vec::new(),
+        }),
+    );
+
+    let mut delayed = snapshot();
+    delayed.boot_id = "delayed-boot".into();
+    delayed.workspaces[0].label = "delayed".into();
+    state.cache_endpoint_snapshot_inactive_for_generation(&endpoint_id, 4, Box::new(delayed));
+    state.set_endpoint_structure_for_generation(
+        &endpoint_id,
+        4,
+        Box::new(crate::protocol::endpoint::ClientShellStructureProjection {
+            session_id: "delayed".into(),
+            boot_id: "delayed-boot".into(),
+            revision: 1,
+            collections: Vec::new(),
+            delegations: Vec::new(),
+            repositories: Vec::new(),
+            space_order: Vec::new(),
+        }),
+    );
+
+    let endpoint = state
+        .endpoints
+        .iter()
+        .find(|endpoint| endpoint.endpoint_id == endpoint_id)
+        .unwrap();
+    assert_eq!(endpoint.snapshot_generation, Some(5));
+    assert_eq!(
+        endpoint.snapshot.as_ref().unwrap().workspaces[0].label,
+        "current"
+    );
+    assert_eq!(endpoint.structure_generation, Some(5));
+    assert_eq!(endpoint.structure.as_ref().unwrap().session_id, "current");
+}
+
+#[test]
+fn endpoint_repository_structure_is_hidden_across_connection_generations() {
+    let (mut state, endpoint_id) = state_with_remote();
+    let endpoint = state
+        .endpoints
+        .iter_mut()
+        .find(|endpoint| endpoint.endpoint_id == endpoint_id)
+        .expect("remote endpoint");
+    let snapshot = endpoint.snapshot.as_ref().expect("snapshot");
+    endpoint.snapshot_generation = Some(8);
+    endpoint.structure_generation = Some(7);
+    endpoint.structure = Some(Box::new(
+        crate::protocol::endpoint::ClientShellStructureProjection {
+            session_id: "stale".into(),
+            boot_id: snapshot.boot_id.clone(),
+            revision: snapshot.revision,
+            collections: Vec::new(),
+            delegations: Vec::new(),
+            repositories: Vec::new(),
+            space_order: Vec::new(),
+        },
+    ));
+
+    assert!(endpoint.current_structure().is_none());
+}
+
+#[test]
 fn reconnect_snapshot_waits_for_coherent_activation_before_replacing_projection() {
     let (mut state, endpoint_id) = state_with_remote();
     assert!(state.activate_endpoint_projection(&endpoint_id));
@@ -1460,7 +1788,6 @@ fn disconnected_active_endpoint_freezes_surface_and_marks_cached_ui_stale() {
     let mut remote_surface = surface();
     remote_surface.boot_id = "remote-boot".into();
     state.set_pane_surface(remote_surface);
-    state.pending_integration_installs = 2;
 
     state.mark_endpoint_disconnected(&endpoint_id);
     let frame = state.compose(100, 28).expect("frozen endpoint frame");
@@ -1475,7 +1802,6 @@ fn disconnected_active_endpoint_freezes_surface_and_marks_cached_ui_stale() {
         .collect::<Vec<_>>()
         .join("\n");
 
-    assert_eq!(state.pending_integration_installs, 0);
     assert_eq!(
         state.endpoint_status(&endpoint_id),
         Some(ClientEndpointStatus::Reconnecting)

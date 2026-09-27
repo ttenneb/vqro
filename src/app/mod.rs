@@ -9,6 +9,16 @@ pub(crate) mod agent_view;
 mod agents;
 pub(crate) use agents::{AGENT_START_SETTLE_DELAY, MAX_AGENT_START_TIMEOUT};
 mod api;
+pub(crate) use api::collections_authority::CollectionsCheckpointResult;
+pub(crate) use api::collections_create::CollectionsCreateCheckpointResult;
+pub(crate) use api::extension_state::ExtensionStatePersistResult;
+#[cfg_attr(test, allow(unused_imports))]
+pub(crate) use api::plugins::{bundled_document_service_declarations, manifest_json_schema};
+pub(crate) fn api_load_plugin_manifest_for_cli(
+    path: &str,
+) -> Result<crate::api::schema::InstalledPluginInfo, (&'static str, String)> {
+    api::plugins::load_plugin_manifest(path, false)
+}
 #[cfg(test)]
 pub(crate) use api::test_support::exiting_test_command;
 mod api_helpers;
@@ -23,6 +33,7 @@ mod runtime;
 mod session;
 pub mod state;
 mod tab_bar_status;
+mod terminal_inspector;
 mod terminal_targets;
 mod terminal_titles;
 mod theme_sync;
@@ -108,6 +119,11 @@ pub struct App {
     pub(crate) direct_graphics_available: bool,
     pub(crate) pixel_mouse_available: bool,
     pub(crate) terminal_runtimes: crate::terminal::TerminalRuntimeRegistry,
+    #[cfg(test)]
+    terminal_id_candidates:
+        std::collections::VecDeque<std::io::Result<crate::terminal::TerminalId>>,
+    #[cfg(test)]
+    tab_id_candidates: std::collections::VecDeque<std::io::Result<crate::workspace::TabId>>,
     pub event_tx: mpsc::Sender<AppEvent>,
     pub(crate) event_rx: mpsc::Receiver<AppEvent>,
     pub(crate) api_rx: tokio::sync::mpsc::UnboundedReceiver<crate::api::ApiRequestMessage>,
@@ -130,6 +146,7 @@ pub struct App {
     pub(crate) pending_worktree_remove_runtime_restores: HashMap<crate::layout::PaneId, u64>,
     pub(crate) next_api_worktree_operation_id: u64,
     pub(crate) next_auto_update_check: Option<Instant>,
+    pub(crate) next_extension_state_refresh: Instant,
     pub(crate) next_agent_manifest_update_check: Option<Instant>,
     pub(crate) update_version_check_enabled: bool,
     pub(crate) update_manifest_check_enabled: bool,
@@ -138,6 +155,19 @@ pub struct App {
     pub(crate) pending_agent_resume_deadline: Option<Instant>,
     pub(crate) session_save_deadline: Option<Instant>,
     pub(crate) session_save_thread: Option<std::thread::JoinHandle<()>>,
+    /// Set when startup rejects the durable snapshot. The original bytes stay
+    /// authoritative until an operator repairs or removes them.
+    session_persistence_blocked: bool,
+    pub(crate) extension_state: crate::extension_state::DurableExtensionStateV1,
+    pub(crate) collections_authority: crate::collections_extension_contract::CollectionsAuthorityV1,
+    #[cfg(test)]
+    pub(crate) collections_checkpoint_paths_override:
+        Option<crate::persist::coordinator::PersistencePaths>,
+    pub(crate) collections_mutations_blocked: bool,
+    pub(crate) extension_state_path: Option<std::path::PathBuf>,
+    /// Rejected extension-state bytes remain authoritative and block automatic writes.
+    pub(crate) extension_state_persistence_blocked: bool,
+    pub(crate) extension_state_transaction_pending: bool,
     pane_exit_checkpoint_pending: bool,
     pub(crate) detached_process_children: Vec<std::process::Child>,
     tab_bar_status_generation: u64,
@@ -156,8 +186,74 @@ pub struct App {
     pub(crate) full_redraw_pending: bool,
     pub(crate) overlay_panes: HashMap<crate::layout::PaneId, OverlayPaneState>,
     pub(crate) config_reloaded_from_disk: bool,
+    pub(crate) extension_catalog_rebuilt: bool,
+    pub(crate) extension_catalog_rebuild_pending: bool,
     client_shell_keybindings_profile: Option<String>,
     endpoint_commands: custom_commands::EndpointCommandRegistry,
+    pub(crate) terminal_telemetry_cache:
+        HashMap<crate::terminal::TerminalId, terminal_inspector::CachedTerminalTelemetry>,
+    pub(crate) extension_services: crate::extension_service::ExtensionServiceManager,
+    /// Non-publishing package candidates owned by package-v1 lifecycle state. Bootstrap and
+    /// service work happen on bounded workers; replacing a slot never affects pane PTYs.
+    pub(crate) extension_package_services:
+        std::collections::BTreeMap<String, crate::extension_candidate::PackageCandidateSlot>,
+    /// Runtime-only revocation cells for exact durable service-binding revisions.
+    pub(crate) service_binding_revocations:
+        std::collections::BTreeMap<(String, u64), Arc<std::sync::atomic::AtomicBool>>,
+    pub(crate) pending_service_fabric_invocations:
+        std::collections::BTreeMap<u64, crate::service_fabric::PendingServiceFabricInvocation>,
+    pub(crate) host_document_services: crate::extension_service::HostDocumentServiceCatalog,
+    pub(crate) extension_index: crate::extensions::CuratedIndex,
+    pub(crate) marketplace_state: crate::extensions::MarketplaceStateFile,
+    pub(crate) configured_disabled_extensions: std::collections::BTreeSet<String>,
+    pub(crate) disabled_extensions: std::collections::BTreeSet<String>,
+    pub(crate) host_document_caches:
+        HashMap<(String, String), crate::host_document_cache::HostDocumentCache>,
+    pub(crate) next_host_document_revision: u64,
+    pub(crate) next_host_spaces_document_revision: u64,
+    pub(crate) next_host_relationships_document_revision: u64,
+    pub(crate) next_host_agent_activity_document_revision: u64,
+    pub(crate) host_document_request_watermarks: HashMap<(String, String), (u64, u64)>,
+    pub(crate) host_document_retry_snapshots:
+        HashMap<(String, String), api::DeferredHostDocumentSnapshot>,
+    pub(crate) host_document_retry_order: std::collections::VecDeque<(String, String)>,
+    pub(crate) host_document_retry_scheduled: std::collections::HashSet<(String, String, u64, u64)>,
+    pub(crate) host_document_retry_attempts: HashMap<(String, String, u64, u64), u32>,
+    pub(crate) host_spaces_last_desired: Option<crate::extension_contract::HostSpacesV1>,
+    pub(crate) spaces_candidate_audits: api::spaces_candidate::SpacesCandidateCoordinator,
+    pub(crate) host_relationships_last_desired:
+        Option<crate::extension_contract::HostRelationshipsV1>,
+    pub(crate) host_agent_activity_last_desired:
+        Option<crate::extension_contract::HostAgentActivityV1>,
+    pub(crate) host_semantic_retry_epochs: HashMap<String, u64>,
+    pub(crate) host_semantic_retry_attempts: HashMap<String, u32>,
+    pub(crate) host_semantic_retry_scheduled: std::collections::HashSet<String>,
+    pub(crate) host_document_confirmation_grants:
+        HashMap<(String, String, u64, u64, String), api::HostDocumentConfirmationGrant>,
+    /// App-owned revocation authorities shared by staged package-v1 host-call providers.
+    pub(crate) host_invocation_authorities: HashMap<
+        (String, String),
+        std::sync::Arc<crate::extension_host_state::HostInvocationAuthority>,
+    >,
+    /// Rebuildable, nonpersistent import of legacy Collections policy for candidate reads.
+    pub(crate) collections_import_overlay: api::collections_candidate::CollectionsImportOverlay,
+    /// Audited candidate profiles. Legacy authority quarantines these from presentation.
+    pub(crate) collections_candidate_audits:
+        api::collections_candidate::CollectionsCandidateCoordinator,
+    /// Generation-1 compatibility projections published only under package authority.
+    pub(crate) collections_package_projections: HashMap<
+        String,
+        crate::collections_extension_contract::CollectionsCompatibilityProjectionV1,
+    >,
+    pub(crate) collections_pending_actions:
+        HashMap<u64, api::collections_authority::PendingCollectionsAction>,
+    pub(crate) collections_pending_creates:
+        HashMap<u64, api::collections_create::PendingCollectionsCreate>,
+    pub(crate) next_collections_action_id: u64,
+    #[cfg(test)]
+    pub(crate) document_shadow_audits: api::document_shadow_audit::DocumentShadowAuditCoordinator<
+        crate::host_document_v2::HostDocumentV2,
+    >,
 }
 
 pub(crate) const APP_EVENT_CHANNEL_CAPACITY: usize = 256;
@@ -354,6 +450,88 @@ pub(crate) fn client_palette_for_appearance(
 }
 
 impl App {
+    pub(crate) fn allocate_terminal_id(&mut self) -> std::io::Result<crate::terminal::TerminalId> {
+        let occupied = self
+            .state
+            .terminals
+            .keys()
+            .cloned()
+            .collect::<std::collections::HashSet<_>>();
+        crate::terminal::TerminalId::alloc_unique_with(&occupied, || {
+            #[cfg(test)]
+            if let Some(candidate) = self.terminal_id_candidates.pop_front() {
+                return candidate;
+            }
+            crate::terminal::TerminalId::alloc()
+        })
+    }
+
+    pub(crate) fn allocate_tab_id(&mut self) -> std::io::Result<crate::workspace::TabId> {
+        self.allocate_tab_ids(1).map(|mut ids| ids.remove(0))
+    }
+
+    pub(crate) fn allocate_tab_ids(
+        &mut self,
+        count: usize,
+    ) -> std::io::Result<Vec<crate::workspace::TabId>> {
+        let mut occupied = self
+            .state
+            .workspaces
+            .iter()
+            .flat_map(|workspace| &workspace.tabs)
+            .map(|tab| tab.id.clone())
+            .collect::<std::collections::HashSet<_>>();
+        let mut allocated = Vec::with_capacity(count);
+        for _ in 0..count {
+            let id = crate::workspace::TabId::alloc_unique_with(&occupied, || {
+                #[cfg(test)]
+                if let Some(candidate) = self.tab_id_candidates.pop_front() {
+                    return candidate;
+                }
+                crate::workspace::TabId::alloc()
+            })?;
+            occupied.insert(id.clone());
+            allocated.push(id);
+        }
+        Ok(allocated)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn inject_terminal_id_candidates_for_test(
+        &mut self,
+        candidates: impl IntoIterator<Item = std::io::Result<crate::terminal::TerminalId>>,
+    ) {
+        self.terminal_id_candidates.extend(candidates);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn inject_tab_id_candidates_for_test(
+        &mut self,
+        candidates: impl IntoIterator<Item = std::io::Result<crate::workspace::TabId>>,
+    ) {
+        self.tab_id_candidates.extend(candidates);
+    }
+
+    pub(crate) fn admit_new_panes(
+        &self,
+        workspace_index: Option<usize>,
+        tab_index: Option<usize>,
+        additional: usize,
+    ) -> Result<(), crate::admission::AdmissionError> {
+        let workspace_panes = workspace_index
+            .and_then(|index| self.state.workspaces.get(index))
+            .map_or(0, crate::workspace::Workspace::pane_count);
+        let tab_panes = workspace_index
+            .zip(tab_index)
+            .and_then(|(workspace, tab)| self.state.workspaces.get(workspace)?.tabs.get(tab))
+            .map_or(0, |tab| tab.panes.len());
+        let session_panes = self
+            .state
+            .pane_count()
+            .saturating_add(usize::from(self.state.popup_pane.is_some()));
+        crate::admission::panes(session_panes, workspace_panes, tab_panes, additional)
+    }
+
     pub fn new(
         config: &Config,
         policy: AppPolicy,
@@ -370,15 +548,79 @@ impl App {
         // Try to restore previous session
         let mut restored_terminals = std::collections::HashMap::new();
         let mut restored_terminal_runtimes = crate::terminal::TerminalRuntimeRegistry::new();
-        let (workspaces, active, selected) = if !policy.restore_session {
-            (Vec::new(), None, 0)
-        } else if let Some(snap) = crate::persist::load() {
+        let mut session_persistence_blocked = false;
+        let mut checkpoint_recovery_blocked = false;
+        let mut loaded_snapshot = None;
+        let mut loaded_history = None;
+        let mut recover_collections_checkpoint = policy.restore_session || policy.persist_session;
+        #[cfg(unix)]
+        {
+            // The source server still owns persistence while the replacement imports handoff
+            // state. Recovery ran in the source process; acquiring ownership here would race the
+            // intentional handoff fence and abort the replacement.
+            recover_collections_checkpoint &= policy != AppPolicy::HANDOFF_REPLACEMENT;
+        }
+        if recover_collections_checkpoint {
+            if let Err(error) = crate::persist::recover_collections_checkpoint() {
+                session_persistence_blocked = true;
+                checkpoint_recovery_blocked = true;
+                tracing::error!(%error, "Collections checkpoint recovery failed; preserving both durable images and blocking writes");
+            }
+        }
+        if policy.restore_session && !checkpoint_recovery_blocked {
+            match crate::persist::load_for_startup() {
+                crate::persist::StartupSessionLoad::Loaded(snapshot) => {
+                    loaded_snapshot = Some(snapshot);
+                }
+                crate::persist::StartupSessionLoad::Rejected(error) => {
+                    session_persistence_blocked = true;
+                    tracing::error!(
+                        %error,
+                        "session load rejected; durable snapshot is preserved and saving is disabled"
+                    );
+                }
+                crate::persist::StartupSessionLoad::Missing => {}
+            }
+            match crate::persist::load_history_for_startup() {
+                crate::persist::StartupHistoryLoad::Loaded(history) => {
+                    loaded_history = Some(history);
+                }
+                crate::persist::StartupHistoryLoad::Rejected(error) => {
+                    session_persistence_blocked = true;
+                    tracing::error!(
+                        %error,
+                        "session history load rejected; durable snapshots are preserved and saving is disabled"
+                    );
+                }
+                crate::persist::StartupHistoryLoad::Missing => {}
+            }
+        }
+        let loaded_collections_authority = loaded_snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.collections_authority.clone())
+            .unwrap_or_default();
+        let loaded_collections_action_sequence = loaded_snapshot
+            .as_ref()
+            .map_or(0, |snapshot| snapshot.collections_action_sequence);
+        let (workspaces, repositories, space_order, active, selected, delegations) = if !policy
+            .restore_session
+        {
+            (
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                None,
+                0,
+                crate::delegation::Delegations::new(),
+            )
+        } else if let Some(snap) = loaded_snapshot {
+            let snap = *snap;
             let history = config
                 .experimental
                 .pane_history
-                .then(crate::persist::load_history)
+                .then_some(loaded_history)
                 .flatten();
-            let (ws, terminals, terminal_runtimes) = crate::persist::restore(
+            match crate::persist::restore(
                 &snap,
                 history.as_ref(),
                 24,
@@ -390,20 +632,60 @@ impl App {
                 event_tx.clone(),
                 render_notify.clone(),
                 render_dirty.clone(),
-            );
-            restored_terminals = terminals;
-            restored_terminal_runtimes = terminal_runtimes.into();
-            if ws.is_empty() {
-                crate::logging::session_restored(0, "empty");
-                (Vec::new(), None, 0)
-            } else {
-                crate::logging::session_restored(ws.len(), "ok");
-                let active = snap.active.filter(|&i| i < ws.len());
-                let selected = snap.selected.min(ws.len().saturating_sub(1));
-                (ws, active, selected)
+            ) {
+                Err(error) => {
+                    session_persistence_blocked = true;
+                    tracing::error!(
+                        %error,
+                        "session restore rejected; durable snapshot is preserved and saving is disabled"
+                    );
+                    (
+                        Vec::new(),
+                        Vec::new(),
+                        Vec::new(),
+                        None,
+                        0,
+                        crate::delegation::Delegations::new(),
+                    )
+                }
+                Ok((ws, terminals, terminal_runtimes)) => {
+                    restored_terminals = terminals;
+                    restored_terminal_runtimes = terminal_runtimes.into();
+                    if ws.is_empty() {
+                        crate::logging::session_restored(0, "empty");
+                        (
+                            Vec::new(),
+                            Vec::new(),
+                            Vec::new(),
+                            None,
+                            0,
+                            crate::delegation::Delegations::new(),
+                        )
+                    } else {
+                        crate::logging::session_restored(ws.len(), "ok");
+                        let active = snap.active.filter(|&i| i < ws.len());
+                        let selected = snap.selected.min(ws.len().saturating_sub(1));
+                        let delegations = crate::persist::restore_delegations(&snap, &ws);
+                        (
+                            ws,
+                            snap.repositories,
+                            snap.space_order,
+                            active,
+                            selected,
+                            delegations,
+                        )
+                    }
+                }
             }
         } else {
-            (Vec::new(), None, 0)
+            (
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                None,
+                0,
+                crate::delegation::Delegations::new(),
+            )
         };
 
         let agent_panel_sort = agent_panel_sort_from_config(config.ui.agent_panel_sort);
@@ -440,6 +722,29 @@ impl App {
         let agent_manifest_summaries = Vec::new();
         let theme_runtime = theme_runtime_config(config, true);
         let (theme_palette, theme_name) = resolve_effective_theme(&theme_runtime, None);
+        let installed_plugins = load_plugin_registry(policy.persist_plugin_registry);
+        let extension_index = crate::extensions::CuratedIndex::bundled()
+            .expect("bundled extension index is validated by tests");
+        let marketplace_state = if policy.persist_plugin_registry {
+            crate::extensions::load_state(&extension_index)
+        } else {
+            crate::extensions::MarketplaceStateFile::defaults(&extension_index)
+        };
+        let mut disabled_extensions =
+            crate::extensions::unavailable_bundled_providers(&extension_index, &marketplace_state);
+        // Preserve the legacy config as an additive kill switch while clients migrate
+        // to the global extension registry.
+        disabled_extensions.extend(config.extensions.disabled.iter().cloned());
+        let extension_services =
+            crate::extension_service::manager_for_plugins(&installed_plugins, event_tx.clone());
+        let bundled_provider_priorities =
+            crate::extensions::bundled_provider_priorities(&extension_index, &marketplace_state);
+        let host_document_services = crate::extension_service::HostDocumentServiceCatalog::bundled(
+            &disabled_extensions,
+            &bundled_provider_priorities,
+            &installed_plugins,
+            event_tx.clone(),
+        );
 
         let mut state = AppState {
             terminals: std::collections::HashMap::new(),
@@ -447,6 +752,9 @@ impl App {
             pane_id_aliases: std::collections::HashMap::new(),
             public_pane_id_aliases: std::collections::HashMap::new(),
             workspaces,
+            repositories,
+            space_order,
+            delegations,
             active,
             previous_pane_focus: None,
             selected,
@@ -513,7 +821,7 @@ impl App {
             integration_recommendations: crate::integration::integration_recommendations(),
             agent_manifest_summaries,
             agent_manifest_update_status: crate::detect::manifest_update::load_status(),
-            installed_plugins: load_plugin_registry(policy.persist_plugin_registry),
+            installed_plugins,
             plugin_panes: std::collections::HashMap::new(),
             popup_pane: None,
             plugin_command_logs: Vec::new(),
@@ -526,6 +834,8 @@ impl App {
         };
 
         state.terminals = restored_terminals;
+        state.reconcile_repositories();
+        state.session_dirty = false;
 
         for ws_idx in 0..state.workspaces.len() {
             let cwd = state.workspaces[ws_idx]
@@ -563,6 +873,49 @@ impl App {
         let client_shell_keybindings_profile = config.local_keybindings_profile_toml().ok();
         let endpoint_commands =
             custom_commands::EndpointCommandRegistry::new(&state.keybinds.custom_commands);
+        let extension_state_path = policy
+            .persist_session
+            .then(|| crate::session::data_dir().join("extension-state-v1.json"));
+        let mut extension_state_persistence_blocked = checkpoint_recovery_blocked;
+        let extension_state = extension_state_path
+            .as_deref()
+            .and_then(|path| match crate::persist::extension_state::load(path) {
+                crate::persist::extension_state::ExtensionStateLoad::Loaded(store) => Some(store),
+                crate::persist::extension_state::ExtensionStateLoad::Missing => None,
+                crate::persist::extension_state::ExtensionStateLoad::Rejected { bytes, error } => {
+                    extension_state_persistence_blocked = true;
+                    tracing::error!(path = %path.display(), byte_count = bytes.len(), %error, "extension state rejected; preserving original bytes and blocking writes");
+                    None
+                }
+            })
+            .unwrap_or_else(|| {
+                let mut random = [0_u8; 16];
+                if crate::platform::fill_secure_random(&mut random).is_err() {
+                    random[..8].copy_from_slice(&
+                        std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_nanos()
+                            .to_le_bytes()[..8]);
+                }
+                crate::extension_state::DurableExtensionStateV1::new(
+                    format!(
+                        "session:{}",
+                        random
+                            .iter()
+                            .map(|byte| format!("{byte:02x}"))
+                            .collect::<String>()
+                    ),
+                    1,
+                )
+                .expect("host-generated extension state identity is valid")
+            });
+
+        let loaded_collections_action_sequence =
+            loaded_collections_action_sequence.max(extension_state.idempotency_suffix_high_water(
+                crate::collections_extension_contract::COLLECTIONS_NAMESPACE,
+                api::COLLECTIONS_ACTION_IDEMPOTENCY_PREFIXES,
+            ));
 
         let mut app = Self {
             config_diagnostic_deadline: None,
@@ -574,6 +927,10 @@ impl App {
             direct_graphics_available: false,
             pixel_mouse_available: false,
             terminal_runtimes: restored_terminal_runtimes,
+            #[cfg(test)]
+            terminal_id_candidates: std::collections::VecDeque::new(),
+            #[cfg(test)]
+            tab_id_candidates: std::collections::VecDeque::new(),
             event_tx,
             event_rx,
             last_git_remote_status_refresh: Instant::now() - GIT_REMOTE_STATUS_REFRESH_INTERVAL,
@@ -590,6 +947,7 @@ impl App {
             next_api_worktree_operation_id: 1,
             next_auto_update_check: version_check_enabled
                 .then_some(Instant::now() + AUTO_UPDATE_CHECK_INTERVAL),
+            next_extension_state_refresh: Instant::now() + Duration::from_secs(1),
             next_agent_manifest_update_check: manifest_check_enabled
                 .then_some(Instant::now() + AUTO_UPDATE_CHECK_INTERVAL),
             update_version_check_enabled: config.update.version_check,
@@ -599,6 +957,15 @@ impl App {
             pending_agent_resume_deadline: None,
             session_save_deadline: None,
             session_save_thread: None,
+            session_persistence_blocked,
+            extension_state,
+            collections_authority: loaded_collections_authority,
+            #[cfg(test)]
+            collections_checkpoint_paths_override: None,
+            collections_mutations_blocked: false,
+            extension_state_path,
+            extension_state_persistence_blocked,
+            extension_state_transaction_pending: false,
             pane_exit_checkpoint_pending: false,
             detached_process_children: Vec::new(),
             tab_bar_status_generation: 0,
@@ -618,11 +985,54 @@ impl App {
             full_redraw_pending: false,
             overlay_panes: HashMap::new(),
             config_reloaded_from_disk: false,
+            extension_catalog_rebuilt: false,
+            extension_catalog_rebuild_pending: false,
             client_shell_keybindings_profile,
             endpoint_commands,
+            terminal_telemetry_cache: HashMap::new(),
+            extension_services,
+            extension_package_services: std::collections::BTreeMap::new(),
+            service_binding_revocations: std::collections::BTreeMap::new(),
+            pending_service_fabric_invocations: std::collections::BTreeMap::new(),
+            host_document_services,
+            extension_index,
+            marketplace_state,
+            configured_disabled_extensions: config.extensions.disabled.clone(),
+            disabled_extensions,
+            host_document_caches: HashMap::new(),
+            next_host_document_revision: 1,
+            next_host_spaces_document_revision: 1,
+            next_host_relationships_document_revision: 1,
+            next_host_agent_activity_document_revision: 1,
+            host_document_request_watermarks: HashMap::new(),
+            host_document_retry_snapshots: HashMap::new(),
+            host_document_retry_order: std::collections::VecDeque::new(),
+            host_document_retry_scheduled: std::collections::HashSet::new(),
+            host_document_retry_attempts: HashMap::new(),
+            host_spaces_last_desired: None,
+            spaces_candidate_audits: Default::default(),
+            host_relationships_last_desired: None,
+            host_agent_activity_last_desired: None,
+            host_semantic_retry_epochs: HashMap::new(),
+            host_semantic_retry_attempts: HashMap::new(),
+            host_semantic_retry_scheduled: std::collections::HashSet::new(),
+            host_document_confirmation_grants: HashMap::new(),
+            host_invocation_authorities: HashMap::new(),
+            collections_import_overlay: Default::default(),
+            collections_candidate_audits: Default::default(),
+            collections_package_projections: Default::default(),
+            collections_pending_actions: Default::default(),
+            collections_pending_creates: Default::default(),
+            next_collections_action_id: loaded_collections_action_sequence,
+            #[cfg(test)]
+            document_shadow_audits: Default::default(),
         };
         app.configure_tab_bar_status(&config.ui.tab_bar_right, &config.ui.tab_bar_right_separator);
         app.configure_window_title(&config.ui.window_title);
+        app.recover_extension_state_on_startup();
+        app.validate_loaded_collections_authority();
+        app.activate_persisted_extension_packages();
+        app.refresh_collection_documents();
         app
     }
 
@@ -633,6 +1043,7 @@ impl App {
         api_rx: tokio::sync::mpsc::UnboundedReceiver<crate::api::ApiRequestMessage>,
         event_hub: crate::api::EventHub,
         snapshot: &crate::persist::SessionSnapshot,
+        deferred_panes: &[u32],
         imports: &mut std::collections::HashMap<
             u32,
             crate::handoff_runtime::ImportedHandoffRuntime,
@@ -659,6 +1070,17 @@ impl App {
 
         app.state.pane_id_aliases = pane_id_aliases;
         app.state.workspaces = workspaces;
+        app.restore_handoff_delegations(snapshot);
+        app.state.repositories = snapshot.repositories.clone();
+        app.state.space_order = snapshot.space_order.clone();
+        app.collections_authority = snapshot.collections_authority.clone();
+        app.next_collections_action_id = snapshot.collections_action_sequence.max(
+            app.extension_state.idempotency_suffix_high_water(
+                crate::collections_extension_contract::COLLECTIONS_NAMESPACE,
+                api::COLLECTIONS_ACTION_IDEMPOTENCY_PREFIXES,
+            ),
+        );
+        app.validate_loaded_collections_authority();
         app.state.terminals = terminals;
         app.terminal_runtimes = runtimes.into();
         app.state.active = snapshot
@@ -672,13 +1094,61 @@ impl App {
         } else {
             state::Mode::Navigate
         };
+        app.state.reconcile_repositories();
+        let expected_deferred = snapshot
+            .workspaces
+            .iter()
+            .flat_map(|workspace| &workspace.tabs)
+            .flat_map(|tab| {
+                deferred_panes.iter().filter_map(|pane_id| {
+                    tab.panes
+                        .get(pane_id)
+                        .and_then(|pane| crate::persist::terminal_id_for_pane_snapshot(pane).ok())
+                })
+            })
+            .collect::<std::collections::HashSet<_>>();
+        if expected_deferred.len() != deferred_panes.len() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "handoff deferred pane contract did not map uniquely to terminals",
+            ));
+        }
+        for (terminal_id, terminal) in &app.state.terminals {
+            let has_runtime = app.terminal_runtimes.get(terminal_id).is_some();
+            let is_deferred = terminal.pending_agent_resume_plan.is_some();
+            if has_runtime == is_deferred || is_deferred != expected_deferred.contains(terminal_id)
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "handoff terminal {terminal_id} violated its runtime/deferred contract"
+                    ),
+                ));
+            }
+        }
+        app.state.session_dirty = true;
         app.last_focus = app.state.active.and_then(|idx| {
             app.state
                 .workspaces
                 .get(idx)
                 .and_then(|ws| ws.focused_pane_id().map(|pane_id| (idx, pane_id)))
         });
+        // App::new builds provider catalogs before imported state exists. Re-project
+        // every source after ownership transfer so a replacement server never serves
+        // empty startup documents until an unrelated mutation happens.
+        app.refresh_collection_documents();
         Ok(app)
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn mark_handoff_snapshot_durable(&mut self) {
+        self.state.session_dirty = false;
+    }
+
+    #[cfg(unix)]
+    fn restore_handoff_delegations(&mut self, snapshot: &crate::persist::SessionSnapshot) {
+        self.state.delegations =
+            crate::persist::restore_delegations(snapshot, &self.state.workspaces);
     }
 
     #[cfg(unix)]
@@ -937,6 +1407,11 @@ impl App {
             self.refresh_effective_app_theme();
         }
 
+        if !invalid_section("extensions") {
+            self.configured_disabled_extensions = config.extensions.disabled.clone();
+            self.apply_bundled_extension_state();
+        }
+
         let status = if diagnostics.is_empty() {
             crate::config::ConfigReloadStatus::Applied
         } else {
@@ -975,6 +1450,45 @@ impl App {
             diagnostics,
         }
     }
+
+    #[cfg(test)]
+    pub(crate) fn assert_terminal_runtime_invariants_for_test(&self) {
+        self.state.assert_terminal_identity_invariants_for_test();
+        let runtime_ids = self
+            .terminal_runtimes
+            .iter()
+            .map(|(terminal_id, _)| terminal_id.clone())
+            .collect::<std::collections::HashSet<_>>();
+        assert_eq!(runtime_ids.len(), self.terminal_runtimes.len());
+        for terminal_id in &runtime_ids {
+            assert!(
+                self.state.terminals.contains_key(terminal_id),
+                "runtime {} has no logical terminal state",
+                terminal_id
+            );
+        }
+        for (terminal_id, terminal) in &self.state.terminals {
+            let has_runtime = runtime_ids.contains(terminal_id);
+            let is_deferred_resume = terminal.pending_agent_resume_plan.is_some();
+            assert_ne!(
+                has_runtime, is_deferred_resume,
+                "terminal {} must own exactly one runtime or explicit deferred-resume plan",
+                terminal_id
+            );
+            if self
+                .state
+                .popup_pane
+                .as_ref()
+                .is_some_and(|popup| popup.terminal_id == *terminal_id)
+            {
+                assert!(
+                    has_runtime,
+                    "popup terminal {} cannot be deferred",
+                    terminal_id
+                );
+            }
+        }
+    }
 }
 #[cfg(test)]
 mod tests {
@@ -996,6 +1510,82 @@ mod tests {
         );
         app.state.default_shell = exiting_test_command().into();
         app
+    }
+
+    #[test]
+    fn app_runtime_invariants_are_separate_from_pure_identity_invariants() {
+        let mut app = test_app();
+        app.state.workspaces = vec![Workspace::test_new("runtime-invariants")];
+        app.state.ensure_test_terminals();
+        for terminal in app.state.terminals.values_mut() {
+            terminal.pending_agent_resume_plan = Some(crate::agent_resume::AgentResumePlan {
+                agent: "codex".into(),
+                argv: vec!["codex".into()],
+                dedupe_key: format!("deferred:{}", terminal.id),
+            });
+        }
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.assert_terminal_identity_invariants_for_test();
+        app.assert_terminal_runtime_invariants_for_test();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn handoff_app_accepts_explicit_deferred_terminal_and_stays_dirty_until_publication() {
+        let mut source = AppState::test_new();
+        source.workspaces = vec![Workspace::test_new("deferred")];
+        source.active = Some(0);
+        source.selected = 0;
+        source.ensure_test_terminals();
+        let root = source.workspaces[0].tabs[0].root_pane;
+        let terminal_id = source.workspaces[0].terminal_id(root).unwrap().clone();
+        source
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_persisted_agent_session(crate::agent_resume::PersistedAgentSession {
+                source: "vqro:codex".into(),
+                agent: "codex".into(),
+                session_ref: crate::agent_resume::AgentSessionRef::id("deferred-session").unwrap(),
+            });
+        let snapshot = crate::persist::capture(
+            &source.workspaces,
+            &source.repositories,
+            &source.space_order,
+            &source.terminals,
+            &crate::terminal::TerminalRuntimeRegistry::new(),
+            source.active,
+            source.selected,
+        );
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut imports = std::collections::HashMap::new();
+        let mut app = App::new_from_handoff(
+            &Config::default(),
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+            &snapshot,
+            &[root.raw()],
+            &mut imports,
+        )
+        .unwrap();
+
+        assert!(app.state.session_dirty);
+        app.assert_terminal_runtime_invariants_for_test();
+        app.mark_handoff_snapshot_durable();
+        assert!(!app.state.session_dirty);
+    }
+
+    #[test]
+    #[should_panic(expected = "must own exactly one runtime or explicit deferred-resume plan")]
+    fn app_runtime_invariants_reject_terminal_without_runtime_or_deferred_resume() {
+        let mut app = test_app();
+        app.state.workspaces = vec![Workspace::test_new("runtime-invariants")];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.assert_terminal_runtime_invariants_for_test();
     }
 
     fn unique_temp_path(name: &str) -> std::path::PathBuf {
@@ -2862,7 +3452,7 @@ mod tests {
         assert_eq!(
             retry["result"]["agent"]["agent_session"],
             serde_json::json!({
-                "source": "herdr:codex",
+                "source": "vqro:codex",
                 "agent": "codex",
                 "kind": "id",
                 "value": "codex-session",
@@ -3124,6 +3714,105 @@ mod tests {
         let _ = std::fs::remove_dir_all(config_home);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn handoff_install_restores_delegation_relationships_against_new_pane_ids() {
+        use crate::persist::{LayoutSnapshot, SessionSnapshot, TabSnapshot, WorkspaceSnapshot};
+
+        let mut app = test_app();
+        app.state.workspaces = vec![Workspace::test_new("handoff")];
+        let restored_pane = app.state.workspaces[0].tabs[0].root_pane;
+        let relationship = crate::delegation::Delegations::new()
+            .create(None, None, Some("handoff relationship".into()))
+            .unwrap();
+        let snapshot = SessionSnapshot {
+            version: 5,
+            workspaces: vec![WorkspaceSnapshot {
+                id: Some(app.state.workspaces[0].id.clone()),
+                custom_name: None,
+                identity_cwd: std::path::PathBuf::from("/tmp"),
+                checkout: None,
+                worktree_space: None,
+                public_pane_numbers: std::collections::HashMap::from([(77, 1)]),
+                next_public_pane_number: 2,
+                public_tab_numbers: vec![1],
+                next_public_tab_number: 2,
+                tabs: vec![TabSnapshot {
+                    id: None,
+                    custom_name: None,
+                    layout: LayoutSnapshot::Pane(77),
+                    collections: Vec::new(),
+                    panes: std::collections::HashMap::new(),
+                    zoomed: false,
+                    focused: Some(77),
+                    focused_leaf: None,
+                    root_pane: Some(77),
+                }],
+                active_tab: 0,
+            }],
+            repositories: Vec::new(),
+            space_order: Vec::new(),
+            active: Some(0),
+            selected: 0,
+            sidebar_width: None,
+            sidebar_section_split: None,
+            collapsed_space_keys: Default::default(),
+            delegations: vec![crate::delegation::DelegationRecord {
+                id: relationship,
+                pane_id: Some(crate::layout::PaneId::from_raw(77)),
+                parent_id: None,
+                purpose: Some("handoff relationship".into()),
+                sibling_rank: 0,
+                tombstone: false,
+            }],
+            collections_authority: Default::default(),
+            collections_action_sequence: 0,
+        };
+
+        app.restore_handoff_delegations(&snapshot);
+
+        let restored = app.state.delegations.get(relationship).unwrap();
+        assert_eq!(restored.pane_id, Some(restored_pane));
+        assert_eq!(restored.purpose.as_deref(), Some("handoff relationship"));
+    }
+
+    #[test]
+    fn rejected_restore_blocks_overwriting_the_original_snapshot_bytes() {
+        let _guard = crate::config::test_config_env_lock().lock().unwrap();
+        let config_home = unique_temp_path("rejected-restore-preserves-snapshot");
+        std::env::set_var("XDG_CONFIG_HOME", &config_home);
+        std::env::remove_var(crate::session::SESSION_ENV_VAR);
+
+        let session_path = crate::session::data_dir().join("session.json");
+        std::fs::create_dir_all(session_path.parent().unwrap()).unwrap();
+        let original = b"{ definitely not a session }".to_vec();
+        std::fs::write(&session_path, &original).unwrap();
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &crate::config::Config::default(),
+            AppPolicy {
+                restore_session: true,
+                persist_session: true,
+                persist_plugin_registry: false,
+                background_updates: false,
+            },
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        assert!(app.session_persistence_blocked);
+
+        app.state
+            .workspaces
+            .push(Workspace::test_new("replacement"));
+        app.save_session_now();
+
+        assert_eq!(std::fs::read(&session_path).unwrap(), original);
+        assert!(app.session_save_deadline.is_none());
+        std::env::remove_var("XDG_CONFIG_HOME");
+        let _ = std::fs::remove_dir_all(config_home);
+    }
+
     #[test]
     fn normal_autosave_replaces_a_signaled_exit_checkpoint() {
         let _guard = crate::config::test_config_env_lock().lock().unwrap();
@@ -3277,5 +3966,816 @@ mod tests {
             AgentState::Idle,
             "Working→Idle should still apply after temporary queue pressure"
         );
+    }
+
+    #[test]
+    fn service_fabric_public_invoke_normalizes_missing_authority() {
+        let mut app = test_app();
+        let (respond_to, response_rx) = std::sync::mpsc::channel();
+        app.start_deferred_extension_artifact_request(
+            crate::api::schema::Request {
+                id: "fabric-missing".into(),
+                method: crate::api::schema::Method::ExtensionServiceBindingInvoke(
+                    crate::api::schema::ExtensionServiceBindingInvokeParams {
+                        binding_id: "sb_missing".into(),
+                        expected_binding_revision: 1,
+                        consumer_method: "compose".into(),
+                        params: serde_json::json!({}),
+                    },
+                ),
+            },
+            respond_to,
+        );
+        let response: crate::api::schema::ErrorResponse = serde_json::from_str(
+            &response_rx
+                .recv_timeout(std::time::Duration::from_secs(1))
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            response.error.code,
+            crate::service_fabric::ERROR_BINDING_UNAVAILABLE
+        );
+    }
+
+    #[test]
+    fn service_fabric_public_invoke_is_deferred_exact_and_pty_isolated() {
+        fn ready_slot(
+            app: &mut App,
+            installed: crate::extension_package::InstalledPackageV1,
+            generation: u64,
+        ) -> crate::extension_candidate::PackageCandidateSlot {
+            let expected_package_id = installed.package_id.clone();
+            let mut slot = crate::extension_candidate::PackageCandidateSlot::spawn(
+                installed,
+                generation,
+                app.event_tx.clone(),
+            )
+            .unwrap();
+            let ready = loop {
+                match app.event_rx.blocking_recv().unwrap() {
+                    AppEvent::ExtensionPackageCandidateReady(ready)
+                        if ready.package_id == expected_package_id =>
+                    {
+                        break ready;
+                    }
+                    event => {
+                        app.handle_internal_event(event);
+                    }
+                }
+            };
+            assert!(slot.accepts(&ready));
+            slot.install_ready(ready.result.unwrap());
+            slot
+        }
+
+        fn lifecycle_record(
+            package: &crate::extension_package::ValidatedPackageV1,
+            generation: u64,
+        ) -> crate::extension_package::PackageLifecycleRecordV1 {
+            crate::extension_package::PackageLifecycleRecordV1 {
+                package_id: package.manifest.id.clone(),
+                source: crate::extension_package::PackageProvenanceV1::Git {
+                    url: format!("https://example.invalid/{}.git", package.manifest.id),
+                    source_commit: "a".repeat(40),
+                    package_path: "package".into(),
+                    package_id: package.manifest.id.clone(),
+                    version: package.manifest.version.clone(),
+                    package_sha256: package.package_sha256.clone(),
+                    manifest_sha256: package.manifest_sha256.clone(),
+                },
+                previous_source: None,
+                namespaces: package.manifest.namespaces.clone(),
+                revision: 1,
+                status: crate::extension_package::PackageLifecycleStatusV1::Enabled,
+                active: Some(crate::extension_package::PackageArtifactPointerV1 {
+                    package_sha256: package.package_sha256.clone(),
+                    version: package.manifest.version.clone(),
+                    runtime_generation: generation,
+                }),
+                previous: None,
+                activation_error: None,
+                pending_activation: None,
+                retained_data: false,
+            }
+        }
+
+        let mut app = test_app();
+        app.state.workspaces = vec![Workspace::test_new("fabric-pty-isolation")];
+        app.state.ensure_test_terminals();
+        let terminal_ids = app
+            .state
+            .terminals
+            .keys()
+            .cloned()
+            .collect::<std::collections::HashSet<_>>();
+
+        let provider_component = crate::extension_runtime::component::tests::component_bytes(
+            crate::extension_runtime::component::tests::ECHO_BODY,
+        );
+        let consumer_component =
+            crate::extension_runtime::component::tests::fabric_component("example.api-consumer");
+        let (provider_root, provider_installed) =
+            crate::extension_runtime::component::tests::install_archive(
+                crate::extension_runtime::component::tests::fabric_package_bytes(
+                    &provider_component,
+                    "example.api-provider",
+                    false,
+                    "conformance.echo",
+                ),
+            );
+        let (consumer_root, consumer_installed) =
+            crate::extension_runtime::component::tests::install_archive(
+                crate::extension_runtime::component::tests::fabric_package_bytes(
+                    &consumer_component,
+                    "example.api-consumer",
+                    true,
+                    "conformance.echo",
+                ),
+            );
+        let provider_package = crate::extension_package::validate_package_file(
+            &std::path::Path::new(&provider_installed.immutable_root).join("package.vqrox"),
+            Some(&provider_installed.package_sha256),
+        )
+        .unwrap()
+        .descriptor;
+        let consumer_package = crate::extension_package::validate_package_file(
+            &std::path::Path::new(&consumer_installed.immutable_root).join("package.vqrox"),
+            Some(&consumer_installed.package_sha256),
+        )
+        .unwrap()
+        .descriptor;
+        let provider_slot = ready_slot(&mut app, provider_installed, 13);
+        let consumer_slot = ready_slot(&mut app, consumer_installed, 11);
+        app.marketplace_state.packages.revision = 2;
+        app.marketplace_state.packages.packages.insert(
+            provider_package.manifest.id.clone(),
+            lifecycle_record(&provider_package, 13),
+        );
+        app.marketplace_state.packages.packages.insert(
+            consumer_package.manifest.id.clone(),
+            lifecycle_record(&consumer_package, 11),
+        );
+        app.marketplace_state.packages.load_order = vec![
+            consumer_package.manifest.id.clone(),
+            provider_package.manifest.id.clone(),
+        ];
+        app.extension_package_services
+            .insert(provider_package.manifest.id.clone(), provider_slot);
+        app.extension_package_services
+            .insert(consumer_package.manifest.id.clone(), consumer_slot);
+
+        let consumer_endpoint = crate::api::schema::ExtensionServiceEndpointParams {
+            package_id: consumer_package.manifest.id.clone(),
+            service_id: "echo".into(),
+            endpoint_id: "echo-source".into(),
+        };
+        let provider_endpoint = crate::api::schema::ExtensionServiceEndpointParams {
+            package_id: provider_package.manifest.id.clone(),
+            service_id: "echo".into(),
+            endpoint_id: "echo".into(),
+        };
+        let inspected: crate::api::schema::SuccessResponse =
+            serde_json::from_str(&app.handle_api_request(crate::api::schema::Request {
+                id: "fabric-inspect".into(),
+                method: crate::api::schema::Method::ExtensionServiceBindingInspect(
+                    crate::api::schema::ExtensionServiceBindingInspectParams {
+                        consumer: consumer_endpoint.clone(),
+                        provider: provider_endpoint.clone(),
+                    },
+                ),
+            }))
+            .unwrap();
+        let crate::api::schema::ResponseResult::ExtensionServiceBindingInspected { inspection } =
+            inspected.result
+        else {
+            panic!("unexpected binding inspection response");
+        };
+        let approved: crate::api::schema::SuccessResponse =
+            serde_json::from_str(&app.handle_api_request(crate::api::schema::Request {
+                id: "fabric-approve".into(),
+                method: crate::api::schema::Method::ExtensionServiceBindingApprove(
+                    crate::api::schema::ExtensionServiceBindingApproveParams {
+                        consumer: consumer_endpoint.clone(),
+                        provider: provider_endpoint.clone(),
+                        expected_registry_revision: inspection.registry_revision,
+                        expected_binding_revision: None,
+                        expected_consent_sha256: inspection.consent_sha256.clone(),
+                        confirmed: true,
+                    },
+                ),
+            }))
+            .unwrap();
+        let crate::api::schema::ResponseResult::ExtensionServiceBindingChanged {
+            binding: approved_binding,
+        } = approved.result
+        else {
+            panic!("unexpected binding approval response");
+        };
+        let binding = approved_binding.binding;
+        let stale: crate::api::schema::ErrorResponse =
+            serde_json::from_str(&app.handle_api_request(crate::api::schema::Request {
+                id: "fabric-stale-approve".into(),
+                method: crate::api::schema::Method::ExtensionServiceBindingApprove(
+                    crate::api::schema::ExtensionServiceBindingApproveParams {
+                        consumer: consumer_endpoint.clone(),
+                        provider: provider_endpoint.clone(),
+                        expected_registry_revision: inspection.registry_revision,
+                        expected_binding_revision: None,
+                        expected_consent_sha256: inspection.consent_sha256,
+                        confirmed: true,
+                    },
+                ),
+            }))
+            .unwrap();
+        assert_eq!(
+            stale.error.code,
+            "extension_service_binding_approval_failed"
+        );
+        let (respond_to, response_rx) = std::sync::mpsc::channel();
+        let request = crate::api::schema::Request {
+            id: "fabric-api-call".into(),
+            method: crate::api::schema::Method::ExtensionServiceBindingInvoke(
+                crate::api::schema::ExtensionServiceBindingInvokeParams {
+                    binding_id: binding.binding_id.clone(),
+                    expected_binding_revision: binding.revision,
+                    consumer_method: "conformance.echo".into(),
+                    params: serde_json::json!({"trigger": "public-api"}),
+                },
+            ),
+        };
+        assert!(app.extension_artifact_request_requires_staging(&request));
+        let started = std::time::Instant::now();
+        app.start_deferred_extension_artifact_request(request, respond_to);
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(100),
+            "the App actor must enqueue without waiting for either component"
+        );
+        assert_eq!(
+            terminal_ids,
+            app.state
+                .terminals
+                .keys()
+                .cloned()
+                .collect::<std::collections::HashSet<_>>()
+        );
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            match app.event_rx.try_recv() {
+                Ok(AppEvent::ExtensionPackageCandidateFinished(completion)) => {
+                    app.handle_extension_package_candidate_finished(*completion);
+                    break;
+                }
+                Ok(event) => {
+                    app.handle_internal_event(event);
+                }
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+                    if std::time::Instant::now() < deadline =>
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                Err(error) => panic!("fabric completion unavailable: {error}"),
+            }
+        }
+        let encoded = response_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .unwrap();
+        let response: crate::api::schema::SuccessResponse = serde_json::from_str(&encoded).unwrap();
+        let crate::api::schema::ResponseResult::ExtensionServiceBindingInvoked {
+            binding_id,
+            result,
+        } = response.result
+        else {
+            panic!("unexpected service fabric response");
+        };
+        assert_eq!(binding_id, binding.binding_id);
+        assert_eq!(
+            result["result"],
+            serde_json::json!({"count": 2, "text": "vqro"})
+        );
+        assert_eq!(
+            terminal_ids,
+            app.state
+                .terminals
+                .keys()
+                .cloned()
+                .collect::<std::collections::HashSet<_>>()
+        );
+
+        let revoked: crate::api::schema::SuccessResponse =
+            serde_json::from_str(&app.handle_api_request(crate::api::schema::Request {
+                id: "fabric-revoke".into(),
+                method: crate::api::schema::Method::ExtensionServiceBindingRevoke(
+                    crate::api::schema::ExtensionServiceBindingRevokeParams {
+                        binding_id: binding.binding_id.clone(),
+                        expected_registry_revision: app.marketplace_state.service_bindings.revision,
+                        expected_binding_revision: binding.revision,
+                        confirmed: true,
+                    },
+                ),
+            }))
+            .unwrap();
+        let crate::api::schema::ResponseResult::ExtensionServiceBindingChanged {
+            binding: revoked_binding,
+        } = revoked.result
+        else {
+            panic!("unexpected binding revocation response");
+        };
+        assert_eq!(
+            revoked_binding.effective_status,
+            crate::service_fabric::EffectiveServiceBindingStatusV1::Revoked
+        );
+        let (respond_to, response_rx) = std::sync::mpsc::channel();
+        app.start_deferred_extension_artifact_request(
+            crate::api::schema::Request {
+                id: "fabric-revoked-call".into(),
+                method: crate::api::schema::Method::ExtensionServiceBindingInvoke(
+                    crate::api::schema::ExtensionServiceBindingInvokeParams {
+                        binding_id: binding.binding_id.clone(),
+                        expected_binding_revision: revoked_binding.binding.revision,
+                        consumer_method: "conformance.echo".into(),
+                        params: serde_json::json!({}),
+                    },
+                ),
+            },
+            respond_to,
+        );
+        let denied: crate::api::schema::ErrorResponse = serde_json::from_str(
+            &response_rx
+                .recv_timeout(std::time::Duration::from_secs(1))
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            denied.error.code,
+            crate::service_fabric::ERROR_BINDING_REVOKED
+        );
+
+        let reinspection: crate::api::schema::SuccessResponse =
+            serde_json::from_str(&app.handle_api_request(crate::api::schema::Request {
+                id: "fabric-reinspect".into(),
+                method: crate::api::schema::Method::ExtensionServiceBindingInspect(
+                    crate::api::schema::ExtensionServiceBindingInspectParams {
+                        consumer: consumer_endpoint.clone(),
+                        provider: provider_endpoint.clone(),
+                    },
+                ),
+            }))
+            .unwrap();
+        let crate::api::schema::ResponseResult::ExtensionServiceBindingInspected {
+            inspection: reinspection,
+        } = reinspection.result
+        else {
+            panic!("unexpected binding reinspection response");
+        };
+        let restored: crate::api::schema::SuccessResponse =
+            serde_json::from_str(&app.handle_api_request(crate::api::schema::Request {
+                id: "fabric-restore".into(),
+                method: crate::api::schema::Method::ExtensionServiceBindingApprove(
+                    crate::api::schema::ExtensionServiceBindingApproveParams {
+                        consumer: consumer_endpoint,
+                        provider: provider_endpoint,
+                        expected_registry_revision: reinspection.registry_revision,
+                        expected_binding_revision: Some(revoked_binding.binding.revision),
+                        expected_consent_sha256: reinspection.consent_sha256,
+                        confirmed: true,
+                    },
+                ),
+            }))
+            .unwrap();
+        let crate::api::schema::ResponseResult::ExtensionServiceBindingChanged {
+            binding: restored,
+        } = restored.result
+        else {
+            panic!("unexpected identical-artifact binding restoration response");
+        };
+        assert_eq!(
+            restored.effective_status,
+            crate::service_fabric::EffectiveServiceBindingStatusV1::Ready
+        );
+        app.extension_package_services
+            .remove(&provider_package.manifest.id);
+        let listed: crate::api::schema::SuccessResponse =
+            serde_json::from_str(&app.handle_api_request(crate::api::schema::Request {
+                id: "fabric-list".into(),
+                method: crate::api::schema::Method::ExtensionServiceBindingList(
+                    crate::api::schema::EmptyParams::default(),
+                ),
+            }))
+            .unwrap();
+        let crate::api::schema::ResponseResult::ExtensionServiceBindingList { bindings, .. } =
+            listed.result
+        else {
+            panic!("unexpected binding list response");
+        };
+        assert_eq!(
+            bindings[0].effective_status,
+            crate::service_fabric::EffectiveServiceBindingStatusV1::Suspended
+        );
+
+        drop(app);
+        let _ = std::fs::remove_dir_all(consumer_root);
+        let _ = std::fs::remove_dir_all(provider_root);
+    }
+
+    fn extension_doctor_test_binding(
+        state: crate::service_fabric::ServiceBindingStateV1,
+    ) -> crate::service_fabric::ServiceBindingV1 {
+        let digest = |byte: char| byte.to_string().repeat(64);
+        crate::service_fabric::ServiceBindingV1 {
+            binding_id: "sb_extension_doctor".into(),
+            revision: 7,
+            state,
+            consent_sha256: digest('e'),
+            consent: crate::service_fabric::ServiceBindingConsentV1 {
+                consumer: crate::service_fabric::ServiceEndpointV1 {
+                    package_id: crate::extension_health::DOCTOR_PACKAGE_ID.into(),
+                    package_version: "1.0.0".into(),
+                    package_sha256: digest('a'),
+                    manifest_sha256: digest('b'),
+                    service_id: crate::extension_health::DOCTOR_SERVICE_ID.into(),
+                    endpoint_id: crate::extension_health::DOCTOR_IMPORT_ID.into(),
+                },
+                provider: crate::service_fabric::ServiceEndpointV1 {
+                    package_id: "vqro.extension-health-default".into(),
+                    package_version: "1.0.0".into(),
+                    package_sha256: digest('c'),
+                    manifest_sha256: digest('d'),
+                    service_id: "health".into(),
+                    endpoint_id: "health".into(),
+                },
+                contract: crate::service_fabric::ServiceContractIdentityV1 {
+                    contract_id: "vqro.extension-health".into(),
+                    contract_version: "1.0.0".into(),
+                    descriptor_sha256: digest('f'),
+                },
+                methods: Vec::new(),
+            },
+        }
+    }
+
+    #[test]
+    fn extension_doctor_preflight_uses_only_normalized_r1_errors() {
+        for (binding, expected) in [
+            (None, crate::service_fabric::ERROR_BINDING_UNAVAILABLE),
+            (
+                Some(extension_doctor_test_binding(
+                    crate::service_fabric::ServiceBindingStateV1::Revoked,
+                )),
+                crate::service_fabric::ERROR_BINDING_REVOKED,
+            ),
+        ] {
+            let mut app = test_app();
+            if let Some(binding) = binding {
+                app.marketplace_state
+                    .service_bindings
+                    .bindings
+                    .insert(binding.binding_id.clone(), binding);
+            }
+            let (respond_to, response_rx) = std::sync::mpsc::channel();
+            app.start_deferred_extension_artifact_request(
+                crate::api::schema::Request {
+                    id: "doctor-preflight".into(),
+                    method: crate::api::schema::Method::ExtensionDoctor(
+                        crate::api::schema::ExtensionDoctorParams::default(),
+                    ),
+                },
+                respond_to,
+            );
+            let encoded = response_rx
+                .recv_timeout(std::time::Duration::from_secs(1))
+                .unwrap();
+            let error: crate::api::schema::ErrorResponse = serde_json::from_str(&encoded).unwrap();
+            assert_eq!(error.error.code, expected);
+            assert!(!encoded.contains("extension_doctor_diagnostic"));
+        }
+    }
+
+    #[test]
+    fn extension_health_capture_is_complete_bounded_and_credential_free() {
+        let mut app = test_app();
+        let binding =
+            extension_doctor_test_binding(crate::service_fabric::ServiceBindingStateV1::Approved);
+        app.marketplace_state.service_bindings.revision = binding.revision;
+        app.marketplace_state
+            .service_bindings
+            .bindings
+            .insert(binding.binding_id.clone(), binding.clone());
+        app.marketplace_state.packages.revision = 3;
+        app.marketplace_state.packages.packages.insert(
+            "secret.package".into(),
+            crate::extension_package::PackageLifecycleRecordV1 {
+                package_id: "secret.package".into(),
+                source: crate::extension_package::PackageProvenanceV1::Git {
+                    url: "https://credential@example.invalid/private.git".into(),
+                    source_commit: "1".repeat(40),
+                    package_path: "/arbitrary/private/package.vqrox".into(),
+                    package_id: "secret.package".into(),
+                    version: "1.0.0".into(),
+                    package_sha256: "1".repeat(64),
+                    manifest_sha256: "2".repeat(64),
+                },
+                previous_source: None,
+                namespaces: Vec::new(),
+                revision: 1,
+                status: crate::extension_package::PackageLifecycleStatusV1::Failed,
+                active: None,
+                previous: None,
+                activation_error: Some("raw trap includes credential and /private/path".into()),
+                pending_activation: None,
+                retained_data: false,
+            },
+        );
+
+        let observation = app.extension_health_observation(&binding).unwrap();
+        assert_eq!(observation.packages.total, 1);
+        assert_eq!(observation.packages.enabled_unavailable, 1);
+        assert_eq!(observation.bindings.total, 1);
+        assert_eq!(
+            observation.doctor_edge.consumer_manifest_sha256,
+            "b".repeat(64)
+        );
+        assert_eq!(
+            observation.doctor_edge.provider_manifest_sha256,
+            "d".repeat(64)
+        );
+        let encoded = serde_json::to_string(&observation).unwrap();
+        assert!(encoded.len() <= crate::extension_health::MAX_OBSERVATION_BYTES);
+        for secret in ["credential", "private", "raw trap", "package.vqrox"] {
+            assert!(!encoded.contains(secret), "observation leaked {secret}");
+        }
+
+        let recovered_state = app.marketplace_state.clone();
+        let mut restarted = test_app();
+        restarted.marketplace_state = recovered_state;
+        let resupplied = restarted.extension_health_observation(&binding).unwrap();
+        assert_eq!(resupplied, observation);
+    }
+
+    #[test]
+    fn extension_health_services_cover_every_retained_active_manifest() {
+        let _guard = config_env_lock().lock().unwrap();
+        let temp = unique_temp_path("extension-health-services");
+        std::fs::create_dir_all(&temp).unwrap();
+        let original_xdg_config_home = std::env::var_os("XDG_CONFIG_HOME");
+        std::env::set_var("XDG_CONFIG_HOME", &temp);
+
+        fn make_tree_writable(path: &std::path::Path) {
+            if path.is_dir() {
+                let mut permissions = std::fs::metadata(path).unwrap().permissions();
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    permissions.set_mode(0o755);
+                }
+                #[cfg(windows)]
+                permissions.set_readonly(false);
+                std::fs::set_permissions(path, permissions).unwrap();
+                for entry in std::fs::read_dir(path).unwrap() {
+                    make_tree_writable(&entry.unwrap().path());
+                }
+            }
+        }
+
+        fn record(
+            package: &crate::extension_package::ValidatedPackageV1,
+            status: crate::extension_package::PackageLifecycleStatusV1,
+            activating: bool,
+        ) -> crate::extension_package::PackageLifecycleRecordV1 {
+            let active = crate::extension_package::PackageArtifactPointerV1 {
+                package_sha256: package.package_sha256.clone(),
+                version: package.manifest.version.clone(),
+                runtime_generation: 11,
+            };
+            crate::extension_package::PackageLifecycleRecordV1 {
+                package_id: package.manifest.id.clone(),
+                source: crate::extension_package::PackageProvenanceV1::File {
+                    package_sha256: package.package_sha256.clone(),
+                },
+                previous_source: None,
+                namespaces: package.manifest.namespaces.clone(),
+                revision: 1,
+                status,
+                active: Some(active.clone()),
+                previous: activating.then_some(active),
+                activation_error: None,
+                pending_activation: activating.then(|| {
+                    crate::extension_package::PendingActivationV1 {
+                        operation_id: "doctor-activating".into(),
+                        candidate: crate::extension_package::PackageArtifactPointerV1 {
+                            package_sha256: "f".repeat(64),
+                            version: "2.0.0".into(),
+                            runtime_generation: 12,
+                        },
+                    }
+                }),
+                retained_data: false,
+            }
+        }
+
+        let mut app = test_app();
+        let binding =
+            extension_doctor_test_binding(crate::service_fabric::ServiceBindingStateV1::Approved);
+        app.marketplace_state.service_bindings.revision = binding.revision;
+        app.marketplace_state
+            .service_bindings
+            .bindings
+            .insert(binding.binding_id.clone(), binding.clone());
+
+        let component = crate::extension_runtime::component::tests::component_bytes(
+            crate::extension_runtime::component::tests::ECHO_BODY,
+        );
+        let statuses = [
+            (
+                "doctor.disabled",
+                crate::extension_package::PackageLifecycleStatusV1::Disabled,
+                false,
+            ),
+            (
+                "doctor.failed",
+                crate::extension_package::PackageLifecycleStatusV1::Failed,
+                false,
+            ),
+            (
+                "doctor.activating",
+                crate::extension_package::PackageLifecycleStatusV1::Activating,
+                true,
+            ),
+            (
+                "doctor.absent-slot",
+                crate::extension_package::PackageLifecycleStatusV1::Enabled,
+                false,
+            ),
+            (
+                "doctor.ready",
+                crate::extension_package::PackageLifecycleStatusV1::Enabled,
+                false,
+            ),
+        ];
+        let mut installed_roots = Vec::new();
+        for (index, (package_id, status, activating)) in statuses.into_iter().enumerate() {
+            let bytes = crate::extension_runtime::component::tests::fabric_package_bytes(
+                &component,
+                package_id,
+                false,
+                "conformance.echo",
+            );
+            let digest = format!("{:x}", <sha2::Sha256 as sha2::Digest>::digest(&bytes));
+            let source = temp.join(format!("package-{index}.vqrox"));
+            std::fs::write(&source, bytes).unwrap();
+            let installed = crate::extension_package::install_local_file(
+                &source,
+                &crate::extensions::package_storage_path().unwrap(),
+                Some(&digest),
+                crate::extension_package::PackageProvenanceV1::File {
+                    package_sha256: digest.clone(),
+                },
+                &std::collections::BTreeMap::new(),
+                None,
+            )
+            .unwrap();
+            let package = crate::extension_package::validate_package_file(
+                &std::path::Path::new(&installed.immutable_root).join("package.vqrox"),
+                Some(&installed.package_sha256),
+            )
+            .unwrap()
+            .descriptor;
+            app.marketplace_state
+                .packages
+                .packages
+                .insert(package_id.into(), record(&package, status, activating));
+            if package_id == "doctor.ready" {
+                let mut slot = crate::extension_candidate::PackageCandidateSlot::spawn(
+                    installed.clone(),
+                    11,
+                    app.event_tx.clone(),
+                )
+                .unwrap();
+                let ready = loop {
+                    match app.event_rx.blocking_recv().unwrap() {
+                        AppEvent::ExtensionPackageCandidateReady(ready)
+                            if ready.package_id == package_id =>
+                        {
+                            break ready;
+                        }
+                        event => app.handle_internal_event(event),
+                    }
+                };
+                assert!(slot.accepts(&ready));
+                slot.install_ready(ready.result.unwrap());
+                app.extension_package_services
+                    .insert(package_id.into(), slot);
+            }
+            installed_roots.push(std::path::PathBuf::from(installed.immutable_root));
+        }
+        app.marketplace_state.packages.packages.insert(
+            "doctor.removed".into(),
+            crate::extension_package::PackageLifecycleRecordV1 {
+                package_id: "doctor.removed".into(),
+                source: crate::extension_package::PackageProvenanceV1::File {
+                    package_sha256: "0".repeat(64),
+                },
+                previous_source: None,
+                namespaces: Vec::new(),
+                revision: 1,
+                status: crate::extension_package::PackageLifecycleStatusV1::RemovedRetainingData,
+                active: None,
+                previous: None,
+                activation_error: None,
+                pending_activation: None,
+                retained_data: true,
+            },
+        );
+
+        let observation = app.extension_health_observation(&binding).unwrap();
+        assert_eq!(observation.packages.total, 6);
+        assert_eq!(observation.services.total, 5);
+        assert_eq!(observation.services.ready, 1);
+        assert_eq!(observation.services.unavailable, 4);
+
+        let missing_root = installed_roots.pop().unwrap();
+        let archive = missing_root.join("package.vqrox");
+        let original_archive = std::fs::read(&archive).unwrap();
+        let mut permissions = std::fs::metadata(&archive).unwrap().permissions();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            permissions.set_mode(0o644);
+        }
+        #[cfg(windows)]
+        permissions.set_readonly(false);
+        std::fs::set_permissions(&archive, permissions).unwrap();
+        std::fs::write(&archive, b"corrupt active artifact").unwrap();
+        let corrupt = app.extension_health_observation(&binding).unwrap_err();
+        assert!(corrupt.contains("cannot validate retained active artifact"));
+        std::fs::write(&archive, original_archive).unwrap();
+        assert!(app.extension_health_observation(&binding).is_ok());
+
+        let missing_artifact = missing_root.with_extension("missing");
+        std::fs::rename(&missing_root, &missing_artifact).unwrap();
+        let missing = app.extension_health_observation(&binding).unwrap_err();
+        assert!(missing.contains("cannot validate retained active artifact"));
+
+        if let Some(original) = original_xdg_config_home {
+            std::env::set_var("XDG_CONFIG_HOME", original);
+        } else {
+            std::env::remove_var("XDG_CONFIG_HOME");
+        }
+        drop(installed_roots);
+        drop(missing_artifact);
+        make_tree_writable(&temp);
+        std::fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn extension_doctor_stale_completion_uses_r1_error_not_success() {
+        let mut app = test_app();
+        let (respond_to, response_rx) = std::sync::mpsc::channel();
+        let attempt_id = 42;
+        app.pending_service_fabric_invocations.insert(
+            attempt_id,
+            crate::service_fabric::PendingServiceFabricInvocation {
+                request_id: "doctor-stale".into(),
+                completion_kind:
+                    crate::service_fabric::ServiceFabricCompletionKind::ExtensionDoctor,
+                request_constraint: None,
+                binding_id: "sb_extension_doctor".into(),
+                binding_revision: 1,
+                consumer_package_id: crate::extension_health::DOCTOR_PACKAGE_ID.into(),
+                consumer_service_id: crate::extension_health::DOCTOR_SERVICE_ID.into(),
+                consumer_artifact_sha256: "a".repeat(64),
+                consumer_artifact_generation: 1,
+                consumer_runtime_generation: 1,
+                provider_package_id: "vqro.extension-health-default".into(),
+                provider_service_id: "health".into(),
+                provider_artifact_sha256: "b".repeat(64),
+                provider_artifact_generation: 1,
+                provider_runtime_generation: 1,
+                canceled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                respond_to,
+            },
+        );
+        app.handle_extension_package_candidate_finished(
+            crate::extension_candidate::PackageCandidateInvocationResult {
+                package_id: crate::extension_health::DOCTOR_PACKAGE_ID.into(),
+                service_id: crate::extension_health::DOCTOR_SERVICE_ID.into(),
+                artifact_sha256: "a".repeat(64),
+                artifact_generation: 1,
+                runtime_generation: 1,
+                attempt_id,
+                result: Ok(serde_json::json!({
+                    "contract": crate::extension_health::DIAGNOSTIC_CONTRACT_V1,
+                    "status": "healthy",
+                    "findings": []
+                })),
+            },
+        );
+        let encoded = response_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .unwrap();
+        let error: crate::api::schema::ErrorResponse = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(error.error.code, crate::service_fabric::ERROR_STALE_LEASE);
+        assert!(!encoded.contains("extension_doctor_diagnostic"));
     }
 }

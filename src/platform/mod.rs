@@ -18,6 +18,41 @@ pub struct ForegroundJob {
     pub processes: Vec<ForegroundProcess>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ProcessTelemetry {
+    pub(crate) pid: u32,
+    pub(crate) name: String,
+    pub(crate) state: Option<String>,
+    pub(crate) cpu_time_ms: Option<u64>,
+    pub(crate) resident_bytes: Option<u64>,
+    pub(crate) thread_count: Option<u32>,
+    pub(crate) read_bytes: Option<u64>,
+    pub(crate) write_bytes: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum TerminalTelemetrySample {
+    // Process telemetry is implemented only by the Linux platform module.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    Available {
+        process_group_id: u32,
+        processes: Vec<ProcessTelemetry>,
+        truncated: bool,
+    },
+    Unavailable(&'static str),
+    // This variant is produced by non-Linux platform implementations.
+    #[cfg_attr(target_os = "linux", allow(dead_code))]
+    Unsupported,
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn sample_terminal_telemetry(
+    _shell_pid: u32,
+    _max_processes: usize,
+) -> TerminalTelemetrySample {
+    TerminalTelemetrySample::Unsupported
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Signal {
     Hangup,
@@ -277,11 +312,22 @@ mod remote_bridge_tests;
 mod unix_common;
 #[cfg(unix)]
 pub(crate) use unix_common::{
-    begin_cli_output, end_cli_output, forward_remote_bridge_stdio, RemoteBridgeWake,
+    begin_cli_output, configure_package_nofollow, create_private_package_directory, end_cli_output,
+    forward_remote_bridge_stdio, open_package_staging, write_package_staging_file,
+    PackageStagingBackend, RemoteBridgeWake,
 };
 
 mod client_state;
-pub(crate) use client_state::{create_private_state_file, replace_file, sync_parent_directory};
+mod package_fs;
+mod persistence_lock;
+pub(crate) use client_state::{
+    create_private_state_file, durable_replace_file, replace_file, resolve_write_target,
+    sync_containing_directory, sync_parent_directory,
+};
+pub(crate) use package_fs::{read_bounded_regular_nofollow, SecurePackageStaging};
+pub(crate) use persistence_lock::{
+    try_lock_persistence, PersistenceLockError, PersistenceLockGuard,
+};
 
 #[cfg(not(unix))]
 pub(crate) fn begin_cli_output() {}

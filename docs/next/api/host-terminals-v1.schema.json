@@ -1,0 +1,213 @@
+{
+  "$id": "https://vqro.dev/schema/host-terminals/v1",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "availability": "staged; production package activation is not enabled",
+  "capabilities": {
+    "snapshot": "host.terminals.read"
+  },
+  "contract": "host.terminals.v1",
+  "limits": {
+    "max_containers_per_tab": 32,
+    "max_layout_items": 64,
+    "max_members_per_container": 64,
+    "max_response_bytes": 65536,
+    "max_terminals_per_tab": 32
+  },
+  "methods": [
+    "terminals.snapshot"
+  ],
+  "schemas": {
+    "snapshot": {
+      "$defs": {
+        "HostTerminalLayoutItemV1": {
+          "oneOf": [
+            {
+              "additionalProperties": false,
+              "properties": {
+                "kind": {
+                  "const": "tiled",
+                  "type": "string"
+                },
+                "terminal_id": {
+                  "$ref": "#/schemas/snapshot/$defs/TerminalId"
+                }
+              },
+              "required": [
+                "kind",
+                "terminal_id"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "container_id": {
+                  "maxLength": 26,
+                  "minLength": 26,
+                  "pattern": "^container_[0-9a-f]{16}$",
+                  "type": "string"
+                },
+                "kind": {
+                  "const": "container",
+                  "type": "string"
+                },
+                "selected_terminal_id": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/schemas/snapshot/$defs/TerminalId"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "terminal_ids": {
+                  "items": {
+                    "$ref": "#/schemas/snapshot/$defs/TerminalId"
+                  },
+                  "maxItems": 64,
+                  "type": "array",
+                  "uniqueItems": true
+                }
+              },
+              "required": [
+                "kind",
+                "container_id",
+                "terminal_ids"
+              ],
+              "type": "object"
+            }
+          ]
+        },
+        "HostTerminalsLeaseFenceV1": {
+          "additionalProperties": false,
+          "properties": {
+            "artifact_generation": {
+              "format": "uint64",
+              "maximum": 18446744073709551615,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "catalog_generation": {
+              "format": "uint64",
+              "maximum": 18446744073709551615,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "package_generation": {
+              "format": "uint64",
+              "maximum": 18446744073709551615,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "provider_generation": {
+              "format": "uint64",
+              "maximum": 18446744073709551615,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "runtime_generation": {
+              "format": "uint64",
+              "maximum": 18446744073709551615,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "service_generation": {
+              "format": "uint64",
+              "maximum": 18446744073709551615,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "catalog_generation",
+            "package_generation",
+            "service_generation",
+            "artifact_generation",
+            "provider_generation",
+            "runtime_generation"
+          ],
+          "type": "object"
+        },
+        "TabId": {
+          "description": "Stable opaque identity for a server-owned tab.",
+          "maxLength": 36,
+          "minLength": 36,
+          "pattern": "^tab_[0-9a-f]{32}$",
+          "type": "string"
+        },
+        "TerminalId": {
+          "description": "Stable opaque identity for a server-owned logical terminal.",
+          "maxLength": 37,
+          "minLength": 37,
+          "pattern": "^term_[0-9a-f]{32}$",
+          "type": "string"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "contract": {
+          "const": "host.terminals.v1",
+          "type": "string"
+        },
+        "fingerprint_sha256": {
+          "maxLength": 64,
+          "minLength": 64,
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "layout": {
+          "items": {
+            "$ref": "#/schemas/snapshot/$defs/HostTerminalLayoutItemV1"
+          },
+          "maxItems": 64,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "lease_fence": {
+          "$ref": "#/schemas/snapshot/$defs/HostTerminalsLeaseFenceV1"
+        },
+        "tab_id": {
+          "$ref": "#/schemas/snapshot/$defs/TabId"
+        },
+        "workspace_id": {
+          "maxLength": 32,
+          "minLength": 2,
+          "pattern": "^w[123456789ABCDEFGHJKMNPQRSTVWXYZ0]+$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "contract",
+        "workspace_id",
+        "tab_id",
+        "lease_fence",
+        "fingerprint_sha256",
+        "layout"
+      ],
+      "title": "HostTerminalsSnapshotV1",
+      "type": "object"
+    },
+    "snapshot_params": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "contract": {
+          "const": "host.terminals.v1",
+          "type": "string"
+        }
+      },
+      "required": [
+        "contract"
+      ],
+      "title": "HostTerminalsSnapshotParamsV1",
+      "type": "object"
+    }
+  },
+  "title": "staged read-only host terminals contract v1",
+  "validation_authority": {
+    "json_schema": "structural, canonical field forms, and per-array bounds",
+    "rust_validator": "normative for recomputed fingerprint, global identity uniqueness, container selection integrity, and cross-field topology bounds"
+  }
+}

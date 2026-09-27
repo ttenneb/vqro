@@ -171,6 +171,708 @@ fn grouped_worktrees_render_parent_branch_and_indented_child() {
 }
 
 #[test]
+fn typed_repository_projection_drives_space_identity_git_context_and_compact_count() {
+    let mut projected = snapshot();
+    projected.workspaces[0].label = "checkout-directory".into();
+    projected.workspaces[0].branch = Some("main".into());
+    projected.workspaces[0].git_ahead_behind = Some((1, 0));
+    let mut child = projected.workspaces[0].clone();
+    child.workspace_id = "ws_2".into();
+    child.number = 2;
+    child.label = "feature-directory".into();
+    child.branch = Some("feature/sidebar".into());
+    child.git_ahead_behind = Some((2, 1));
+    child.focused = false;
+    child.agent_status = AgentStatus::Blocked;
+    projected.workspaces.push(child);
+    let structure = Box::new(crate::protocol::endpoint::ClientShellStructureProjection {
+        session_id: "alpha".into(),
+        boot_id: projected.boot_id.clone(),
+        revision: projected.revision,
+        collections: Vec::new(),
+        delegations: Vec::new(),
+        repositories: vec![crate::protocol::endpoint::ClientShellRepository {
+            repository_id: "repo_1".into(),
+            label: "custom repository".into(),
+            repository_path: Some("/repo/custom".into()),
+            web_url: Some("https://github.com/example/custom".into()),
+            durable_identity: Some("https://github.com/example/custom".into()),
+            checkouts: vec![
+                crate::protocol::endpoint::ClientShellRepositoryCheckout {
+                    workspace_id: "ws_1".into(),
+                    checkout_path: Some("/repo/custom".into()),
+                    kind: crate::protocol::endpoint::ClientShellCheckoutKind::Primary,
+                    upstream: Some("origin/main".into()),
+                    upstream_web_url: Some("https://github.com/example/custom/tree/main".into()),
+                    detached_head: None,
+                },
+                crate::protocol::endpoint::ClientShellRepositoryCheckout {
+                    workspace_id: "ws_2".into(),
+                    checkout_path: Some("/repo/linked".into()),
+                    kind: crate::protocol::endpoint::ClientShellCheckoutKind::Linked,
+                    upstream: None,
+                    upstream_web_url: None,
+                    detached_head: None,
+                },
+            ],
+            last_focused_workspace_id: Some("ws_2".into()),
+        }],
+        space_order: vec![crate::protocol::endpoint::ClientShellSpaceRef {
+            kind: crate::protocol::endpoint::ClientShellSpaceKind::Repository,
+            id: "repo_1".into(),
+        }],
+    });
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    state.set_snapshot(Box::new(projected));
+    state.structure = Some(structure.clone());
+    state
+        .endpoints
+        .iter_mut()
+        .find(|endpoint| endpoint.endpoint_id.is_local())
+        .expect("local endpoint")
+        .structure = Some(structure);
+    state.set_pane_surface(surface());
+
+    let frame = state.compose(106, 24).expect("repository projection");
+    let text = frame
+        .cells
+        .chunks(frame.width as usize)
+        .map(|row| {
+            row.iter()
+                .map(|cell| cell.symbol.as_str())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(text.contains("custom repository"), "{text}");
+    assert!(text.contains("main → origin/ma"), "{text}");
+    assert!(text.contains("feature/sidebar"), "{text}");
+    assert!(text.contains("└─  feature/sidebar"), "{text}");
+    assert!(!text.contains("└─ · feature/sidebar"), "{text}");
+    let child_hit = &state.hits.workspaces[1];
+    let child_status = usize::from(child_hit.rect.y) * usize::from(frame.width)
+        + usize::from(child_hit.rect.x.saturating_add(1));
+    assert_eq!(
+        frame.cells[child_status].symbol,
+        status_icon(AgentStatus::Blocked, state.config.status_indicators),
+        "linked checkouts keep their own base-depth attention bubble"
+    );
+    assert!(text.contains("↑2 ↓1"), "{text}");
+    assert!(state.hits.workspaces[0].group_toggle.is_some());
+    assert_eq!(
+        state
+            .hits
+            .space_links
+            .iter()
+            .filter(|hit| matches!(hit.target, SpaceLinkTarget::LocalDirectory(_)))
+            .count(),
+        3,
+        "the repository and both local branch labels open the checkout"
+    );
+    for hit in &state.hits.space_links {
+        let index = usize::from(hit.rect.y) * usize::from(frame.width) + usize::from(hit.rect.x);
+        let hyperlink = frame.cells[index].hyperlink.expect("OSC 8 link") as usize;
+        let expected = match &hit.target {
+            SpaceLinkTarget::LocalDirectory(path) => format!("file://{path}"),
+            SpaceLinkTarget::WebUrl(_) => "https://github.com/example/custom/tree/main".to_string(),
+        };
+        assert_eq!(frame.hyperlinks[hyperlink], expected);
+    }
+    assert!(state.hits.space_links.iter().any(|hit| matches!(
+        &hit.target,
+        SpaceLinkTarget::LocalDirectory(path) if path == "/repo/linked"
+    )));
+    let repository_link = state
+        .hits
+        .space_links
+        .iter()
+        .find(|hit| matches!(hit.target, SpaceLinkTarget::LocalDirectory(_)))
+        .expect("repository directory link");
+    assert!(matches!(
+        &repository_link.target,
+        SpaceLinkTarget::LocalDirectory(path) if path == "/repo/custom"
+    ));
+    let upstream_link = state
+        .hits
+        .space_links
+        .iter()
+        .find(|hit| matches!(hit.target, SpaceLinkTarget::WebUrl(_)))
+        .expect("upstream web link");
+    assert!(matches!(
+        &upstream_link.target,
+        SpaceLinkTarget::WebUrl(url)
+            if url == "https://github.com/example/custom/tree/main"
+    ));
+    let repository_rect = repository_link.rect;
+    let upstream_rect = upstream_link.rect;
+    for (rect, expected) in [
+        (
+            repository_rect,
+            SpaceLinkTarget::LocalDirectory("/repo/custom".into()),
+        ),
+        (
+            upstream_rect,
+            SpaceLinkTarget::WebUrl("https://github.com/example/custom/tree/main".into()),
+        ),
+    ] {
+        let click =
+            state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: rect.x,
+                row: rect.y,
+                modifiers: KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+            })]);
+        assert!(
+            matches!(
+                (&click.actions[..], &expected),
+                ([ClientShellAction::OpenLocalDirectory(actual)], SpaceLinkTarget::LocalDirectory(expected))
+                    if actual == expected
+            ) || matches!(
+                (&click.actions[..], &expected),
+                ([ClientShellAction::OpenSafeWebUrl(actual)], SpaceLinkTarget::WebUrl(expected))
+                    if actual == expected
+            )
+        );
+    }
+    let ctrl_only_click =
+        state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: upstream_rect.x,
+            row: upstream_rect.y,
+            modifiers: KeyModifiers::CONTROL,
+        })]);
+    assert!(matches!(
+        &ctrl_only_click.actions[..],
+        [ClientShellAction::OpenSafeWebUrl(url)]
+            if url == "https://github.com/example/custom/tree/main"
+    ));
+
+    state.collapsed_groups.insert("repo_1".into());
+    state.compose(106, 24).expect("collapsed repository space");
+    assert_eq!(state.hits.workspaces[0].workspace_id, "ws_2");
+    assert_eq!(state.hits.workspaces[0].move_workspace_id, "ws_1");
+    let navigation_entries =
+        state.navigation_workspace_entries(state.snapshot.as_deref().expect("snapshot"));
+    assert_eq!(
+        state.navigation_workspace_id(
+            state.snapshot.as_deref().expect("snapshot"),
+            &navigation_entries[0],
+        ),
+        "ws_2"
+    );
+    state.collapsed_groups.remove("repo_1");
+
+    state.sidebar_collapsed = true;
+    state.sidebar_collapsed_manual = true;
+    let compact_snapshot = state.snapshot.as_deref().expect("snapshot");
+    let compact_structure = state
+        .endpoints
+        .iter()
+        .find(|endpoint| endpoint.endpoint_id.is_local())
+        .and_then(|endpoint| endpoint.structure.as_deref())
+        .expect("repository structure");
+    assert_eq!(
+        (
+            compact_structure.boot_id.as_str(),
+            compact_structure.revision
+        ),
+        (compact_snapshot.boot_id.as_str(), compact_snapshot.revision)
+    );
+    assert_eq!(
+        super::super::sidebar::workspace_entries_with_structure(
+            compact_snapshot,
+            Some(compact_structure),
+            None,
+            &HashSet::from(["repo_1".to_owned()]),
+        )
+        .into_iter()
+        .filter(|entry| !entry.indented)
+        .count(),
+        1
+    );
+    let compact = state.compose(106, 24).expect("compact repository spaces");
+    assert_eq!(
+        state.hits.workspaces.len(),
+        1,
+        "compact workspace hits: {:?}",
+        state
+            .hits
+            .workspaces
+            .iter()
+            .map(|hit| hit.workspace_id.as_str())
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(state.hits.workspaces[0].workspace_id, "ws_2");
+    let compact_status = usize::from(state.hits.workspaces[0].rect.y) * usize::from(compact.width)
+        + usize::from(state.hits.workspaces[0].rect.x.saturating_add(2));
+    assert_eq!(
+        compact.cells[compact_status].fg,
+        crate::protocol::color_to_u32(state.config.palette.red),
+        "compact repository status must aggregate hidden checkout attention"
+    );
+
+    state.collapsed_groups.insert("repo_1".into());
+    state.open_workspace_context_menu("ws_1".into(), 1, 1);
+    assert!(matches!(
+        state.overlay,
+        Some(ClientShellOverlay::ContextMenu(ClientContextMenuOverlay {
+            target: ClientContextMenuTarget::Workspace {
+                has_worktree_children: true,
+                collapsed: true,
+                is_linked_worktree: false,
+                ..
+            },
+            ..
+        }))
+    ));
+}
+
+#[test]
+fn repository_collapse_keys_are_scoped_per_remote_endpoint() {
+    let first = ClientEndpointId::Ssh(
+        crate::client::endpoint::ProfileId::parse("11111111111111111111111111111111").unwrap(),
+    );
+    let second = ClientEndpointId::Ssh(
+        crate::client::endpoint::ProfileId::parse("22222222222222222222222222222222").unwrap(),
+    );
+    assert_ne!(
+        super::super::sidebar::repository_group_key(&first, "repo_1"),
+        super::super::sidebar::repository_group_key(&second, "repo_1")
+    );
+}
+
+#[test]
+fn typed_single_checkout_repository_is_still_a_repository_space() {
+    let mut projected = snapshot();
+    projected.workspaces[0].branch = None;
+    let mut structure = crate::protocol::endpoint::ClientShellStructureProjection {
+        session_id: "alpha".into(),
+        boot_id: projected.boot_id.clone(),
+        revision: projected.revision,
+        collections: Vec::new(),
+        delegations: Vec::new(),
+        repositories: vec![crate::protocol::endpoint::ClientShellRepository {
+            repository_id: "repo_1".into(),
+            label: "stable repository label".into(),
+            repository_path: None,
+            web_url: None,
+            durable_identity: None,
+            checkouts: vec![crate::protocol::endpoint::ClientShellRepositoryCheckout {
+                workspace_id: "ws_1".into(),
+                checkout_path: None,
+                kind: crate::protocol::endpoint::ClientShellCheckoutKind::Primary,
+                upstream: None,
+                upstream_web_url: None,
+                detached_head: Some("abc1234".into()),
+            }],
+            last_focused_workspace_id: Some("ws_1".into()),
+        }],
+        space_order: vec![crate::protocol::endpoint::ClientShellSpaceRef {
+            kind: crate::protocol::endpoint::ClientShellSpaceKind::Repository,
+            id: "repo_1".into(),
+        }],
+    };
+    let entries = super::super::sidebar::workspace_entries_with_structure(
+        &projected,
+        Some(&structure),
+        None,
+        &HashSet::new(),
+    );
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].repository_index, Some(0));
+    assert!(!entries[0].repository_has_children);
+    let rows = super::super::sidebar::projected_workspace_rows(
+        &projected.workspaces[0],
+        projected.workspaces[0].agent_status,
+        &entries[0],
+        Some(&structure),
+        &Config::default().ui.sidebar.spaces,
+    );
+    assert!(rows.iter().flatten().any(|token| matches!(
+        &token.kind,
+        crate::ui::ResolvedTokenKind::Branch(branch) if branch == "detached@abc1234"
+    )));
+    structure.repositories[0].checkouts[0].detached_head = None;
+    let unknown_rows = super::super::sidebar::projected_workspace_rows(
+        &projected.workspaces[0],
+        projected.workspaces[0].agent_status,
+        &entries[0],
+        Some(&structure),
+        &Config::default().ui.sidebar.spaces,
+    );
+    assert!(!unknown_rows.iter().flatten().any(|token| matches!(
+        &token.kind,
+        crate::ui::ResolvedTokenKind::Branch(branch) if branch.contains("detached")
+    )));
+}
+
+#[test]
+fn typed_standalone_space_order_is_authoritative_without_repositories() {
+    let mut projected = snapshot();
+    let mut second = projected.workspaces[0].clone();
+    second.workspace_id = "ws_2".into();
+    second.focused = false;
+    projected.workspaces.push(second);
+    let structure = crate::protocol::endpoint::ClientShellStructureProjection {
+        session_id: "alpha".into(),
+        boot_id: projected.boot_id.clone(),
+        revision: projected.revision,
+        collections: Vec::new(),
+        delegations: Vec::new(),
+        repositories: Vec::new(),
+        space_order: vec![
+            crate::protocol::endpoint::ClientShellSpaceRef {
+                kind: crate::protocol::endpoint::ClientShellSpaceKind::StandaloneWorkspace,
+                id: "ws_2".into(),
+            },
+            crate::protocol::endpoint::ClientShellSpaceRef {
+                kind: crate::protocol::endpoint::ClientShellSpaceKind::StandaloneWorkspace,
+                id: "ws_1".into(),
+            },
+        ],
+    };
+
+    let entries = super::super::sidebar::workspace_entries_with_structure(
+        &projected,
+        Some(&structure),
+        None,
+        &HashSet::new(),
+    );
+
+    assert_eq!(
+        entries
+            .iter()
+            .map(|entry| projected.workspaces[entry.index].workspace_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["ws_2", "ws_1"]
+    );
+}
+
+#[test]
+fn spaces_document_controls_workspace_order_labels_and_hierarchy() {
+    use crate::extension_contract::{
+        HostDocumentItem, HostDocumentItemFlags, HostDocumentV1, HostItemRole, HostSurface,
+        HostTarget, HOST_DOCUMENT_CONTRACT_V1,
+    };
+
+    let mut projected = snapshot();
+    let mut child = projected.workspaces[0].clone();
+    child.workspace_id = "ws_2".into();
+    child.focused = false;
+    let mut standalone = projected.workspaces[0].clone();
+    standalone.workspace_id = "ws_3".into();
+    standalone.focused = false;
+    projected.workspaces.extend([child, standalone]);
+    let structure = crate::protocol::endpoint::ClientShellStructureProjection {
+        session_id: "alpha".into(),
+        boot_id: projected.boot_id.clone(),
+        revision: projected.revision,
+        collections: Vec::new(),
+        delegations: Vec::new(),
+        repositories: vec![crate::protocol::endpoint::ClientShellRepository {
+            repository_id: "repo_1".into(),
+            label: "native repository".into(),
+            repository_path: None,
+            web_url: None,
+            durable_identity: None,
+            checkouts: vec![
+                crate::protocol::endpoint::ClientShellRepositoryCheckout {
+                    workspace_id: "ws_1".into(),
+                    checkout_path: None,
+                    kind: crate::protocol::endpoint::ClientShellCheckoutKind::Primary,
+                    upstream: None,
+                    upstream_web_url: None,
+                    detached_head: None,
+                },
+                crate::protocol::endpoint::ClientShellRepositoryCheckout {
+                    workspace_id: "ws_2".into(),
+                    checkout_path: None,
+                    kind: crate::protocol::endpoint::ClientShellCheckoutKind::Linked,
+                    upstream: None,
+                    upstream_web_url: None,
+                    detached_head: None,
+                },
+            ],
+            last_focused_workspace_id: Some("ws_1".into()),
+        }],
+        space_order: vec![
+            crate::protocol::endpoint::ClientShellSpaceRef {
+                kind: crate::protocol::endpoint::ClientShellSpaceKind::Repository,
+                id: "repo_1".into(),
+            },
+            crate::protocol::endpoint::ClientShellSpaceRef {
+                kind: crate::protocol::endpoint::ClientShellSpaceKind::StandaloneWorkspace,
+                id: "ws_3".into(),
+            },
+        ],
+    };
+    let item = |id: &str, parent_id: Option<&str>, role, label: &str| HostDocumentItem {
+        id: id.into(),
+        parent_id: parent_id.map(str::to_owned),
+        role,
+        label: label.into(),
+        detail: None,
+        terminal: None,
+        action_ids: Vec::new(),
+        flags: HostDocumentItemFlags::default(),
+    };
+    let document = HostDocumentV1 {
+        contract: HOST_DOCUMENT_CONTRACT_V1.into(),
+        namespace: "vqro.spaces".into(),
+        generation: 1,
+        revision: projected.revision,
+        surface: HostSurface::Navigation,
+        target: HostTarget::Session,
+        items: vec![
+            item("workspace:ws_3", None, HostItemRole::Section, "Scratch doc"),
+            item(
+                "repository:repo_1",
+                None,
+                HostItemRole::Group,
+                "Repository doc",
+            ),
+            item(
+                "workspace:ws_2",
+                Some("repository:repo_1"),
+                HostItemRole::Section,
+                "Feature doc",
+            ),
+            item(
+                "workspace:ws_1",
+                Some("repository:repo_1"),
+                HostItemRole::Section,
+                "Main doc",
+            ),
+        ],
+        actions: Vec::new(),
+        required_capabilities: Vec::new(),
+    };
+    let documents = crate::protocol::endpoint::HostDocumentsProjectionV1 {
+        boot_id: projected.boot_id.clone(),
+        revision: projected.revision,
+        documents: vec![crate::protocol::endpoint::HostDocumentProjectionEntryV1 {
+            provider_priority: 100,
+            document,
+            confirmation_tokens: Default::default(),
+        }],
+    };
+
+    let entries = super::super::sidebar::workspace_entries_with_structure(
+        &projected,
+        Some(&structure),
+        Some(&documents),
+        &HashSet::new(),
+    );
+    assert_eq!(
+        entries
+            .iter()
+            .map(|entry| (
+                projected.workspaces[entry.index].workspace_id.as_str(),
+                entry.indented,
+                entry.label.as_deref(),
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            ("ws_3", false, Some("Scratch doc")),
+            ("ws_1", false, Some("Repository doc")),
+            ("ws_2", true, Some("Feature doc")),
+        ]
+    );
+
+    let mut incomplete = documents.clone();
+    incomplete.documents[0]
+        .document
+        .items
+        .retain(|item| item.id != "workspace:ws_3");
+    let fallback = super::super::sidebar::workspace_entries_with_structure(
+        &projected,
+        Some(&structure),
+        Some(&incomplete),
+        &HashSet::new(),
+    );
+    assert_eq!(
+        fallback
+            .iter()
+            .map(|entry| projected.workspaces[entry.index].workspace_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["ws_1", "ws_2", "ws_3"]
+    );
+    assert!(fallback.iter().all(|entry| entry.label.is_none()));
+}
+
+#[test]
+fn highest_priority_spaces_document_wins_deterministically() {
+    use crate::extension_contract::{
+        HostDocumentItem, HostDocumentItemFlags, HostDocumentV1, HostItemRole, HostSurface,
+        HostTarget, HOST_DOCUMENT_CONTRACT_V1,
+    };
+
+    let projected = snapshot();
+    let structure = crate::protocol::endpoint::ClientShellStructureProjection {
+        session_id: "alpha".into(),
+        boot_id: projected.boot_id.clone(),
+        revision: projected.revision,
+        collections: Vec::new(),
+        delegations: Vec::new(),
+        repositories: Vec::new(),
+        space_order: vec![crate::protocol::endpoint::ClientShellSpaceRef {
+            kind: crate::protocol::endpoint::ClientShellSpaceKind::StandaloneWorkspace,
+            id: "ws_1".into(),
+        }],
+    };
+    let document = |label: &str| HostDocumentV1 {
+        contract: HOST_DOCUMENT_CONTRACT_V1.into(),
+        namespace: "vqro.spaces".into(),
+        generation: 1,
+        revision: projected.revision,
+        surface: HostSurface::Navigation,
+        target: HostTarget::Session,
+        items: vec![HostDocumentItem {
+            id: "workspace:ws_1".into(),
+            parent_id: None,
+            role: HostItemRole::Section,
+            label: label.into(),
+            detail: None,
+            terminal: None,
+            action_ids: Vec::new(),
+            flags: HostDocumentItemFlags::default(),
+        }],
+        actions: Vec::new(),
+        required_capabilities: Vec::new(),
+    };
+    let documents = crate::protocol::endpoint::HostDocumentsProjectionV1 {
+        boot_id: projected.boot_id.clone(),
+        revision: projected.revision,
+        documents: vec![
+            crate::protocol::endpoint::HostDocumentProjectionEntryV1 {
+                provider_priority: 20,
+                document: document("high first"),
+                confirmation_tokens: Default::default(),
+            },
+            crate::protocol::endpoint::HostDocumentProjectionEntryV1 {
+                provider_priority: 10,
+                document: document("low"),
+                confirmation_tokens: Default::default(),
+            },
+            crate::protocol::endpoint::HostDocumentProjectionEntryV1 {
+                provider_priority: 20,
+                document: document("high second"),
+                confirmation_tokens: Default::default(),
+            },
+        ],
+    };
+
+    let entries = super::super::sidebar::workspace_entries_with_structure(
+        &projected,
+        Some(&structure),
+        Some(&documents),
+        &HashSet::new(),
+    );
+    assert_eq!(entries[0].label.as_deref(), Some("high first"));
+
+    let mut malformed_winner = documents;
+    malformed_winner.documents[0].document.items.clear();
+    let fallback = super::super::sidebar::workspace_entries_with_structure(
+        &projected,
+        Some(&structure),
+        Some(&malformed_winner),
+        &HashSet::new(),
+    );
+    assert_eq!(fallback.len(), 1);
+    assert_eq!(fallback[0].label, None);
+}
+
+#[test]
+fn typed_repository_drag_moves_all_checkouts_when_visual_root_is_linked() {
+    let mut projected = snapshot();
+    let mut sibling = projected.workspaces[0].clone();
+    sibling.workspace_id = "ws_2".into();
+    sibling.focused = false;
+    let mut standalone = projected.workspaces[0].clone();
+    standalone.workspace_id = "ws_3".into();
+    standalone.focused = false;
+    projected.workspaces.extend([sibling, standalone]);
+    let structure = Box::new(crate::protocol::endpoint::ClientShellStructureProjection {
+        session_id: "alpha".into(),
+        boot_id: projected.boot_id.clone(),
+        revision: projected.revision,
+        collections: Vec::new(),
+        delegations: Vec::new(),
+        repositories: vec![crate::protocol::endpoint::ClientShellRepository {
+            repository_id: "repo_1".into(),
+            label: "repo".into(),
+            repository_path: None,
+            web_url: None,
+            durable_identity: None,
+            checkouts: vec![
+                crate::protocol::endpoint::ClientShellRepositoryCheckout {
+                    workspace_id: "ws_1".into(),
+                    checkout_path: None,
+                    kind: crate::protocol::endpoint::ClientShellCheckoutKind::Linked,
+                    upstream: None,
+                    upstream_web_url: None,
+                    detached_head: None,
+                },
+                crate::protocol::endpoint::ClientShellRepositoryCheckout {
+                    workspace_id: "ws_2".into(),
+                    checkout_path: None,
+                    kind: crate::protocol::endpoint::ClientShellCheckoutKind::Linked,
+                    upstream: None,
+                    upstream_web_url: None,
+                    detached_head: None,
+                },
+            ],
+            last_focused_workspace_id: Some("ws_1".into()),
+        }],
+        space_order: vec![
+            crate::protocol::endpoint::ClientShellSpaceRef {
+                kind: crate::protocol::endpoint::ClientShellSpaceKind::Repository,
+                id: "repo_1".into(),
+            },
+            crate::protocol::endpoint::ClientShellSpaceRef {
+                kind: crate::protocol::endpoint::ClientShellSpaceKind::StandaloneWorkspace,
+                id: "ws_3".into(),
+            },
+        ],
+    });
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    state.set_snapshot(Box::new(projected));
+    state.structure = Some(structure);
+
+    assert!(matches!(
+        state.workspace_move_method("ws_1", None),
+        Some(crate::api::schema::Method::WorkspaceMoveBlock(
+            crate::api::schema::WorkspaceMoveBlockParams { workspace_ids, .. }
+        )) if workspace_ids == ["ws_1", "ws_2"]
+    ));
+}
+
+#[test]
+fn repository_group_survives_without_a_primary_checkout_projection() {
+    let mut projected = snapshot();
+    projected.workspaces[0].worktree = Some(ClientShellWorktree {
+        key: "repo".into(),
+        label: "repo".into(),
+        is_linked_worktree: true,
+    });
+    let mut sibling = projected.workspaces[0].clone();
+    sibling.workspace_id = "ws_2".into();
+    sibling.number = 2;
+    sibling.focused = false;
+    projected.workspaces.push(sibling);
+
+    let entries = super::super::sidebar::workspace_entries(&projected, &HashSet::new());
+
+    assert_eq!(entries.len(), 2);
+    assert!(!entries[0].indented);
+    assert!(entries[1].indented);
+    assert_eq!(
+        super::super::sidebar::parent_group_key(&projected, entries[0].index).as_deref(),
+        Some("repo")
+    );
+}
+
+#[test]
 fn workspace_click_waits_for_release_and_drag_reorders_by_stable_id() {
     let mut projected = snapshot();
     for index in 2..=3 {
@@ -844,7 +1546,7 @@ fn workspace_actions_preserve_selected_target_and_client_confirmation() {
     assert!(matches!(
         state.overlay.as_ref(),
         Some(ClientShellOverlay::ConfirmClose(ClientConfirmCloseOverlay {
-            workspace_id,
+            target: ClientConfirmCloseTarget::Workspace { workspace_id },
             ..
         })) if workspace_id == "ws_2"
     ));
@@ -1098,7 +1800,7 @@ fn worktree_action_errors_expire_without_more_input() {
         crate::input::KeybindMatch::Action(crate::input::KeybindAction::RemoveWorktree),
         &mut guard,
     );
-    let message = "This workspace is not a Herdr-managed worktree checkout.";
+    let message = "This workspace is not a vqro-managed worktree checkout.";
     assert_eq!(state.endpoint_error.as_deref(), Some(message));
 
     let deadline = state.endpoint_error_deadline.expect("deadline");
@@ -1137,7 +1839,7 @@ fn worktree_prepare_rejection_notice_expires() {
         &request_id,
         Err(ClientShellEndpointError {
             code: Some("not_git_worktree".into()),
-            message: "Herdr worktree actions require a workspace inside a Git work tree".into(),
+            message: "vqro worktree actions require a workspace inside a Git work tree".into(),
         }),
     );
     let notice = state

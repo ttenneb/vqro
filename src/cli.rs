@@ -24,7 +24,10 @@ macro_rules! println {
 
 mod agent;
 mod api;
+mod collection;
 mod completion;
+mod delegation;
+mod extension;
 mod integration;
 mod machine;
 mod notification;
@@ -34,6 +37,7 @@ mod protocol_guard;
 mod runtime;
 mod server;
 mod server_not_running;
+mod service_binding;
 mod spec;
 mod status;
 mod tab;
@@ -42,17 +46,14 @@ mod workspace;
 mod worktree;
 
 const TERMINAL_SESSION_OBSERVE_USAGE: &str =
-    "usage: herdr terminal session observe <target> [--cols N] [--rows N]";
+    "usage: vqro terminal session observe <target> [--cols N] [--rows N]";
 const TERMINAL_SESSION_CONTROL_USAGE: &str =
-    "usage: herdr terminal session control <target> [--takeover] [--cols N] [--rows N]";
+    "usage: vqro terminal session control <target> [--takeover] [--cols N] [--rows N]";
 pub(crate) const AGENT_HELP_FOOTER: &str = concat!(
-    "Are you an AI? Use these resources ONLY IF your task specifically asks you to:\n",
-    "  Help a human understand or set up Herdr for the first time:\n",
-    "    https://herdr.dev/agent-guide.md\n",
-    "  Debug or investigate a problem with Herdr:\n",
-    "    https://herdr.dev/llms.txt\n",
-    "  Control Herdr panes, agents, or workspaces:\n",
-    "    SKIP if a Herdr skill is already in your context. Otherwise run: herdr --skill",
+    "Are you an AI working with vqro?\n",
+    "  Read the alpha guide only when your task requires runtime control:\n",
+    "    vqro --skill\n",
+    "  Keep VQRO_* routing isolated from any installed Herdr session.",
 );
 
 pub(crate) fn parse_token_assignment(raw: &str) -> Result<(String, Option<String>), String> {
@@ -108,6 +109,12 @@ pub fn maybe_run(args: &[String]) -> std::io::Result<CommandOutcome> {
     }
 
     let exit_code = match command {
+        "_extension-service" => {
+            let Some(provider) = args.get(2) else {
+                return Ok(CommandOutcome::Handled(2));
+            };
+            crate::first_party::service::run(provider)?
+        }
         "server" => {
             let Some(exit_code) = server::run_server_command(&args[2..])? else {
                 return Ok(CommandOutcome::NotCli);
@@ -123,6 +130,10 @@ pub fn maybe_run(args: &[String]) -> std::io::Result<CommandOutcome> {
         "workspace" => workspace::run_workspace_command(&args[2..])?,
         "worktree" => worktree::run_worktree_command(&args[2..])?,
         "tab" => tab::run_tab_command(&args[2..])?,
+        "collection" => collection::run_collection_command(&args[2..])?,
+        "service-binding" => service_binding::run_service_binding_command(&args[2..])?,
+        "extension" => extension::run_extension_command(&args[2..])?,
+        "delegation" => delegation::run_delegation_command(&args[2..])?,
         "notification" => notification::run_notification_command(&args[2..])?,
         "agent" => agent::run_agent_command(&args[2..])?,
         "terminal" => run_terminal_command(&args[2..])?,
@@ -433,6 +444,7 @@ fn run_session_command(args: &[String]) -> std::io::Result<i32> {
         "attach" => session_attach_help(&args[1..]),
         "stop" => session_stop(&args[1..]),
         "delete" => session_delete(&args[1..]),
+        "import-herdr" => session_import_herdr(&args[1..]),
         "help" | "--help" | "-h" => {
             print_session_help();
             Ok(0)
@@ -449,15 +461,15 @@ fn session_attach_help(args: &[String]) -> std::io::Result<i32> {
         args.first().map(String::as_str),
         Some("help" | "--help" | "-h")
     ) {
-        eprintln!("usage: herdr session attach <name>");
+        eprintln!("usage: vqro session attach <name>");
         return Ok(0);
     }
-    eprintln!("usage: herdr session attach <name>");
+    eprintln!("usage: vqro session attach <name>");
     Ok(2)
 }
 
 fn session_list(args: &[String]) -> std::io::Result<i32> {
-    let json = match parse_session_json_only(args, "usage: herdr session list [--json]") {
+    let json = match parse_session_json_only(args, "usage: vqro session list [--json]") {
         Ok(json) => json,
         Err(code) => return Ok(code),
     };
@@ -475,7 +487,7 @@ fn session_list(args: &[String]) -> std::io::Result<i32> {
 
 fn session_stop(args: &[String]) -> std::io::Result<i32> {
     let (name, json) =
-        match parse_session_name_and_json(args, "usage: herdr session stop <name> [--json]") {
+        match parse_session_name_and_json(args, "usage: vqro session stop <name> [--json]") {
             Ok(parsed) => parsed,
             Err(code) => return Ok(code),
         };
@@ -508,7 +520,7 @@ fn session_stop(args: &[String]) -> std::io::Result<i32> {
 
 fn session_delete(args: &[String]) -> std::io::Result<i32> {
     let (name, json) =
-        match parse_session_name_and_json(args, "usage: herdr session delete <name> [--json]") {
+        match parse_session_name_and_json(args, "usage: vqro session delete <name> [--json]") {
             Ok(parsed) => parsed,
             Err(code) => return Ok(code),
         };
@@ -532,10 +544,64 @@ fn session_delete(args: &[String]) -> std::io::Result<i32> {
     }
 }
 
+fn session_import_herdr(args: &[String]) -> std::io::Result<i32> {
+    const USAGE: &str =
+        "usage: vqro session import-herdr [HERDR_SESSION] --name <VQRO_SESSION> [--json]";
+    let args = expand_equals_args(args, &["--name"]);
+    let mut source = None;
+    let mut target = None;
+    let mut json = false;
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--name" => {
+                index += 1;
+                let Some(value) = args.get(index) else {
+                    eprintln!("{USAGE}");
+                    return Ok(2);
+                };
+                if target.replace(value.clone()).is_some() {
+                    eprintln!("{USAGE}");
+                    return Ok(2);
+                }
+            }
+            "--json" => json = true,
+            value if value.starts_with('-') || source.is_some() => {
+                eprintln!("{USAGE}");
+                return Ok(2);
+            }
+            value => source = Some(value.to_owned()),
+        }
+        index += 1;
+    }
+    let Some(target) = target else {
+        eprintln!("{USAGE}");
+        return Ok(2);
+    };
+
+    match crate::session::import_herdr_session(source.as_deref(), &target) {
+        Ok(imported) => {
+            if json {
+                _print_json(&serde_json::json!({ "imported": imported }));
+            } else {
+                println!(
+                    "imported Herdr session {} as vqro session {}\nattach with: vqro session attach {}",
+                    imported.source, imported.target, imported.target
+                );
+            }
+            Ok(0)
+        }
+        Err(message) => {
+            print_session_error("session_import_failed", &message);
+            Ok(1)
+        }
+    }
+}
+
 fn terminal_attach(args: &[String]) -> std::io::Result<i32> {
     let (terminal_id, takeover) = match parse_attach_target(
         args,
-        "usage: herdr terminal attach <terminal_id> [--takeover]",
+        "usage: vqro terminal attach <terminal_id> [--takeover]",
     ) {
         Ok(parsed) => parsed,
         Err(code) => return Ok(code),
@@ -687,7 +753,7 @@ fn terminal_title(args: &[String]) -> std::io::Result<i32> {
     match args.first().map(|arg| arg.as_str()) {
         Some("set") => {
             if args.len() != 2 {
-                eprintln!("usage: herdr terminal title set <title>");
+                eprintln!("usage: vqro terminal title set <title>");
                 return Ok(2);
             }
             print_response(&send_request(&Request {
@@ -699,7 +765,7 @@ fn terminal_title(args: &[String]) -> std::io::Result<i32> {
         }
         Some("clear") => {
             if args.len() != 1 {
-                eprintln!("usage: herdr terminal title clear");
+                eprintln!("usage: vqro terminal title clear");
                 return Ok(2);
             }
             print_response(&send_request(&Request {
@@ -708,12 +774,12 @@ fn terminal_title(args: &[String]) -> std::io::Result<i32> {
             })?)
         }
         Some("help" | "--help" | "-h") => {
-            eprintln!("usage: herdr terminal title set <title>");
+            eprintln!("usage: vqro terminal title set <title>");
             eprintln!("       herdr terminal title clear");
             Ok(0)
         }
         _ => {
-            eprintln!("usage: herdr terminal title set <title>");
+            eprintln!("usage: vqro terminal title set <title>");
             eprintln!("       herdr terminal title clear");
             Ok(2)
         }
@@ -1040,12 +1106,15 @@ fn print_terminal_help() {
 }
 
 fn print_session_help() {
-    eprintln!("herdr session commands:");
-    eprintln!("  herdr session list [--json]");
-    eprintln!("  herdr session attach <name>");
-    eprintln!("  herdr session stop <name> [--json]");
-    eprintln!("  herdr session delete <name> [--json]");
-    eprintln!("  use 'default' as <name> to target the default session for stop");
+    eprintln!("vqro session commands:");
+    eprintln!("  vqro session list [--json]");
+    eprintln!("  vqro session attach <name>");
+    eprintln!("  vqro session stop <name> [--json]");
+    eprintln!("  vqro session delete <name> [--json]");
+    eprintln!("  vqro session import-herdr [HERDR_SESSION] --name <VQRO_SESSION> [--json]");
+    eprintln!(
+        "  use 'default' as <name> to stop the default vqro session or as HERDR_SESSION to import Herdr's default"
+    );
 }
 
 fn _print_json<T: Serialize>(value: &T) {

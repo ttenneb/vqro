@@ -438,6 +438,13 @@ async fn run_client_loop(
                     })
                 }),
         );
+        shell.set_endpoint_capabilities_for(
+            &endpoint::ClientEndpointId::Local,
+            initial
+                .as_ref()
+                .and_then(|(_, handshake)| handshake.endpoint_capabilities.clone())
+                .unwrap_or_default(),
+        );
         if local_unavailable {
             shell.set_endpoint_status(
                 &endpoint::ClientEndpointId::Local,
@@ -666,7 +673,11 @@ async fn run_client_loop(
                         }
                     }
                 }
-                apply_client_shell_input_source_changes(&mut state, &mut prefix_input_source);
+                apply_client_shell_input_source_changes(
+                    &mut state,
+                    &mut write_stream,
+                    &mut prefix_input_source,
+                );
                 if let Some(shell) = state.shell.as_mut() {
                     let cleanup = shell.take_pending_graphics_cleanup();
                     let frame = shell.compose(state.reported_size.0, state.reported_size.1);
@@ -1203,6 +1214,10 @@ async fn run_client_loop(
                             &endpoint_id,
                             agent_view_projection_supported,
                         );
+                        shell.set_endpoint_capabilities_for(
+                            &endpoint_id,
+                            negotiation.capabilities(),
+                        );
                         shell.compose(state.reported_size.0, state.reported_size.1)
                     });
                     let reader_quit = writer.stop_handle();
@@ -1355,6 +1370,7 @@ async fn run_client_loop(
                         };
                         apply_client_shell_input_source_changes(
                             &mut state,
+                            &mut write_stream,
                             &mut prefix_input_source,
                         );
                         if let Some(frame) = composed {
@@ -1388,6 +1404,7 @@ async fn run_client_loop(
                         };
                         apply_client_shell_input_source_changes(
                             &mut state,
+                            &mut write_stream,
                             &mut prefix_input_source,
                         );
                         if compose_fallback {
@@ -1723,6 +1740,7 @@ async fn run_client_loop(
                         }
                         apply_client_shell_input_source_changes(
                             &mut state,
+                            &mut write_stream,
                             &mut prefix_input_source,
                         );
                         let (replay_mouse, dispatch_repaint) = dispatch_client_shell_actions(
@@ -1887,6 +1905,192 @@ async fn run_client_loop(
                             }
                             Ok(endpoint::EndpointControlMessage::Ignored) => {
                                 debug!(%kind, "ignoring unknown endpoint control message");
+                                continue;
+                            }
+                            Ok(endpoint::EndpointControlMessage::Structure(projection)) => {
+                                if let Some(shell) = state.shell.as_mut() {
+                                    shell.set_endpoint_structure_for_generation(
+                                        &endpoint_id,
+                                        generation,
+                                        projection,
+                                    );
+                                }
+                                continue;
+                            }
+                            Ok(endpoint::EndpointControlMessage::HostDocuments(projection)) => {
+                                if let Some(shell) = state.shell.as_mut() {
+                                    shell.set_endpoint_host_documents_for_generation(
+                                        &endpoint_id,
+                                        generation,
+                                        projection,
+                                    );
+                                }
+                                continue;
+                            }
+                            Ok(endpoint::EndpointControlMessage::TerminalViewsSurface(surface)) => {
+                                let repaint = state.shell.as_mut().is_some_and(|shell| {
+                                    shell.set_terminal_views_surface_for_generation(
+                                        &endpoint_id,
+                                        generation,
+                                        *surface,
+                                    )
+                                });
+                                if repaint {
+                                    if let Some(frame) = state.shell.as_mut().and_then(|shell| {
+                                        shell.compose(state.reported_size.0, state.reported_size.1)
+                                    }) {
+                                        state.present_frame(frame);
+                                    }
+                                    apply_client_shell_input_source_changes(
+                                        &mut state,
+                                        &mut write_stream,
+                                        &mut prefix_input_source,
+                                    );
+                                }
+                                continue;
+                            }
+                            Ok(endpoint::EndpointControlMessage::PaneViewResult(result)) => {
+                                let repaint = state.shell.as_mut().is_some_and(|shell| {
+                                    shell.handle_pane_view_result(&endpoint_id, generation, *result)
+                                });
+                                if repaint {
+                                    if let Some(frame) = state.shell.as_mut().and_then(|shell| {
+                                        shell.compose(state.reported_size.0, state.reported_size.1)
+                                    }) {
+                                        state.present_frame(frame);
+                                    }
+                                    apply_client_shell_input_source_changes(
+                                        &mut state,
+                                        &mut write_stream,
+                                        &mut prefix_input_source,
+                                    );
+                                }
+                                continue;
+                            }
+                            Ok(endpoint::EndpointControlMessage::PaneViewActionResult(result)) => {
+                                let repaint = state.shell.as_mut().is_some_and(|shell| {
+                                    shell.handle_pane_view_action_result(
+                                        &endpoint_id,
+                                        generation,
+                                        *result,
+                                    )
+                                });
+                                if repaint {
+                                    if let Some(frame) = state.shell.as_mut().and_then(|shell| {
+                                        shell.compose(state.reported_size.0, state.reported_size.1)
+                                    }) {
+                                        state.present_frame(frame);
+                                    }
+                                    apply_client_shell_input_source_changes(
+                                        &mut state,
+                                        &mut write_stream,
+                                        &mut prefix_input_source,
+                                    );
+                                }
+                                continue;
+                            }
+                            Ok(endpoint::EndpointControlMessage::NativeApiResponse(response)) => {
+                                let chunk = response.decode_data().map_err(|message| {
+                                    ClientError::Protocol(protocol::FramingError::Io(
+                                        io::Error::new(io::ErrorKind::InvalidData, message),
+                                    ))
+                                })?;
+                                let completed = endpoint_commands
+                                    .receive_chunk(
+                                        &endpoint_id,
+                                        generation,
+                                        &response.boot_id,
+                                        &response.request_id,
+                                        response.final_chunk,
+                                        chunk,
+                                    )
+                                    .map_err(ClientError::ConnectionLost)?;
+                                let Some(completed) = completed else {
+                                    continue;
+                                };
+                                let (repaint, actions) = state.shell.as_mut().map_or_else(
+                                    || (false, Vec::new()),
+                                    |shell| {
+                                        if completed.generation == generation
+                                            && shell.endpoint_is_active(&completed.endpoint_id)
+                                        {
+                                            shell.handle_endpoint_result(
+                                                &completed.boot_id,
+                                                &completed.request_id,
+                                                completed.result,
+                                            )
+                                        } else {
+                                            (
+                                                shell
+                                                    .cancel_endpoint_request(&completed.request_id),
+                                                Vec::new(),
+                                            )
+                                        }
+                                    },
+                                );
+                                if let Some(shell) = state.shell.as_mut() {
+                                    shell.reconcile_input_source();
+                                }
+                                apply_client_shell_input_source_changes(
+                                    &mut state,
+                                    &mut write_stream,
+                                    &mut prefix_input_source,
+                                );
+                                let (replay_mouse, dispatch_repaint) =
+                                    dispatch_client_shell_actions(
+                                        actions,
+                                        &mut endpoint_commands,
+                                        &mut write_stream,
+                                        state.shell.as_mut(),
+                                        &mut state.detached_process_children,
+                                        &event_tx,
+                                    )?;
+                                let repaint = repaint || dispatch_repaint;
+                                if replay_mouse.is_empty() {
+                                    if repaint {
+                                        if let Some(frame) =
+                                            state.shell.as_mut().and_then(|shell| {
+                                                shell.compose(
+                                                    state.reported_size.0,
+                                                    state.reported_size.1,
+                                                )
+                                            })
+                                        {
+                                            state.present_frame(frame);
+                                        }
+                                    }
+                                } else {
+                                    let (outcome, frame) = {
+                                        let shell = state
+                                            .shell
+                                            .as_mut()
+                                            .expect("shell native endpoint response");
+                                        let mut outcome = shell.replay_mouse_events(replay_mouse);
+                                        outcome.repaint |= repaint;
+                                        let frame = outcome
+                                            .repaint
+                                            .then(|| {
+                                                shell.compose(
+                                                    state.reported_size.0,
+                                                    state.reported_size.1,
+                                                )
+                                            })
+                                            .flatten();
+                                        (outcome, frame)
+                                    };
+                                    if finish_client_shell_input(
+                                        &mut state,
+                                        outcome,
+                                        frame,
+                                        &mut write_stream,
+                                        &mut pending_activation,
+                                        &mut endpoint_commands,
+                                        &mut prefix_input_source,
+                                        &event_tx,
+                                    )? {
+                                        return Ok(());
+                                    }
+                                }
                                 continue;
                             }
                             Ok(endpoint::EndpointControlMessage::Snapshot(snapshot)) => snapshot,

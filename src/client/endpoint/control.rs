@@ -10,6 +10,12 @@ pub(crate) enum EndpointControlMessage {
     HealthPong,
     AgentViewProjection(DecodedAgentViewProjection),
     Snapshot(Box<crate::protocol::ClientShellSnapshot>),
+    Structure(Box<crate::protocol::endpoint::ClientShellStructureProjection>),
+    HostDocuments(Box<crate::protocol::endpoint::HostDocumentsProjectionV1>),
+    TerminalViewsSurface(Box<crate::protocol::endpoint::ServerTerminalViewsSurface>),
+    PaneViewResult(Box<crate::protocol::endpoint::ServerPaneViewResult>),
+    PaneViewActionResult(Box<crate::protocol::endpoint::ServerPaneViewActionResult>),
+    NativeApiResponse(crate::native_api::NativeEndpointResponseChunkV1),
     Ignored,
 }
 
@@ -46,6 +52,44 @@ pub(crate) fn decode_endpoint_control(
                 view,
             },
         ));
+    }
+    if kind == crate::native_api::NATIVE_API_RESPONSE_KIND_V1 {
+        let response = serde_json::from_str(data)
+            .map_err(|error| format!("invalid native API response: {error}"))?;
+        return Ok(EndpointControlMessage::NativeApiResponse(response));
+    }
+    if kind == crate::protocol::endpoint::PANE_VIEW_RESULT_KIND {
+        let result = serde_json::from_str(data)
+            .map_err(|error| format!("invalid pane view result: {error}"))?;
+        return Ok(EndpointControlMessage::PaneViewResult(Box::new(result)));
+    }
+    if kind == crate::protocol::endpoint::PANE_VIEW_ACTION_RESULT_KIND {
+        let result = serde_json::from_str(data)
+            .map_err(|error| format!("invalid pane view action result: {error}"))?;
+        return Ok(EndpointControlMessage::PaneViewActionResult(Box::new(
+            result,
+        )));
+    }
+    if kind == crate::protocol::endpoint::TERMINAL_VIEWS_SURFACE_KIND {
+        let surface = serde_json::from_str(data)
+            .map_err(|error| format!("invalid terminal views surface: {error}"))?;
+        return Ok(EndpointControlMessage::TerminalViewsSurface(Box::new(
+            surface,
+        )));
+    }
+    if kind == crate::protocol::endpoint::HOST_DOCUMENTS_KIND {
+        let projection: crate::protocol::endpoint::HostDocumentsProjectionV1 =
+            serde_json::from_str(data)
+                .map_err(|error| format!("invalid host document projection: {error}"))?;
+        projection
+            .validate()
+            .map_err(|error| format!("invalid host document projection: {error}"))?;
+        return Ok(EndpointControlMessage::HostDocuments(Box::new(projection)));
+    }
+    if kind == crate::protocol::endpoint::SESSION_STRUCTURE_KIND {
+        let projection = serde_json::from_str(data)
+            .map_err(|error| format!("invalid endpoint structure projection: {error}"))?;
+        return Ok(EndpointControlMessage::Structure(Box::new(projection)));
     }
     if kind == crate::protocol::endpoint::ENDPOINT_SNAPSHOT_KIND {
         let snapshot = serde_json::from_str(data)
@@ -132,6 +176,66 @@ mod tests {
             .unwrap(),
             EndpointControlMessage::Ignored
         ));
+    }
+
+    #[test]
+    fn typed_structure_control_preserves_boot_revision_and_pane_identity() {
+        let decoded = decode_endpoint_control(
+            crate::protocol::endpoint::SESSION_STRUCTURE_KIND,
+            r#"{"session_id":"alpha","boot_id":"boot-2","revision":9,"collections":[{"collection_id":"collection_1","workspace_id":"w1","tab_id":"w1:t1","label":null,"selected_pane_id":"w1:p7","members":[{"pane_id":"w1:p7","index":0,"archived":false}]}],"delegations":[]}"#,
+        )
+        .unwrap();
+        let EndpointControlMessage::Structure(projection) = decoded else {
+            panic!("typed structure projection");
+        };
+        assert_eq!(projection.session_id, "alpha");
+        assert_eq!(projection.boot_id, "boot-2");
+        assert_eq!(projection.revision, 9);
+        assert_eq!(projection.collections[0].members[0].pane_id, "w1:p7");
+        assert!(projection.repositories.is_empty());
+        assert!(projection.space_order.is_empty());
+    }
+
+    #[test]
+    fn terminal_views_surface_is_typed_and_revision_bound() {
+        let decoded = decode_endpoint_control(
+            crate::protocol::endpoint::TERMINAL_VIEWS_SURFACE_KIND,
+            r#"{"boot_id":"boot-2","projection_revision":9,"views":[]}"#,
+        )
+        .unwrap();
+        let EndpointControlMessage::TerminalViewsSurface(surface) = decoded else {
+            panic!("terminal views surface");
+        };
+        assert_eq!(surface.boot_id, "boot-2");
+        assert_eq!(surface.projection_revision, 9);
+        assert!(surface.replace);
+        assert!(surface.views.is_empty());
+    }
+
+    #[test]
+    fn malformed_host_document_projection_is_rejected_before_caching() {
+        let document: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/collections-document-v1.json"
+        ))
+        .unwrap();
+        let entry = serde_json::json!({
+            "provider_priority": 100,
+            "document": document,
+            "confirmation_tokens": {}
+        });
+        let projection = serde_json::json!({
+            "boot_id": "boot-1",
+            "revision": 1,
+            "documents": [entry.clone(), entry]
+        });
+        let error = match decode_endpoint_control(
+            crate::protocol::endpoint::HOST_DOCUMENTS_KIND,
+            &projection.to_string(),
+        ) {
+            Ok(_) => panic!("malformed projection was accepted"),
+            Err(error) => error,
+        };
+        assert!(error.contains("identities must be unique"));
     }
 
     #[test]

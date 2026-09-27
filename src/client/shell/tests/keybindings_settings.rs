@@ -547,6 +547,40 @@ fn unavailable_endpoint_method_is_disabled_without_disconnect() {
 }
 
 #[test]
+fn host_document_action_falls_back_when_optional_method_is_unavailable() {
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    state.set_snapshot(Box::new(snapshot()));
+    state.set_endpoint_methods(Some(vec!["collection.select".into()]));
+    let fallback =
+        crate::api::schema::Method::CollectionSelect(crate::api::schema::CollectionSelectParams {
+            collection_id: "collection_1".into(),
+            pane_id: "pane_1".into(),
+            focus: true,
+        });
+    let mut outcome = ClientShellInput::default();
+    state.route_host_document_action(
+        crate::api::schema::HostDocumentActionParams {
+            namespace: "vqro.collections".into(),
+            scope_id: "tab_1".into(),
+            generation: 1,
+            revision: 2,
+            action_id: "focus".into(),
+            confirmed: false,
+            confirmation_token: None,
+        },
+        fallback,
+        &mut outcome,
+    );
+    let [ClientShellAction::Endpoint { request, .. }] = &outcome.actions[..] else {
+        panic!("expected baseline endpoint request")
+    };
+    assert!(matches!(
+        request.method,
+        crate::api::schema::Method::CollectionSelect(_)
+    ));
+}
+
+#[test]
 fn generic_endpoint_failures_and_control_errors_are_visible() {
     let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
     state.set_snapshot(Box::new(snapshot()));

@@ -523,14 +523,36 @@ impl ClientShellState {
             .workspaces
             .iter()
             .filter(|hit| hit.endpoint_id == self.active_endpoint_id && !hit.indented)
-            .map(|hit| (Some(hit.workspace_id.clone()), hit.rect.y.saturating_sub(1)))
+            .map(|hit| {
+                (
+                    Some(hit.move_workspace_id.clone()),
+                    hit.rect.y.saturating_sub(1),
+                )
+            })
             .collect::<Vec<_>>();
         let snapshot = self.snapshot.as_deref()?;
         let empty_collapsed_groups = HashSet::new();
         let collapsed_groups = self
             .collapsed_groups_for_endpoint(&self.active_endpoint_id)
             .unwrap_or(&empty_collapsed_groups);
-        let entries = render::workspace_entries(snapshot, collapsed_groups);
+        let collapsed_repositories = self.navigation_collapsed_repository_ids();
+        let host_documents = self
+            .endpoints
+            .iter()
+            .find(|endpoint| endpoint.endpoint_id == self.active_endpoint_id)
+            .and_then(ClientShellEndpoint::current_host_documents);
+        let entries = render::workspace_entries_with_structure(
+            snapshot,
+            self.structure.as_deref(),
+            host_documents,
+            if self.structure.as_ref().is_some_and(|structure| {
+                !structure.repositories.is_empty() || !structure.space_order.is_empty()
+            }) {
+                &collapsed_repositories
+            } else {
+                collapsed_groups
+            },
+        );
         let last_hit = self
             .hits
             .workspaces
@@ -541,7 +563,7 @@ impl ClientShellState {
             snapshot
                 .workspaces
                 .get(entry.index)
-                .is_some_and(|workspace| workspace.workspace_id == last_hit.workspace_id)
+                .is_some_and(|workspace| workspace.workspace_id == last_hit.move_workspace_id)
         })?;
         let next = entries.get(last_position + 1);
         if !next.is_some_and(|entry| entry.indented) {
@@ -563,11 +585,109 @@ impl ClientShellState {
             .map(|(_, target)| target)
     }
 
-    fn workspace_move_method(
+    fn projected_workspace_move_method(
+        &self,
+        source_workspace_id: &str,
+        before_workspace_id: Option<&str>,
+    ) -> Option<Option<crate::api::schema::Method>> {
+        let snapshot = self.snapshot.as_deref()?;
+        let structure = self.structure.as_deref().filter(|structure| {
+            structure.boot_id == snapshot.boot_id
+                && structure.revision == snapshot.revision
+                && (!structure.repositories.is_empty() || !structure.space_order.is_empty())
+        })?;
+        let host_documents = self
+            .endpoints
+            .iter()
+            .find(|endpoint| endpoint.endpoint_id == self.active_endpoint_id)
+            .and_then(ClientShellEndpoint::current_host_documents);
+        let entries = super::sidebar::workspace_entries_with_structure(
+            snapshot,
+            Some(structure),
+            host_documents,
+            &HashSet::new(),
+        );
+        let roots = entries
+            .iter()
+            .filter(|entry| !entry.indented)
+            .filter_map(|entry| {
+                snapshot
+                    .workspaces
+                    .get(entry.index)
+                    .map(|workspace| (entry, workspace))
+            })
+            .collect::<Vec<_>>();
+        let source_position = roots
+            .iter()
+            .position(|(_, workspace)| workspace.workspace_id == source_workspace_id)?;
+        let (source_entry, source) = roots[source_position];
+        if before_workspace_id == Some(source_workspace_id) {
+            return Some(None);
+        }
+        let remaining = roots
+            .iter()
+            .copied()
+            .filter(|(_, workspace)| workspace.workspace_id != source_workspace_id)
+            .collect::<Vec<_>>();
+        let insert_position = match before_workspace_id {
+            Some(target) => remaining
+                .iter()
+                .position(|(_, workspace)| workspace.workspace_id == target)?,
+            None => remaining.len(),
+        };
+        if insert_position == source_position {
+            return Some(None);
+        }
+        if let Some(repository) = source_entry
+            .repository_index
+            .and_then(|index| structure.repositories.get(index))
+        {
+            let workspace_ids = repository
+                .checkouts
+                .iter()
+                .filter(|checkout| {
+                    snapshot
+                        .workspaces
+                        .iter()
+                        .any(|workspace| workspace.workspace_id == checkout.workspace_id)
+                })
+                .map(|checkout| checkout.workspace_id.clone())
+                .collect::<Vec<_>>();
+            return Some((!workspace_ids.is_empty()).then(|| {
+                crate::api::schema::Method::WorkspaceMoveBlock(
+                    crate::api::schema::WorkspaceMoveBlockParams {
+                        workspace_ids,
+                        before_workspace_id: before_workspace_id.map(str::to_owned),
+                    },
+                )
+            }));
+        }
+        let insert_index = before_workspace_id
+            .and_then(|target| {
+                snapshot
+                    .workspaces
+                    .iter()
+                    .position(|workspace| workspace.workspace_id == target)
+            })
+            .unwrap_or(snapshot.workspaces.len());
+        Some(Some(crate::api::schema::Method::WorkspaceMove(
+            crate::api::schema::WorkspaceMoveParams {
+                workspace_id: source.workspace_id.clone(),
+                insert_index,
+            },
+        )))
+    }
+
+    pub(super) fn workspace_move_method(
         &self,
         source_workspace_id: &str,
         before_workspace_id: Option<&str>,
     ) -> Option<crate::api::schema::Method> {
+        if let Some(projected) =
+            self.projected_workspace_move_method(source_workspace_id, before_workspace_id)
+        {
+            return projected;
+        }
         let snapshot = self.snapshot.as_deref()?;
         let source = snapshot
             .workspaces
@@ -1057,6 +1177,18 @@ impl ClientShellState {
                     self.chrome_drag = None;
                     return;
                 }
+                Some(ClientChromeDrag::CollectionPreviewHeight {
+                    pane_id,
+                    start_row,
+                    start_height,
+                }) => {
+                    let delta = i32::from(mouse.row) - i32::from(*start_row);
+                    let height = (i32::from(*start_height) + delta).clamp(2, 40) as u16;
+                    self.collection_preview_heights
+                        .insert(pane_id.clone(), height);
+                    outcome.repaint = true;
+                    return;
+                }
                 Some(ClientChromeDrag::PaneScrollbar {
                     hit,
                     grab_row_offset,
@@ -1177,7 +1309,7 @@ impl ClientShellState {
                     .abs_diff(press.start_column)
                     .max(mouse.row.abs_diff(press.start_row));
                 if delta >= 1 {
-                    let source_workspace_id = press.workspace_id.clone();
+                    let source_workspace_id = press.move_workspace_id.clone();
                     let draggable = self.endpoint_workspace_is_draggable(press);
                     if draggable {
                         if let Some(target) = self.workspace_drop_target_at(point) {
@@ -1259,6 +1391,9 @@ impl ClientShellState {
                                 self.push_endpoint_method(method, outcome);
                             }
                         }
+                        outcome.repaint = true;
+                    }
+                    ClientChromeDrag::CollectionPreviewHeight { .. } => {
                         outcome.repaint = true;
                     }
                     ClientChromeDrag::PaneScrollbar {
@@ -1472,6 +1607,122 @@ impl ClientShellState {
             }
             return;
         }
+        if matches!(self.overlay, Some(ClientShellOverlay::Extensions(_))) {
+            let mutating = matches!(
+                self.overlay,
+                Some(ClientShellOverlay::Extensions(ClientExtensionsOverlay {
+                    mutating: true,
+                    ..
+                }))
+            );
+            if mutating {
+                return;
+            }
+            if super::contains(self.hits.extensions_popup, point) {
+                match mouse.kind {
+                    MouseEventKind::ScrollUp => {
+                        self.move_extension_selection(-1);
+                        outcome.repaint = true;
+                        return;
+                    }
+                    MouseEventKind::ScrollDown => {
+                        self.move_extension_selection(1);
+                        outcome.repaint = true;
+                        return;
+                    }
+                    _ => {}
+                }
+            }
+            if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
+                if let Some((_, tab)) = self
+                    .hits
+                    .extensions_tabs
+                    .iter()
+                    .find(|(rect, _)| super::contains(*rect, point))
+                    .copied()
+                {
+                    if let Some(ClientShellOverlay::Extensions(extensions)) = self.overlay.as_mut()
+                    {
+                        extensions.tab = tab;
+                        extensions.selected = 0;
+                        extensions.confirmation = None;
+                        extensions.search_focused = false;
+                    }
+                    outcome.repaint = true;
+                } else if let Some((_, category)) = self
+                    .hits
+                    .extensions_categories
+                    .iter()
+                    .find(|(rect, _)| super::contains(*rect, point))
+                    .cloned()
+                {
+                    if let Some(ClientShellOverlay::Extensions(extensions)) = self.overlay.as_mut()
+                    {
+                        extensions.category = category;
+                        extensions.selected = 0;
+                        extensions.confirmation = None;
+                        extensions.search_focused = false;
+                    }
+                    outcome.repaint = true;
+                } else if super::contains(self.hits.extensions_search, point) {
+                    if let Some(ClientShellOverlay::Extensions(extensions)) = self.overlay.as_mut()
+                    {
+                        extensions.search_focused = true;
+                        extensions.confirmation = None;
+                        extensions.confirmation_extension = None;
+                    }
+                    outcome.repaint = true;
+                } else if let Some((_, extension_index)) = self
+                    .hits
+                    .extensions_rows
+                    .iter()
+                    .find(|(rect, _)| super::contains(*rect, point))
+                    .copied()
+                {
+                    if let Some(ClientShellOverlay::Extensions(extensions)) = self.overlay.as_mut()
+                    {
+                        if let Some(filtered_position) = extensions
+                            .filtered_indices()
+                            .iter()
+                            .position(|index| *index == extension_index)
+                        {
+                            extensions.selected = filtered_position;
+                            extensions.confirmation = None;
+                            extensions.search_focused = false;
+                        }
+                    }
+                    outcome.repaint = true;
+                } else if super::contains(self.hits.overlay_primary, point) {
+                    let confirming = matches!(
+                        self.overlay,
+                        Some(ClientShellOverlay::Extensions(ClientExtensionsOverlay {
+                            confirmation: Some(_),
+                            ..
+                        }))
+                    );
+                    if confirming {
+                        self.confirm_extension_action(outcome);
+                    } else {
+                        self.activate_selected_extension(outcome);
+                    }
+                } else if super::contains(self.hits.overlay_cancel, point)
+                    || !super::contains(self.hits.extensions_popup, point)
+                {
+                    let mutating = matches!(
+                        self.overlay,
+                        Some(ClientShellOverlay::Extensions(ClientExtensionsOverlay {
+                            mutating: true,
+                            ..
+                        }))
+                    );
+                    if !mutating {
+                        self.overlay = None;
+                        outcome.repaint = true;
+                    }
+                }
+            }
+            return;
+        }
         if matches!(self.overlay, Some(ClientShellOverlay::Settings(_))) {
             if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
                 if let Some((_, section)) = self
@@ -1508,17 +1759,8 @@ impl ClientShellState {
                 } else if super::contains(self.hits.overlay_cancel, point)
                     || !super::contains(self.hits.settings_popup, point)
                 {
-                    let installing = matches!(
-                        self.overlay,
-                        Some(ClientShellOverlay::Settings(ClientSettingsOverlay {
-                            installing_integrations: true,
-                            ..
-                        }))
-                    );
-                    if !installing {
-                        self.cancel_settings_overlay();
-                        outcome.repaint = true;
-                    }
+                    self.cancel_settings_overlay();
+                    outcome.repaint = true;
                 }
             }
             return;
@@ -1594,6 +1836,56 @@ impl ClientShellState {
             }
             return;
         }
+        if matches!(self.overlay, Some(ClientShellOverlay::Recovery(_))) {
+            let rendered_projection_is_current = self.overlay.as_ref().is_some_and(|overlay| {
+                matches!(overlay, ClientShellOverlay::Recovery(recovery)
+                    if self.hits.recovery_projection_token == Some(recovery.projection_token))
+            });
+            if !rendered_projection_is_current {
+                outcome.repaint = true;
+                return;
+            }
+            let row_hit = self
+                .hits
+                .recovery_rows
+                .iter()
+                .find(|hit| super::contains(hit.rect, point))
+                .cloned();
+            match mouse.kind {
+                MouseEventKind::Moved => {
+                    if let Some(hit) = row_hit {
+                        if self.select_recovery_row(hit.row_index) {
+                            outcome.repaint = true;
+                        }
+                    }
+                }
+                MouseEventKind::Down(MouseButton::Left) => {
+                    if let Some(hit) = row_hit {
+                        if !self.select_recovery_row(hit.row_index) {
+                            return;
+                        }
+                        if !hit.close.is_empty() && super::contains(hit.close, point) {
+                            self.request_recovery_close(outcome);
+                        } else {
+                            self.activate_recovery_selection(outcome);
+                        }
+                    } else if !super::contains(self.hits.recovery_popup, point) {
+                        self.overlay = None;
+                        outcome.repaint = true;
+                    }
+                }
+                MouseEventKind::ScrollUp => {
+                    self.move_recovery_selection(-3);
+                    outcome.repaint = true;
+                }
+                MouseEventKind::ScrollDown => {
+                    self.move_recovery_selection(3);
+                    outcome.repaint = true;
+                }
+                _ => {}
+            }
+            return;
+        }
         if matches!(self.overlay, Some(ClientShellOverlay::Navigator(_))) {
             let row_hit = self
                 .hits
@@ -1658,20 +1950,67 @@ impl ClientShellState {
             if super::contains(self.hits.overlay_primary, point) {
                 match self.overlay.as_ref() {
                     Some(ClientShellOverlay::Rename(_)) => self.save_rename_overlay(outcome),
+                    Some(ClientShellOverlay::PaneInterruptConfirm(_)) => {
+                        let Some(ClientShellOverlay::PaneInterruptConfirm(confirm)) =
+                            self.overlay.take()
+                        else {
+                            return;
+                        };
+                        if self.pane_interrupt_confirmation_is_current(&confirm) {
+                            let request = crate::protocol::endpoint::ClientPaneViewConfirm {
+                                boot_id: confirm.boot_id,
+                                confirmation_token: confirm.confirmation_token,
+                            };
+                            if let Ok(data) = serde_json::to_string(&request) {
+                                outcome.actions.push(ClientShellAction::EndpointControl {
+                                    endpoint_id: self.active_endpoint_id.clone(),
+                                    message: ClientMessage::EndpointControl {
+                                        kind: crate::protocol::endpoint::PANE_VIEW_CONFIRM_KIND
+                                            .into(),
+                                        data,
+                                    },
+                                });
+                            }
+                        }
+                        outcome.repaint = true;
+                    }
                     Some(ClientShellOverlay::ConfirmClose(_)) => {
                         let Some(ClientShellOverlay::ConfirmClose(confirm)) = self.overlay.take()
                         else {
                             return;
                         };
-                        self.push_endpoint_method(
-                            crate::api::schema::Method::WorkspaceClose(
-                                crate::api::schema::WorkspaceCloseParams {
-                                    workspace_id: confirm.workspace_id,
-                                    close_group: true,
-                                },
-                            ),
-                            outcome,
-                        );
+                        let method = match confirm.target {
+                            ClientConfirmCloseTarget::Workspace { workspace_id } => {
+                                crate::api::schema::Method::WorkspaceClose(
+                                    crate::api::schema::WorkspaceCloseParams {
+                                        workspace_id,
+                                        close_group: true,
+                                    },
+                                )
+                            }
+                            ClientConfirmCloseTarget::Collection { collection_id } => {
+                                crate::api::schema::Method::CollectionClose(
+                                    crate::api::schema::CollectionCloseParams {
+                                        collection_id,
+                                        disposition: Some(
+                                            crate::api::schema::CollectionCloseDisposition::CascadeClose,
+                                        ),
+                                    },
+                                )
+                            }
+                            ClientConfirmCloseTarget::HostDocumentAction(params) => {
+                                crate::api::schema::Method::HostDocumentAction(params)
+                            }
+                            ClientConfirmCloseTarget::RecoveryPane(lease) => {
+                                let endpoint_id = lease.endpoint_id.clone();
+                                if !self.confirm_recovery_close(lease, outcome) {
+                                    self.open_recovery_browser_for(&endpoint_id);
+                                }
+                                outcome.repaint = true;
+                                return;
+                            }
+                        };
+                        self.push_endpoint_method(method, outcome);
                         outcome.repaint = true;
                     }
                     _ => {}
@@ -1683,10 +2022,318 @@ impl ClientShellState {
                     outcome.repaint = true;
                 }
             } else {
+                let recovery_endpoint = self.overlay.as_ref().and_then(|overlay| match overlay {
+                    ClientShellOverlay::ConfirmClose(ClientConfirmCloseOverlay {
+                        target: ClientConfirmCloseTarget::RecoveryPane(lease),
+                        ..
+                    }) => Some(lease.endpoint_id.clone()),
+                    _ => None,
+                });
                 self.overlay = None;
+                if let Some(endpoint_id) = recovery_endpoint {
+                    self.open_recovery_browser_for(&endpoint_id);
+                }
                 outcome.repaint = true;
             }
             return;
+        }
+
+        if let Some(collection) = self
+            .hits
+            .collections
+            .iter()
+            .find(|hit| super::contains(hit.rect, point))
+            .cloned()
+        {
+            let target = match mouse.kind {
+                MouseEventKind::Down(MouseButton::Right)
+                    if super::contains(collection.rect, point) =>
+                {
+                    self.overlay =
+                        Some(ClientShellOverlay::ContextMenu(ClientContextMenuOverlay {
+                            target: ClientContextMenuTarget::Collection {
+                                collection_id: collection.collection_id,
+                            },
+                            x: mouse.column,
+                            y: mouse.row,
+                            highlighted: 0,
+                        }));
+                    outcome.repaint = true;
+                    return;
+                }
+                MouseEventKind::ScrollUp => collection.previous_pane_id.clone(),
+                MouseEventKind::ScrollDown => collection.next_pane_id.clone(),
+                MouseEventKind::Down(MouseButton::Left)
+                    if super::contains(collection.previous, point) =>
+                {
+                    collection.previous_pane_id.clone()
+                }
+                MouseEventKind::Down(MouseButton::Left)
+                    if super::contains(collection.next, point) =>
+                {
+                    collection.next_pane_id.clone()
+                }
+                MouseEventKind::Down(MouseButton::Left)
+                    if super::contains(collection.presentation_toggle, point) =>
+                {
+                    let terminal_views = self.supports_endpoint_capability(
+                        crate::protocol::endpoint::TERMINAL_VIEWS_CAPABILITY,
+                    );
+                    let maximized = self.collection_maximized_pane.as_ref().is_some_and(
+                        |(collection_id, _)| collection_id == &collection.collection_id,
+                    );
+                    if maximized {
+                        // A maximized child is already a terminal presentation. Its header
+                        // switch returns to the collection list rather than skipping past it
+                        // into the compact terminal presentation.
+                        self.collection_maximized_pane = None;
+                        self.collection_entered_pane = None;
+                        self.collection_list_views
+                            .insert(collection.collection_id.clone());
+                    } else if self
+                        .collection_list_views
+                        .insert(collection.collection_id.clone())
+                    {
+                        if terminal_views {
+                            if let Some(selected_pane_id) = collection.selected_pane_id.clone() {
+                                self.collection_expanded_members
+                                    .entry(collection.collection_id.clone())
+                                    .or_default()
+                                    .insert(selected_pane_id);
+                            }
+                        }
+                    } else {
+                        self.collection_list_views.remove(&collection.collection_id);
+                        self.collection_entered_pane = None;
+                    }
+                    if self.inspector.is_some() {
+                        self.close_terminal_inspector(outcome);
+                    }
+                    outcome.repaint = true;
+                    return;
+                }
+                MouseEventKind::Down(MouseButton::Left)
+                    if super::contains(collection.inspect, point) =>
+                {
+                    let Some(selected_pane_id) = collection.selected_pane_id else {
+                        return;
+                    };
+                    if self
+                        .inspector
+                        .as_ref()
+                        .is_some_and(|inspector| inspector.pane_id == selected_pane_id)
+                    {
+                        self.close_terminal_inspector(outcome);
+                    } else {
+                        self.open_terminal_inspector(selected_pane_id, outcome);
+                    }
+                    outcome.repaint = true;
+                    return;
+                }
+                _ => None,
+            };
+            if let Some(pane_id) = target {
+                self.collection_entered_pane = None;
+                if self.inspector.is_some() {
+                    self.close_terminal_inspector(outcome);
+                }
+                let fallback = crate::api::schema::Method::CollectionSelect(
+                    crate::api::schema::CollectionSelectParams {
+                        collection_id: collection.collection_id,
+                        pane_id: pane_id.clone(),
+                        focus: true,
+                    },
+                );
+                if let Some(action) = self.host_document_action_for_pane(&pane_id) {
+                    self.route_host_document_action(action, fallback, outcome);
+                } else {
+                    self.push_endpoint_method(fallback, outcome);
+                }
+                outcome.repaint = true;
+            }
+            return;
+        }
+
+        if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
+            if let Some(member) = self
+                .hits
+                .collection_members
+                .iter()
+                .find(|member| {
+                    !member.resize_handle.is_empty() && super::contains(member.resize_handle, point)
+                })
+                .cloned()
+            {
+                self.chrome_drag = Some(ClientChromeDrag::CollectionPreviewHeight {
+                    pane_id: member.pane_id,
+                    start_row: mouse.row,
+                    start_height: member.preview.height,
+                });
+                return;
+            }
+        }
+
+        if matches!(
+            mouse.kind,
+            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+        ) && self.hits.collection_members.iter().any(|member| {
+            (super::contains(member.preview, point)
+                || member
+                    .scrollbar
+                    .is_some_and(|scrollbar| super::contains(scrollbar, point)))
+                && self.collection_entered_pane.as_deref() != Some(member.pane_id.as_str())
+        }) {
+            return;
+        }
+
+        if mouse.kind == MouseEventKind::Down(MouseButton::Right) {
+            if let Some(member) = self
+                .hits
+                .collection_members
+                .iter()
+                .find(|member| super::contains(member.rect, point))
+                .cloned()
+            {
+                self.open_pane_context_menu(member.pane_id, mouse.column, mouse.row);
+                outcome.repaint = true;
+                return;
+            }
+            if let Some(collection) = self
+                .hits
+                .collections
+                .iter()
+                .find(|collection| {
+                    super::contains(collection.surface_rect, point)
+                        && !self
+                            .hits
+                            .panes
+                            .iter()
+                            .any(|pane| super::contains(pane.rect, point))
+                })
+                .cloned()
+            {
+                self.overlay = Some(ClientShellOverlay::ContextMenu(ClientContextMenuOverlay {
+                    target: ClientContextMenuTarget::Collection {
+                        collection_id: collection.collection_id,
+                    },
+                    x: mouse.column,
+                    y: mouse.row,
+                    highlighted: 0,
+                }));
+                outcome.repaint = true;
+                return;
+            }
+        }
+
+        if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
+            if let Some(member) = self
+                .hits
+                .collection_members
+                .iter()
+                .find(|member| super::contains(member.rect, point))
+                .cloned()
+            {
+                if super::contains(member.disclosure, point) {
+                    if !self.supports_endpoint_capability(
+                        crate::protocol::endpoint::TERMINAL_VIEWS_CAPABILITY,
+                    ) {
+                        return;
+                    }
+                    let expanded = self
+                        .collection_expanded_members
+                        .entry(member.collection_id)
+                        .or_default();
+                    if !expanded.insert(member.pane_id.clone()) {
+                        expanded.remove(&member.pane_id);
+                        if self.collection_entered_pane.as_deref() == Some(member.pane_id.as_str())
+                        {
+                            self.collection_entered_pane = None;
+                        }
+                    }
+                } else {
+                    self.collection_entered_pane = None;
+                    let fallback = crate::api::schema::Method::CollectionSelect(
+                        crate::api::schema::CollectionSelectParams {
+                            collection_id: member.collection_id,
+                            pane_id: member.pane_id,
+                            focus: true,
+                        },
+                    );
+                    if let Some(action) = member.host_document_action {
+                        self.route_host_document_action(action, fallback, outcome);
+                    } else {
+                        self.push_endpoint_method(fallback, outcome);
+                    }
+                }
+                outcome.repaint = true;
+                return;
+            }
+            if let Some(member) = self
+                .hits
+                .collection_members
+                .iter()
+                .find(|member| !member.preview.is_empty() && super::contains(member.preview, point))
+                .cloned()
+            {
+                self.collection_entered_pane = Some(member.pane_id);
+            }
+        }
+
+        if matches!(
+            mouse.kind,
+            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+        ) && self.hits.collection_members.iter().any(|member| {
+            !member.preview.is_empty()
+                && super::contains(member.preview, point)
+                && self.collection_entered_pane.as_deref() != Some(member.pane_id.as_str())
+        }) {
+            // The collection surface itself never scrolls. Wheel input belongs to a PTY only
+            // after that terminal has explicitly received focus.
+            return;
+        }
+
+        if super::contains(self.hits.inspector_body, point) {
+            if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
+                if let Some(inspector) = self.inspector.as_mut() {
+                    inspector.focused = true;
+                }
+                if let Some((_, action_id)) = self
+                    .hits
+                    .contribution_actions
+                    .iter()
+                    .find(|(rect, _)| super::contains(*rect, point))
+                    .cloned()
+                {
+                    self.activate_pane_contribution_action(&action_id, outcome);
+                    outcome.repaint = true;
+                } else if super::contains(self.hits.inspector_close, point) {
+                    if self.inspector.is_some() {
+                        self.close_terminal_inspector(outcome);
+                    }
+                    outcome.repaint = true;
+                } else if super::contains(self.hits.inspector_refresh, point) {
+                    if let Some(pane_id) = self
+                        .inspector
+                        .as_ref()
+                        .map(|inspector| inspector.pane_id.clone())
+                    {
+                        self.refresh_terminal_inspector(pane_id, outcome);
+                        outcome.repaint = true;
+                    }
+                }
+            }
+            return;
+        }
+
+        if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
+            if let Some(inspector) = self.inspector.as_mut() {
+                if self.hits.panes.iter().any(|pane| {
+                    pane.pane_id == inspector.pane_id && super::contains(pane.inner_rect, point)
+                }) {
+                    inspector.focused = false;
+                    outcome.repaint = true;
+                }
+            }
         }
 
         if mouse.kind == MouseEventKind::Drag(MouseButton::Left) {
@@ -1793,6 +2440,17 @@ impl ClientShellState {
                     self.open_workspace_context_menu(workspace_id, mouse.column, mouse.row);
                     outcome.repaint = true;
                     return;
+                }
+                if !self.sidebar_collapsed && super::contains(self.hits.workspace_body, point) {
+                    let focused_workspace_id = self
+                        .snapshot
+                        .as_deref()
+                        .and_then(|snapshot| snapshot.focused_workspace_id.clone());
+                    if let Some(workspace_id) = focused_workspace_id {
+                        self.open_workspace_context_menu(workspace_id, mouse.column, mouse.row);
+                        outcome.repaint = true;
+                        return;
+                    }
                 }
                 let tab_id = self
                     .hits
@@ -2040,6 +2698,28 @@ impl ClientShellState {
                     self.persist_chrome_preferences(outcome);
                     return;
                 }
+                // Some terminals reserve Shift for selection and report a
+                // Ctrl+Shift click to mouse-aware applications as Ctrl-only.
+                let space_link = mouse
+                    .modifiers
+                    .contains(crossterm::event::KeyModifiers::CONTROL)
+                    .then(|| {
+                        self.hits
+                            .space_links
+                            .iter()
+                            .find(|hit| super::contains(hit.rect, point))
+                            .map(|hit| hit.target.clone())
+                    })
+                    .flatten();
+                if let Some(target) = space_link {
+                    outcome.actions.push(match target {
+                        SpaceLinkTarget::LocalDirectory(path) => {
+                            ClientShellAction::OpenLocalDirectory(path)
+                        }
+                        SpaceLinkTarget::WebUrl(url) => ClientShellAction::OpenSafeWebUrl(url),
+                    });
+                    return;
+                }
                 let group_toggle = self.hits.workspaces.iter().find_map(|hit| {
                     let (rect, key) = hit.group_toggle.as_ref()?;
                     super::contains(*rect, point).then(|| (hit.endpoint_id.clone(), key.clone()))
@@ -2058,6 +2738,7 @@ impl ClientShellState {
                     .map(|hit| ClientWorkspacePress {
                         endpoint_id: hit.endpoint_id.clone(),
                         workspace_id: hit.workspace_id.clone(),
+                        move_workspace_id: hit.move_workspace_id.clone(),
                         start_column: mouse.column,
                         start_row: mouse.row,
                     });
@@ -2124,6 +2805,11 @@ impl ClientShellState {
                     })
                     .cloned();
                 if let Some(hit) = scrollbar_hit {
+                    if self.hits.collection_members.iter().any(|member| {
+                        member.pane_id == hit.pane_id && member.scrollbar == hit.scrollbar_rect
+                    }) {
+                        self.collection_entered_pane = Some(hit.pane_id.clone());
+                    }
                     self.mode = ClientShellMode::Terminal;
                     self.push_endpoint_method(
                         crate::api::schema::Method::PaneFocus(crate::api::schema::PaneTarget {

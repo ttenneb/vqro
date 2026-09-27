@@ -1,12 +1,17 @@
 use serde::{Deserialize, Serialize};
 
 pub mod agents;
+pub mod collections;
 pub mod commands;
 pub mod common;
+pub mod delegations;
 pub mod events;
+pub mod extension_state;
+pub mod extensions;
 pub mod integrations;
 pub mod panes;
 pub mod plugins;
+pub mod repositories;
 pub mod response;
 pub mod server;
 pub mod session;
@@ -15,12 +20,17 @@ pub mod workspaces;
 pub mod worktrees;
 
 pub use agents::*;
+pub use collections::*;
 pub use commands::*;
 pub use common::*;
+pub use delegations::*;
 pub use events::*;
+pub use extension_state::*;
+pub use extensions::*;
 pub use integrations::*;
 pub use panes::*;
 pub use plugins::*;
+pub use repositories::*;
 pub use response::*;
 pub use server::*;
 pub use session::*;
@@ -73,6 +83,12 @@ pub enum Method {
     ClientShellSurfaceSet(ClientShellSurfaceSetParams),
     #[serde(rename = "session.snapshot")]
     SessionSnapshot(EmptyParams),
+    #[serde(rename = "extension.state.snapshot.v1")]
+    ExtensionStateSnapshotV1(ExtensionStateSnapshotParams),
+    #[serde(rename = "extension.state.transact.v1")]
+    ExtensionStateTransactV1(crate::extension_state::ExtensionStateTransactionV1),
+    #[serde(rename = "extension.state.events.v1")]
+    ExtensionStateEventsV1(ExtensionStateEventsParams),
     #[serde(rename = "workspace.create")]
     WorkspaceCreate(WorkspaceCreateParams),
     #[serde(rename = "workspace.list")]
@@ -137,6 +153,44 @@ pub enum Method {
     AgentPrompt(AgentPromptParams),
     #[serde(rename = "agent.wait")]
     AgentWait(AgentWaitParams),
+    #[serde(rename = "collection.list")]
+    CollectionList(CollectionListParams),
+    #[serde(rename = "collection.get")]
+    CollectionGet(CollectionTarget),
+    #[serde(rename = "collection.create")]
+    CollectionCreate(CollectionCreateParams),
+    #[serde(rename = "collection.add")]
+    CollectionAdd(CollectionAddParams),
+    #[serde(rename = "collection.promote")]
+    CollectionPromote(CollectionPromoteParams),
+    #[serde(rename = "host.document.list")]
+    HostDocumentList(HostDocumentListParams),
+    #[serde(rename = "host.document.action")]
+    HostDocumentAction(HostDocumentActionParams),
+    #[serde(rename = "collection.select")]
+    CollectionSelect(CollectionSelectParams),
+    #[serde(rename = "collection.reorder")]
+    CollectionReorder(CollectionReorderParams),
+    #[serde(rename = "collection.archive")]
+    CollectionArchive(CollectionMemberTarget),
+    #[serde(rename = "collection.restore")]
+    CollectionRestore(CollectionMemberTarget),
+    #[serde(rename = "collection.close")]
+    CollectionClose(CollectionCloseParams),
+    #[serde(rename = "delegation.create")]
+    DelegationCreate(DelegationCreateParams),
+    #[serde(rename = "delegation.get")]
+    DelegationGet(DelegationTarget),
+    #[serde(rename = "delegation.tree")]
+    DelegationTree(EmptyParams),
+    #[serde(rename = "delegation.root")]
+    DelegationRoot(DelegationTarget),
+    #[serde(rename = "delegation.descendants")]
+    DelegationDescendants(DelegationTarget),
+    #[serde(rename = "delegation.reparent")]
+    DelegationReparent(DelegationReparentParams),
+    #[serde(rename = "delegation.reorder")]
+    DelegationReorder(DelegationReorderParams),
     #[serde(rename = "pane.split")]
     PaneSplit(PaneSplitParams),
     #[serde(rename = "pane.swap")]
@@ -149,6 +203,8 @@ pub enum Method {
     PaneLayout(PaneLayoutParams),
     #[serde(rename = "pane.process_info")]
     PaneProcessInfo(PaneProcessInfoParams),
+    #[serde(rename = "pane.telemetry")]
+    PaneTelemetry(PaneTelemetryParams),
     #[serde(rename = "layout.export")]
     LayoutExport(LayoutExportParams),
     #[serde(rename = "layout.apply")]
@@ -266,6 +322,52 @@ pub enum Method {
     PluginPaneFocus(PluginPaneFocusParams),
     #[serde(rename = "plugin.pane.close")]
     PluginPaneClose(PluginPaneCloseParams),
+    #[serde(rename = "extension.list")]
+    ExtensionList(ExtensionListParams),
+    #[serde(rename = "extension.install")]
+    ExtensionInstall(ExtensionConfirmedParams),
+    #[serde(rename = "extension.enable")]
+    ExtensionEnable(ExtensionSetEnabledParams),
+    #[serde(rename = "extension.remove")]
+    ExtensionRemove(ExtensionConfirmedParams),
+    #[serde(rename = "extension.data.delete")]
+    ExtensionDataDelete(ExtensionConfirmedParams),
+    #[serde(rename = "extension.reorder")]
+    ExtensionReorder(ExtensionReorderParams),
+    #[serde(rename = "extension.repository_override.set")]
+    ExtensionRepositoryOverrideSet(ExtensionRepositoryOverrideParams),
+    #[serde(rename = "extension.update")]
+    ExtensionUpdate(ExtensionUpdateParams),
+    #[serde(rename = "extension.rollback")]
+    ExtensionRollback(ExtensionConfirmedParams),
+    #[serde(rename = "extension.package.inspect")]
+    ExtensionPackageInspect(ExtensionPackageInspectParams),
+    #[serde(rename = "extension.package.install")]
+    ExtensionPackageInstall(ExtensionPackageApprovalParams),
+    #[serde(rename = "extension.package.update")]
+    ExtensionPackageUpdate(ExtensionPackageApprovalParams),
+    #[serde(rename = "extension.package.list")]
+    ExtensionPackageList(EmptyParams),
+    #[serde(rename = "extension.package.enable")]
+    ExtensionPackageEnable(ExtensionPackageMutationParams),
+    #[serde(rename = "extension.package.disable")]
+    ExtensionPackageDisable(ExtensionPackageMutationParams),
+    #[serde(rename = "extension.package.remove")]
+    ExtensionPackageRemove(ExtensionPackageMutationParams),
+    #[serde(rename = "extension.package.rollback")]
+    ExtensionPackageRollback(ExtensionPackageMutationParams),
+    #[serde(rename = "extension.service.binding.inspect")]
+    ExtensionServiceBindingInspect(ExtensionServiceBindingInspectParams),
+    #[serde(rename = "extension.service.binding.approve")]
+    ExtensionServiceBindingApprove(ExtensionServiceBindingApproveParams),
+    #[serde(rename = "extension.service.binding.list")]
+    ExtensionServiceBindingList(EmptyParams),
+    #[serde(rename = "extension.service.binding.revoke")]
+    ExtensionServiceBindingRevoke(ExtensionServiceBindingRevokeParams),
+    #[serde(rename = "extension.service.binding.invoke")]
+    ExtensionServiceBindingInvoke(ExtensionServiceBindingInvokeParams),
+    #[serde(rename = "extension.doctor")]
+    ExtensionDoctor(ExtensionDoctorParams),
 }
 
 #[cfg(test)]

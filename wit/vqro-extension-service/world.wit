@@ -1,0 +1,49 @@
+package vqro:extension@1.0.0;
+
+interface host {
+  record host-error {
+    code: string,
+    message: string,
+  }
+
+  enum log-level {
+    trace,
+    debug,
+    info,
+    warn,
+    error,
+  }
+
+  /// Canonical JSON bytes for vqro.service.v1 RuntimeHostCallV1 and
+  /// RuntimeHostCallResponseV1. The host validates identity, generation,
+  /// namespace, depth, capability, and byte limits.
+  call: func(request: list<u8>) -> result<list<u8>, host-error>;
+
+  /// Bounded, non-secret component diagnostic output.
+  log: func(level: log-level, message: string);
+
+  /// Cooperative cancellation hint. Epoch interruption remains authoritative.
+  cancelled: func() -> bool;
+}
+
+interface types {
+  record service-descriptor {
+    service-id: string,
+    methods: list<string>,
+  }
+
+  record service-error {
+    code: string,
+    message: string,
+  }
+}
+
+world service {
+  import host;
+  use types.{service-descriptor, service-error};
+
+  export descriptor: func() -> result<service-descriptor, service-error>;
+
+  /// Canonical JSON bytes for vqro.service.v1 RuntimeRequestV1 and response.
+  export invoke: func(request: list<u8>) -> result<list<u8>, service-error>;
+}

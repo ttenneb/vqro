@@ -7,6 +7,7 @@ use super::{model::LoadedConfig, Config, CONFIG_PATH_ENV_VAR};
 const KNOWN_TOP_LEVEL_CONFIG_KEYS: &[&str] = &[
     "advanced",
     "experimental",
+    "extensions",
     "keys",
     "onboarding",
     "remote",
@@ -20,11 +21,7 @@ const KNOWN_TOP_LEVEL_CONFIG_KEYS: &[&str] = &[
 ];
 
 pub fn app_dir_name() -> &'static str {
-    if cfg!(debug_assertions) {
-        "herdr-dev"
-    } else {
-        "herdr"
-    }
+    crate::product::app_dir_name(cfg!(debug_assertions))
 }
 
 pub fn config_dir() -> PathBuf {
@@ -374,6 +371,14 @@ fn load_live_config_from_str(content: &str) -> Result<LoadedConfig, Vec<String>>
         &mut diagnostics,
         &mut invalid_sections,
         |section| config.remote = section,
+    );
+    load_live_section(
+        table,
+        "extensions",
+        "extensions config",
+        &mut diagnostics,
+        &mut invalid_sections,
+        |section| config.extensions = section,
     );
 
     diagnostics.extend(config.theme.diagnostics());
@@ -896,6 +901,25 @@ resume_agents_on_restore = true
         .unwrap();
 
         assert!(loaded.config.session.resume_agents_on_restore);
+        assert!(loaded.diagnostics.is_empty());
+        assert!(loaded.invalid_sections.is_empty());
+    }
+
+    #[test]
+    fn load_live_config_preserves_bundled_extension_disables() {
+        let loaded = load_live_config_from_str(
+            r#"
+[extensions]
+disabled = ["vqro.collections"]
+"#,
+        )
+        .unwrap();
+
+        assert!(loaded
+            .config
+            .extensions
+            .disabled
+            .contains("vqro.collections"));
         assert!(loaded.diagnostics.is_empty());
         assert!(loaded.invalid_sections.is_empty());
     }

@@ -794,6 +794,11 @@ pub struct AppState {
     pub(crate) pane_id_aliases: std::collections::HashMap<u32, PaneId>,
     pub(crate) public_pane_id_aliases: std::collections::HashMap<String, PaneId>,
     pub workspaces: Vec<Workspace>,
+    /// Shared repository identities and top-level Spaces ordering.
+    pub repositories: Vec<crate::repository::Repository>,
+    pub space_order: Vec<crate::repository::SpaceRef>,
+    /// Session-wide delegation provenance, independent of pane placement.
+    pub delegations: crate::delegation::Delegations,
     pub active: Option<usize>,
     pub(crate) previous_pane_focus: Option<PaneFocusTarget>,
     pub selected: usize,
@@ -892,6 +897,38 @@ pub struct AppState {
 }
 
 impl AppState {
+    pub(crate) fn reconcile_repositories(&mut self) -> bool {
+        let previous_repositories = self.repositories.clone();
+        let previous_order = self.space_order.clone();
+        let previous_checkouts = self
+            .workspaces
+            .iter()
+            .map(|workspace| workspace.checkout.clone())
+            .collect::<Vec<_>>();
+        let active_workspace_id = self
+            .active
+            .and_then(|index| self.workspaces.get(index))
+            .map(|workspace| workspace.id.clone());
+        crate::repository::reconcile(
+            &mut self.workspaces,
+            &mut self.repositories,
+            &mut self.space_order,
+            active_workspace_id.as_deref(),
+        );
+        let changed = previous_repositories != self.repositories
+            || previous_order != self.space_order
+            || previous_checkouts
+                != self
+                    .workspaces
+                    .iter()
+                    .map(|workspace| workspace.checkout.clone())
+                    .collect::<Vec<_>>();
+        if changed {
+            self.mark_session_dirty();
+        }
+        changed
+    }
+
     pub(crate) fn mark_session_dirty(&mut self) {
         self.session_dirty = true;
     }
@@ -919,6 +956,10 @@ impl AppState {
                 recommendation.state == crate::integration::IntegrationStatusKind::Outdated
                     && recommendation.needs_install()
             })
+    }
+
+    pub fn pane_count(&self) -> usize {
+        self.workspaces.iter().map(Workspace::pane_count).sum()
     }
 
     pub fn estimate_pane_size(&self) -> (u16, u16) {
@@ -1025,6 +1066,9 @@ impl AppState {
             pane_id_aliases: std::collections::HashMap::new(),
             public_pane_id_aliases: std::collections::HashMap::new(),
             workspaces: Vec::new(),
+            repositories: Vec::new(),
+            space_order: Vec::new(),
+            delegations: crate::delegation::Delegations::new(),
             active: None,
             previous_pane_focus: None,
             selected: 0,
@@ -1137,7 +1181,66 @@ impl AppState {
         state
     }
 
+    pub fn assert_terminal_identity_invariants_for_test(&self) {
+        let mut attached = std::collections::HashSet::new();
+        for (pane_id, pane) in self
+            .workspaces
+            .iter()
+            .flat_map(|workspace| &workspace.tabs)
+            .flat_map(|tab| &tab.panes)
+        {
+            assert!(
+                attached.insert(pane.attached_terminal_id.clone()),
+                "terminal {} is attached to more than one pane, including {:?}",
+                pane.attached_terminal_id,
+                pane_id
+            );
+            assert!(
+                crate::terminal::TerminalId::parse(pane.attached_terminal_id.as_str()).is_ok(),
+                "pane {:?} has noncanonical terminal identity {}",
+                pane_id,
+                pane.attached_terminal_id
+            );
+            let terminal = self
+                .terminals
+                .get(&pane.attached_terminal_id)
+                .unwrap_or_else(|| panic!("pane {:?} references missing terminal", pane_id));
+            assert_eq!(
+                terminal.id, pane.attached_terminal_id,
+                "terminal-state key and logical identity diverged"
+            );
+        }
+        if let Some(popup) = &self.popup_pane {
+            assert!(
+                attached.insert(popup.terminal_id.clone()),
+                "popup terminal is also attached to a pane"
+            );
+            let terminal = self
+                .terminals
+                .get(&popup.terminal_id)
+                .expect("popup references missing terminal state");
+            assert_eq!(terminal.id, popup.terminal_id);
+        }
+        for (terminal_id, terminal) in &self.terminals {
+            assert_eq!(
+                terminal_id, &terminal.id,
+                "terminal-state key and logical identity diverged"
+            );
+            assert!(
+                attached.contains(terminal_id),
+                "terminal state {} is not attached to a tiled or popup pane",
+                terminal_id
+            );
+        }
+        assert_eq!(
+            attached.len(),
+            self.terminals.len(),
+            "pane/terminal-state identity projection is not bijective"
+        );
+    }
+
     pub fn assert_invariants_for_test(&self) {
+        self.assert_terminal_identity_invariants_for_test();
         if self.workspaces.is_empty() {
             assert!(
                 self.active.is_none(),
@@ -1174,6 +1277,19 @@ impl AppState {
                     "empty app state must not keep pane-targeted toast"
                 );
             }
+            for repository in &self.repositories {
+                assert!(
+                    repository.checkout_workspace_ids.is_empty()
+                        && repository.last_focused_workspace_id.is_none(),
+                    "empty app state must not keep repository workspace references"
+                );
+            }
+            assert!(
+                self.space_order
+                    .iter()
+                    .all(|space| matches!(space, crate::repository::SpaceRef::Repository(_))),
+                "empty app state must not keep standalone workspace references"
+            );
             return;
         }
 
@@ -1195,7 +1311,9 @@ impl AppState {
 
         let mut workspace_ids = std::collections::HashSet::new();
         let mut workspace_id_to_idx = std::collections::HashMap::new();
+        let mut tab_ids = std::collections::HashSet::new();
         let mut pane_ids = std::collections::HashSet::new();
+        let mut collection_ids = std::collections::HashSet::new();
         let mut attached_terminal_ids = std::collections::HashSet::new();
         for (ws_idx, ws) in self.workspaces.iter().enumerate() {
             assert!(
@@ -1204,10 +1322,39 @@ impl AppState {
                 ws.id,
                 ws_idx
             );
+            let workspace_number = crate::workspace::public_workspace_number(&ws.id)
+                .unwrap_or_else(|| panic!("workspace {} has noncanonical identity", ws.id));
+            assert!(workspace_number > 0, "workspace identity w0 is reserved");
+            assert_eq!(
+                ws.id,
+                format!(
+                    "w{}",
+                    crate::workspace::encode_public_number(workspace_number)
+                ),
+                "workspace {} has noncanonical identity",
+                ws.id
+            );
             workspace_id_to_idx.insert(ws.id.clone(), ws_idx);
             ws.assert_invariants_for_test();
 
             for tab in &ws.tabs {
+                assert!(
+                    crate::workspace::TabId::parse(tab.id.as_str()).is_ok(),
+                    "tab {} has noncanonical identity",
+                    tab.id
+                );
+                assert!(
+                    tab_ids.insert(tab.id.clone()),
+                    "duplicate tab identity {}",
+                    tab.id
+                );
+                for collection_id in tab.layout.collection_ids() {
+                    assert!(
+                        collection_ids.insert(collection_id),
+                        "collection {:?} appears in more than one workspace/tab",
+                        collection_id
+                    );
+                }
                 for (pane_id, pane) in &tab.panes {
                     assert!(
                         pane_ids.insert(*pane_id),
@@ -1226,6 +1373,34 @@ impl AppState {
                         pane.attached_terminal_id
                     );
                 }
+            }
+        }
+
+        for repository in &self.repositories {
+            for workspace_id in &repository.checkout_workspace_ids {
+                assert!(
+                    workspace_ids.contains(workspace_id),
+                    "repository {} references missing checkout workspace {}",
+                    repository.id,
+                    workspace_id
+                );
+            }
+            if let Some(workspace_id) = &repository.last_focused_workspace_id {
+                assert!(
+                    workspace_ids.contains(workspace_id),
+                    "repository {} references missing focused workspace {}",
+                    repository.id,
+                    workspace_id
+                );
+            }
+        }
+        for space in &self.space_order {
+            if let crate::repository::SpaceRef::StandaloneWorkspace(workspace_id) = space {
+                assert!(
+                    workspace_ids.contains(workspace_id),
+                    "space order references missing standalone workspace {}",
+                    workspace_id
+                );
             }
         }
 
@@ -1342,9 +1517,36 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "duplicate tab identity")]
+    fn pure_identity_invariants_reject_duplicate_tab_identity() {
+        let mut state = AppState::test_new();
+        let mut workspace = crate::workspace::Workspace::test_new("test");
+        let second = workspace.test_add_tab(None);
+        workspace.tabs[second].id = workspace.tabs[0].id.clone();
+        state.workspaces = vec![workspace];
+        state.active = Some(0);
+        state.selected = 0;
+        state.ensure_test_terminals();
+        state.assert_invariants_for_test();
+    }
+
+    #[test]
+    #[should_panic(expected = "is not attached to a tiled or popup pane")]
+    fn pure_identity_invariants_reject_orphan_terminal_state() {
+        let mut state = AppState::test_new();
+        let terminal_id = crate::terminal::TerminalId::alloc().unwrap();
+        state.terminals.insert(
+            terminal_id.clone(),
+            crate::terminal::TerminalState::new(terminal_id, "/tmp".into()),
+        );
+        state.assert_terminal_identity_invariants_for_test();
+    }
+
+    #[test]
     fn adversarial_identity_state_satisfies_app_invariants_after_mutation() {
         let mut state = AppState::test_with_adversarial_identity_state();
         state.assert_invariants_for_test();
+        state.assert_terminal_identity_invariants_for_test();
 
         let ws = &mut state.workspaces[0];
         let active_public = ws.tabs[ws.active_tab].number;
@@ -1354,6 +1556,18 @@ mod tests {
         state.ensure_test_terminals();
 
         state.assert_invariants_for_test();
+        state.assert_terminal_identity_invariants_for_test();
+        for workspace in &state.workspaces {
+            for tab in &workspace.tabs {
+                for (pane_id, pane) in &tab.panes {
+                    assert_ne!(
+                        pane.attached_terminal_id.as_str(),
+                        pane_id.raw().to_string(),
+                        "logical terminal identity must not derive from PaneId"
+                    );
+                }
+            }
+        }
     }
 
     fn rgb_luminance(color: Color) -> f64 {

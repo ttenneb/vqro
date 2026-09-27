@@ -158,6 +158,12 @@ impl ActiveSubscription {
                 Ok(event_subscription(EventKind::PaneAgentDetected))
             }
             Subscription::LayoutUpdated {} => Ok(event_subscription(EventKind::LayoutUpdated)),
+            Subscription::HostDocumentUpdated {} => {
+                Ok(event_subscription(EventKind::HostDocumentUpdated))
+            }
+            Subscription::ExtensionStateCommitted {} => {
+                Ok(event_subscription(EventKind::ExtensionStateCommitted))
+            }
             Subscription::PaneOutputMatched {
                 pane_id,
                 source,

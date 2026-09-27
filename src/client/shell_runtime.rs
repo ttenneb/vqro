@@ -25,6 +25,14 @@ pub(super) fn dispatch_client_shell_actions(
                     repaint |= shell.cancel_endpoint_request(&request.id);
                 }
             }
+            shell::ClientShellAction::EndpointControl {
+                endpoint_id,
+                message,
+            } => {
+                if endpoints.active_id() == &endpoint_id {
+                    let _ = endpoints.send_to(&endpoint_id, &message);
+                }
+            }
             shell::ClientShellAction::ClipboardWrite(bytes) => {
                 crate::selection::write_osc52_bytes(&bytes);
             }
@@ -44,6 +52,18 @@ pub(super) fn dispatch_client_shell_actions(
                         Ok(Some(child)) => detached_process_children.push(child),
                         Ok(None) => {}
                         Err(err) => warn!(err = %err, url = %url, "failed to open pane URL"),
+                    }
+                }
+            }
+            shell::ClientShellAction::OpenLocalDirectory(path) => {
+                let path = std::path::PathBuf::from(path);
+                if path.is_absolute() && path.is_dir() {
+                    match crate::platform::open_path(&path) {
+                        Ok(Some(child)) => detached_process_children.push(child),
+                        Ok(None) => {}
+                        Err(err) => {
+                            warn!(err = %err, path = %path.display(), "failed to open repository directory")
+                        }
                     }
                 }
             }
@@ -132,6 +152,7 @@ pub(super) fn clear_endpoint_host_effects(
 
 pub(super) fn apply_client_shell_input_source_changes(
     state: &mut ClientState,
+    endpoints: &mut endpoint::EndpointRegistry,
     prefix_input_source: &mut impl crate::platform::PrefixInputSource,
 ) {
     let changes = state
@@ -144,6 +165,16 @@ pub(super) fn apply_client_shell_input_source_changes(
             prefix_input_source.switch_to_ascii();
         } else {
             prefix_input_source.restore();
+        }
+    }
+    let controls = state
+        .shell
+        .as_mut()
+        .map(shell::ClientShellState::take_pending_endpoint_controls)
+        .unwrap_or_default();
+    for (endpoint_id, message) in controls {
+        if endpoints.active_id() == &endpoint_id {
+            let _ = endpoints.send_to(&endpoint_id, &message);
         }
     }
 }
@@ -596,7 +627,7 @@ pub(super) fn install_client_shell_snapshot(
     } else {
         (None, None, Vec::new())
     };
-    apply_client_shell_input_source_changes(state, prefix_input_source);
+    apply_client_shell_input_source_changes(state, endpoints, prefix_input_source);
     state.present_graphics(&graphics_cleanup);
     if let Some(resize) = resize {
         endpoints.send_to(endpoint_id, &resize);
@@ -621,7 +652,7 @@ pub(super) fn finish_client_shell_input(
     prefix_input_source: &mut impl crate::platform::PrefixInputSource,
     event_tx: &tokio::sync::mpsc::Sender<ClientLoopEvent>,
 ) -> Result<bool, ClientError> {
-    apply_client_shell_input_source_changes(state, prefix_input_source);
+    apply_client_shell_input_source_changes(state, endpoints, prefix_input_source);
     if outcome.detach {
         let _ = write_to_server(endpoints, &ClientMessage::Detach);
         return Ok(true);

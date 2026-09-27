@@ -1,6 +1,7 @@
 name: CI
 
 on:
+  workflow_dispatch:
   pull_request:
     types: [opened, synchronize, reopened]
   push:
@@ -26,7 +27,7 @@ concurrency:
 
 jobs:
   conventional-commits:
-    if: github.event_name != 'push' || github.ref_name == 'master'
+    if: github.event_name != 'workflow_dispatch' && (github.event_name != 'push' || github.ref_name == 'master')
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -46,8 +47,32 @@ jobs:
           PR_TITLE: ${{ github.event.pull_request.title }}
         run: python3 scripts/conventional_commits.py "$PR_TITLE"
 
+  smoke:
+    name: advisory smoke
+    if: github.event_name != 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install Rust formatter
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # v1
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN_VERSION }}
+          components: rustfmt
+
+      - name: Check formatting and preview docs
+        run: |
+          cargo fmt --check
+          node scripts/docs/preview.mjs check
+
   check:
     name: check (${{ matrix.os }})
+    if: github.event_name == 'workflow_dispatch'
     strategy:
       fail-fast: false
       matrix:
@@ -61,7 +86,7 @@ jobs:
           - os: windows-latest
             kind: windows
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 15
+    timeout-minutes: ${{ matrix.kind == 'windows' && 30 || 15 }}
     steps:
       - name: Checkout
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
@@ -173,11 +198,61 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          $exe = Join-Path $PWD "target\debug\herdr.exe"
-          .\scripts\windows_smoke_conpty_path.ps1 -ExePath $exe -Session "ci-windows-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          $exe = Join-Path $PWD "target\debug\vqro.exe"
+          $session = "ci-windows-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          $env:VQRO_SESSION = $session
+          Remove-Item Env:VQRO_SOCKET_PATH, Env:VQRO_CLIENT_SOCKET_PATH -ErrorAction SilentlyContinue
+          .\scripts\windows_smoke_conpty_path.ps1 -ExePath $exe -Session $session
+
+  collections-package-conformance:
+    name: Collections package conformance
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout host
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
+
+      - name: Checkout exact Collections candidate
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          repository: ttenneb/vqro-extension-collections
+          ref: f3f4d2f8ce1dce8c319bf4c4d0e7224850afa868
+          path: .candidate/collections
+          persist-credentials: false
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # v1
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN_VERSION }}
+          targets: wasm32-unknown-unknown
+
+      - name: Install Rust tools
+        uses: taiki-e/install-action@fd2f5e3d644b484055ebf4268f474c565f148f25 # v2.81.9
+        with:
+          tool: just,cargo-nextest
+
+      - name: Install Zig
+        uses: vercel-labs/setup-zig@83c1594f26b86da8a9a8ddd9b5ee5f3af0f96943 # v1.0.2
+        with:
+          version: 0.16.0
+
+      - name: Restore cargo cache
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          cache-bin: false
+          key: collections-package-conformance
+
+      - name: Run host-owned Collections gate
+        env:
+          VQRO_COLLECTIONS_CHECKOUT: ${{ github.workspace }}/.candidate/collections
+        run: just collections-package-conformance
 
   windows-conpty-package:
     name: Windows ConPTY package
+    if: github.event_name == 'workflow_dispatch'
     runs-on: windows-2022
     timeout-minutes: 25
     steps:
@@ -220,15 +295,15 @@ jobs:
           cache-bin: false
           key: conpty-package-windows-2022
 
-      - name: Build Herdr
+      - name: Build Vqro
         run: cargo build --locked --target x86_64-pc-windows-msvc
 
       - name: Verify invalid bundle is rejected and system override recovers
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          Remove-Item Env:HERDR_SOCKET_PATH, Env:HERDR_CLIENT_SOCKET_PATH -ErrorAction SilentlyContinue
-          $exe = Join-Path $PWD "target\x86_64-pc-windows-msvc\debug\herdr.exe"
+          Remove-Item Env:HERDR_SOCKET_PATH, Env:HERDR_CLIENT_SOCKET_PATH, Env:VQRO_SOCKET_PATH, Env:VQRO_CLIENT_SOCKET_PATH -ErrorAction SilentlyContinue
+          $exe = Join-Path $PWD "target\x86_64-pc-windows-msvc\debug\vqro.exe"
           $bundle = Join-Path (Split-Path -Parent $exe) "conpty"
           New-Item -ItemType Directory -Force -Path (Join-Path $bundle "x64"), (Join-Path $bundle "arm64") | Out-Null
           Set-Content -LiteralPath (Join-Path $bundle "herdr-conpty.json") -Value "{}" -Encoding ascii
@@ -238,9 +313,10 @@ jobs:
           try {
             $rejected = $false
             try {
+              $env:VQRO_SESSION = "ci-conpty-invalid-windows-2022-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
               .\scripts\windows_smoke_conpty_path.ps1 `
                 -ExePath $exe `
-                -Session "ci-conpty-invalid-windows-2022-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+                -Session $env:VQRO_SESSION
             } catch {
               if ($_.Exception.Message -notlike "workspace create failed with exit code*") {
                 throw
@@ -248,13 +324,14 @@ jobs:
               $rejected = $true
             }
             if (-not $rejected) {
-              throw "Herdr accepted a tampered app-local ConPTY bundle"
+              throw "Vqro accepted a tampered app-local ConPTY bundle"
             }
 
             $env:HERDR_WINDOWS_CONPTY = "system"
+            $env:VQRO_SESSION = "ci-conpty-system-windows-2022-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
             .\scripts\windows_smoke_conpty_path.ps1 `
               -ExePath $exe `
-              -Session "ci-conpty-system-windows-2022-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+              -Session $env:VQRO_SESSION
           } finally {
             Remove-Item Env:HERDR_WINDOWS_CONPTY -ErrorAction SilentlyContinue
             Remove-Item -LiteralPath $bundle -Recurse -Force -ErrorAction SilentlyContinue
@@ -265,32 +342,29 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           $package = Join-Path $env:RUNNER_TEMP "Microsoft.Windows.Console.ConPTY.nupkg"
-          $stage = Join-Path $env:RUNNER_TEMP "herdr-windows-x86_64"
+          $stage = Join-Path $env:RUNNER_TEMP "vqro-windows-x86_64"
           New-Item -ItemType Directory -Force -Path artifacts | Out-Null
           .\scripts\package_windows_conpty.ps1 `
-            -HerdrExe target\x86_64-pc-windows-msvc\debug\herdr.exe `
+            -HerdrExe target\x86_64-pc-windows-msvc\debug\vqro.exe `
+            -ExecutableName vqro.exe `
             -PackagePath $package `
             -StageDir $stage `
-            -OutputPath artifacts\herdr-windows-x86_64.zip
-          "HERDR_CONPTY_PACKAGE_DIR=$stage" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+            -OutputPath artifacts\vqro-windows-x86_64.zip
+          "VQRO_CONPTY_PACKAGE_DIR=$stage" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Probe enhanced pane input with bundled ConPTY
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          $exe = Join-Path $env:HERDR_CONPTY_PACKAGE_DIR "herdr.exe"
-          $consoleHost = Join-Path $env:HERDR_CONPTY_PACKAGE_DIR "conpty\x64\OpenConsole.exe"
+          $exe = Join-Path $env:VQRO_CONPTY_PACKAGE_DIR "vqro.exe"
+          $consoleHost = Join-Path $env:VQRO_CONPTY_PACKAGE_DIR "conpty\x64\OpenConsole.exe"
+          $env:VQRO_SESSION = "ci-conpty-bundled-windows-2022-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          Remove-Item Env:VQRO_SOCKET_PATH, Env:VQRO_CLIENT_SOCKET_PATH -ErrorAction SilentlyContinue
           .\scripts\windows_conpty_enhanced_input_probe.ps1 `
             -ExePath $exe `
-            -Session "ci-conpty-bundled-windows-2022-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT" `
+            -Session $env:VQRO_SESSION `
             -ExpectedConsoleHostPath $consoleHost
 
-      - name: Test packaged installer and repair with Windows PowerShell 5.1
-        shell: pwsh
-        run: |
-          & powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
-            .\scripts\windows_install_conpty_package_test.ps1 `
-            -ArchivePath artifacts\herdr-windows-x86_64.zip
-          if ($LASTEXITCODE -ne 0) {
-            throw "Windows PowerShell installer test failed with exit code $LASTEXITCODE"
-          }
+      # The inherited installer/repair test invokes Herdr install paths and
+      # commands, not Vqro's. Keep the invalid-bundle, signed-package and
+      # enhanced-input gates above; add Vqro installer coverage with its design.

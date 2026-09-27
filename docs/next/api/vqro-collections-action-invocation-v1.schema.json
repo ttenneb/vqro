@@ -1,0 +1,209 @@
+{
+  "$defs": {
+    "CollectionsActionDependencyV1": {
+      "description": "The minimum host-owned dependency needed by each typed action.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "container_id": {
+              "maxLength": 26,
+              "minLength": 26,
+              "pattern": "^container_[0-9a-f]{16}$",
+              "type": "string"
+            },
+            "kind": {
+              "const": "container",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "container_id"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "container_id": {
+              "maxLength": 26,
+              "minLength": 26,
+              "pattern": "^container_[0-9a-f]{16}$",
+              "type": "string"
+            },
+            "kind": {
+              "const": "terminal_membership",
+              "type": "string"
+            },
+            "provider_generation": {
+              "format": "uint64",
+              "maximum": 18446744073709551615,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "terminal_id": {
+              "maxLength": 37,
+              "minLength": 37,
+              "pattern": "^term_[0-9a-f]{32}$",
+              "type": "string"
+            },
+            "terminal_snapshot_fingerprint_sha256": {
+              "maxLength": 64,
+              "minLength": 64,
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "container_id",
+            "terminal_id",
+            "terminal_snapshot_fingerprint_sha256",
+            "provider_generation"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "CollectionsActionInputV1": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "container_id": {
+              "maxLength": 26,
+              "minLength": 26,
+              "pattern": "^container_[0-9a-f]{16}$",
+              "type": "string"
+            },
+            "kind": {
+              "const": "set_label",
+              "type": "string"
+            },
+            "label": {
+              "maxLength": 4096,
+              "pattern": "^[^\\u0000-\\u001F\\u007F-\\u009F]*$",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "kind",
+            "container_id"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "archived": {
+              "type": "boolean"
+            },
+            "container_id": {
+              "maxLength": 26,
+              "minLength": 26,
+              "pattern": "^container_[0-9a-f]{16}$",
+              "type": "string"
+            },
+            "kind": {
+              "const": "set_archived",
+              "type": "string"
+            },
+            "terminal_id": {
+              "maxLength": 37,
+              "minLength": 37,
+              "pattern": "^term_[0-9a-f]{32}$",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "container_id",
+            "terminal_id",
+            "archived"
+          ],
+          "type": "object"
+        }
+      ]
+    }
+  },
+  "$id": "https://vqro.dev/schema/collections/action-invocation/v1",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "contract": "vqro.collections.action-invocation.v1",
+  "properties": {
+    "action_id": {
+      "maxLength": 256,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9._:/-]+$",
+      "type": "string"
+    },
+    "actions_revision": {
+      "format": "uint64",
+      "maximum": 18446744073709551615,
+      "minimum": 1,
+      "type": "integer"
+    },
+    "contract": {
+      "const": "vqro.collections.action-invocation.v1",
+      "type": "string"
+    },
+    "dependency": {
+      "$ref": "#/$defs/CollectionsActionDependencyV1"
+    },
+    "document_revision": {
+      "format": "uint64",
+      "maximum": 18446744073709551615,
+      "minimum": 1,
+      "type": "integer"
+    },
+    "expected_namespace_revision": {
+      "format": "uint64",
+      "maximum": 18446744073709551615,
+      "minimum": 0,
+      "type": "integer"
+    },
+    "expected_store_generation": {
+      "format": "uint64",
+      "maximum": 18446744073709551615,
+      "minimum": 1,
+      "type": "integer"
+    },
+    "idempotency_key": {
+      "maxLength": 256,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9._:/-]+$",
+      "type": "string"
+    },
+    "input": {
+      "$ref": "#/$defs/CollectionsActionInputV1"
+    },
+    "ticket": {
+      "maxLength": 256,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9._:/-]+$",
+      "type": "string"
+    }
+  },
+  "required": [
+    "contract",
+    "ticket",
+    "idempotency_key",
+    "document_revision",
+    "actions_revision",
+    "action_id",
+    "expected_store_generation",
+    "expected_namespace_revision",
+    "dependency",
+    "input"
+  ],
+  "title": "vqro Collections action invocation v1",
+  "type": "object",
+  "validation_authority": {
+    "json_schema": "structural and per-field constraints",
+    "rust_validator": "normative for canonical identities, label byte/control bounds, declaration matching, and revision fences"
+  }
+}

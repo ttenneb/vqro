@@ -35,17 +35,20 @@ herdr status server
 herdr status client
 ```
 
-API schema commands:
+Native API schema commands:
 
 ```bash
-herdr api schema
-herdr api schema --json
-herdr api schema --output herdr-api.schema.json
+vqro api describe [--json]
+vqro api schema
+vqro api schema --json
+vqro api schema --output vqro-api.schema.json
 ```
 
-`herdr api schema` prints a short summary of the socket protocol schema bundled
-with the installed binary. Use `--json` for the full JSON Schema document, or
-`--output PATH` to write that document to a file.
+`vqro api describe` reports the public `vqro.api.v1` identity and packaged
+schema digest. `vqro api schema` prints a short summary of that JSON API schema;
+use `--json` or `--output PATH` for the full document. This API major is
+independent from the private same-install runtime protocol and the frozen Herdr
+endpoint bridge.
 
 ## Saved SSH machines
 
@@ -441,32 +444,56 @@ herdr integration uninstall grok
 herdr integration status [--outdated-only]
 ```
 
-## Plugins
+## Experimental service bindings
 
-Plugin commands install and run local executable workflow plugins. A plugin is a manifest plus out-of-process commands; Herdr owns the host surface and plugins own their implementation language.
-
-Install, list, and remove plugins:
+Manifest-v3 component packages can inspect and explicitly authorize one exact read-only package-to-package edge:
 
 ```bash
-herdr plugin install <owner>/<repo>[/subdir...] [--ref REF] [--yes]
-herdr plugin list [--plugin ID] [--json]
-herdr plugin uninstall <plugin_id|owner/repo[/subdir...]>
-herdr plugin enable <plugin_id>
-herdr plugin disable <plugin_id>
+vqro service-binding inspect --consumer-package ID --consumer-service ID --import ID --provider-package ID --provider-service ID --export ID
+vqro service-binding list
+vqro service-binding approve --consumer-package ID --consumer-service ID --import ID --provider-package ID --provider-service ID --export ID --registry-revision N [--binding-revision N] --consent-sha256 SHA256 --confirm
+vqro service-binding revoke BINDING_ID --registry-revision N --binding-revision N --confirm
+vqro service-binding call BINDING_ID --binding-revision N --consumer-method METHOD --params-json JSON
 ```
 
-`plugin install` accepts GitHub shorthand only, such as `ogulcancelik/herdr-plugin-examples/worktree-bootstrap`. It uses `git`, shows a trust preview in interactive terminals, runs supported manifest build commands, and stores GitHub installs in a Herdr-managed directory. Use `--yes` for noninteractive installs. Reinstalling a GitHub-managed plugin replaces that managed checkout. Installing over a locally linked plugin is refused. Plugin manifests must declare `min_herdr_version`; install and link fail when the plugin requires a newer Herdr binary. `plugin list` is human-readable by default; pass `--json` for the raw API response.
+Run `inspect` first and review the exact artifacts, methods, request/response information categories, and byte limits. Approval and revocation require revision compare-and-swap values plus explicit confirmation. `call` starts one bounded consumer invocation off the App actor; every required import must be ready, and replacement, revocation, timeout, queue saturation, or stale completion fails closed. This surface is experimental and is not yet used by an ordinary product composition.
+
+## Plugins
+
+These `plugin` commands install and run legacy manifest-v1 executable workflow plugins. Their build commands and services run as trusted same-user code. They are distinct from deterministic component extension packages installed through the Extensions marketplace journey; see [Extension platform status](/docs/extension-platform-status/) and [Marketplace](/docs/marketplace/).
+
+Inspect, validate, and run protocol conformance without a server:
+
+```bash
+vqro plugin schema <bundle|manifest|manifest-v2|package|runtime|service> [--output PATH]
+vqro plugin validate <path> [--json]
+vqro plugin conformance <path> [--json]
+```
+
+`validate` never executes extension code. `conformance` explicitly starts declared services through production supervision and validates their handshake and available canonical fixtures.
+
+Install, list, and remove extensions:
+
+```bash
+vqro plugin install <owner>/<repo>[/subdir...] [--ref REF] [--yes]
+vqro plugin list [--plugin ID] [--json]
+vqro plugin uninstall <plugin_id|owner/repo[/subdir...]>
+vqro plugin enable <plugin_id>
+vqro plugin disable <plugin_id>
+```
+
+`plugin install` accepts GitHub shorthand only, such as `ogulcancelik/herdr-plugin-examples/worktree-bootstrap`. It uses `git`, shows a trust preview in interactive terminals, runs supported manifest build commands, and stores GitHub installs in a Herdr-managed directory. Use `--yes` for noninteractive installs. Reinstalling a GitHub-managed plugin replaces that managed checkout. Installing over a locally linked plugin is refused. New extension manifests declare `min_vqro_version`; the legacy `min_herdr_version` key remains a compatibility alias. Install and link fail when the package requires a newer vqro binary. `plugin list` is human-readable by default; pass `--json` for the raw API response.
 
 Plugin installation and enabled state are global to the current user. A plugin installed, linked, enabled, or disabled through one Herdr session is immediately available with the same state in every session.
 
 Local development:
 
 ```bash
-herdr plugin link <path> [--disabled]
-herdr plugin unlink <plugin_id>
+vqro plugin link <path> [--disabled]
+vqro plugin unlink <plugin_id>
 ```
 
-`plugin link` accepts a plugin directory containing `herdr-plugin.toml` or a direct manifest path. Use it while authoring or testing a plugin from a local checkout. `plugin unlink` unregisters the plugin and leaves files alone. `plugin uninstall` unregisters a plugin and also removes Herdr-managed GitHub checkout files. For GitHub installs, uninstall accepts either the plugin id or the same `owner/repo[/subdir...]` shorthand used by install. Actions, event hooks, panes, and link handlers are declared in the manifest; runtime action registration is not part of v1.
+`plugin link` accepts a package directory containing `vqro-extension.toml` (or the legacy `herdr-plugin.toml`) or a direct manifest path. Use it while authoring or testing a plugin from a local checkout. `plugin unlink` unregisters the plugin and leaves files alone. `plugin uninstall` unregisters a plugin and also removes Herdr-managed GitHub checkout files. For GitHub installs, uninstall accepts either the plugin id or the same `owner/repo[/subdir...]` shorthand used by install. Actions, event hooks, panes, and link handlers are declared in the manifest; runtime action registration is not part of v1.
 
 Config directory:
 

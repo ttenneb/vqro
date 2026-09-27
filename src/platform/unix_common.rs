@@ -1,5 +1,75 @@
 use std::path::{Path, PathBuf};
 
+#[derive(Debug)]
+pub(crate) struct PlatformPersistenceLock {
+    _file: std::fs::File,
+}
+
+#[allow(dead_code)] // Used when the staged persistence coordinator is wired into production.
+/// Locks a stable file in a trusted private parent. This cooperative Unix lock cannot stop a
+/// same-user actor with parent write access from replacing the pathname; Vqro never unlinks or
+/// renames it.
+pub(crate) fn try_lock_platform_persistence(
+    path: &Path,
+) -> Result<PlatformPersistenceLock, super::PersistenceLockError> {
+    use std::os::fd::AsRawFd as _;
+    use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _, PermissionsExt as _};
+
+    let open = |create_new| {
+        let mut options = std::fs::OpenOptions::new();
+        options
+            .read(true)
+            .write(true)
+            .create_new(create_new)
+            .mode(0o600)
+            .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW);
+        options.open(path)
+    };
+    let file = match open(true) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            open(false).map_err(super::PersistenceLockError::Io)?
+        }
+        Err(error) => return Err(super::PersistenceLockError::Io(error)),
+    };
+    let metadata = file.metadata().map_err(super::PersistenceLockError::Io)?;
+    if !metadata.is_file() {
+        return Err(super::PersistenceLockError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "persistence ownership path is not a regular file",
+        )));
+    }
+    let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+    if result != 0 {
+        let error = std::io::Error::last_os_error();
+        let code = error.raw_os_error();
+        if code == Some(libc::EWOULDBLOCK) || code == Some(libc::EAGAIN) {
+            return Err(super::PersistenceLockError::Busy);
+        }
+        return Err(super::PersistenceLockError::Io(error));
+    }
+    // Ownership and permissions are validated or repaired only after this open file description
+    // owns the lock. Re-read metadata so a pre-lock observation cannot hide a mode change.
+    let metadata = file.metadata().map_err(super::PersistenceLockError::Io)?;
+    if metadata.uid() != unsafe { libc::geteuid() } {
+        return Err(super::PersistenceLockError::Io(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "persistence ownership file belongs to another user",
+        )));
+    }
+    if metadata.mode() & 0o777 != 0o600 {
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))
+            .map_err(super::PersistenceLockError::Io)?;
+    }
+    Ok(PlatformPersistenceLock { _file: file })
+}
+
+pub(crate) fn local_listener_accept_error_is_resource_exhaustion(error: &std::io::Error) -> bool {
+    error
+        .raw_os_error()
+        .is_some_and(|code| code == libc::EMFILE || code == libc::ENFILE)
+}
+
 pub(crate) fn classify_child_exit(status: &portable_pty::ExitStatus) -> super::ChildExitReason {
     if status.signal().is_some() {
         super::ChildExitReason::Interrupted
@@ -261,7 +331,7 @@ pub(crate) fn create_remote_ssh_config_dir(control_socket_name: &str) -> std::io
     let mut path_fits = false;
     for base in bases {
         for attempt in 0..100 {
-            let dir = base.join(format!("herdr-ssh-{}-{attempt}", std::process::id()));
+            let dir = base.join(format!("vqro-ssh-{}-{attempt}", std::process::id()));
             if !fits_unix_socket_path(&dir.join(control_socket_name)) {
                 continue;
             }
@@ -389,6 +459,50 @@ pub(crate) fn status_commands_supported() -> bool {
     true
 }
 
+pub(crate) fn fill_secure_random(bytes: &mut [u8]) -> std::io::Result<()> {
+    use std::io::Read as _;
+
+    std::fs::File::open("/dev/urandom")?.read_exact(bytes)
+}
+
+#[derive(Debug)]
+pub(crate) struct ExtensionServiceContainment {
+    process_group: i32,
+}
+
+impl ExtensionServiceContainment {
+    pub(crate) fn new(child: &std::process::Child) -> std::io::Result<Self> {
+        let process_group = i32::try_from(child.id())
+            .map_err(|_| std::io::Error::other("extension process ID exceeds i32"))?;
+        Ok(Self { process_group })
+    }
+}
+
+impl Drop for ExtensionServiceContainment {
+    fn drop(&mut self) {
+        // The service is launched as its own process group. Killing the group also
+        // covers idle root-process exits whose descendants retained no stdio.
+        unsafe {
+            libc::kill(-self.process_group, libc::SIGKILL);
+        }
+    }
+}
+
+pub(crate) fn configure_extension_service_command(command: &mut std::process::Command) {
+    use std::os::unix::process::CommandExt as _;
+    command.process_group(0);
+}
+
+pub(crate) fn terminate_extension_service_process_group(child: &std::process::Child) {
+    if let Ok(pid) = i32::try_from(child.id()) {
+        // The service is launched as its own process group. Killing the group prevents a
+        // descendant from retaining captured stdout/stderr indefinitely.
+        unsafe {
+            libc::kill(-pid, libc::SIGKILL);
+        }
+    }
+}
+
 pub(crate) fn configure_status_command(process: &mut std::process::Command) {
     use std::os::unix::process::CommandExt;
 
@@ -453,9 +567,128 @@ pub(crate) fn set_default_plugin_pane_pwd(env: &mut Vec<(String, String)>, cwd: 
     }
 }
 
+pub(crate) struct PackageStagingBackend(std::os::fd::OwnedFd);
+
+pub(crate) fn configure_package_nofollow(options: &mut std::fs::OpenOptions) {
+    use std::os::unix::fs::OpenOptionsExt;
+    options.custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW);
+}
+
+pub(crate) fn create_private_package_directory(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::DirBuilderExt;
+    let mut builder = std::fs::DirBuilder::new();
+    builder.mode(0o700).create(path)
+}
+
+pub(crate) fn open_package_staging(path: &Path) -> std::io::Result<PackageStagingBackend> {
+    use std::ffi::CString;
+    use std::os::fd::{FromRawFd, OwnedFd};
+    use std::os::unix::ffi::OsStrExt;
+    let path = CString::new(path.as_os_str().as_bytes()).map_err(|_| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "NUL in staging path")
+    })?;
+    // SAFETY: path is NUL-terminated and the returned descriptor is owned below.
+    let descriptor = unsafe {
+        libc::open(
+            path.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if descriptor < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: open returned a fresh owned descriptor.
+    Ok(PackageStagingBackend(unsafe {
+        OwnedFd::from_raw_fd(descriptor)
+    }))
+}
+
+pub(crate) fn write_package_staging_file(
+    staging: &PackageStagingBackend,
+    components: &[std::ffi::OsString],
+    bytes: &[u8],
+    mode: u32,
+) -> std::io::Result<()> {
+    use std::ffi::CString;
+    use std::io::Write;
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    use std::os::unix::ffi::OsStrExt;
+
+    // SAFETY: fcntl duplicates a valid descriptor and returns a new owned descriptor.
+    let duplicate = unsafe { libc::fcntl(staging.0.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 0) };
+    if duplicate < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: fcntl returned a fresh descriptor.
+    let mut directory = unsafe { OwnedFd::from_raw_fd(duplicate) };
+    for component in &components[..components.len() - 1] {
+        let component = CString::new(component.as_bytes()).map_err(|_| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "NUL in package path")
+        })?;
+        // SAFETY: directory and component are valid; EEXIST is handled below.
+        let created = unsafe { libc::mkdirat(directory.as_raw_fd(), component.as_ptr(), 0o700) };
+        if created < 0 {
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() != Some(libc::EEXIST) {
+                return Err(error);
+            }
+        }
+        // SAFETY: arguments are valid and the returned descriptor is owned below.
+        let next = unsafe {
+            libc::openat(
+                directory.as_raw_fd(),
+                component.as_ptr(),
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            )
+        };
+        if next < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        // SAFETY: openat returned a fresh descriptor.
+        directory = unsafe { OwnedFd::from_raw_fd(next) };
+    }
+    let name = CString::new(components[components.len() - 1].as_bytes()).map_err(|_| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "NUL in package path")
+    })?;
+    // SAFETY: arguments are valid and the returned descriptor is owned by File.
+    let descriptor = unsafe {
+        libc::openat(
+            directory.as_raw_fd(),
+            name.as_ptr(),
+            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            0o600,
+        )
+    };
+    if descriptor < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: openat returned a fresh descriptor.
+    let mut file = unsafe { std::fs::File::from_raw_fd(descriptor) };
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    // SAFETY: file owns a valid descriptor; mode is limited by package validation.
+    if unsafe { libc::fchmod(file.as_raw_fd(), mode as libc::mode_t) } < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn listener_resource_exhaustion_classifies_descriptor_limits_only() {
+        assert!(local_listener_accept_error_is_resource_exhaustion(
+            &std::io::Error::from_raw_os_error(libc::EMFILE)
+        ));
+        assert!(local_listener_accept_error_is_resource_exhaustion(
+            &std::io::Error::from_raw_os_error(libc::ENFILE)
+        ));
+        assert!(!local_listener_accept_error_is_resource_exhaustion(
+            &std::io::Error::from_raw_os_error(libc::ECONNABORTED)
+        ));
+    }
 
     #[test]
     fn plugin_pane_pwd_defaults_to_cwd_without_overriding_explicit_env() {

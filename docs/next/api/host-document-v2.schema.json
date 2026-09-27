@@ -1,0 +1,308 @@
+{
+  "$defs": {
+    "DocumentAccessibilityV2": {
+      "additionalProperties": false,
+      "properties": {
+        "description": {
+          "maxLength": 1024,
+          "pattern": "^[^\\u0000-\\u001F\\u007F-\\u009F]*$",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^[^\\u0000-\\u001F\\u007F-\\u009F]*$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "type": "object"
+    },
+    "DocumentDependencyV2": {
+      "additionalProperties": false,
+      "properties": {
+        "contract": {
+          "maxLength": 128,
+          "pattern": "^[a-z0-9-]+(?:\\.[a-z0-9-]+)+$",
+          "type": "string"
+        },
+        "generation": {
+          "format": "uint64",
+          "maximum": 18446744073709551615,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "revision": {
+          "format": "uint64",
+          "maximum": 18446744073709551615,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "scope_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9._:/-]+$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "contract",
+        "scope_id",
+        "revision",
+        "generation"
+      ],
+      "type": "object"
+    },
+    "DocumentNodeV2": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "accessibility": {
+              "$ref": "#/$defs/DocumentAccessibilityV2"
+            },
+            "children": {
+              "default": [],
+              "items": {
+                "maxLength": 128,
+                "minLength": 1,
+                "pattern": "^[A-Za-z0-9._:/-]+$",
+                "type": "string"
+              },
+              "maxItems": 512,
+              "type": "array",
+              "uniqueItems": true
+            },
+            "id": {
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9._:/-]+$",
+              "type": "string"
+            },
+            "kind": {
+              "const": "group",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "id",
+            "accessibility"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "accessibility": {
+              "$ref": "#/$defs/DocumentAccessibilityV2"
+            },
+            "id": {
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9._:/-]+$",
+              "type": "string"
+            },
+            "kind": {
+              "const": "text",
+              "type": "string"
+            },
+            "text": {
+              "maxLength": 4096,
+              "pattern": "^[^\\u0000-\\u001F\\u007F-\\u009F]*$",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "id",
+            "accessibility",
+            "text"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "accessibility": {
+              "$ref": "#/$defs/DocumentAccessibilityV2"
+            },
+            "id": {
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9._:/-]+$",
+              "type": "string"
+            },
+            "kind": {
+              "const": "terminal_slot",
+              "type": "string"
+            },
+            "terminal_id": {
+              "maxLength": 37,
+              "minLength": 37,
+              "pattern": "^term_[0-9a-f]{32}$",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "id",
+            "accessibility",
+            "terminal_id"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "DocumentProducerFenceV2": {
+      "additionalProperties": false,
+      "properties": {
+        "artifact_sha256": {
+          "maxLength": 64,
+          "minLength": 64,
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "package_id": {
+          "maxLength": 128,
+          "pattern": "^[a-z0-9-]+(?:\\.[a-z0-9-]+)+$",
+          "type": "string"
+        },
+        "provider_generation": {
+          "format": "uint64",
+          "maximum": 18446744073709551615,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "runtime_generation": {
+          "format": "uint64",
+          "maximum": 18446744073709551615,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "scope_generation": {
+          "format": "uint64",
+          "maximum": 18446744073709551615,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "service_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9._:/-]+$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "package_id",
+        "service_id",
+        "artifact_sha256",
+        "runtime_generation",
+        "provider_generation",
+        "scope_generation"
+      ],
+      "type": "object"
+    },
+    "DocumentScopeV2": {
+      "additionalProperties": false,
+      "properties": {
+        "contract": {
+          "maxLength": 128,
+          "pattern": "^[a-z0-9-]+(?:\\.[a-z0-9-]+)+$",
+          "type": "string"
+        },
+        "scope_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9._:/-]+$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "contract",
+        "scope_id"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "https://vqro.dev/schema/host-document/v2",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "contract": "host.document.v2",
+  "limits": {
+    "actions": 0,
+    "effects": 0,
+    "max_accessible_description_chars": 1024,
+    "max_accessible_name_chars": 256,
+    "max_dependencies": 64,
+    "max_depth": 16,
+    "max_encoded_bytes": 131072,
+    "max_nodes": 512,
+    "max_text_chars": 4096,
+    "max_total_text_chars": 65536
+  },
+  "properties": {
+    "contract": {
+      "const": "host.document.v2",
+      "type": "string"
+    },
+    "dependencies": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/DocumentDependencyV2"
+      },
+      "maxItems": 64,
+      "type": "array",
+      "uniqueItems": true
+    },
+    "nodes": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/DocumentNodeV2"
+      },
+      "maxItems": 512,
+      "type": "array"
+    },
+    "producer": {
+      "$ref": "#/$defs/DocumentProducerFenceV2"
+    },
+    "revision": {
+      "format": "uint64",
+      "maximum": 18446744073709551615,
+      "minimum": 1,
+      "type": "integer"
+    },
+    "roots": {
+      "default": [],
+      "items": {
+        "maxLength": 128,
+        "minLength": 1,
+        "pattern": "^[A-Za-z0-9._:/-]+$",
+        "type": "string"
+      },
+      "maxItems": 512,
+      "type": "array",
+      "uniqueItems": true
+    },
+    "scope": {
+      "$ref": "#/$defs/DocumentScopeV2"
+    }
+  },
+  "required": [
+    "contract",
+    "producer",
+    "scope",
+    "revision"
+  ],
+  "title": "canonical host document v2",
+  "type": "object",
+  "validation_authority": {
+    "json_schema": "structural and per-field constraints",
+    "rust_validator": "normative for encoded/aggregate budgets, sorted dependencies, graph invariants, and terminal scope coverage"
+  }
+}

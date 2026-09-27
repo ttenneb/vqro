@@ -7,6 +7,7 @@ mod title;
 
 pub(crate) use history_read::{merge_scrolled_up, snapshot_text, ScreenSnapshot, UpwardMerge};
 pub use id::TerminalId;
+pub(crate) use id::MAX_TERMINAL_ID_BYTES;
 pub use runtime::TerminalRuntime;
 pub(crate) use runtime_registry::TerminalRuntimeRegistry;
 pub use state::{

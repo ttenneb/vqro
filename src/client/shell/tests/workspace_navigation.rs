@@ -277,25 +277,26 @@ fn mouse_clicks_cancel_remote_workspace_navigation() {
 }
 
 #[test]
-fn single_machine_compact_navigation_includes_visible_collapsed_group_children() {
+fn single_machine_compact_navigation_uses_one_target_per_compatibility_group() {
     let (mut state, _) = navigation_state(grouped_workspaces());
     state.set_endpoint_catalog(&[]);
-    state.toggle_collapsed_group(&ClientEndpointId::Local, "repo".into());
     state.sidebar_collapsed = true;
     state.compose(100, 28).unwrap();
-    workspace_rect(&state, &ClientEndpointId::Local, "ws_3");
+    assert!(state
+        .hits
+        .workspaces
+        .iter()
+        .all(|hit| hit.workspace_id != "ws_3"));
     enter_navigation(&mut state);
-    for id in ["ws_2", "ws_3"] {
-        preview_key(&mut state, b"\x1b[B");
-        assert_selected(&state, &ClientEndpointId::Local, id);
-    }
+    preview_key(&mut state, b"\x1b[B");
+    assert_selected(&state, &ClientEndpointId::Local, "ws_2");
 }
 
 #[test]
 fn workspace_navigation_respects_each_machines_visible_worktree_groups() {
     for (cols, compact, unavailable, show_child) in [
         (100, false, false, false),
-        (100, true, false, true),
+        (100, true, false, false),
         (44, false, false, true),
         (44, true, true, false),
     ] {
@@ -307,10 +308,10 @@ fn workspace_navigation_respects_each_machines_visible_worktree_groups() {
         }
         state.compose(cols, 28).unwrap();
         enter_navigation(&mut state);
-        let local = if compact && !unavailable {
-            ["ws_2", "ws_3"]
+        let local: &[&str] = if compact && !unavailable {
+            &["ws_2"]
         } else {
-            ["ws_3", "ws_2"]
+            &["ws_3", "ws_2"]
         };
         let remote_ids: &[&str] = if !show_child {
             &["ws_1", "ws_2"]
@@ -319,10 +320,7 @@ fn workspace_navigation_respects_each_machines_visible_worktree_groups() {
         } else {
             &["ws_1", "ws_3", "ws_2"]
         };
-        for (endpoint, ids) in [
-            (&ClientEndpointId::Local, local.as_slice()),
-            (&remote, remote_ids),
-        ] {
+        for (endpoint, ids) in [(&ClientEndpointId::Local, local), (&remote, remote_ids)] {
             for id in ids {
                 preview_key(&mut state, b"\x1b[B");
                 assert_selected(&state, endpoint, id);

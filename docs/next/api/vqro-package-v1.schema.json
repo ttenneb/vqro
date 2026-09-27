@@ -1,0 +1,1831 @@
+{
+  "$id": "https://vqro.dev/schema/package/v1",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "archive": {
+    "checksums": "checksums.sha256",
+    "extension": ".vqrox",
+    "format": "deterministic uncompressed ustar",
+    "manifest": "vqro-extension.toml",
+    "max_archive_bytes": 8388608,
+    "max_entries": 10000,
+    "max_expanded_bytes": 67108864
+  },
+  "contract": "vqro.package.v1",
+  "schemas": {
+    "activation_journal": {
+      "$defs": {
+        "ActivationPhaseV1": {
+          "enum": [
+            "prepared",
+            "artifact_committed",
+            "registry_committed"
+          ],
+          "type": "string"
+        },
+        "PackageArtifactPointerV1": {
+          "properties": {
+            "package_sha256": {
+              "type": "string"
+            },
+            "runtime_generation": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "version": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "package_sha256",
+            "version",
+            "runtime_generation"
+          ],
+          "type": "object"
+        },
+        "PackageProvenanceV1": {
+          "oneOf": [
+            {
+              "additionalProperties": false,
+              "properties": {
+                "authorized_namespaces": {
+                  "default": [],
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "catalog": {
+                  "type": "string"
+                },
+                "kind": {
+                  "const": "curated",
+                  "type": "string"
+                },
+                "manifest_sha256": {
+                  "type": "string"
+                },
+                "package_id": {
+                  "type": "string"
+                },
+                "package_sha256": {
+                  "type": "string"
+                },
+                "publisher": {
+                  "type": "string"
+                },
+                "repository": {
+                  "type": "string"
+                },
+                "source_commit": {
+                  "type": "string"
+                },
+                "version": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind",
+                "catalog",
+                "publisher",
+                "repository",
+                "package_id",
+                "version",
+                "source_commit",
+                "package_sha256",
+                "manifest_sha256"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "kind": {
+                  "const": "file",
+                  "type": "string"
+                },
+                "package_sha256": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind",
+                "package_sha256"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "kind": {
+                  "const": "git",
+                  "type": "string"
+                },
+                "manifest_sha256": {
+                  "type": "string"
+                },
+                "package_id": {
+                  "type": "string"
+                },
+                "package_path": {
+                  "type": "string"
+                },
+                "package_sha256": {
+                  "type": "string"
+                },
+                "source_commit": {
+                  "type": "string"
+                },
+                "url": {
+                  "type": "string"
+                },
+                "version": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind",
+                "url",
+                "source_commit",
+                "package_path",
+                "package_id",
+                "version",
+                "package_sha256",
+                "manifest_sha256"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "canonical_path": {
+                  "type": "string"
+                },
+                "kind": {
+                  "const": "link",
+                  "type": "string"
+                },
+                "manifest_sha256": {
+                  "type": "string"
+                },
+                "package_id": {
+                  "type": "string"
+                },
+                "package_sha256": {
+                  "type": "string"
+                },
+                "trust_id": {
+                  "type": "string"
+                },
+                "trusted": {
+                  "type": "boolean"
+                },
+                "version": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind",
+                "canonical_path",
+                "trust_id",
+                "trusted",
+                "package_id",
+                "version",
+                "package_sha256",
+                "manifest_sha256"
+              ],
+              "type": "object"
+            }
+          ]
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "candidate": {
+          "$ref": "#/schemas/activation_journal/$defs/PackageArtifactPointerV1"
+        },
+        "candidate_source": {
+          "$ref": "#/schemas/activation_journal/$defs/PackageProvenanceV1"
+        },
+        "contract": {
+          "type": "string"
+        },
+        "expected_package_revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "expected_registry_revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "operation_id": {
+          "type": "string"
+        },
+        "package_id": {
+          "type": "string"
+        },
+        "phase": {
+          "$ref": "#/schemas/activation_journal/$defs/ActivationPhaseV1"
+        },
+        "previous": {
+          "anyOf": [
+            {
+              "$ref": "#/schemas/activation_journal/$defs/PackageArtifactPointerV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "previous_source": {
+          "anyOf": [
+            {
+              "$ref": "#/schemas/activation_journal/$defs/PackageProvenanceV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "contract",
+        "operation_id",
+        "package_id",
+        "expected_registry_revision",
+        "expected_package_revision",
+        "phase",
+        "candidate",
+        "candidate_source"
+      ],
+      "title": "PackageActivationJournalV1",
+      "type": "object"
+    },
+    "installed_package": {
+      "$defs": {
+        "PackageProvenanceV1": {
+          "oneOf": [
+            {
+              "additionalProperties": false,
+              "properties": {
+                "authorized_namespaces": {
+                  "default": [],
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "catalog": {
+                  "type": "string"
+                },
+                "kind": {
+                  "const": "curated",
+                  "type": "string"
+                },
+                "manifest_sha256": {
+                  "type": "string"
+                },
+                "package_id": {
+                  "type": "string"
+                },
+                "package_sha256": {
+                  "type": "string"
+                },
+                "publisher": {
+                  "type": "string"
+                },
+                "repository": {
+                  "type": "string"
+                },
+                "source_commit": {
+                  "type": "string"
+                },
+                "version": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind",
+                "catalog",
+                "publisher",
+                "repository",
+                "package_id",
+                "version",
+                "source_commit",
+                "package_sha256",
+                "manifest_sha256"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "kind": {
+                  "const": "file",
+                  "type": "string"
+                },
+                "package_sha256": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind",
+                "package_sha256"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "kind": {
+                  "const": "git",
+                  "type": "string"
+                },
+                "manifest_sha256": {
+                  "type": "string"
+                },
+                "package_id": {
+                  "type": "string"
+                },
+                "package_path": {
+                  "type": "string"
+                },
+                "package_sha256": {
+                  "type": "string"
+                },
+                "source_commit": {
+                  "type": "string"
+                },
+                "url": {
+                  "type": "string"
+                },
+                "version": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind",
+                "url",
+                "source_commit",
+                "package_path",
+                "package_id",
+                "version",
+                "package_sha256",
+                "manifest_sha256"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "canonical_path": {
+                  "type": "string"
+                },
+                "kind": {
+                  "const": "link",
+                  "type": "string"
+                },
+                "manifest_sha256": {
+                  "type": "string"
+                },
+                "package_id": {
+                  "type": "string"
+                },
+                "package_sha256": {
+                  "type": "string"
+                },
+                "trust_id": {
+                  "type": "string"
+                },
+                "trusted": {
+                  "type": "boolean"
+                },
+                "version": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind",
+                "canonical_path",
+                "trust_id",
+                "trusted",
+                "package_id",
+                "version",
+                "package_sha256",
+                "manifest_sha256"
+              ],
+              "type": "object"
+            }
+          ]
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "immutable_root": {
+          "type": "string"
+        },
+        "manifest_sha256": {
+          "type": "string"
+        },
+        "package_id": {
+          "type": "string"
+        },
+        "package_sha256": {
+          "type": "string"
+        },
+        "provenance": {
+          "$ref": "#/schemas/installed_package/$defs/PackageProvenanceV1"
+        },
+        "version": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "package_id",
+        "version",
+        "package_sha256",
+        "manifest_sha256",
+        "immutable_root",
+        "provenance"
+      ],
+      "title": "InstalledPackageV1",
+      "type": "object"
+    },
+    "linked_package": {
+      "$defs": {
+        "PackageProvenanceV1": {
+          "oneOf": [
+            {
+              "additionalProperties": false,
+              "properties": {
+                "authorized_namespaces": {
+                  "default": [],
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "catalog": {
+                  "type": "string"
+                },
+                "kind": {
+                  "const": "curated",
+                  "type": "string"
+                },
+                "manifest_sha256": {
+                  "type": "string"
+                },
+                "package_id": {
+                  "type": "string"
+                },
+                "package_sha256": {
+                  "type": "string"
+                },
+                "publisher": {
+                  "type": "string"
+                },
+                "repository": {
+                  "type": "string"
+                },
+                "source_commit": {
+                  "type": "string"
+                },
+                "version": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind",
+                "catalog",
+                "publisher",
+                "repository",
+                "package_id",
+                "version",
+                "source_commit",
+                "package_sha256",
+                "manifest_sha256"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "kind": {
+                  "const": "file",
+                  "type": "string"
+                },
+                "package_sha256": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind",
+                "package_sha256"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "kind": {
+                  "const": "git",
+                  "type": "string"
+                },
+                "manifest_sha256": {
+                  "type": "string"
+                },
+                "package_id": {
+                  "type": "string"
+                },
+                "package_path": {
+                  "type": "string"
+                },
+                "package_sha256": {
+                  "type": "string"
+                },
+                "source_commit": {
+                  "type": "string"
+                },
+                "url": {
+                  "type": "string"
+                },
+                "version": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind",
+                "url",
+                "source_commit",
+                "package_path",
+                "package_id",
+                "version",
+                "package_sha256",
+                "manifest_sha256"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "canonical_path": {
+                  "type": "string"
+                },
+                "kind": {
+                  "const": "link",
+                  "type": "string"
+                },
+                "manifest_sha256": {
+                  "type": "string"
+                },
+                "package_id": {
+                  "type": "string"
+                },
+                "package_sha256": {
+                  "type": "string"
+                },
+                "trust_id": {
+                  "type": "string"
+                },
+                "trusted": {
+                  "type": "boolean"
+                },
+                "version": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind",
+                "canonical_path",
+                "trust_id",
+                "trusted",
+                "package_id",
+                "version",
+                "package_sha256",
+                "manifest_sha256"
+              ],
+              "type": "object"
+            }
+          ]
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "canonical_root": {
+          "type": "string"
+        },
+        "inventory_sha256": {
+          "type": "string"
+        },
+        "manifest_sha256": {
+          "type": "string"
+        },
+        "namespaces": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "package_id": {
+          "type": "string"
+        },
+        "provenance": {
+          "$ref": "#/schemas/linked_package/$defs/PackageProvenanceV1"
+        },
+        "version": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "package_id",
+        "version",
+        "manifest_sha256",
+        "namespaces",
+        "inventory_sha256",
+        "canonical_root",
+        "provenance"
+      ],
+      "title": "LinkedPackageV1",
+      "type": "object"
+    },
+    "manifest": {
+      "$defs": {
+        "PackageRuntimeV1": {
+          "oneOf": [
+            {
+              "additionalProperties": false,
+              "properties": {
+                "component": {
+                  "type": "string"
+                },
+                "kind": {
+                  "const": "component",
+                  "type": "string"
+                },
+                "world": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind",
+                "component",
+                "world"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "args": {
+                  "default": [],
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "executables": {
+                  "additionalProperties": {
+                    "type": "string"
+                  },
+                  "type": "object"
+                },
+                "kind": {
+                  "const": "process",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind",
+                "executables"
+              ],
+              "type": "object"
+            }
+          ]
+        },
+        "PackageServiceV1": {
+          "additionalProperties": false,
+          "properties": {
+            "capabilities": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "id": {
+              "type": "string"
+            },
+            "provides": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "runtime": {
+              "$ref": "#/schemas/manifest/$defs/PackageRuntimeV1"
+            }
+          },
+          "required": [
+            "id",
+            "runtime"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "manifest_version": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "min_vqro_version": {
+          "type": "string"
+        },
+        "namespaces": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "package_contract": {
+          "type": "string"
+        },
+        "services": {
+          "default": [],
+          "items": {
+            "$ref": "#/schemas/manifest/$defs/PackageServiceV1"
+          },
+          "type": "array"
+        },
+        "version": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "manifest_version",
+        "package_contract",
+        "id",
+        "version",
+        "min_vqro_version"
+      ],
+      "title": "PackageManifestV2",
+      "type": "object"
+    },
+    "manifest_v3": {
+      "$defs": {
+        "PackageRuntimeV1": {
+          "oneOf": [
+            {
+              "additionalProperties": false,
+              "properties": {
+                "component": {
+                  "type": "string"
+                },
+                "kind": {
+                  "const": "component",
+                  "type": "string"
+                },
+                "world": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind",
+                "component",
+                "world"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "args": {
+                  "default": [],
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "executables": {
+                  "additionalProperties": {
+                    "type": "string"
+                  },
+                  "type": "object"
+                },
+                "kind": {
+                  "const": "process",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind",
+                "executables"
+              ],
+              "type": "object"
+            }
+          ]
+        },
+        "PackageServiceV2": {
+          "additionalProperties": false,
+          "properties": {
+            "capabilities": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "exports": {
+              "default": [],
+              "items": {
+                "$ref": "#/schemas/manifest_v3/$defs/ServiceContractExportV1"
+              },
+              "type": "array"
+            },
+            "id": {
+              "type": "string"
+            },
+            "imports": {
+              "default": [],
+              "items": {
+                "$ref": "#/schemas/manifest_v3/$defs/ServiceContractImportV1"
+              },
+              "type": "array"
+            },
+            "runtime": {
+              "$ref": "#/schemas/manifest_v3/$defs/PackageRuntimeV1"
+            }
+          },
+          "required": [
+            "id",
+            "runtime"
+          ],
+          "type": "object"
+        },
+        "ServiceContractExportV1": {
+          "additionalProperties": false,
+          "properties": {
+            "descriptor": {
+              "type": "string"
+            },
+            "descriptor_sha256": {
+              "type": "string"
+            },
+            "id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "descriptor",
+            "descriptor_sha256"
+          ],
+          "type": "object"
+        },
+        "ServiceContractImportV1": {
+          "additionalProperties": false,
+          "properties": {
+            "descriptor": {
+              "type": "string"
+            },
+            "descriptor_sha256": {
+              "type": "string"
+            },
+            "id": {
+              "type": "string"
+            },
+            "required": {
+              "default": true,
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "id",
+            "descriptor",
+            "descriptor_sha256"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "manifest_version": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "min_vqro_version": {
+          "type": "string"
+        },
+        "namespaces": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "package_contract": {
+          "type": "string"
+        },
+        "services": {
+          "default": [],
+          "items": {
+            "$ref": "#/schemas/manifest_v3/$defs/PackageServiceV2"
+          },
+          "type": "array"
+        },
+        "version": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "manifest_version",
+        "package_contract",
+        "id",
+        "version",
+        "min_vqro_version"
+      ],
+      "title": "PackageManifestV3",
+      "type": "object"
+    },
+    "provenance": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "authorized_namespaces": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "catalog": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "curated",
+              "type": "string"
+            },
+            "manifest_sha256": {
+              "type": "string"
+            },
+            "package_id": {
+              "type": "string"
+            },
+            "package_sha256": {
+              "type": "string"
+            },
+            "publisher": {
+              "type": "string"
+            },
+            "repository": {
+              "type": "string"
+            },
+            "source_commit": {
+              "type": "string"
+            },
+            "version": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "catalog",
+            "publisher",
+            "repository",
+            "package_id",
+            "version",
+            "source_commit",
+            "package_sha256",
+            "manifest_sha256"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "file",
+              "type": "string"
+            },
+            "package_sha256": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "package_sha256"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "git",
+              "type": "string"
+            },
+            "manifest_sha256": {
+              "type": "string"
+            },
+            "package_id": {
+              "type": "string"
+            },
+            "package_path": {
+              "type": "string"
+            },
+            "package_sha256": {
+              "type": "string"
+            },
+            "source_commit": {
+              "type": "string"
+            },
+            "url": {
+              "type": "string"
+            },
+            "version": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "url",
+            "source_commit",
+            "package_path",
+            "package_id",
+            "version",
+            "package_sha256",
+            "manifest_sha256"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "canonical_path": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "link",
+              "type": "string"
+            },
+            "manifest_sha256": {
+              "type": "string"
+            },
+            "package_id": {
+              "type": "string"
+            },
+            "package_sha256": {
+              "type": "string"
+            },
+            "trust_id": {
+              "type": "string"
+            },
+            "trusted": {
+              "type": "boolean"
+            },
+            "version": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "canonical_path",
+            "trust_id",
+            "trusted",
+            "package_id",
+            "version",
+            "package_sha256",
+            "manifest_sha256"
+          ],
+          "type": "object"
+        }
+      ],
+      "title": "PackageProvenanceV1"
+    },
+    "registry": {
+      "$defs": {
+        "PackageArtifactPointerV1": {
+          "properties": {
+            "package_sha256": {
+              "type": "string"
+            },
+            "runtime_generation": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "version": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "package_sha256",
+            "version",
+            "runtime_generation"
+          ],
+          "type": "object"
+        },
+        "PackageLifecycleRecordV1": {
+          "properties": {
+            "activation_error": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "active": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/registry/$defs/PackageArtifactPointerV1"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "namespaces": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "package_id": {
+              "type": "string"
+            },
+            "pending_activation": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/registry/$defs/PendingActivationV1"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "previous": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/registry/$defs/PackageArtifactPointerV1"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "previous_source": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/registry/$defs/PackageProvenanceV1"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "retained_data": {
+              "default": false,
+              "type": "boolean"
+            },
+            "revision": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "source": {
+              "$ref": "#/schemas/registry/$defs/PackageProvenanceV1"
+            },
+            "status": {
+              "$ref": "#/schemas/registry/$defs/PackageLifecycleStatusV1"
+            }
+          },
+          "required": [
+            "package_id",
+            "source",
+            "revision",
+            "status"
+          ],
+          "type": "object"
+        },
+        "PackageLifecycleStatusV1": {
+          "enum": [
+            "disabled",
+            "enabled",
+            "activating",
+            "failed",
+            "removed_retaining_data"
+          ],
+          "type": "string"
+        },
+        "PackageProvenanceV1": {
+          "oneOf": [
+            {
+              "additionalProperties": false,
+              "properties": {
+                "authorized_namespaces": {
+                  "default": [],
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "catalog": {
+                  "type": "string"
+                },
+                "kind": {
+                  "const": "curated",
+                  "type": "string"
+                },
+                "manifest_sha256": {
+                  "type": "string"
+                },
+                "package_id": {
+                  "type": "string"
+                },
+                "package_sha256": {
+                  "type": "string"
+                },
+                "publisher": {
+                  "type": "string"
+                },
+                "repository": {
+                  "type": "string"
+                },
+                "source_commit": {
+                  "type": "string"
+                },
+                "version": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind",
+                "catalog",
+                "publisher",
+                "repository",
+                "package_id",
+                "version",
+                "source_commit",
+                "package_sha256",
+                "manifest_sha256"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "kind": {
+                  "const": "file",
+                  "type": "string"
+                },
+                "package_sha256": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind",
+                "package_sha256"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "kind": {
+                  "const": "git",
+                  "type": "string"
+                },
+                "manifest_sha256": {
+                  "type": "string"
+                },
+                "package_id": {
+                  "type": "string"
+                },
+                "package_path": {
+                  "type": "string"
+                },
+                "package_sha256": {
+                  "type": "string"
+                },
+                "source_commit": {
+                  "type": "string"
+                },
+                "url": {
+                  "type": "string"
+                },
+                "version": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind",
+                "url",
+                "source_commit",
+                "package_path",
+                "package_id",
+                "version",
+                "package_sha256",
+                "manifest_sha256"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "canonical_path": {
+                  "type": "string"
+                },
+                "kind": {
+                  "const": "link",
+                  "type": "string"
+                },
+                "manifest_sha256": {
+                  "type": "string"
+                },
+                "package_id": {
+                  "type": "string"
+                },
+                "package_sha256": {
+                  "type": "string"
+                },
+                "trust_id": {
+                  "type": "string"
+                },
+                "trusted": {
+                  "type": "boolean"
+                },
+                "version": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind",
+                "canonical_path",
+                "trust_id",
+                "trusted",
+                "package_id",
+                "version",
+                "package_sha256",
+                "manifest_sha256"
+              ],
+              "type": "object"
+            }
+          ]
+        },
+        "PendingActivationV1": {
+          "properties": {
+            "candidate": {
+              "$ref": "#/schemas/registry/$defs/PackageArtifactPointerV1"
+            },
+            "operation_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "operation_id",
+            "candidate"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "contract": {
+          "default": "vqro.package-registry.v1",
+          "type": "string"
+        },
+        "load_order": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "packages": {
+          "additionalProperties": {
+            "$ref": "#/schemas/registry/$defs/PackageLifecycleRecordV1"
+          },
+          "type": "object"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "revision",
+        "packages"
+      ],
+      "title": "PackageRegistryV1",
+      "type": "object"
+    },
+    "service_contract": {
+      "$defs": {
+        "ServiceContractMethodV1": {
+          "additionalProperties": false,
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "max_request_bytes": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "max_response_bytes": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "request_information": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "request_schema": true,
+            "response_information": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "response_schema": true
+          },
+          "required": [
+            "id",
+            "request_schema",
+            "response_schema",
+            "max_request_bytes",
+            "max_response_bytes"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "contract": {
+          "type": "string"
+        },
+        "contract_id": {
+          "type": "string"
+        },
+        "contract_version": {
+          "type": "string"
+        },
+        "methods": {
+          "items": {
+            "$ref": "#/schemas/service_contract/$defs/ServiceContractMethodV1"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "contract",
+        "contract_id",
+        "contract_version",
+        "methods"
+      ],
+      "title": "ServiceContractDescriptorV1",
+      "type": "object"
+    },
+    "validated_package": {
+      "$defs": {
+        "PackageFileV1": {
+          "properties": {
+            "executable": {
+              "type": "boolean"
+            },
+            "path": {
+              "type": "string"
+            },
+            "sha256": {
+              "type": "string"
+            },
+            "size": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "path",
+            "sha256",
+            "size",
+            "executable"
+          ],
+          "type": "object"
+        },
+        "PackageRuntimeV1": {
+          "oneOf": [
+            {
+              "additionalProperties": false,
+              "properties": {
+                "component": {
+                  "type": "string"
+                },
+                "kind": {
+                  "const": "component",
+                  "type": "string"
+                },
+                "world": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind",
+                "component",
+                "world"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "args": {
+                  "default": [],
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "executables": {
+                  "additionalProperties": {
+                    "type": "string"
+                  },
+                  "type": "object"
+                },
+                "kind": {
+                  "const": "process",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind",
+                "executables"
+              ],
+              "type": "object"
+            }
+          ]
+        },
+        "ServiceContractDescriptorV1": {
+          "additionalProperties": false,
+          "properties": {
+            "contract": {
+              "type": "string"
+            },
+            "contract_id": {
+              "type": "string"
+            },
+            "contract_version": {
+              "type": "string"
+            },
+            "methods": {
+              "items": {
+                "$ref": "#/schemas/validated_package/$defs/ServiceContractMethodV1"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "contract",
+            "contract_id",
+            "contract_version",
+            "methods"
+          ],
+          "type": "object"
+        },
+        "ServiceContractExportV1": {
+          "additionalProperties": false,
+          "properties": {
+            "descriptor": {
+              "type": "string"
+            },
+            "descriptor_sha256": {
+              "type": "string"
+            },
+            "id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "descriptor",
+            "descriptor_sha256"
+          ],
+          "type": "object"
+        },
+        "ServiceContractImportV1": {
+          "additionalProperties": false,
+          "properties": {
+            "descriptor": {
+              "type": "string"
+            },
+            "descriptor_sha256": {
+              "type": "string"
+            },
+            "id": {
+              "type": "string"
+            },
+            "required": {
+              "default": true,
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "id",
+            "descriptor",
+            "descriptor_sha256"
+          ],
+          "type": "object"
+        },
+        "ServiceContractMethodV1": {
+          "additionalProperties": false,
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "max_request_bytes": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "max_response_bytes": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "request_information": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "request_schema": true,
+            "response_information": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "response_schema": true
+          },
+          "required": [
+            "id",
+            "request_schema",
+            "response_schema",
+            "max_request_bytes",
+            "max_response_bytes"
+          ],
+          "type": "object"
+        },
+        "ValidatedPackageManifestV1": {
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "manifest_version": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "min_vqro_version": {
+              "type": "string"
+            },
+            "namespaces": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "package_contract": {
+              "type": "string"
+            },
+            "services": {
+              "items": {
+                "$ref": "#/schemas/validated_package/$defs/ValidatedPackageServiceV1"
+              },
+              "type": "array"
+            },
+            "version": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "manifest_version",
+            "package_contract",
+            "id",
+            "version",
+            "min_vqro_version",
+            "namespaces",
+            "services"
+          ],
+          "type": "object"
+        },
+        "ValidatedPackageServiceV1": {
+          "properties": {
+            "capabilities": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "exports": {
+              "default": [],
+              "items": {
+                "$ref": "#/schemas/validated_package/$defs/ServiceContractExportV1"
+              },
+              "type": "array"
+            },
+            "id": {
+              "type": "string"
+            },
+            "imports": {
+              "default": [],
+              "items": {
+                "$ref": "#/schemas/validated_package/$defs/ServiceContractImportV1"
+              },
+              "type": "array"
+            },
+            "provides": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "runtime": {
+              "$ref": "#/schemas/validated_package/$defs/PackageRuntimeV1"
+            }
+          },
+          "required": [
+            "id",
+            "runtime"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "contract": {
+          "type": "string"
+        },
+        "contract_descriptors": {
+          "additionalProperties": {
+            "$ref": "#/schemas/validated_package/$defs/ServiceContractDescriptorV1"
+          },
+          "default": {},
+          "type": "object"
+        },
+        "files": {
+          "items": {
+            "$ref": "#/schemas/validated_package/$defs/PackageFileV1"
+          },
+          "type": "array"
+        },
+        "manifest": {
+          "$ref": "#/schemas/validated_package/$defs/ValidatedPackageManifestV1"
+        },
+        "manifest_sha256": {
+          "type": "string"
+        },
+        "package_sha256": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "contract",
+        "package_sha256",
+        "manifest_sha256",
+        "manifest",
+        "files"
+      ],
+      "title": "ValidatedPackageV1",
+      "type": "object"
+    }
+  },
+  "title": "vqro package contract v1"
+}

@@ -132,7 +132,7 @@ fn named_sessions_use_separate_servers_and_workspace_state() {
     assert!(alpha_session["socket_path"]
         .as_str()
         .unwrap()
-        .ends_with("/sessions/alpha/herdr.sock"));
+        .ends_with("/sessions/alpha/vqro.sock"));
     assert!(beta_session["session_dir"]
         .as_str()
         .unwrap()
@@ -210,7 +210,7 @@ fn dead_server_cli_reports_one_session_aware_json_line() {
         assert_eq!(
             response["error"]["message"],
             format!(
-                "no herdr server is running at {}; run `{attach_command}` to start or attach it",
+                "no vqro server is running at {}; run `{attach_command}` to start or attach it",
                 socket_path.display()
             )
         );
@@ -228,27 +228,27 @@ fn dead_server_cli_reports_one_session_aware_json_line() {
         &runtime_dir,
         &["--session", "foo", "workspace", "create"],
     );
-    assert_server_not_running(missing, &named_socket, "herdr session attach foo");
+    assert_server_not_running(missing, &named_socket, "vqro session attach foo");
 
     let stale_socket = runtime_dir.join("stale.sock");
     drop(UnixListener::bind(&stale_socket).unwrap());
-    let stale = Command::new(env!("CARGO_BIN_EXE_herdr"))
+    let stale = Command::new(env!("CARGO_BIN_EXE_vqro"))
         .args(["workspace", "create"])
         .env("XDG_CONFIG_HOME", &config_home)
         .env("XDG_RUNTIME_DIR", &runtime_dir)
-        .env("HERDR_SOCKET_PATH", &stale_socket)
-        .env("HERDR_SESSION", "unrelated")
-        .env_remove("HERDR_CLIENT_SOCKET_PATH")
-        .env_remove("HERDR_ENV")
+        .env("VQRO_SOCKET_PATH", &stale_socket)
+        .env("VQRO_SESSION", "unrelated")
+        .env_remove("VQRO_CLIENT_SOCKET_PATH")
+        .env_remove("VQRO_ENV")
         .output()
         .unwrap();
-    assert_server_not_running(stale, &stale_socket, "herdr");
+    assert_server_not_running(stale, &stale_socket, "vqro");
 
     cleanup_test_base(&base);
 }
 
 #[test]
-fn integration_commands_run_locally_when_server_is_missing() {
+fn vqro_owned_integration_mutation_preserves_inherited_files() {
     let base = unique_test_dir();
     let home_dir = base.join("home");
     let extensions_dir = home_dir.join(".pi/agent/extensions");
@@ -259,60 +259,69 @@ fn integration_commands_run_locally_when_server_is_missing() {
     register_runtime_dir(&runtime_dir);
     let missing_socket = runtime_dir.join("missing.sock");
 
-    let expected_extension = extensions_dir.join("herdr-agent-state.ts");
-    assert!(
-        !expected_extension.exists(),
-        "test setup should start without extension file"
-    );
+    let inherited_extension = extensions_dir.join("herdr-agent-state.ts");
+    fs::write(&inherited_extension, "preserve exactly\n").unwrap();
+    let expected_extension = extensions_dir.join("vqro-agent-state.ts");
+    assert!(!expected_extension.exists());
 
-    let workspace_list = Command::new(env!("CARGO_BIN_EXE_herdr"))
+    let workspace_list = Command::new(env!("CARGO_BIN_EXE_vqro"))
         .args(["workspace", "list"])
-        .env("HERDR_SOCKET_PATH", &missing_socket)
+        .env("VQRO_SOCKET_PATH", &missing_socket)
         .env("HOME", &home_dir)
         .output()
         .unwrap();
     assert_eq!(workspace_list.status.code(), Some(1));
 
-    let integration_install = Command::new(env!("CARGO_BIN_EXE_herdr"))
+    let integration_install = Command::new(env!("CARGO_BIN_EXE_vqro"))
         .args(["integration", "install", "pi"])
-        .env("HERDR_SOCKET_PATH", &missing_socket)
+        .env("VQRO_SOCKET_PATH", &missing_socket)
         .env("HOME", &home_dir)
         .output()
         .unwrap();
     assert_eq!(integration_install.status.code(), Some(0));
-    assert!(
-        expected_extension.exists(),
-        "integration install should write local files without a server"
+    assert!(expected_extension.exists());
+    assert_eq!(
+        fs::read_to_string(&inherited_extension).unwrap(),
+        "preserve exactly\n"
     );
 
-    let integration_status = Command::new(env!("CARGO_BIN_EXE_herdr"))
+    let inherited_install = Command::new(env!("CARGO_BIN_EXE_vqro"))
+        .args(["integration", "install", "kimi"])
+        .env("VQRO_SOCKET_PATH", &missing_socket)
+        .env("HOME", &home_dir)
+        .output()
+        .unwrap();
+    assert_eq!(inherited_install.status.code(), Some(1));
+
+    let integration_status = Command::new(env!("CARGO_BIN_EXE_vqro"))
         .args(["integration", "status"])
-        .env("HERDR_SOCKET_PATH", &missing_socket)
+        .env("VQRO_SOCKET_PATH", &missing_socket)
         .env("HOME", &home_dir)
         .output()
         .unwrap();
     assert_eq!(integration_status.status.code(), Some(0));
     let status_stdout = String::from_utf8_lossy(&integration_status.stdout);
-    assert!(status_stdout.contains("pi: current (v9)"));
+    assert!(status_stdout.contains("pi: current"));
     assert!(status_stdout.contains("claude: not installed"));
 
-    let integration_uninstall = Command::new(env!("CARGO_BIN_EXE_herdr"))
+    let integration_uninstall = Command::new(env!("CARGO_BIN_EXE_vqro"))
         .args(["integration", "uninstall", "pi"])
-        .env("HERDR_SOCKET_PATH", &missing_socket)
+        .env("VQRO_SOCKET_PATH", &missing_socket)
         .env("HOME", &home_dir)
         .output()
         .unwrap();
     assert_eq!(integration_uninstall.status.code(), Some(0));
-    assert!(
-        !expected_extension.exists(),
-        "integration uninstall should remove local files without a server"
+    assert!(!expected_extension.exists());
+    assert_eq!(
+        fs::read_to_string(&inherited_extension).unwrap(),
+        "preserve exactly\n"
     );
 
     cleanup_test_base(&base);
 }
 
 #[test]
-fn integration_status_outdated_only_prints_action_for_legacy_install() {
+fn integration_status_ignores_legacy_herdr_install() {
     let base = unique_test_dir();
     let home_dir = base.join("home");
     let extensions_dir = home_dir.join(".pi/agent/extensions");
@@ -328,18 +337,16 @@ fn integration_status_outdated_only_prints_action_for_legacy_install() {
     register_runtime_dir(&runtime_dir);
     let missing_socket = runtime_dir.join("missing.sock");
 
-    let output = Command::new(env!("CARGO_BIN_EXE_herdr"))
+    let output = Command::new(env!("CARGO_BIN_EXE_vqro"))
         .args(["integration", "status", "--outdated-only"])
-        .env("HERDR_SOCKET_PATH", &missing_socket)
+        .env("VQRO_SOCKET_PATH", &missing_socket)
         .env("HOME", &home_dir)
         .output()
         .unwrap();
 
     assert_eq!(output.status.code(), Some(0));
     assert!(output.stdout.is_empty());
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("installed herdr integrations need updating"));
-    assert!(stderr.contains("herdr integration install pi"));
+    assert!(output.stderr.is_empty());
 
     cleanup_test_base(&base);
 }
@@ -354,9 +361,9 @@ fn integration_status_rejects_unknown_flags() {
     register_runtime_dir(&runtime_dir);
     let missing_socket = runtime_dir.join("missing.sock");
 
-    let output = Command::new(env!("CARGO_BIN_EXE_herdr"))
+    let output = Command::new(env!("CARGO_BIN_EXE_vqro"))
         .args(["integration", "status", "--wat"])
-        .env("HERDR_SOCKET_PATH", &missing_socket)
+        .env("VQRO_SOCKET_PATH", &missing_socket)
         .env("HOME", &home_dir)
         .output()
         .unwrap();
@@ -389,7 +396,7 @@ fn status_commands_report_client_and_server_versions() {
         "stdout: {full_stdout}"
     );
     assert!(
-        full_stdout.contains("  protocol: 22"),
+        full_stdout.contains("  protocol: 23"),
         "stdout: {full_stdout}"
     );
     assert!(full_stdout.contains("server:\n"), "stdout: {full_stdout}");
@@ -430,7 +437,7 @@ fn status_commands_report_client_and_server_versions() {
         "stdout: {server_stdout}"
     );
     assert!(
-        server_stdout.contains("private_protocol: 22"),
+        server_stdout.contains("private_protocol: 23"),
         "stdout: {server_stdout}"
     );
 
@@ -442,7 +449,7 @@ fn status_commands_report_client_and_server_versions() {
         "stdout: {client_stdout}"
     );
     assert!(
-        client_stdout.contains("protocol: 22"),
+        client_stdout.contains("protocol: 23"),
         "stdout: {client_stdout}"
     );
     assert!(
@@ -456,7 +463,7 @@ fn status_commands_report_client_and_server_versions() {
 
     let full_json = run_cli_json(&socket_path, &["status", "--json"]);
     assert_eq!(full_json["client"]["version"], env!("CARGO_PKG_VERSION"));
-    assert_eq!(full_json["client"]["protocol"], 22);
+    assert_eq!(full_json["client"]["protocol"], 23);
     assert_eq!(full_json["client"]["endpoint_protocol_generation"], 1);
     assert_eq!(full_json["client"]["remote_host_bridge"], true);
     assert_eq!(full_json["server"]["status"], "running");
@@ -475,13 +482,13 @@ fn status_commands_report_client_and_server_versions() {
     let server_json = run_cli_json(&socket_path, &["status", "server", "--json"]);
     assert_eq!(server_json["status"], "running");
     assert_eq!(server_json["version"], env!("CARGO_PKG_VERSION"));
-    assert_eq!(server_json["protocol"], 22);
+    assert_eq!(server_json["protocol"], 23);
     assert_eq!(server_json["compatible"], true);
     assert_eq!(server_json["endpoint_compatible"], true);
 
     let client_json = run_cli_json(&socket_path, &["status", "client", "--json"]);
     assert_eq!(client_json["version"], env!("CARGO_PKG_VERSION"));
-    assert_eq!(client_json["protocol"], 22);
+    assert_eq!(client_json["protocol"], 23);
     assert_eq!(client_json["endpoint_protocol_generation"], 1);
     assert_eq!(client_json["remote_host_bridge"], true);
     assert!(client_json["binary"]
@@ -713,12 +720,15 @@ fn server_start_restores_legacy_session_through_api_identity() {
     assert_eq!(panes.len(), 2);
     let root_pane_id = format!("{workspace_id}:p1");
     let focused_pane_id = format!("{workspace_id}:p2");
-    assert!(panes.iter().any(|pane| {
-        pane["pane_id"] == root_pane_id
-            && pane["tab_id"] == format!("{workspace_id}:t1")
-            && pane["cwd"] == pion_cwd
-            && pane["focused"] == false
-    }));
+    assert!(
+        panes.iter().any(|pane| {
+            pane["pane_id"] == root_pane_id
+                && pane["tab_id"] == format!("{workspace_id}:t1")
+                && pane["cwd"] == pion_cwd
+                && pane["focused"] == false
+        }),
+        "restored panes: {panes:?}"
+    );
     assert!(panes.iter().any(|pane| {
         pane["pane_id"] == focused_pane_id
             && pane["tab_id"] == format!("{workspace_id}:t1")
@@ -757,4 +767,46 @@ fn server_start_restores_legacy_session_through_api_identity() {
     assert_eq!(agents[0]["agent_status"], "working");
 
     cleanup_spawned_herdr(herdr, base);
+}
+
+#[test]
+fn session_import_herdr_copies_into_a_new_named_session() {
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let herdr_root = config_home.join("herdr");
+    fs::create_dir_all(&herdr_root).unwrap();
+    fs::write(
+        herdr_root.join("session.json"),
+        r#"{"version":4,"workspaces":[],"repositories":[],"space_order":[],"active":null,"selected":0}"#,
+    )
+    .unwrap();
+
+    let imported = run_named_cli(
+        &config_home,
+        &runtime_dir,
+        &["session", "import-herdr", "--name", "from-herdr", "--json"],
+    );
+    assert!(
+        imported.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&imported.stderr)
+    );
+    let imported: serde_json::Value = serde_json::from_slice(&imported.stdout).unwrap();
+    assert_eq!(imported["imported"]["source"], "default");
+    assert_eq!(imported["imported"]["target"], "from-herdr");
+    assert!(config_home
+        .join(app_dir_name())
+        .join("sessions/from-herdr/session.json")
+        .is_file());
+
+    let duplicate = run_named_cli(
+        &config_home,
+        &runtime_dir,
+        &["session", "import-herdr", "--name=from-herdr"],
+    );
+    assert_eq!(duplicate.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&duplicate.stderr).contains("already exists"));
+
+    cleanup_test_base(&base);
 }

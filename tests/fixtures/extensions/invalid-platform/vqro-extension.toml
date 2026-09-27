@@ -1,0 +1,5 @@
+id = "example.invalid"
+name = "Invalid extension"
+version = "1.0.0"
+min_vqro_version = "0.9.0"
+platforms = ["plan9"]

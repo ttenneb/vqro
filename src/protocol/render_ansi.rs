@@ -86,6 +86,14 @@ impl BlitEncoder {
         suppress_visible_cursor: bool,
     ) -> EncodedBlit {
         let previous_frame = self.last_frame.as_ref();
+        if !repaint && previous_frame == Some(frame) {
+            return EncodedBlit {
+                bytes: Vec::new(),
+                full: false,
+                next_last_visible_cursor: self.last_visible_cursor,
+                next_last_cursor_shape: self.last_cursor_shape,
+            };
+        }
         let prev = if repaint { None } else { previous_frame };
         let full = repaint
             || prev.is_none()
@@ -1715,6 +1723,31 @@ mod tests {
                 assert_eq!(graphemes, vec![u32::from('B')]);
             }
         }
+    }
+
+    #[test]
+    fn unchanged_composed_frame_after_lifecycle_event_emits_no_terminal_bytes() {
+        let initial = make_frame(2, 1, vec![make_cell("A", 0, 0, 0), make_cell("B", 0, 0, 0)]);
+        let mut encoder = BlitEncoder::new();
+
+        let first = encoder.encode(&initial, false);
+        assert!(!first.bytes.is_empty(), "the first frame must be presented");
+        encoder.commit(initial.clone(), first);
+
+        let unchanged = encoder.encode(&initial, false);
+        assert!(
+            unchanged.bytes.is_empty(),
+            "a lifecycle event with an unchanged composed frame must not emit a presentation envelope"
+        );
+        encoder.commit(initial, unchanged);
+
+        let changed = make_frame(2, 1, vec![make_cell("A", 0, 0, 0), make_cell("C", 0, 0, 0)]);
+        let update = encoder.encode(&changed, false);
+        assert!(
+            !update.bytes.is_empty(),
+            "a changed composed frame must still be presented"
+        );
+        assert!(update.bytes.windows(1).any(|bytes| bytes == b"C"));
     }
 
     #[test]

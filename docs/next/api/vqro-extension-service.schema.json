@@ -1,0 +1,189 @@
+{
+  "$id": "https://vqro.dev/schema/extension-service/v1",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "contract": "vqro.extension-service.v1",
+  "host_protocol": 2,
+  "limits": {
+    "handshake_timeout_ms": 3000,
+    "max_frame_bytes": 262144,
+    "request_timeout_ms": 750
+  },
+  "schemas": {
+    "hello": {
+      "$defs": {
+        "ExtensionServiceCapability": {
+          "enum": [
+            "view_contribution",
+            "host_document",
+            "action_choices",
+            "focus_terminal",
+            "terminal_interrupt",
+            "unknown"
+          ],
+          "type": "string"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "methods": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "protocol": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "requested_capabilities": {
+          "default": [],
+          "items": {
+            "$ref": "#/schemas/hello/$defs/ExtensionServiceCapability"
+          },
+          "type": "array"
+        },
+        "service_id": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "protocol",
+        "service_id"
+      ],
+      "title": "ServiceHello",
+      "type": "object"
+    },
+    "request": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "id": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "method": {
+          "type": "string"
+        },
+        "params": true,
+        "type": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "id",
+        "method",
+        "params"
+      ],
+      "title": "ExtensionServiceRequestV1",
+      "type": "object"
+    },
+    "response": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "result": true,
+        "type": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "id"
+      ],
+      "title": "ExtensionServiceResponseV1",
+      "type": "object"
+    },
+    "welcome": {
+      "$defs": {
+        "ExtensionServiceCapability": {
+          "enum": [
+            "view_contribution",
+            "host_document",
+            "action_choices",
+            "focus_terminal",
+            "terminal_interrupt",
+            "unknown"
+          ],
+          "type": "string"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "granted_capabilities": {
+          "items": {
+            "$ref": "#/schemas/welcome/$defs/ExtensionServiceCapability"
+          },
+          "type": "array"
+        },
+        "methods": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "protocol": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "trust": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "protocol",
+        "granted_capabilities",
+        "methods",
+        "trust"
+      ],
+      "title": "ExtensionServiceWelcomeV1",
+      "type": "object"
+    }
+  },
+  "stability": {
+    "experimental_methods": [
+      "host.action.choices.v1",
+      "host.action.choice.invoke.v1"
+    ],
+    "foundation_contracts": [
+      "host.terminal-resource.v1",
+      "host.acknowledgement.v1"
+    ],
+    "restricted_sources": [
+      "spaces",
+      "relationships",
+      "agent_activity"
+    ],
+    "stable_methods": [
+      "view.render",
+      "view.action",
+      "host.document.render",
+      "host.document.action"
+    ]
+  },
+  "title": "vqro extension service protocol v1",
+  "transport": "bounded newline-delimited JSON over stdio"
+}

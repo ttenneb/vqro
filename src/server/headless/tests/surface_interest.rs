@@ -74,6 +74,11 @@ async fn metadata_only_shell_is_isolated_until_surface_activation() {
             endpoint_keybindings: true,
             mouse_capture: true,
             surface_active: false,
+            structure_enabled: false,
+            host_documents_enabled: false,
+            pane_viewport_enabled: false,
+            pane_view_enabled: false,
+            terminal_views_enabled: false,
             writer,
         })
     );
@@ -290,6 +295,11 @@ async fn background_surface_activation_preserves_focused_viewer_geometry() {
             endpoint_keybindings: false,
             mouse_capture: false,
             surface_active: false,
+            structure_enabled: false,
+            host_documents_enabled: false,
+            pane_viewport_enabled: false,
+            pane_view_enabled: false,
+            terminal_views_enabled: false,
             writer,
         })
     );
@@ -401,6 +411,11 @@ async fn presentation_sync_epoch_replays_modes_and_title() {
             endpoint_keybindings: true,
             mouse_capture: true,
             surface_active: true,
+            structure_enabled: false,
+            host_documents_enabled: false,
+            pane_viewport_enabled: false,
+            pane_view_enabled: false,
+            terminal_views_enabled: false,
             writer,
         })
     );
@@ -515,6 +530,11 @@ async fn two_headless_servers_drive_atomic_endpoint_handoff() {
             endpoint_keybindings: true,
             mouse_capture: true,
             surface_active: true,
+            structure_enabled: false,
+            host_documents_enabled: false,
+            pane_viewport_enabled: false,
+            pane_view_enabled: false,
+            terminal_views_enabled: false,
             writer: source_writer,
         })
     );
@@ -540,6 +560,11 @@ async fn two_headless_servers_drive_atomic_endpoint_handoff() {
             endpoint_keybindings: true,
             mouse_capture: true,
             surface_active: false,
+            structure_enabled: false,
+            host_documents_enabled: false,
+            pane_viewport_enabled: false,
+            pane_view_enabled: false,
+            terminal_views_enabled: false,
             writer: target_writer,
         })
     );

@@ -1,0 +1,25 @@
+{
+  "contract": "vqro.collections.actions.v1",
+  "document_revision": 7,
+  "revision": 9,
+  "actions": [
+    {
+      "id": "set-label:container_000000000000002a",
+      "subject_node_id": "collection:container_000000000000002a",
+      "label": "Rename",
+      "action": "set_label"
+    },
+    {
+      "id": "set-archived:term_11111111111111111111111111111111",
+      "subject_node_id": "terminal:term_11111111111111111111111111111111",
+      "label": "Archive",
+      "action": "set_archived"
+    },
+    {
+      "id": "set-archived:term_22222222222222222222222222222222",
+      "subject_node_id": "terminal:term_22222222222222222222222222222222",
+      "label": "Restore",
+      "action": "set_archived"
+    }
+  ]
+}

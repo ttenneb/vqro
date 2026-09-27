@@ -1,0 +1,7 @@
+{
+  "snapshot_version": 7,
+  "collections_authority_fixture": "package-authority-valid.json",
+  "reader_snapshot_version": 6,
+  "expected_result": "reject_before_mutation",
+  "expected_error": "session file version 7 is newer than supported 6"
+}

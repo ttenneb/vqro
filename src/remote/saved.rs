@@ -74,7 +74,7 @@ impl SavedSshApiBridge {
 
 pub(crate) fn saved_ssh_bootstrap_command(target: &str, session: &str) -> String {
     format!(
-        "herdr --remote {} --session {}",
+        "vqro --remote {} --session {}",
         super::shell_quote(target),
         super::shell_quote(session)
     )
@@ -109,8 +109,8 @@ pub(crate) fn saved_ssh_failure_needs_attention(error: &io::Error) -> bool {
 
 fn saved_bridge_path(profile_id: &str) -> PathBuf {
     let pid = std::process::id();
-    let readable = format!("herdr-ssh-{pid}-{profile_id}.sock");
-    let short = format!("herdr-s-{pid}-{}.sock", &profile_id[..16]);
+    let readable = format!("vqro-ssh-{pid}-{profile_id}.sock");
+    let short = format!("vqro-s-{pid}-{}.sock", &profile_id[..16]);
     crate::platform::remote_bridge_endpoint_path(&readable, &short)
 }
 
@@ -153,7 +153,7 @@ mod tests {
     fn bootstrap_command_preserves_the_explicit_remote_session() {
         assert_eq!(
             saved_ssh_bootstrap_command("build host", "agent work"),
-            "herdr --remote 'build host' --session 'agent work'"
+            "vqro --remote 'build host' --session 'agent work'"
         );
     }
 

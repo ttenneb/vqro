@@ -86,6 +86,18 @@ pub(super) fn worktree_remove(params: WorktreeRemoveParams) -> std::io::Result<i
     print_method_response("cli:worktree:remove", Method::WorktreeRemove(params))
 }
 
+pub(super) fn collection(method: Method) -> std::io::Result<i32> {
+    print_method_response("cli:collection", method)
+}
+
+pub(super) fn service_binding(method: Method) -> std::io::Result<i32> {
+    print_method_response("cli:service-binding", method)
+}
+
+pub(super) fn delegation(method: Method) -> std::io::Result<i32> {
+    print_method_response("cli:delegation", method)
+}
+
 pub(super) fn pane_focus(params: PaneFocusDirectionParams) -> std::io::Result<i32> {
     print_method_response("cli:pane:focus", Method::PaneFocusDirection(params))
 }

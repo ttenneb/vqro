@@ -226,7 +226,7 @@ impl ClientShellState {
                 workspace_id: workspace_id.clone(),
             },
             KeybindAction::RemoveWorktree if !linked => {
-                self.set_endpoint_error("This workspace is not a Herdr-managed worktree checkout.");
+                self.set_endpoint_error("This workspace is not a vqro-managed worktree checkout.");
                 outcome.repaint = true;
                 return;
             }
@@ -476,7 +476,7 @@ impl ClientShellState {
                     ));
                 } else {
                     self.set_endpoint_error(
-                        "This workspace is not a Herdr-managed worktree checkout.",
+                        "This workspace is not a vqro-managed worktree checkout.",
                     );
                 }
                 true
@@ -551,9 +551,13 @@ impl ClientShellState {
                 | PendingEndpointKind::ReleaseNotesDismiss
                 | PendingEndpointKind::PopupCommand
                 | PendingEndpointKind::ReloadConfig
-                | PendingEndpointKind::IntegrationList
-                | PendingEndpointKind::IntegrationInstall
+                | PendingEndpointKind::ExtensionList(_)
+                | PendingEndpointKind::ExtensionPackageList(_)
+                | PendingEndpointKind::ExtensionPackageInspect(_)
+                | PendingEndpointKind::ExtensionPackageMutation(_)
+                | PendingEndpointKind::ExtensionMutation(_)
                 | PendingEndpointKind::SelectionCopy
+                | PendingEndpointKind::TerminalInspector { .. }
                 | PendingEndpointKind::PaneScroll { .. }
                 | PendingEndpointKind::WordSelection { .. }
                 | PendingEndpointKind::PaneLinkActivate { .. }

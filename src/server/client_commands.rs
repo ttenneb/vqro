@@ -54,16 +54,61 @@ const CLIENT_SHELL_METHODS: &[&str] = &[
     "worktree.remove",
 ];
 
+/// Optional methods introduced after the frozen generation-1 method set.
+/// Older endpoints simply omit these names and clients disable the actions.
+pub(crate) const CLIENT_SHELL_OPTIONAL_METHODS: &[&str] = &[
+    "collection.add",
+    "collection.archive",
+    "collection.close",
+    "collection.create",
+    "collection.get",
+    "collection.list",
+    "collection.promote",
+    "collection.reorder",
+    "collection.restore",
+    "collection.select",
+    "delegation.create",
+    "delegation.descendants",
+    "delegation.get",
+    "delegation.reorder",
+    "delegation.reparent",
+    "delegation.root",
+    "delegation.tree",
+    "extension.data.delete",
+    "extension.enable",
+    "extension.install",
+    "extension.list",
+    "extension.package.disable",
+    "extension.package.enable",
+    "extension.package.inspect",
+    "extension.package.install",
+    "extension.package.list",
+    "extension.package.remove",
+    "extension.package.rollback",
+    "extension.package.update",
+    "extension.remove",
+    "extension.reorder",
+    "extension.repository_override.set",
+    "extension.rollback",
+    "extension.update",
+    "host.document.action",
+    "pane.telemetry",
+];
+
 pub(crate) fn supported_client_shell_method_names() -> &'static [&'static str] {
     CLIENT_SHELL_METHODS
 }
 
+pub(crate) fn optional_client_shell_method_names() -> &'static [&'static str] {
+    CLIENT_SHELL_OPTIONAL_METHODS
+}
+
 pub(crate) fn supports_client_shell_method_name(method: &str) -> bool {
-    CLIENT_SHELL_METHODS.contains(&method)
+    crate::protocol::endpoint_bridge_v1::supports_name(method)
 }
 
 pub(crate) fn supports_client_shell_method(method: &Method) -> bool {
-    supports_client_shell_method_name(crate::api::api_method_name(method))
+    crate::protocol::endpoint_bridge_v1::supports(method)
 }
 
 pub(crate) fn error_response(id: String, code: &str, message: impl Into<String>) -> String {
@@ -132,12 +177,31 @@ fn correlate_response_id(response: String, request_id: &str) -> String {
     serde_json::to_string(&value).unwrap_or(response)
 }
 
+#[cfg(test)]
 pub(crate) fn spawn_response_waiter(
     client_id: u64,
     boot_id: String,
     request_id: String,
     response_rx: mpsc::Receiver<String>,
     server_event_tx: tokio_mpsc::Sender<ServerEvent>,
+) -> io::Result<()> {
+    spawn_response_waiter_for_lane(
+        client_id,
+        boot_id,
+        request_id,
+        response_rx,
+        server_event_tx,
+        false,
+    )
+}
+
+pub(crate) fn spawn_response_waiter_for_lane(
+    client_id: u64,
+    boot_id: String,
+    request_id: String,
+    response_rx: mpsc::Receiver<String>,
+    server_event_tx: tokio_mpsc::Sender<ServerEvent>,
+    native: bool,
 ) -> io::Result<()> {
     std::thread::Builder::new()
         .name("herdr-client-endpoint-response".into())
@@ -151,29 +215,46 @@ pub(crate) fn spawn_response_waiter(
             });
             let response = correlate_response_id(response, &request_id).into_bytes();
             if response.is_empty() {
-                let _ = server_event_tx.blocking_send(
+                let event = if native {
+                    ServerEvent::NativeEndpointResponseChunkReady {
+                        client_id,
+                        boot_id,
+                        request_id,
+                        final_chunk: true,
+                        data: Vec::new(),
+                    }
+                } else {
                     ServerEvent::ClientShellEndpointResponseChunkReady {
                         client_id,
                         boot_id,
                         request_id,
                         final_chunk: true,
                         data: Vec::new(),
-                    },
-                );
+                    }
+                };
+                let _ = server_event_tx.blocking_send(event);
                 return;
             }
             let chunk_count = response.len().div_ceil(ENDPOINT_RESPONSE_CHUNK_BYTES);
             for (index, chunk) in response.chunks(ENDPOINT_RESPONSE_CHUNK_BYTES).enumerate() {
-                if server_event_tx
-                    .blocking_send(ServerEvent::ClientShellEndpointResponseChunkReady {
+                let event = if native {
+                    ServerEvent::NativeEndpointResponseChunkReady {
                         client_id,
                         boot_id: boot_id.clone(),
                         request_id: request_id.clone(),
                         final_chunk: index + 1 == chunk_count,
                         data: chunk.to_vec(),
-                    })
-                    .is_err()
-                {
+                    }
+                } else {
+                    ServerEvent::ClientShellEndpointResponseChunkReady {
+                        client_id,
+                        boot_id: boot_id.clone(),
+                        request_id: request_id.clone(),
+                        final_chunk: index + 1 == chunk_count,
+                        data: chunk.to_vec(),
+                    }
+                };
+                if server_event_tx.blocking_send(event).is_err() {
                     break;
                 }
             }
@@ -231,7 +312,7 @@ mod tests {
         }
     }
 
-    fn endpoint_method_shape_digests() -> BTreeMap<String, String> {
+    fn endpoint_method_shape_digests(methods: &[&str]) -> BTreeMap<String, String> {
         let schema = serde_json::to_value(schemars::schema_for!(crate::api::schema::Request))
             .expect("request schema");
         let definitions = schema
@@ -244,7 +325,7 @@ mod tests {
             .expect("request method branches");
         let mut digests = BTreeMap::new();
 
-        for method in CLIENT_SHELL_METHODS {
+        for method in methods {
             let branch = branches
                 .iter()
                 .find(|branch| {
@@ -286,7 +367,7 @@ mod tests {
             "/tests/fixtures/endpoint-method-shapes-v1.json"
         )))
         .expect("endpoint method shape fixture");
-        let mut actual = endpoint_method_shape_digests();
+        let mut actual = endpoint_method_shape_digests(CLIENT_SHELL_METHODS);
         // Freeze the additive method separately without rewriting the published fixture.
         assert_eq!(
             actual.remove("pane.link.resolve").as_deref(),
@@ -297,6 +378,43 @@ mod tests {
             actual, expected,
             "an existing endpoint method changed shape; add load-bearing behavior as a new advertised method or explicitly gate new fields"
         );
+    }
+
+    #[test]
+    fn extension_optional_method_shapes_are_frozen() {
+        let methods = CLIENT_SHELL_OPTIONAL_METHODS
+            .iter()
+            .copied()
+            .filter(|method| method.starts_with("extension."))
+            .collect::<Vec<_>>();
+        let mut actual = endpoint_method_shape_digests(&methods);
+        let additive: BTreeMap<String, String> = serde_json::from_value(serde_json::json!({
+            "extension.package.disable": "135f469b07ad4cc2d8385ede5fdd9093486d72b48157d1abea512eff05404b56",
+            "extension.package.enable": "7a494a42a8353fa7e3048677543dabe7d46d03573ed3c938054b4cfc9f6dcde0",
+            "extension.package.inspect": "a1cd0ef6a93d9ce3001a93d97afe62978cdf094b59d71f607d01c867c832fc82",
+            "extension.package.install": "5f9ab324e89f903d3f953883604a5f55e37d8a11a51f573ff63eb23e1dcb1797",
+            "extension.package.list": "1b2d9d96ea121ef1f8ba608d25fd4e160561caabde6d274b877c39484a175000",
+            "extension.package.remove": "be368ca3ea9f6dbab2dc652f043f6da5a357acbd1ba6fe9eccea8aa56e06e9ea",
+            "extension.package.rollback": "f6b797c62fb75de8b0e59f217f667b557c3b0dcd31c9d3f3a768074870a303d3",
+            "extension.package.update": "43cf65a362e165b65bd468bbc1c5d00197fb5ea092ac530ae7660af0347b4dd9"
+        }))
+        .expect("additive package method shapes");
+        for (method, digest) in additive {
+            assert_eq!(actual.remove(&method).as_ref(), Some(&digest));
+        }
+        let expected: BTreeMap<String, String> = serde_json::from_value(serde_json::json!({
+            "extension.data.delete": "d059ee1c7131f2009ef6fb90f4396f2584f1cfc29f06f01045c7913c0775cb0d",
+            "extension.enable": "84c5c02436e0b3495bbdb8c2cc7e169a5e1ae3fefc69b6d3944faa5c22042d6e",
+            "extension.install": "224b706f76947f2b332ff4c11194f0e85ba9e24ee50d23f9c5b7577519ca56b2",
+            "extension.list": "d1e09d69befbe1bfad6145471f0b38f8dd16507b37c3fac1fe7b916d674e1e1c",
+            "extension.remove": "0f39aa9b91aaf0fd942d34639a3dc7df1e76d0e1fe2c096f88111366c1378d52",
+            "extension.reorder": "c1f1a45766e14655fb746445ad81a0acce5c33259f3497799f329d2549698dda",
+            "extension.repository_override.set": "a1daa4a155454b4eece1e3f056c2b049075729218c40b4576e2a6fe883c65d62",
+            "extension.rollback": "5a04e0a01ad2874c134bb068574574cb13454907879752119935b10b9dff2572",
+            "extension.update": "a913b2751ae43da2613ee3a24b8d6aa20b40cec109b29ebf5969502216928682"
+        }))
+        .expect("extension method shape fixture");
+        assert_eq!(actual, expected);
     }
 
     #[test]
@@ -341,6 +459,34 @@ mod tests {
     }
 
     #[test]
+    fn post_v1_methods_are_optional_and_do_not_change_frozen_set() {
+        assert!(CLIENT_SHELL_OPTIONAL_METHODS
+            .windows(2)
+            .all(|pair| pair[0] < pair[1]));
+        assert!(CLIENT_SHELL_OPTIONAL_METHODS
+            .iter()
+            .all(|method| !CLIENT_SHELL_METHODS.contains(method)));
+        assert!(!supports_client_shell_method(&Method::CollectionList(
+            crate::api::schema::CollectionListParams::default()
+        )));
+        assert!(!supports_client_shell_method(&Method::PaneTelemetry(
+            crate::api::schema::PaneTelemetryParams::default()
+        )));
+        assert!(!supports_client_shell_method(&Method::PaneLinkResolve(
+            crate::api::schema::PaneLinkActivateParams {
+                pane_id: "p1".into(),
+                viewport_row: 1,
+                col: 1,
+                content_revision: None,
+                offset_from_bottom: None,
+            }
+        )));
+        assert!(!supports_client_shell_method(&Method::ExtensionList(
+            crate::api::schema::ExtensionListParams::default()
+        )));
+    }
+
+    #[test]
     fn client_shell_lane_excludes_api_front_door_and_lifecycle_methods() {
         assert!(supports_client_shell_method(
             &Method::ClientShellSurfaceSet(crate::api::schema::ClientShellSurfaceSetParams {
@@ -359,7 +505,7 @@ mod tests {
                 offset_from_bottom: None,
             },
         )));
-        assert!(supports_client_shell_method(&Method::PaneLinkResolve(
+        assert!(!supports_client_shell_method(&Method::PaneLinkResolve(
             crate::api::schema::PaneLinkActivateParams {
                 pane_id: "w1:p1".into(),
                 viewport_row: 0,

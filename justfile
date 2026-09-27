@@ -1,4 +1,4 @@
-# herdr task runner
+# vqro task runner
 set windows-shell := ["cmd.exe", "/d", "/s", "/c"]
 
 python := if os() == "windows" { "python" } else { "python3" }
@@ -18,6 +18,15 @@ maintenance-test:
 # Run one nextest filter, e.g. `just test-one codex_stale_working`
 test-one filter:
     cargo nextest run --locked "{{filter}}" --status-level fail --final-status-level fail --failure-output final --success-output never
+
+# Verify, install, execute, and structurally audit the exact pinned Collections R0 artifact.
+# Requires a clean checkout at VQRO_COLLECTIONS_CHECKOUT; no production catalog is changed.
+collections-package-conformance:
+    cargo nextest run --locked 'collections_candidate_passes_authoritative_host_gate' --run-ignored ignored-only --status-level fail --final-status-level fail --failure-output final --success-output never
+
+# Verify and invoke the exact pinned zero-capability Spaces package artifact.
+spaces-package-conformance:
+    cargo nextest run --locked 'spaces_package_passes_authoritative_host_gate' --run-ignored ignored-only --status-level fail --final-status-level fail --failure-output final --success-output never
 
 # Enforce deterministic UI hot-path architecture boundaries
 ui-hot-path-architecture-test:
@@ -79,12 +88,12 @@ build:
 
 # Non-gating full-render scaling profile for background workspaces and active panes
 bench-render-scale:
-    cargo test --release --locked --bin herdr render_scale_profile -- --ignored --nocapture --test-threads=1
+    cargo test --release --locked --bin vqro render_scale_profile -- --ignored --nocapture --test-threads=1
 
 # ~3-5 minute CPU comparison; downloads stable unless HERDR_PERF_BASELINE_BIN is set
 bench-release-smoke:
     cargo build --release --locked
-    scripts/release_perf_smoke.sh "${CARGO_TARGET_DIR:-target}/release/herdr"
+    scripts/release_perf_smoke.sh "${CARGO_TARGET_DIR:-target}/release/vqro"
 
 # Test public documentation snapshot and release lifecycle tooling
 docs-contract-test:

@@ -1,0 +1,12 @@
+manifest_version = 1
+id = "example.conformant"
+name = "Conformant extension"
+version = "1.0.0"
+min_vqro_version = "0.9.0"
+platforms = ["linux", "macos", "windows"]
+
+[[services]]
+id = "choices"
+command = ["python3", "service.py"]
+provides = ["action_choices"]
+capabilities = ["action_choices"]

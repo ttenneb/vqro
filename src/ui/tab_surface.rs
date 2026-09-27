@@ -1,6 +1,8 @@
 use ratatui::{layout::Rect, Frame};
 
-use super::panes::{compute_pane_infos_for_tab, render_panes, resize_tab_panes};
+use super::panes::{
+    compute_pane_infos_for_tab, render_panes, resize_tab_panes, resize_tab_panes_except,
+};
 use crate::app::AppState;
 use crate::layout::{PaneInfo, SplitBorder};
 use crate::protocol::CursorState;
@@ -113,6 +115,33 @@ pub(crate) fn resize_tab_surface(
         tab,
         area,
         cell_size,
+    );
+}
+
+pub(crate) fn resize_tab_surface_except(
+    app: &AppState,
+    terminal_runtimes: &TerminalRuntimeRegistry,
+    workspace_index: usize,
+    tab_index: usize,
+    area: Rect,
+    cell_size: crate::kitty_graphics::HostCellSize,
+    excluded_panes: &std::collections::HashSet<crate::layout::PaneId>,
+) {
+    let Some(tab) = app
+        .workspaces
+        .get(workspace_index)
+        .and_then(|workspace| workspace.tabs.get(tab_index))
+    else {
+        return;
+    };
+    resize_tab_panes_except(
+        app,
+        terminal_runtimes,
+        workspace_index,
+        tab,
+        area,
+        cell_size,
+        excluded_panes,
     );
 }
 

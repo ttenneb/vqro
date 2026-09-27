@@ -10,8 +10,11 @@ mod targets;
 mod types;
 mod version;
 
+// Retain the baked installers as the parity oracle while direct public mutation
+// stays gated. Marketplace lifecycle uses only verified Vqro artifact paths.
 pub(crate) use actions::{
-    install_experimental_letta, install_target, uninstall_experimental_letta, uninstall_target,
+    artifact_asset_path, install_target, install_target_from_artifact, install_target_from_asset,
+    uninstall_target, uninstall_target_artifact,
 };
 #[cfg(test)]
 pub(crate) use env::integration_env_lock;
@@ -19,45 +22,54 @@ pub(crate) use env::{
     apply_pane_base_env, HERDR_PANE_ID_ENV_VAR, HERDR_TAB_ID_ENV_VAR, HERDR_WORKSPACE_ID_ENV_VAR,
 };
 pub(crate) use registry::{
-    experimental_letta_integration_status, installed_integration_statuses,
-    integration_recommendations, integration_target_label, print_outdated_update_notice,
+    installed_integration_statuses, integration_recommendations, integration_target_label,
+    print_outdated_update_notice,
 };
-pub(crate) use types::{
-    ExperimentalIntegrationStatus, IntegrationRecommendation, IntegrationStatus,
-    IntegrationStatusKind,
-};
+pub(crate) use types::{IntegrationRecommendation, IntegrationStatus, IntegrationStatusKind};
 
 /// CLI labels for experimental integrations that are intentionally not part of
 /// the frozen client endpoint `IntegrationTarget` enum. Empty this list once the
 /// agent registry provides first-class target registration.
 pub(crate) const EXPERIMENTAL_INTEGRATION_TARGET_LABELS: &[&str] = &["letta"];
 
-const PI_EXTENSION_INSTALL_NAME: &str = "herdr-agent-state.ts";
-const PI_EXTENSION_ASSET: &str = include_str!("assets/pi/herdr-agent-state.ts");
+const PI_EXTENSION_INSTALL_NAME: &str = "vqro-agent-state.ts";
+const MARKETPLACE_PI_EXTENSION_INSTALL_NAME: &str = "vqro-extension-agent-state.ts";
+const LEGACY_PI_EXTENSION_INSTALL_NAME: &str = "herdr-agent-state.ts";
+const PI_EXTENSION_ASSET: &str = include_str!("assets/pi/vqro-agent-state.ts");
 const PI_INTEGRATION_VERSION: u32 = 9;
 const OMP_EXTENSION_INSTALL_NAME: &str = "herdr-omp-agent-state.ts";
 const OMP_EXTENSION_ASSET: &str = include_str!("assets/omp/herdr-agent-state.ts");
 const OMP_INTEGRATION_VERSION: u32 = 10;
 const CLAUDE_HOOK_INSTALL_NAME: &str = if cfg!(windows) {
-    "herdr-agent-state.ps1"
+    "vqro-agent-state.ps1"
 } else {
-    "herdr-agent-state.sh"
+    "vqro-agent-state.sh"
+};
+const MARKETPLACE_CLAUDE_HOOK_INSTALL_NAME: &str = if cfg!(windows) {
+    "vqro-extension-agent-state.ps1"
+} else {
+    "vqro-extension-agent-state.sh"
 };
 const CLAUDE_HOOK_ASSET: &str = if cfg!(windows) {
-    include_str!("assets/claude/herdr-agent-state.ps1")
+    include_str!("assets/claude/vqro-agent-state.ps1")
 } else {
-    include_str!("assets/claude/herdr-agent-state.sh")
+    include_str!("assets/claude/vqro-agent-state.sh")
 };
 const CLAUDE_INTEGRATION_VERSION: u32 = 10;
 const CODEX_HOOK_INSTALL_NAME: &str = if cfg!(windows) {
-    "herdr-agent-state.ps1"
+    "vqro-agent-state.ps1"
 } else {
-    "herdr-agent-state.sh"
+    "vqro-agent-state.sh"
+};
+const MARKETPLACE_CODEX_HOOK_INSTALL_NAME: &str = if cfg!(windows) {
+    "vqro-extension-agent-state.ps1"
+} else {
+    "vqro-extension-agent-state.sh"
 };
 const CODEX_HOOK_ASSET: &str = if cfg!(windows) {
-    include_str!("assets/codex/herdr-agent-state.ps1")
+    include_str!("assets/codex/vqro-agent-state.ps1")
 } else {
-    include_str!("assets/codex/herdr-agent-state.sh")
+    include_str!("assets/codex/vqro-agent-state.sh")
 };
 const CODEX_INTEGRATION_VERSION: u32 = 8;
 const KIMI_HOOK_INSTALL_NAME: &str = if cfg!(windows) {
@@ -227,7 +239,6 @@ const LETTA_HOOK_ASSET: &str = if cfg!(windows) {
 } else {
     include_str!("assets/letta/herdr-agent-session.sh")
 };
-const LETTA_INTEGRATION_VERSION: u32 = 1;
 const LETTA_HOOK_TIMEOUT_MS: u64 = 10_000;
 const QODERCLI_REMOVED_LIFECYCLE_HOOK_EVENTS: [(&str, &str); 12] = [
     ("SessionStart", "idle"),
@@ -279,7 +290,8 @@ const ANTIGRAVITY_CLI_HOOK_TIMEOUT_SEC: u64 = 10;
 /// events accept a `matcher`/`hooks` wrapper, and sending one here would
 /// invalidate the whole file.
 const ANTIGRAVITY_CLI_HOOK_EVENTS: [(&str, &str); 1] = [("PreInvocation", "session")];
-const INTEGRATION_VERSION_MARKER: &str = "HERDR_INTEGRATION_VERSION=";
+const INTEGRATION_VERSION_MARKER: &str = "VQRO_INTEGRATION_VERSION=";
+const LEGACY_INTEGRATION_VERSION_MARKER: &str = "HERDR_INTEGRATION_VERSION=";
 const MASTRACODE_HOOK_INSTALL_NAME: &str = if cfg!(windows) {
     "herdr-agent-state.ps1"
 } else {
@@ -321,6 +333,17 @@ const GROK_HOOK_ASSET: &str = if cfg!(windows) {
 const GROK_INTEGRATION_VERSION: u32 = 2;
 
 pub(crate) const INSTALL_WARNING_PREFIX: &str = "warning:";
+
+/// Only integrations with Vqro-owned assets, paths, environment variables, and
+/// runtime authority may mutate an agent installation.
+pub(crate) fn integration_mutation_enabled(target: crate::api::schema::IntegrationTarget) -> bool {
+    matches!(
+        target,
+        crate::api::schema::IntegrationTarget::Pi
+            | crate::api::schema::IntegrationTarget::Claude
+            | crate::api::schema::IntegrationTarget::Codex
+    )
+}
 
 #[cfg(test)]
 mod tests;

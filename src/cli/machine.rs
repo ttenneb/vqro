@@ -3,16 +3,16 @@ use serde::Serialize;
 use crate::client::endpoint::{EndpointCatalog, ProfileId};
 
 const HELP: &str = "Usage:
-  herdr machine list [--json]
-  herdr machine add <ssh-target> --label <label> [--remote-session <name>]
-  herdr machine rename <profile-id> --label <label>
-  herdr machine remove <profile-id>
-  herdr machine enable <profile-id>
-  herdr machine disable <profile-id>
+  vqro machine list [--json]
+  vqro machine add <ssh-target> --label <label> [--remote-session <name>]
+  vqro machine rename <profile-id> --label <label>
+  vqro machine remove <profile-id>
+  vqro machine enable <profile-id>
+  vqro machine disable <profile-id>
 
 Add prepares the remote Herdr installation and starts its server before saving.
 Missing or incompatible installations require approval in an interactive terminal.
-Changes apply automatically to open local Herdr clients.
+Changes apply automatically to open local vqro clients.
 Removing or disabling a machine leaves its remote sessions running.
 Saved machines contain only a label, SSH target, explicit Herdr session, and enabled state.
 SSH credentials and key material remain owned by OpenSSH.";
@@ -51,7 +51,7 @@ fn list(args: &[String]) -> std::io::Result<i32> {
         [] => false,
         [flag] if flag == "--json" => true,
         _ => {
-            eprintln!("usage: herdr machine list [--json]");
+            eprintln!("usage: vqro machine list [--json]");
             return Ok(2);
         }
     };
@@ -133,7 +133,7 @@ fn parse_add_args(args: &[String]) -> Result<AddArgs, String> {
         }
     }
     let target = target.ok_or_else(|| {
-        "usage: herdr machine add <ssh-target> --label <label> [--remote-session <name>]".to_owned()
+        "usage: vqro machine add <ssh-target> --label <label> [--remote-session <name>]".to_owned()
     })?;
     let label = label.ok_or_else(|| "--label is required".to_owned())?;
     let session = session.unwrap_or_else(|| crate::session::DEFAULT_SESSION_NAME.to_owned());
@@ -188,18 +188,18 @@ fn add(args: &[String]) -> std::io::Result<i32> {
         ))
     })?;
     println!("Saved SSH machine {id}. Remote server is ready.");
-    println!("Open Herdr clients connect automatically.");
+    println!("Open vqro clients connect automatically.");
     Ok(0)
 }
 
 fn rename(args: &[String]) -> std::io::Result<i32> {
     let args = super::expand_equals_args(args, &["--label"]);
     let [raw_id, flag, label] = args.as_slice() else {
-        eprintln!("usage: herdr machine rename <profile-id> --label <label>");
+        eprintln!("usage: vqro machine rename <profile-id> --label <label>");
         return Ok(2);
     };
     if flag != "--label" {
-        eprintln!("usage: herdr machine rename <profile-id> --label <label>");
+        eprintln!("usage: vqro machine rename <profile-id> --label <label>");
         return Ok(2);
     }
     let id = match ProfileId::parse(raw_id.clone()) {
@@ -227,7 +227,7 @@ fn rename(args: &[String]) -> std::io::Result<i32> {
 }
 
 fn remove(args: &[String]) -> std::io::Result<i32> {
-    let Some(id) = one_profile_id(args, "usage: herdr machine remove <profile-id>")? else {
+    let Some(id) = one_profile_id(args, "usage: vqro machine remove <profile-id>")? else {
         return Ok(2);
     };
     let mut catalog = load_catalog()?;
@@ -246,7 +246,7 @@ fn remove(args: &[String]) -> std::io::Result<i32> {
 
 fn set_enabled(args: &[String], enabled: bool) -> std::io::Result<i32> {
     let action = if enabled { "enable" } else { "disable" };
-    let usage = format!("usage: herdr machine {action} <profile-id>");
+    let usage = format!("usage: vqro machine {action} <profile-id>");
     let Some(id) = one_profile_id(args, &usage)? else {
         return Ok(2);
     };
@@ -292,6 +292,17 @@ fn store_catalog(catalog: &EndpointCatalog) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn user_facing_machine_commands_name_vqro_and_remote_runtime_accurately() {
+        assert!(HELP.contains("vqro machine list"));
+        assert!(HELP.contains("open local vqro clients"));
+        assert!(HELP.contains("remote Herdr installation"));
+        assert_eq!(
+            parse_add_args(&[]).unwrap_err(),
+            "usage: vqro machine add <ssh-target> --label <label> [--remote-session <name>]"
+        );
+    }
 
     #[test]
     fn add_parser_preserves_values_across_argument_orders() {

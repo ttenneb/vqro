@@ -128,6 +128,12 @@ impl ClientShellState {
     }
 
     fn prepare_committed_text(&mut self, text: &str, outcome: &mut ClientShellInput) -> bool {
+        if matches!(self.overlay, Some(ClientShellOverlay::Extensions(_))) {
+            if self.insert_overlay_text(text) {
+                outcome.repaint = true;
+            }
+            return true;
+        }
         if !(self.mode == ClientShellMode::Navigate && self.workspace_preview_action_blocked())
             && self.insert_copy_search_text(text)
         {
@@ -194,10 +200,10 @@ impl ClientShellState {
                         if self.insert_overlay_text(&text) {
                             outcome.repaint = true;
                         } else if self.overlay.is_none() && self.mode == ClientShellMode::Terminal {
-                            self.push_focused_pane_event(
-                                ClientPaneInputEvent::TextCommit(text),
-                                &mut outcome,
-                            );
+                            let event = ClientPaneInputEvent::TextCommit(text);
+                            if !self.route_committed_pane_event(event.clone(), &mut outcome) {
+                                self.push_focused_pane_event(event, &mut outcome);
+                            }
                         }
                     }
                 }
@@ -227,10 +233,10 @@ impl ClientShellState {
                         if self.insert_overlay_text(&text) {
                             outcome.repaint = true;
                         } else if self.overlay.is_none() && self.mode == ClientShellMode::Terminal {
-                            self.push_focused_pane_event(
-                                ClientPaneInputEvent::Paste(text),
-                                &mut outcome,
-                            );
+                            let event = ClientPaneInputEvent::Paste(text);
+                            if !self.route_committed_pane_event(event.clone(), &mut outcome) {
+                                self.push_focused_pane_event(event, &mut outcome);
+                            }
                         }
                     }
                 }
@@ -475,6 +481,11 @@ impl ClientShellState {
                     search_focused: true,
                     ..
                 }))
+                | Some(ClientShellOverlay::Extensions(ClientExtensionsOverlay {
+                    search_focused: true,
+                    mutating: false,
+                    ..
+                }))
         )
     }
 
@@ -503,29 +514,369 @@ impl ClientShellState {
         {
             return None;
         }
-        if matches!(
-            self.overlay,
-            Some(
-                ClientShellOverlay::Onboarding
-                    | ClientShellOverlay::ProductAnnouncement(_)
-                    | ClientShellOverlay::ReleaseNotes(_)
-            )
-        ) {
+        // Modal overlays own keyboard input before pane-local inspector shortcuts. In
+        // particular Enter/Esc must confirm/cancel an interrupt rather than refresh or close the
+        // inspector behind it.
+        if self.overlay.is_some() {
             if key.kind == KeyEventKind::Press {
                 self.route_overlay_key(key, outcome);
             }
             return None;
         }
+        // Server-owned terminal popups remain keyboard-accessible above pane contributions.
         if let Some(target) = self.popup_input_target() {
             return Some(target);
         }
         if self.popup_pending {
             return None;
         }
-        if self.overlay.is_some() {
-            self.route_overlay_key(key, outcome);
+        let list_collection = self.snapshot.as_deref().and_then(|snapshot| {
+            let focused_pane_id = snapshot.focused_pane_id.as_deref()?;
+            self.structure
+                .as_deref()?
+                .collections
+                .iter()
+                .find(|collection| {
+                    self.collection_list_views
+                        .contains(&collection.collection_id)
+                        && collection.selected_pane_id.as_deref() == Some(focused_pane_id)
+                })
+        });
+        if let Some(collection) = list_collection.cloned() {
+            if let Some(entered_pane) = self.collection_entered_pane.clone().filter(|pane_id| {
+                collection
+                    .members
+                    .iter()
+                    .any(|member| &member.pane_id == pane_id)
+                    && self
+                        .collection_expanded_members
+                        .get(&collection.collection_id)
+                        .is_some_and(|expanded| expanded.contains(pane_id))
+            }) {
+                match self.mode {
+                    ClientShellMode::Terminal => {
+                        if key.kind == KeyEventKind::Press {
+                            if let Some(binding) = crate::input::resolve_direct_binding(
+                                &self.config.keybinds.keybinds,
+                                key,
+                            ) {
+                                self.record_binding(binding, outcome);
+                                return None;
+                            }
+                            if crate::config::terminal_key_matches_combo(
+                                key,
+                                self.config.keybinds.prefix,
+                            ) {
+                                self.mode = ClientShellMode::Prefix;
+                                outcome.repaint = true;
+                                return None;
+                            }
+                        }
+                        return Some(ClientInputTarget::Pane(entered_pane));
+                    }
+                    ClientShellMode::Prefix => {
+                        self.mode = ClientShellMode::Terminal;
+                        outcome.repaint = true;
+                        if crate::config::terminal_key_matches_combo(
+                            key,
+                            self.config.keybinds.prefix,
+                        ) {
+                            return Some(ClientInputTarget::Pane(entered_pane));
+                        }
+                        if key.code == KeyCode::Esc {
+                            self.collection_entered_pane = None;
+                            return None;
+                        }
+                        if let Some(binding) = crate::input::resolve_prefix_binding(
+                            &self.config.keybinds.keybinds,
+                            key,
+                        ) {
+                            self.record_binding(binding, outcome);
+                        }
+                        return None;
+                    }
+                    _ => {
+                        self.collection_entered_pane = None;
+                    }
+                }
+            }
+            if key.kind == KeyEventKind::Press {
+                let mut members = collection
+                    .members
+                    .iter()
+                    .filter(|member| !member.archived)
+                    .collect::<Vec<_>>();
+                members.sort_by_key(|member| member.index);
+                let selected = collection.selected_pane_id.as_deref();
+                let selected_index = members
+                    .iter()
+                    .position(|member| Some(member.pane_id.as_str()) == selected)
+                    .unwrap_or(0);
+                let target = match key.code {
+                    KeyCode::Up
+                        if key.modifiers.contains(KeyModifiers::CONTROL) && selected.is_some() =>
+                    {
+                        let pane_id = selected.unwrap_or_default().to_owned();
+                        self.push_endpoint_method(
+                            crate::api::schema::Method::CollectionReorder(
+                                crate::api::schema::CollectionReorderParams {
+                                    collection_id: collection.collection_id.clone(),
+                                    pane_id,
+                                    index: selected_index.saturating_sub(1),
+                                },
+                            ),
+                            outcome,
+                        );
+                        outcome.repaint = true;
+                        None
+                    }
+                    KeyCode::Down
+                        if key.modifiers.contains(KeyModifiers::CONTROL) && selected.is_some() =>
+                    {
+                        let pane_id = selected.unwrap_or_default().to_owned();
+                        self.push_endpoint_method(
+                            crate::api::schema::Method::CollectionReorder(
+                                crate::api::schema::CollectionReorderParams {
+                                    collection_id: collection.collection_id.clone(),
+                                    pane_id,
+                                    index: selected_index
+                                        .saturating_add(1)
+                                        .min(collection.members.len().saturating_sub(1)),
+                                },
+                            ),
+                            outcome,
+                        );
+                        outcome.repaint = true;
+                        None
+                    }
+                    KeyCode::Up | KeyCode::Char('k') if !members.is_empty() => {
+                        Some(&members[(selected_index + members.len() - 1) % members.len()].pane_id)
+                    }
+                    KeyCode::Down | KeyCode::Char('j') if !members.is_empty() => {
+                        Some(&members[(selected_index + 1) % members.len()].pane_id)
+                    }
+                    KeyCode::Enter if selected.is_some() => {
+                        if self.supports_endpoint_capability(
+                            crate::protocol::endpoint::TERMINAL_VIEWS_CAPABILITY,
+                        ) {
+                            let pane_id = selected.unwrap_or_default().to_owned();
+                            self.collection_expanded_members
+                                .entry(collection.collection_id.clone())
+                                .or_default()
+                                .insert(pane_id.clone());
+                            self.collection_entered_pane = Some(pane_id);
+                        } else {
+                            self.collection_list_views.remove(&collection.collection_id);
+                        }
+                        outcome.repaint = true;
+                        None
+                    }
+                    KeyCode::Char(' ')
+                        if selected.is_some()
+                            && self.supports_endpoint_capability(
+                                crate::protocol::endpoint::TERMINAL_VIEWS_CAPABILITY,
+                            ) =>
+                    {
+                        let pane_id = selected.unwrap_or_default().to_owned();
+                        let expanded = self
+                            .collection_expanded_members
+                            .entry(collection.collection_id.clone())
+                            .or_default();
+                        if !expanded.insert(pane_id.clone()) {
+                            expanded.remove(&pane_id);
+                        }
+                        outcome.repaint = true;
+                        None
+                    }
+                    KeyCode::Char('+') | KeyCode::Char('=') if selected.is_some() => {
+                        let pane_id = selected.unwrap_or_default().to_owned();
+                        let height = self.collection_preview_heights.entry(pane_id).or_insert(8);
+                        *height = height.saturating_add(1).min(40);
+                        outcome.repaint = true;
+                        None
+                    }
+                    KeyCode::Char('-') if selected.is_some() => {
+                        let pane_id = selected.unwrap_or_default().to_owned();
+                        let height = self.collection_preview_heights.entry(pane_id).or_insert(8);
+                        *height = height.saturating_sub(1).max(2);
+                        outcome.repaint = true;
+                        None
+                    }
+                    KeyCode::Char('z')
+                        if selected.is_some()
+                            && self.supports_endpoint_capability(
+                                crate::protocol::endpoint::TERMINAL_VIEWS_CAPABILITY,
+                            ) =>
+                    {
+                        let pane_id = selected.unwrap_or_default().to_owned();
+                        let target = (collection.collection_id.clone(), pane_id.clone());
+                        if self.collection_maximized_pane.as_ref() == Some(&target) {
+                            self.collection_maximized_pane = None;
+                            self.collection_entered_pane = None;
+                        } else {
+                            self.collection_maximized_pane = Some(target);
+                            self.collection_expanded_members
+                                .entry(collection.collection_id.clone())
+                                .or_default()
+                                .insert(pane_id.clone());
+                            self.collection_entered_pane = Some(pane_id);
+                        }
+                        outcome.repaint = true;
+                        None
+                    }
+                    KeyCode::Char('p') if selected.is_some() => {
+                        let pane_id = selected.unwrap_or_default().to_owned();
+                        let member_ids = collection
+                            .members
+                            .iter()
+                            .map(|member| member.pane_id.as_str())
+                            .collect::<HashSet<_>>();
+                        let target_pane_id = self.snapshot.as_deref().and_then(|snapshot| {
+                            snapshot
+                                .panes
+                                .iter()
+                                .find(|pane| {
+                                    pane.tab_id == collection.tab_id
+                                        && !member_ids.contains(pane.pane_id.as_str())
+                                })
+                                .map(|pane| pane.pane_id.clone())
+                        });
+                        if let Some(target_pane_id) = target_pane_id {
+                            self.push_endpoint_method(
+                                crate::api::schema::Method::CollectionPromote(
+                                    crate::api::schema::CollectionPromoteParams {
+                                        pane_id,
+                                        target_pane_id,
+                                        direction: crate::api::schema::SplitDirection::Right,
+                                        ratio: Some(0.5),
+                                        focus: true,
+                                    },
+                                ),
+                                outcome,
+                            );
+                            outcome.repaint = true;
+                        }
+                        None
+                    }
+                    KeyCode::Char('a') if selected.is_some() => {
+                        let pane_id = selected.unwrap_or_default().to_owned();
+                        let archived = collection
+                            .members
+                            .iter()
+                            .find(|member| member.pane_id == pane_id)
+                            .is_some_and(|member| member.archived);
+                        self.push_endpoint_method(
+                            if archived {
+                                crate::api::schema::Method::CollectionRestore(
+                                    crate::api::schema::CollectionMemberTarget {
+                                        collection_id: collection.collection_id.clone(),
+                                        pane_id,
+                                    },
+                                )
+                            } else {
+                                crate::api::schema::Method::CollectionArchive(
+                                    crate::api::schema::CollectionMemberTarget {
+                                        collection_id: collection.collection_id.clone(),
+                                        pane_id,
+                                    },
+                                )
+                            },
+                            outcome,
+                        );
+                        outcome.repaint = true;
+                        None
+                    }
+                    _ => None,
+                };
+                if let Some(pane_id) = target {
+                    let fallback = crate::api::schema::Method::CollectionSelect(
+                        crate::api::schema::CollectionSelectParams {
+                            collection_id: collection.collection_id,
+                            pane_id: pane_id.clone(),
+                            focus: true,
+                        },
+                    );
+                    if let Some(action) = self.host_document_action_for_pane(pane_id) {
+                        self.route_host_document_action(action, fallback, outcome);
+                    } else {
+                        self.push_endpoint_method(fallback, outcome);
+                    }
+                    outcome.repaint = true;
+                }
+            }
             return None;
         }
+        if let Some(inspector_pane_id) = self
+            .inspector
+            .as_ref()
+            .filter(|inspector| inspector.focused)
+            .map(|inspector| inspector.pane_id.clone())
+        {
+            if key.kind == KeyEventKind::Press {
+                match key.code {
+                    KeyCode::Esc => {
+                        self.close_terminal_inspector(outcome);
+                        outcome.repaint = true;
+                    }
+                    KeyCode::Char('r') => {
+                        self.refresh_terminal_inspector(inspector_pane_id, outcome);
+                        outcome.repaint = true;
+                    }
+                    KeyCode::Char(digit @ '1'..='9') => {
+                        let index = usize::from(digit as u8 - b'1');
+                        if let Some(action_id) = self
+                            .hits
+                            .contribution_actions
+                            .get(index)
+                            .map(|(_, action_id)| action_id.clone())
+                        {
+                            self.activate_pane_contribution_action(&action_id, outcome);
+                            outcome.repaint = true;
+                        }
+                    }
+                    KeyCode::Char('v') => {
+                        if !self.supports_endpoint_capability(
+                            crate::protocol::endpoint::PANE_VIEWPORT_CAPABILITY,
+                        ) || self.graphics.pane_has_graphics(&inspector_pane_id)
+                        {
+                            return None;
+                        }
+                        let placement = self.inspector.as_mut().map(|inspector| {
+                            inspector.placement = match inspector.placement {
+                                crate::pane_contribution::PaneContributionPlacement::Accessory => {
+                                    crate::pane_contribution::PaneContributionPlacement::Replacement
+                                }
+                                crate::pane_contribution::PaneContributionPlacement::Replacement => {
+                                    crate::pane_contribution::PaneContributionPlacement::Accessory
+                                }
+                            };
+                            if let Some(contribution) = inspector.contribution.as_mut() {
+                                contribution.placement = inspector.placement;
+                            }
+                            inspector.placement
+                        });
+                        if let Some(placement) = placement {
+                            self.set_pane_contribution_viewport(
+                                &inspector_pane_id,
+                                Some(placement),
+                                outcome,
+                            );
+                        }
+                        outcome.repaint = true;
+                    }
+                    _ => {}
+                }
+            }
+            return None;
+        }
+        let contribution_terminal_target =
+            self.inspector.as_ref().and_then(|inspector| {
+                (!inspector.focused
+                    && self.hits.panes.iter().any(|pane| {
+                        pane.pane_id == inspector.pane_id && !pane.inner_rect.is_empty()
+                    }))
+                .then(|| inspector.pane_id.clone())
+            });
         if matches!(key.code, KeyCode::Modifier(_)) {
             return None;
         }
@@ -568,7 +919,9 @@ impl ClientShellState {
                     outcome.repaint = true;
                     return None;
                 }
-                self.focused_pane_id().map(ClientInputTarget::Pane)
+                contribution_terminal_target
+                    .or_else(|| self.focused_pane_id())
+                    .map(ClientInputTarget::Pane)
             }
             ClientShellMode::Prefix => {
                 let return_mode = if self.copy_mode.as_ref().is_some_and(|copy_mode| {
@@ -581,7 +934,9 @@ impl ClientShellState {
                 if crate::config::terminal_key_matches_combo(key, self.config.keybinds.prefix) {
                     self.mode = return_mode;
                     outcome.repaint = true;
-                    return self.focused_pane_id().map(ClientInputTarget::Pane);
+                    return contribution_terminal_target
+                        .or_else(|| self.focused_pane_id())
+                        .map(ClientInputTarget::Pane);
                 }
                 if key.code == KeyCode::Esc {
                     self.mode = return_mode;
@@ -944,6 +1299,10 @@ impl ClientShellState {
         ClientInputContext {
             mode: self.mode,
             overlay: self.overlay.as_ref().map(ClientShellOverlay::kind),
+            inspector_pane_id: self
+                .inspector
+                .as_ref()
+                .map(|inspector| inspector.pane_id.clone()),
             popup_terminal_id: self.popup_input_target().and_then(|target| match target {
                 ClientInputTarget::Popup(terminal_id) => Some(terminal_id),
                 ClientInputTarget::Pane(_) => None,
@@ -1009,6 +1368,66 @@ impl ClientShellState {
         if let Some(event) = ClientPaneInputEvent::from_terminal_key(key) {
             super::push_target_event(target, event, outcome);
         }
+    }
+
+    /// Routes committed IME text and paste through the same pane-local ownership rules as keys.
+    /// Returns true when a collection list or inspector consumed the event, including when the
+    /// owner deliberately swallows it instead of forwarding it to a PTY.
+    fn route_committed_pane_event(
+        &self,
+        event: ClientPaneInputEvent,
+        outcome: &mut ClientShellInput,
+    ) -> bool {
+        let list_collection = self.snapshot.as_deref().and_then(|snapshot| {
+            let focused_pane_id = snapshot.focused_pane_id.as_deref()?;
+            self.structure
+                .as_deref()?
+                .collections
+                .iter()
+                .find(|collection| {
+                    self.collection_list_views
+                        .contains(&collection.collection_id)
+                        && collection.selected_pane_id.as_deref() == Some(focused_pane_id)
+                })
+        });
+        if let Some(collection) = list_collection {
+            if let Some(entered_pane) = self.collection_entered_pane.as_deref().filter(|pane_id| {
+                collection
+                    .members
+                    .iter()
+                    .any(|member| member.pane_id == **pane_id)
+                    && self
+                        .collection_expanded_members
+                        .get(&collection.collection_id)
+                        .is_some_and(|expanded| expanded.contains(*pane_id))
+            }) {
+                super::push_target_event(
+                    ClientInputTarget::Pane(entered_pane.to_owned()),
+                    event,
+                    outcome,
+                );
+            }
+            return true;
+        }
+        if let Some(inspector) = self.inspector.as_ref() {
+            if inspector.focused {
+                return true;
+            }
+            if self
+                .hits
+                .panes
+                .iter()
+                .any(|pane| pane.pane_id == inspector.pane_id && !pane.inner_rect.is_empty())
+            {
+                super::push_target_event(
+                    ClientInputTarget::Pane(inspector.pane_id.clone()),
+                    event,
+                    outcome,
+                );
+                return true;
+            }
+        }
+        false
     }
 
     fn push_focused_pane_event(&self, event: ClientPaneInputEvent, outcome: &mut ClientShellInput) {

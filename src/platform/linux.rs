@@ -11,20 +11,22 @@ pub(super) const REMOTE_BRIDGE_CLOCK: libc::clockid_t = libc::CLOCK_BOOTTIME;
 
 use super::{
     read_limited_reader, ClipboardCommand, ClipboardImage, ForegroundJob, ForegroundProcess,
-    LimitedRead, Signal,
+    LimitedRead, ProcessTelemetry, Signal, TerminalTelemetrySample,
 };
 
 pub(crate) use super::unix_common::{
-    configure_status_command, create_remote_private_dir, create_remote_ssh_config_dir,
-    create_remote_ssh_config_file, hostname, local_datetime, remote_bridge_endpoint_path,
-    remote_private_temp_base, remote_reattach_argument, remote_reattach_program,
-    remote_ssh_config_paths, set_default_plugin_pane_pwd, shutdown_client_stream,
-    status_commands_supported, wait_client_stream_readable, write_client_stream,
-    ClientStreamReader, StatusCommandGuard,
+    configure_extension_service_command, configure_status_command, create_remote_private_dir,
+    create_remote_ssh_config_dir, create_remote_ssh_config_file, fill_secure_random, hostname,
+    local_datetime, local_listener_accept_error_is_resource_exhaustion,
+    remote_bridge_endpoint_path, remote_private_temp_base, remote_reattach_argument,
+    remote_reattach_program, remote_ssh_config_paths, set_default_plugin_pane_pwd,
+    shutdown_client_stream, status_commands_supported, terminate_extension_service_process_group,
+    try_lock_platform_persistence, wait_client_stream_readable, write_client_stream,
+    ClientStreamReader, ExtensionServiceContainment, PlatformPersistenceLock, StatusCommandGuard,
 };
 
 const WSL_MARKER_ENV_VARS: &[&str] = &["WSL_DISTRO_NAME", "WSL_INTEROP"];
-const PROCESS_DETECTION_ENV_VAR: &str = "HERDR_PROCESS_DETECTION";
+const PROCESS_DETECTION_ENV_VAR: &str = "VQRO_PROCESS_DETECTION";
 const CHILD_GROUPS_SCAN_LIMIT: usize = 64;
 /// Upper bound on the number of processes visited while resolving a pane's
 /// foreground process-group tree. Foreground-job detection reads /proc/<pid>/stat
@@ -70,6 +72,8 @@ impl ForegroundScanBudget {
         }
     }
 }
+const TELEMETRY_TREE_SCAN_LIMIT: usize = 128;
+const TELEMETRY_TASK_SCAN_LIMIT: usize = 128;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ProcessDetectionMode {
@@ -514,6 +518,134 @@ pub fn foreground_group_leader_job(process_group_id: u32) -> Option<ForegroundJo
     })
 }
 
+pub(crate) fn sample_terminal_telemetry(
+    shell_pid: u32,
+    max_processes: usize,
+) -> TerminalTelemetrySample {
+    let Some(process_group_id) = foreground_process_group_id(shell_pid) else {
+        return TerminalTelemetrySample::Unavailable("foreground process group is unavailable");
+    };
+    let scan_limit = TELEMETRY_TREE_SCAN_LIMIT.max(max_processes);
+    let candidates = process_tree_pids_bounded([shell_pid, process_group_id], scan_limit);
+    let scan_truncated = candidates.len() == scan_limit;
+    let mut processes = Vec::new();
+    let mut matching = 0usize;
+    for pid in candidates {
+        let Some((pgrp, _, _)) = process_pgrp_comm_and_state(pid) else {
+            continue;
+        };
+        if pgrp <= 0 || pgrp as u32 != process_group_id {
+            continue;
+        }
+        matching = matching.saturating_add(1);
+        if processes.len() < max_processes {
+            if let Some(process) = process_telemetry(pid) {
+                processes.push(process);
+            }
+        }
+    }
+    processes.sort_unstable_by_key(|process| process.pid);
+    if processes.is_empty() {
+        return TerminalTelemetrySample::Unavailable("foreground processes exited while sampling");
+    }
+    TerminalTelemetrySample::Available {
+        process_group_id,
+        truncated: scan_truncated || matching > processes.len(),
+        processes,
+    }
+}
+
+fn process_tree_pids_bounded(roots: impl IntoIterator<Item = u32>, max_pids: usize) -> Vec<u32> {
+    let mut pending = VecDeque::new();
+    let mut visited = HashSet::new();
+    for pid in roots {
+        if pid > 0 && visited.insert(pid) {
+            pending.push_back(pid);
+        }
+    }
+    let mut pids = Vec::new();
+    while let Some(pid) = pending.pop_front() {
+        if pids.len() >= max_pids {
+            break;
+        }
+        pids.push(pid);
+        let task_path = format!("/proc/{pid}/task");
+        let tasks = std::fs::read_dir(task_path)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter_map(|entry| numeric_file_name(&entry))
+            .take(TELEMETRY_TASK_SCAN_LIMIT);
+        for tid in tasks {
+            let Some(children) =
+                std::fs::read_to_string(format!("/proc/{pid}/task/{tid}/children")).ok()
+            else {
+                continue;
+            };
+            for child in children
+                .split_whitespace()
+                .filter_map(|value| value.parse::<u32>().ok())
+            {
+                if visited.len() >= max_pids || !visited.insert(child) {
+                    continue;
+                }
+                pending.push_back(child);
+            }
+        }
+    }
+    pids
+}
+
+fn process_telemetry(pid: u32) -> Option<ProcessTelemetry> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let close = stat.rfind(')')?;
+    let name = stat.get(1 + stat.find('(')?..close)?.to_owned();
+    let fields = stat
+        .get(close + 2..)?
+        .split_whitespace()
+        .collect::<Vec<_>>();
+    let state = fields.first().map(|value| (*value).to_owned());
+    let user_ticks = fields.get(11).and_then(|value| value.parse::<u64>().ok());
+    let system_ticks = fields.get(12).and_then(|value| value.parse::<u64>().ok());
+    let cpu_ticks = user_ticks
+        .zip(system_ticks)
+        .map(|(user, system)| user + system);
+    let ticks_per_second = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
+    let cpu_time_ms = (ticks_per_second > 0)
+        .then_some(ticks_per_second as u64)
+        .and_then(|ticks_per_second| {
+            cpu_ticks.map(|ticks| ticks.saturating_mul(1_000) / ticks_per_second)
+        });
+    let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+    let resident_bytes = (page_size > 0)
+        .then_some(page_size as u64)
+        .and_then(|page_size| {
+            fields
+                .get(21)
+                .and_then(|value| value.parse::<u64>().ok())
+                .map(|pages| pages.saturating_mul(page_size))
+        });
+    let thread_count = fields.get(17).and_then(|value| value.parse::<u32>().ok());
+    let io = std::fs::read_to_string(format!("/proc/{pid}/io")).ok();
+    let io_value = |key: &str| {
+        io.as_deref().and_then(|contents| {
+            contents
+                .lines()
+                .find_map(|line| line.strip_prefix(key)?.trim().parse::<u64>().ok())
+        })
+    };
+    Some(ProcessTelemetry {
+        pid,
+        name,
+        state,
+        cpu_time_ms,
+        resident_bytes,
+        thread_count,
+        read_bytes: io_value("read_bytes:"),
+        write_bytes: io_value("write_bytes:"),
+    })
+}
+
 pub fn foreground_process_group_id(child_pid: u32) -> Option<u32> {
     // /proc/<pid>/stat format: "pid (comm) state ppid pgrp session tty_nr tpgid ..."
     // The (comm) field can contain spaces and parens, so we find the last ')' first.
@@ -662,8 +794,12 @@ pub fn read_clipboard_text() -> Option<String> {
 }
 
 pub fn open_url(url: &str) -> std::io::Result<Option<std::process::Child>> {
+    open_path(std::path::Path::new(url))
+}
+
+pub fn open_path(path: &std::path::Path) -> std::io::Result<Option<std::process::Child>> {
     Command::new("xdg-open")
-        .arg(url)
+        .arg(path)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -771,7 +907,10 @@ fn show_desktop_notification_with_command(
     }
 
     let mut cmd = command("notify-send");
-    cmd.arg("--app-name").arg("Herdr").arg("--").arg(title);
+    cmd.arg("--app-name")
+        .arg(crate::product::DISPLAY_NAME)
+        .arg("--")
+        .arg(title);
     if let Some(body) = body.filter(|body| !body.is_empty()) {
         cmd.arg(body);
     }
@@ -1511,6 +1650,16 @@ mod tests {
     }
 
     #[test]
+    fn process_telemetry_reads_safe_numeric_fields_for_current_process() {
+        let process = process_telemetry(std::process::id()).expect("current process telemetry");
+        assert_eq!(process.pid, std::process::id());
+        assert!(!process.name.is_empty());
+        assert!(process.cpu_time_ms.is_some());
+        assert!(process.resident_bytes.is_some());
+        assert!(process.thread_count.is_some());
+    }
+
+    #[test]
     fn clipboard_commands_prefer_wayland_when_available() {
         let _guard = env_lock().lock().unwrap();
         unsafe {
@@ -2021,7 +2170,7 @@ mod tests {
         assert!(shown);
         let args = std::fs::read_to_string(&path).expect("args file");
         let _ = std::fs::remove_file(&path);
-        assert_eq!(args, "--app-name\nHerdr\n--\n-danger\nbody\n");
+        assert_eq!(args, "--app-name\nvqro\n--\n-danger\nbody\n");
     }
 
     #[test]

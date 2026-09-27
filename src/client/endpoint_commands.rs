@@ -111,9 +111,45 @@ impl EndpointCommands {
                     continue;
                 }
             };
-            let message = ClientMessage::ClientShellEndpointRequest {
-                boot_id: queued.boot_id.clone(),
-                request,
+            let native = endpoints.connection(endpoint_id).is_some_and(|connection| {
+                connection
+                    .negotiation
+                    .supports_capability(crate::native_api::NATIVE_API_CAPABILITY_V1)
+            });
+            let negotiated_legacy = endpoints.connection(endpoint_id).is_some_and(|connection| {
+                connection
+                    .negotiation
+                    .supports_method(crate::api::api_method_name(&queued.request.method))
+            });
+            if !native
+                && !crate::protocol::endpoint_bridge_v1::supports(&queued.request.method)
+                && !negotiated_legacy
+            {
+                tracing::debug!(
+                    %request_id,
+                    "native-only endpoint method unavailable on legacy server"
+                );
+                cancelled.push(request_id);
+                continue;
+            }
+            let message = if native {
+                let envelope = crate::native_api::NativeEndpointRequestV1 {
+                    boot_id: queued.boot_id.clone(),
+                    request: (*queued.request).clone(),
+                };
+                let Ok(data) = serde_json::to_string(&envelope) else {
+                    cancelled.push(request_id);
+                    continue;
+                };
+                ClientMessage::EndpointControl {
+                    kind: crate::native_api::NATIVE_API_REQUEST_KIND_V1.into(),
+                    data,
+                }
+            } else {
+                ClientMessage::ClientShellEndpointRequest {
+                    boot_id: queued.boot_id.clone(),
+                    request,
+                }
             };
             if endpoints.send_to(endpoint_id, &message) != EndpointSendOutcome::Sent {
                 cancelled.push(request_id);

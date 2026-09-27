@@ -403,6 +403,20 @@ herdr integration uninstall cursor
 herdr integration status [--outdated-only]
 ```
 
+## 実験的なサービスバインディング
+
+manifest v3 のコンポーネントパッケージでは、厳密な読み取り専用パッケージ間エッジを確認し、明示的に承認できます。
+
+```bash
+vqro service-binding inspect --consumer-package ID --consumer-service ID --import ID --provider-package ID --provider-service ID --export ID
+vqro service-binding list
+vqro service-binding approve --consumer-package ID --consumer-service ID --import ID --provider-package ID --provider-service ID --export ID --registry-revision N [--binding-revision N] --consent-sha256 SHA256 --confirm
+vqro service-binding revoke BINDING_ID --registry-revision N --binding-revision N --confirm
+vqro service-binding call BINDING_ID --binding-revision N --consumer-method METHOD --params-json JSON
+```
+
+最初に `inspect` を実行し、厳密なアーティファクト、メソッド、要求/応答の情報カテゴリ、バイト制限を確認してください。承認と失効にはリビジョン CAS と明示的な確認が必要です。`call` は App actor の外で、上限付きの consumer 呼び出しを 1 回開始します。必須 import が未準備、置換、失効、タイムアウト、キュー飽和、古い完了の場合は fail closed になります。この機能は実験的です。
+
 ## プラグイン
 
 プラグインコマンドは、ローカル実行型ワークフロープラグインをインストールして実行します。プラグインはマニフェストとプロセス外コマンドの組み合わせです。ホスト側の面は Herdr が、実装言語はプラグインが担います。

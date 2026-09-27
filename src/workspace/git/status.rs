@@ -17,6 +17,8 @@ use super::{
 pub struct GitStatusRefreshDemand {
     pub branch: bool,
     pub ahead_behind: bool,
+    /// Resolve tracking identity without necessarily computing commit counts.
+    pub upstream: bool,
 }
 
 impl GitStatusRefreshDemand {
@@ -24,10 +26,11 @@ impl GitStatusRefreshDemand {
     pub const ALL: Self = Self {
         branch: true,
         ahead_behind: true,
+        upstream: true,
     };
 
     pub fn is_empty(self) -> bool {
-        !self.branch && !self.ahead_behind
+        !self.branch && !self.ahead_behind && !self.upstream
     }
 }
 
@@ -136,7 +139,7 @@ pub fn git_status_snapshot_for_cwd_with_demand(
     let space = git_space_metadata_from_info(&repository_context.0);
 
     if !demand.ahead_behind {
-        let fingerprint = fingerprint(repository_context, false);
+        let fingerprint = fingerprint(repository_context, demand.upstream);
         let branch = demand
             .branch
             .then(|| fingerprint.as_ref()?.branch_name())
@@ -230,6 +233,26 @@ fn fingerprint(mut repo: RepoContext, include_upstream: bool) -> Option<GitStatu
 }
 
 impl GitStatusFingerprint {
+    fn remote_url(&self, remote: &str) -> Option<&str> {
+        self.repository_context
+            .3
+            .as_ref()?
+            .1
+            .as_ref()?
+            .remote_urls
+            .iter()
+            .rev()
+            .find_map(|(name, url)| (name == remote).then_some(url.as_str()))
+    }
+
+    pub(crate) fn preferred_repository_remote_url(&self) -> Option<&str> {
+        self.remote_url("origin").or_else(|| {
+            self.upstream
+                .as_ref()
+                .and_then(|upstream| self.remote_url(&upstream.remote))
+        })
+    }
+
     fn branch_name(&self) -> Option<&str> {
         match &self.head {
             GitHeadIdentity::Branch { short_name, .. } => Some(short_name.as_str()),
@@ -437,6 +460,7 @@ mod tests {
             GitStatusRefreshDemand {
                 branch: true,
                 ahead_behind: false,
+                upstream: false,
             },
         );
 
@@ -444,6 +468,32 @@ mod tests {
         assert_eq!(snapshot.ahead_behind, None);
         assert!(update.is_some_and(|entry| entry.fingerprint.is_some()));
 
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn upstream_only_refresh_resolves_tracking_identity_without_commit_counts() {
+        let root = temp_test_dir("upstream-only");
+        write_fake_tracked_repo(&root);
+
+        let (snapshot, update) = git_status_snapshot_for_cwd_with_demand(
+            &root,
+            None,
+            GitStatusRefreshDemand {
+                branch: false,
+                ahead_behind: false,
+                upstream: true,
+            },
+        );
+
+        assert_eq!(snapshot.branch, None);
+        assert_eq!(snapshot.ahead_behind, None);
+        assert!(update.is_some_and(|entry| {
+            entry
+                .fingerprint
+                .and_then(|fingerprint| fingerprint.upstream)
+                .is_some()
+        }));
         std::fs::remove_dir_all(root).unwrap();
     }
 

@@ -127,6 +127,7 @@ fn surface() -> PaneSurfaceFrame {
             pixel_width: 0,
             pixel_height: 0,
         }],
+        collections: Vec::new(),
         splits: Vec::new(),
         popup: None,
         graphics: crate::protocol::SurfaceGraphicsScene::default(),
@@ -248,6 +249,7 @@ mod chrome_context;
 mod copy;
 mod endpoint_requests;
 mod endpoints;
+mod extensions;
 mod graphics;
 #[path = "input.rs"]
 mod input_domain;
@@ -256,4 +258,5 @@ mod link_hover;
 mod mobile;
 mod mouse_selection;
 mod popup_focus_projection;
+mod recovery;
 mod startup_overlays;

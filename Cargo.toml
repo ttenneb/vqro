@@ -1,20 +1,51 @@
 [package]
-name = "herdr"
+name = "vqro"
 version = "0.9.0"
 edition = "2021"
 build = "build.rs"
 description = "terminal workspace manager for AI coding agents"
 license = "Apache-2.0"
-repository = "https://github.com/herdrdev/herdr"
-homepage = "https://herdr.dev"
+repository = "https://github.com/ttenneb/vqro"
 keywords = ["terminal", "tui", "ai", "agents", "multiplexer"]
 categories = ["command-line-utilities"]
 include = [
     "src/**/*",
+    "build.rs",
     "assets/sounds/*",
+    "docs/next/api/host-document-v2.schema.json",
+    "docs/next/api/host-document-v2.md",
+    "docs/next/api/host-document-v2.fixtures/*.json",
     "docs/next/api/herdr-api.schema.json",
+    "docs/next/api/vqro-api.schema.json",
+    "docs/next/api/vqro-extension-manifest.schema.json",
+    "docs/next/api/vqro-extension-manifest-v2.schema.json",
+    "docs/next/api/vqro-extension-service.schema.json",
+    "docs/next/api/vqro-package-v1.schema.json",
+    "docs/next/api/vqro-package-v1.md",
+    "docs/next/api/vqro-service-v1.schema.json",
+    "docs/next/api/vqro-service-v1.md",
+    "docs/next/api/vqro-extension.schema.json",
+    "extensions/first-party/*/vqro-extension.toml",
+    "extensions/index-v1.json",
+    "extensions/reference-host-document/README.md",
+    "extensions/reference-host-document/fixtures/*.json",
+    "extensions/reference-host-document/service.py",
+    "extensions/reference-host-document/vqro-extension.toml",
+    "extensions/terminal-inspector/README.md",
+    "extensions/terminal-inspector/herdr-plugin.toml",
+    "extensions/terminal-inspector/service.py",
+    "extensions/terminal-inspector/vqro-extension.toml",
+    "tests/fixtures/**/*",
+    "wit/**/*",
     "skills/herdr/SKILL.md",
+    "skills/vqro/SKILL.md",
+    "vendor/libghostty-vt/**/*",
+    "!vendor/libghostty-vt/.zig-cache/**/*",
+    "!vendor/libghostty-vt/zig-out/**/*",
+    "!vendor/libghostty-vt/zig-pkg/**/*",
+    "vendor/libghostty-vt.vendor.json",
     "distribution/install.ps1",
+    "distribution/latest.json",
     "README.md",
     "LICENSE",
     "Cargo.toml",
@@ -39,6 +70,7 @@ serde = { version = "1", features = ["derive"] }
 serde_ignored = "0.1.14"
 serde_json = "1"
 sha2 = "0.10"
+tar = "0.4"
 time = { version = "0.3.47", features = ["formatting"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "process", "io-util"] }
 toml = "0.8"
@@ -46,6 +78,16 @@ tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 unicode-width = "0.2"
 schemars = { version = "1.2.1", features = ["derive"] }
+wasmtime = { version = "=48.0.1", default-features = false, features = ["component-model", "cranelift", "runtime", "std"] }
+
+[target.'cfg(not(windows))'.dependencies]
+# Kept feature-empty: M1 components link only the Vqro world, with no ambient WASI imports.
+wasmtime-wasi = { version = "=48.0.1", default-features = false }
+
+[dev-dependencies]
+wat = "=1.254.0"
+wit-component = { version = "=0.254.0", features = ["dummy-module"] }
+wit-parser = "=0.254.0"
 
 [patch.crates-io]
 portable-pty = { path = "vendor/portable-pty" }
@@ -59,11 +101,13 @@ windows-sys = { version = "0.61.2", features = [
     "Win32_Foundation",
     "Win32_Globalization",
     "Win32_Security",
+    "Win32_Security_Cryptography",
     "Win32_Storage_FileSystem",
     "Win32_System_DataExchange",
     "Win32_System_Diagnostics_Debug",
     "Win32_System_Diagnostics_ToolHelp",
     "Win32_System_Console",
+    "Win32_System_IO",
     "Win32_System_JobObjects",
     "Win32_System_Kernel",
     "Win32_System_Memory",

@@ -142,12 +142,15 @@ pub(super) enum ClientMobileTarget {
 pub(super) struct ShellHitMap {
     pub(super) machines: Vec<MachineHit>,
     pub(super) workspaces: Vec<WorkspaceHit>,
+    pub(super) space_links: Vec<SpaceLinkHit>,
     pub(super) workspace_body: Rect,
     pub(super) workspace_scrollbar: Rect,
     pub(super) workspace_scroll_metrics: Option<crate::pane::ScrollMetrics>,
     pub(super) workspace_max_scroll: usize,
     pub(super) tabs: Vec<(Rect, String)>,
     pub(super) panes: Vec<PaneHit>,
+    pub(super) collections: Vec<CollectionChromeHit>,
+    pub(super) collection_members: Vec<CollectionMemberHit>,
     pub(super) popup: Option<PaneHit>,
     pub(super) pane_splits: Vec<PaneSplitHit>,
     pub(super) agents: Vec<(Rect, String)>,
@@ -175,9 +178,16 @@ pub(super) struct ShellHitMap {
     pub(super) overlay_primary: Rect,
     pub(super) overlay_clear: Rect,
     pub(super) overlay_cancel: Rect,
+    pub(super) inspector_body: Rect,
+    pub(super) inspector_close: Rect,
+    pub(super) inspector_refresh: Rect,
+    pub(super) contribution_actions: Vec<(Rect, String)>,
     pub(super) navigator_popup: Rect,
     pub(super) navigator_search: Rect,
     pub(super) navigator_rows: Vec<(Rect, ClientNavigatorTarget)>,
+    pub(super) recovery_popup: Rect,
+    pub(super) recovery_projection_token: Option<u64>,
+    pub(super) recovery_rows: Vec<super::recovery_browser::RecoveryRowHit>,
     pub(super) worktree_search: Rect,
     pub(super) worktree_rows: Vec<(Rect, usize)>,
     pub(super) help_popup: Rect,
@@ -187,6 +197,11 @@ pub(super) struct ShellHitMap {
     pub(super) settings_popup: Rect,
     pub(super) settings_tabs: Vec<(Rect, ClientSettingsSection)>,
     pub(super) settings_choices: Vec<(Rect, usize)>,
+    pub(super) extensions_popup: Rect,
+    pub(super) extensions_tabs: Vec<(Rect, ClientExtensionsTab)>,
+    pub(super) extensions_categories: Vec<(Rect, Option<String>)>,
+    pub(super) extensions_rows: Vec<(Rect, usize)>,
+    pub(super) extensions_search: Rect,
     pub(super) product_announcement_scrollbar: Rect,
     pub(super) product_announcement_scroll_metrics: Option<crate::pane::ScrollMetrics>,
     pub(super) product_announcement_max_scroll: usize,
@@ -195,10 +210,38 @@ pub(super) struct ShellHitMap {
     pub(super) release_notes_max_scroll: usize,
 }
 
+#[derive(Clone, Debug)]
+pub(super) struct CollectionChromeHit {
+    pub(super) rect: Rect,
+    pub(super) surface_rect: Rect,
+    pub(super) collection_id: String,
+    pub(super) selected_pane_id: Option<String>,
+    pub(super) previous_pane_id: Option<String>,
+    pub(super) next_pane_id: Option<String>,
+    pub(super) previous: Rect,
+    pub(super) next: Rect,
+    pub(super) presentation_toggle: Rect,
+    pub(super) inspect: Rect,
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct CollectionMemberHit {
+    pub(super) rect: Rect,
+    pub(super) disclosure: Rect,
+    pub(super) preview: Rect,
+    pub(super) resize_handle: Rect,
+    pub(super) scrollbar: Option<Rect>,
+    pub(super) scroll: Option<crate::pane::ScrollMetrics>,
+    pub(super) collection_id: String,
+    pub(super) pane_id: String,
+    pub(super) host_document_action: Option<crate::api::schema::HostDocumentActionParams>,
+}
+
 #[derive(Clone)]
 pub(super) struct PaneHit {
     pub(super) rect: Rect,
     pub(super) inner_rect: Rect,
+    pub(super) projected_inner_rect: Rect,
     pub(super) scrollbar_rect: Option<Rect>,
     pub(super) scroll: Option<crate::pane::ScrollMetrics>,
     pub(super) pane_id: String,
@@ -230,6 +273,7 @@ pub(super) struct ClientPaneMouseGesture {
 pub(super) struct ClientWorkspacePress {
     pub(super) endpoint_id: ClientEndpointId,
     pub(super) workspace_id: String,
+    pub(super) move_workspace_id: String,
     pub(super) start_column: u16,
     pub(super) start_row: u16,
 }
@@ -268,6 +312,11 @@ pub(super) enum ClientChromeDrag {
         source_workspace_id: String,
         target: Option<(Option<String>, u16)>,
     },
+    CollectionPreviewHeight {
+        pane_id: String,
+        start_row: u16,
+        start_height: u16,
+    },
     PaneSplit {
         hit: PaneSplitHit,
         tab_id: String,
@@ -283,10 +332,22 @@ pub(super) enum ClientChromeDrag {
     },
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum SpaceLinkTarget {
+    LocalDirectory(String),
+    WebUrl(String),
+}
+
+pub(super) struct SpaceLinkHit {
+    pub(super) rect: Rect,
+    pub(super) target: SpaceLinkTarget,
+}
+
 pub(super) struct WorkspaceHit {
     pub(super) rect: Rect,
     pub(super) endpoint_id: ClientEndpointId,
     pub(super) workspace_id: String,
+    pub(super) move_workspace_id: String,
     pub(super) indented: bool,
     pub(super) group_toggle: Option<(Rect, String)>,
 }
@@ -298,8 +359,13 @@ pub(crate) enum ClientShellAction {
         boot_id: String,
         request: Box<crate::api::schema::Request>,
     },
+    EndpointControl {
+        endpoint_id: ClientEndpointId,
+        message: ClientMessage,
+    },
     ClipboardWrite(Vec<u8>),
     OpenSafeWebUrl(String),
+    OpenLocalDirectory(String),
     ActivateEndpoint {
         endpoint_id: ClientEndpointId,
         target: Option<ClientEndpointFocusTarget>,
@@ -337,12 +403,14 @@ pub(super) enum ClientShellOverlayKind {
     ConfirmClose,
     Help,
     Navigator,
+    Recovery,
     WorktreeCreate,
     WorktreeOpen,
     WorktreeRemove,
     ContextMenu,
     GlobalMenu,
     Settings,
+    Extensions,
 }
 
 #[derive(Debug)]
@@ -438,22 +506,82 @@ pub(super) struct ClientGlobalMenuOverlay {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ClientExtensionsTab {
+    Browse,
+    Installed,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ClientExtensionConfirmation {
+    Install,
+    Remove,
+    DeleteData,
+    Update,
+    Rollback,
+}
+
+#[derive(Debug)]
+pub(super) struct ClientExtensionsOverlay {
+    pub(super) generation: u64,
+    pub(super) tab: ClientExtensionsTab,
+    pub(super) query: String,
+    pub(super) search_focused: bool,
+    pub(super) category: Option<String>,
+    pub(super) selected: usize,
+    pub(super) extensions: Vec<crate::api::schema::ExtensionInfo>,
+    pub(super) loading: bool,
+    pub(super) mutating: bool,
+    pub(super) confirmation: Option<ClientExtensionConfirmation>,
+    pub(super) confirmation_extension: Option<Box<crate::api::schema::ExtensionInfo>>,
+    pub(super) repository_context: Option<String>,
+    pub(super) message: Option<String>,
+    pub(super) git_install_mode: bool,
+    pub(super) git_inspection: Option<Box<crate::api::schema::ExtensionPackageInspection>>,
+}
+
+impl ClientExtensionsOverlay {
+    pub(super) fn filtered_indices(&self) -> Vec<usize> {
+        let query = self.query.trim().to_ascii_lowercase();
+        self.extensions
+            .iter()
+            .enumerate()
+            .filter(|(_, extension)| self.tab == ClientExtensionsTab::Browse || extension.installed)
+            .filter(|(_, extension)| {
+                self.category.as_ref().is_none_or(|category| {
+                    extension
+                        .categories
+                        .iter()
+                        .any(|candidate| candidate == category)
+                })
+            })
+            .filter(|(_, extension)| {
+                query.is_empty()
+                    || extension.name.to_ascii_lowercase().contains(&query)
+                    || extension.id.to_ascii_lowercase().contains(&query)
+                    || extension.summary.to_ascii_lowercase().contains(&query)
+                    || extension.repository.to_ascii_lowercase().contains(&query)
+            })
+            .map(|(index, _)| index)
+            .collect()
+    }
+
+    pub(super) fn selected_extension(&self) -> Option<&crate::api::schema::ExtensionInfo> {
+        let filtered = self.filtered_indices();
+        let index = filtered.get(self.selected).or_else(|| filtered.first())?;
+        self.extensions.get(*index)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum ClientSettingsSection {
     Theme,
     Indicators,
     Sound,
     Toast,
-    Integrations,
 }
 
 impl ClientSettingsSection {
-    pub(super) const ALL: &[Self] = &[
-        Self::Theme,
-        Self::Indicators,
-        Self::Sound,
-        Self::Toast,
-        Self::Integrations,
-    ];
+    pub(super) const ALL: &[Self] = &[Self::Theme, Self::Indicators, Self::Sound, Self::Toast];
 
     pub(super) fn label(self) -> &'static str {
         match self {
@@ -461,7 +589,6 @@ impl ClientSettingsSection {
             Self::Indicators => "indicators",
             Self::Sound => "sound",
             Self::Toast => "toasts",
-            Self::Integrations => "integrations",
         }
     }
 }
@@ -472,10 +599,6 @@ pub(super) struct ClientSettingsOverlay {
     pub(super) selected: usize,
     pub(super) original_theme_name: String,
     pub(super) original_palette: Palette,
-    pub(super) integrations: Vec<crate::api::schema::IntegrationInfo>,
-    pub(super) integration_messages: Vec<String>,
-    pub(super) loading_integrations: bool,
-    pub(super) installing_integrations: bool,
 }
 
 #[derive(Debug)]
@@ -574,6 +697,7 @@ pub(super) enum ClientContextMenuAction {
     RemoveWorktree,
     ToggleGroup,
     NewTab,
+    InspectTerminal,
     RenamePane,
     ClearPaneName,
     SwapWithFocusedPane,
@@ -581,6 +705,11 @@ pub(super) enum ClientContextMenuAction {
     SplitDown,
     Zoom,
     ToggleRightClickPassthrough,
+    ArchiveCollectionMember,
+    RestoreCollectionMember,
+    PromoteCollectionMember,
+    PromoteCollectionMembers,
+    CloseCollectionCascade,
     ClosePane,
 }
 
@@ -597,12 +726,17 @@ pub(super) enum ClientContextMenuTarget {
         tab_id: String,
         workspace_id: String,
     },
+    Collection {
+        collection_id: String,
+    },
     Pane {
         pane_id: String,
         workspace_id: String,
         source_pane_id: Option<String>,
         has_manual_label: bool,
         right_click_passthrough: bool,
+        collection_id: Option<String>,
+        collection_archived: bool,
     },
 }
 
@@ -620,10 +754,48 @@ pub(super) struct ClientContextMenuItem {
 }
 
 #[derive(Debug)]
+pub(super) struct ClientTerminalInspectorPane {
+    pub(super) pane_id: String,
+    pub(super) pane_label: String,
+    pub(super) loading: bool,
+    pub(super) focused: bool,
+    pub(super) request_revision: u64,
+    pub(super) view_request_id: Option<String>,
+    pub(super) service_generation: Option<u64>,
+    pub(super) pending_action: Option<crate::protocol::endpoint::ClientPaneViewActionRequest>,
+    pub(super) placement: crate::pane_contribution::PaneContributionPlacement,
+    pub(super) contribution: Option<crate::pane_contribution::PaneContribution>,
+    pub(super) telemetry: Option<crate::api::schema::PaneTelemetry>,
+    pub(super) error: Option<String>,
+}
+
+#[derive(Debug)]
+pub(super) enum ClientConfirmCloseTarget {
+    Workspace { workspace_id: String },
+    Collection { collection_id: String },
+    HostDocumentAction(crate::api::schema::HostDocumentActionParams),
+    RecoveryPane(super::recovery_browser::RecoveryCloseLease),
+}
+
+#[derive(Debug)]
 pub(super) struct ClientConfirmCloseOverlay {
-    pub(super) workspace_id: String,
+    pub(super) target: ClientConfirmCloseTarget,
     pub(super) title: String,
     pub(super) detail: String,
+}
+
+#[derive(Debug)]
+pub(super) struct ClientPaneInterruptConfirmOverlay {
+    pub(super) endpoint_id: ClientEndpointId,
+    pub(super) boot_id: String,
+    pub(super) projection_revision: u64,
+    pub(super) pane_id: String,
+    pub(super) contribution_request_id: String,
+    pub(super) contribution_revision: u64,
+    pub(super) owner_service_id: String,
+    pub(super) service_generation: u64,
+    pub(super) action_request_id: String,
+    pub(super) confirmation_token: String,
 }
 
 #[derive(Debug)]
@@ -633,14 +805,17 @@ pub(super) enum ClientShellOverlay {
     ReleaseNotes(crate::app::state::ReleaseNotesState),
     Rename(ClientRenameOverlay),
     ConfirmClose(ClientConfirmCloseOverlay),
+    PaneInterruptConfirm(ClientPaneInterruptConfirmOverlay),
     Help(ClientHelpOverlay),
     Navigator(ClientNavigatorOverlay),
+    Recovery(super::recovery_browser::ClientRecoveryOverlay),
     WorktreeCreate(ClientWorktreeCreateOverlay),
     WorktreeOpen(ClientWorktreeOpenOverlay),
     WorktreeRemove(ClientWorktreeRemoveOverlay),
     ContextMenu(ClientContextMenuOverlay),
     GlobalMenu(ClientGlobalMenuOverlay),
     Settings(ClientSettingsOverlay),
+    Extensions(ClientExtensionsOverlay),
 }
 
 impl ClientShellOverlay {
@@ -650,15 +825,19 @@ impl ClientShellOverlay {
             Self::ProductAnnouncement(_) => ClientShellOverlayKind::ProductAnnouncement,
             Self::ReleaseNotes(_) => ClientShellOverlayKind::ReleaseNotes,
             Self::Rename(_) => ClientShellOverlayKind::Rename,
-            Self::ConfirmClose(_) => ClientShellOverlayKind::ConfirmClose,
+            Self::ConfirmClose(_) | Self::PaneInterruptConfirm(_) => {
+                ClientShellOverlayKind::ConfirmClose
+            }
             Self::Help(_) => ClientShellOverlayKind::Help,
             Self::Navigator(_) => ClientShellOverlayKind::Navigator,
+            Self::Recovery(_) => ClientShellOverlayKind::Recovery,
             Self::WorktreeCreate(_) => ClientShellOverlayKind::WorktreeCreate,
             Self::WorktreeOpen(_) => ClientShellOverlayKind::WorktreeOpen,
             Self::WorktreeRemove(_) => ClientShellOverlayKind::WorktreeRemove,
             Self::ContextMenu(_) => ClientShellOverlayKind::ContextMenu,
             Self::GlobalMenu(_) => ClientShellOverlayKind::GlobalMenu,
             Self::Settings(_) => ClientShellOverlayKind::Settings,
+            Self::Extensions(_) => ClientShellOverlayKind::Extensions,
         }
     }
 }
@@ -673,8 +852,11 @@ pub(super) enum PendingEndpointKind {
     ReleaseNotesDismiss,
     PopupCommand,
     ReloadConfig,
-    IntegrationList,
-    IntegrationInstall,
+    ExtensionList(u64),
+    ExtensionPackageList(u64),
+    ExtensionPackageInspect(u64),
+    ExtensionPackageMutation(u64),
+    ExtensionMutation(u64),
     PrepareWorktreeCreate {
         workspace_id: String,
     },
@@ -690,6 +872,9 @@ pub(super) enum PendingEndpointKind {
         forced: bool,
     },
     SelectionCopy,
+    TerminalInspector {
+        pane_id: String,
+    },
     PaneScroll {
         pane_id: String,
         serial: u64,
@@ -796,6 +981,7 @@ pub(super) enum ClientInputTarget {
 pub(super) struct ClientInputContext {
     pub(super) mode: ClientShellMode,
     pub(super) overlay: Option<ClientShellOverlayKind>,
+    pub(super) inspector_pane_id: Option<String>,
     pub(super) popup_terminal_id: Option<String>,
     pub(super) popup_pending: bool,
     pub(super) retained_selection: bool,
@@ -895,6 +1081,7 @@ pub(super) struct ClientCopyModeState {
 pub(crate) struct ClientShellState {
     pub(super) config: ClientShellConfig,
     pub(super) snapshot: Option<Box<ClientShellSnapshot>>,
+    pub(super) structure: Option<Box<crate::protocol::endpoint::ClientShellStructureProjection>>,
     pub(super) pane_surface: Option<PaneSurfaceFrame>,
     /// A future projection surface waits here until its matching snapshot arrives. The visible
     /// pane surface always remains an exact snapshot pair.
@@ -915,6 +1102,21 @@ pub(crate) struct ClientShellState {
     pub(super) tab_press: Option<ClientTabPress>,
     pub(super) collapsed_groups: HashSet<String>,
     pub(super) remote_collapsed_groups: HashMap<ClientEndpointId, HashSet<String>>,
+    /// Collection list presentation is local to this client. Absence keeps the compact terminal
+    /// presentation used by generation-1 clients.
+    pub(super) collection_list_views: HashSet<String>,
+    pub(super) collection_expanded_members: HashMap<String, HashSet<String>>,
+    pub(super) collection_preview_heights: HashMap<String, u16>,
+    pub(super) collection_entered_pane: Option<String>,
+    pub(super) collection_maximized_pane: Option<(String, String)>,
+    /// Stable local presentation preferences; never carries connection/action authority.
+    pub(super) recovery_presentations:
+        HashMap<ClientEndpointId, super::recovery_browser::RecoveryPresentationState>,
+    pub(super) next_recovery_projection_token: u64,
+    pub(super) terminal_view_surfaces:
+        HashMap<String, crate::protocol::endpoint::ServerTerminalViewSurface>,
+    pub(super) last_terminal_views_interest:
+        Option<crate::protocol::endpoint::ClientTerminalViewsInterest>,
     pub(super) workspace_scroll: usize,
     pub(super) agent_scroll: usize,
     pub(super) tab_scroll: usize,
@@ -935,6 +1137,7 @@ pub(crate) struct ClientShellState {
     pub(super) navigate_workspace_id: Option<WorkspaceNavigationTarget>,
     pub(super) reveal_navigation_workspace: bool,
     pub(super) overlay: Option<ClientShellOverlay>,
+    pub(super) inspector: Option<Box<ClientTerminalInspectorPane>>,
     pub(super) previous_pane_id: Option<String>,
     pub(super) pane_mouse_gesture: Option<ClientPaneMouseGesture>,
     pub(super) link_hover: Option<super::link_hover::LinkHover>,
@@ -964,7 +1167,6 @@ pub(crate) struct ClientShellState {
     pub(super) popup_pending_deadline: Option<std::time::Instant>,
     pub(super) next_request_id: u64,
     pub(super) pending_requests: HashMap<String, PendingEndpointRequest>,
-    pub(super) pending_integration_installs: usize,
     pub(super) pending_notifications: Vec<ClientPendingNotification>,
     pub(super) visible_notification: Option<ClientVisibleNotification>,
     pub(super) queued_notifications: VecDeque<ClientVisibleNotification>,
@@ -973,6 +1175,9 @@ pub(crate) struct ClientShellState {
     pub(super) outer_focused: Option<bool>,
     pub(super) ascii_input_source_active: bool,
     pub(super) pending_input_source_changes: Vec<bool>,
+    pub(super) pending_endpoint_controls: Vec<(ClientEndpointId, ClientMessage)>,
+    pub(super) last_pane_viewport_request:
+        Option<crate::protocol::endpoint::ClientPaneViewportRequest>,
     pub(super) host_appearance: Option<crate::terminal_theme::HostAppearance>,
     pub(super) host_appearance_explicit: bool,
     pub(super) host_background: Option<crate::terminal_theme::RgbColor>,
@@ -1007,11 +1212,17 @@ pub(super) fn release_notes_state(
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub(super) struct WorkspaceEntry {
     pub(super) index: usize,
     pub(super) indented: bool,
     pub(super) last_child: bool,
+    /// Index into the negotiated repository projection when this row belongs to one.
+    pub(super) repository_index: Option<usize>,
+    pub(super) checkout_index: Option<usize>,
+    pub(super) repository_has_children: bool,
+    /// Presentation supplied by a validated Spaces document. Runtime identity remains projected.
+    pub(super) label: Option<String>,
 }
 
 impl ClientShellState {
@@ -1054,6 +1265,7 @@ impl ClientShellState {
         Self {
             config,
             snapshot: None,
+            structure: None,
             pane_surface: None,
             pending_pane_surface: None,
             graphics: crate::kitty_graphics::surface::ClientState::default(),
@@ -1075,6 +1287,15 @@ impl ClientShellState {
             tab_press: None,
             collapsed_groups: preferences.collapsed_groups.into_iter().collect(),
             remote_collapsed_groups,
+            collection_list_views: HashSet::new(),
+            collection_expanded_members: HashMap::new(),
+            collection_preview_heights: HashMap::new(),
+            collection_entered_pane: None,
+            collection_maximized_pane: None,
+            recovery_presentations: HashMap::new(),
+            next_recovery_projection_token: 0,
+            terminal_view_surfaces: HashMap::new(),
+            last_terminal_views_interest: None,
             workspace_scroll: 0,
             agent_scroll: 0,
             tab_scroll: 0,
@@ -1095,6 +1316,7 @@ impl ClientShellState {
             navigate_workspace_id: None,
             reveal_navigation_workspace: false,
             overlay,
+            inspector: None,
             previous_pane_id: None,
             pane_mouse_gesture: None,
             link_hover: None,
@@ -1124,7 +1346,6 @@ impl ClientShellState {
             popup_pending_deadline: None,
             next_request_id: 1,
             pending_requests: HashMap::new(),
-            pending_integration_installs: 0,
             pending_notifications: Vec::new(),
             visible_notification: None,
             queued_notifications: VecDeque::new(),
@@ -1133,6 +1354,8 @@ impl ClientShellState {
             outer_focused: None,
             ascii_input_source_active: false,
             pending_input_source_changes: Vec::new(),
+            pending_endpoint_controls: Vec::new(),
+            last_pane_viewport_request: None,
             host_appearance: None,
             host_appearance_explicit: false,
             host_background: None,
@@ -1197,20 +1420,91 @@ impl ClientShellState {
         }
     }
 
+    pub(super) fn navigation_collapsed_repository_ids(&self) -> HashSet<String> {
+        let collapsed_groups = self
+            .collapsed_groups_for_endpoint(&self.active_endpoint_id)
+            .unwrap_or(&self.collapsed_groups);
+        self.structure
+            .as_deref()
+            .into_iter()
+            .flat_map(|structure| &structure.repositories)
+            .filter(|repository| {
+                collapsed_groups.contains(&super::sidebar::repository_group_key(
+                    &self.active_endpoint_id,
+                    &repository.repository_id,
+                ))
+            })
+            .map(|repository| repository.repository_id.clone())
+            .collect()
+    }
+
     pub(super) fn navigation_workspace_entries(
         &self,
         snapshot: &ClientShellSnapshot,
     ) -> Vec<WorkspaceEntry> {
         let empty_collapsed_groups = HashSet::new();
+        let host_documents = self
+            .endpoints
+            .iter()
+            .find(|endpoint| endpoint.endpoint_id == self.active_endpoint_id)
+            .and_then(ClientShellEndpoint::current_host_documents);
         if self.mobile_layout_active() {
-            render::workspace_entries(snapshot, &empty_collapsed_groups)
-        } else {
-            render::workspace_entries(
+            render::workspace_entries_with_structure(
                 snapshot,
+                self.structure.as_deref(),
+                host_documents,
+                &empty_collapsed_groups,
+            )
+        } else if self.structure.as_ref().is_some_and(|structure| {
+            !structure.repositories.is_empty() || !structure.space_order.is_empty()
+        }) {
+            render::workspace_entries_with_structure(
+                snapshot,
+                self.structure.as_deref(),
+                host_documents,
+                &self.navigation_collapsed_repository_ids(),
+            )
+        } else {
+            render::workspace_entries_with_structure(
+                snapshot,
+                self.structure.as_deref(),
+                host_documents,
                 self.collapsed_groups_for_endpoint(&self.active_endpoint_id)
                     .unwrap_or(&empty_collapsed_groups),
             )
         }
+    }
+
+    pub(super) fn navigation_workspace_id(
+        &self,
+        snapshot: &ClientShellSnapshot,
+        entry: &WorkspaceEntry,
+    ) -> String {
+        let Some(workspace) = snapshot.workspaces.get(entry.index) else {
+            return String::new();
+        };
+        if self.mobile_layout_active() {
+            return workspace.workspace_id.clone();
+        }
+        let collapsed_groups = self
+            .collapsed_groups_for_endpoint(&self.active_endpoint_id)
+            .unwrap_or(&self.collapsed_groups);
+        let repository_collapsed = entry
+            .repository_index
+            .and_then(|index| self.structure.as_deref()?.repositories.get(index))
+            .is_some_and(|repository| {
+                collapsed_groups.contains(&super::sidebar::repository_group_key(
+                    &self.active_endpoint_id,
+                    &repository.repository_id,
+                ))
+            });
+        super::sidebar::projected_workspace_target(
+            snapshot,
+            workspace,
+            entry,
+            self.structure.as_deref(),
+            repository_collapsed,
+        )
     }
 
     pub(super) fn reveal_workspace(&mut self, workspace_id: &str) {
@@ -1225,7 +1519,7 @@ impl ClientShellState {
         let target = self.snapshot.as_deref().and_then(|snapshot| {
             self.navigation_workspace_entries(snapshot)
                 .iter()
-                .position(|entry| snapshot.workspaces[entry.index].workspace_id == workspace_id)
+                .position(|entry| self.navigation_workspace_id(snapshot, entry) == workspace_id)
         });
         if let Some(target) = target {
             self.workspace_scroll = target.min(self.hits.workspace_max_scroll);
@@ -1252,6 +1546,14 @@ impl ClientShellState {
 
     pub(super) fn reset_endpoint_projection(&mut self) {
         self.hits = ShellHitMap::default();
+        self.structure = None;
+        self.collection_list_views.clear();
+        self.collection_expanded_members.clear();
+        self.collection_preview_heights.clear();
+        self.collection_entered_pane = None;
+        self.collection_maximized_pane = None;
+        self.terminal_view_surfaces.clear();
+        self.last_terminal_views_interest = None;
         self.pane_surface = None;
         self.pending_pane_surface = None;
         self.input_leases = ClientInputLeases::default();
@@ -1277,7 +1579,6 @@ impl ClientShellState {
         self.pane_scroll_targets.clear();
         self.popup_pending = false;
         self.popup_pending_deadline = None;
-        self.pending_integration_installs = 0;
         self.endpoint_notice_seen.clear();
         self.visible_endpoint_notice = None;
         self.endpoint_error = None;
@@ -1287,6 +1588,7 @@ impl ClientShellState {
             .config
             .startup_onboarding
             .then_some(ClientShellOverlay::Onboarding);
+        self.inspector = None;
         self.previous_pane_id = None;
         self.pane_mouse_gesture = None;
         self.link_hover = None;
@@ -1306,6 +1608,8 @@ impl ClientShellState {
         self.copy_feedback = None;
         self.copy_feedback_deadline = None;
         self.host_mouse_pixels = None;
+        self.pending_endpoint_controls.clear();
+        self.last_pane_viewport_request = None;
         self.dismissed_product_announcement = None;
     }
 
@@ -1326,6 +1630,23 @@ impl ClientShellState {
             })
         {
             return;
+        }
+        let projection_changed = self.snapshot.as_ref().is_some_and(|current| {
+            current.boot_id == snapshot.boot_id && current.revision != snapshot.revision
+        });
+        if projection_changed || endpoint_boot_changed {
+            // Contributions and terminal views are leased to one exact projection identity. Close it explicitly;
+            // preserving it would leave stale content or a permanently loading request.
+            self.inspector = None;
+            self.last_pane_viewport_request = None;
+            self.terminal_view_surfaces.clear();
+            self.last_terminal_views_interest = None;
+            if matches!(
+                self.overlay.as_ref(),
+                Some(ClientShellOverlay::PaneInterruptConfirm(_))
+            ) {
+                self.overlay = None;
+            }
         }
         self.graphics.set_scope(&graphics_scope);
         let command_bindings_changed = self.snapshot.as_ref().is_none_or(|current| {
@@ -1468,6 +1789,14 @@ impl ClientShellState {
             self.word_selection_gesture = None;
             self.last_pane_click = None;
         }
+        if self.inspector.as_ref().is_some_and(|inspector| {
+            !snapshot
+                .panes
+                .iter()
+                .any(|pane| pane.pane_id == inspector.pane_id)
+        }) {
+            self.inspector = None;
+        }
         if let Some(copy_pane_id) = self
             .copy_mode
             .as_ref()
@@ -1587,6 +1916,10 @@ impl ClientShellState {
             }
         }
         self.snapshot = Some(snapshot);
+        let focused_repository = self.focused_repository_id();
+        if let Some(ClientShellOverlay::Extensions(extensions)) = self.overlay.as_mut() {
+            extensions.repository_context = focused_repository;
+        }
         let pending_surface = self.pending_pane_surface.take();
         if let Some(surface) = pending_surface {
             let matching = self.snapshot.as_ref().is_some_and(|snapshot| {

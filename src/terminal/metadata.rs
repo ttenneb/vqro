@@ -526,7 +526,10 @@ mod tests {
     use crate::terminal::TerminalId;
 
     fn test_terminal() -> TerminalState {
-        TerminalState::new(TerminalId::alloc(), "/tmp".into())
+        TerminalState::new(
+            TerminalId::alloc().expect("test terminal identity"),
+            "/tmp".into(),
+        )
     }
 
     #[test]

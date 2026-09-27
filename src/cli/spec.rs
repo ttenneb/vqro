@@ -6,14 +6,14 @@ mod completion;
 mod machine;
 
 pub(super) fn command() -> Command {
-    let command = Command::new("herdr")
+    let command = Command::new(crate::product::NAME)
         .about("terminal workspace manager for AI coding agents")
         .disable_help_flag(true)
         .disable_version_flag(true)
         .arg(help_flag())
         .arg(option("session", "NAME").help("Use or create a named persistent session"))
         .arg(option("machine", "LABEL-OR-ID").help("Run an API command on a saved SSH machine"))
-        .arg(option("remote", "TARGET").help("Attach through SSH to a remote Herdr server"))
+        .arg(option("remote", "TARGET").help("Attach through SSH to a remote vqro server"))
         .arg(
             option("remote-keybindings", "MODE")
                 .value_parser(["local", "server"])
@@ -40,6 +40,10 @@ pub(super) fn command() -> Command {
         .subcommand(workspace_command())
         .subcommand(worktree_command())
         .subcommand(tab_command())
+        .subcommand(collection_command())
+        .subcommand(service_binding_command())
+        .subcommand(extension_command())
+        .subcommand(delegation_command())
         .subcommand(notification_command())
         .subcommand(agent_command())
         .subcommand(pane_command())
@@ -296,9 +300,195 @@ fn tab_command() -> Command {
         .subcommand(id_command("close", "tab_id", "Close a tab"))
 }
 
+fn collection_command() -> Command {
+    Command::new("collection")
+        .about("Manage pane collections over the socket API")
+        .subcommand(
+            Command::new("list")
+                .about("List pane collections")
+                .arg(option("workspace", "WORKSPACE_ID"))
+                .arg(option("tab", "TAB_ID")),
+        )
+        .subcommand(id_command("get", "collection_id", "Show a collection"))
+        .subcommand(
+            Command::new("create")
+                .about("Create a pane collection")
+                .arg(option("target-pane", "PANE_ID").required(true))
+                .arg(split_direction_option().required(true))
+                .arg(option("ratio", "FLOAT"))
+                .arg(option("label", "TEXT"))
+                .arg(flag("focus"))
+                .arg(flag("no-focus")),
+        )
+        .subcommand(
+            Command::new("add")
+                .about("Add a tiled pane to a collection")
+                .arg(required("collection_id", "COLLECTION_ID"))
+                .arg(required("pane_id", "PANE_ID")),
+        )
+        .subcommand(
+            Command::new("promote")
+                .about("Promote a collection member to tiled placement")
+                .arg(required("pane_id", "PANE_ID"))
+                .arg(option("target-pane", "PANE_ID").required(true))
+                .arg(split_direction_option().required(true))
+                .arg(option("ratio", "FLOAT"))
+                .arg(flag("focus"))
+                .arg(flag("no-focus")),
+        )
+        .subcommand(
+            Command::new("select")
+                .about("Select a collection member")
+                .arg(required("collection_id", "COLLECTION_ID"))
+                .arg(required("pane_id", "PANE_ID"))
+                .arg(flag("focus"))
+                .arg(flag("no-focus")),
+        )
+        .subcommand(
+            Command::new("reorder")
+                .about("Reorder a collection member")
+                .arg(required("collection_id", "COLLECTION_ID"))
+                .arg(required("pane_id", "PANE_ID"))
+                .arg(option("index", "N").required(true)),
+        )
+        .subcommand(
+            Command::new("archive")
+                .about("Archive a collection member")
+                .arg(required("collection_id", "COLLECTION_ID"))
+                .arg(required("pane_id", "PANE_ID")),
+        )
+        .subcommand(
+            Command::new("restore")
+                .about("Restore an archived collection member")
+                .arg(required("collection_id", "COLLECTION_ID"))
+                .arg(required("pane_id", "PANE_ID")),
+        )
+        .subcommand(
+            Command::new("close")
+                .about("Close a collection with an optional member disposition")
+                .arg(required("collection_id", "COLLECTION_ID"))
+                .arg(flag("cascade-close"))
+                .arg(flag("promote-members"))
+                .group(
+                    ArgGroup::new("disposition")
+                        .args(["cascade-close", "promote-members"])
+                        .multiple(false),
+                ),
+        )
+}
+
+fn service_binding_command() -> Command {
+    let endpoints = || {
+        [
+            option("consumer-package", "PACKAGE_ID").required(true),
+            option("consumer-service", "SERVICE_ID").required(true),
+            option("import", "IMPORT_ID").required(true),
+            option("provider-package", "PACKAGE_ID").required(true),
+            option("provider-service", "SERVICE_ID").required(true),
+            option("export", "EXPORT_ID").required(true),
+        ]
+    };
+    Command::new("service-binding")
+        .about("Inspect and manage package service bindings")
+        .subcommand(endpoints().into_iter().fold(
+            Command::new("inspect").about("Inspect exact binding consent"),
+            |command, arg| command.arg(arg),
+        ))
+        .subcommand(Command::new("list").about("List durable service bindings"))
+        .subcommand(
+            endpoints().into_iter().fold(
+                Command::new("approve")
+                    .about("Approve an exact service binding")
+                    .arg(option("registry-revision", "REVISION").required(true))
+                    .arg(option("binding-revision", "REVISION"))
+                    .arg(option("consent-sha256", "SHA256").required(true))
+                    .arg(flag("confirm").required(true)),
+                |command, arg| command.arg(arg),
+            ),
+        )
+        .subcommand(
+            Command::new("revoke")
+                .about("Revoke a durable service binding")
+                .arg(required("binding_id", "BINDING_ID"))
+                .arg(option("registry-revision", "REVISION").required(true))
+                .arg(option("binding-revision", "REVISION").required(true))
+                .arg(flag("confirm").required(true)),
+        )
+        .subcommand(
+            Command::new("call")
+                .about("Run one bounded consumer invocation")
+                .arg(required("binding_id", "BINDING_ID"))
+                .arg(option("binding-revision", "REVISION").required(true))
+                .arg(option("consumer-method", "METHOD").required(true))
+                .arg(option("params-json", "JSON").required(true)),
+        )
+}
+
+fn extension_command() -> Command {
+    Command::new("extension")
+        .about("Inspect extension product health")
+        .subcommand(
+            Command::new("doctor")
+                .about("Run the approved Extension Doctor composition")
+                .arg(flag("json").help("Print the stable diagnostic or API error as JSON")),
+        )
+}
+
+fn delegation_command() -> Command {
+    Command::new("delegation")
+        .about("Manage delegation provenance over the socket API")
+        .subcommand(
+            Command::new("create")
+                .about("Create a delegation record")
+                .arg(option("pane", "PANE_ID"))
+                .arg(option("parent", "DELEGATION_ID"))
+                .arg(option("purpose", "TEXT")),
+        )
+        .subcommand(id_command("get", "delegation_id", "Show a delegation"))
+        .subcommand(Command::new("tree").about("Show the delegation forest"))
+        .subcommand(id_command(
+            "root",
+            "delegation_id",
+            "Show a delegation root",
+        ))
+        .subcommand(id_command(
+            "descendants",
+            "delegation_id",
+            "Show delegation descendants",
+        ))
+        .subcommand(
+            Command::new("reparent")
+                .about("Change a delegation parent")
+                .arg(required("delegation_id", "DELEGATION_ID"))
+                .arg(option("parent", "DELEGATION_ID"))
+                .arg(flag("root"))
+                .group(
+                    ArgGroup::new("parentage")
+                        .args(["parent", "root"])
+                        .required(true)
+                        .multiple(false),
+                ),
+        )
+        .subcommand(
+            Command::new("reorder")
+                .about("Reorder a delegation among its siblings")
+                .arg(required("delegation_id", "DELEGATION_ID"))
+                .arg(flag("first"))
+                .arg(flag("last"))
+                .arg(option("before", "DELEGATION_ID"))
+                .arg(option("after", "DELEGATION_ID"))
+                .group(
+                    ArgGroup::new("position")
+                        .args(["first", "last", "before", "after"])
+                        .required(true)
+                        .multiple(false),
+                ),
+        )
+}
+
 fn notification_command() -> Command {
     Command::new("notification")
-        .about("Show Herdr notifications")
+        .about("Show vqro notifications")
         .subcommand(
             Command::new("show")
                 .about("Show a notification")
@@ -322,7 +512,7 @@ fn agent_command() -> Command {
         .subcommand(
             Command::new("read")
                 .about("Read agent terminal output")
-                .override_usage("herdr agent read <TARGET> [OPTIONS]")
+                .override_usage("vqro agent read <TARGET> [OPTIONS]")
                 .arg(required("target", "TARGET"))
                 .arg(read_source_option(true))
                 .arg(option("lines", "N"))
@@ -339,7 +529,7 @@ fn agent_command() -> Command {
         .subcommand(
             Command::new("prompt")
                 .about("Submit a prompt to an agent")
-                .override_usage("herdr agent prompt <TARGET> <TEXT> [OPTIONS]")
+                .override_usage("vqro agent prompt <TARGET> <TEXT> [OPTIONS]")
                 .arg(required("target", "TARGET"))
                 .arg(required("text", "TEXT"))
                 .arg(
@@ -365,7 +555,7 @@ fn agent_command() -> Command {
         .subcommand(
             Command::new("rename")
                 .about("Rename an agent")
-                .override_usage("herdr agent rename <TARGET> <NAME>|--clear")
+                .override_usage("vqro agent rename <TARGET> <NAME>|--clear")
                 .arg(required("target", "TARGET"))
                 .arg(Arg::new("name").value_name("NAME"))
                 .arg(flag("clear"))
@@ -379,7 +569,7 @@ fn agent_command() -> Command {
         .subcommand(
             Command::new("wait")
                 .about("Wait until an agent reaches one of the requested states")
-                .override_usage("herdr agent wait <TARGET> [OPTIONS]")
+                .override_usage("vqro agent wait <TARGET> [OPTIONS]")
                 .arg(required("target", "TARGET"))
                 .arg(
                     option("until", "STATUS")
@@ -395,7 +585,7 @@ fn agent_command() -> Command {
         .subcommand(
             Command::new("attach")
                 .about("Attach directly to an agent terminal")
-                .override_usage("herdr agent attach <TARGET> [OPTIONS]")
+                .override_usage("vqro agent attach <TARGET> [OPTIONS]")
                 .arg(required("target", "TARGET"))
                 .arg(flag("takeover")),
         )
@@ -403,7 +593,7 @@ fn agent_command() -> Command {
             Command::new("start")
                 .about("Start a supported interactive agent in an existing pane")
                 .override_usage(
-                    "herdr agent start <NAME> --kind <KIND> --pane <ID> [OPTIONS] [-- [AGENT_ARG]...]",
+                    "vqro agent start <NAME> --kind <KIND> --pane <ID> [OPTIONS] [-- [AGENT_ARG]...]",
                 )
                 .arg(required("name", "NAME"))
                 .arg(
@@ -428,7 +618,7 @@ fn agent_command() -> Command {
                         .last(true),
                 )
                 .after_help(
-                    "The pane must be at its interactive shell prompt. Success means the expected agent was detected in the same terminal and is ready for input.\n\nnext: herdr agent prompt <TARGET> <TEXT> --wait",
+                    "The pane must be at its interactive shell prompt. Success means the expected agent was detected in the same terminal and is ready for input.\n\nnext: vqro agent prompt <TARGET> <TEXT> --wait",
                 ),
         )
         .subcommand(
@@ -584,7 +774,7 @@ fn pane_command() -> Command {
                 .arg(required("pane_id", "PANE_ID"))
                 .arg(required("text", "TEXT"))
                 .after_help(
-                    "next: herdr pane run <PANE_ID> <COMMAND> sends text and Enter in one call",
+                    "next: vqro pane run <PANE_ID> <COMMAND> sends text and Enter in one call",
                 ),
         )
         .subcommand(
@@ -747,6 +937,21 @@ fn session_command() -> Command {
             Command::new("delete")
                 .about("Delete a stopped session")
                 .arg(required("name", "NAME"))
+                .arg(json_flag()),
+        )
+        .subcommand(
+            Command::new("import-herdr")
+                .about("Copy a persisted Herdr session into a new named vqro session")
+                .arg(
+                    Arg::new("source")
+                        .value_name("HERDR_SESSION")
+                        .help("Herdr session name; omit or use default for its default session"),
+                )
+                .arg(
+                    option("name", "VQRO_SESSION")
+                        .required(true)
+                        .help("New vqro session name"),
+                )
                 .arg(json_flag()),
         )
 }
@@ -1086,13 +1291,13 @@ mod tests {
                 let mut output = Vec::new();
                 assert!(
                     super::write_requested_help(&args, &mut output, || {}).unwrap(),
-                    "help was not handled for herdr {} {flag}",
+                    "help was not handled for vqro {} {flag}",
                     path.join(" ")
                 );
                 let output = String::from_utf8(output).unwrap();
                 assert!(
-                    output.contains(&format!("Usage: herdr {}", path.join(" "))),
-                    "unexpected help for herdr {}: {output}",
+                    output.contains(&format!("Usage: vqro {}", path.join(" "))),
+                    "unexpected help for vqro {}: {output}",
                     path.join(" ")
                 );
             }
@@ -1162,7 +1367,7 @@ mod tests {
             for option in options {
                 assert!(
                     option_arg(&cmd, option).is_required_set(),
-                    "herdr {} --{option} should be required",
+                    "vqro {} --{option} should be required",
                     path.join(" ")
                 );
             }
@@ -1211,7 +1416,7 @@ mod tests {
         .unwrap();
         assert!(String::from_utf8(help)
             .unwrap()
-            .contains("Usage: herdr agent rename <TARGET> <NAME>|--clear"));
+            .contains("Usage: vqro agent rename <TARGET> <NAME>|--clear"));
     }
 
     #[test]
@@ -1221,7 +1426,7 @@ mod tests {
             let worktree_command = command_path(&cmd, &["worktree", subcommand]);
             assert!(
                 !has_option(worktree_command, "json"),
-                "herdr worktree {subcommand} should not advertise --json"
+                "vqro worktree {subcommand} should not advertise --json"
             );
         }
     }
@@ -1315,7 +1520,7 @@ mod tests {
         let mut output = Vec::new();
         assert!(
             super::write_requested_help(&args, &mut output, || {}).unwrap(),
-            "help was not handled for herdr {}",
+            "help was not handled for vqro {}",
             path.join(" ")
         );
         String::from_utf8(output).unwrap()
@@ -1327,7 +1532,7 @@ mod tests {
             let help = long_help(&[group]);
             assert!(
                 help.contains(super::super::AGENT_HELP_FOOTER),
-                "herdr {group} is missing agent resources: {help}"
+                "vqro {group} is missing agent resources: {help}"
             );
         }
 
@@ -1346,17 +1551,92 @@ mod tests {
             "agent start dropped its existing after_help: {agent_start}"
         );
         assert!(
-            agent_start.contains("next: herdr agent prompt <TARGET> <TEXT> --wait"),
+            agent_start.contains("next: vqro agent prompt <TARGET> <TEXT> --wait"),
             "agent start is missing its next-step hint: {agent_start}"
         );
 
         let pane_send_text = long_help(&["pane", "send-text"]);
         assert!(
             pane_send_text.contains(
-                "next: herdr pane run <PANE_ID> <COMMAND> sends text and Enter in one call"
+                "next: vqro pane run <PANE_ID> <COMMAND> sends text and Enter in one call"
             ),
             "pane send-text is missing its next-step hint: {pane_send_text}"
         );
+    }
+
+    #[test]
+    fn spec_exposes_service_binding_commands_and_mutation_guards() {
+        let cmd = super::command();
+        for name in ["inspect", "list", "approve", "revoke", "call"] {
+            command_path(&cmd, &["service-binding", name]);
+        }
+        let inspect = command_path(&cmd, &["service-binding", "inspect"]);
+        for option in [
+            "consumer-package",
+            "consumer-service",
+            "import",
+            "provider-package",
+            "provider-service",
+            "export",
+        ] {
+            assert!(has_option(inspect, option));
+        }
+        let approve = command_path(&cmd, &["service-binding", "approve"]);
+        for option in ["registry-revision", "consent-sha256", "confirm"] {
+            assert!(has_option(approve, option));
+        }
+        let revoke = command_path(&cmd, &["service-binding", "revoke"]);
+        for option in ["registry-revision", "binding-revision", "confirm"] {
+            assert!(has_option(revoke, option));
+        }
+        let call = command_path(&cmd, &["service-binding", "call"]);
+        for option in ["binding-revision", "consumer-method", "params-json"] {
+            assert!(has_option(call, option));
+        }
+    }
+
+    #[test]
+    fn spec_exposes_extension_doctor_without_provider_selection() {
+        let cmd = super::command();
+        let doctor = command_path(&cmd, &["extension", "doctor"]);
+        assert!(has_option(doctor, "json"));
+        for forbidden in ["provider", "binding", "method", "params-json"] {
+            assert!(!has_option(doctor, forbidden));
+        }
+    }
+
+    #[test]
+    fn spec_exposes_collection_and_delegation_orchestration_commands() {
+        let cmd = super::command();
+        for name in [
+            "list", "get", "create", "add", "promote", "select", "reorder", "archive", "restore",
+            "close",
+        ] {
+            command_path(&cmd, &["collection", name]);
+        }
+        for name in [
+            "create",
+            "get",
+            "tree",
+            "root",
+            "descendants",
+            "reparent",
+            "reorder",
+        ] {
+            command_path(&cmd, &["delegation", name]);
+        }
+        assert_eq!(
+            option_values(command_path(&cmd, &["collection", "create"]), "direction"),
+            ["right", "down"]
+        );
+        assert!(has_option(
+            command_path(&cmd, &["collection", "close"]),
+            "cascade-close"
+        ));
+        assert!(has_option(
+            command_path(&cmd, &["collection", "close"]),
+            "promote-members"
+        ));
     }
 
     #[test]

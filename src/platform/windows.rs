@@ -15,6 +15,109 @@ use std::{
 
 mod clipboard_image;
 
+#[derive(Debug)]
+pub(crate) struct PlatformPersistenceLock {
+    _handle: OwnedHandle,
+}
+
+#[allow(dead_code)] // Used when the staged persistence coordinator is wired into production.
+pub(crate) fn try_lock_platform_persistence(
+    path: &std::path::Path,
+) -> Result<PlatformPersistenceLock, super::PersistenceLockError> {
+    use std::os::windows::ffi::OsStrExt as _;
+    use windows_sys::Win32::{
+        Foundation::{ERROR_LOCK_VIOLATION, ERROR_SHARING_VIOLATION, GENERIC_READ, GENERIC_WRITE},
+        Storage::FileSystem::{
+            CreateFileW, GetFileInformationByHandle, GetFileType, LockFileEx,
+            BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL,
+            FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ,
+            FILE_SHARE_WRITE, FILE_TYPE_DISK, LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY,
+            OPEN_ALWAYS,
+        },
+        System::IO::OVERLAPPED,
+    };
+
+    let mut path = path.as_os_str().encode_wide().collect::<Vec<_>>();
+    if path.contains(&0) {
+        return Err(super::PersistenceLockError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "persistence ownership path contains an interior NUL",
+        )));
+    }
+    path.push(0);
+    let raw = unsafe {
+        CreateFileW(
+            path.as_ptr(),
+            GENERIC_READ | GENERIC_WRITE,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            std::ptr::null(),
+            OPEN_ALWAYS,
+            FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT,
+            std::ptr::null_mut(),
+        )
+    };
+    if raw == INVALID_HANDLE_VALUE {
+        let error = std::io::Error::last_os_error();
+        return if matches!(
+            error.raw_os_error().map(|code| code as u32),
+            Some(ERROR_SHARING_VIOLATION)
+        ) {
+            Err(super::PersistenceLockError::Busy)
+        } else {
+            Err(super::PersistenceLockError::Io(error))
+        };
+    }
+    let handle = unsafe { OwnedHandle::from_raw_handle(raw) };
+    if unsafe { GetFileType(handle.as_raw_handle()) } != FILE_TYPE_DISK {
+        return Err(super::PersistenceLockError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "persistence ownership path is not a disk file",
+        )));
+    }
+    let mut information = MaybeUninit::<BY_HANDLE_FILE_INFORMATION>::zeroed();
+    if unsafe { GetFileInformationByHandle(handle.as_raw_handle(), information.as_mut_ptr()) } == 0
+    {
+        return Err(super::PersistenceLockError::Io(
+            std::io::Error::last_os_error(),
+        ));
+    }
+    let information = unsafe { information.assume_init() };
+    if information.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT) != 0
+    {
+        return Err(super::PersistenceLockError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "persistence ownership path is not a regular non-reparse file",
+        )));
+    }
+    let mut overlapped = MaybeUninit::<OVERLAPPED>::zeroed();
+    let locked = unsafe {
+        LockFileEx(
+            handle.as_raw_handle(),
+            LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY,
+            0,
+            u32::MAX,
+            u32::MAX,
+            overlapped.as_mut_ptr(),
+        )
+    };
+    if locked == 0 {
+        let error = std::io::Error::last_os_error();
+        return if matches!(
+            error.raw_os_error().map(|code| code as u32),
+            Some(ERROR_LOCK_VIOLATION) | Some(ERROR_SHARING_VIOLATION)
+        ) {
+            Err(super::PersistenceLockError::Busy)
+        } else {
+            Err(super::PersistenceLockError::Io(error))
+        };
+    }
+    Ok(PlatformPersistenceLock { _handle: handle })
+}
+
+pub(crate) fn local_listener_accept_error_is_resource_exhaustion(error: &std::io::Error) -> bool {
+    error.raw_os_error() == Some(10024) // WSAEMFILE
+}
+
 pub(crate) fn classify_child_exit(status: &portable_pty::ExitStatus) -> super::ChildExitReason {
     // STATUS_CONTROL_C_EXIT is reported without a Unix signal by portable-pty.
     if status.exit_code() == 0xC000013A {
@@ -154,7 +257,10 @@ use windows_sys::{
             MAX_PATH, NTSTATUS, STATUS_SUCCESS, UNICODE_STRING,
         },
         Globalization::{CompareStringOrdinal, CSTR_EQUAL, CSTR_GREATER_THAN, CSTR_LESS_THAN},
-        Security::SECURITY_ATTRIBUTES,
+        Security::{
+            Cryptography::{BCryptGenRandom, BCRYPT_USE_SYSTEM_PREFERRED_RNG},
+            SECURITY_ATTRIBUTES,
+        },
         Storage::FileSystem::CreateDirectoryW,
         System::{
             Console::GetConsoleWindow,
@@ -209,6 +315,90 @@ use windows_sys::{
     },
 };
 
+pub(crate) fn fill_secure_random(bytes: &mut [u8]) -> std::io::Result<()> {
+    let len = u32::try_from(bytes.len())
+        .map_err(|_| std::io::Error::other("random request exceeds Windows API limit"))?;
+    let status = unsafe {
+        BCryptGenRandom(
+            std::ptr::null_mut(),
+            bytes.as_mut_ptr(),
+            len,
+            BCRYPT_USE_SYSTEM_PREFERRED_RNG,
+        )
+    };
+    if status == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::from_raw_os_error(status))
+    }
+}
+
+pub(crate) fn configure_extension_service_command(command: &mut std::process::Command) {
+    use std::os::windows::process::CommandExt;
+
+    // No extension code may run before kill-on-close containment is installed.
+    command.creation_flags(CREATE_NO_WINDOW | CREATE_SUSPENDED);
+}
+
+#[derive(Debug)]
+pub(crate) struct ExtensionServiceContainment {
+    job: usize,
+}
+
+impl ExtensionServiceContainment {
+    pub(crate) fn new(child: &std::process::Child) -> std::io::Result<Self> {
+        use std::os::windows::io::AsRawHandle;
+
+        let job = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+        if job.is_null() {
+            return Err(std::io::Error::last_os_error());
+        }
+        let result = (|| {
+            let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
+            limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            let size = u32::try_from(size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>())
+                .map_err(|_| std::io::Error::other("job limits size exceeds u32"))?;
+            if unsafe {
+                SetInformationJobObject(
+                    job,
+                    JobObjectExtendedLimitInformation,
+                    std::ptr::from_ref(&limits).cast(),
+                    size,
+                )
+            } == 0
+            {
+                return Err(std::io::Error::last_os_error());
+            }
+            if unsafe { AssignProcessToJobObject(job, child.as_raw_handle().cast()) } == 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            resume_suspended_process(Some(child.id()))?;
+            Ok(Self { job: job as usize })
+        })();
+        if result.is_err() {
+            unsafe {
+                CloseHandle(job);
+            }
+        }
+        result
+    }
+}
+
+impl Drop for ExtensionServiceContainment {
+    fn drop(&mut self) {
+        if self.job != 0 {
+            unsafe {
+                CloseHandle(self.job as HANDLE);
+            }
+            self.job = 0;
+        }
+    }
+}
+
+pub(crate) fn terminate_extension_service_process_group(_child: &std::process::Child) {
+    // Dropping ExtensionServiceContainment closes the kill-on-close Job Object.
+}
+
 use super::{ClipboardImage, ForegroundJob, Signal};
 
 const STILL_ACTIVE: u32 = 259;
@@ -216,7 +406,7 @@ const FOREGROUND_PROCESS_SNAPSHOT_CACHE_TTL: Duration = Duration::from_millis(25
 const FOREGROUND_SELECTION_RECHECK: Duration = Duration::from_secs(5);
 const FOREGROUND_SELECTION_CACHE_CAPACITY: usize = 1_024;
 const FOREGROUND_SELECTION_CACHE_RETENTION: Duration = Duration::from_secs(60);
-const PANE_RUNTIME_MARKER_ENV_VAR: &str = "HERDR_PANE_RUNTIME_ID";
+const PANE_RUNTIME_MARKER_ENV_VAR: &str = "VQRO_PANE_RUNTIME_ID";
 
 pub(crate) fn terminal_title_for_presentation(title: &str) -> &str {
     title.strip_prefix("Administrator: ").unwrap_or(title)
@@ -2067,6 +2257,13 @@ pub fn read_clipboard_text() -> Option<String> {
     None
 }
 
+pub fn open_path(path: &std::path::Path) -> std::io::Result<Option<std::process::Child>> {
+    std::process::Command::new("explorer.exe")
+        .arg(path)
+        .spawn()
+        .map(Some)
+}
+
 pub fn open_url(url: &str) -> std::io::Result<Option<std::process::Child>> {
     let operation = wide_null("open");
     let url = wide_null(url);
@@ -2685,6 +2882,82 @@ impl Drop for InputSourceRestore {
     }
 }
 
+pub(crate) struct PackageStagingBackend {
+    root: PathBuf,
+    canonical_root: PathBuf,
+}
+
+pub(crate) fn configure_package_nofollow(options: &mut std::fs::OpenOptions) {
+    use std::os::windows::fs::OpenOptionsExt;
+    options.custom_flags(windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT);
+}
+
+pub(crate) fn create_private_package_directory(path: &std::path::Path) -> std::io::Result<()> {
+    std::fs::create_dir(path)
+}
+
+pub(crate) fn open_package_staging(
+    path: &std::path::Path,
+) -> std::io::Result<PackageStagingBackend> {
+    let metadata = std::fs::symlink_metadata(path)?;
+    if !metadata.file_type().is_dir() || metadata.file_type().is_symlink() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "package staging root is not a real directory",
+        ));
+    }
+    Ok(PackageStagingBackend {
+        root: path.to_path_buf(),
+        canonical_root: std::fs::canonicalize(path)?,
+    })
+}
+
+pub(crate) fn write_package_staging_file(
+    staging: &PackageStagingBackend,
+    components: &[std::ffi::OsString],
+    bytes: &[u8],
+    _mode: u32,
+) -> std::io::Result<()> {
+    use std::io::Write;
+
+    let mut parent = staging.root.clone();
+    for component in &components[..components.len() - 1] {
+        parent.push(component);
+        match std::fs::create_dir(&parent) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error),
+        }
+        let metadata = std::fs::symlink_metadata(&parent)?;
+        if !metadata.file_type().is_dir() || metadata.file_type().is_symlink() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "package staging path contains a link",
+            ));
+        }
+        if !std::fs::canonicalize(&parent)?.starts_with(&staging.canonical_root) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "package staging path escaped its root",
+            ));
+        }
+    }
+    let output = parent.join(&components[components.len() - 1]);
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    configure_package_nofollow(&mut options);
+    let mut file = options.open(output)?;
+    let metadata = file.metadata()?;
+    if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "package output is not a regular file",
+        ));
+    }
+    file.write_all(bytes)?;
+    file.sync_all()
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
@@ -2698,6 +2971,48 @@ mod tests {
     use windows_sys::Win32::System::Console::{
         AllocConsole, FreeConsole, GetConsoleProcessList, GetConsoleWindow,
     };
+
+    #[test]
+    fn extension_service_containment_kills_descendants_on_drop() {
+        let pid_file = std::env::temp_dir().join(format!(
+            "vqro-extension-descendant-{}.pid",
+            std::process::id()
+        ));
+        let _ = fs::remove_file(&pid_file);
+        let mut command = Command::new("powershell.exe");
+        command
+            .args([
+                "-NoLogo",
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "$p = Start-Process -FilePath \"$env:SystemRoot\\System32\\ping.exe\" -ArgumentList \"-n\",\"30\",\"127.0.0.1\" -PassThru; Set-Content -LiteralPath $env:VQRO_TEST_PID_FILE -Value $p.Id; Wait-Process -Id $p.Id",
+            ])
+            .env("VQRO_TEST_PID_FILE", &pid_file)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        super::configure_extension_service_command(&mut command);
+        let mut child = command.spawn().unwrap();
+        let containment = super::ExtensionServiceContainment::new(&child).unwrap();
+        let started = Instant::now();
+        let descendant = loop {
+            if let Ok(contents) = fs::read_to_string(&pid_file) {
+                break contents.trim().parse::<u32>().unwrap();
+            }
+            assert!(started.elapsed() < Duration::from_secs(10));
+            thread::sleep(Duration::from_millis(20));
+        };
+        assert!(super::ProcessIdentity::open(descendant).is_some_and(|process| process.running()));
+        drop(containment);
+        let started = Instant::now();
+        while super::ProcessIdentity::open(descendant).is_some_and(|process| process.running()) {
+            assert!(started.elapsed() < Duration::from_secs(5));
+            thread::sleep(Duration::from_millis(20));
+        }
+        let _ = child.wait();
+        fs::remove_file(pid_file).unwrap();
+    }
 
     #[test]
     fn windows_standard_plugin_runtime_paths_drop_only_disk_and_unc_verbatim_prefixes() {

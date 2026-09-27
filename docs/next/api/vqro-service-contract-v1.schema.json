@@ -1,0 +1,84 @@
+{
+  "$defs": {
+    "ServiceContractMethodV1": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "max_request_bytes": {
+          "format": "uint64",
+          "maximum": 131072,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "max_response_bytes": {
+          "format": "uint64",
+          "maximum": 131072,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "request_information": {
+          "default": [],
+          "items": {
+            "pattern": "^[a-z0-9_-]+(?:\\.[a-z0-9_-]+)+$",
+            "type": "string"
+          },
+          "maxItems": 32,
+          "type": "array"
+        },
+        "request_schema": true,
+        "response_information": {
+          "default": [],
+          "items": {
+            "pattern": "^[a-z0-9_-]+(?:\\.[a-z0-9_-]+)+$",
+            "type": "string"
+          },
+          "maxItems": 32,
+          "type": "array"
+        },
+        "response_schema": true
+      },
+      "required": [
+        "id",
+        "request_schema",
+        "response_schema",
+        "max_request_bytes",
+        "max_response_bytes"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "https://vqro.dev/schema/service-contract/v1",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "contract": "vqro.service-contract.v1",
+  "properties": {
+    "contract": {
+      "const": "vqro.service-contract.v1",
+      "type": "string"
+    },
+    "contract_id": {
+      "type": "string"
+    },
+    "contract_version": {
+      "type": "string"
+    },
+    "methods": {
+      "items": {
+        "$ref": "#/$defs/ServiceContractMethodV1"
+      },
+      "maxItems": 32,
+      "minItems": 1,
+      "type": "array"
+    }
+  },
+  "required": [
+    "contract",
+    "contract_id",
+    "contract_version",
+    "methods"
+  ],
+  "title": "vqro service contract descriptor v1",
+  "type": "object"
+}

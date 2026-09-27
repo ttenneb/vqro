@@ -7,7 +7,7 @@ use crate::api::schema::{
     LayoutNode, LayoutPane, LayoutSetSplitRatioParams, ResponseResult, SplitDirection,
 };
 use crate::app::{App, Mode};
-use crate::layout::{Node, PaneId};
+use crate::layout::{LayoutLeaf, Node, PaneId, TileLayout, TypedNode};
 use crate::workspace::NewPane;
 
 use super::responses::{encode_error, encode_success};
@@ -68,6 +68,24 @@ impl App {
         if let Err(message) = validate_layout_tree(&params.root) {
             return encode_error(id, "invalid_layout", message);
         }
+        let requested_panes = layout_pane_count(&params.root);
+        let replaced_panes = replace_target.map_or(0, |(_, tab_idx)| {
+            self.state.workspaces[ws_idx].tabs[tab_idx].panes.len()
+        });
+        let additional_panes = replacement_pane_increase(requested_panes, replaced_panes);
+        let destination_tab = replace_target.map(|(_, tab_idx)| tab_idx);
+        if let Err(error) = self.admit_new_panes(Some(ws_idx), destination_tab, additional_panes) {
+            return encode_error(id, "resource_limit", error.to_string());
+        }
+        let transient_capacity_available = self
+            .admit_new_panes(Some(ws_idx), None, requested_panes)
+            .is_ok();
+        if let Some(target) = replace_target.filter(|_| !transient_capacity_available) {
+            return self.handle_in_place_layout_replacement(id, params, target);
+        }
+        if let Err(error) = self.state.workspaces[ws_idx].ensure_public_tab_numbers_available(1) {
+            return encode_error(id, "layout_apply_failed", error.to_string());
+        }
 
         let replacement_label = params.tab_label.clone().or_else(|| {
             let (_, tab_idx) = replace_target?;
@@ -103,12 +121,22 @@ impl App {
             Err(message) => return encode_error(id, "invalid_layout", message),
         };
 
+        let tab_id = match self.allocate_tab_id() {
+            Ok(tab_id) => tab_id,
+            Err(error) => return encode_error(id, "layout_apply_failed", error.to_string()),
+        };
+        let terminal_id = match self.allocate_terminal_id() {
+            Ok(id) => id,
+            Err(error) => return encode_error(id, "layout_apply_failed", error.to_string()),
+        };
         let created = {
             let Some(ws) = self.state.workspaces.get_mut(ws_idx) else {
                 return encode_error(id, "workspace_not_found", "workspace not found");
             };
             if let Some(argv) = command.as_deref() {
                 ws.create_tab_argv_command(
+                    tab_id,
+                    terminal_id,
                     rows,
                     cols,
                     first_cwd,
@@ -120,6 +148,8 @@ impl App {
                 )
             } else {
                 ws.create_tab(
+                    tab_id,
+                    terminal_id,
                     rows,
                     cols,
                     first_cwd,
@@ -167,6 +197,10 @@ impl App {
                 return encode_error(id, "tab_not_found", "tab not found");
             };
             if ws.close_tab(target_tab_idx) {
+                for pane_id in &plugin_pane_ids {
+                    self.state.delegations.tombstone_pane(*pane_id);
+                }
+                self.state.delegations.gc_tombstones();
                 self.state.remove_plugin_pane_records(plugin_pane_ids);
                 self.state.remove_unattached_terminal_ids(terminal_ids);
                 self.shutdown_detached_terminal_runtimes();
@@ -190,6 +224,7 @@ impl App {
 
         if params.focus || replace_was_active {
             self.state.switch_workspace_tab(ws_idx, new_tab_idx);
+            self.apply_bundled_extension_state();
             self.state.mode = Mode::Terminal;
         }
         self.schedule_session_save();
@@ -215,6 +250,66 @@ impl App {
         let Some(layout) = self.layout_description(ws_idx, new_tab_idx) else {
             return encode_error(id, "layout_apply_failed", "new layout unavailable");
         };
+        self.refresh_collection_documents();
+        encode_success(id, ResponseResult::LayoutApply { layout })
+    }
+
+    fn handle_in_place_layout_replacement(
+        &mut self,
+        id: String,
+        params: LayoutApplyParams,
+        (ws_idx, tab_idx): (usize, usize),
+    ) -> String {
+        let removed_collections = self.collection_infos(None, Some((ws_idx, tab_idx)));
+        let tab = &self.state.workspaces[ws_idx].tabs[tab_idx];
+        let existing_panes = tab.layout.pane_ids();
+        if layout_pane_count(&params.root) != existing_panes.len()
+            || layout_has_launch_changes(&params.root)
+        {
+            return encode_error(
+                id,
+                "resource_limit",
+                "transactional replacement requires temporary pane capacity; at capacity only same-size layout-only replacements are allowed",
+            );
+        }
+        let mut pane_iter = existing_panes.iter().copied();
+        let mut labels = Vec::new();
+        let Some(root) = remap_layout_to_existing_panes(&params.root, &mut pane_iter, &mut labels)
+        else {
+            return encode_error(id, "invalid_layout", "layout pane mapping failed");
+        };
+        let Some(first_pane) = existing_panes.first().copied() else {
+            return encode_error(id, "invalid_layout", "replacement layout is empty");
+        };
+        let Some(layout) =
+            TileLayout::from_typed_saved(root, LayoutLeaf::Pane(first_pane), Vec::new())
+        else {
+            return encode_error(id, "invalid_layout", "replacement layout is invalid");
+        };
+        {
+            let tab = &mut self.state.workspaces[ws_idx].tabs[tab_idx];
+            tab.replace_layout_without_collections(layout, first_pane);
+            if let Some(label) = params.tab_label {
+                tab.set_custom_name(label);
+            }
+        }
+        for (pane_id, leaf) in labels {
+            self.apply_layout_pane_label(ws_idx, pane_id, leaf);
+        }
+        if params.focus {
+            self.state.switch_workspace_tab(ws_idx, tab_idx);
+            self.apply_bundled_extension_state();
+            self.state.mode = Mode::Terminal;
+        }
+        self.state.mark_session_dirty();
+        self.schedule_session_save();
+        for collection in removed_collections {
+            self.emit_collection_event("closed", collection);
+        }
+        self.emit_layout_updated_event(ws_idx, tab_idx);
+        let Some(layout) = self.layout_description(ws_idx, tab_idx) else {
+            return encode_error(id, "layout_apply_failed", "replacement layout unavailable");
+        };
         encode_success(id, ResponseResult::LayoutApply { layout })
     }
 
@@ -238,7 +333,7 @@ impl App {
             .workspaces
             .get_mut(ws_idx)
             .and_then(|ws| ws.tabs.get_mut(tab_idx))
-            .is_some_and(|tab| tab.layout.set_ratio_at(&params.path, params.ratio));
+            .is_some_and(|tab| tab.set_layout_split_ratio(&params.path, params.ratio));
         if !changed {
             return encode_error(id, "split_not_found", "split path not found");
         }
@@ -413,12 +508,16 @@ impl App {
             SplitDirection::Down => Direction::Vertical,
         };
         let command = layout_command(pane)?;
+        let terminal_id = self
+            .allocate_terminal_id()
+            .map_err(|error| error.to_string())?;
         let result = {
             let Some(ws) = self.state.workspaces.get_mut(ws_idx) else {
                 return Err("workspace not found".into());
             };
             if let Some(argv) = command.as_deref() {
                 ws.split_pane_argv_command_with_ratio(
+                    terminal_id,
                     target_pane_id,
                     direction,
                     ratio,
@@ -434,6 +533,7 @@ impl App {
                 )
             } else {
                 ws.split_pane_with_ratio(
+                    terminal_id,
                     target_pane_id,
                     direction,
                     ratio,
@@ -527,6 +627,58 @@ fn layout_command(pane: &LayoutPane) -> Result<Option<Vec<String>>, String> {
         Some(command) if command.is_empty() => Err("pane command must not be empty".into()),
         Some(command) => Ok(Some(command.clone())),
         None => Ok(None),
+    }
+}
+
+fn layout_has_launch_changes(node: &LayoutNode) -> bool {
+    match node {
+        LayoutNode::Pane { pane } => {
+            pane.command.is_some() || pane.cwd.is_some() || !pane.env.is_empty()
+        }
+        LayoutNode::Split { first, second, .. } => {
+            layout_has_launch_changes(first) || layout_has_launch_changes(second)
+        }
+    }
+}
+
+fn remap_layout_to_existing_panes<'a>(
+    node: &'a LayoutNode,
+    panes: &mut impl Iterator<Item = PaneId>,
+    labels: &mut Vec<(PaneId, &'a LayoutPane)>,
+) -> Option<TypedNode> {
+    match node {
+        LayoutNode::Pane { pane } => {
+            let pane_id = panes.next()?;
+            labels.push((pane_id, pane));
+            Some(TypedNode::Leaf(LayoutLeaf::Pane(pane_id)))
+        }
+        LayoutNode::Split {
+            direction: split_direction,
+            ratio,
+            first,
+            second,
+        } => Some(TypedNode::Split {
+            direction: match split_direction {
+                SplitDirection::Right => Direction::Horizontal,
+                SplitDirection::Down => Direction::Vertical,
+            },
+            ratio: *ratio,
+            first: Box::new(remap_layout_to_existing_panes(first, panes, labels)?),
+            second: Box::new(remap_layout_to_existing_panes(second, panes, labels)?),
+        }),
+    }
+}
+
+fn replacement_pane_increase(requested: usize, replaced: usize) -> usize {
+    requested.saturating_sub(replaced)
+}
+
+fn layout_pane_count(node: &LayoutNode) -> usize {
+    match node {
+        LayoutNode::Pane { .. } => 1,
+        LayoutNode::Split { first, second, .. } => {
+            layout_pane_count(first).saturating_add(layout_pane_count(second))
+        }
     }
 }
 
@@ -801,6 +953,83 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn failed_replacement_restores_a_reachable_generic_terminal() {
+        let mut app = app_with_workspace();
+        let original_tab_id = app.public_tab_id(0, 0).unwrap();
+        let original_pane = app.state.workspaces[0].tabs[0].root_pane;
+        let original_terminal = app.state.workspaces[0].tabs[0].panes[&original_pane]
+            .attached_terminal_id
+            .clone();
+        let runtime_count = app.terminal_runtimes.len();
+
+        let response = app.handle_layout_apply(
+            "req".into(),
+            LayoutApplyParams {
+                workspace_id: None,
+                tab_id: Some(original_tab_id),
+                tab_label: None,
+                focus: true,
+                root: LayoutNode::Pane {
+                    pane: LayoutPane {
+                        command: Some(vec!["/definitely/not/a/vqro-command".into()]),
+                        ..Default::default()
+                    },
+                },
+            },
+        );
+
+        let error: ErrorResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(error.error.code, "layout_apply_failed");
+        assert_eq!(app.state.workspaces[0].tabs.len(), 1);
+        assert_eq!(app.state.workspaces[0].pane_count(), 1);
+        assert_eq!(app.state.terminals.len(), 1);
+        assert_eq!(app.state.workspaces[0].tabs[0].root_pane, original_pane);
+        assert_eq!(
+            app.state.workspaces[0].tabs[0].panes[&original_pane].attached_terminal_id,
+            original_terminal
+        );
+        assert_eq!(app.terminal_runtimes.len(), runtime_count);
+    }
+
+    #[tokio::test]
+    async fn later_split_failure_recovers_replacement_without_false_close_event() {
+        let mut app = app_with_workspace();
+        let original_tab_id = app.public_tab_id(0, 0).unwrap();
+        let response = app.handle_layout_apply(
+            "req".into(),
+            LayoutApplyParams {
+                workspace_id: None,
+                tab_id: Some(original_tab_id),
+                tab_label: None,
+                focus: true,
+                root: LayoutNode::Split {
+                    direction: SplitDirection::Right,
+                    ratio: 0.5,
+                    first: Box::new(LayoutNode::Pane {
+                        pane: LayoutPane::default(),
+                    }),
+                    second: Box::new(LayoutNode::Pane {
+                        pane: LayoutPane {
+                            command: Some(vec!["/definitely/not/a/vqro-command".into()]),
+                            ..Default::default()
+                        },
+                    }),
+                },
+            },
+        );
+
+        let error: ErrorResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(error.error.code, "layout_apply_failed");
+        assert_eq!(app.state.workspaces[0].tabs.len(), 1);
+        assert_eq!(app.state.workspaces[0].pane_count(), 1);
+        assert!(!app
+            .event_hub
+            .events_after(0)
+            .iter()
+            .any(|(_, event)| event.event == EventKind::TabClosed));
+    }
+
+    #[tokio::test]
     async fn layout_apply_new_tab_follows_cached_focused_pane_cwd_without_runtime() {
         let mut app = app_with_workspace();
         let focused_pane = app.state.workspaces[0].tabs[0].root_pane;
@@ -848,6 +1077,16 @@ mod tests {
                 entrypoint: "board".into(),
             },
         );
+        let parent = app
+            .state
+            .delegations
+            .create(Some(replaced_pane), None, Some("parent".into()))
+            .unwrap();
+        let child = app
+            .state
+            .delegations
+            .create(None, Some(parent), Some("child".into()))
+            .unwrap();
 
         let response = app.handle_layout_apply(
             "req".into(),
@@ -868,6 +1107,13 @@ mod tests {
         let success: SuccessResponse = serde_json::from_str(&response).unwrap();
         assert!(matches!(success.result, ResponseResult::LayoutApply { .. }));
         assert!(!app.state.plugin_panes.contains_key(&replaced_pane));
+        let retained = app.state.delegations.get(parent).unwrap();
+        assert!(retained.tombstone);
+        assert_eq!(retained.pane_id, None);
+        assert_eq!(
+            app.state.delegations.get(child).unwrap().parent_id,
+            Some(parent)
+        );
         app.state.assert_invariants_for_test();
     }
 
@@ -905,6 +1151,65 @@ mod tests {
         let error: ErrorResponse = serde_json::from_str(&response).unwrap();
         assert_eq!(error.error.code, "invalid_layout");
         assert_eq!(app.state.workspaces[0].tabs.len(), original_tab_count);
+    }
+
+    #[tokio::test]
+    async fn same_size_replacement_at_session_capacity_is_in_place_and_transactional() {
+        let mut app = app_with_workspace();
+        app.state.workspaces.extend(
+            (1..crate::admission::MAX_SESSION_PANES)
+                .map(|_| crate::workspace::Workspace::test_new("capacity")),
+        );
+        let tab_id = app.public_tab_id(0, 0).unwrap();
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.state.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        let next_pane_id = PaneId::next_for_test();
+
+        let response = app.handle_layout_apply(
+            "req".into(),
+            LayoutApplyParams {
+                workspace_id: None,
+                tab_id: Some(tab_id.clone()),
+                tab_label: Some("rearranged".into()),
+                focus: true,
+                root: LayoutNode::Pane {
+                    pane: LayoutPane {
+                        label: Some("same terminal".into()),
+                        ..Default::default()
+                    },
+                },
+            },
+        );
+
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        assert!(matches!(success.result, ResponseResult::LayoutApply { .. }));
+        assert_eq!(app.public_tab_id(0, 0).unwrap(), tab_id);
+        assert_eq!(app.state.workspaces[0].tabs[0].root_pane, pane_id);
+        assert_eq!(
+            app.state.workspaces[0].tabs[0].panes[&pane_id].attached_terminal_id,
+            terminal_id
+        );
+        assert_eq!(PaneId::next_for_test(), next_pane_id);
+        assert!(!app
+            .event_hub
+            .events_after(0)
+            .iter()
+            .any(|(_, event)| matches!(event.event, EventKind::TabClosed | EventKind::TabCreated)));
+    }
+
+    #[test]
+    fn same_size_replacement_is_admitted_at_every_pane_limit() {
+        let additional = replacement_pane_increase(MAX_LAYOUT_PANES, MAX_LAYOUT_PANES);
+        assert_eq!(additional, 0);
+        assert!(crate::admission::panes(
+            crate::admission::MAX_SESSION_PANES,
+            crate::admission::MAX_WORKSPACE_PANES,
+            crate::admission::MAX_TAB_PANES,
+            additional,
+        )
+        .is_ok());
     }
 
     #[test]

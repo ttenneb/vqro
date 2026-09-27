@@ -30,19 +30,49 @@ fn rewrite_schema_refs(value: &mut serde_json::Value, schema_name: &str) {
 }
 
 fn protocol_schema_document() -> serde_json::Value {
+    // The Herdr schema is a published generation-1 compatibility fixture. Native
+    // vqro additions belong only in native_api_schema_document().
+    serde_json::from_str(include_str!("../../../docs/next/api/herdr-api.schema.json"))
+        .expect("frozen Herdr API schema is valid JSON")
+}
+
+fn native_api_schema_document() -> serde_json::Value {
+    let mut request = protocol_schema_entry::<Request>("request");
+    if let Some(branches) = request
+        .get_mut("oneOf")
+        .and_then(serde_json::Value::as_array_mut)
+    {
+        branches.retain(|branch| {
+            branch
+                .pointer("/properties/method/const")
+                .and_then(serde_json::Value::as_str)
+                != Some("client_shell.surface.set")
+        });
+    }
     serde_json::json!({
         "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "title": "Herdr API",
-        "schema_version": 1,
-        "protocol": crate::protocol::PROTOCOL_VERSION,
+        "$id": crate::native_api::NATIVE_API_SCHEMA_ID,
+        "title": "vqro JSON API",
+        "contract": crate::native_api::NATIVE_API_CONTRACT_V1,
+        "major_version": crate::native_api::NATIVE_API_MAJOR_VERSION,
         "schemas": {
-            "request": protocol_schema_entry::<Request>("request"),
+            "request": request,
             "success_response": protocol_schema_entry::<SuccessResponse>("success_response"),
             "error_response": protocol_schema_entry::<ErrorResponse>("error_response"),
             "event": protocol_schema_entry::<EventEnvelope>("event"),
             "subscription_event": protocol_schema_entry::<SubscriptionEventEnvelope>("subscription_event"),
         },
     })
+}
+
+#[test]
+fn native_schema_excludes_bridge_only_surface_method() {
+    let native = native_api_schema_document();
+    let native_json = serde_json::to_string(&native["schemas"]["request"]).unwrap();
+    assert!(!native_json.contains("client_shell.surface.set"));
+    let bridge_source =
+        serde_json::to_string(&protocol_schema_document()["schemas"]["request"]).unwrap();
+    assert!(bridge_source.contains("client_shell.surface.set"));
 }
 
 #[test]
@@ -177,16 +207,28 @@ fn bundled_protocol_schema_refs_resolve_inside_bundle() {
     }
 
     assert_no_standalone_refs(&protocol_schema_document());
+    assert_no_standalone_refs(&native_api_schema_document());
 }
 
 #[test]
-fn generated_protocol_schema_artifact_is_current() {
+fn frozen_protocol_schema_artifact_is_unchanged() {
+    use sha2::{Digest, Sha256};
+
+    let bytes = include_bytes!("../../../docs/next/api/herdr-api.schema.json");
+    assert_eq!(
+        format!("{:x}", Sha256::digest(bytes)),
+        "a275001298cb2726fb496e5d49924fe39b73ca9dd34971909b6f4f5b34a6c633"
+    );
+}
+
+#[test]
+fn generated_native_api_schema_artifact_is_current() {
     let actual = format!(
         "{}\n",
-        serde_json::to_string_pretty(&protocol_schema_document()).unwrap()
+        serde_json::to_string_pretty(&native_api_schema_document()).unwrap()
     );
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("docs/next/api/herdr-api.schema.json");
+    let path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/next/api/vqro-api.schema.json");
 
     if std::env::var_os("HERDR_UPDATE_API_SCHEMA").is_some() {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -194,15 +236,46 @@ fn generated_protocol_schema_artifact_is_current() {
         return;
     }
 
-    let expected = std::fs::read_to_string(&path).unwrap_or_else(|err| {
-        panic!(
-            "failed to read {}; run `HERDR_UPDATE_API_SCHEMA=1 just test-one generated_protocol_schema_artifact_is_current`: {err}",
-            path.display()
-        )
-    });
+    let expected = std::fs::read_to_string(&path)
+        .unwrap_or_else(|err| panic!("failed to read {}: {err}", path.display()));
     assert_eq!(
         expected, actual,
-        "generated API schema artifact is stale; run `HERDR_UPDATE_API_SCHEMA=1 just test-one generated_protocol_schema_artifact_is_current`"
+        "generated vqro API schema artifact is stale"
+    );
+}
+
+#[test]
+fn extension_doctor_uses_additive_method_and_success_variant() {
+    let request = Request {
+        id: "doctor_1".into(),
+        method: Method::ExtensionDoctor(ExtensionDoctorParams::default()),
+    };
+    let encoded = serde_json::to_value(&request).unwrap();
+    assert_eq!(encoded["method"], "extension.doctor");
+    assert_eq!(encoded["params"], serde_json::json!({}));
+    assert_eq!(serde_json::from_value::<Request>(encoded).unwrap(), request);
+    assert!(serde_json::from_value::<Request>(serde_json::json!({
+        "id": "doctor_2",
+        "method": "extension.doctor",
+        "params": {"provider": "not-allowed"}
+    }))
+    .is_err());
+
+    let response = SuccessResponse {
+        id: "doctor_1".into(),
+        result: ResponseResult::ExtensionDoctorDiagnostic {
+            diagnostic: crate::extension_health::ExtensionDoctorDiagnosticV1 {
+                contract: crate::extension_health::DIAGNOSTIC_CONTRACT_V1.into(),
+                status: crate::extension_health::ExtensionDoctorStatusV1::Healthy,
+                findings: Vec::new(),
+            },
+        },
+    };
+    let encoded = serde_json::to_value(&response).unwrap();
+    assert_eq!(encoded["result"]["type"], "extension_doctor_diagnostic");
+    assert_eq!(
+        serde_json::from_value::<SuccessResponse>(encoded).unwrap(),
+        response
     );
 }
 
@@ -531,6 +604,37 @@ fn pane_process_info_request_round_trips() {
 }
 
 #[test]
+fn pane_telemetry_is_additive_and_omits_sensitive_process_data() {
+    let request = Request {
+        id: "req_telemetry".into(),
+        method: Method::PaneTelemetry(PaneTelemetryParams {
+            pane_id: Some("w1-1".into()),
+        }),
+    };
+    let json = serde_json::to_value(&request).unwrap();
+    assert_eq!(json["method"], "pane.telemetry");
+    assert_eq!(json["params"]["pane_id"], "w1-1");
+
+    let process = PaneTelemetryProcess {
+        pid: 42,
+        name: "cargo".into(),
+        state: Some("R".into()),
+        cpu_time_ms: Some(10),
+        cpu_tenths_percent: None,
+        resident_bytes: Some(0),
+        thread_count: Some(1),
+        read_bytes: None,
+        write_bytes: Some(0),
+    };
+    let json = serde_json::to_value(process).unwrap();
+    assert!(json.get("argv").is_none());
+    assert!(json.get("cmdline").is_none());
+    assert!(json.get("env").is_none());
+    assert_eq!(json["resident_bytes"], 0);
+    assert!(json.get("cpu_tenths_percent").is_none());
+}
+
+#[test]
 fn event_envelope_round_trips() {
     let events = [
         EventEnvelope {
@@ -755,11 +859,15 @@ fn session_snapshot_request_and_response_round_trip() {
                 focused_workspace_id: None,
                 focused_tab_id: None,
                 focused_pane_id: None,
+                repositories: Vec::new(),
+                space_order: Vec::new(),
                 workspaces: Vec::new(),
                 tabs: Vec::new(),
                 panes: Vec::new(),
                 layouts: Vec::new(),
                 agents: Vec::new(),
+                collections: Vec::new(),
+                delegations: Vec::new(),
             }),
         },
     };
@@ -800,6 +908,8 @@ fn worktree_request_and_response_round_trip() {
                 active_tab_id: "w_1:1".into(),
                 agent_status: AgentStatus::Unknown,
                 tokens: HashMap::new(),
+                repository_id: None,
+                checkout: None,
                 worktree: Some(WorkspaceWorktreeInfo {
                     repo_key: "/repo/herdr/.git".into(),
                     repo_name: "herdr".into(),
@@ -886,6 +996,8 @@ fn worktree_lifecycle_events_round_trip() {
         active_tab_id: "w_2:1".into(),
         agent_status: AgentStatus::Unknown,
         tokens: HashMap::new(),
+        repository_id: None,
+        checkout: None,
         worktree: Some(WorkspaceWorktreeInfo {
             repo_key: "/repo/herdr/.git".into(),
             repo_name: "herdr".into(),
@@ -993,12 +1105,14 @@ fn plugin_link_list_unlink_round_trip() {
         manifest_path: "/plugins/worktree-bootstrap/herdr-plugin.toml".into(),
         plugin_root: "/plugins/worktree-bootstrap".into(),
         enabled: true,
+        load_order: 0,
         platforms: None,
         build: vec![PluginManifestBuild {
             platforms: None,
             command: vec!["bun".into(), "install".into()],
         }],
         startup: vec![],
+        services: vec![],
         actions: vec![PluginManifestAction {
             id: "bootstrap".into(),
             title: "Bootstrap worktree".into(),

@@ -314,7 +314,7 @@ impl AppState {
             .get_mut(ws_idx)
             .and_then(|ws| ws.tabs.get_mut(tab_idx))
         {
-            tab.layout.focus_pane(pane_id);
+            tab.focus_pane(pane_id);
             self.previous_pane_focus = previous;
             self.mark_session_dirty();
             return true;
@@ -459,6 +459,19 @@ impl AppState {
             self.active = Some(idx);
             self.selected = idx;
             let workspace_id = self.workspaces[idx].id.clone();
+            if let Some(repository_id) = self.workspaces[idx]
+                .checkout
+                .as_ref()
+                .map(|checkout| checkout.repository_id.clone())
+            {
+                if let Some(repository) = self
+                    .repositories
+                    .iter_mut()
+                    .find(|repo| repo.id == repository_id)
+                {
+                    repository.last_focused_workspace_id = Some(workspace_id.clone());
+                }
+            }
             crate::logging::workspace_focused(&workspace_id);
             self.mark_session_dirty();
             if let Some(ws) = self.workspaces.get_mut(idx) {
@@ -489,6 +502,19 @@ impl AppState {
         self.active = Some(ws_idx);
         self.selected = ws_idx;
         let workspace_id = self.workspaces[ws_idx].id.clone();
+        if let Some(repository_id) = self.workspaces[ws_idx]
+            .checkout
+            .as_ref()
+            .map(|checkout| checkout.repository_id.clone())
+        {
+            if let Some(repository) = self
+                .repositories
+                .iter_mut()
+                .find(|repo| repo.id == repository_id)
+            {
+                repository.last_focused_workspace_id = Some(workspace_id.clone());
+            }
+        }
         if workspace_changed {
             crate::logging::workspace_focused(&workspace_id);
         }
@@ -570,6 +596,11 @@ impl AppState {
         self.selected = selected_id
             .and_then(|id| self.workspaces.iter().position(|ws| ws.id == id))
             .unwrap_or(0);
+        crate::repository::project_workspace_order(
+            &self.workspaces,
+            &mut self.repositories,
+            &mut self.space_order,
+        );
         true
     }
 
@@ -636,6 +667,11 @@ impl AppState {
         self.selected = selected_id
             .and_then(|id| self.workspaces.iter().position(|ws| ws.id == id))
             .unwrap_or(0);
+        crate::repository::project_workspace_order(
+            &self.workspaces,
+            &mut self.repositories,
+            &mut self.space_order,
+        );
         true
     }
 
@@ -752,6 +788,10 @@ impl AppState {
             .active
             .and_then(|idx| self.workspaces.get(idx))
             .map(|ws| ws.id.clone());
+        for pane_id in &pane_ids {
+            self.delegations.tombstone_pane(*pane_id);
+        }
+        self.delegations.gc_tombstones();
         self.remove_plugin_pane_records(pane_ids);
         for idx in close_indices.iter().rev() {
             self.workspaces.remove(*idx);
@@ -772,6 +812,7 @@ impl AppState {
             }
             self.active = Some(self.selected);
         }
+        self.reconcile_repositories();
     }
 }
 
@@ -851,7 +892,7 @@ impl AppState {
         else {
             return false;
         };
-        if tab.layout.swap_panes(source, target) {
+        if tab.swap_panes(source, target) {
             self.mark_session_dirty();
             true
         } else {
@@ -872,7 +913,7 @@ impl AppState {
                 .and_then(|i| self.workspaces.get_mut(i))
                 .and_then(|ws| ws.active_tab_mut())
             {
-                tab.layout.resize_focused(direction, 0.05, area);
+                tab.resize_focused(direction, 0.05, area);
                 self.mark_session_dirty();
             }
         }
@@ -1396,6 +1437,7 @@ impl AppState {
         results: Vec<WorkspaceGitStatus>,
     ) -> bool {
         let mut changed = false;
+        let mut repository_changed = false;
         for result in results {
             let Some(ws_idx) = self
                 .workspaces
@@ -1406,7 +1448,7 @@ impl AppState {
             };
 
             if self.workspaces[ws_idx]
-                .resolved_identity_cwd_from(&self.terminals, terminal_runtimes)
+                .repository_identity_cwd_from(&self.terminals, terminal_runtimes)
                 .as_ref()
                 != Some(&result.resolved_identity_cwd)
             {
@@ -1416,6 +1458,7 @@ impl AppState {
             let ws = &mut self.workspaces[ws_idx];
             if ws.cached_identity_cwd != result.resolved_identity_cwd {
                 ws.cached_identity_cwd = result.resolved_identity_cwd;
+                repository_changed = true;
             }
             if ws.cached_auto_label != result.auto_label {
                 ws.cached_auto_label = result.auto_label;
@@ -1435,7 +1478,11 @@ impl AppState {
             if ws.cached_git_space != result.space {
                 ws.cached_git_space = result.space;
                 changed = true;
+                repository_changed = true;
             }
+        }
+        if repository_changed {
+            changed |= self.reconcile_repositories();
         }
         changed
     }
@@ -1674,7 +1721,25 @@ impl AppState {
             AppEvent::WorktreeAddFinished(_) => Vec::new(),
             AppEvent::WorktreeRemoveFinished(_) => Vec::new(),
             AppEvent::TabBarCommandFinished { .. } => Vec::new(),
-            AppEvent::PluginCommandFinished { .. } => Vec::new(),
+            AppEvent::PluginCommandFinished { .. }
+            | AppEvent::ExtensionArtifactStaged(_)
+            | AppEvent::ExtensionGitPackageFinished(_)
+            | AppEvent::ExtensionPackageCandidateReady(_)
+            | AppEvent::ExtensionPackageCandidateFinished(_)
+            | AppEvent::ExtensionServiceFabricTimeout { .. }
+            | AppEvent::ExtensionCatalogCapacityAvailable
+            | AppEvent::ExtensionHostStateCall(_)
+            | AppEvent::ExtensionHostTerminalsCall(_)
+            | AppEvent::ExtensionStatePersisted(_)
+            | AppEvent::CollectionsCheckpointPersisted(_)
+            | AppEvent::CollectionsCreateCheckpointPersisted(_)
+            | AppEvent::ExtensionServiceFinished(_)
+            | AppEvent::HostDocumentFinished(_)
+            | AppEvent::HostRelationshipsDocumentFinished(_)
+            | AppEvent::HostAgentActivityDocumentFinished(_)
+            | AppEvent::HostDocumentRetryDue { .. }
+            | AppEvent::HostSemanticDocumentRetryDue { .. }
+            | AppEvent::HostDocumentProviderActionFinished { .. } => Vec::new(),
         }
     }
 
@@ -2054,6 +2119,10 @@ impl AppState {
 
         let pane_terminal_id = self.terminal_id_for_pane(ws_idx, pane_id);
         let workspace_terminal_ids = self.terminal_ids_for_workspace(ws_idx);
+        // Relationships retain pane-less ancestry so descendant completion can still escalate
+        // through a closed intermediate node without making the dead PTY actionable.
+        self.delegations.tombstone_pane(pane_id);
+        self.delegations.gc_tombstones();
         self.pane_id_aliases.retain(|_, alias| *alias != pane_id);
         self.public_pane_id_aliases
             .retain(|_, alias| *alias != pane_id);
@@ -2624,6 +2693,7 @@ mod tests {
                 demand: crate::workspace::GitStatusRefreshDemand {
                     branch: false,
                     ahead_behind: true,
+                    upstream: true,
                 },
                 auto_label: "one".into(),
                 branch: Some("new".into()),
@@ -2665,7 +2735,7 @@ mod tests {
     }
 
     #[test]
-    fn apply_workspace_git_statuses_does_not_change_worktree_membership() {
+    fn apply_workspace_git_statuses_reconciles_changed_repository_membership() {
         let mut state = app_with_workspaces(&["one"]);
         mark_linked_worktree(&mut state, 0);
         let workspace_id = state.workspaces[0].id.clone();
@@ -2694,7 +2764,13 @@ mod tests {
         );
 
         assert!(changed);
-        assert_eq!(state.workspaces[0].worktree_space().cloned(), membership);
+        assert_ne!(state.workspaces[0].worktree_space().cloned(), membership);
+        assert_eq!(
+            state.workspaces[0]
+                .worktree_space()
+                .map(|membership| membership.key.as_str()),
+            Some("other-repo-key")
+        );
     }
 
     #[test]
@@ -3369,6 +3445,40 @@ mod tests {
     }
 
     #[test]
+    fn pane_death_collects_leaf_delegation() {
+        let mut state = app_with_workspaces(&["active"]);
+        let pane_id = *state.workspaces[0].panes.keys().next().unwrap();
+        let leaf = state.delegations.create(Some(pane_id), None, None).unwrap();
+        state.handle_app_event(AppEvent::PaneDied {
+            pane_id,
+            exit_reason: crate::platform::ChildExitReason::Exited,
+        });
+        assert!(state.delegations.get(leaf).is_none());
+    }
+
+    #[test]
+    fn pane_death_retains_tombstoned_delegation_ancestry() {
+        let mut state = app_with_workspaces(&["active"]);
+        let pane_id = *state.workspaces[0].panes.keys().next().unwrap();
+        let root = state
+            .delegations
+            .create(Some(pane_id), None, Some("root".into()))
+            .unwrap();
+        let child = state
+            .delegations
+            .create(None, Some(root), Some("child".into()))
+            .unwrap();
+        state.handle_app_event(AppEvent::PaneDied {
+            pane_id,
+            exit_reason: crate::platform::ChildExitReason::Exited,
+        });
+        let root_record = state.delegations.get(root).unwrap();
+        assert!(root_record.tombstone);
+        assert!(root_record.pane_id.is_none());
+        assert_eq!(state.delegations.get(child).unwrap().parent_id, Some(root));
+    }
+
+    #[test]
     fn hook_reported_unknown_agent_sets_toast_title_from_label() {
         let mut state = app_with_workspaces(&["active", "background"]);
         state.active = Some(0);
@@ -3415,7 +3525,7 @@ mod tests {
         });
         state.handle_app_event(AppEvent::HookStateReported {
             pane_id: bg_pane_id,
-            source: "herdr:codex".into(),
+            source: "vqro:codex".into(),
             agent_label: "codex".into(),
             state: AgentState::Working,
             message: None,
@@ -3463,7 +3573,7 @@ mod tests {
         });
         state.handle_app_event(AppEvent::HookStateReported {
             pane_id,
-            source: "herdr:claude".into(),
+            source: "vqro:claude".into(),
             agent_label: "claude".into(),
             state: AgentState::Blocked,
             message: None,
@@ -3512,7 +3622,7 @@ mod tests {
         });
         let terminal = state.terminals.get_mut(&terminal_id).unwrap();
         terminal.set_persisted_agent_session(crate::agent_resume::PersistedAgentSession {
-            source: "herdr:pi".into(),
+            source: "vqro:pi".into(),
             agent: "pi".into(),
             session_ref: crate::agent_resume::AgentSessionRef::path(
                 std::env::current_dir()
@@ -3524,7 +3634,7 @@ mod tests {
             .unwrap(),
         });
         terminal.set_hook_authority(
-            "herdr:pi".into(),
+            "vqro:pi".into(),
             "pi".into(),
             AgentState::Working,
             None,
@@ -3535,7 +3645,7 @@ mod tests {
 
         let updates = state.handle_app_event(AppEvent::HookAgentReleased {
             pane_id,
-            source: "herdr:pi".into(),
+            source: "vqro:pi".into(),
             agent_label: "pi".into(),
             known_agent: Some(Agent::Pi),
             seq: Some(2),

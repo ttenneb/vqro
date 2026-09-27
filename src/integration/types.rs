@@ -164,17 +164,6 @@ pub(crate) enum IntegrationStatusKind {
     Outdated,
 }
 
-/// Status for an experimental target that is deliberately not part of the
-/// frozen client endpoint `IntegrationTarget` enum.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ExperimentalIntegrationStatus {
-    pub label: &'static str,
-    pub path: PathBuf,
-    pub state: IntegrationStatusKind,
-    pub installed_version: Option<u32>,
-    pub expected_version: u32,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct IntegrationRecommendation {
     pub target: crate::api::schema::IntegrationTarget,

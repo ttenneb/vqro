@@ -13,6 +13,7 @@ use crate::api::schema::{
     PluginUnlinkParams, ResponseResult,
 };
 use crate::app::App;
+pub(crate) use manifest::bundled_document_service_declarations;
 pub(super) use manifest::normalize_plugin_id;
 use manifest::{
     effective_platforms, ensure_platform_supported, normalize_action_id, normalize_plugin_source,
@@ -20,7 +21,7 @@ use manifest::{
 
 #[cfg(test)]
 use crate::api::schema::{PluginCommandStatus, PluginInvocationContext};
-pub(crate) use manifest::load_plugin_manifest;
+pub(crate) use manifest::{load_plugin_manifest, manifest_json_schema};
 #[cfg(test)]
 use runtime::{read_capped_plugin_output, MAX_PLUGIN_COMMANDS_IN_FLIGHT};
 
@@ -30,10 +31,99 @@ impl App {
             crate::persist::plugin_registry::reload_manifests(entries, |path, enabled| {
                 load_plugin_manifest(path, enabled).map_err(|(_, message)| message)
             });
-        self.state.installed_plugins = entries
+        let installed_plugins = entries
             .into_iter()
             .map(|plugin| (plugin.plugin_id.clone(), plugin))
             .collect();
+        if self.state.installed_plugins != installed_plugins {
+            self.state.installed_plugins = installed_plugins;
+            self.rebuild_extension_catalogs();
+        } else if self.extension_catalog_rebuild_pending {
+            self.rebuild_extension_catalogs();
+        }
+    }
+
+    pub(crate) fn rebuild_extension_catalogs(&mut self) {
+        let extension_services = crate::extension_service::manager_for_plugins(
+            &self.state.installed_plugins,
+            self.event_tx.clone(),
+        );
+        let bundled_provider_priorities = crate::extensions::bundled_provider_priorities(
+            &self.extension_index,
+            &self.marketplace_state,
+        );
+        let host_document_services = crate::extension_service::HostDocumentServiceCatalog::bundled(
+            &self.disabled_extensions,
+            &bundled_provider_priorities,
+            &self.state.installed_plugins,
+            self.event_tx.clone(),
+        );
+        let complete = extension_services.is_complete() && host_document_services.is_complete();
+        self.extension_catalog_rebuild_pending = !complete;
+        if !complete {
+            tracing::warn!(
+                "extension catalog rebuild is capacity-limited; retiring the old catalog and retrying"
+            );
+        }
+        self.extension_services = extension_services;
+        self.host_document_services = host_document_services;
+        self.extension_catalog_rebuilt = true;
+        let package_namespaces = [
+            crate::collections_extension_contract::COLLECTIONS_NAMESPACE,
+            crate::spaces_extension_contract::SPACES_NAMESPACE,
+        ];
+        let retired_documents = self
+            .host_document_caches
+            .iter()
+            .filter(|((namespace, _), _)| !package_namespaces.contains(&namespace.as_str()))
+            .filter_map(|((_, scope_id), cache)| {
+                let document = cache.current()?;
+                Some((
+                    document.namespace.clone(),
+                    scope_id.clone(),
+                    document.generation,
+                    document.revision,
+                ))
+            })
+            .collect::<Vec<_>>();
+        self.host_document_caches
+            .retain(|(namespace, _), _| package_namespaces.contains(&namespace.as_str()));
+        for (namespace, scope_id, generation, revision) in retired_documents {
+            self.event_hub.push(crate::api::schema::EventEnvelope {
+                event: crate::api::schema::EventKind::HostDocumentUpdated,
+                data: crate::api::schema::EventData::HostDocumentUpdated {
+                    namespace,
+                    scope_id,
+                    generation,
+                    revision,
+                    available: false,
+                },
+            });
+        }
+        self.host_document_request_watermarks
+            .retain(|(namespace, _), _| package_namespaces.contains(&namespace.as_str()));
+        self.host_document_confirmation_grants.clear();
+        self.host_document_retry_snapshots.clear();
+        self.host_document_retry_order.clear();
+        self.host_document_retry_scheduled.clear();
+        self.host_document_retry_attempts.clear();
+        self.host_relationships_last_desired = None;
+        self.host_agent_activity_last_desired = None;
+        for namespace in [
+            crate::first_party::delegation::NAMESPACE,
+            crate::first_party::agent_status::NAMESPACE,
+        ] {
+            let epoch = self
+                .host_semantic_retry_epochs
+                .entry(namespace.into())
+                .or_default();
+            *epoch = epoch.saturating_add(1).max(1);
+        }
+        self.host_semantic_retry_attempts.clear();
+        self.host_semantic_retry_scheduled.clear();
+        self.refresh_collection_documents();
+        self.refresh_relationships_document();
+        self.refresh_agent_activity_document();
     }
 
     fn refresh_installed_plugins(&mut self) -> std::io::Result<()> {
@@ -50,7 +140,12 @@ impl App {
         mutation: impl FnOnce(&mut crate::app::state::InstalledPluginRegistry) -> T,
     ) -> std::io::Result<T> {
         if !self.policy.persist_plugin_registry {
-            return Ok(mutation(&mut self.state.installed_plugins));
+            let before = self.state.installed_plugins.clone();
+            let result = mutation(&mut self.state.installed_plugins);
+            if self.state.installed_plugins != before {
+                self.rebuild_extension_catalogs();
+            }
+            return Ok(result);
         }
         let (result, entries) = crate::persist::plugin_registry::update(|entries| {
             let mut registry = entries
@@ -80,6 +175,45 @@ impl App {
             return encode_error(id, "plugin_user_dir_create_failed", err.to_string());
         }
         if let Err(err) = self.update_installed_plugins(|plugins| {
+            let repository_identity = plugin.source.repository_identity();
+            let replaced_order = plugins
+                .values()
+                .filter(|installed| {
+                    repository_identity.is_some()
+                        && installed.source.repository_identity() == repository_identity
+                })
+                .map(|installed| installed.load_order)
+                .max()
+                .or_else(|| {
+                    plugins
+                        .get(&plugin.plugin_id)
+                        .map(|installed| installed.load_order)
+                });
+            if let Some(repository_identity) = repository_identity.as_deref() {
+                plugins.retain(|_, installed| {
+                    installed.source.repository_identity().as_deref() != Some(repository_identity)
+                });
+            }
+            plugin.load_order = replaced_order.unwrap_or_else(|| {
+                let max_order = plugins
+                    .values()
+                    .map(|installed| installed.load_order)
+                    .max()
+                    .unwrap_or(0);
+                max_order.checked_add(1).unwrap_or_else(|| {
+                    let mut ordered = plugins
+                        .values()
+                        .map(|installed| (installed.load_order, installed.plugin_id.clone()))
+                        .collect::<Vec<_>>();
+                    ordered.sort();
+                    for (index, (_, plugin_id)) in ordered.iter().enumerate() {
+                        if let Some(installed) = plugins.get_mut(plugin_id) {
+                            installed.load_order = u64::try_from(index).unwrap_or(u64::MAX);
+                        }
+                    }
+                    u64::try_from(ordered.len()).unwrap_or(u64::MAX)
+                })
+            });
             plugins.insert(plugin.plugin_id.clone(), plugin.clone());
         }) {
             return encode_error(id, "plugin_registry_save_failed", err.to_string());
@@ -106,7 +240,11 @@ impl App {
             })
             .cloned()
             .collect::<Vec<_>>();
-        plugins.sort_by(|a, b| a.plugin_id.cmp(&b.plugin_id));
+        plugins.sort_by(|left, right| {
+            left.load_order
+                .cmp(&right.load_order)
+                .then_with(|| left.plugin_id.cmp(&right.plugin_id))
+        });
         encode_success(id, ResponseResult::PluginList { plugins })
     }
 
@@ -673,7 +811,12 @@ impl App {
             .filter(|plugin| plugin.enabled && plugin_manifest_available(plugin))
             .cloned()
             .collect::<Vec<_>>();
-        plugins.sort_by(|a, b| a.plugin_id.cmp(&b.plugin_id));
+        plugins.sort_by(|left, right| {
+            right
+                .load_order
+                .cmp(&left.load_order)
+                .then_with(|| left.plugin_id.cmp(&right.plugin_id))
+        });
         for plugin in plugins {
             for handler in &plugin.link_handlers {
                 if ensure_platform_supported(
@@ -768,9 +911,7 @@ fn normalize_optional_plugin_id(
 }
 
 fn plugin_manifest_available(plugin: &InstalledPluginInfo) -> bool {
-    !plugin.warnings.iter().any(|warning| {
-        warning.starts_with(crate::persist::plugin_registry::MANIFEST_UNAVAILABLE_WARNING_PREFIX)
-    })
+    crate::persist::plugin_registry::manifest_available(plugin)
 }
 
 fn manifest_action_info(
@@ -1450,6 +1591,48 @@ platforms = ["linux", "macos"]
     }
 
     #[test]
+    fn extension_service_manifest_loads() {
+        let root = unique_temp_path("plugin-service-manifest");
+        write_manifest_content(
+            &root,
+            r#"
+id = "example.inspector"
+name = "Inspector"
+version = "0.1.0"
+min_herdr_version = "0.6.10"
+platforms = ["linux", "macos", "windows"]
+
+[[services]]
+id = "telemetry"
+command = ["python3", "service.py"]
+platforms = ["linux"]
+provides = ["pane_inspector"]
+capabilities = ["view_contribution", "terminal_interrupt"]
+"#,
+        );
+
+        let plugin = load_plugin_manifest(&root.display().to_string(), true).unwrap();
+        assert_eq!(plugin.services.len(), 1);
+        assert_eq!(plugin.services[0].id, "telemetry");
+        assert_eq!(
+            plugin.services[0].provides,
+            [crate::api::schema::PluginServiceCapability::PaneInspector]
+        );
+        assert_eq!(
+            plugin.services[0].requested_capabilities,
+            [
+                crate::api::schema::ExtensionServiceCapability::ViewContribution,
+                crate::api::schema::ExtensionServiceCapability::TerminalInterrupt,
+            ]
+        );
+        assert_eq!(
+            plugin.services[0].granted_capabilities,
+            plugin.services[0].requested_capabilities
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn smoke_fixture_manifest_loads() {
         let plugin = load_plugin_manifest("tests/fixtures/plugin-smoke", true)
             .expect("smoke fixture should load");
@@ -1515,6 +1698,165 @@ platforms = ["linux", "macos"]
         };
         assert!(plugin.enabled);
 
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn reserved_host_document_namespaces_are_rejected() {
+        for namespace in [
+            "vqro.collections",
+            "vqro.spaces",
+            "vqro.delegation",
+            "vqro.agent-status",
+            "host.fallback",
+        ] {
+            let root = unique_temp_path("reserved-host-document-namespace");
+            write_manifest_content(
+                &root,
+                &format!(
+                    r#"
+id = "{namespace}"
+name = "Reserved"
+version = "0.1.0"
+min_herdr_version = "0.9.0"
+
+[[services]]
+id = "documents"
+command = ["document-service"]
+provides = ["host_document"]
+capabilities = ["host_document"]
+"#
+                ),
+            );
+            let error = load_plugin_manifest(root.to_str().unwrap(), true).unwrap_err();
+            assert_eq!(error.0, "reserved_host_document_namespace");
+            let _ = std::fs::remove_dir_all(root);
+        }
+    }
+
+    #[test]
+    fn user_plugins_cannot_request_the_host_derived_spaces_source() {
+        let root = unique_temp_path("restricted-spaces-document-source");
+        write_manifest_content(
+            &root,
+            r#"
+id = "example.spaces"
+name = "Spaces"
+version = "0.1.0"
+min_herdr_version = "0.9.0"
+
+[[services]]
+id = "documents"
+command = ["document-service"]
+document_source = "spaces"
+provides = ["host_document"]
+capabilities = ["host_document"]
+"#,
+        );
+        let error = load_plugin_manifest(root.to_str().unwrap(), true).unwrap_err();
+        assert_eq!(error.0, "restricted_host_document_source");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn provider_capacity_event_retries_deferred_catalog_rebuild() {
+        let mut app = test_app();
+        app.extension_catalog_rebuild_pending = true;
+        app.extension_catalog_rebuilt = false;
+        app.handle_internal_event(crate::events::AppEvent::ExtensionCatalogCapacityAvailable);
+        assert!(!app.extension_catalog_rebuild_pending);
+        assert!(app.extension_catalog_rebuilt);
+    }
+
+    #[test]
+    fn plugin_lifecycle_atomically_rebuilds_and_revokes_host_document_provider() {
+        let mut app = test_app();
+        let root = unique_temp_path("plugin-host-document-lifecycle");
+        write_manifest_content(
+            &root,
+            r#"
+id = "example.documents"
+name = "Documents"
+version = "0.1.0"
+min_herdr_version = "0.9.0"
+platforms = ["linux", "macos", "windows"]
+
+[[services]]
+id = "documents"
+command = ["document-service"]
+priority = 200
+provides = ["host_document"]
+capabilities = ["host_document", "focus_terminal"]
+"#,
+        );
+        link_manifest(&mut app, &root);
+        let enabled_generation = app
+            .host_document_services
+            .generation("example.documents")
+            .expect("linked provider is cataloged");
+        app.host_document_confirmation_grants.insert(
+            (
+                "example.documents".into(),
+                "w1:t1".into(),
+                enabled_generation,
+                1,
+                "interrupt".into(),
+            ),
+            crate::app::api::HostDocumentConfirmationGrant {
+                token: "retired-token".into(),
+                terminal_id: "term-retired".into(),
+                expires_at: std::time::Instant::now() + std::time::Duration::from_secs(30),
+            },
+        );
+
+        let disabled = app.handle_api_request(Request {
+            id: "disable-docs".into(),
+            method: Method::PluginDisable(PluginSetEnabledParams {
+                plugin_id: "example.documents".into(),
+            }),
+        });
+        assert!(matches!(
+            response_result(&disabled),
+            ResponseResult::PluginDisabled { .. }
+        ));
+        assert_eq!(
+            app.host_document_services.generation("example.documents"),
+            None
+        );
+        assert!(app
+            .host_document_caches
+            .keys()
+            .all(|(namespace, _)| namespace != "example.documents"));
+        assert!(app.host_document_confirmation_grants.is_empty());
+
+        let enabled = app.handle_api_request(Request {
+            id: "enable-docs".into(),
+            method: Method::PluginEnable(PluginSetEnabledParams {
+                plugin_id: "example.documents".into(),
+            }),
+        });
+        assert!(matches!(
+            response_result(&enabled),
+            ResponseResult::PluginEnabled { .. }
+        ));
+        assert_ne!(
+            app.host_document_services
+                .generation("example.documents")
+                .unwrap(),
+            enabled_generation
+        );
+
+        // Read paths reload manifests to notice on-disk changes, but identical effective
+        // catalogs must preserve worker generations and in-flight client requests.
+        app.extension_catalog_rebuilt = false;
+        let manager_generation = app.extension_services.manager_generation();
+        let unchanged = app.state.installed_plugins.values().cloned().collect();
+        app.replace_installed_plugins(unchanged);
+        assert_eq!(
+            app.extension_services.manager_generation(),
+            manager_generation
+        );
+        assert!(!app.extension_catalog_rebuilt);
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -1769,12 +2111,12 @@ platforms = ["linux"]
 [[actions]]
 id = "probe"
 title = "Probe executable"
-command = ["sh", "-c", '"$HERDR_BIN_PATH" --list >/dev/null; printf "%s\n" "$?" > action-status']
+command = ["sh", "-c", '"$VQRO_BIN_PATH" --list >/dev/null; printf "%s\n" "$?" > action-status']
 
 [[panes]]
 id = "probe"
 title = "Probe executable"
-command = ["sh", "-c", '"$HERDR_BIN_PATH" --list >/dev/null; printf "%s\n" "$?" > pane-status']
+command = ["sh", "-c", '"$VQRO_BIN_PATH" --list >/dev/null; printf "%s\n" "$?" > pane-status']
 "#,
             );
             link_manifest(&mut app, &plugin_root);
@@ -1810,13 +2152,13 @@ command = ["sh", "-c", '"$HERDR_BIN_PATH" --list >/dev/null; printf "%s\n" "$?" 
             assert_eq!(
                 (action_status.trim(), pane_status.trim()),
                 ("0", "0"),
-                "plugin action and pane must launch Herdr after its executable is replaced"
+                "plugin action and pane must launch vqro after its executable is replaced"
             );
             return;
         }
 
         let root = std::path::PathBuf::from("/var/tmp").join(format!(
-            "herdr-plugin-update-{}-{}",
+            "vqro-plugin-update-{}-{}",
             std::process::id(),
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -1824,7 +2166,7 @@ command = ["sh", "-c", '"$HERDR_BIN_PATH" --list >/dev/null; printf "%s\n" "$?" 
                 .as_nanos()
         ));
         std::fs::create_dir_all(&root).unwrap();
-        let executable = root.join("herdr test");
+        let executable = root.join("vqro test");
         std::fs::copy(std::env::current_exe().unwrap(), &executable).unwrap();
         let result = std::process::Command::new(&executable)
             .args([
@@ -1880,7 +2222,7 @@ platforms = ["linux", "macos"]
 [[panes]]
 id = "board"
 title = "Plugin Board"
-command = ["sh", "-c", "printf '%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n' \"$PWD\" \"$HERDR_PLUGIN_ID\" \"$HERDR_PLUGIN_ENTRYPOINT_ID\" \"$HERDR_WORKSPACE_ID\" \"$HERDR_PANE_ID\" \"$HERDR_BIN_PATH\" \"$HERDR_PLUGIN_CONTEXT_JSON\" \"${{HERDR_CELL_WIDTH_PX-unset}}\" \"${{HERDR_CELL_HEIGHT_PX-unset}}\" > {}"]
+command = ["sh", "-c", "printf '%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n' \"$PWD\" \"$VQRO_PLUGIN_ID\" \"$VQRO_PLUGIN_ENTRYPOINT_ID\" \"$VQRO_WORKSPACE_ID\" \"$VQRO_PANE_ID\" \"$VQRO_BIN_PATH\" \"$VQRO_PLUGIN_CONTEXT_JSON\" \"${{VQRO_CELL_WIDTH_PX-unset}}\" \"${{VQRO_CELL_HEIGHT_PX-unset}}\" > {}"]
 "#,
                 capture.display()
             ),
@@ -1901,17 +2243,17 @@ command = ["sh", "-c", "printf '%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n' \"$PWD\" \
                 cwd: None,
                 focus: true,
                 env: std::collections::HashMap::from([
-                    ("HERDR_PLUGIN_ID".to_string(), "spoofed-plugin".to_string()),
+                    ("VQRO_PLUGIN_ID".to_string(), "spoofed-plugin".to_string()),
                     (
-                        "HERDR_PLUGIN_ENTRYPOINT_ID".to_string(),
+                        "VQRO_PLUGIN_ENTRYPOINT_ID".to_string(),
                         "spoofed-entrypoint".to_string(),
                     ),
                     (
-                        "HERDR_PLUGIN_CONTEXT_JSON".to_string(),
+                        "VQRO_PLUGIN_CONTEXT_JSON".to_string(),
                         "{\"spoofed\":true}".to_string(),
                     ),
                     (
-                        "HERDR_BIN_PATH".to_string(),
+                        "VQRO_BIN_PATH".to_string(),
                         "/tmp/spoofed-herdr".to_string(),
                     ),
                 ]),
@@ -1987,7 +2329,7 @@ platforms = ["linux", "macos"]
 [[panes]]
 id = "board"
 title = "Plugin Board"
-command = ["sh", "-c", "printf '%s\n%s\n%s\n' \"$HERDR_PLUGIN_ROOT\" \"$HERDR_PLUGIN_CONFIG_DIR\" \"$HERDR_PLUGIN_STATE_DIR\" > {}"]
+command = ["sh", "-c", "printf '%s\n%s\n%s\n' \"$VQRO_PLUGIN_ROOT\" \"$VQRO_PLUGIN_CONFIG_DIR\" \"$VQRO_PLUGIN_STATE_DIR\" > {}"]
 "#,
                 capture.display()
             ),
@@ -2009,15 +2351,15 @@ command = ["sh", "-c", "printf '%s\n%s\n%s\n' \"$HERDR_PLUGIN_ROOT\" \"$HERDR_PL
                 focus: true,
                 env: std::collections::HashMap::from([
                     (
-                        "HERDR_PLUGIN_ROOT".to_string(),
+                        "VQRO_PLUGIN_ROOT".to_string(),
                         "/tmp/spoofed-root".to_string(),
                     ),
                     (
-                        "HERDR_PLUGIN_CONFIG_DIR".to_string(),
+                        "VQRO_PLUGIN_CONFIG_DIR".to_string(),
                         "/tmp/spoofed-config".to_string(),
                     ),
                     (
-                        "HERDR_PLUGIN_STATE_DIR".to_string(),
+                        "VQRO_PLUGIN_STATE_DIR".to_string(),
                         "/tmp/spoofed-state".to_string(),
                     ),
                 ]),
@@ -2337,7 +2679,7 @@ title = "Plugin Popup"
 placement = "popup"
 width = "80%"
 height = "40%"
-command = ["sh", "-c", "printf %s ${{HERDR_PANE_ID-unset}} > '{}'; sleep 1"]
+command = ["sh", "-c", "printf %s ${{VQRO_PANE_ID-unset}} > '{}'; sleep 1"]
 "#,
             env_capture.display()
         );
@@ -2672,7 +3014,7 @@ platforms = ["linux", "macos"]
 [[actions]]
 id = "run"
 title = "Run"
-command = ["sh", "-c", "printf '%s' \"$HERDR_PLUGIN_ACTION_ID\""]
+command = ["sh", "-c", "printf '%s' \"$VQRO_PLUGIN_ACTION_ID\""]
 "#,
         );
         link_manifest(&mut app, &root);
@@ -2739,7 +3081,7 @@ platforms = ["linux", "macos"]
 [[actions]]
 id = "run"
 title = "Run"
-command = ["sh", "-c", "printf '%s\n%s\n%s' \"$HERDR_PLUGIN_ROOT\" \"$HERDR_PLUGIN_CONFIG_DIR\" \"$HERDR_PLUGIN_STATE_DIR\""]
+command = ["sh", "-c", "printf '%s\n%s\n%s' \"$VQRO_PLUGIN_ROOT\" \"$VQRO_PLUGIN_CONFIG_DIR\" \"$VQRO_PLUGIN_STATE_DIR\""]
 "#,
         );
         link_manifest(&mut app, &root);
@@ -2848,7 +3190,7 @@ min_herdr_version = "0.6.10"
 platforms = ["linux", "macos"]
 
 [[startup]]
-command = ["sh", "-c", "printf '%s:%s' \"$HERDR_PLUGIN_ID\" \"$HERDR_PLUGIN_EVENT\" > {}"]
+command = ["sh", "-c", "printf '%s:%s' \"$VQRO_PLUGIN_ID\" \"$VQRO_PLUGIN_EVENT\" > {}"]
 "#,
                 capture.display()
             ),
@@ -2896,7 +3238,7 @@ platforms = ["linux", "macos"]
 
 [[events]]
 on = "worktree.created"
-command = ["sh", "-c", "printf '%s' \"$HERDR_PLUGIN_CONTEXT_JSON\" > {}"]
+command = ["sh", "-c", "printf '%s' \"$VQRO_PLUGIN_CONTEXT_JSON\" > {}"]
 "#,
                 capture.display()
             ),
@@ -3115,7 +3457,7 @@ platforms = ["linux", "macos"]
 [[actions]]
 id = "open"
 title = "Open link"
-command = ["sh", "-c", "printf '%s|%s' \"$HERDR_PLUGIN_LINK_HANDLER_ID\" \"$HERDR_PLUGIN_CLICKED_URL\""]
+command = ["sh", "-c", "printf '%s|%s' \"$VQRO_PLUGIN_LINK_HANDLER_ID\" \"$VQRO_PLUGIN_CLICKED_URL\""]
 
 [[link_handlers]]
 id = "github-issue"
@@ -3212,6 +3554,57 @@ action = "generic"
         assert_eq!(handler.action, "specific");
 
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn later_plugin_load_order_wins_overlapping_link_handlers() {
+        let mut app = test_app();
+        let early_root = unique_temp_path("plugin-link-handler-early");
+        let late_root = unique_temp_path("plugin-link-handler-late");
+        let manifest = |id: &str| {
+            format!(
+                r#"
+id = "{id}"
+name = "{id}"
+version = "0.1.0"
+min_herdr_version = "0.6.10"
+platforms = ["linux", "macos", "windows"]
+
+[[actions]]
+id = "open"
+title = "Open"
+command = ["true"]
+
+[[link_handlers]]
+id = "github"
+title = "GitHub"
+pattern = "^https://github\\.com/"
+action = "open"
+"#
+            )
+        };
+        write_manifest_content(&early_root, &manifest("example.early"));
+        write_manifest_content(&late_root, &manifest("example.late"));
+        link_manifest(&mut app, &early_root);
+        link_manifest(&mut app, &late_root);
+        app.state
+            .installed_plugins
+            .get_mut("example.early")
+            .unwrap()
+            .load_order = 1;
+        app.state
+            .installed_plugins
+            .get_mut("example.late")
+            .unwrap()
+            .load_order = 2;
+
+        let (plugin, _) = app
+            .find_plugin_link_handler("https://github.com/herdrdev/herdr")
+            .expect("handler should match");
+
+        assert_eq!(plugin.plugin_id, "example.late");
+        let _ = std::fs::remove_dir_all(early_root);
+        let _ = std::fs::remove_dir_all(late_root);
     }
 
     #[test]

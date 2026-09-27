@@ -144,21 +144,56 @@ fn run_handoff_import_server(socket_path: &Path, token: &str) -> io::Result<()> 
         .map_err(io::Error::other)?;
 
     let result = rt.block_on(async {
-        let app = app::App::new_from_handoff(
+        let mut app = app::App::new_from_handoff(
             &loaded_config.config,
             config::config_diagnostic_summary(&loaded_config.diagnostics),
             api_rx,
             event_hub.clone(),
             &received.manifest.snapshot,
+            &received.manifest.deferred_panes,
             &mut imports,
         )?;
+        // Sync the admitted v6 bytes before asking the source to relinquish
+        // ownership. The staging name is not authoritative until commit.
+        let staged_snapshot = crate::persist::stage_handoff_snapshot(&received.manifest.snapshot)?;
         crate::server::handoff::report_restored(&mut received.stream)?;
-        if std::env::var("HERDR_TEST_HANDOFF_IMPORT_FAIL").as_deref() == Ok("after_restored") {
+        if std::env::var("VQRO_TEST_HANDOFF_IMPORT_FAIL").as_deref() == Ok("after_restored") {
             return Err(io::Error::other(
                 "test handoff import failure after restored",
             ));
         }
         wait_for_old_public_sockets_to_close(Duration::from_secs(5))?;
+        if std::env::var("VQRO_TEST_HANDOFF_IMPORT_FAIL").as_deref() == Ok("before_prepared") {
+            return Err(io::Error::other(
+                "test handoff import failure before prepared",
+            ));
+        }
+        let legacy_source = received.manifest.version == 1;
+        if legacy_source {
+            // Generation 1 interprets `ready` as the final pre-commit signal.
+            // Do not expose target endpoints before its following commit.
+            crate::server::handoff::report_ready(&mut received.stream)?;
+        } else {
+            crate::server::handoff::report_prepared(&mut received.stream)?;
+        }
+        crate::server::handoff::wait_committed(&mut received.stream)?;
+
+        // Source ownership is now irrevocably committed. Publish the accepted
+        // identity snapshot before opening either target endpoint.
+        if std::env::var("VQRO_TEST_HANDOFF_IMPORT_FAIL").as_deref() == Ok("publish_after_commit") {
+            return Err(io::Error::other(
+                "test durable handoff publication failure after commit",
+            ));
+        }
+        staged_snapshot.publish()?;
+        app.mark_handoff_snapshot_durable();
+        if std::env::var("VQRO_TEST_HANDOFF_IMPORT_FAIL").as_deref()
+            == Ok("after_publish_before_ready")
+        {
+            return Err(io::Error::other(
+                "test handoff import failure after publish before ready",
+            ));
+        }
 
         let api_server = api::start_server_with_stop_control(
             api_tx.clone(),
@@ -175,11 +210,12 @@ fn run_handoff_import_server(socket_path: &Path, token: &str) -> io::Result<()> 
         // Carried across before any client attaches, so the first title sent is
         // the override rather than the configured one it replaced.
         server.api_window_title = received.manifest.api_window_title.take();
-        crate::server::handoff::report_ready(&mut received.stream)?;
-        crate::server::handoff::wait_committed(&mut received.stream)?;
         server.app.assume_handoff_ownership();
         server.app.unpause_handoff_readers();
         server.pending_handoff_repaint_nudge = true;
+        if !legacy_source {
+            crate::server::handoff::report_ready(&mut received.stream)?;
+        }
         if let Err(err) = crate::server::handoff::report_owned(&mut received.stream) {
             warn!(err = %err, "failed to report handoff ownership; continuing as owner");
         }
@@ -206,7 +242,7 @@ fn print_ready_message(api_socket: &Path, client_socket: &Path) {
     eprintln!(
         "logs: {}",
         crate::session::data_dir()
-            .join("herdr-server.log")
+            .join(crate::product::SERVER_LOG_FILE)
             .display()
     );
     eprintln!("did you mean to open the Herdr TUI? run `herdr`; you do not need `herdr server`.");
@@ -214,5 +250,5 @@ fn print_ready_message(api_socket: &Path, client_socket: &Path) {
 
 /// Initialize logging for the server process.
 fn init_logging() {
-    crate::logging::init_file_logging("herdr-server.log");
+    crate::logging::init_file_logging(crate::product::SERVER_LOG_FILE);
 }

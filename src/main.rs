@@ -1,6 +1,6 @@
 use std::io;
 
-pub(crate) const HERDR_ENV_VAR: &str = "HERDR_ENV";
+pub(crate) const HERDR_ENV_VAR: &str = crate::product::ENV_MARKER;
 pub(crate) const HERDR_ENV_VALUE: &str = "1";
 const NESTED_HERDR_MESSAGES: [&str; 6] = [
     "inception detected. we need to go deeper... said no one ever.",
@@ -11,6 +11,9 @@ const NESTED_HERDR_MESSAGES: [&str; 6] = [
     "recursion detected. base case not found. aborting.",
 ];
 
+pub mod acknowledgement;
+pub mod action_choices;
+mod admission;
 mod agent_resume;
 mod agent_view_eval;
 mod api;
@@ -19,51 +22,81 @@ mod build_info;
 mod checksum;
 mod cli;
 mod client;
+pub mod collections_extension_contract;
 mod config;
 mod copy_mode;
+mod delegation;
 mod detect;
 mod events;
+mod extension_artifact;
+mod extension_candidate;
+pub mod extension_contract;
+mod extension_git_package;
+mod extension_health;
+mod extension_host_invocation;
+mod extension_host_state;
+mod extension_host_terminals;
+pub mod extension_package;
+pub mod extension_resource;
+mod extension_runtime;
+mod extension_service;
+pub mod extension_spec;
+pub mod extension_state;
+mod extensions;
+mod first_party;
 mod ghostty;
 mod handoff_runtime;
+pub mod host_document_cache;
+mod host_document_v2;
 mod input;
 mod integration;
 mod ipc;
 mod kitty_graphics;
 mod layout;
+mod legacy_collection_snapshot;
 mod logging;
 mod metadata_tokens;
+pub mod native_api;
 mod noninteractive_process;
 mod pane;
+mod pane_contribution;
 mod pane_graphics_files;
 mod persist;
 mod platform;
 mod plugin_command;
 mod plugin_paths;
 mod popup_size;
+mod product;
 mod product_announcements;
 mod protocol;
 mod pty;
+pub mod quarantined_audit_cache;
 mod raw_input;
 mod release_notes;
 mod remote;
 mod render_prof;
 mod render_signal;
+mod repository;
 mod selection;
 mod server;
+mod service_fabric;
 mod session;
 mod sound;
+pub mod spaces_extension_contract;
 mod terminal;
+mod terminal_container;
 mod terminal_effects;
 mod terminal_modes;
 mod terminal_notify;
 mod terminal_theme;
 mod ui;
 mod update;
+mod view_document;
 mod workspace;
 mod worktree;
 
-const DEFAULT_CONFIG: &str = r##"# herdr configuration
-# Place this file at ~/.config/herdr/config.toml
+const DEFAULT_CONFIG: &str = r##"# vqro configuration
+# Place this file at ~/.config/vqro/config.toml
 
 # Show first-run notification setup on startup.
 # Missing also shows onboarding; set false after you've chosen.
@@ -226,7 +259,7 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # headless_rows = 40
 
 # [worktrees]
-# directory = "~/.herdr/worktrees"
+# directory = "~/.vqro/worktrees"
 
 [ui]
 # Sidebar width (auto-scaled based on workspace names, this sets the default)
@@ -439,7 +472,7 @@ pane_history = false
 "##;
 
 // Bundled at build time so the printed skill always matches this binary's release.
-const SKILL: &str = include_str!("../skills/herdr/SKILL.md");
+const SKILL: &str = include_str!("../skills/vqro/SKILL.md");
 
 fn should_block_nested(config: &config::Config) -> bool {
     should_block_nested_for_env(config, std::env::var(HERDR_ENV_VAR).ok().as_deref())
@@ -505,7 +538,7 @@ fn main() -> io::Result<()> {
         Ok(args) => args,
         Err(err) => {
             eprintln!("error: {err}");
-            eprintln!("run 'herdr --help' for usage");
+            eprintln!("run 'vqro --help' for usage");
             std::process::exit(2);
         }
     };
@@ -516,7 +549,7 @@ fn main() -> io::Result<()> {
         Ok(args) => args,
         Err(err) => {
             eprintln!("error: {err}");
-            eprintln!("run 'herdr --help' for usage");
+            eprintln!("run 'vqro --help' for usage");
             std::process::exit(2);
         }
     };
@@ -524,7 +557,7 @@ fn main() -> io::Result<()> {
         Ok(parsed) => parsed,
         Err(err) => {
             eprintln!("error: {err}");
-            eprintln!("run 'herdr --help' for usage");
+            eprintln!("run 'vqro --help' for usage");
             std::process::exit(2);
         }
     };
@@ -539,7 +572,7 @@ fn main() -> io::Result<()> {
         })
     {
         eprintln!("error: --remote can only be used with the default launch command");
-        eprintln!("run 'herdr --help' for usage");
+        eprintln!("run 'vqro --help' for usage");
         std::process::exit(2);
     }
 
@@ -574,7 +607,7 @@ fn main() -> io::Result<()> {
             }
             Err(err) => {
                 eprintln!("{err}");
-                eprintln!("usage: herdr update [--handoff]");
+                eprintln!("usage: vqro update [--handoff]");
                 std::process::exit(2);
             }
         };
@@ -593,93 +626,96 @@ fn main() -> io::Result<()> {
 
     if args.iter().any(|a| a == "--help" || a == "-h") {
         platform::begin_cli_output();
-        println!("herdr — terminal workspace manager for AI coding agents");
+        println!(
+            "{} — terminal workspace manager for AI coding agents",
+            product::DISPLAY_NAME
+        );
         println!();
-        println!("Usage: herdr [options]");
-        println!("       herdr --session <name> [options]");
-        println!("       herdr --machine <label-or-id> <command>");
-        println!("       herdr --remote <ssh-target> [--session <name>]");
-        println!("       herdr session attach <name>");
-        println!("       herdr completion zsh");
-        println!("       herdr update [--handoff]");
-        println!("       herdr channel set <stable|preview>");
-        println!("       herdr machine <subcommand> ...");
-        println!("       herdr server stop");
-        println!("       herdr server reload-config");
-        println!("       herdr api <subcommand> ...");
-        println!("       herdr completion <shell>");
-        println!("       herdr config <subcommand> ...");
-        println!("       herdr channel <subcommand> ...");
-        println!("       herdr workspace <subcommand> ...");
-        println!("       herdr worktree <subcommand> ...");
-        println!("       herdr tab <subcommand> ...");
-        println!("       herdr notification <subcommand> ...");
-        println!("       herdr agent <subcommand> ...");
-        println!("       herdr pane <subcommand> ...");
-        println!("       herdr session <subcommand> ...");
-        println!("       herdr integration <subcommand> ...");
+        println!("Usage: vqro [options]");
+        println!("       vqro --session <name> [options]");
+        println!("       vqro --machine <label-or-id> <command>");
+        println!("       vqro --remote <ssh-target> [--session <name>]");
+        println!("       vqro session attach <name>");
+        println!("       vqro completion zsh");
+        println!("       vqro update [--handoff]");
+        println!("       vqro channel set <stable|preview>");
+        println!("       vqro machine <subcommand> ...");
+        println!("       vqro server stop");
+        println!("       vqro server reload-config");
+        println!("       vqro api <subcommand> ...");
+        println!("       vqro completion <shell>");
+        println!("       vqro config <subcommand> ...");
+        println!("       vqro channel <subcommand> ...");
+        println!("       vqro workspace <subcommand> ...");
+        println!("       vqro worktree <subcommand> ...");
+        println!("       vqro tab <subcommand> ...");
+        println!("       vqro notification <subcommand> ...");
+        println!("       vqro agent <subcommand> ...");
+        println!("       vqro pane <subcommand> ...");
+        println!("       vqro session <subcommand> ...");
+        println!("       vqro integration <subcommand> ...");
         println!();
         println!("Common commands:");
         for (command, description) in [
-            ("herdr", "Launch or attach to the persistent session"),
+            ("vqro", "Launch or attach to the persistent session"),
             (
-                "herdr status [server|client]",
+                "vqro status [server|client]",
                 "Show local client and running server status",
             ),
-            ("herdr update", "Download and install the latest version"),
-            ("herdr completion zsh", "Generate shell completions for zsh"),
+            ("vqro update", "Download and install the latest version"),
+            ("vqro completion zsh", "Generate shell completions for zsh"),
             (
-                "herdr server stop",
+                "vqro server stop",
                 "Stop the running server via the API socket",
             ),
             (
-                "herdr channel set <stable|preview>",
+                "vqro channel set <stable|preview>",
                 "Choose the stable or preview update channel",
             ),
             (
-                "herdr server reload-config",
+                "vqro server reload-config",
                 "Reload config.toml in the running server",
             ),
             (
-                "herdr config reset-keys",
+                "vqro config reset-keys",
                 "Back up config.toml and remove custom keybindings",
             ),
             (
-                "herdr channel <subcommand>",
+                "vqro channel <subcommand>",
                 "Manage the stable or preview update channel",
             ),
-            ("herdr machine <subcommand>", "Manage saved SSH machines"),
+            ("vqro machine <subcommand>", "Manage saved SSH machines"),
             (
-                "herdr api <subcommand>",
+                "vqro api <subcommand>",
                 "Inspect socket API metadata and live runtime state",
             ),
             (
-                "herdr workspace <subcommand>",
+                "vqro workspace <subcommand>",
                 "Workspace helpers over the socket API",
             ),
             (
-                "herdr worktree <subcommand>",
+                "vqro worktree <subcommand>",
                 "Git worktree helpers over the socket API",
             ),
-            ("herdr tab <subcommand>", "Tab helpers over the socket API"),
+            ("vqro tab <subcommand>", "Tab helpers over the socket API"),
             (
-                "herdr notification <subcommand>",
+                "vqro notification <subcommand>",
                 "Notification helpers over the socket API",
             ),
             (
-                "herdr agent <subcommand>",
+                "vqro agent <subcommand>",
                 "Agent/terminal helpers over the socket API",
             ),
             (
-                "herdr pane <subcommand>",
+                "vqro pane <subcommand>",
                 "Pane control helpers over the socket API",
             ),
             (
-                "herdr session <subcommand>",
+                "vqro session <subcommand>",
                 "Manage named persistent sessions",
             ),
             (
-                "herdr integration <subcommand>",
+                "vqro integration <subcommand>",
                 "Manage built-in agent integrations",
             ),
         ] {
@@ -687,12 +723,12 @@ fn main() -> io::Result<()> {
         }
         println!();
         println!("Advanced commands:");
-        println!("  {:<32} Run as headless server", "herdr server");
+        println!("  {:<32} Run as headless server", "vqro server");
         println!();
         println!("Options:");
         println!("  --session <name>    Use or create a named persistent session");
         println!("  --machine <label-or-id>  Run an API command on a saved SSH machine");
-        println!("  --remote <target>   Attach through SSH to a remote Herdr server");
+        println!("  --remote <target>   Attach through SSH to a remote vqro server");
         println!("  --remote-keybindings <local|server>");
         println!("                      Keybindings for --remote app attach (default: local)");
         println!("  --handoff           Opt into live handoff for update or remote attach");
@@ -703,8 +739,12 @@ fn main() -> io::Result<()> {
         println!();
         println!("Config: {}", config::config_path().display());
         println!("Logs:   {}", logging::help_log_paths_summary());
-        println!("Env:    HERDR_CONFIG_PATH overrides config file path");
-        println!("Home:   https://herdr.dev");
+        println!(
+            "Env:    {} overrides config file path",
+            product::CONFIG_PATH_ENV
+        );
+        println!("Fork:   https://github.com/ttenneb/vqro");
+        println!("Upstream: https://github.com/herdrdev/herdr");
         println!();
         println!("{}", cli::AGENT_HELP_FOOTER);
         return Ok(());
@@ -712,7 +752,7 @@ fn main() -> io::Result<()> {
 
     if args.iter().any(|a| a == "--version" || a == "-V") {
         platform::begin_cli_output();
-        println!("herdr {}", crate::build_info::version());
+        println!("{} {}", product::NAME, crate::build_info::version());
         return Ok(());
     }
 
@@ -745,7 +785,7 @@ fn main() -> io::Result<()> {
         let arg_name = arg.split_once('=').map(|(name, _)| name).unwrap_or(arg);
         if arg.starts_with('-') && !known_flags.contains(&arg_name) {
             eprintln!("unknown option: {arg}");
-            eprintln!("run 'herdr --help' for usage");
+            eprintln!("run 'vqro --help' for usage");
             std::process::exit(2);
         }
         if !arg.starts_with('-')
@@ -767,7 +807,7 @@ fn main() -> io::Result<()> {
             .contains(&arg.as_str())
         {
             eprintln!("unknown command: {arg}");
-            eprintln!("run 'herdr --help' for usage");
+            eprintln!("run 'vqro --help' for usage");
             std::process::exit(2);
         }
     }
@@ -788,7 +828,7 @@ fn main() -> io::Result<()> {
     let saved_federation =
         client::endpoint::EndpointCatalog::load().is_ok_and(|catalog| catalog.has_enabled_ssh());
     if let Err(err) = server::autodetect::auto_detect_launch(saved_federation) {
-        eprintln!("herdr: {err}");
+        eprintln!("{}: {err}", product::NAME);
         std::process::exit(1);
     }
     Ok(())

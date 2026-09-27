@@ -101,6 +101,13 @@ impl App {
                 format!("pane {target_pane_id} not found"),
             );
         };
+        let Some(tab_idx) = self.state.workspaces[ws_idx].find_tab_index_for_pane(target_pane)
+        else {
+            return encode_error(id, "pane_not_found", "pane not found");
+        };
+        if let Err(error) = self.admit_new_panes(Some(ws_idx), Some(tab_idx), 1) {
+            return encode_error(id, "resource_limit", error.to_string());
+        }
         let context = self.plugin_context_for_pane(ws_idx, target_pane, "plugin-pane");
         let cwd = self.plugin_pane_cwd(plugin, params.cwd);
         let extra_env =
@@ -116,11 +123,16 @@ impl App {
             crate::api::schema::SplitDirection::Down => Direction::Vertical,
         };
         let (rows, cols) = self.state.estimate_pane_size();
+        let terminal_id = match self.allocate_terminal_id() {
+            Ok(id) => id,
+            Err(error) => return encode_error(id, "plugin_pane_open_failed", error.to_string()),
+        };
         let previous_focus = self.state.current_pane_focus_target();
         let Some(ws) = self.state.workspaces.get_mut(ws_idx) else {
             return encode_error(id, "workspace_not_found", "workspace not found");
         };
         let result = ws.split_pane_argv_command(
+            terminal_id,
             target_pane,
             direction,
             rows.max(4),
@@ -146,6 +158,7 @@ impl App {
         };
         if params.focus || placement == PluginPanePlacement::Zoomed {
             self.state.switch_workspace_tab(ws_idx, tab_idx);
+            self.apply_bundled_extension_state();
             self.state
                 .record_pane_focus_change(previous_focus, ws_idx, new_pane.pane_id);
             self.state.mode = crate::app::Mode::Terminal;
@@ -188,6 +201,12 @@ impl App {
                 None => return encode_error(id, "no_active_workspace", "no active workspace"),
             },
         };
+        if let Err(error) = self.admit_new_panes(Some(ws_idx), None, 1) {
+            return encode_error(id, "resource_limit", error.to_string());
+        }
+        if let Err(error) = self.state.workspaces[ws_idx].ensure_public_tab_numbers_available(1) {
+            return encode_error(id, "plugin_pane_open_failed", error.to_string());
+        }
         let cwd = self.plugin_pane_cwd(plugin, params.cwd);
         let context = self.plugin_context_for_workspace(ws_idx, "plugin-pane");
         let extra_env =
@@ -196,10 +215,20 @@ impl App {
                 Err((code, message)) => return encode_error(id, &code, message),
             };
         let (rows, cols) = self.state.estimate_pane_size();
+        let tab_id = match self.allocate_tab_id() {
+            Ok(tab_id) => tab_id,
+            Err(error) => return encode_error(id, "plugin_pane_open_failed", error.to_string()),
+        };
+        let terminal_id = match self.allocate_terminal_id() {
+            Ok(id) => id,
+            Err(error) => return encode_error(id, "plugin_pane_open_failed", error.to_string()),
+        };
         let Some(ws) = self.state.workspaces.get_mut(ws_idx) else {
             return encode_error(id, "workspace_not_found", "workspace not found");
         };
         let (tab_idx, terminal, runtime) = match ws.create_tab_argv_command(
+            tab_id,
+            terminal_id,
             rows.max(4),
             cols.max(10),
             cwd,
@@ -215,6 +244,7 @@ impl App {
         let pane_id = ws.tabs[tab_idx].root_pane;
         if params.focus {
             self.state.switch_workspace_tab(ws_idx, tab_idx);
+            self.apply_bundled_extension_state();
             self.state.mode = crate::app::Mode::Terminal;
         }
         let new_pane = crate::workspace::NewPane {
@@ -253,16 +283,16 @@ impl App {
             crate::api::SOCKET_PATH_ENV_VAR.to_string(),
             crate::api::socket_path().display().to_string(),
         ));
-        env.push(("HERDR_ENV".to_string(), "1".to_string()));
-        env.push(("HERDR_PLUGIN_ID".to_string(), plugin.plugin_id.clone()));
+        env.push(("VQRO_ENV".to_string(), "1".to_string()));
+        env.push(("VQRO_PLUGIN_ID".to_string(), plugin.plugin_id.clone()));
         env.push((
-            "HERDR_PLUGIN_ENTRYPOINT_ID".to_string(),
+            "VQRO_PLUGIN_ENTRYPOINT_ID".to_string(),
             entrypoint.to_string(),
         ));
-        env.push(("HERDR_PLUGIN_CONTEXT_JSON".to_string(), context_json));
+        env.push(("VQRO_PLUGIN_CONTEXT_JSON".to_string(), context_json));
         if let Ok(current_exe) = crate::platform::launch_executable() {
             env.push((
-                "HERDR_BIN_PATH".to_string(),
+                "VQRO_BIN_PATH".to_string(),
                 current_exe.display().to_string(),
             ));
         }
@@ -347,13 +377,13 @@ fn plugin_pane_protected_env_key(key: &str) -> bool {
     matches!(
         key,
         crate::api::SOCKET_PATH_ENV_VAR
-            | "HERDR_ENV"
-            | "HERDR_PLUGIN_ID"
-            | "HERDR_PLUGIN_ROOT"
-            | "HERDR_PLUGIN_CONFIG_DIR"
-            | "HERDR_PLUGIN_STATE_DIR"
-            | "HERDR_PLUGIN_ENTRYPOINT_ID"
-            | "HERDR_PLUGIN_CONTEXT_JSON"
-            | "HERDR_BIN_PATH"
+            | "VQRO_ENV"
+            | "VQRO_PLUGIN_ID"
+            | "VQRO_PLUGIN_ROOT"
+            | "VQRO_PLUGIN_CONFIG_DIR"
+            | "VQRO_PLUGIN_STATE_DIR"
+            | "VQRO_PLUGIN_ENTRYPOINT_ID"
+            | "VQRO_PLUGIN_CONTEXT_JSON"
+            | "VQRO_BIN_PATH"
     )
 }

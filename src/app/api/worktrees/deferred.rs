@@ -240,7 +240,7 @@ impl App {
                 encode_error(
                     id,
                     "not_linked_worktree",
-                    "workspace is not a Herdr-managed worktree checkout",
+                    "workspace is not a vqro-managed worktree checkout",
                 ),
             );
             return;
@@ -439,6 +439,9 @@ impl App {
             true,
             !created_workspace,
         );
+        if api.focus {
+            self.apply_bundled_extension_state();
+        }
         if let Some(label) = api.label {
             if let Some(ws) = self.state.workspaces.get_mut(ws_idx) {
                 ws.set_custom_name(label);
@@ -460,6 +463,7 @@ impl App {
             return;
         };
         self.emit_worktree_created_event(ws_idx, worktree.clone());
+        self.refresh_spaces_document();
         let tab_idx = self.state.workspaces[ws_idx].active_tab;
         let response = encode_success(
             api.id,
@@ -586,6 +590,7 @@ impl App {
             worktree,
             result.forced,
         );
+        self.refresh_collection_documents();
         let response = encode_success(
             api.id,
             ResponseResult::WorktreeRemoved {

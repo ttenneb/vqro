@@ -67,7 +67,7 @@
       apps = forAllSystems (system: {
         default = {
           type = "app";
-          program = "${self.packages.${system}.default}/bin/herdr";
+          program = "${self.packages.${system}.default}/bin/vqro";
           meta.description = "Run Herdr";
         };
       });

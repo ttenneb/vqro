@@ -121,9 +121,16 @@ pub(super) fn remote_error(error: io::Error) -> io::Error {
 
 pub(super) fn restart_guidance() -> String {
     TARGET.with(|target| match target.borrow().as_ref() {
-        Some(target) => format!("Update Herdr and restart the server on machine '{}' (session {}). Stopping the server exits its pane processes.", target.profile.label, target.profile.session),
+        Some(target) => remote_restart_guidance(&target.profile.label, &target.profile.session),
         None => crate::session::active_restart_after_update_guidance(),
     })
+}
+
+fn remote_restart_guidance(label: &str, session: &str) -> String {
+    format!(
+        "Update {} and restart the server on machine '{label}' (session {session}). Stopping the server exits its pane processes.",
+        crate::product::DISPLAY_NAME
+    )
 }
 
 pub(super) fn remote_identity() -> Option<(String, String)> {
@@ -158,9 +165,11 @@ pub(super) fn caller_pane_id() -> Option<String> {
     if is_remote() {
         return None;
     }
-    std::env::var("HERDR_PANE_ID")
-        .ok()
-        .filter(|value| !value.trim().is_empty())
+    caller_pane_id_from_env(|key| std::env::var(key).ok())
+}
+
+fn caller_pane_id_from_env(mut read_env: impl FnMut(&str) -> Option<String>) -> Option<String> {
+    read_env(crate::product::PANE_ID_ENV).filter(|value| !value.trim().is_empty())
 }
 
 fn parse_machine_prefix(args: &[String]) -> Result<Option<(String, Vec<String>)>, String> {
@@ -204,7 +213,10 @@ fn parse_machine_prefix(args: &[String]) -> Result<Option<(String, Vec<String>)>
         return Err("--machine cannot be combined with other launch options; it uses the saved machine's session".into());
     }
     if index >= args.len() || args[index] == "--" {
-        return Err("usage: herdr --machine <label-or-id> <command>".into());
+        return Err(format!(
+            "usage: {}",
+            crate::product::command("--machine <label-or-id> <command>")
+        ));
     }
     let mut cleaned = vec![args[0].clone()];
     cleaned.extend_from_slice(&args[index..]);
@@ -222,9 +234,12 @@ fn resolve_machine<'a>(
         profile
     } else {
         let mut matches = profiles.iter().filter(|profile| profile.label == selector);
-        let profile = matches
-            .next()
-            .ok_or_else(|| format!("unknown machine '{selector}'; use `herdr machine list`"))?;
+        let profile = matches.next().ok_or_else(|| {
+            format!(
+                "unknown machine '{selector}'; use `{}`",
+                crate::product::command("machine list")
+            )
+        })?;
         if matches.next().is_some() {
             return Err(format!(
                 "machine label '{selector}' is ambiguous; use its profile ID"
@@ -365,6 +380,39 @@ mod tests {
         ] {
             assert!(parse_machine_prefix(&input).is_err(), "{input:?}");
         }
+    }
+
+    #[test]
+    fn caller_pane_uses_only_the_vqro_environment() {
+        let values = std::collections::HashMap::from([
+            ("HERDR_PANE_ID", "herdr:pane".to_owned()),
+            (crate::product::PANE_ID_ENV, "vqro:pane".to_owned()),
+        ]);
+        assert_eq!(
+            caller_pane_id_from_env(|key| values.get(key).cloned()).as_deref(),
+            Some("vqro:pane")
+        );
+
+        let upstream_only =
+            std::collections::HashMap::from([("HERDR_PANE_ID", "herdr:pane".to_owned())]);
+        assert_eq!(
+            caller_pane_id_from_env(|key| upstream_only.get(key).cloned()),
+            None
+        );
+    }
+
+    #[test]
+    fn machine_guidance_uses_vqro_commands() {
+        assert_eq!(
+            parse_machine_prefix(&args(&["vqro", "--machine", "mac"])).unwrap_err(),
+            "usage: vqro --machine <label-or-id> <command>"
+        );
+        assert_eq!(
+            resolve_machine(&[], "missing").unwrap_err(),
+            "unknown machine 'missing'; use `vqro machine list`"
+        );
+        assert!(remote_restart_guidance("mac", "agents")
+            .starts_with("Update vqro and restart the server on machine 'mac' (session agents)."));
     }
 
     #[test]

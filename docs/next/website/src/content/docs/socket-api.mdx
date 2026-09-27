@@ -1,9 +1,9 @@
 ---
 title: Socket API
-description: Control a running Herdr server from scripts, tools, and coding agents.
+description: Control a running vqro server from scripts, tools, and coding agents.
 ---
 
-Herdr exposes a local socket API for scripts and agents that need to inspect or control a running session.
+vqro exposes a local socket API for scripts and agents that need to inspect or control a running session.
 
 Most automation should start with the CLI wrappers. Use the raw socket API only when you need direct request/response control or long-lived event subscriptions.
 
@@ -19,19 +19,21 @@ The layers share the same control surface.
 
 ## Schema
 
-The installed CLI can print the socket protocol schema bundled with that Herdr
-binary:
+The installed CLI reports and prints the native `vqro.api.v1` schema bundled
+with that vqro binary:
 
 ```bash
-herdr api schema
-herdr api schema --json
-herdr api schema --output herdr-api.schema.json
+vqro api describe --json
+vqro api schema
+vqro api schema --json
+vqro api schema --output vqro-api.schema.json
 ```
 
-Plain `herdr api schema` prints a short summary. `--json` prints the full JSON
+Plain `vqro api schema` prints a short summary. `--json` prints the full JSON
 Schema document for tools, and `--output PATH` writes that document to a file.
 The schema covers raw requests, success responses, error responses, emitted
-events, and subscription events.
+events, and subscription events. Its API major is independent from the private
+runtime protocol number and the frozen generation-1 Herdr bridge.
 
 ## What you can control
 
@@ -496,10 +498,12 @@ A source mismatch leaves the active view unchanged. Set and clear responses use
 
 ## Plugin APIs
 
-The plugin API is an early interface for executable workflow tools. A plugin is
-a package with a `herdr-plugin.toml` manifest. The manifest declares startup
-hooks, shareable actions, event hooks, terminal pane entrypoints, and link
-handlers. Startup hooks run once after restore when the API is ready.
+The plugin API is the compatibility interface for legacy manifest-v1 executable
+workflow tools. A plugin uses `vqro-extension.toml`; `herdr-plugin.toml` remains
+a compatibility alias. Its commands and services run as trusted same-user code,
+not in the component-package sandbox. The manifest declares startup hooks,
+shareable actions, event hooks, terminal pane entrypoints, and link handlers.
+Startup hooks run once after restore when the API is ready.
 Actions and panes are manifest-only; runtime action registration and runtime
 argv pane creation are not part of v1.
 

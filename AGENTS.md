@@ -228,7 +228,7 @@ Normal feature and fix work must not edit `docs/next/CHANGELOG.md`; this keeps l
 
 Normal feature/fix work should not edit root `README.md`, root `CHANGELOG.md`, published version docs, or `distribution/latest.json` unless it is a focused correction to already-published documentation or explicitly requested.
 
-Put local PRDs, planning notes, and exploratory specs under `.local/prd/`; `.local/` is ignored and locally controlled.
+Put local PRDs, temporary owners and clocks, test receipts, planning notes, and exploratory specs under `.local/prd/`; `.local/` is ignored and locally controlled. Do not use an ignored PRD as the only source for an accepted cross-worktree architecture decision, public contract availability, authority boundary, or compatibility obligation. Put proposed and accepted unreleased architecture decisions under `docs/next/architecture/`, following its status convention, and keep normative contract availability under `docs/next/api/`. Have local execution ledgers link to those tracked sources rather than restating them. Source comments should describe capability state or removal conditions instead of referring only to locally defined milestone numbers.
 
 ## Commit Style
 

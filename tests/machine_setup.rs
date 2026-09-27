@@ -28,10 +28,10 @@ case "$last" in
     'tee '*) cat >/dev/null; exit 0 ;;
 esac
 case "$last" in
-    *'herdr-remote-output-ready:1'*) script=$last ;;
+    *'vqro-remote-output-ready:1'*) script=$last ;;
     *) script=$(cat) ;;
 esac
-printf '\n%s\n' 'herdr-remote-output-ready:1'
+printf '\n%s\n' 'vqro-remote-output-ready:1'
 case "$script" in
     *'uname -s'*) uname -s; uname -m ;;
     *'version='*) echo /home/remote/.local/bin/herdr ;;
@@ -85,9 +85,9 @@ fn setup_with_strict_host_key_failure(
         strict_host_key_failure
     ));
     let app = if cfg!(debug_assertions) {
-        "herdr-dev"
+        "vqro-dev"
     } else {
-        "herdr"
+        "vqro"
     };
     fs::create_dir_all(root.join("bin")).unwrap();
     fs::create_dir_all(root.join("config").join(app)).unwrap();
@@ -98,14 +98,14 @@ fn setup_with_strict_host_key_failure(
         "onboarding = false\n[remote]\nmanage_ssh_config = false\n",
     )
     .unwrap();
-    let status = Command::new(env!("CARGO_BIN_EXE_herdr"))
+    let status = Command::new(env!("CARGO_BIN_EXE_vqro"))
         .args(["status", "client", "--json"])
         .output()
         .unwrap();
     assert!(status.status.success());
 
     let pair = native_pty_system().openpty(PtySize::default()).unwrap();
-    let mut command = CommandBuilder::new(env!("CARGO_BIN_EXE_herdr"));
+    let mut command = CommandBuilder::new(env!("CARGO_BIN_EXE_vqro"));
     if handoff {
         command.args(["--remote", "fake-host", "--handoff"]);
     } else {
@@ -130,12 +130,12 @@ fn setup_with_strict_host_key_failure(
         String::from_utf8(status.stdout).unwrap(),
     );
     for name in [
-        "HERDR_ENV",
-        "HERDR_SESSION",
-        "HERDR_SOCKET_PATH",
-        "HERDR_CLIENT_SOCKET_PATH",
-        "HERDR_REMOTE_BINARY",
-        "HERDR_CONFIG_PATH",
+        "VQRO_ENV",
+        "VQRO_SESSION",
+        "VQRO_SOCKET_PATH",
+        "VQRO_CLIENT_SOCKET_PATH",
+        "VQRO_REMOTE_BINARY",
+        "VQRO_CONFIG_PATH",
     ] {
         command.env_remove(name);
     }
@@ -217,9 +217,9 @@ fn machine_add_accepts_help_argument_order() {
     ));
     fs::create_dir(&root).unwrap();
     let app = if cfg!(debug_assertions) {
-        "herdr-dev"
+        "vqro-dev"
     } else {
-        "herdr"
+        "vqro"
     };
     fs::create_dir_all(root.join("config").join(app)).unwrap();
     fs::write(
@@ -227,7 +227,7 @@ fn machine_add_accepts_help_argument_order() {
         "onboarding = false\n[remote]\nmanage_ssh_config = false\n",
     )
     .unwrap();
-    let mut command = Command::new(env!("CARGO_BIN_EXE_herdr"));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_vqro"));
     command.args(["machine", "add", "--label", "coder", "workstation.coder"]);
     // Reach remote preparation, but never execute SSH or start a server.
     command.env("PATH", root.join("no-executables"));
@@ -236,12 +236,12 @@ fn machine_add_accepts_help_argument_order() {
     command.env("XDG_STATE_HOME", root.join("state"));
     command.env("XDG_RUNTIME_DIR", &root);
     for name in [
-        "HERDR_ENV",
-        "HERDR_SESSION",
-        "HERDR_SOCKET_PATH",
-        "HERDR_CLIENT_SOCKET_PATH",
-        "HERDR_REMOTE_BINARY",
-        "HERDR_CONFIG_PATH",
+        "VQRO_ENV",
+        "VQRO_SESSION",
+        "VQRO_SOCKET_PATH",
+        "VQRO_CLIENT_SOCKET_PATH",
+        "VQRO_REMOTE_BINARY",
+        "VQRO_CONFIG_PATH",
     ] {
         command.env_remove(name);
     }
@@ -259,43 +259,26 @@ fn machine_add_accepts_help_argument_order() {
 }
 
 #[test]
-fn machine_add_reports_strict_host_key_failure() {
+fn machine_add_is_quarantined_before_strict_host_key_check() {
     let result = setup_with_strict_host_key_failure("new", "", false, true);
     assert!(!result.success, "{}", result.output);
     assert_eq!(result.prompts, 0, "{}", result.output);
     assert!(result.actions.is_empty(), "{}", result.output);
     assert!(
-        result.output.contains("Host key verification failed"),
+        result.output.contains("vqro remote mode is disabled"),
         "{}",
         result.output
     );
-    assert!(
-        result
-            .output
-            .contains("saved machines use strict host-key checking"),
-        "{}",
-        result.output
-    );
-    assert!(
-        !result.output.contains("lost connection to server"),
-        "{}",
-        result.output
-    );
+    assert!(!result.output.contains("Host key verification failed"));
 }
 
 #[test]
-fn machine_setup_old_install_requires_one_explicit_stop_approval() {
+fn machine_setup_old_install_is_quarantined_before_approval() {
     let result = setup("old", "y\n", false);
-    assert_eq!(result.prompts, 1, "{}", result.output);
+    assert_eq!(result.prompts, 0, "{}", result.output);
+    assert!(result.actions.is_empty(), "{}", result.output);
     assert!(
-        result
-            .output
-            .contains("This stops active remote pane processes"),
-        "{}",
-        result.output
-    );
-    assert_eq!(
-        result.actions, "install\nstop\nstart\n",
+        result.output.contains("vqro remote mode is disabled"),
         "{}",
         result.output
     );
@@ -313,33 +296,35 @@ fn machine_setup_old_install_enter_cancels_without_remote_changes() {
 }
 
 #[test]
-fn machine_setup_new_install_old_server_enter_does_not_stop_or_handoff() {
+fn machine_setup_new_install_is_quarantined_before_restart_prompt() {
     let result = setup("new", "\n", false);
     assert!(result.actions.is_empty(), "{}", result.output);
+    assert_eq!(result.prompts, 0, "{}", result.output);
     assert!(
-        result
-            .output
-            .contains("This stops active remote pane processes"),
+        result.output.contains("vqro remote mode is disabled"),
         "{}",
         result.output
     );
 }
 
 #[test]
-fn machine_setup_new_install_old_server_approval_stops_then_starts_without_installing() {
+fn machine_setup_new_install_approval_cannot_bypass_quarantine() {
     let result = setup("new", "y\n", false);
-    assert_eq!(result.prompts, 1, "{}", result.output);
-    assert_eq!(result.actions, "stop\nstart\n", "{}", result.output);
+    assert_eq!(result.prompts, 0, "{}", result.output);
+    assert!(result.actions.is_empty(), "{}", result.output);
+    assert!(
+        result.output.contains("vqro remote mode is disabled"),
+        "{}",
+        result.output
+    );
 }
 
 #[test]
-fn machine_setup_explicit_remote_handoff_remains_available_but_restart_fallback_defaults_to_no() {
+fn machine_setup_explicit_remote_handoff_is_quarantined() {
     let result = setup("new", "\n", true);
-    assert_eq!(result.actions, "handoff\n", "{}", result.output);
+    assert!(result.actions.is_empty(), "{}", result.output);
     assert!(
-        result
-            .output
-            .contains("This stops active remote pane processes"),
+        result.output.contains("vqro remote mode is disabled"),
         "{}",
         result.output
     );

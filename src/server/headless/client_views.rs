@@ -81,7 +81,7 @@ impl HeadlessServer {
             .or_else(|| self.default_shell_target())
     }
 
-    fn tab_id_for_target(&self, target: crate::ui::TabSurfaceTarget) -> Option<String> {
+    pub(super) fn tab_id_for_target(&self, target: crate::ui::TabSurfaceTarget) -> Option<String> {
         self.app
             .public_tab_id(target.workspace_index, target.tab_index)
     }
@@ -568,34 +568,162 @@ impl HeadlessServer {
             return false;
         };
         let (cols, rows) = client.terminal_size;
+        let pane_viewport = client.shell_pane_viewport.clone().filter(|request| {
+            request.boot_id == self.client_shell_boot_id
+                && request.projection_revision == client.shell_projection_revision
+        });
+        let terminal_views = client
+            .shell_terminal_views_interest
+            .clone()
+            .filter(|request| {
+                request.boot_id == self.client_shell_boot_id
+                    && request.projection_revision == client.shell_projection_revision
+            });
+        let viewport_pane_id = pane_viewport
+            .as_ref()
+            .filter(|request| request.size.is_some())
+            .map(|request| request.pane_id.clone());
         let cell_size = if client.cell_size.is_known() {
             client.cell_size
         } else {
             crate::kitty_graphics::HostCellSize::default()
         };
+        // A preview or accessory viewport is the geometry authority for its PTY. Exclude these
+        // panes from the ordinary layout pass so one geometry replay cannot resize the PTY to the
+        // full leaf and immediately back to the preview, emitting duplicate SIGWINCH events.
+        let excluded_panes = viewport_pane_id
+            .iter()
+            .chain(
+                terminal_views
+                    .as_ref()
+                    .into_iter()
+                    .flat_map(|interest| interest.views.iter().map(|view| &view.pane_id)),
+            )
+            .filter_map(|pane_id| self.app.parse_pane_id(pane_id))
+            .filter_map(|(workspace_index, pane_id)| {
+                (workspace_index == target.workspace_index
+                    && self
+                        .app
+                        .state
+                        .workspaces
+                        .get(workspace_index)
+                        .and_then(|workspace| workspace.tabs.get(target.tab_index))
+                        .is_some_and(|tab| tab.terminal_id(pane_id).is_some()))
+                .then_some(pane_id)
+            })
+            .collect::<HashSet<_>>();
+        let no_excluded_panes = HashSet::new();
         let area = Rect::new(0, 0, cols, rows);
         if self.app_client_count() == 1 {
             for (workspace_index, workspace) in self.app.state.workspaces.iter().enumerate() {
                 for tab_index in 0..workspace.tabs.len() {
-                    crate::ui::resize_tab_surface(
+                    let exclusions = if workspace_index == target.workspace_index
+                        && tab_index == target.tab_index
+                    {
+                        &excluded_panes
+                    } else {
+                        &no_excluded_panes
+                    };
+                    crate::ui::resize_tab_surface_except(
                         &self.app.state,
                         &self.app.terminal_runtimes,
                         workspace_index,
                         tab_index,
                         area,
                         cell_size,
+                        exclusions,
                     );
                 }
             }
         } else {
-            crate::ui::compute_tab_surface_for(
+            crate::ui::resize_tab_surface_except(
                 &self.app.state,
                 &self.app.terminal_runtimes,
-                Some(target),
+                target.workspace_index,
+                target.tab_index,
                 area,
-                true,
                 cell_size,
+                &excluded_panes,
             );
+        }
+        if let Some(request) = pane_viewport {
+            if let Some(size) = request.size {
+                if let Some((workspace_index, pane_id)) = self.app.parse_pane_id(&request.pane_id) {
+                    if workspace_index == target.workspace_index {
+                        if let Some(terminal_id) = self
+                            .app
+                            .state
+                            .workspaces
+                            .get(workspace_index)
+                            .and_then(|workspace| workspace.tabs.get(target.tab_index))
+                            .and_then(|tab| tab.terminal_id(pane_id))
+                        {
+                            if !self
+                                .app
+                                .state
+                                .direct_attach_resize_locks
+                                .contains(terminal_id)
+                            {
+                                if let Some(runtime) = self.app.state.runtime_for_pane_in_workspace(
+                                    &self.app.terminal_runtimes,
+                                    workspace_index,
+                                    pane_id,
+                                ) {
+                                    runtime.resize(
+                                        size.rows,
+                                        size.cols,
+                                        cell_size.width_px,
+                                        cell_size.height_px,
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(terminal_views) = terminal_views {
+            for view in terminal_views.views {
+                if viewport_pane_id.as_deref() == Some(view.pane_id.as_str()) {
+                    continue;
+                }
+                let Some((workspace_index, pane_id)) = self.app.parse_pane_id(&view.pane_id) else {
+                    continue;
+                };
+                if workspace_index != target.workspace_index {
+                    continue;
+                }
+                let Some(terminal_id) = self
+                    .app
+                    .state
+                    .workspaces
+                    .get(workspace_index)
+                    .and_then(|workspace| workspace.tabs.get(target.tab_index))
+                    .and_then(|tab| tab.terminal_id(pane_id))
+                else {
+                    continue;
+                };
+                if self
+                    .app
+                    .state
+                    .direct_attach_resize_locks
+                    .contains(terminal_id)
+                {
+                    continue;
+                }
+                if let Some(runtime) = self.app.state.runtime_for_pane_in_workspace(
+                    &self.app.terminal_runtimes,
+                    workspace_index,
+                    pane_id,
+                ) {
+                    runtime.resize(
+                        view.size.rows,
+                        view.size.cols,
+                        cell_size.width_px,
+                        cell_size.height_px,
+                    );
+                }
+            }
         }
         if self
             .popup_owner_tab_id
@@ -624,7 +752,11 @@ impl HeadlessServer {
         }) else {
             return false;
         };
-        self.apply_shell_tab_geometry(client_id, start_pending_agent_resumes)
+        if self.claim_unowned_shell_tab_geometry(client_id, start_pending_agent_resumes) {
+            true
+        } else {
+            self.apply_shell_tab_geometry(client_id, start_pending_agent_resumes)
+        }
     }
 
     pub(super) fn reapply_controlled_shell_tab_geometry(

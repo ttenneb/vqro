@@ -32,19 +32,26 @@ const REMOTE_SERVER_SHUTDOWN_POLL_INTERVAL: Duration = Duration::from_millis(100
 const CURRENT_PROTOCOL: u32 = crate::protocol::PROTOCOL_VERSION;
 const STABLE_UPDATE_MANIFEST_URL: &str = "https://herdr.dev/latest.json";
 const PREVIEW_UPDATE_MANIFEST_URL: &str = "https://herdr.dev/preview.json";
-const REMOTE_BINARY_ENV_VAR: &str = "HERDR_REMOTE_BINARY";
-const REMOTE_OUTPUT_READY_MARKER: &str = "herdr-remote-output-ready:1";
-const WINDOWS_REMOTE_PATH_MARKER: &str = "herdr-remote-path:1:";
-const WINDOWS_REMOTE_INSTALL_DIR_MARKER: &str = "herdr-remote-install-dir:1:";
-const WINDOWS_REMOTE_INSTALL_RESULT_MARKER: &str = "herdr-remote-install-result:1:";
+const REMOTE_BINARY_ENV_VAR: &str = "VQRO_REMOTE_BINARY";
+const REMOTE_OUTPUT_READY_MARKER: &str = "vqro-remote-output-ready:1";
+const WINDOWS_REMOTE_PATH_MARKER: &str = "vqro-remote-path:1:";
+const WINDOWS_REMOTE_INSTALL_DIR_MARKER: &str = "vqro-remote-install-dir:1:";
+const WINDOWS_REMOTE_INSTALL_RESULT_MARKER: &str = "vqro-remote-install-result:1:";
 const SSH_CONTROL_SOCKET_NAME: &str = "ctl";
 pub(crate) fn run_remote(remote: RemoteLaunch) -> io::Result<()> {
+    if !crate::product::REMOTE_ENABLED {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "vqro remote mode is disabled until remote discovery and installation use the vqro namespace",
+        ));
+    }
+
     let session_name = crate::session::active_name()
         .unwrap_or_else(|| crate::session::DEFAULT_SESSION_NAME.to_string());
     let local_socket = local_forward_socket_path(&remote.target, &session_name);
     let program = std::env::args()
         .next()
-        .unwrap_or_else(|| "herdr".to_string());
+        .unwrap_or_else(|| crate::product::NAME.to_string());
     let reattach_command = reattach_command(
         &program,
         &remote.target,
@@ -87,6 +94,13 @@ pub(crate) fn run_remote(remote: RemoteLaunch) -> io::Result<()> {
 }
 
 pub(crate) fn prepare_saved_ssh(target: &str, session_name: &str) -> io::Result<()> {
+    if !crate::product::REMOTE_ENABLED {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "vqro remote mode is disabled until remote discovery and installation use the vqro namespace",
+        ));
+    }
+
     super::validate_remote_target(target)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
     crate::session::validate_name(session_name)
@@ -1607,7 +1621,7 @@ fn install_source_description_for(
     }
 
     if local_binary_can_seed_remote {
-        "the current local herdr binary".to_string()
+        "the current local vqro binary".to_string()
     } else {
         format!(
             "the {} {} asset for {}",
@@ -3060,10 +3074,10 @@ fn local_forward_socket_path(target: &str, session_name: &str) -> PathBuf {
     let pid = std::process::id();
     let target_clean = sanitize_path_component(target);
     let session_clean = sanitize_path_component(session_name);
-    let readable_name = format!("herdr-remote-{pid}-{target_clean}-{session_clean}.sock");
+    let readable_name = format!("vqro-remote-{pid}-{target_clean}-{session_clean}.sock");
     let target_prefix: String = target_clean.chars().take(8).collect();
     let hash = short_socket_hash(target, session_name);
-    let short_name = format!("herdr-r-{pid}-{target_prefix}-{hash}.sock");
+    let short_name = format!("vqro-r-{pid}-{target_prefix}-{hash}.sock");
     crate::platform::remote_bridge_endpoint_path(&readable_name, &short_name)
 }
 
@@ -4216,7 +4230,7 @@ mod tests {
     fn remote_output_framing_discards_any_banner_and_preserves_binary() {
         let payload = [0, 1, 2, 0xff, b'\n'];
         let mut input = vec![b'x'; 4 * 1024 * 1024];
-        input.extend_from_slice(b"\r\nherdr-remote-output-ready:1\r\n");
+        input.extend_from_slice(b"\r\nvqro-remote-output-ready:1\r\n");
         input.extend_from_slice(&payload);
         let mut reader = io::BufReader::with_capacity(17, io::Cursor::new(input));
 
@@ -4230,7 +4244,7 @@ mod tests {
         normalize_remote_stdout(&mut missing, false).unwrap();
         assert_eq!(missing, b"profile output without marker");
 
-        let mut platform = b"profile output\nherdr-remote-output-ready:1\nLinux\nx86_64\n".to_vec();
+        let mut platform = b"profile output\nvqro-remote-output-ready:1\nLinux\nx86_64\n".to_vec();
         normalize_remote_stdout(&mut platform, true).unwrap();
         let platform = String::from_utf8(platform).unwrap();
         let mut lines = platform.lines();
@@ -4352,7 +4366,7 @@ mod tests {
             remote_herdr
                 .executable
                 .bridge_command(crate::session::DEFAULT_SESSION_NAME),
-            "printf '\n%s\n' 'herdr-remote-output-ready:1'\nexec \"$HOME/.local/bin/herdr\" remote-client-bridge"
+            "printf '\n%s\n' 'vqro-remote-output-ready:1'\nexec \"$HOME/.local/bin/herdr\" remote-client-bridge"
         );
         assert_eq!(
             remote_herdr.executable.saved_bridge_command("agents"),
@@ -4373,7 +4387,7 @@ mod tests {
             remote_herdr
                 .executable
                 .bridge_command(crate::session::DEFAULT_SESSION_NAME),
-            "printf '\n%s\n' 'herdr-remote-output-ready:1'\nexec /usr/bin/herdr remote-client-bridge"
+            "printf '\n%s\n' 'vqro-remote-output-ready:1'\nexec /usr/bin/herdr remote-client-bridge"
         );
     }
 
@@ -4391,7 +4405,7 @@ mod tests {
             remote_herdr
                 .executable
                 .bridge_command(crate::session::DEFAULT_SESSION_NAME),
-            "printf '\n%s\n' 'herdr-remote-output-ready:1'\nexec '/opt/herdr bin/herdr' remote-client-bridge"
+            "printf '\n%s\n' 'vqro-remote-output-ready:1'\nexec '/opt/herdr bin/herdr' remote-client-bridge"
         );
     }
 
@@ -4409,7 +4423,7 @@ mod tests {
             remote_herdr
                 .executable
                 .bridge_command(crate::session::DEFAULT_SESSION_NAME),
-            "printf '\n%s\n' 'herdr-remote-output-ready:1'\nexec /opt/homebrew/bin/herdr remote-client-bridge"
+            "printf '\n%s\n' 'vqro-remote-output-ready:1'\nexec /opt/homebrew/bin/herdr remote-client-bridge"
         );
         assert_eq!(remote_herdr.platform.asset_key(), "macos-aarch64");
     }
@@ -4506,7 +4520,7 @@ mod tests {
             remote_herdr
                 .executable
                 .bridge_command(crate::session::DEFAULT_SESSION_NAME),
-            "printf '\n%s\n' 'herdr-remote-output-ready:1'\nexec '/opt/herdr'\\''s/bin/herdr' remote-client-bridge"
+            "printf '\n%s\n' 'vqro-remote-output-ready:1'\nexec '/opt/herdr'\\''s/bin/herdr' remote-client-bridge"
         );
     }
 
@@ -4888,7 +4902,7 @@ mod tests {
         };
         assert_eq!(
             install_source_description_for(&platform, Some(Path::new("/tmp/herdr-aarch64")), false),
-            "HERDR_REMOTE_BINARY (/tmp/herdr-aarch64)"
+            "VQRO_REMOTE_BINARY (/tmp/herdr-aarch64)"
         );
     }
 
@@ -4898,7 +4912,7 @@ mod tests {
 
         assert_eq!(
             install_source_description_for(&platform, None, true),
-            "the current local herdr binary"
+            "the current local vqro binary"
         );
     }
 
@@ -4936,7 +4950,7 @@ mod tests {
         assert!(path.starts_with(crate::platform::remote_private_temp_base()));
         assert!(path
             .file_name()
-            .is_some_and(|name| name.to_string_lossy().starts_with("herdr-r-")));
+            .is_some_and(|name| name.to_string_lossy().starts_with("vqro-r-")));
     }
 
     #[cfg(unix)]
@@ -4964,7 +4978,7 @@ mod tests {
             .unwrap_or("")
             .to_string();
         assert!(
-            filename.starts_with("herdr-remote-"),
+            filename.starts_with("vqro-remote-"),
             "expected readable name, got {filename}"
         );
         assert!(filename.contains("-dev-default."), "got {filename}");
@@ -5023,7 +5037,7 @@ mod tests {
         assert!(fits, "fallback path still overflows: {}", path.display());
         assert_eq!(parent.as_deref(), Some(Path::new("/tmp")));
         assert!(
-            filename.starts_with("herdr-r-"),
+            filename.starts_with("vqro-r-"),
             "expected hashed fallback, got {filename}"
         );
     }

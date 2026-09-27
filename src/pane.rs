@@ -153,6 +153,20 @@ fn apply_pane_launch_env(cmd: &mut CommandBuilder, launch_env: &PaneLaunchEnv) {
     for (key, value) in &launch_env.extra {
         cmd.env(key, value);
     }
+    // A Vqro pane may be launched from inside Herdr. Never let the upstream
+    // runtime identity activate Herdr-owned hooks against the wrong server.
+    for key in [
+        "HERDR_ENV",
+        "HERDR_SOCKET_PATH",
+        "HERDR_CLIENT_SOCKET_PATH",
+        "HERDR_PANE_ID",
+        "HERDR_TAB_ID",
+        "HERDR_WORKSPACE_ID",
+        "HERDR_BIN_PATH",
+        "HERDR_SESSION",
+    ] {
+        cmd.env_remove(key);
+    }
     cmd.env(crate::HERDR_ENV_VAR, crate::HERDR_ENV_VALUE);
     crate::integration::apply_pane_base_env(cmd);
     crate::platform::apply_pane_runtime_marker(cmd);
@@ -1918,6 +1932,7 @@ impl PaneRuntime {
         let (rows, cols, cell_width_px, cell_height_px) = self.current_size.get();
         crate::handoff_runtime::HandoffRuntimeState {
             pane_id,
+            terminal_id: None,
             child_pid,
             rows,
             cols,
@@ -2131,6 +2146,7 @@ impl PaneRuntime {
         let crate::handoff_runtime::ImportedHandoffRuntime { master_fd, state } = import;
         let crate::handoff_runtime::HandoffRuntimeState {
             pane_id,
+            terminal_id: _,
             child_pid,
             rows,
             cols,
@@ -2143,9 +2159,6 @@ impl PaneRuntime {
             initial_history_ansi,
         } = state;
         let pane_id = PaneId::from_raw(pane_id);
-        use std::os::fd::FromRawFd;
-
-        let master_fd = unsafe { std::os::fd::OwnedFd::from_raw_fd(master_fd) };
 
         let (response_tx, _response_rx) = mpsc::channel::<Bytes>(1);
         let mut terminal = crate::ghostty::Terminal::new(cols, rows, scrollback_limit_bytes)

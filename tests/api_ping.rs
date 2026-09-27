@@ -122,11 +122,11 @@ fn spawn_herdr_with_options(
     path_override: Option<&Path>,
     shell: &str,
 ) -> SpawnedHerdr {
-    fs::create_dir_all(config_home.join("herdr")).unwrap();
+    fs::create_dir_all(config_home.join("vqro-dev")).unwrap();
     fs::create_dir_all(runtime_dir).unwrap();
     register_runtime_dir(runtime_dir);
     fs::write(
-        config_home.join("herdr/config.toml"),
+        config_home.join("vqro-dev/config.toml"),
         "onboarding = false\n",
     )
     .unwrap();
@@ -140,14 +140,14 @@ fn spawn_herdr_with_options(
         })
         .unwrap();
 
-    let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_herdr"));
+    let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_vqro"));
     cmd.arg("server");
     cmd.env("XDG_CONFIG_HOME", config_home);
     cmd.env("XDG_RUNTIME_DIR", runtime_dir);
-    cmd.env("HERDR_SOCKET_PATH", socket_path);
-    cmd.env_remove("HERDR_CLIENT_SOCKET_PATH");
+    cmd.env("VQRO_SOCKET_PATH", socket_path);
+    cmd.env_remove("VQRO_CLIENT_SOCKET_PATH");
     cmd.env("SHELL", shell);
-    cmd.env_remove("HERDR_ENV");
+    cmd.env_remove("VQRO_ENV");
     if let Some(path) = path_override {
         cmd.env("PATH", path);
     }
@@ -306,7 +306,7 @@ fn ping_over_socket_returns_version() {
     assert_eq!(value["result"]["version"], env!("CARGO_PKG_VERSION"));
     // Intentionally hardcoded so wire protocol bumps require updating this test.
     // Changing this value means old clients/servers are no longer compatible.
-    assert_eq!(value["result"]["protocol"], 22);
+    assert_eq!(value["result"]["protocol"], 23);
 
     cleanup_spawned_herdr(child, base);
 }
@@ -322,7 +322,7 @@ fn server_reload_agent_manifests_reports_runtime_override() {
     let child = spawn_herdr(&config_home, &runtime_dir, &socket_path);
     wait_for_socket(&socket_path, Duration::from_secs(5));
 
-    let override_dir = config_home.join("herdr-dev").join("agent-detection");
+    let override_dir = config_home.join("vqro-dev").join("agent-detection");
     fs::create_dir_all(&override_dir).unwrap();
     let override_path = override_dir.join("codex.toml");
     fs::write(
@@ -414,7 +414,7 @@ fn shutdown_preserves_session_after_shell_is_signaled() {
     child.child.wait().expect("server should stop cleanly");
 
     let session: serde_json::Value = serde_json::from_slice(
-        &fs::read(config_home.join("herdr-dev/session.json")).expect("saved session"),
+        &fs::read(config_home.join("vqro-dev/session.json")).expect("saved session"),
     )
     .expect("valid session json");
     assert_eq!(session["workspaces"].as_array().map(Vec::len), Some(1));
@@ -1784,7 +1784,7 @@ fn pane_report_agent_updates_effective_state() {
     let session = send_request(
         &socket_path,
         &format!(
-            r#"{{"id":"req_hook_session","method":"pane.report_agent_session","params":{{"pane_id":"{}","source":"herdr:pi","agent":"pi","agent_session_path":"{}","session_start_source":"startup","seq":1}}}}"#,
+            r#"{{"id":"req_hook_session","method":"pane.report_agent_session","params":{{"pane_id":"{}","source":"vqro:pi","agent":"pi","agent_session_path":"{}","session_start_source":"startup","seq":1}}}}"#,
             pane_id,
             session_path.display()
         ),
@@ -1793,7 +1793,7 @@ fn pane_report_agent_updates_effective_state() {
     let hook = send_request(
         &socket_path,
         &format!(
-            r#"{{"id":"req_hook_5","method":"pane.report_agent","params":{{"pane_id":"{}","source":"herdr:pi","agent":"pi","state":"working","message":"thinking","agent_session_path":"{}","seq":2}}}}"#,
+            r#"{{"id":"req_hook_5","method":"pane.report_agent","params":{{"pane_id":"{}","source":"vqro:pi","agent":"pi","state":"working","message":"thinking","agent_session_path":"{}","seq":2}}}}"#,
             pane_id,
             session_path.display()
         ),
@@ -1809,10 +1809,7 @@ fn pane_report_agent_updates_effective_state() {
     );
     assert_eq!(pane["result"]["pane"]["agent"], "pi");
     assert_eq!(pane["result"]["pane"]["agent_status"], "working");
-    assert_eq!(
-        pane["result"]["pane"]["agent_session"]["source"],
-        "herdr:pi"
-    );
+    assert_eq!(pane["result"]["pane"]["agent_session"]["source"], "vqro:pi");
     assert_eq!(pane["result"]["pane"]["agent_session"]["agent"], "pi");
     assert_eq!(pane["result"]["pane"]["agent_session"]["kind"], "path");
     assert_eq!(
@@ -1823,7 +1820,7 @@ fn pane_report_agent_updates_effective_state() {
     let metadata = send_request(
         &socket_path,
         &format!(
-            r#"{{"id":"req_hook_metadata","method":"pane.report_metadata","params":{{"pane_id":"{}","source":"user:pi-display","agent":"pi","applies_to_source":"herdr:pi","title":"Refactor auth","display_agent":"Pi auth","state_labels":{{"working":"deep in the mines"}},"tokens":{{"summary":"reviewing auth","model":"opus"}}}}}}"#,
+            r#"{{"id":"req_hook_metadata","method":"pane.report_metadata","params":{{"pane_id":"{}","source":"user:pi-display","agent":"pi","applies_to_source":"vqro:pi","title":"Refactor auth","display_agent":"Pi auth","state_labels":{{"working":"deep in the mines"}},"tokens":{{"summary":"reviewing auth","model":"opus"}}}}}}"#,
             pane_id
         ),
     );
@@ -1860,7 +1857,7 @@ fn pane_report_agent_updates_effective_state() {
     assert_eq!(agent["result"]["agent"]["agent"], "pi");
     assert_eq!(
         agent["result"]["agent"]["agent_session"]["source"],
-        "herdr:pi"
+        "vqro:pi"
     );
     assert_eq!(agent["result"]["agent"]["agent_session"]["agent"], "pi");
     assert_eq!(agent["result"]["agent"]["agent_session"]["kind"], "path");
@@ -2055,7 +2052,7 @@ fn official_release_waits_for_confirmed_process_exit() {
     let session = send_request(
         &socket_path,
         &format!(
-            r#"{{"id":"req_release_session","method":"pane.report_agent_session","params":{{"pane_id":"{}","source":"herdr:pi","agent":"pi","agent_session_path":"{}","session_start_source":"startup","seq":1}}}}"#,
+            r#"{{"id":"req_release_session","method":"pane.report_agent_session","params":{{"pane_id":"{}","source":"vqro:pi","agent":"pi","agent_session_path":"{}","session_start_source":"startup","seq":1}}}}"#,
             pane_id,
             session_path.display()
         ),
@@ -2064,7 +2061,7 @@ fn official_release_waits_for_confirmed_process_exit() {
     let hook = send_request(
         &socket_path,
         &format!(
-            r#"{{"id":"req_release_4","method":"pane.report_agent","params":{{"pane_id":"{}","source":"herdr:pi","agent":"pi","state":"working","agent_session_path":"{}","seq":2}}}}"#,
+            r#"{{"id":"req_release_4","method":"pane.report_agent","params":{{"pane_id":"{}","source":"vqro:pi","agent":"pi","state":"working","agent_session_path":"{}","seq":2}}}}"#,
             pane_id,
             session_path.display()
         ),
@@ -2074,7 +2071,7 @@ fn official_release_waits_for_confirmed_process_exit() {
     let released = send_request(
         &socket_path,
         &format!(
-            r#"{{"id":"req_release_5","method":"pane.release_agent","params":{{"pane_id":"{}","source":"herdr:pi","agent":"pi"}}}}"#,
+            r#"{{"id":"req_release_5","method":"pane.release_agent","params":{{"pane_id":"{}","source":"vqro:pi","agent":"pi"}}}}"#,
             pane_id
         ),
     );
@@ -2217,7 +2214,7 @@ fn pane_clear_agent_authority_restores_fallback_state() {
     let hook = send_request(
         &socket_path,
         &format!(
-            r#"{{"id":"req_clear_4","method":"pane.report_agent","params":{{"pane_id":"{}","source":"herdr:pi","agent":"pi","state":"idle"}}}}"#,
+            r#"{{"id":"req_clear_4","method":"pane.report_agent","params":{{"pane_id":"{}","source":"vqro:pi","agent":"pi","state":"idle"}}}}"#,
             pane_id
         ),
     );
@@ -2226,7 +2223,7 @@ fn pane_clear_agent_authority_restores_fallback_state() {
     let cleared = send_request(
         &socket_path,
         &format!(
-            r#"{{"id":"req_clear_5","method":"pane.clear_agent_authority","params":{{"pane_id":"{}","source":"herdr:pi"}}}}"#,
+            r#"{{"id":"req_clear_5","method":"pane.clear_agent_authority","params":{{"pane_id":"{}","source":"vqro:pi"}}}}"#,
             pane_id
         ),
     );

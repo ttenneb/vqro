@@ -72,6 +72,9 @@ impl App {
         for (ws_idx, pane_id) in publish {
             self.emit_pane_updated(ws_idx, pane_id);
         }
+        if changes.stripped_changed {
+            self.refresh_collection_documents();
+        }
 
         changes
     }
@@ -123,6 +126,11 @@ mod tests {
         assert_eq!(pane.title, None);
         assert_eq!(pane.agent_status, crate::api::schema::AgentStatus::Working);
         assert_eq!(pane.revision, 1);
+        assert!(app.next_host_document_revision > 1);
+        assert!(app.host_documents().iter().all(|document| {
+            document.document.namespace
+                != crate::collections_extension_contract::COLLECTIONS_NAMESPACE
+        }));
         let agent = app.collect_agent_infos().pop().unwrap();
         assert_eq!(agent.terminal_title.as_deref(), Some("⠋ 修复🙂标题"));
         assert_eq!(agent.terminal_title_stripped.as_deref(), Some("修复🙂标题"));

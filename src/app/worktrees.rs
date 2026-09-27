@@ -19,6 +19,9 @@ impl App {
 
         self.state.selected = ws_idx;
         self.state.close_selected_workspace();
+        if removed_workspace_was_active {
+            self.apply_bundled_extension_state();
+        }
 
         if !removed_workspace_was_active {
             return;
@@ -34,6 +37,7 @@ impl App {
             return;
         };
         self.state.switch_workspace(parent_idx);
+        self.apply_bundled_extension_state();
     }
 
     pub(crate) fn shutdown_workspace_terminal_runtimes_for_worktree_remove(

@@ -216,7 +216,9 @@ fn every_dialog_and_menu_occludes_its_panel_not_the_whole_screen() {
             },
         }),
         ClientShellOverlay::ConfirmClose(ClientConfirmCloseOverlay {
-            workspace_id: "ws_1".into(),
+            target: ClientConfirmCloseTarget::Workspace {
+                workspace_id: "ws_1".into(),
+            },
             title: "close".into(),
             detail: "confirm".into(),
         }),
@@ -273,10 +275,6 @@ fn every_dialog_and_menu_occludes_its_panel_not_the_whole_screen() {
             selected: 0,
             original_theme_name: String::new(),
             original_palette: palette,
-            integrations: Vec::new(),
-            integration_messages: Vec::new(),
-            loading_integrations: false,
-            installing_integrations: false,
         }),
     ];
     for overlay in overlays {
@@ -304,6 +302,7 @@ fn every_dialog_and_menu_occludes_its_panel_not_the_whole_screen() {
                 snapshot,
                 &state.endpoints,
                 &state.active_endpoint_id,
+                state.recovery_presentations.get(&state.active_endpoint_id),
                 &state.config.keybinds,
                 &state.config.palette,
             ),

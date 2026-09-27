@@ -3,6 +3,202 @@ use ratatui::layout::Rect;
 use crate::app;
 use crate::protocol::{self, FrameData};
 
+pub(super) fn structure_projection(
+    app: &app::App,
+    boot_id: &str,
+    revision: u64,
+) -> protocol::endpoint::ClientShellStructureProjection {
+    let workspace_index = app
+        .state
+        .workspaces
+        .iter()
+        .map(|workspace| (workspace.id.as_str(), workspace))
+        .collect::<std::collections::HashMap<_, _>>();
+    let git_identity_for_workspace = |workspace_id: &str| {
+        let fingerprint = workspace_index
+            .get(workspace_id)
+            .and_then(|workspace| app.git_status_cache.get(&workspace.cached_git_status_key))
+            .and_then(|entry| entry.fingerprint.as_ref());
+        let upstream = fingerprint
+            .and_then(|fingerprint| fingerprint.upstream.as_ref())
+            .map(|upstream| {
+                upstream
+                    .full_ref
+                    .strip_prefix("refs/remotes/")
+                    .unwrap_or(&upstream.full_ref)
+                    .to_owned()
+            });
+        let repository_web_url = fingerprint.and_then(|fingerprint| {
+            crate::repository::canonical_repository_web_url(
+                fingerprint.preferred_repository_remote_url()?,
+            )
+        });
+        let upstream_web_url = fingerprint.and_then(|fingerprint| {
+            let branch = fingerprint
+                .upstream
+                .as_ref()?
+                .merge_ref
+                .strip_prefix("refs/heads/")?;
+            crate::repository::repository_branch_web_url(repository_web_url.as_deref()?, branch)
+        });
+        let detached_head = fingerprint.and_then(|fingerprint| match &fingerprint.head {
+            crate::workspace::GitHeadIdentity::Detached { oid } => {
+                Some(oid.chars().take(8).collect())
+            }
+            crate::workspace::GitHeadIdentity::Branch { .. } => None,
+        });
+        (
+            upstream,
+            repository_web_url,
+            upstream_web_url,
+            detached_head,
+        )
+    };
+    let spaces_document = app
+        .host_document_caches
+        .get(&(
+            crate::spaces_extension_contract::SPACES_NAMESPACE.into(),
+            crate::spaces_extension_contract::SPACES_SCOPE_ID.into(),
+        ))
+        .and_then(crate::host_document_cache::HostDocumentCache::current);
+    let spaces_repository_ids = spaces_document
+        .into_iter()
+        .flat_map(|document| document.items.iter())
+        .filter(|item| item.parent_id.is_none())
+        .filter_map(|item| item.id.strip_prefix("repository:"))
+        .collect::<std::collections::HashSet<_>>();
+    let repositories = app
+        .state
+        .repositories
+        .iter()
+        .filter(|repository| spaces_repository_ids.contains(repository.id.as_str()))
+        .map(|repository| {
+            let mut web_url = None;
+            let checkouts = repository
+                .checkout_workspace_ids
+                .iter()
+                .filter_map(|workspace_id| {
+                    let workspace = workspace_index.get(workspace_id.as_str())?;
+                    let checkout = workspace.checkout.as_ref()?;
+                    let kind = match checkout.kind {
+                        crate::repository::CheckoutKind::Primary => {
+                            protocol::endpoint::ClientShellCheckoutKind::Primary
+                        }
+                        crate::repository::CheckoutKind::Linked => {
+                            protocol::endpoint::ClientShellCheckoutKind::Linked
+                        }
+                    };
+                    let (upstream, repository_web_url, upstream_web_url, detached_head) =
+                        git_identity_for_workspace(workspace_id);
+                    if web_url.is_none() {
+                        web_url = repository_web_url;
+                    }
+                    Some(protocol::endpoint::ClientShellRepositoryCheckout {
+                        workspace_id: workspace_id.clone(),
+                        checkout_path: Some(checkout.checkout_path.display().to_string()),
+                        kind,
+                        upstream,
+                        upstream_web_url,
+                        detached_head,
+                    })
+                })
+                .collect::<Vec<_>>();
+            let repository_path = repository
+                .checkout_workspace_ids
+                .iter()
+                .filter_map(|workspace_id| workspace_index.get(workspace_id.as_str()))
+                .filter_map(|workspace| workspace.checkout.as_ref())
+                .find(|checkout| checkout.kind == crate::repository::CheckoutKind::Primary)
+                .or_else(|| {
+                    repository
+                        .checkout_workspace_ids
+                        .iter()
+                        .filter_map(|workspace_id| workspace_index.get(workspace_id.as_str()))
+                        .find_map(|workspace| workspace.checkout.as_ref())
+                })
+                .map(|checkout| checkout.checkout_path.display().to_string());
+            // Repository remotes come from the background Git-status cache. Never read
+            // identity marker files while projecting a frame for each attached client.
+            let durable_identity = web_url.clone().or_else(|| Some(repository.id.clone()));
+            protocol::endpoint::ClientShellRepository {
+                repository_id: repository.id.clone(),
+                label: repository.display_label().to_owned(),
+                repository_path,
+                web_url,
+                durable_identity,
+                checkouts,
+                last_focused_workspace_id: repository.last_focused_workspace_id.clone(),
+            }
+        })
+        .collect();
+    let space_order = spaces_document
+        .into_iter()
+        .flat_map(|document| document.items.iter())
+        .filter(|item| item.parent_id.is_none())
+        .filter_map(|item| {
+            item.id
+                .strip_prefix("repository:")
+                .map(|id| protocol::endpoint::ClientShellSpaceRef {
+                    kind: protocol::endpoint::ClientShellSpaceKind::Repository,
+                    id: id.into(),
+                })
+                .or_else(|| {
+                    item.id.strip_prefix("workspace:").map(|id| {
+                        protocol::endpoint::ClientShellSpaceRef {
+                            kind: protocol::endpoint::ClientShellSpaceKind::StandaloneWorkspace,
+                            id: id.into(),
+                        }
+                    })
+                })
+        })
+        .collect();
+    let collections = if app.collections_package_runtime_available() {
+        app.collection_infos(None, None)
+    } else {
+        Vec::new()
+    }
+    .into_iter()
+    .map(|collection| protocol::endpoint::ClientShellCollection {
+        collection_id: collection.collection_id,
+        workspace_id: collection.workspace_id,
+        tab_id: collection.tab_id,
+        label: collection.label,
+        selected_pane_id: collection.selected_pane_id,
+        members: collection
+            .members
+            .into_iter()
+            .map(|member| protocol::endpoint::ClientShellCollectionMember {
+                pane_id: member.pane_id,
+                index: member.index,
+                archived: member.archived,
+            })
+            .collect(),
+    })
+    .collect();
+    let delegations = app
+        .delegation_tree()
+        .into_iter()
+        .filter(|_| app.bundled_extension_enabled("delegation", None))
+        .map(|entry| protocol::endpoint::ClientShellDelegation {
+            delegation_id: entry.delegation.delegation_id,
+            pane_id: entry.delegation.pane_id,
+            parent_id: entry.delegation.parent_id,
+            purpose: entry.delegation.purpose,
+            depth: entry.depth,
+            external_parent_id: None,
+        })
+        .collect();
+    protocol::endpoint::ClientShellStructureProjection {
+        session_id: crate::session::active_name().unwrap_or_else(|| "default".into()),
+        boot_id: boot_id.to_owned(),
+        revision,
+        collections,
+        delegations,
+        repositories,
+        space_order,
+    }
+}
+
 pub(super) fn snapshot(
     app: &app::App,
     boot_id: &str,
@@ -10,7 +206,7 @@ pub(super) fn snapshot(
     config_diagnostic: Option<&str>,
     location: Option<&crate::server::clients::ClientShellLocation>,
 ) -> protocol::ClientShellSnapshot {
-    let snapshot = app.session_snapshot();
+    let snapshot = app.session_snapshot_v1_compat();
     let focused_workspace_id = location
         .and_then(|location| location.focused_workspace_id.clone())
         .or_else(|| snapshot.focused_workspace_id.clone());
@@ -32,6 +228,7 @@ pub(super) fn snapshot(
             app.public_pane_id(workspace_index, pane_id)
         })
         .or_else(|| snapshot.focused_pane_id.clone());
+    let agent_status_enabled = app.bundled_extension_enabled("agent-status", None);
     let workspaces = snapshot
         .workspaces
         .into_iter()
@@ -71,7 +268,11 @@ pub(super) fn snapshot(
                         label: worktree.repo_name,
                         is_linked_worktree: worktree.is_linked_worktree,
                     }),
-                agent_status: workspace.agent_status,
+                agent_status: if agent_status_enabled {
+                    workspace.agent_status
+                } else {
+                    crate::api::schema::AgentStatus::Unknown
+                },
             }
         })
         .collect();
@@ -94,11 +295,15 @@ pub(super) fn snapshot(
                 label: tab.label,
                 custom_label: !state.is_auto_named(),
                 zoomed: state.zoomed,
-                agent_status: tab.agent_status,
+                agent_status: if agent_status_enabled {
+                    tab.agent_status
+                } else {
+                    crate::api::schema::AgentStatus::Unknown
+                },
             }
         })
         .collect();
-    let panes = snapshot
+    let panes: Vec<protocol::ClientShellPane> = snapshot
         .panes
         .into_iter()
         .map(|pane| {
@@ -128,6 +333,7 @@ pub(super) fn snapshot(
     let agents = snapshot
         .agents
         .into_iter()
+        .filter(|_| agent_status_enabled)
         .map(|agent| {
             let pane_id = agent.pane_id;
             let focused = focused_pane_id.as_deref() == Some(pane_id.as_str());
@@ -246,6 +452,7 @@ pub(super) fn snapshot(
 pub(super) struct RenderedPaneSurface {
     pub(super) frame: FrameData,
     pub(super) panes: Vec<protocol::PaneSurfacePane>,
+    pub(super) collections: Vec<protocol::PaneSurfaceCollection>,
     pub(super) splits: Vec<protocol::PaneSurfaceSplit>,
     pub(super) popup: Option<Box<protocol::ClientShellPopupSurface>>,
     pub(super) graphics: protocol::SurfaceGraphicsScene,
@@ -353,10 +560,49 @@ pub(super) fn render_pane_surface(
                 .collect()
         })
         .unwrap_or_default();
+    let collections: Vec<protocol::PaneSurfaceCollection> = target
+        .and_then(|target| {
+            let workspace = app.state.workspaces.get(target.workspace_index)?;
+            let tab = workspace.tabs.get(target.tab_index)?;
+            Some(
+                tab.layout
+                    .collection_ids()
+                    .into_iter()
+                    .filter_map(|collection_id| {
+                        let rect = tab.layout.leaf_rect(
+                            crate::layout::LayoutLeaf::Collection(collection_id),
+                            area,
+                        )?;
+                        let inner_rect = Rect::new(
+                            rect.x,
+                            rect.y.saturating_add(1),
+                            rect.width,
+                            rect.height.saturating_sub(1),
+                        );
+                        Some(protocol::PaneSurfaceCollection {
+                            collection_id: format!("collection_{}", collection_id.raw()),
+                            rect: rect.into(),
+                            inner_rect: inner_rect.into(),
+                            focused: tab.layout.focused_leaf()
+                                == crate::layout::LayoutLeaf::Collection(collection_id),
+                        })
+                    })
+                    .collect(),
+            )
+        })
+        .unwrap_or_default();
     let pane_frames = layout
         .pane_infos
         .iter()
         .map(|pane| pane.rect)
+        .chain(collections.iter().map(|collection| {
+            Rect::new(
+                collection.rect.x,
+                collection.rect.y,
+                collection.rect.width,
+                collection.rect.height,
+            )
+        }))
         .collect::<Vec<_>>();
     let splits = layout
         .split_borders
@@ -401,6 +647,7 @@ pub(super) fn render_pane_surface(
     RenderedPaneSurface {
         frame: FrameData::from_ratatui_buffer_with_hyperlinks(&buffer, cursor, &hyperlinks),
         panes,
+        collections,
         splits,
         popup,
         graphics,
@@ -604,6 +851,287 @@ mod tests {
         app.state.integration_recommendations[0].state =
             crate::integration::IntegrationStatusKind::Outdated;
         assert!(snapshot(&app, "boot", 2, None, None).integration_updates_available);
+    }
+
+    #[test]
+    fn structure_projects_authoritative_repository_spaces_and_checkout_order() {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = crate::app::App::new(
+            &crate::config::Config::default(),
+            crate::app::AppPolicy::TEST,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        let mut primary = crate::workspace::Workspace::test_new("primary");
+        let mut linked = crate::workspace::Workspace::test_new("linked");
+        let primary_id = primary.id.clone();
+        let linked_id = linked.id.clone();
+        primary.checkout = Some(crate::repository::CheckoutProvenance {
+            repository_id: "repo_1".into(),
+            checkout_path: "/repo".into(),
+            kind: crate::repository::CheckoutKind::Primary,
+        });
+        linked.checkout = Some(crate::repository::CheckoutProvenance {
+            repository_id: "repo_1".into(),
+            checkout_path: "/repo-feature".into(),
+            kind: crate::repository::CheckoutKind::Linked,
+        });
+        app.state.workspaces = vec![primary, linked];
+        app.state.repositories = vec![crate::repository::Repository {
+            id: "repo_1".into(),
+            git_common_dir: "/repo/.git".into(),
+            label: "repo".into(),
+            custom_name: Some("custom repo".into()),
+            preferred_base: None,
+            checkout_workspace_ids: vec![primary_id.clone(), linked_id.clone()],
+            last_focused_workspace_id: Some(linked_id.clone()),
+        }];
+        app.state.space_order = vec![crate::repository::SpaceRef::Repository("repo_1".into())];
+        let item = |id: &str, parent_id: Option<&str>, role, label: &str| {
+            crate::extension_contract::HostDocumentItem {
+                id: id.into(),
+                parent_id: parent_id.map(str::to_owned),
+                role,
+                label: label.into(),
+                detail: None,
+                terminal: None,
+                action_ids: Vec::new(),
+                flags: crate::extension_contract::HostDocumentItemFlags::default(),
+            }
+        };
+        let document = crate::extension_contract::HostDocumentV1 {
+            contract: crate::extension_contract::HOST_DOCUMENT_CONTRACT_V1.into(),
+            namespace: crate::spaces_extension_contract::SPACES_NAMESPACE.into(),
+            generation: 1,
+            revision: 1,
+            surface: crate::extension_contract::HostSurface::Navigation,
+            target: crate::extension_contract::HostTarget::Session,
+            items: vec![
+                item(
+                    "repository:repo_1",
+                    None,
+                    crate::extension_contract::HostItemRole::Group,
+                    "custom repo",
+                ),
+                item(
+                    &format!("workspace:{primary_id}"),
+                    Some("repository:repo_1"),
+                    crate::extension_contract::HostItemRole::Section,
+                    "primary",
+                ),
+                item(
+                    &format!("workspace:{linked_id}"),
+                    Some("repository:repo_1"),
+                    crate::extension_contract::HostItemRole::Section,
+                    "linked",
+                ),
+            ],
+            actions: Vec::new(),
+            required_capabilities: Vec::new(),
+        };
+        app.host_document_caches
+            .entry((
+                crate::spaces_extension_contract::SPACES_NAMESPACE.into(),
+                crate::spaces_extension_contract::SPACES_SCOPE_ID.into(),
+            ))
+            .or_default()
+            .publish_for_namespace(
+                crate::spaces_extension_contract::SPACES_NAMESPACE,
+                1,
+                100,
+                &std::collections::HashSet::new(),
+                document,
+            )
+            .unwrap();
+
+        let projected = structure_projection(&app, "boot", 3);
+
+        assert_eq!(projected.repositories.len(), 1);
+        assert_eq!(projected.repositories[0].label, "custom repo");
+        assert_eq!(
+            projected.repositories[0].repository_path.as_deref(),
+            Some("/repo")
+        );
+        assert_eq!(
+            projected.repositories[0]
+                .checkouts
+                .iter()
+                .map(|checkout| (
+                    checkout.workspace_id.as_str(),
+                    checkout.checkout_path.as_deref(),
+                    checkout.kind,
+                ))
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    primary_id.as_str(),
+                    Some("/repo"),
+                    protocol::endpoint::ClientShellCheckoutKind::Primary,
+                ),
+                (
+                    linked_id.as_str(),
+                    Some("/repo-feature"),
+                    protocol::endpoint::ClientShellCheckoutKind::Linked,
+                ),
+            ]
+        );
+        assert_eq!(projected.space_order[0].id, "repo_1");
+    }
+
+    #[test]
+    fn pane_surface_exposes_empty_collection_leaf_geometry() {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = crate::app::App::new(
+            &crate::config::Config::default(),
+            crate::app::AppPolicy::TEST,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        let mut workspace = crate::workspace::Workspace::test_new("plain");
+        let root = workspace.tabs[0].root_pane;
+        let collection = workspace.tabs[0]
+            .create_collection_near(
+                crate::layout::LayoutLeaf::Pane(root),
+                ratatui::layout::Direction::Horizontal,
+                0.5,
+                Some("empty".into()),
+            )
+            .unwrap();
+        workspace.tabs[0]
+            .focus_layout_leaf(crate::layout::LayoutLeaf::Collection(collection.into()));
+        app.state.workspaces = vec![workspace];
+        app.state.active = Some(0);
+
+        let rendered = render_pane_surface(
+            &mut app,
+            Some(crate::ui::TabSurfaceTarget {
+                workspace_index: 0,
+                tab_index: 0,
+            }),
+            Rect::new(0, 0, 80, 20),
+            false,
+            false,
+            crate::kitty_graphics::HostCellSize::default(),
+            &crate::kitty_graphics::surface::DeliveryCache::default(),
+            1,
+        );
+
+        assert_eq!(rendered.collections.len(), 1);
+        let projected = &rendered.collections[0];
+        assert_eq!(
+            projected.collection_id,
+            format!("collection_{}", collection.raw())
+        );
+        assert_eq!(
+            projected.rect,
+            protocol::SurfaceRect {
+                x: 40,
+                y: 0,
+                width: 40,
+                height: 20
+            }
+        );
+        assert_eq!(
+            projected.inner_rect,
+            protocol::SurfaceRect {
+                x: 40,
+                y: 1,
+                width: 40,
+                height: 19
+            }
+        );
+        assert!(projected.focused);
+    }
+
+    #[test]
+    fn collection_non_agents_never_leak_into_filtered_agent_order() {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = crate::app::App::new(
+            &crate::config::Config::default(),
+            crate::app::AppPolicy::TEST,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        let mut workspace = crate::workspace::Workspace::test_new("plain");
+        let root = workspace.tabs[0].root_pane;
+        let member = workspace.test_split(ratatui::layout::Direction::Horizontal);
+        let collection = workspace.tabs[0]
+            .create_collection_near(
+                crate::layout::LayoutLeaf::Pane(root),
+                ratatui::layout::Direction::Vertical,
+                0.5,
+                Some("plain terminals".into()),
+            )
+            .unwrap();
+        workspace.tabs[0]
+            .collect_tiled_pane(member, collection)
+            .unwrap();
+        app.state.workspaces = vec![workspace];
+        app.state.active = Some(0);
+        app.state.agent_view_override = Some(crate::api::schema::AgentViewSetParams {
+            source: "test".into(),
+            label: Some("filtered".into()),
+            filter: None,
+            sort: Vec::new(),
+        });
+
+        let projected = snapshot(&app, "boot", 1, None, None);
+
+        assert_eq!(projected.agent_view_label.as_deref(), Some("filtered"));
+        assert!(projected.agents.is_empty());
+        assert!(projected.agent_order.is_empty());
+        let structure = structure_projection(&app, "boot", 1);
+        assert!(structure.collections.is_empty());
+        let generic = app.session_snapshot_v1_compat();
+        assert_eq!(generic.layouts[0].panes.len(), 2);
+    }
+
+    #[test]
+    fn unavailable_spaces_hides_projection_without_hiding_generic_workspaces() {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = crate::app::App::new(
+            &crate::config::Config::default(),
+            crate::app::AppPolicy::TEST,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        let mut repository_workspace = crate::workspace::Workspace::test_new("repo");
+        repository_workspace.checkout = Some(crate::repository::CheckoutProvenance {
+            repository_id: "repo_1".into(),
+            checkout_path: "/repo".into(),
+            kind: crate::repository::CheckoutKind::Primary,
+        });
+        let repository_workspace_id = repository_workspace.id.clone();
+        let standalone = crate::workspace::Workspace::test_new("scratch");
+        let standalone_id = standalone.id.clone();
+        app.state.workspaces = vec![repository_workspace, standalone];
+        app.state.repositories = vec![crate::repository::Repository {
+            id: "repo_1".into(),
+            git_common_dir: "/repo/.git".into(),
+            label: "repo".into(),
+            custom_name: None,
+            preferred_base: None,
+            checkout_workspace_ids: vec![repository_workspace_id],
+            last_focused_workspace_id: None,
+        }];
+        app.configured_disabled_extensions
+            .insert("vqro.spaces".into());
+        app.apply_bundled_extension_state();
+
+        let projection = structure_projection(&app, "boot", 1);
+
+        assert!(projection.repositories.is_empty());
+        assert!(projection.space_order.is_empty());
+        let generic = app.session_snapshot_v1_compat();
+        assert_eq!(generic.workspaces.len(), 2);
+        assert!(generic
+            .workspaces
+            .iter()
+            .any(|workspace| workspace.workspace_id == standalone_id));
     }
 
     #[test]

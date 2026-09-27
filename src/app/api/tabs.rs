@@ -62,6 +62,12 @@ impl App {
         } else {
             return encode_error(id, "workspace_not_found", "no active workspace");
         };
+        if let Err(error) = self.admit_new_panes(Some(ws_idx), None, 1) {
+            return encode_error(id, "resource_limit", error.to_string());
+        }
+        if let Err(error) = self.state.workspaces[ws_idx].ensure_public_tab_numbers_available(1) {
+            return encode_error(id, "tab_create_failed", error.to_string());
+        }
         let cwd = cwd.map(PathBuf::from).unwrap_or_else(|| {
             self.resolve_new_terminal_cwd(self.focused_pane_cwd_in_workspace(ws_idx))
         });
@@ -74,6 +80,14 @@ impl App {
             Ok(env) => env,
             Err((code, message)) => return encode_error(id, &code, message),
         };
+        let tab_id = match self.allocate_tab_id() {
+            Ok(tab_id) => tab_id,
+            Err(error) => return encode_error(id, "tab_create_failed", error.to_string()),
+        };
+        let terminal_id = match self.allocate_terminal_id() {
+            Ok(id) => id,
+            Err(error) => return encode_error(id, "tab_create_failed", error.to_string()),
+        };
         let result = self
             .state
             .workspaces
@@ -81,6 +95,8 @@ impl App {
             .ok_or_else(|| std::io::Error::other("workspace disappeared"))
             .and_then(|ws| {
                 ws.create_tab(
+                    tab_id,
+                    terminal_id,
                     rows,
                     cols,
                     cwd,
@@ -115,10 +131,12 @@ impl App {
                 }
                 if focus {
                     self.state.switch_workspace_tab(ws_idx, tab_idx);
+                    self.apply_bundled_extension_state();
                     self.state.mode = Mode::Terminal;
                 }
                 self.schedule_session_save();
                 self.emit_tab_created_events(ws_idx, tab_idx);
+                self.refresh_collection_documents();
                 encode_success(
                     id,
                     self.tab_created_result(ws_idx, tab_idx)
@@ -134,6 +152,7 @@ impl App {
             return tab_not_found(id, &target.tab_id);
         };
         self.state.switch_workspace_tab(ws_idx, tab_idx);
+        self.apply_bundled_extension_state();
         let tab = self.tab_info(ws_idx, tab_idx).unwrap();
 
         encode_success(id, ResponseResult::TabInfo { tab })
@@ -259,6 +278,7 @@ impl App {
                     workspace: Some(workspace),
                 },
             });
+            self.refresh_collection_documents();
             return encode_success(id, ResponseResult::Ok {});
         }
 
@@ -272,6 +292,10 @@ impl App {
                 format!("tab {} could not be closed", target.tab_id),
             );
         }
+        for pane_id in &pane_ids {
+            self.state.delegations.tombstone_pane(*pane_id);
+        }
+        self.state.delegations.gc_tombstones();
         self.state.remove_plugin_pane_records(pane_ids);
         self.state.remove_unattached_terminal_ids(terminal_ids);
         self.shutdown_detached_terminal_runtimes();
@@ -283,6 +307,7 @@ impl App {
                 workspace_id,
             },
         });
+        self.refresh_collection_documents();
 
         encode_success(id, ResponseResult::Ok {})
     }
@@ -376,6 +401,49 @@ mod tests {
     }
 
     #[test]
+    fn api_tab_close_retains_delegation_ancestry_for_another_tab() {
+        let event_hub = crate::api::EventHub::default();
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &Config::default(),
+            crate::app::AppPolicy::TEST,
+            None,
+            api_rx,
+            event_hub,
+        );
+        let mut workspace = Workspace::test_new("tabs");
+        workspace.test_add_tab(Some("child"));
+        let parent_pane = workspace.tabs[0].root_pane;
+        let child_pane = workspace.tabs[1].root_pane;
+        app.state.workspaces = vec![workspace];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        let parent = app
+            .state
+            .delegations
+            .create(Some(parent_pane), None, Some("parent".into()))
+            .unwrap();
+        let child = app
+            .state
+            .delegations
+            .create(Some(child_pane), Some(parent), Some("child".into()))
+            .unwrap();
+        let tab_id = app.public_tab_id(0, 0).unwrap();
+
+        let response = app.handle_tab_close("req".into(), TabTarget { tab_id });
+
+        let _: SuccessResponse = serde_json::from_str(&response).unwrap();
+        let retained = app.state.delegations.get(parent).unwrap();
+        assert!(retained.tombstone);
+        assert_eq!(retained.pane_id, None);
+        assert_eq!(
+            app.state.delegations.get(child).unwrap().parent_id,
+            Some(parent)
+        );
+    }
+
+    #[test]
     fn api_tab_move_reorders_tabs_in_target_workspace() {
         let event_hub = crate::api::EventHub::default();
         let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -425,6 +493,89 @@ mod tests {
         }));
     }
 
+    #[test]
+    fn tab_create_public_number_exhaustion_precedes_identity_pty_and_topology() {
+        let event_hub = crate::api::EventHub::default();
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &Config::default(),
+            crate::app::AppPolicy::TEST,
+            None,
+            api_rx,
+            event_hub,
+        );
+        let mut workspace = Workspace::test_new("tabs");
+        workspace.next_public_tab_number = usize::MAX - 1;
+        app.state.workspaces = vec![workspace];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.ensure_test_terminals();
+        app.inject_tab_id_candidates_for_test([Err(std::io::Error::other(
+            "identity allocation should remain untouched",
+        ))]);
+        let runtime_count = app.terminal_runtimes.len();
+        let terminal_count = app.state.terminals.len();
+
+        let request = || TabCreateParams {
+            workspace_id: None,
+            cwd: None,
+            focus: false,
+            label: None,
+            env: Default::default(),
+        };
+        let response = app.handle_tab_create("req".into(), request());
+        assert!(response.contains("public tab-number space is exhausted"));
+        assert_eq!(app.state.workspaces[0].tabs.len(), 1);
+        assert_eq!(app.terminal_runtimes.len(), runtime_count);
+        assert_eq!(app.state.terminals.len(), terminal_count);
+
+        app.state.workspaces[0].next_public_tab_number = 2;
+        let response = app.handle_tab_create("req:identity".into(), request());
+        assert!(response.contains("identity allocation should remain untouched"));
+        assert_eq!(app.state.workspaces[0].tabs.len(), 1);
+    }
+
+    #[test]
+    fn tab_create_identity_failure_precedes_pty_and_topology_mutation() {
+        let event_hub = crate::api::EventHub::default();
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &Config::default(),
+            crate::app::AppPolicy::TEST,
+            None,
+            api_rx,
+            event_hub,
+        );
+        let workspace = Workspace::test_new("tabs");
+        let occupied = workspace.tabs[0].id.clone();
+        app.state.workspaces = vec![workspace];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.ensure_test_terminals();
+        app.inject_tab_id_candidates_for_test([
+            Ok(occupied),
+            Err(std::io::Error::other("injected entropy failure")),
+        ]);
+        let runtime_count = app.terminal_runtimes.len();
+        let terminal_count = app.state.terminals.len();
+
+        let response = app.handle_tab_create(
+            "req".into(),
+            TabCreateParams {
+                workspace_id: None,
+                cwd: None,
+                focus: false,
+                label: None,
+                env: Default::default(),
+            },
+        );
+
+        assert!(response.contains("injected entropy failure"));
+        assert_eq!(app.state.workspaces[0].tabs.len(), 1);
+        assert_eq!(app.terminal_runtimes.len(), runtime_count);
+        assert_eq!(app.state.terminals.len(), terminal_count);
+    }
+
     #[tokio::test]
     async fn tab_create_follows_cached_focused_pane_cwd_without_runtime() {
         let event_hub = crate::api::EventHub::default();
@@ -464,6 +615,10 @@ mod tests {
 
         let success: SuccessResponse = serde_json::from_str(&response).unwrap();
         assert!(matches!(success.result, ResponseResult::TabCreated { .. }));
+        assert!(app.host_documents().iter().all(|document| {
+            document.document.namespace
+                != crate::collections_extension_contract::COLLECTIONS_NAMESPACE
+        }));
         let created = &app.state.workspaces[0].tabs[1];
         let created_terminal_id = created.terminal_id(created.root_pane).unwrap();
         let created_cwd = &app.state.terminals.get(created_terminal_id).unwrap().cwd;

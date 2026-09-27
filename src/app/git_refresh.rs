@@ -100,7 +100,10 @@ impl App {
     }
 
     fn git_refresh_demand(&self) -> GitStatusRefreshDemand {
-        let mut demand = GitStatusRefreshDemand::default();
+        let mut demand = GitStatusRefreshDemand {
+            upstream: !self.state.repositories.is_empty(),
+            ..GitStatusRefreshDemand::default()
+        };
         for token in self.state.sidebar_spaces.rows.iter().flatten() {
             match token.parts().0 {
                 crate::config::SpaceSidebarToken::Branch => demand.branch = true,
@@ -119,8 +122,8 @@ impl App {
             .workspaces
             .iter()
             .filter_map(|ws| {
-                let cwd =
-                    ws.resolved_identity_cwd_from(&self.state.terminals, &self.terminal_runtimes)?;
+                let cwd = ws
+                    .repository_identity_cwd_from(&self.state.terminals, &self.terminal_runtimes)?;
                 let cache_key_hint = (!refresh_repo_discovery && ws.cached_identity_cwd == cwd)
                     .then(|| ws.cached_git_status_key.clone());
                 Some(WorkspaceGitRefreshItem {
@@ -402,6 +405,7 @@ mod tests {
                 GitStatusRefreshDemand {
                     branch: true,
                     ahead_behind: false,
+                    upstream: false,
                 },
             ),
             (
@@ -409,6 +413,7 @@ mod tests {
                 GitStatusRefreshDemand {
                     branch: false,
                     ahead_behind: true,
+                    upstream: false,
                 },
             ),
         ];

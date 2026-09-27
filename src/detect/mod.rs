@@ -327,7 +327,7 @@ pub fn should_skip_state_update(agent: Option<Agent>, screen_content: &str) -> b
 pub(crate) fn full_lifecycle_hook_authority(source: &str, agent_label: &str) -> bool {
     matches!(
         (source, agent_label),
-        ("herdr:pi", "pi")
+        ("vqro:pi", "pi")
             | ("herdr:omp", "omp")
             | ("herdr:mastracode", "mastracode")
             | ("herdr:opencode", "opencode")

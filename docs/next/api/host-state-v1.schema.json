@@ -1,0 +1,197 @@
+{
+  "$id": "https://vqro.dev/schema/host-state/v1",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "availability": "staged; production package activation is not enabled",
+  "capabilities": {
+    "snapshot": "host.state.read",
+    "transact": "host.state.write"
+  },
+  "contract": "host.state.v1",
+  "schemas": {
+    "commit": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "contract": {
+          "const": "host.state.v1",
+          "type": "string"
+        },
+        "namespace": {
+          "type": "string"
+        },
+        "replayed": {
+          "type": "boolean"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "sequence": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "store_generation": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "store_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "contract",
+        "store_id",
+        "store_generation",
+        "namespace",
+        "revision",
+        "sequence",
+        "replayed"
+      ],
+      "title": "HostStateCommitV1",
+      "type": "object"
+    },
+    "snapshot": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "contract": {
+          "const": "host.state.v1",
+          "type": "string"
+        },
+        "namespace": {
+          "type": "string"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "sequence": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "store_generation": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "store_id": {
+          "type": "string"
+        },
+        "values": {
+          "additionalProperties": true,
+          "type": "object"
+        }
+      },
+      "required": [
+        "contract",
+        "store_id",
+        "store_generation",
+        "namespace",
+        "revision",
+        "sequence",
+        "values"
+      ],
+      "title": "HostStateSnapshotV1",
+      "type": "object"
+    },
+    "snapshot_params": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "contract": {
+          "const": "host.state.v1",
+          "type": "string"
+        }
+      },
+      "required": [
+        "contract"
+      ],
+      "title": "HostStateSnapshotParamsV1",
+      "type": "object"
+    },
+    "transact_params": {
+      "$defs": {
+        "HostStateOperationV1": {
+          "oneOf": [
+            {
+              "additionalProperties": false,
+              "properties": {
+                "key": {
+                  "type": "string"
+                },
+                "op": {
+                  "const": "set",
+                  "type": "string"
+                },
+                "value": true
+              },
+              "required": [
+                "op",
+                "key",
+                "value"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "key": {
+                  "type": "string"
+                },
+                "op": {
+                  "const": "delete",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "op",
+                "key"
+              ],
+              "type": "object"
+            }
+          ]
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "contract": {
+          "const": "host.state.v1",
+          "type": "string"
+        },
+        "expected_revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "expected_store_generation": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "idempotency_key": {
+          "type": "string"
+        },
+        "operations": {
+          "items": {
+            "$ref": "#/schemas/transact_params/$defs/HostStateOperationV1"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "contract",
+        "expected_store_generation",
+        "expected_revision",
+        "idempotency_key",
+        "operations"
+      ],
+      "title": "HostStateTransactParamsV1",
+      "type": "object"
+    }
+  },
+  "title": "staged host state contract v1"
+}

@@ -82,6 +82,10 @@ pub enum Subscription {
     PaneScrollChanged { pane_id: String },
     #[serde(rename = "layout.updated")]
     LayoutUpdated {},
+    #[serde(rename = "host.document.updated")]
+    HostDocumentUpdated {},
+    #[serde(rename = "extension.state.committed")]
+    ExtensionStateCommitted {},
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -208,6 +212,8 @@ pub enum EventKind {
     TabRenamed,
     TabMoved,
     TabFocused,
+    CollectionUpdated,
+    DelegationUpdated,
     PaneCreated,
     PaneClosed,
     PaneUpdated,
@@ -218,6 +224,8 @@ pub enum EventKind {
     PaneAgentDetected,
     PaneAgentStatusChanged,
     LayoutUpdated,
+    HostDocumentUpdated,
+    ExtensionStateCommitted,
 }
 
 impl EventKind {
@@ -239,6 +247,8 @@ impl EventKind {
             EventKind::TabRenamed => "tab.renamed",
             EventKind::TabMoved => "tab.moved",
             EventKind::TabFocused => "tab.focused",
+            EventKind::CollectionUpdated => "collection.updated",
+            EventKind::DelegationUpdated => "delegation.updated",
             EventKind::PaneCreated => "pane.created",
             EventKind::PaneClosed => "pane.closed",
             EventKind::PaneUpdated => "pane.updated",
@@ -249,12 +259,16 @@ impl EventKind {
             EventKind::PaneAgentDetected => "pane.agent_detected",
             EventKind::PaneAgentStatusChanged => "pane.agent_status_changed",
             EventKind::LayoutUpdated => "layout.updated",
+            EventKind::HostDocumentUpdated => "host.document.updated",
+            EventKind::ExtensionStateCommitted => "extension.state.committed",
         }
     }
 }
 
 #[cfg(test)]
 pub const KNOWN_EVENT_KINDS: &[EventKind] = &[
+    EventKind::CollectionUpdated,
+    EventKind::DelegationUpdated,
     EventKind::WorkspaceCreated,
     EventKind::WorkspaceUpdated,
     EventKind::WorkspaceMetadataUpdated,
@@ -281,6 +295,8 @@ pub const KNOWN_EVENT_KINDS: &[EventKind] = &[
     EventKind::PaneAgentDetected,
     EventKind::PaneAgentStatusChanged,
     EventKind::LayoutUpdated,
+    EventKind::HostDocumentUpdated,
+    EventKind::ExtensionStateCommitted,
 ];
 
 pub const PLUGIN_HOOK_EVENT_KINDS: &[EventKind] = &[
@@ -489,6 +505,29 @@ pub enum EventData {
     TabFocused {
         tab_id: String,
         workspace_id: String,
+    },
+    CollectionUpdated {
+        action: String,
+        collection: super::CollectionInfo,
+    },
+    DelegationUpdated {
+        action: String,
+        delegation: super::DelegationInfo,
+    },
+    HostDocumentUpdated {
+        namespace: String,
+        scope_id: String,
+        generation: u64,
+        revision: u64,
+        available: bool,
+    },
+    ExtensionStateCommitted {
+        namespace: String,
+        store_id: String,
+        store_generation: u64,
+        namespace_revision: u64,
+        first_sequence: u64,
+        last_sequence: u64,
     },
     PaneCreated {
         pane: PaneInfo,

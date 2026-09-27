@@ -13,6 +13,9 @@ impl HeadlessServer {
     ) -> Option<(bool, u64)> {
         let focus_before = self.shell_focus_targets();
         let focused_tabs_before = self.focused_shell_tabs();
+        if !active {
+            self.cancel_client_extension_work(client_id);
+        }
         let (changed, projection_revision) = {
             let client = self.clients.get_mut(&client_id)?;
             if !client.is_shell_client() {
@@ -25,11 +28,20 @@ impl HeadlessServer {
                 // Force the next control snapshot to carry this new floor instead of reusing a
                 // same-boot cached snapshot from the prior surface epoch.
                 client.shell_snapshot = None;
+                client.shell_structure = None;
             }
             if !changed && !active {
                 return Some((false, client.shell_projection_revision));
             }
             client.shell_surface_active = active;
+            if !active {
+                client.shell_pane_viewport = None;
+                client.shell_terminal_views_interest = None;
+                client.pending_pane_view = None;
+                client.pane_contribution_lease = None;
+                client.pending_pane_action = None;
+                client.pending_pane_confirmation = None;
+            }
             client.request_repaint();
             client.shell_graphics_delivery = Default::default();
             // The client drops target effects while its old source frame is frozen. Reset the

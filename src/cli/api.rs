@@ -1,4 +1,4 @@
-const API_SCHEMA_JSON: &str = include_str!("../../docs/next/api/herdr-api.schema.json");
+const API_SCHEMA_JSON: &str = include_str!("../../docs/next/api/vqro-api.schema.json");
 
 use crate::api::schema::{EmptyParams, Method, Request};
 
@@ -9,6 +9,7 @@ pub(super) fn run_api_command(args: &[String]) -> std::io::Result<i32> {
     };
 
     match subcommand {
+        "describe" => api_describe(&args[1..]),
         "schema" => api_schema(&args[1..]),
         "snapshot" => api_snapshot(&args[1..]),
         "help" | "--help" | "-h" => {
@@ -53,9 +54,31 @@ fn api_schema(args: &[String]) -> std::io::Result<i32> {
     Ok(0)
 }
 
+fn api_describe(args: &[String]) -> std::io::Result<i32> {
+    let descriptor = crate::native_api::descriptor();
+    match args {
+        [] => println!(
+            "contract: {}\nmajor_version: {}\nschema_id: {}\nschema_sha256: {}",
+            descriptor.contract,
+            descriptor.major_version,
+            descriptor.schema_id,
+            descriptor.schema_sha256
+        ),
+        [flag] if flag == "--json" => println!(
+            "{}",
+            serde_json::to_string_pretty(&descriptor).map_err(std::io::Error::other)?
+        ),
+        _ => {
+            eprintln!("usage: vqro api describe [--json]");
+            return Ok(2);
+        }
+    }
+    Ok(0)
+}
+
 fn api_snapshot(args: &[String]) -> std::io::Result<i32> {
     if !args.is_empty() {
-        eprintln!("usage: herdr api snapshot");
+        eprintln!("usage: vqro api snapshot");
         return Ok(2);
     }
 
@@ -71,14 +94,14 @@ fn write_schema_file(path: &std::path::Path) -> std::io::Result<()> {
 
 fn schema_summary_text() -> std::io::Result<String> {
     let value: serde_json::Value = serde_json::from_str(API_SCHEMA_JSON)?;
-    let protocol = value
-        .get("protocol")
+    let contract = value
+        .get("contract")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| std::io::Error::other("API schema is missing contract"))?;
+    let major_version = value
+        .get("major_version")
         .and_then(serde_json::Value::as_u64)
-        .ok_or_else(|| std::io::Error::other("API schema is missing protocol"))?;
-    let schema_version = value
-        .get("schema_version")
-        .and_then(serde_json::Value::as_u64)
-        .ok_or_else(|| std::io::Error::other("API schema is missing schema_version"))?;
+        .ok_or_else(|| std::io::Error::other("API schema is missing major_version"))?;
     let mut schemas: Vec<&str> = value
         .get("schemas")
         .and_then(serde_json::Value::as_object)
@@ -89,21 +112,22 @@ fn schema_summary_text() -> std::io::Result<String> {
     schemas.sort();
 
     Ok(format!(
-        "Herdr API schema\nprotocol: {}\nschema_version: {}\nschemas: {}\n\nUse `herdr api schema --json` to print the full schema.\nUse `herdr api schema --output PATH` to write it to a file.\n",
-        protocol,
-        schema_version,
+        "vqro API schema\ncontract: {}\nmajor_version: {}\nschemas: {}\n\nUse `vqro api schema --json` to print the full schema.\nUse `vqro api schema --output PATH` to write it to a file.\n",
+        contract,
+        major_version,
         schemas.join(", ")
     ))
 }
 
 fn print_api_help() {
-    eprintln!("herdr api commands:");
-    eprintln!("  herdr api snapshot");
-    eprintln!("  herdr api schema [--json | --output PATH]");
+    eprintln!("vqro api commands:");
+    eprintln!("  vqro api describe [--json]");
+    eprintln!("  vqro api snapshot");
+    eprintln!("  vqro api schema [--json | --output PATH]");
 }
 
 fn print_api_schema_help() {
-    eprintln!("usage: herdr api schema [--json | --output PATH]");
+    eprintln!("usage: vqro api schema [--json | --output PATH]");
 }
 
 #[cfg(test)]
@@ -111,8 +135,8 @@ mod tests {
     #[test]
     fn schema_summary_text_stays_human_sized() {
         let text = super::schema_summary_text().unwrap();
-        assert!(text.contains("Herdr API schema"));
-        assert!(text.contains("Use `herdr api schema --json`"));
+        assert!(text.contains("vqro API schema"));
+        assert!(text.contains("Use `vqro api schema --json`"));
         assert!(text.len() < 400);
     }
 }

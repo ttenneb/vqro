@@ -1,0 +1,14 @@
+id = "vqro.terminal-inspector"
+name = "vqro Terminal Inspector"
+version = "0.1.0"
+min_herdr_version = "0.8.2"
+description = "Formats process telemetry and agent activity as a declarative inspector."
+platforms = ["linux"]
+
+[[services]]
+id = "telemetry"
+command = ["python3", "service.py"]
+priority = 100
+platforms = ["linux"]
+provides = ["pane_inspector"]
+capabilities = ["view_contribution", "terminal_interrupt"]
