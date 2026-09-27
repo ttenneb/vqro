@@ -2227,12 +2227,12 @@ fn send_legacy_handoff_fd(stream: &UnixStream, fd: std::os::fd::RawFd) {
     message.msg_iov = &mut iov;
     message.msg_iovlen = 1;
     message.msg_control = control.as_mut_ptr().cast();
-    message.msg_controllen = control.len();
+    message.msg_controllen = control.len() as _;
     unsafe {
         let header = libc::CMSG_FIRSTHDR(&message);
         (*header).cmsg_level = libc::SOL_SOCKET;
         (*header).cmsg_type = libc::SCM_RIGHTS;
-        (*header).cmsg_len = libc::CMSG_LEN(std::mem::size_of::<libc::c_int>() as _) as usize;
+        (*header).cmsg_len = libc::CMSG_LEN(std::mem::size_of::<libc::c_int>() as _) as _;
         std::ptr::copy_nonoverlapping(
             (&fd as *const std::os::fd::RawFd).cast::<u8>(),
             libc::CMSG_DATA(header),

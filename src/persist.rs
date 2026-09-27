@@ -14,7 +14,7 @@ mod snapshot;
 
 #[cfg(test)]
 pub use self::io::load;
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(crate) use self::io::publish_handoff_snapshot_to_path;
 #[cfg(unix)]
 pub(crate) use self::io::stage_handoff_snapshot;
@@ -22,6 +22,7 @@ pub use self::io::{clear, clear_history, save};
 pub(crate) use self::io::{
     load_for_startup, load_history_for_startup, StartupHistoryLoad, StartupSessionLoad,
 };
+#[cfg(unix)]
 pub(crate) use self::restore::validate_snapshot_admission;
 #[cfg(unix)]
 pub use self::restore::{handoff_pane_aliases, restore_handoff};
@@ -30,9 +31,10 @@ pub use self::snapshot::{
     capture, capture_history, DirectionSnapshot, LayoutSnapshot, SessionHistorySnapshot,
     SessionSnapshot, TabSnapshot, WorkspaceSnapshot,
 };
+#[cfg(unix)]
+pub(crate) use self::snapshot::{normalize_identity_changes, terminal_id_for_pane_snapshot};
 pub(crate) use self::snapshot::{
-    normalize_identity_changes, parse_snapshot, reserve_empty_collection,
-    terminal_id_for_pane_snapshot, validate_snapshot, LEGACY_SNAPSHOT_WRITER_VERSION,
+    parse_snapshot, reserve_empty_collection, validate_snapshot, LEGACY_SNAPSHOT_WRITER_VERSION,
     SNAPSHOT_VERSION,
 };
 
@@ -78,5 +80,5 @@ pub(crate) fn persist_collections_checkpoint_at(
     let ownership = coordinator::PersistenceOwnership::try_acquire(paths)?;
     coordinator::persist_checkpoint(&ownership, paths, session, extension_state)
 }
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(crate) use self::snapshot::{PaneAgentSessionSnapshot, PaneSnapshot};

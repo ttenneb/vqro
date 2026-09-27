@@ -18,7 +18,9 @@ fn local_directory_uri(path: &str) -> Option<String> {
         return None;
     }
     #[cfg(windows)]
-    let path = path.replace('\\', "/");
+    let normalized = path.replace('\\', "/");
+    #[cfg(windows)]
+    let path = normalized.as_str();
     let encoded = percent_encode_uri_path(path);
     #[cfg(windows)]
     let uri = if encoded.starts_with("//") {
