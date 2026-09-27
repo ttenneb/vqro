@@ -51,15 +51,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - os: ubuntu-latest
-            kind: unix
-            nextest_filter: all()
-          - os: macos-latest
-            kind: unix
-            nextest_filter: not binary(live_handoff)
-          - os: windows-latest
-            kind: windows
+        # Only R1 PR #3 and its first push from frozen master omit paid Windows runners.
+        include: ${{ fromJSON((github.event_name == 'pull_request' && github.event.pull_request.number == 3 || github.event_name == 'push' && github.ref == 'refs/heads/master' && github.event.before == '75c6303e223b3b86193b5f4d1b57e5912ae2af40') && '[{"os":"ubuntu-latest","kind":"unix","nextest_filter":"all()"},{"os":"macos-latest","kind":"unix","nextest_filter":"not binary(live_handoff)"}]' || '[{"os":"ubuntu-latest","kind":"unix","nextest_filter":"all()"},{"os":"macos-latest","kind":"unix","nextest_filter":"not binary(live_handoff)"},{"os":"windows-latest","kind":"windows"}]') }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     steps:
@@ -226,6 +219,7 @@ jobs:
 
   windows-conpty-package:
     name: Windows ConPTY package
+    if: (github.event_name != 'pull_request' || github.event.pull_request.number != 3) && (github.event_name != 'push' || github.ref != 'refs/heads/master' || github.event.before != '75c6303e223b3b86193b5f4d1b57e5912ae2af40')
     runs-on: windows-2022
     timeout-minutes: 25
     steps:
