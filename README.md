@@ -4,6 +4,8 @@
 
 vqro is exploring an open, extensible agentic multiplexer: a terminal-native environment for organizing work among humans, agents, tools, and automation. It is intended to be provider-neutral, independently operable, and not dependent on a proprietary service.
 
+Vqro should do more than host agents: it should help direct work, context, communication, and action among them. Intelligent behavior should be part of the multiplexer's experience, built through replaceable extensions rather than tied to one model or workflow.
+
 ## Principles
 
 - **PTYs are canonical for execution and recovery.** Agents remain real, independently interactive and addressable terminal processes—not reconstructed chats or opaque jobs.

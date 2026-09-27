@@ -17,6 +17,8 @@ A traditional terminal multiplexer routes processes, terminal input, output, and
 - authority to act or delegate; and
 - claims, evidence, and accepted outcomes.
 
+Participants, including the human, may address intent to Vqro rather than only to a particular agent's input. Vqro may help interpret that intent, select relevant context, and direct interactions toward appropriate participants or capabilities. In this and other parts of the experience, the multiplexer can participate in agentic work, not merely host it.
+
 These concerns do not imply that one task model, hierarchy, or coordination policy belongs in the host. PTYs are canonical for execution and recovery, not automatically the source of truth for work, messaging, or authority. These concerns describe the problem space that extensions and users should be able to explore.
 
 ## A useful default, not a final ontology
@@ -49,7 +51,7 @@ Vqro should be local-first, useful without a required cloud or model provider, a
 
 Agents and extensions have different trust boundaries. Sandboxed extension packages should receive explicit host capabilities. A terminal agent is a process the user chose to run and ordinarily has that process's operating-system authority; Vqro should expose its platform-visible activity and delegated authority without claiming containment or complete observation it does not provide.
 
-Model intelligence may improve routing, summarization, or policy, but no particular model should be required for the basic environment. Intelligent layers should consume public state and remain replaceable.
+Model intelligence may improve routing, summarization, or policy, but no particular model should be required for the basic environment. Intelligent layers should consume public state, remain inspectable and replaceable, and act only within explicit user authority. Routing decisions should be recorded, visible, and overridable, with an explicit direct path always available. Sharing context does not itself transfer permission to act.
 
 ## Relationship to terminal backends
 
@@ -66,6 +68,7 @@ This note does not freeze:
 - one hierarchy, autonomy model, or attention policy;
 - a complete UI toolkit or workspace-lens protocol;
 - multi-human collaboration or synchronization semantics;
+- how intent is interpreted, routed, or branched into derived contexts;
 - a required intelligent router or model provider; or
 - the eventual business or governance structure of the ecosystem.
 
