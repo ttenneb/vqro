@@ -173,8 +173,11 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          $exe = Join-Path $PWD "target\debug\herdr.exe"
-          .\scripts\windows_smoke_conpty_path.ps1 -ExePath $exe -Session "ci-windows-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          $exe = Join-Path $PWD "target\debug\vqro.exe"
+          $session = "ci-windows-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          $env:VQRO_SESSION = $session
+          Remove-Item Env:VQRO_SOCKET_PATH, Env:VQRO_CLIENT_SOCKET_PATH -ErrorAction SilentlyContinue
+          .\scripts\windows_smoke_conpty_path.ps1 -ExePath $exe -Session $session
 
   collections-package-conformance:
     name: Collections package conformance
@@ -265,15 +268,15 @@ jobs:
           cache-bin: false
           key: conpty-package-windows-2022
 
-      - name: Build Herdr
+      - name: Build Vqro
         run: cargo build --locked --target x86_64-pc-windows-msvc
 
       - name: Verify invalid bundle is rejected and system override recovers
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          Remove-Item Env:HERDR_SOCKET_PATH, Env:HERDR_CLIENT_SOCKET_PATH -ErrorAction SilentlyContinue
-          $exe = Join-Path $PWD "target\x86_64-pc-windows-msvc\debug\herdr.exe"
+          Remove-Item Env:HERDR_SOCKET_PATH, Env:HERDR_CLIENT_SOCKET_PATH, Env:VQRO_SOCKET_PATH, Env:VQRO_CLIENT_SOCKET_PATH -ErrorAction SilentlyContinue
+          $exe = Join-Path $PWD "target\x86_64-pc-windows-msvc\debug\vqro.exe"
           $bundle = Join-Path (Split-Path -Parent $exe) "conpty"
           New-Item -ItemType Directory -Force -Path (Join-Path $bundle "x64"), (Join-Path $bundle "arm64") | Out-Null
           Set-Content -LiteralPath (Join-Path $bundle "herdr-conpty.json") -Value "{}" -Encoding ascii
@@ -283,9 +286,10 @@ jobs:
           try {
             $rejected = $false
             try {
+              $env:VQRO_SESSION = "ci-conpty-invalid-windows-2022-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
               .\scripts\windows_smoke_conpty_path.ps1 `
                 -ExePath $exe `
-                -Session "ci-conpty-invalid-windows-2022-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+                -Session $env:VQRO_SESSION
             } catch {
               if ($_.Exception.Message -notlike "workspace create failed with exit code*") {
                 throw
@@ -293,13 +297,14 @@ jobs:
               $rejected = $true
             }
             if (-not $rejected) {
-              throw "Herdr accepted a tampered app-local ConPTY bundle"
+              throw "Vqro accepted a tampered app-local ConPTY bundle"
             }
 
             $env:HERDR_WINDOWS_CONPTY = "system"
+            $env:VQRO_SESSION = "ci-conpty-system-windows-2022-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
             .\scripts\windows_smoke_conpty_path.ps1 `
               -ExePath $exe `
-              -Session "ci-conpty-system-windows-2022-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+              -Session $env:VQRO_SESSION
           } finally {
             Remove-Item Env:HERDR_WINDOWS_CONPTY -ErrorAction SilentlyContinue
             Remove-Item -LiteralPath $bundle -Recurse -Force -ErrorAction SilentlyContinue
@@ -310,32 +315,29 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           $package = Join-Path $env:RUNNER_TEMP "Microsoft.Windows.Console.ConPTY.nupkg"
-          $stage = Join-Path $env:RUNNER_TEMP "herdr-windows-x86_64"
+          $stage = Join-Path $env:RUNNER_TEMP "vqro-windows-x86_64"
           New-Item -ItemType Directory -Force -Path artifacts | Out-Null
           .\scripts\package_windows_conpty.ps1 `
-            -HerdrExe target\x86_64-pc-windows-msvc\debug\herdr.exe `
+            -HerdrExe target\x86_64-pc-windows-msvc\debug\vqro.exe `
+            -ExecutableName vqro.exe `
             -PackagePath $package `
             -StageDir $stage `
-            -OutputPath artifacts\herdr-windows-x86_64.zip
-          "HERDR_CONPTY_PACKAGE_DIR=$stage" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+            -OutputPath artifacts\vqro-windows-x86_64.zip
+          "VQRO_CONPTY_PACKAGE_DIR=$stage" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Probe enhanced pane input with bundled ConPTY
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          $exe = Join-Path $env:HERDR_CONPTY_PACKAGE_DIR "herdr.exe"
-          $consoleHost = Join-Path $env:HERDR_CONPTY_PACKAGE_DIR "conpty\x64\OpenConsole.exe"
+          $exe = Join-Path $env:VQRO_CONPTY_PACKAGE_DIR "vqro.exe"
+          $consoleHost = Join-Path $env:VQRO_CONPTY_PACKAGE_DIR "conpty\x64\OpenConsole.exe"
+          $env:VQRO_SESSION = "ci-conpty-bundled-windows-2022-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          Remove-Item Env:VQRO_SOCKET_PATH, Env:VQRO_CLIENT_SOCKET_PATH -ErrorAction SilentlyContinue
           .\scripts\windows_conpty_enhanced_input_probe.ps1 `
             -ExePath $exe `
-            -Session "ci-conpty-bundled-windows-2022-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT" `
+            -Session $env:VQRO_SESSION `
             -ExpectedConsoleHostPath $consoleHost
 
-      - name: Test packaged installer and repair with Windows PowerShell 5.1
-        shell: pwsh
-        run: |
-          & powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
-            .\scripts\windows_install_conpty_package_test.ps1 `
-            -ArchivePath artifacts\herdr-windows-x86_64.zip
-          if ($LASTEXITCODE -ne 0) {
-            throw "Windows PowerShell installer test failed with exit code $LASTEXITCODE"
-          }
+      # The inherited installer/repair test invokes Herdr install paths and
+      # commands, not Vqro's. Keep the invalid-bundle, signed-package and
+      # enhanced-input gates above; add Vqro installer coverage with its design.
