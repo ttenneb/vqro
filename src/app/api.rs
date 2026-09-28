@@ -1121,10 +1121,7 @@ impl App {
             | Method::DelegationDescendants(_)
             | Method::DelegationReparent(_)
             | Method::DelegationReorder(_) => Some("delegation"),
-            Method::AgentList(_)
-            | Method::AgentGet(_)
-            | Method::AgentViewSet(_)
-            | Method::AgentViewClear(_) => Some("agent-status"),
+            Method::AgentViewSet(_) | Method::AgentViewClear(_) => Some("agent-status"),
             _ => None,
         };
         if required_provider.is_some_and(|provider| !self.bundled_extension_enabled(provider, None))

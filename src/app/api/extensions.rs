@@ -3601,7 +3601,7 @@ mod tests {
     }
 
     #[test]
-    fn removed_runtime_extensions_reject_their_public_methods() {
+    fn removed_runtime_extensions_reject_extension_owned_methods() {
         let mut app = test_app();
         for (repository, method) in [
             (
@@ -3610,7 +3610,7 @@ mod tests {
             ),
             (
                 "ttenneb/vqro-extension-agent-status",
-                Method::AgentList(crate::api::schema::EmptyParams::default()),
+                Method::AgentViewClear(crate::api::schema::AgentViewClearParams::default()),
             ),
         ] {
             let removed = app.handle_api_request(Request {
@@ -3632,7 +3632,7 @@ mod tests {
     }
 
     #[test]
-    fn disabling_agent_status_does_not_disable_agent_control_apis() {
+    fn disabling_agent_status_keeps_neutral_agent_facts_and_controls() {
         let mut app = test_app();
         let disabled = app.handle_api_request(Request {
             id: "disable".into(),
@@ -3647,14 +3647,23 @@ mod tests {
             .generation("vqro.agent-status")
             .is_none());
 
-        let response: serde_json::Value = serde_json::from_str(&app.handle_api_request(Request {
-            id: "focus".into(),
-            method: Method::AgentFocus(crate::api::schema::AgentTarget {
+        for method in [
+            Method::AgentList(crate::api::schema::EmptyParams::default()),
+            Method::AgentGet(crate::api::schema::AgentTarget {
                 target: "missing".into(),
             }),
-        }))
-        .unwrap();
-        assert_ne!(response["error"]["code"], "extension_disabled");
+            Method::AgentFocus(crate::api::schema::AgentTarget {
+                target: "missing".into(),
+            }),
+        ] {
+            let response: serde_json::Value =
+                serde_json::from_str(&app.handle_api_request(Request {
+                    id: "neutral-agent-fact".into(),
+                    method,
+                }))
+                .unwrap();
+            assert_ne!(response["error"]["code"], "extension_disabled");
+        }
     }
 
     #[test]
