@@ -9,6 +9,7 @@ test:
     just maintenance-test
     just ui-hot-path-architecture-test
     just integration-assets-test
+    just pi-launch-profile-test
     just docs-contract-test
 
 # Run repository maintenance contract tests
@@ -53,6 +54,11 @@ ci-tests filter='all()':
     just maintenance-test
     just ui-hot-path-architecture-test
     just integration-assets-test
+    just pi-launch-profile-test
+
+# Test the public-CLI Pi launch adapter without starting a server or model.
+pi-launch-profile-test:
+    node --test extensions/pi-launch-profile/launch.test.mjs
 
 # Download the Windows SDK once (requires xwin; prompts for Microsoft's SDK license)
 [unix]
