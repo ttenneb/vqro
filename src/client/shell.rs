@@ -18,6 +18,7 @@ mod endpoint_navigation;
 mod endpoint_notices;
 mod endpoint_sidebar;
 mod endpoints;
+mod extension_context;
 pub(super) use endpoints::*;
 mod extensions;
 mod global_menu;

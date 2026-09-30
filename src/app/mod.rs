@@ -222,9 +222,9 @@ pub struct App {
     pub(crate) host_spaces_last_desired: Option<crate::extension_contract::HostSpacesV1>,
     pub(crate) spaces_candidate_audits: api::spaces_candidate::SpacesCandidateCoordinator,
     pub(crate) host_relationships_last_desired:
-        Option<crate::extension_contract::HostRelationshipsV1>,
+        HashMap<String, crate::extension_contract::HostRelationshipsV1>,
     pub(crate) host_agent_activity_last_desired:
-        Option<crate::extension_contract::HostAgentActivityV1>,
+        HashMap<String, crate::extension_contract::HostAgentActivityV1>,
     pub(crate) host_semantic_retry_epochs: HashMap<String, u64>,
     pub(crate) host_semantic_retry_attempts: HashMap<String, u32>,
     pub(crate) host_semantic_retry_scheduled: std::collections::HashSet<String>,
@@ -1011,8 +1011,8 @@ impl App {
             host_document_retry_attempts: HashMap::new(),
             host_spaces_last_desired: None,
             spaces_candidate_audits: Default::default(),
-            host_relationships_last_desired: None,
-            host_agent_activity_last_desired: None,
+            host_relationships_last_desired: HashMap::new(),
+            host_agent_activity_last_desired: HashMap::new(),
             host_semantic_retry_epochs: HashMap::new(),
             host_semantic_retry_attempts: HashMap::new(),
             host_semantic_retry_scheduled: std::collections::HashSet::new(),

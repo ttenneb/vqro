@@ -32,7 +32,7 @@ Use these lifecycle terms precisely:
 | Runtime | Trusted process protocol 2 | Restricted Wasmtime component using `vqro.service.v1` |
 | Install/update/rollback/remove lifecycle | Production compatibility lifecycle | Production exact-Git package journey; file/link contracts remain lower-level foundations |
 | Runtime instantiation after enable/restart | Production | Production |
-| Host document v1 | Production for admitted protocol-2 providers | Validated cached output for the exact pinned Collections and Spaces authority packages |
+| Host document v1 | Production for admitted protocol-2 providers; trusted non-reserved publishers may request terminal-group, activity or relationship snapshots (see [trusted semantic documents](trusted-semantic-documents-v1.md)) | Validated cached output for the exact pinned Collections and Spaces authority packages |
 | `host.state.v1` lease | Not granted through the package dispatcher | Revocable read-only lease for the exact pinned Collections package during audit and typed action planning; no package write lease |
 | `host.terminals.v1` lease | Not granted through the package dispatcher | Revocable exact-scope read lease for the exact pinned Collections package |
 | Package document invocation and audit | Not part of the legacy surface | Bounded, fenced invocation and semantic audit for exact pinned Collections and Spaces packages |

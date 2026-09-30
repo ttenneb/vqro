@@ -102,19 +102,15 @@ impl App {
             tabs,
             panes: self.collect_panes_for_workspace(None).unwrap_or_default(),
             layouts,
-            agents: if self.disabled_extensions.contains("vqro.agent-status") {
-                Vec::new()
-            } else {
-                self.collect_agent_infos()
-            },
+            // Runtime facts must remain available to any admitted document provider/client;
+            // disabling a presentation extension revokes its document, not these identities.
+            agents: self.collect_agent_infos(),
             collections: if include_structure && self.collections_package_runtime_available() {
                 self.collection_infos(None, None)
             } else {
                 Vec::new()
             },
-            delegations: if include_structure
-                && !self.disabled_extensions.contains("vqro.delegation")
-            {
+            delegations: if include_structure {
                 self.delegation_tree()
             } else {
                 Vec::new()
@@ -275,6 +271,39 @@ mod tests {
         let endpoint_v1_source = app.session_snapshot_v1_compat();
         assert!(endpoint_v1_source.collections.is_empty());
         assert!(endpoint_v1_source.delegations.is_empty());
+    }
+
+    #[test]
+    fn neutral_snapshot_facts_survive_bundled_presentation_disablement() {
+        let mut app = app_with_two_tabs();
+        app.state.ensure_test_terminals();
+        let pane = app.state.workspaces[0].focused_pane_id().unwrap();
+        let terminal_id = app.state.workspaces[0]
+            .pane_state(pane)
+            .unwrap()
+            .attached_terminal_id
+            .clone();
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_detected_state(
+                Some(crate::detect::Agent::Pi),
+                crate::detect::AgentState::Idle,
+            );
+        app.state
+            .delegations
+            .create(Some(pane), None, None)
+            .unwrap();
+        let before = app.session_snapshot();
+        assert!(!before.agents.is_empty());
+        app.disabled_extensions.insert("vqro.agent-status".into());
+        app.disabled_extensions.insert("vqro.delegation".into());
+        let after = app.session_snapshot();
+        assert_eq!(after.agents, before.agents);
+        assert_eq!(after.delegations, before.delegations);
+        // Do not widen the gen-1 base snapshot's optional structure projection.
+        assert!(app.session_snapshot_v1_compat().delegations.is_empty());
     }
 
     #[test]

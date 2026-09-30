@@ -1,0 +1,12 @@
+manifest_version = 1
+id = "example.public-activity"
+name = "Public activity"
+version = "1.0.0"
+min_vqro_version = "0.9.0"
+
+[[services]]
+id = "document"
+command = ["python3", "service.py"]
+document_source = "agent_activity"
+provides = ["host_document"]
+capabilities = ["host_document"]

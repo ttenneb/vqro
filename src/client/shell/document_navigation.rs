@@ -11,7 +11,9 @@ use crate::protocol::endpoint::{
 };
 use crate::protocol::ClientShellSnapshot;
 
+#[cfg(test)]
 const DELEGATION_NAMESPACE: &str = "vqro.delegation";
+#[cfg(test)]
 const AGENT_STATUS_NAMESPACE: &str = "vqro.agent-status";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -65,7 +67,13 @@ pub(super) fn delegation_navigation(
 ) -> Option<DelegationNavigation> {
     #[cfg(test)]
     DELEGATION_NAVIGATION_CALLS.with(|count| count.set(count.get().saturating_add(1)));
-    let document = session_navigation_document(snapshot, projection, DELEGATION_NAMESPACE)?;
+    let document = session_navigation_document(snapshot, projection, |document| {
+        !document.items.is_empty()
+            && document
+                .items
+                .iter()
+                .all(|item| item.id.starts_with("relationship:"))
+    })?;
     let item_indexes = document
         .items
         .iter()
@@ -226,7 +234,16 @@ pub(super) fn agent_navigation(
 ) -> Option<Vec<DocumentedAgent>> {
     #[cfg(test)]
     AGENT_NAVIGATION_CALLS.with(|count| count.set(count.get().saturating_add(1)));
-    let document = session_navigation_document(snapshot, projection, AGENT_STATUS_NAMESPACE)?;
+    let document = session_navigation_document(snapshot, projection, |document| {
+        document
+            .items
+            .iter()
+            .all(|item| matches!(item.role, HostItemRole::Group | HostItemRole::Terminal))
+            && document
+                .items
+                .iter()
+                .any(|item| item.role == HostItemRole::Group)
+    })?;
     let agents = snapshot
         .agents
         .iter()
@@ -339,22 +356,29 @@ pub(super) fn agent_navigation(
 fn session_navigation_document<'a>(
     snapshot: &ClientShellSnapshot,
     projection: Option<&'a HostDocumentsProjectionV1>,
-    namespace: &str,
+    matches_shape: impl Fn(&crate::extension_contract::HostDocumentV1) -> bool,
 ) -> Option<&'a crate::extension_contract::HostDocumentV1> {
     let projection = projection.filter(|projection| {
         projection.boot_id == snapshot.boot_id && projection.revision == snapshot.revision
     })?;
-    let mut entries = projection.documents.iter().filter(|entry| {
-        entry.document.namespace == namespace
-            && entry.document.surface == HostSurface::Navigation
-            && entry.document.target == HostTarget::Session
-    });
-    let HostDocumentProjectionEntryV1 { document, .. } = entries.next()?;
-    if entries.next().is_some() {
-        return None;
-    }
-    // Endpoint projections are fully validated once at the client cache boundary. Render paths
-    // perform only the authoritative snapshot join, avoiding repeated hierarchy validation.
+    // Any admitted trusted namespace may project navigation. Select by bounded shape and
+    // host-assigned priority, not namespace privilege; the caller then requires complete
+    // identity joins. Invalid winning output fails closed rather than partially blending it.
+    let HostDocumentProjectionEntryV1 { document, .. } = projection
+        .documents
+        .iter()
+        .filter(|entry| {
+            entry.document.surface == HostSurface::Navigation
+                && entry.document.target == HostTarget::Session
+                && matches_shape(&entry.document)
+        })
+        .min_by(|left, right| {
+            right
+                .provider_priority
+                .cmp(&left.provider_priority)
+                .then_with(|| left.document.namespace.cmp(&right.document.namespace))
+        })?;
+    // Endpoint projections are validated once at the client cache boundary.
     Some(document)
 }
 
@@ -556,6 +580,18 @@ mod tests {
         assert_eq!(rows[1].group_label, "Working now");
         assert_eq!(snapshot.agents[0].agent_status, AgentStatus::Done);
         assert_eq!(snapshot.agents[1].agent_status, AgentStatus::Working);
+        let mut external = projection.clone();
+        external.documents[0].document.namespace = "example.pi-status".into();
+        assert_eq!(
+            agent_navigation(&snapshot, Some(&external)),
+            Some(rows.clone())
+        );
+        let mut competitors = external.clone();
+        let mut lower = projection.documents[0].clone();
+        lower.provider_priority = external.documents[0].provider_priority - 1;
+        lower.document.items[1].label = "Lower priority".into();
+        competitors.documents.push(lower);
+        assert_eq!(agent_navigation(&snapshot, Some(&competitors)), Some(rows));
 
         let mut unacknowledged = snapshot.clone();
         unacknowledged.agents[0].agent_status = AgentStatus::Idle;
@@ -577,6 +613,51 @@ mod tests {
         )
         .unwrap();
         assert!(row.group_label.is_none());
+    }
+
+    #[test]
+    #[ignore = "supporting local performance evidence, not a CI timing gate"]
+    fn public_document_navigation_render_scale_profile() {
+        for panes in [1, 15] {
+            for providers in [1, 15] {
+                let mut snapshot = snapshot();
+                let template = snapshot.panes[0].clone();
+                snapshot.panes.clear();
+                snapshot.agents.clear();
+                let mut items = vec![group("activity:idle", "Idle")];
+                for index in 0..panes {
+                    let pane_id = format!("pane_{index}");
+                    let mut pane = template.clone();
+                    pane.pane_id = pane_id.clone();
+                    snapshot.panes.push(pane);
+                    snapshot.agents.push(agent(&pane_id, AgentStatus::Idle));
+                    items.push(terminal_item(
+                        &format!("terminal:t{index}"),
+                        &pane_id,
+                        "Pi role requested",
+                        Some("activity:idle"),
+                        false,
+                    ));
+                }
+                let mut docs = projection("example.public-0", items);
+                let template = docs.documents[0].clone();
+                for index in 1..providers {
+                    let mut entry = template.clone();
+                    entry.document.namespace = format!("example.public-{index}");
+                    docs.documents.push(entry);
+                }
+                let mut samples = Vec::new();
+                for _ in 0..200 {
+                    let start = std::time::Instant::now();
+                    let result =
+                        std::hint::black_box(agent_navigation(&snapshot, Some(&docs))).unwrap();
+                    samples.push(start.elapsed().as_nanos());
+                    assert_eq!(result.len(), panes);
+                }
+                samples.sort_unstable();
+                eprintln!("public_document_navigation panes={panes} providers={providers} median_ns={} p95_ns={}", samples[100], samples[190]);
+            }
+        }
     }
 
     #[test]
@@ -627,6 +708,12 @@ mod tests {
         assert_eq!(child.depth, 1);
         assert_eq!(child.parent_pane_id, None);
         assert!(navigation.for_pane("pane_2").is_none());
+        let mut external = projection.clone();
+        external.documents[0].document.namespace = "example.public-relationships".into();
+        assert_eq!(
+            delegation_navigation(&snapshot, &structure, Some(&external)),
+            Some(navigation)
+        );
 
         let mut missing = projection;
         missing.documents[0].document.items[1].terminal = None;

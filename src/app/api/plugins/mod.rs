@@ -107,12 +107,9 @@ impl App {
         self.host_document_retry_order.clear();
         self.host_document_retry_scheduled.clear();
         self.host_document_retry_attempts.clear();
-        self.host_relationships_last_desired = None;
-        self.host_agent_activity_last_desired = None;
-        for namespace in [
-            crate::first_party::delegation::NAMESPACE,
-            crate::first_party::agent_status::NAMESPACE,
-        ] {
+        self.host_relationships_last_desired.clear();
+        self.host_agent_activity_last_desired.clear();
+        for namespace in self.host_document_services.namespaces() {
             let epoch = self
                 .host_semantic_retry_epochs
                 .entry(namespace.into())

@@ -282,16 +282,6 @@ pub(crate) fn load_plugin_manifest(
             format!("plugin namespace {plugin_id} is reserved by the host"),
         ));
     }
-    if services
-        .iter()
-        .any(|service| service.document_source != HostDocumentSourceKind::TerminalGroups)
-    {
-        return Err((
-            "restricted_host_document_source",
-            "host-derived document sources are restricted to their bundled first-party providers"
-                .to_string(),
-        ));
-    }
     let mut actions = manifest_source
         .actions
         .into_iter()
@@ -445,6 +435,12 @@ fn normalize_manifest_service(
         return Err((
             "invalid_host_document_source",
             "unknown host document source".to_string(),
+        ));
+    }
+    if service.document_source == HostDocumentSourceKind::Spaces {
+        return Err((
+            "restricted_host_document_source",
+            "Spaces document authority belongs to its pinned component package".to_string(),
         ));
     }
     if service.document_source != HostDocumentSourceKind::TerminalGroups
@@ -924,6 +920,33 @@ mod contract_tests {
             let error =
                 load_plugin_manifest(root.join(fixture).to_str().unwrap(), false).unwrap_err();
             assert_eq!(error.0, code, "fixture {fixture}");
+        }
+    }
+
+    #[test]
+    fn trusted_non_bundled_services_may_request_neutral_document_sources() {
+        let root =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/extensions");
+        for (fixture, source) in [
+            (
+                "valid-public-activity",
+                HostDocumentSourceKind::AgentActivity,
+            ),
+            (
+                "valid-public-relationships",
+                HostDocumentSourceKind::Relationships,
+            ),
+        ] {
+            let installed =
+                load_plugin_manifest(root.join(fixture).to_str().unwrap(), true).unwrap();
+            assert!(installed.enabled);
+            assert!(installed.plugin_id.starts_with("example.public-"));
+            let service = &installed.services[0];
+            assert_eq!(service.document_source, source);
+            assert_eq!(
+                service.granted_capabilities,
+                vec![ExtensionServiceCapability::HostDocument]
+            );
         }
     }
 
