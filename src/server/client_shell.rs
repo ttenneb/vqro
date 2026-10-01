@@ -178,7 +178,6 @@ pub(super) fn structure_projection(
     let delegations = app
         .delegation_tree()
         .into_iter()
-        .filter(|_| app.bundled_extension_enabled("delegation", None))
         .map(|entry| protocol::endpoint::ClientShellDelegation {
             delegation_id: entry.delegation.delegation_id,
             pane_id: entry.delegation.pane_id,
@@ -228,7 +227,6 @@ pub(super) fn snapshot(
             app.public_pane_id(workspace_index, pane_id)
         })
         .or_else(|| snapshot.focused_pane_id.clone());
-    let agent_status_enabled = app.bundled_extension_enabled("agent-status", None);
     let workspaces = snapshot
         .workspaces
         .into_iter()
@@ -268,11 +266,7 @@ pub(super) fn snapshot(
                         label: worktree.repo_name,
                         is_linked_worktree: worktree.is_linked_worktree,
                     }),
-                agent_status: if agent_status_enabled {
-                    workspace.agent_status
-                } else {
-                    crate::api::schema::AgentStatus::Unknown
-                },
+                agent_status: workspace.agent_status,
             }
         })
         .collect();
@@ -295,11 +289,7 @@ pub(super) fn snapshot(
                 label: tab.label,
                 custom_label: !state.is_auto_named(),
                 zoomed: state.zoomed,
-                agent_status: if agent_status_enabled {
-                    tab.agent_status
-                } else {
-                    crate::api::schema::AgentStatus::Unknown
-                },
+                agent_status: tab.agent_status,
             }
         })
         .collect();
@@ -333,7 +323,6 @@ pub(super) fn snapshot(
     let agents = snapshot
         .agents
         .into_iter()
-        .filter(|_| agent_status_enabled)
         .map(|agent| {
             let pane_id = agent.pane_id;
             let focused = focused_pane_id.as_deref() == Some(pane_id.as_str());
@@ -1087,6 +1076,46 @@ mod tests {
         assert!(structure.collections.is_empty());
         let generic = app.session_snapshot_v1_compat();
         assert_eq!(generic.layouts[0].panes.len(), 2);
+    }
+
+    #[test]
+    fn client_runtime_facts_do_not_depend_on_bundled_document_providers() {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = crate::app::App::new(
+            &crate::config::Config::default(),
+            crate::app::AppPolicy::TEST,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        app.state.workspaces = vec![crate::workspace::Workspace::test_new("neutral-facts")];
+        app.state.active = Some(0);
+        app.state.ensure_test_terminals();
+        let pane = app.state.workspaces[0].focused_pane_id().unwrap();
+        let terminal = app.state.workspaces[0]
+            .pane_state(pane)
+            .unwrap()
+            .attached_terminal_id
+            .clone();
+        app.state
+            .terminals
+            .get_mut(&terminal)
+            .unwrap()
+            .set_detected_state(
+                Some(crate::detect::Agent::Pi),
+                crate::detect::AgentState::Working,
+            );
+        app.state
+            .delegations
+            .create(Some(pane), None, None)
+            .unwrap();
+        let before = snapshot(&app, "boot", 1, None, None);
+        let structure_before = structure_projection(&app, "boot", 1);
+        assert_eq!(before.agents.len(), 1);
+        app.disabled_extensions.insert("vqro.agent-status".into());
+        app.disabled_extensions.insert("vqro.delegation".into());
+        assert_eq!(snapshot(&app, "boot", 1, None, None), before);
+        assert_eq!(structure_projection(&app, "boot", 1), structure_before);
     }
 
     #[test]

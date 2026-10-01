@@ -604,14 +604,35 @@ impl App {
     }
 
     pub(crate) fn refresh_relationships_document(&mut self) {
-        let namespace = crate::first_party::delegation::NAMESPACE;
+        let namespaces = self.semantic_document_namespaces(
+            crate::api::schema::HostDocumentSourceKind::Relationships,
+        );
+        self.host_relationships_last_desired
+            .retain(|namespace, _| namespaces.contains(namespace));
+        for namespace in namespaces {
+            self.refresh_relationships_document_for_namespace(&namespace);
+        }
+    }
+
+    fn semantic_document_namespaces(
+        &self,
+        source: crate::api::schema::HostDocumentSourceKind,
+    ) -> Vec<String> {
+        self.host_document_services
+            .namespaces()
+            .filter(|namespace| self.host_document_services.source(namespace) == Some(source))
+            .map(str::to_owned)
+            .collect()
+    }
+
+    fn refresh_relationships_document_for_namespace(&mut self, namespace: &str) {
         let scope_id = crate::spaces_extension_contract::SPACES_SCOPE_ID.to_string();
         let Some(generation) = self.host_document_services.generation(namespace) else {
             self.host_document_caches
                 .remove(&(namespace.into(), scope_id.clone()));
             self.host_document_request_watermarks
                 .remove(&(namespace.into(), scope_id));
-            self.host_relationships_last_desired = None;
+            self.host_relationships_last_desired.remove(namespace);
             return;
         };
         let relationships = self
@@ -629,7 +650,7 @@ impl App {
                 }
                 crate::extension_contract::HostRelationship {
                     relationship_id: record.id.to_string(),
-                    kind: namespace.into(),
+                    kind: crate::first_party::delegation::NAMESPACE.into(),
                     terminal: record
                         .pane_id
                         .and_then(|pane_id| self.host_terminal_ref_for_pane(pane_id)),
@@ -658,12 +679,12 @@ impl App {
             self.host_document_caches.remove(&key);
             self.host_document_request_watermarks.remove(&key);
             self.host_document_retry_snapshots.remove(&key);
-            self.host_relationships_last_desired = None;
+            self.host_relationships_last_desired.remove(namespace);
             return;
         }
         if self
             .host_relationships_last_desired
-            .as_ref()
+            .get(namespace)
             .is_some_and(|previous| {
                 let mut normalized = previous.clone();
                 normalized.revision = 1;
@@ -673,7 +694,8 @@ impl App {
             return;
         }
         snapshot.revision = self.next_host_relationships_document_revision();
-        self.host_relationships_last_desired = Some(snapshot.clone());
+        self.host_relationships_last_desired
+            .insert(namespace.to_owned(), snapshot.clone());
         self.host_document_request_watermarks
             .insert(key.clone(), (generation, snapshot.revision));
         self.disable_host_document_projection(&key, generation, snapshot.revision);
@@ -692,7 +714,7 @@ impl App {
                     .insert(key, DeferredHostDocumentSnapshot::Relationships(snapshot));
             }
             Err(error) => {
-                self.host_relationships_last_desired = None;
+                self.host_relationships_last_desired.remove(namespace);
                 self.schedule_host_semantic_retry(namespace);
                 tracing::warn!(%error, "Delegation provider unavailable; using relationship fallback");
             }
@@ -700,14 +722,24 @@ impl App {
     }
 
     pub(crate) fn refresh_agent_activity_document(&mut self) {
-        let namespace = crate::first_party::agent_status::NAMESPACE;
+        let namespaces = self.semantic_document_namespaces(
+            crate::api::schema::HostDocumentSourceKind::AgentActivity,
+        );
+        self.host_agent_activity_last_desired
+            .retain(|namespace, _| namespaces.contains(namespace));
+        for namespace in namespaces {
+            self.refresh_agent_activity_document_for_namespace(&namespace);
+        }
+    }
+
+    fn refresh_agent_activity_document_for_namespace(&mut self, namespace: &str) {
         let scope_id = crate::spaces_extension_contract::SPACES_SCOPE_ID.to_string();
         let Some(generation) = self.host_document_services.generation(namespace) else {
             self.host_document_caches
                 .remove(&(namespace.into(), scope_id.clone()));
             self.host_document_request_watermarks
                 .remove(&(namespace.into(), scope_id));
-            self.host_agent_activity_last_desired = None;
+            self.host_agent_activity_last_desired.remove(namespace);
             return;
         };
         let mut seen = std::collections::HashSet::new();
@@ -729,7 +761,8 @@ impl App {
                         continue;
                     };
                     let (source, evidence_kind) = terminal.effective_evidence_attribution();
-                    let effective_display_agent = terminal.effective_presentation().display_agent;
+                    let presentation = terminal.effective_presentation();
+                    let effective_display_agent = presentation.display_agent;
                     let activity = match terminal.state {
                         crate::detect::AgentState::Idle => {
                             crate::extension_contract::HostAgentActivityState::Idle
@@ -744,21 +777,29 @@ impl App {
                             crate::extension_contract::HostAgentActivityState::Unknown
                         }
                     };
+                    let mut labels = std::collections::BTreeMap::from([
+                        ("agent".into(), bounded_document_text(agent_label)),
+                        (
+                            "display".into(),
+                            bounded_document_text(
+                                effective_display_agent.as_deref().unwrap_or(agent_label),
+                            ),
+                        ),
+                    ]);
+                    // Copy existing neutral display-only metadata, not role policy. The fixed
+                    // key set keeps source snapshots bounded even for arbitrary metadata input.
+                    for state in ["idle", "working", "blocked", "unknown"] {
+                        if let Some(label) = presentation.state_labels.get(state) {
+                            labels.insert(format!("state_{state}"), bounded_document_text(label));
+                        }
+                    }
                     activities.push(crate::extension_contract::HostAgentActivityRecord {
                         terminal: terminal_ref,
                         activity,
                         source: bounded_document_text(source),
                         evidence_kind: evidence_kind.into(),
                         state_change_seq: terminal.last_agent_state_change_seq.unwrap_or(0),
-                        labels: std::collections::BTreeMap::from([
-                            ("agent".into(), bounded_document_text(agent_label)),
-                            (
-                                "display".into(),
-                                bounded_document_text(
-                                    effective_display_agent.as_deref().unwrap_or(agent_label),
-                                ),
-                            ),
-                        ]),
+                        labels,
                     });
                 }
             }
@@ -775,12 +816,12 @@ impl App {
             self.host_document_caches.remove(&key);
             self.host_document_request_watermarks.remove(&key);
             self.host_document_retry_snapshots.remove(&key);
-            self.host_agent_activity_last_desired = None;
+            self.host_agent_activity_last_desired.remove(namespace);
             return;
         }
         if self
             .host_agent_activity_last_desired
-            .as_ref()
+            .get(namespace)
             .is_some_and(|previous| {
                 let mut normalized = previous.clone();
                 normalized.revision = 1;
@@ -790,7 +831,8 @@ impl App {
             return;
         }
         snapshot.revision = self.next_host_agent_activity_document_revision();
-        self.host_agent_activity_last_desired = Some(snapshot.clone());
+        self.host_agent_activity_last_desired
+            .insert(namespace.to_owned(), snapshot.clone());
         self.host_document_request_watermarks
             .insert(key.clone(), (generation, snapshot.revision));
         self.disable_host_document_projection(&key, generation, snapshot.revision);
@@ -809,7 +851,7 @@ impl App {
                     .insert(key, DeferredHostDocumentSnapshot::AgentActivity(snapshot));
             }
             Err(error) => {
-                self.host_agent_activity_last_desired = None;
+                self.host_agent_activity_last_desired.remove(namespace);
                 self.schedule_host_semantic_retry(namespace);
                 tracing::warn!(%error, "Agent Status provider unavailable; using native fallback");
             }
@@ -882,23 +924,41 @@ impl App {
                     *watermark == (result.snapshot.generation, result.snapshot.revision)
                 });
         if current {
-            match result.result {
-                Ok(document) => {
-                    self.complete_host_semantic_retry(&result.namespace);
-                    let _ = self
-                        .host_document_caches
-                        .entry(key)
-                        .or_default()
-                        .publish_for_namespace(
-                            &result.namespace,
-                            result.snapshot.generation,
-                            result.provider_priority,
-                            &result.grants,
-                            document,
-                        );
+            let publication = result.result.and_then(|document| {
+                if document.revision != result.snapshot.revision
+                    || document.target != crate::extension_contract::HostTarget::Session
+                    || !document.items.iter().all(|item| {
+                        item.id.starts_with("relationship:")
+                            && matches!(
+                                item.role,
+                                crate::extension_contract::HostItemRole::Terminal
+                                    | crate::extension_contract::HostItemRole::Section
+                            )
+                    })
+                {
+                    return Err(
+                        "relationship document does not match its admitted source or revision"
+                            .into(),
+                    );
                 }
+                self.host_document_caches
+                    .entry(key)
+                    .or_default()
+                    .publish_for_namespace(
+                        &result.namespace,
+                        result.snapshot.generation,
+                        result.provider_priority,
+                        &result.grants,
+                        document,
+                    )
+                    .map(|_| ())
+                    .map_err(|error| error.to_string())
+            });
+            match publication {
+                Ok(()) => self.complete_host_semantic_retry(&result.namespace),
                 Err(error) => {
-                    self.host_relationships_last_desired = None;
+                    self.host_relationships_last_desired
+                        .remove(&result.namespace);
                     self.schedule_host_semantic_retry(&result.namespace);
                     tracing::warn!(%error, "Delegation document render failed; using relationship fallback");
                 }
@@ -947,23 +1007,42 @@ impl App {
                     *watermark == (result.snapshot.generation, result.snapshot.revision)
                 });
         if current {
-            match result.result {
-                Ok(document) => {
-                    self.complete_host_semantic_retry(&result.namespace);
-                    let _ = self
-                        .host_document_caches
-                        .entry(key)
-                        .or_default()
-                        .publish_for_namespace(
-                            &result.namespace,
-                            result.snapshot.generation,
-                            result.provider_priority,
-                            &result.grants,
-                            document,
-                        );
+            let publication = result.result.and_then(|document| {
+                if document.revision != result.snapshot.revision
+                    || document.target != crate::extension_contract::HostTarget::Session
+                    || !document.items.iter().all(|item| match item.role {
+                        crate::extension_contract::HostItemRole::Group => {
+                            item.id.starts_with("activity:")
+                        }
+                        crate::extension_contract::HostItemRole::Terminal => {
+                            !item.id.starts_with("relationship:")
+                                && !item.id.starts_with("context:")
+                        }
+                        _ => false,
+                    })
+                {
+                    return Err(
+                        "activity document does not match its admitted source or revision".into(),
+                    );
                 }
+                self.host_document_caches
+                    .entry(key)
+                    .or_default()
+                    .publish_for_namespace(
+                        &result.namespace,
+                        result.snapshot.generation,
+                        result.provider_priority,
+                        &result.grants,
+                        document,
+                    )
+                    .map(|_| ())
+                    .map_err(|error| error.to_string())
+            });
+            match publication {
+                Ok(()) => self.complete_host_semantic_retry(&result.namespace),
                 Err(error) => {
-                    self.host_agent_activity_last_desired = None;
+                    self.host_agent_activity_last_desired
+                        .remove(&result.namespace);
                     self.schedule_host_semantic_retry(&result.namespace);
                     tracing::warn!(%error, "Agent Status document render failed; using native fallback");
                 }
@@ -2906,7 +2985,7 @@ mod tests {
                 crate::api::schema::HostDocumentSourceKind::Relationships,
             );
         app.refresh_relationships_document();
-        let snapshot = app.host_relationships_last_desired.as_ref().unwrap();
+        let snapshot = app.host_relationships_last_desired.get(namespace).unwrap();
         let root_record = snapshot
             .relationships
             .iter()
@@ -2947,7 +3026,10 @@ mod tests {
             applies_to_source: None,
             title: None,
             display_agent: Some("Friendly Claude".into()),
-            state_labels: std::collections::HashMap::new(),
+            state_labels: std::collections::HashMap::from([(
+                "idle".into(),
+                "role requested".into(),
+            )]),
             clear_title: false,
             clear_display_agent: false,
             clear_state_labels: false,
@@ -2962,7 +3044,7 @@ mod tests {
                 crate::api::schema::HostDocumentSourceKind::AgentActivity,
             );
         app.refresh_agent_activity_document();
-        let snapshot = app.host_agent_activity_last_desired.as_ref().unwrap();
+        let snapshot = app.host_agent_activity_last_desired.get(namespace).unwrap();
         assert_eq!(snapshot.activities.len(), 1);
         assert_eq!(
             snapshot.activities[0].activity,
@@ -2977,13 +3059,20 @@ mod tests {
             Some("Friendly Claude")
         );
         assert_eq!(snapshot.activities[0].state_change_seq, 17);
+        assert_eq!(
+            snapshot.activities[0]
+                .labels
+                .get("state_idle")
+                .map(String::as_str),
+            Some("role requested")
+        );
         assert!(!serde_json::to_string(snapshot).unwrap().contains("done"));
         let previous_revision = snapshot.revision;
 
         app.sync_agent_metadata_deadline();
         let deadline = app.agent_metadata_deadline.unwrap();
         app.expire_metadata_at(deadline, deadline + std::time::Duration::from_millis(1));
-        let refreshed = app.host_agent_activity_last_desired.as_ref().unwrap();
+        let refreshed = app.host_agent_activity_last_desired.get(namespace).unwrap();
         assert!(refreshed.revision > previous_revision);
         assert_ne!(
             refreshed.activities[0]
@@ -2992,10 +3081,190 @@ mod tests {
                 .map(String::as_str),
             Some("Friendly Claude")
         );
+        assert!(!refreshed.activities[0].labels.contains_key("state_idle"));
+    }
+
+    #[test]
+    fn public_semantic_sources_refresh_each_namespace_without_bundled_providers() {
+        let mut app = app_with_workspace();
+        app.host_document_services = crate::extension_service::HostDocumentServiceCatalog::with_test_saturated_render_providers(&[
+            ("example.activity-a", 7, crate::api::schema::HostDocumentSourceKind::AgentActivity),
+            ("example.activity-b", 8, crate::api::schema::HostDocumentSourceKind::AgentActivity),
+            ("example.relationships", 9, crate::api::schema::HostDocumentSourceKind::Relationships),
+        ]);
+        app.refresh_agent_activity_document();
+        app.refresh_relationships_document();
+        assert_eq!(app.host_agent_activity_last_desired.len(), 2);
+        assert_eq!(app.host_relationships_last_desired.len(), 1);
+        let a = app.host_agent_activity_last_desired["example.activity-a"].clone();
+        let b = app.host_agent_activity_last_desired["example.activity-b"].clone();
+        assert_eq!(a.generation, 7);
+        assert_eq!(b.generation, 8);
+        assert_eq!(a.activities, b.activities);
+        app.refresh_agent_activity_document();
+        assert_eq!(
+            app.host_agent_activity_last_desired["example.activity-a"],
+            a
+        );
+        assert_eq!(
+            app.host_agent_activity_last_desired["example.activity-b"],
+            b
+        );
+        assert!(app
+            .host_document_retry_snapshots
+            .keys()
+            .all(|(namespace, _)| namespace.starts_with("example.")));
+        // Retire the old test catalog before reserving a replacement's global slots.
+        app.host_document_services =
+            crate::extension_service::HostDocumentServiceCatalog::with_test_providers(&[]);
+        app.host_document_services = crate::extension_service::HostDocumentServiceCatalog::with_test_document_source_provider(
+            "example.activity-b", 18, crate::api::schema::HostDocumentSourceKind::AgentActivity,
+        );
+        app.refresh_agent_activity_document();
+        app.refresh_relationships_document();
+        assert_eq!(app.host_agent_activity_last_desired.len(), 1);
+        assert_eq!(
+            app.host_agent_activity_last_desired["example.activity-b"].generation,
+            18
+        );
+        assert!(app.host_relationships_last_desired.is_empty());
+    }
+
+    #[test]
+    fn external_activity_completion_cannot_revive_a_retired_generation() {
+        let mut app = app_with_workspace();
+        let namespace = "example.external-activity";
+        app.host_document_services = crate::extension_service::HostDocumentServiceCatalog::with_test_document_source_provider(
+            namespace, 31, crate::api::schema::HostDocumentSourceKind::AgentActivity,
+        );
+        app.refresh_agent_activity_document();
+        let old = app.host_agent_activity_last_desired[namespace].clone();
+        let mut document = crate::first_party::agent_status::project(&old).unwrap();
+        document.namespace = namespace.into();
+        app.host_document_services =
+            crate::extension_service::HostDocumentServiceCatalog::with_test_providers(&[]);
+        app.host_document_services = crate::extension_service::HostDocumentServiceCatalog::with_test_document_source_provider(
+            namespace, 32, crate::api::schema::HostDocumentSourceKind::AgentActivity,
+        );
+        app.refresh_agent_activity_document();
+        let current = app.host_agent_activity_last_desired[namespace].clone();
+        app.handle_host_agent_activity_document_result(
+            crate::extension_service::HostAgentActivityDocumentAsyncResult {
+                _render_slot: None,
+                namespace: namespace.into(),
+                provider_priority: 100,
+                snapshot: old,
+                result: Ok(document),
+                grants: std::collections::HashSet::new(),
+            },
+        );
+        assert!(app
+            .host_document_caches
+            .get(&(namespace.into(), current.scope_id.clone()))
+            .and_then(|cache| cache.current())
+            .is_none());
+        assert_eq!(app.host_agent_activity_last_desired[namespace], current);
+        let mut document = crate::first_party::agent_status::project(&current).unwrap();
+        document.namespace = namespace.into();
+        app.handle_host_agent_activity_document_result(
+            crate::extension_service::HostAgentActivityDocumentAsyncResult {
+                _render_slot: None,
+                namespace: namespace.into(),
+                provider_priority: 100,
+                snapshot: current.clone(),
+                result: Ok(document),
+                grants: std::collections::HashSet::new(),
+            },
+        );
+        assert_eq!(
+            app.host_document_caches[&(namespace.into(), current.scope_id)]
+                .current()
+                .unwrap()
+                .generation,
+            32
+        );
+    }
+
+    #[test]
+    fn semantic_cache_publication_rejection_schedules_bounded_retry() {
+        use crate::api::schema::HostDocumentSourceKind;
+        for source in [
+            HostDocumentSourceKind::AgentActivity,
+            HostDocumentSourceKind::Relationships,
+        ] {
+            for invalid_namespace in [true, false] {
+                let mut app = app_with_workspace();
+                let namespace = "example.rejected";
+                app.host_document_services = crate::extension_service::HostDocumentServiceCatalog::with_test_document_source_provider(namespace, 21, source);
+                if source == HostDocumentSourceKind::AgentActivity {
+                    app.refresh_agent_activity_document();
+                    let snapshot = app.host_agent_activity_last_desired[namespace].clone();
+                    let mut document =
+                        crate::first_party::agent_status::project(&snapshot).unwrap();
+                    document.namespace = if invalid_namespace {
+                        "other.provider"
+                    } else {
+                        namespace
+                    }
+                    .into();
+                    if !invalid_namespace {
+                        document
+                            .required_capabilities
+                            .push(crate::extension_contract::HostCapability::FocusTerminal);
+                    }
+                    app.handle_host_agent_activity_document_result(
+                        crate::extension_service::HostAgentActivityDocumentAsyncResult {
+                            _render_slot: None,
+                            namespace: namespace.into(),
+                            provider_priority: 0,
+                            snapshot,
+                            result: Ok(document),
+                            grants: std::collections::HashSet::new(),
+                        },
+                    );
+                    assert!(!app.host_agent_activity_last_desired.contains_key(namespace));
+                } else {
+                    app.refresh_relationships_document();
+                    let snapshot = app.host_relationships_last_desired[namespace].clone();
+                    let mut document = crate::first_party::delegation::project(&snapshot).unwrap();
+                    document.namespace = if invalid_namespace {
+                        "other.provider"
+                    } else {
+                        namespace
+                    }
+                    .into();
+                    if !invalid_namespace {
+                        document
+                            .required_capabilities
+                            .push(crate::extension_contract::HostCapability::FocusTerminal);
+                    }
+                    app.handle_host_relationships_document_result(
+                        crate::extension_service::HostRelationshipsDocumentAsyncResult {
+                            _render_slot: None,
+                            namespace: namespace.into(),
+                            provider_priority: 0,
+                            snapshot,
+                            result: Ok(document),
+                            grants: std::collections::HashSet::new(),
+                        },
+                    );
+                    assert!(!app.host_relationships_last_desired.contains_key(namespace));
+                }
+                assert!(app
+                    .host_document_caches
+                    .values()
+                    .all(|cache| cache.current().is_none()));
+                assert!(app.host_semantic_retry_scheduled.contains(namespace));
+                assert_eq!(app.host_semantic_retry_attempts[namespace], 1);
+                app.schedule_host_semantic_retry(namespace);
+                assert_eq!(app.host_semantic_retry_attempts[namespace], 1);
+            }
+        }
     }
 
     #[test]
     fn hook_state_reports_refresh_agent_activity_documents() {
+        let namespace = crate::first_party::agent_status::NAMESPACE;
         let mut app = app_with_workspace();
         let pane_id = app.state.workspaces[0].focused_pane_id().unwrap();
         app.host_document_services =
@@ -3007,7 +3276,7 @@ mod tests {
         app.refresh_agent_activity_document();
         let previous_revision = app
             .host_agent_activity_last_desired
-            .as_ref()
+            .get(namespace)
             .unwrap()
             .revision;
 
@@ -3021,7 +3290,7 @@ mod tests {
             seq: Some(1),
         });
 
-        let snapshot = app.host_agent_activity_last_desired.as_ref().unwrap();
+        let snapshot = app.host_agent_activity_last_desired.get(namespace).unwrap();
         assert!(snapshot.revision > previous_revision);
         assert_eq!(snapshot.activities.len(), 1);
         assert_eq!(
@@ -3044,7 +3313,7 @@ mod tests {
             app.state.delegations.create(None, None, None).unwrap();
         }
         app.refresh_relationships_document();
-        assert!(app.host_relationships_last_desired.is_none());
+        assert!(app.host_relationships_last_desired.is_empty());
         assert!(!app.host_document_caches.contains_key(&(
             namespace.into(),
             crate::spaces_extension_contract::SPACES_SCOPE_ID.into()

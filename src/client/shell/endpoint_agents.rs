@@ -124,6 +124,10 @@ fn agent_rows(
         .iter()
         .filter_map(|endpoint| {
             endpoint.snapshot.as_deref().map(|snapshot| {
+                let context = super::extension_context::navigation(
+                    snapshot,
+                    endpoint.current_host_documents(),
+                );
                 let documented_by_pane = navigation
                     .get(&endpoint.endpoint_id)
                     .and_then(Option::as_ref)
@@ -139,13 +143,15 @@ fn agent_rows(
                         let documented = documented_by_pane
                             .as_ref()
                             .and_then(|rows| rows.get(agent.pane_id.as_str()).copied());
-                        super::agent_sidebar::agent_row_with_document(
+                        let mut row = super::agent_sidebar::agent_row_with_document(
                             snapshot,
                             &agent.pane_id,
                             config,
                             Some(&endpoint.label),
                             documented,
-                        )
+                        )?;
+                        super::agent_sidebar::append_context(&mut row, context.get(&agent.pane_id));
+                        Some(row)
                     })
                     .map(|agent| ((endpoint.endpoint_id.clone(), agent.pane_id.clone()), agent))
                     .collect::<Vec<_>>()

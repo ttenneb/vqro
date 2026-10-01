@@ -105,8 +105,13 @@ bench-release-smoke:
 docs-contract-test:
     bun test ./scripts/docs
 
+# Test public trusted semantic provider examples without a server or model.
+public-semantic-documents-test:
+    {{python}} extensions/public-facts.test.py
+    bun test extensions/public-activity/pi-role-status.test.ts
+
 # Test bundled agent integration assets
-integration-assets-test:
+integration-assets-test: public-semantic-documents-test
     bun test src/integration/assets/herdr-agent-state.test.ts
     bun test src/integration/assets/opencode/herdr-agent-state.test.ts
     bun test src/integration/assets/opencode/herdr-tui-session.test.ts

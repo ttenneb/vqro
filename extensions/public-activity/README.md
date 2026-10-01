@@ -1,0 +1,13 @@
+# Trusted public activity example
+
+This manifest-v1 same-user executable receives bounded `host.agent-activity.v1` snapshots through the public `vqro.extension-service.v1` pipe and publishes `host.document.v1`. Link/enable grants `host_document` and the selected `document_source`; this is **not an OS sandbox**. It does not read runtime files, private sockets, or network. Any admitted, non-reserved dotted namespace can use the same contract.
+
+With separately approved local runtime effects, `vqro plugin link <absolute-directory>` registers the provider. Disable/unlink retires its cached projection; the host fences late render completions by namespace, scope, generation and revision. The extension owns grouping/order/display labels. The client validates complete joins to its current endpoint snapshot; status authority still comes from runtime evidence, never from labels. Source count, payload, queues and cached documents remain bounded. It is not Todo, mailbox, delegation acceptance, or final role attestation.
+
+## Pi role text observation
+
+Optionally load `pi-role-status.ts` through Pi's native `--extension` option and supply `--vqro-role-text <exact-role-text>` in addition to a normal `--append-system-prompt <text-or-path>` selection. The public Pi extension observes `ctx.getSystemPrompt()` at session start and `event.systemPrompt` at its before-agent-start hook. It displays **role requested** unless the exact bounded expected text occurs once; then displays **role loaded at Pi hook**. No role file is read by this extension and it does not mutate the prompt. Later hooks/providers can still change it; this is **not final provider-visible proof** and does not satisfy P2. The explicitly supplied expected role text may be visible in process arguments: never put secrets in it.
+
+The Pi extension reports only display metadata through public `vqro pane report-metadata`, with source/sequence and a one-hour TTL, and also shows status in Pi's own status area. The host exports the fixed existing idle/working/blocked/unknown display labels into the activity snapshot; `service.py` decides how to display them. When a later observed prompt lacks the text, it returns to requested. It refuses mixed Herdr/Vqro routing and marks a rejected CLI report unavailable. The ordinary Vqro Pi lifecycle integration must still be loaded for session/activity facts. No automatic polling, credential access, model request, or launch occurs here.
+
+Validation: `bun test extensions/public-activity/pi-role-status.test.ts`; provider projection tests in `extensions/public-facts.test.py`. Linux private-root validation is required before claiming installed behavior; Windows provider invocation is unsupported in this example, macOS is untested.

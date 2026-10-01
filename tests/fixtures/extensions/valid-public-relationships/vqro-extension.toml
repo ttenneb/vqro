@@ -1,0 +1,12 @@
+manifest_version = 1
+id = "example.public-relationships"
+name = "Public relationships"
+version = "1.0.0"
+min_vqro_version = "0.9.0"
+
+[[services]]
+id = "document"
+command = ["python3", "service.py"]
+document_source = "relationships"
+provides = ["host_document"]
+capabilities = ["host_document"]

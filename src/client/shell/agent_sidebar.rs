@@ -268,6 +268,7 @@ pub(super) fn agent_rows(
     host_documents: Option<&crate::protocol::endpoint::HostDocumentsProjectionV1>,
 ) -> Vec<AgentRow> {
     let documented = super::document_navigation::agent_navigation(snapshot, host_documents);
+    let context = super::extension_context::navigation(snapshot, host_documents);
     let documented_by_pane = documented.as_ref().map(|rows| {
         rows.iter()
             .map(|row| (row.pane_id.as_str(), row))
@@ -289,7 +290,10 @@ pub(super) fn agent_rows(
             let document_row = documented_by_pane
                 .as_ref()
                 .and_then(|rows| rows.get(pane_id.as_str()).copied());
-            agent_row_with_document(snapshot, &pane_id, config, machine, document_row)
+            let mut row =
+                agent_row_with_document(snapshot, &pane_id, config, machine, document_row)?;
+            append_context(&mut row, context.get(&pane_id));
+            Some(row)
         })
         .collect()
 }
@@ -369,6 +373,17 @@ pub(super) fn agent_row_with_document(
             .map(|row| row.group_label.clone()),
         rows,
     })
+}
+
+pub(super) fn append_context(row: &mut AgentRow, labels: Option<&Vec<String>>) {
+    if let Some(labels) = labels {
+        row.rows.extend(labels.iter().take(3).map(|label| {
+            vec![crate::ui::ResolvedToken {
+                kind: crate::ui::ResolvedTokenKind::Custom(label.clone()),
+                style: crate::config::SidebarTokenStyle::default(),
+            }]
+        }));
+    }
 }
 
 pub(super) fn render_agent_row(

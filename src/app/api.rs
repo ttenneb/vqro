@@ -267,10 +267,14 @@ impl App {
             AppEvent::HostSemanticDocumentRetryDue { namespace, epoch } => {
                 if self.host_semantic_retry_epochs.get(&namespace) == Some(&epoch) {
                     self.host_semantic_retry_scheduled.remove(&namespace);
-                    if namespace == crate::first_party::delegation::NAMESPACE {
-                        self.refresh_relationships_document();
-                    } else if namespace == crate::first_party::agent_status::NAMESPACE {
-                        self.refresh_agent_activity_document();
+                    match self.host_document_services.source(&namespace) {
+                        Some(crate::api::schema::HostDocumentSourceKind::Relationships) => {
+                            self.refresh_relationships_document()
+                        }
+                        Some(crate::api::schema::HostDocumentSourceKind::AgentActivity) => {
+                            self.refresh_agent_activity_document()
+                        }
+                        _ => {}
                     }
                 }
                 return Vec::new();
@@ -1121,10 +1125,7 @@ impl App {
             | Method::DelegationDescendants(_)
             | Method::DelegationReparent(_)
             | Method::DelegationReorder(_) => Some("delegation"),
-            Method::AgentList(_)
-            | Method::AgentGet(_)
-            | Method::AgentViewSet(_)
-            | Method::AgentViewClear(_) => Some("agent-status"),
+            Method::AgentViewSet(_) | Method::AgentViewClear(_) => Some("agent-status"),
             _ => None,
         };
         if required_provider.is_some_and(|provider| !self.bundled_extension_enabled(provider, None))
@@ -2723,7 +2724,7 @@ mod tests {
         app.refresh_agent_activity_document();
         let previous_revision = app
             .host_agent_activity_last_desired
-            .as_ref()
+            .get(crate::first_party::agent_status::NAMESPACE)
             .expect("initial activity snapshot")
             .revision;
 
@@ -2746,7 +2747,7 @@ mod tests {
         assert!(terminal.agent_name.is_none());
         let activity = app
             .host_agent_activity_last_desired
-            .as_ref()
+            .get(crate::first_party::agent_status::NAMESPACE)
             .expect("respawn activity snapshot");
         assert!(activity.revision > previous_revision);
         assert!(activity.activities.iter().all(|record| {
