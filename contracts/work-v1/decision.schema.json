@@ -1,0 +1,58 @@
+{
+ "$schema":"https://json-schema.org/draft/2020-12/schema",
+ "$id":"urn:vqro:decision-contract:v1",
+ "title":"Async decision ABI candidate; work-extension policy, no host task ontology",
+ "oneOf":[{"$ref":"#/$defs/request"},{"$ref":"#/$defs/result"}],
+ "$defs":{
+  "id":{"type":"string","minLength":1,"maxLength":128,"pattern":"^[A-Za-z0-9][A-Za-z0-9._:-]*$"},
+  "revision":{"type":"string","maxLength":20,"pattern":"^(0|[1-9][0-9]*)$"},
+  "digest":{"type":"string","pattern":"^[a-f0-9]{64}$"},
+  "point":{"enum":["recipient.routing","message.triage","task.next","report.acceptance","action.confirmation","turn.output_route"]},
+  "request":{
+   "type":"object","additionalProperties":false,
+   "required":["contract","request_id","point","scope_id","input_revision","input_digest","policy_revision","mode","budget_ms","context","input"],
+   "properties":{"contract":{"const":"vqro.decision.request.v1"},"request_id":{"$ref":"#/$defs/id"},"point":{"$ref":"#/$defs/point"},"scope_id":{"$ref":"#/$defs/id"},"input_revision":{"$ref":"#/$defs/revision"},"input_digest":{"$ref":"#/$defs/digest"},"policy_revision":{"$ref":"#/$defs/revision"},"mode":{"enum":["suggest","auto_apply"]},"budget_ms":{"type":"integer","minimum":1,"maximum":5000},"context":{"$ref":"#/$defs/context"},"input":{"type":"object","description":"Point-specific immutable work data; caller cannot author trusted context."}},
+   "allOf":[
+    {"if":{"properties":{"point":{"const":"recipient.routing"}}},"then":{"properties":{"input":{"$ref":"#/$defs/routingInput"}}}},
+    {"if":{"properties":{"point":{"const":"message.triage"}}},"then":{"properties":{"input":{"type":"object","additionalProperties":false,"required":["entry_id"],"properties":{"entry_id":{"$ref":"#/$defs/id"}}}}}},
+    {"if":{"properties":{"point":{"const":"task.next"}}},"then":{"properties":{"input":{"type":"object","additionalProperties":false,"maxProperties":0}}}},
+    {"if":{"properties":{"point":{"const":"report.acceptance"}}},"then":{"properties":{"input":{"type":"object","additionalProperties":false,"required":["report_entry_id"],"properties":{"report_entry_id":{"$ref":"#/$defs/id"}}}}}},
+    {"if":{"properties":{"point":{"const":"action.confirmation"}}},"then":{"properties":{"input":{"$ref":"#/$defs/confirmationInput"}}}},
+    {"if":{"properties":{"point":{"const":"turn.output_route"}}},"then":{"properties":{"input":{"$ref":"#/$defs/outputInput"}}}}
+   ]
+  },
+  "routingInput":{"type":"object","additionalProperties":false,"required":["recipient_actor_id","recipient_state"],"properties":{"recipient_actor_id":{"oneOf":[{"type":"null"},{"$ref":"#/$defs/id"}]},"recipient_state":{"enum":["available","offline","unknown","retired","unregistered"]}}},
+  "confirmationInput":{"type":"object","additionalProperties":false,"required":["action","task_id","parent_task_id","cross_subtree"],"properties":{"action":{"enum":["work.task.create.v1","work.task.assign.v1","work.entry.post.v1","work.entry.reply.v1","work.report.propose.v1","work.report.accept.v1","work.report.reject.v1","work.resume.v1","work.output.route.v1","work.proposal.confirm.v1","work.decision.override.v1"]},"task_id":{"oneOf":[{"type":"null"},{"$ref":"#/$defs/id"}]},"parent_task_id":{"oneOf":[{"type":"null"},{"$ref":"#/$defs/id"}]},"cross_subtree":{"type":"boolean"}},"description":"cross_subtree and target refs are canonical work-computed, not caller-provided policy hints."},
+  "outputInput":{"type":"object","additionalProperties":false,"required":["run_id","outcome","source","explicit_human_actor_id","explicit_human_available"],"properties":{"run_id":{"$ref":"#/$defs/id"},"outcome":{"enum":["completed","aborted","error"]},"source":{"oneOf":[{"type":"null"},{"$ref":"#/$defs/source"}]},"explicit_human_actor_id":{"oneOf":[{"type":"null"},{"$ref":"#/$defs/id"}]},"explicit_human_available":{"type":"boolean"}}},
+  "source":{"type":"object","additionalProperties":false,"required":["entry_id","entry_version","thread_id","sender_actor_id","recipient_actor_id","run_id"],"properties":{"entry_id":{"$ref":"#/$defs/id"},"entry_version":{"$ref":"#/$defs/revision"},"thread_id":{"$ref":"#/$defs/id"},"sender_actor_id":{"$ref":"#/$defs/id"},"recipient_actor_id":{"$ref":"#/$defs/id"},"run_id":{"$ref":"#/$defs/id"}},"description":"Derived from verified canonical entry + host claim + persisted actor checkpoint. Notification-only agent_settled is insufficient."},
+  "context":{
+   "type":"object","additionalProperties":false,"required":["actor_id","actor_class","execution_current","human_explicit","assigned_roots","tasks","actor_current","human_route"],
+   "properties":{"actor_id":{"$ref":"#/$defs/id"},"actor_class":{"enum":["human","agent","service"]},"execution_current":{"type":"boolean"},"actor_current":{"type":"boolean"},"human_explicit":{"type":"boolean"},"human_route":{"oneOf":[{"type":"null"},{"$ref":"#/$defs/humanRoute"}]},"assigned_roots":{"type":"array","maxItems":256,"uniqueItems":true,"items":{"$ref":"#/$defs/id"}},"tasks":{"type":"array","maxItems":256,"items":{"$ref":"#/$defs/task"}}}
+  },
+  "humanRoute":{"type":"object","additionalProperties":false,"required":["authorization_id","recipient_actor_id","run_id"],"properties":{"authorization_id":{"$ref":"#/$defs/id"},"recipient_actor_id":{"$ref":"#/$defs/id"},"run_id":{"$ref":"#/$defs/id"}},"description":"Work-built canonical human-authored route authorization bound to exact run/current scope, verified immutable host operator attribution. Never an adapter/client flag."},
+  "task":{"type":"object","additionalProperties":false,"required":["id","parent_id","assigned_actor_id","state","assignment_sequence"],"properties":{"id":{"$ref":"#/$defs/id"},"parent_id":{"oneOf":[{"type":"null"},{"$ref":"#/$defs/id"}]},"assigned_actor_id":{"oneOf":[{"type":"null"},{"$ref":"#/$defs/id"}]},"state":{"enum":["active","blocked","reported","accepted","rejected","archived"]},"assignment_sequence":{"$ref":"#/$defs/revision"}}},
+  "result":{
+   "type":"object","additionalProperties":false,
+   "required":["contract","request_id","point","scope_id","input_revision","input_digest","policy_revision","provider_id","provider_version","provider_generation","mode","outcome","proposal","rationale_code","explanation","evidence_ids"],
+   "properties":{"contract":{"const":"vqro.decision.result.v1"},"request_id":{"$ref":"#/$defs/id"},"point":{"$ref":"#/$defs/point"},"scope_id":{"$ref":"#/$defs/id"},"input_revision":{"$ref":"#/$defs/revision"},"input_digest":{"$ref":"#/$defs/digest"},"policy_revision":{"$ref":"#/$defs/revision"},"provider_id":{"$ref":"#/$defs/id"},"provider_version":{"type":"string","maxLength":64},"provider_generation":{"$ref":"#/$defs/revision"},"mode":{"enum":["suggest","auto_apply"]},"outcome":{"enum":["proposal","fallback","unsupported","cancelled"]},"proposal":{"type":"object"},"rationale_code":{"type":"string","maxLength":128},"explanation":{"type":"string","maxLength":1024},"evidence_ids":{"type":"array","maxItems":16,"uniqueItems":true,"items":{"$ref":"#/$defs/id"}}},
+   "allOf":[
+    {"if":{"properties":{"point":{"const":"recipient.routing"}}},"then":{"properties":{"proposal":{"$ref":"#/$defs/routing"}}}},
+    {"if":{"properties":{"point":{"const":"message.triage"}}},"then":{"properties":{"proposal":{"$ref":"#/$defs/triage"}}}},
+    {"if":{"properties":{"point":{"const":"task.next"}}},"then":{"properties":{"proposal":{"$ref":"#/$defs/next"}}}},
+    {"if":{"properties":{"point":{"const":"report.acceptance"}}},"then":{"properties":{"proposal":{"$ref":"#/$defs/acceptance"}}}},
+    {"if":{"properties":{"point":{"const":"action.confirmation"}}},"then":{"properties":{"proposal":{"$ref":"#/$defs/confirmation"}}}},
+    {"if":{"properties":{"point":{"const":"turn.output_route"}}},"then":{"properties":{"proposal":{"$ref":"#/$defs/output"}}}}
+   ]
+  },
+  "routing":{"type":"object","additionalProperties":false,"required":["recipient_actor_id","delivery"],"properties":{"recipient_actor_id":{"oneOf":[{"type":"null"},{"$ref":"#/$defs/id"}]},"delivery":{"const":"queue"}}},
+  "triage":{"type":"object","additionalProperties":false,"required":["priority","disposition"],"properties":{"priority":{"enum":["low","normal","high"]},"disposition":{"const":"queue"}}},
+  "next":{"type":"object","additionalProperties":false,"required":["task_id"],"properties":{"task_id":{"oneOf":[{"type":"null"},{"$ref":"#/$defs/id"}]}}},
+  "acceptance":{"type":"object","additionalProperties":false,"required":["recommendation","report_entry_id"],"properties":{"recommendation":{"enum":["review","accept","reject"]},"report_entry_id":{"$ref":"#/$defs/id"}}},
+  "confirmation":{"type":"object","additionalProperties":false,"required":["authorization"],"properties":{"authorization":{"enum":["auto_apply","suggest_confirm"]}}},
+  "output":{"type":"object","additionalProperties":false,"required":["route","recipient_actor_id","thread_id","source_entry_id","source_entry_version"],"properties":{"route":{"enum":["thread_reply","explicit_human","unrouted"]},"recipient_actor_id":{"oneOf":[{"type":"null"},{"$ref":"#/$defs/id"}]},"thread_id":{"oneOf":[{"type":"null"},{"$ref":"#/$defs/id"}]},"source_entry_id":{"oneOf":[{"type":"null"},{"$ref":"#/$defs/id"}]},"source_entry_version":{"oneOf":[{"type":"null"},{"$ref":"#/$defs/revision"}]}},"allOf":[
+   {"if":{"properties":{"route":{"const":"thread_reply"}}},"then":{"properties":{"recipient_actor_id":{"$ref":"#/$defs/id"},"thread_id":{"$ref":"#/$defs/id"},"source_entry_id":{"$ref":"#/$defs/id"},"source_entry_version":{"$ref":"#/$defs/revision"}}}},
+   {"if":{"properties":{"route":{"const":"explicit_human"}}},"then":{"properties":{"recipient_actor_id":{"$ref":"#/$defs/id"},"thread_id":{"type":"null"},"source_entry_id":{"type":"null"},"source_entry_version":{"type":"null"}}}},
+   {"if":{"properties":{"route":{"const":"unrouted"}}},"then":{"properties":{"recipient_actor_id":{"type":"null"},"thread_id":{"type":"null"},"source_entry_id":{"type":"null"},"source_entry_version":{"type":"null"}}}}
+  ]}
+ }
+}

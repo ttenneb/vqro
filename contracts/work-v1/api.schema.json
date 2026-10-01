@@ -1,0 +1,7302 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:vqro:neutral-method-shapes:v1",
+  "title": "Unavailable candidate new method requests/responses; not gen1 fixture replacement",
+  "description": "Actor/caller/invocation authorization lives in transport, never params. Errors feature-local. Byte/scalar/permission/graph/CAS constraints are normative semantic checks.",
+  "oneOf": [
+    {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/runtime_execution_get_v1_request"
+        },
+        {
+          "$ref": "#/$defs/runtime_operator_begin_v1_request"
+        },
+        {
+          "$ref": "#/$defs/runtime_operator_confirm_v1_request"
+        },
+        {
+          "$ref": "#/$defs/runtime_actor_ticket_v1_request"
+        },
+        {
+          "$ref": "#/$defs/runtime_actor_ticket_take_v1_request"
+        },
+        {
+          "$ref": "#/$defs/runtime_actor_bind_v1_request"
+        },
+        {
+          "$ref": "#/$defs/runtime_actor_credential_recover_v1_request"
+        },
+        {
+          "$ref": "#/$defs/runtime_actor_renew_v1_request"
+        },
+        {
+          "$ref": "#/$defs/runtime_actor_get_v1_request"
+        },
+        {
+          "$ref": "#/$defs/runtime_actor_checkpoint_get_v1_request"
+        },
+        {
+          "$ref": "#/$defs/runtime_actor_checkpoint_put_v1_request"
+        },
+        {
+          "$ref": "#/$defs/extension_interfaces_list_v1_request"
+        },
+        {
+          "$ref": "#/$defs/extension_query_invoke_v1_request"
+        },
+        {
+          "$ref": "#/$defs/extension_action_invoke_v1_request"
+        },
+        {
+          "$ref": "#/$defs/extension_action_receipt_v1_request"
+        },
+        {
+          "$ref": "#/$defs/extension_recovery_invoke_v1_request"
+        },
+        {
+          "$ref": "#/$defs/namespace_journal_read_v1_request"
+        },
+        {
+          "$ref": "#/$defs/namespace_journal_append_v1_request"
+        },
+        {
+          "$ref": "#/$defs/namespace_journal_checkpoint_v1_request"
+        },
+        {
+          "$ref": "#/$defs/namespace_journal_pin_v1_request"
+        },
+        {
+          "$ref": "#/$defs/namespace_journal_archive_v1_request"
+        },
+        {
+          "$ref": "#/$defs/namespace_journal_export_v1_request"
+        },
+        {
+          "$ref": "#/$defs/namespace_journal_reset_v1_request"
+        },
+        {
+          "$ref": "#/$defs/mailbox_enqueue_v1_request"
+        },
+        {
+          "$ref": "#/$defs/mailbox_intent_recover_v1_request"
+        },
+        {
+          "$ref": "#/$defs/mailbox_intent_abandon_v1_request"
+        },
+        {
+          "$ref": "#/$defs/mailbox_list_v1_request"
+        },
+        {
+          "$ref": "#/$defs/mailbox_read_v1_request"
+        },
+        {
+          "$ref": "#/$defs/mailbox_edit_v1_request"
+        },
+        {
+          "$ref": "#/$defs/mailbox_claim_v1_request"
+        },
+        {
+          "$ref": "#/$defs/mailbox_claim_renew_v1_request"
+        },
+        {
+          "$ref": "#/$defs/mailbox_ack_v1_request"
+        },
+        {
+          "$ref": "#/$defs/mailbox_receipt_v1_request"
+        },
+        {
+          "$ref": "#/$defs/mailbox_run_bind_v1_request"
+        },
+        {
+          "$ref": "#/$defs/mailbox_run_start_ack_v1_request"
+        },
+        {
+          "$ref": "#/$defs/mailbox_run_receipt_v1_request"
+        }
+      ]
+    },
+    {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/runtime_execution_get_v1_response"
+        },
+        {
+          "$ref": "#/$defs/runtime_operator_begin_v1_response"
+        },
+        {
+          "$ref": "#/$defs/runtime_operator_confirm_v1_response"
+        },
+        {
+          "$ref": "#/$defs/runtime_actor_ticket_v1_response"
+        },
+        {
+          "$ref": "#/$defs/runtime_actor_ticket_take_v1_response"
+        },
+        {
+          "$ref": "#/$defs/runtime_actor_bind_v1_response"
+        },
+        {
+          "$ref": "#/$defs/runtime_actor_credential_recover_v1_response"
+        },
+        {
+          "$ref": "#/$defs/runtime_actor_renew_v1_response"
+        },
+        {
+          "$ref": "#/$defs/runtime_actor_get_v1_response"
+        },
+        {
+          "$ref": "#/$defs/runtime_actor_checkpoint_get_v1_response"
+        },
+        {
+          "$ref": "#/$defs/runtime_actor_checkpoint_put_v1_response"
+        },
+        {
+          "$ref": "#/$defs/extension_interfaces_list_v1_response"
+        },
+        {
+          "$ref": "#/$defs/extension_query_invoke_v1_response"
+        },
+        {
+          "$ref": "#/$defs/extension_action_invoke_v1_response"
+        },
+        {
+          "$ref": "#/$defs/extension_action_receipt_v1_response"
+        },
+        {
+          "$ref": "#/$defs/extension_recovery_invoke_v1_response"
+        },
+        {
+          "$ref": "#/$defs/namespace_journal_read_v1_response"
+        },
+        {
+          "$ref": "#/$defs/namespace_journal_append_v1_response"
+        },
+        {
+          "$ref": "#/$defs/namespace_journal_checkpoint_v1_response"
+        },
+        {
+          "$ref": "#/$defs/namespace_journal_pin_v1_response"
+        },
+        {
+          "$ref": "#/$defs/namespace_journal_archive_v1_response"
+        },
+        {
+          "$ref": "#/$defs/namespace_journal_export_v1_response"
+        },
+        {
+          "$ref": "#/$defs/namespace_journal_reset_v1_response"
+        },
+        {
+          "$ref": "#/$defs/mailbox_enqueue_v1_response"
+        },
+        {
+          "$ref": "#/$defs/mailbox_intent_recover_v1_response"
+        },
+        {
+          "$ref": "#/$defs/mailbox_intent_abandon_v1_response"
+        },
+        {
+          "$ref": "#/$defs/mailbox_list_v1_response"
+        },
+        {
+          "$ref": "#/$defs/mailbox_read_v1_response"
+        },
+        {
+          "$ref": "#/$defs/mailbox_edit_v1_response"
+        },
+        {
+          "$ref": "#/$defs/mailbox_claim_v1_response"
+        },
+        {
+          "$ref": "#/$defs/mailbox_claim_renew_v1_response"
+        },
+        {
+          "$ref": "#/$defs/mailbox_ack_v1_response"
+        },
+        {
+          "$ref": "#/$defs/mailbox_receipt_v1_response"
+        },
+        {
+          "$ref": "#/$defs/mailbox_run_bind_v1_response"
+        },
+        {
+          "$ref": "#/$defs/mailbox_run_start_ack_v1_response"
+        },
+        {
+          "$ref": "#/$defs/mailbox_run_receipt_v1_response"
+        }
+      ]
+    }
+  ],
+  "$defs": {
+    "id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+    },
+    "namespace": {
+      "type": "string",
+      "maxLength": 128,
+      "pattern": "^[a-z0-9_-]+(?:\\.[a-z0-9_-]+)+$"
+    },
+    "revision": {
+      "type": "string",
+      "maxLength": 20,
+      "pattern": "^(0|[1-9][0-9]*)$"
+    },
+    "digest": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "cursor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "store_id",
+        "store_generation",
+        "sequence",
+        "record_id"
+      ],
+      "properties": {
+        "store_id": {
+          "$ref": "#/$defs/id"
+        },
+        "store_generation": {
+          "$ref": "#/$defs/revision"
+        },
+        "sequence": {
+          "$ref": "#/$defs/revision"
+        },
+        "record_id": {
+          "$ref": "#/$defs/id"
+        }
+      }
+    },
+    "lookupDomain": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "store_id",
+        "store_generation"
+      ],
+      "properties": {
+        "store_id": {
+          "$ref": "#/$defs/id"
+        },
+        "store_generation": {
+          "$ref": "#/$defs/revision"
+        }
+      }
+    },
+    "invoke": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "contract",
+        "namespace",
+        "service_id",
+        "action",
+        "expected_provider_generation",
+        "expected_lookup_domain",
+        "operation_id",
+        "input"
+      ],
+      "properties": {
+        "contract": {
+          "const": "vqro.extension.action.invoke.v1"
+        },
+        "namespace": {
+          "$ref": "#/$defs/namespace"
+        },
+        "service_id": {
+          "$ref": "#/$defs/id"
+        },
+        "action": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "expected_provider_generation": {
+          "$ref": "#/$defs/revision"
+        },
+        "expected_lookup_domain": {
+          "$ref": "#/$defs/lookupDomain"
+        },
+        "operation_id": {
+          "$ref": "#/$defs/id"
+        },
+        "input": {
+          "type": "object"
+        }
+      },
+      "description": "Actor/caller from authenticated transport, never JSON params. Registered action schema validates input; opaque to host. <=64KiB UTF-8 JSON."
+    },
+    "journalAppend": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "contract",
+        "namespace",
+        "store_id",
+        "store_generation",
+        "expected_sequence",
+        "operation_id",
+        "opaque",
+        "deferred_deliveries"
+      ],
+      "properties": {
+        "contract": {
+          "const": "vqro.namespace.journal.append.v1"
+        },
+        "namespace": {
+          "$ref": "#/$defs/namespace"
+        },
+        "store_id": {
+          "$ref": "#/$defs/id"
+        },
+        "store_generation": {
+          "$ref": "#/$defs/revision"
+        },
+        "expected_sequence": {
+          "$ref": "#/$defs/revision"
+        },
+        "operation_id": {
+          "$ref": "#/$defs/id"
+        },
+        "opaque": {
+          "type": "object"
+        },
+        "deferred_deliveries": {
+          "type": "array",
+          "maxItems": 16,
+          "items": {
+            "$ref": "#/$defs/deferred"
+          }
+        }
+      },
+      "description": "Owner invocation lease required. Host atomically stamps immutable attribution, digest, operation receipt and deferred delivery manifest; append defaults pinned. <=64KiB charged payload including manifest."
+    },
+    "deferred": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "delivery_id",
+        "recipient_actor_id",
+        "payload_pointer"
+      ],
+      "properties": {
+        "delivery_id": {
+          "$ref": "#/$defs/id"
+        },
+        "recipient_actor_id": {
+          "$ref": "#/$defs/id"
+        },
+        "payload_pointer": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024,
+          "pattern": "^/"
+        }
+      },
+      "description": "RFC6901 pointer within this append's opaque JSON, must resolve to bounded object. Host computes/stamps digest and original actor under current send grant."
+    },
+    "deliveryIntent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "contract",
+        "namespace",
+        "delivery_id",
+        "recipient_actor_id",
+        "original_actor_id",
+        "original_principal_id",
+        "payload_digest",
+        "mailbox_lookup_domain",
+        "cursor",
+        "manifest_index"
+      ],
+      "properties": {
+        "contract": {
+          "const": "vqro.mailbox.intent.v1"
+        },
+        "namespace": {
+          "$ref": "#/$defs/namespace"
+        },
+        "delivery_id": {
+          "$ref": "#/$defs/id"
+        },
+        "recipient_actor_id": {
+          "$ref": "#/$defs/id"
+        },
+        "original_actor_id": {
+          "$ref": "#/$defs/id"
+        },
+        "original_principal_id": {
+          "$ref": "#/$defs/id"
+        },
+        "payload_digest": {
+          "$ref": "#/$defs/digest"
+        },
+        "mailbox_lookup_domain": {
+          "$ref": "#/$defs/lookupDomain"
+        },
+        "cursor": {
+          "$ref": "#/$defs/cursor"
+        },
+        "manifest_index": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 15
+        }
+      },
+      "description": "Host-produced immutable evidence. Recovery accepts cursor/index only, never caller replacement sender/body/digest."
+    },
+    "mailboxEnvelope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "contract",
+        "namespace",
+        "lookup_domain",
+        "delivery_id",
+        "sender_actor_id",
+        "recipient_actor_id",
+        "original_principal_id",
+        "recovery_principal_id",
+        "version",
+        "state",
+        "payload",
+        "payload_digest",
+        "intent"
+      ],
+      "properties": {
+        "contract": {
+          "const": "vqro.mailbox.envelope.v1"
+        },
+        "namespace": {
+          "$ref": "#/$defs/namespace"
+        },
+        "lookup_domain": {
+          "$ref": "#/$defs/lookupDomain"
+        },
+        "delivery_id": {
+          "$ref": "#/$defs/id"
+        },
+        "sender_actor_id": {
+          "$ref": "#/$defs/id"
+        },
+        "recipient_actor_id": {
+          "$ref": "#/$defs/id"
+        },
+        "original_principal_id": {
+          "$ref": "#/$defs/id"
+        },
+        "recovery_principal_id": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/id"
+            }
+          ]
+        },
+        "version": {
+          "$ref": "#/$defs/revision"
+        },
+        "state": {
+          "enum": [
+            "waiting",
+            "held_offline",
+            "held_unknown",
+            "claimed",
+            "consumed",
+            "cancelled",
+            "recipient_retired",
+            "repair_required"
+          ]
+        },
+        "payload": {
+          "type": "object"
+        },
+        "payload_digest": {
+          "$ref": "#/$defs/digest"
+        },
+        "intent": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/deliveryIntent"
+            }
+          ]
+        }
+      },
+      "description": "Opaque payload; host never treats consumed as task acceptance. Registered offline/unknown addresses may queue held without wake; retired cannot newly enqueue."
+    },
+    "claim": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "contract",
+        "namespace",
+        "lookup_domain",
+        "delivery_id",
+        "version",
+        "claim_id",
+        "actor_id",
+        "execution_id",
+        "execution_epoch",
+        "lease_ms"
+      ],
+      "properties": {
+        "contract": {
+          "const": "vqro.mailbox.claim.v1"
+        },
+        "namespace": {
+          "$ref": "#/$defs/namespace"
+        },
+        "lookup_domain": {
+          "$ref": "#/$defs/lookupDomain"
+        },
+        "delivery_id": {
+          "$ref": "#/$defs/id"
+        },
+        "version": {
+          "$ref": "#/$defs/revision"
+        },
+        "claim_id": {
+          "$ref": "#/$defs/id"
+        },
+        "actor_id": {
+          "$ref": "#/$defs/id"
+        },
+        "execution_id": {
+          "$ref": "#/$defs/id"
+        },
+        "execution_epoch": {
+          "$ref": "#/$defs/revision"
+        },
+        "lease_ms": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 30000
+        }
+      },
+      "description": "Atomic waiting-version CAS and exact recipient execution; expiry is not run failure or permission for automatic replay. Human read never starts Pi run."
+    },
+    "executionRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "execution_id",
+        "epoch"
+      ],
+      "properties": {
+        "execution_id": {
+          "$ref": "#/$defs/id"
+        },
+        "epoch": {
+          "$ref": "#/$defs/revision"
+        }
+      }
+    },
+    "actionLookup": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/admission"
+        },
+        {
+          "oneOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "state",
+                "lookup_key",
+                "lookup_domain",
+                "assurance"
+              ],
+              "properties": {
+                "state": {
+                  "const": "absent"
+                },
+                "lookup_key": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "namespace",
+                    "original_actor_id",
+                    "operation_id"
+                  ],
+                  "properties": {
+                    "namespace": {
+                      "$ref": "#/$defs/namespace"
+                    },
+                    "original_actor_id": {
+                      "$ref": "#/$defs/id"
+                    },
+                    "operation_id": {
+                      "$ref": "#/$defs/id"
+                    }
+                  }
+                },
+                "lookup_domain": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "store_id",
+                    "store_generation"
+                  ],
+                  "properties": {
+                    "store_id": {
+                      "$ref": "#/$defs/id"
+                    },
+                    "store_generation": {
+                      "$ref": "#/$defs/revision"
+                    }
+                  }
+                },
+                "assurance": {
+                  "const": "authoritative_absent"
+                }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "state",
+                "lookup_key",
+                "lookup_domain",
+                "assurance"
+              ],
+              "properties": {
+                "state": {
+                  "enum": [
+                    "unknown",
+                    "retired",
+                    "repair_required"
+                  ]
+                },
+                "lookup_key": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "namespace",
+                    "original_actor_id",
+                    "operation_id"
+                  ],
+                  "properties": {
+                    "namespace": {
+                      "$ref": "#/$defs/namespace"
+                    },
+                    "original_actor_id": {
+                      "$ref": "#/$defs/id"
+                    },
+                    "operation_id": {
+                      "$ref": "#/$defs/id"
+                    }
+                  }
+                },
+                "lookup_domain": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "store_id",
+                    "store_generation"
+                  ],
+                  "properties": {
+                    "store_id": {
+                      "$ref": "#/$defs/id"
+                    },
+                    "store_generation": {
+                      "$ref": "#/$defs/revision"
+                    }
+                  }
+                },
+                "assurance": {
+                  "const": "not_authoritative"
+                }
+              }
+            }
+          ]
+        }
+      ]
+    },
+    "deliveryLookup": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/deliveryReceipt"
+        },
+        {
+          "oneOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "state",
+                "lookup_key",
+                "lookup_domain",
+                "assurance"
+              ],
+              "properties": {
+                "state": {
+                  "const": "absent"
+                },
+                "lookup_key": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "namespace",
+                    "delivery_id"
+                  ],
+                  "properties": {
+                    "namespace": {
+                      "$ref": "#/$defs/namespace"
+                    },
+                    "delivery_id": {
+                      "$ref": "#/$defs/id"
+                    }
+                  }
+                },
+                "lookup_domain": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "store_id",
+                    "store_generation"
+                  ],
+                  "properties": {
+                    "store_id": {
+                      "$ref": "#/$defs/id"
+                    },
+                    "store_generation": {
+                      "$ref": "#/$defs/revision"
+                    }
+                  }
+                },
+                "assurance": {
+                  "const": "authoritative_absent"
+                }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "state",
+                "lookup_key",
+                "lookup_domain",
+                "assurance"
+              ],
+              "properties": {
+                "state": {
+                  "enum": [
+                    "unknown",
+                    "retired",
+                    "repair_required"
+                  ]
+                },
+                "lookup_key": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "namespace",
+                    "delivery_id"
+                  ],
+                  "properties": {
+                    "namespace": {
+                      "$ref": "#/$defs/namespace"
+                    },
+                    "delivery_id": {
+                      "$ref": "#/$defs/id"
+                    }
+                  }
+                },
+                "lookup_domain": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "store_id",
+                    "store_generation"
+                  ],
+                  "properties": {
+                    "store_id": {
+                      "$ref": "#/$defs/id"
+                    },
+                    "store_generation": {
+                      "$ref": "#/$defs/revision"
+                    }
+                  }
+                },
+                "assurance": {
+                  "const": "not_authoritative"
+                }
+              }
+            }
+          ]
+        }
+      ]
+    },
+    "actorMetadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "actor_id",
+        "subject_kind",
+        "principal_id",
+        "execution",
+        "availability",
+        "assurance",
+        "consent_revision"
+      ],
+      "properties": {
+        "actor_id": {
+          "$ref": "#/$defs/id"
+        },
+        "subject_kind": {
+          "enum": [
+            "operator",
+            "execution",
+            "service"
+          ]
+        },
+        "principal_id": {
+          "$ref": "#/$defs/id"
+        },
+        "execution": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "execution_id",
+                "epoch"
+              ],
+              "properties": {
+                "execution_id": {
+                  "$ref": "#/$defs/id"
+                },
+                "epoch": {
+                  "$ref": "#/$defs/revision"
+                }
+              }
+            }
+          ]
+        },
+        "availability": {
+          "enum": [
+            "available",
+            "offline",
+            "unknown",
+            "retired"
+          ]
+        },
+        "assurance": {
+          "enum": [
+            "user_authorized_binding",
+            "service_principal"
+          ]
+        },
+        "consent_revision": {
+          "$ref": "#/$defs/revision"
+        }
+      }
+    },
+    "admission": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "lookup_domain",
+        "actor_id",
+        "operation_id",
+        "input_digest",
+        "namespace",
+        "service_id",
+        "provider_generation",
+        "state",
+        "commit",
+        "result",
+        "result_assurance"
+      ],
+      "properties": {
+        "lookup_domain": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "store_id",
+            "store_generation"
+          ],
+          "properties": {
+            "store_id": {
+              "$ref": "#/$defs/id"
+            },
+            "store_generation": {
+              "$ref": "#/$defs/revision"
+            }
+          }
+        },
+        "actor_id": {
+          "$ref": "#/$defs/id"
+        },
+        "operation_id": {
+          "$ref": "#/$defs/id"
+        },
+        "input_digest": {
+          "$ref": "#/$defs/digest"
+        },
+        "namespace": {
+          "$ref": "#/$defs/namespace"
+        },
+        "service_id": {
+          "$ref": "#/$defs/id"
+        },
+        "provider_generation": {
+          "$ref": "#/$defs/revision"
+        },
+        "state": {
+          "enum": [
+            "admitted",
+            "committed",
+            "denied",
+            "conflict",
+            "pending",
+            "unknown",
+            "retired",
+            "repair_required"
+          ]
+        },
+        "commit": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/cursor"
+            }
+          ]
+        },
+        "result": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "object"
+            }
+          ]
+        },
+        "result_assurance": {
+          "enum": [
+            "host_journal",
+            "provider_claim",
+            "unknown"
+          ]
+        }
+      }
+    },
+    "invocation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "invocation_id",
+        "namespace",
+        "service_id",
+        "provider_generation",
+        "operation_id",
+        "budget_ms"
+      ],
+      "properties": {
+        "invocation_id": {
+          "$ref": "#/$defs/id"
+        },
+        "namespace": {
+          "$ref": "#/$defs/namespace"
+        },
+        "service_id": {
+          "$ref": "#/$defs/id"
+        },
+        "provider_generation": {
+          "$ref": "#/$defs/revision"
+        },
+        "operation_id": {
+          "$ref": "#/$defs/id"
+        },
+        "budget_ms": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 60000
+        }
+      }
+    },
+    "journalRecord": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "cursor",
+        "actor_id",
+        "principal_id",
+        "operation_id",
+        "input_digest",
+        "opaque",
+        "semantic_pin",
+        "transport_pins",
+        "deferred_deliveries"
+      ],
+      "properties": {
+        "cursor": {
+          "$ref": "#/$defs/cursor"
+        },
+        "actor_id": {
+          "$ref": "#/$defs/id"
+        },
+        "principal_id": {
+          "$ref": "#/$defs/id"
+        },
+        "operation_id": {
+          "$ref": "#/$defs/id"
+        },
+        "input_digest": {
+          "$ref": "#/$defs/digest"
+        },
+        "opaque": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "object"
+            }
+          ]
+        },
+        "semantic_pin": {
+          "type": "boolean"
+        },
+        "transport_pins": {
+          "type": "array",
+          "maxItems": 16,
+          "items": {
+            "$ref": "#/$defs/id"
+          }
+        },
+        "deferred_deliveries": {
+          "type": "array",
+          "maxItems": 16,
+          "items": {
+            "$ref": "#/$defs/deliveryIntent"
+          }
+        }
+      }
+    },
+    "runReceipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "lookup_domain",
+        "run_id",
+        "namespace",
+        "delivery_id",
+        "version",
+        "claim_id",
+        "actor_id",
+        "execution",
+        "revision",
+        "state",
+        "start_assurance"
+      ],
+      "properties": {
+        "lookup_domain": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "store_id",
+            "store_generation"
+          ],
+          "properties": {
+            "store_id": {
+              "$ref": "#/$defs/id"
+            },
+            "store_generation": {
+              "$ref": "#/$defs/revision"
+            }
+          }
+        },
+        "run_id": {
+          "$ref": "#/$defs/id"
+        },
+        "namespace": {
+          "$ref": "#/$defs/namespace"
+        },
+        "delivery_id": {
+          "$ref": "#/$defs/id"
+        },
+        "version": {
+          "$ref": "#/$defs/revision"
+        },
+        "claim_id": {
+          "$ref": "#/$defs/id"
+        },
+        "actor_id": {
+          "$ref": "#/$defs/id"
+        },
+        "execution": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "execution_id",
+            "epoch"
+          ],
+          "properties": {
+            "execution_id": {
+              "$ref": "#/$defs/id"
+            },
+            "epoch": {
+              "$ref": "#/$defs/revision"
+            }
+          }
+        },
+        "revision": {
+          "$ref": "#/$defs/revision"
+        },
+        "state": {
+          "enum": [
+            "bound",
+            "start_reported",
+            "settled_reported",
+            "unknown",
+            "retired",
+            "repair_required"
+          ]
+        },
+        "start_assurance": {
+          "enum": [
+            "not_started",
+            "adapter_reported",
+            "unknown"
+          ]
+        }
+      }
+    },
+    "deliveryReceipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "lookup_domain",
+        "namespace",
+        "delivery_id",
+        "version",
+        "sender_actor_id",
+        "recipient_actor_id",
+        "state",
+        "claim",
+        "run",
+        "payload_digest"
+      ],
+      "properties": {
+        "lookup_domain": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "store_id",
+            "store_generation"
+          ],
+          "properties": {
+            "store_id": {
+              "$ref": "#/$defs/id"
+            },
+            "store_generation": {
+              "$ref": "#/$defs/revision"
+            }
+          }
+        },
+        "namespace": {
+          "$ref": "#/$defs/namespace"
+        },
+        "delivery_id": {
+          "$ref": "#/$defs/id"
+        },
+        "version": {
+          "$ref": "#/$defs/revision"
+        },
+        "sender_actor_id": {
+          "$ref": "#/$defs/id"
+        },
+        "recipient_actor_id": {
+          "$ref": "#/$defs/id"
+        },
+        "state": {
+          "enum": [
+            "waiting",
+            "held_offline",
+            "held_unknown",
+            "claimed",
+            "consumed",
+            "cancelled",
+            "recipient_retired",
+            "unknown",
+            "retired",
+            "repair_required"
+          ]
+        },
+        "claim": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/claim"
+            }
+          ]
+        },
+        "run": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/runReceipt"
+            }
+          ]
+        },
+        "payload_digest": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/digest"
+            }
+          ]
+        }
+      }
+    },
+    "error": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "code",
+        "message",
+        "operation_id",
+        "receipt_lookup_required"
+      ],
+      "properties": {
+        "code": {
+          "enum": [
+            "unsupported",
+            "invalid_input",
+            "permission_denied",
+            "actor_not_found",
+            "actor_retired",
+            "unverified_subject",
+            "expired",
+            "replayed",
+            "stale_generation",
+            "stale_revision",
+            "conflict",
+            "quota_exceeded",
+            "immutable_intent",
+            "pinned",
+            "backup_required",
+            "cancelled",
+            "timeout",
+            "unknown",
+            "retired",
+            "repair_required"
+          ]
+        },
+        "message": {
+          "type": "string",
+          "maxLength": 1024
+        },
+        "operation_id": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/id"
+            }
+          ]
+        },
+        "receipt_lookup_required": {
+          "type": "boolean"
+        }
+      }
+    },
+    "runtime_execution_get_v1_request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "method",
+        "params"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "method": {
+          "const": "runtime.execution.get.v1"
+        },
+        "params": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "execution_id",
+            "terminal_id"
+          ],
+          "properties": {
+            "execution_id": {
+              "oneOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "$ref": "#/$defs/id"
+                }
+              ]
+            },
+            "terminal_id": {
+              "oneOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "$ref": "#/$defs/id"
+                }
+              ]
+            }
+          }
+        }
+      }
+    },
+    "runtime_execution_get_v1_response": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "method",
+        "result",
+        "error"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "method": {
+          "const": "runtime.execution.get.v1"
+        },
+        "result": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "server_id",
+                "boot_id",
+                "execution",
+                "terminal_id",
+                "availability",
+                "process_birth_verified",
+                "session_trust"
+              ],
+              "properties": {
+                "server_id": {
+                  "$ref": "#/$defs/id"
+                },
+                "boot_id": {
+                  "$ref": "#/$defs/id"
+                },
+                "execution": {
+                  "oneOf": [
+                    {
+                      "type": "null"
+                    },
+                    {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": [
+                        "execution_id",
+                        "epoch"
+                      ],
+                      "properties": {
+                        "execution_id": {
+                          "$ref": "#/$defs/id"
+                        },
+                        "epoch": {
+                          "$ref": "#/$defs/revision"
+                        }
+                      }
+                    }
+                  ]
+                },
+                "terminal_id": {
+                  "oneOf": [
+                    {
+                      "type": "null"
+                    },
+                    {
+                      "$ref": "#/$defs/id"
+                    }
+                  ]
+                },
+                "availability": {
+                  "enum": [
+                    "available",
+                    "offline",
+                    "unknown",
+                    "retired"
+                  ]
+                },
+                "process_birth_verified": {
+                  "type": "boolean"
+                },
+                "session_trust": {
+                  "enum": [
+                    "managed",
+                    "reported",
+                    "unknown"
+                  ]
+                }
+              }
+            }
+          ]
+        },
+        "error": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/error"
+            }
+          ]
+        }
+      },
+      "oneOf": [
+        {
+          "properties": {
+            "result": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "server_id",
+                "boot_id",
+                "execution",
+                "terminal_id",
+                "availability",
+                "process_birth_verified",
+                "session_trust"
+              ],
+              "properties": {
+                "server_id": {
+                  "$ref": "#/$defs/id"
+                },
+                "boot_id": {
+                  "$ref": "#/$defs/id"
+                },
+                "execution": {
+                  "oneOf": [
+                    {
+                      "type": "null"
+                    },
+                    {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": [
+                        "execution_id",
+                        "epoch"
+                      ],
+                      "properties": {
+                        "execution_id": {
+                          "$ref": "#/$defs/id"
+                        },
+                        "epoch": {
+                          "$ref": "#/$defs/revision"
+                        }
+                      }
+                    }
+                  ]
+                },
+                "terminal_id": {
+                  "oneOf": [
+                    {
+                      "type": "null"
+                    },
+                    {
+                      "$ref": "#/$defs/id"
+                    }
+                  ]
+                },
+                "availability": {
+                  "enum": [
+                    "available",
+                    "offline",
+                    "unknown",
+                    "retired"
+                  ]
+                },
+                "process_birth_verified": {
+                  "type": "boolean"
+                },
+                "session_trust": {
+                  "enum": [
+                    "managed",
+                    "reported",
+                    "unknown"
+                  ]
+                }
+              }
+            },
+            "error": {
+              "type": "null"
+            }
+          }
+        },
+        {
+          "properties": {
+            "result": {
+              "type": "null"
+            },
+            "error": {
+              "$ref": "#/$defs/error"
+            }
+          }
+        }
+      ]
+    },
+    "runtime_operator_begin_v1_request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "method",
+        "params"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "method": {
+          "const": "runtime.operator.begin.v1"
+        },
+        "params": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "requested_scopes"
+          ],
+          "properties": {
+            "requested_scopes": {
+              "type": "array",
+              "maxItems": 32,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "namespace",
+                  "capabilities"
+                ],
+                "properties": {
+                  "namespace": {
+                    "$ref": "#/$defs/namespace"
+                  },
+                  "capabilities": {
+                    "type": "array",
+                    "maxItems": 32,
+                    "items": {
+                      "type": "string",
+                      "maxLength": 128
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "runtime_operator_begin_v1_response": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "method",
+        "result",
+        "error"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "method": {
+          "const": "runtime.operator.begin.v1"
+        },
+        "result": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "challenge_id",
+                "challenge_secret",
+                "expires_in_ms"
+              ],
+              "properties": {
+                "challenge_id": {
+                  "$ref": "#/$defs/id"
+                },
+                "challenge_secret": {
+                  "type": "string",
+                  "maxLength": 512
+                },
+                "expires_in_ms": {
+                  "const": 60000
+                }
+              }
+            }
+          ]
+        },
+        "error": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/error"
+            }
+          ]
+        }
+      },
+      "oneOf": [
+        {
+          "properties": {
+            "result": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "challenge_id",
+                "challenge_secret",
+                "expires_in_ms"
+              ],
+              "properties": {
+                "challenge_id": {
+                  "$ref": "#/$defs/id"
+                },
+                "challenge_secret": {
+                  "type": "string",
+                  "maxLength": 512
+                },
+                "expires_in_ms": {
+                  "const": 60000
+                }
+              }
+            },
+            "error": {
+              "type": "null"
+            }
+          }
+        },
+        {
+          "properties": {
+            "result": {
+              "type": "null"
+            },
+            "error": {
+              "$ref": "#/$defs/error"
+            }
+          }
+        }
+      ]
+    },
+    "runtime_operator_confirm_v1_request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "method",
+        "params"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "method": {
+          "const": "runtime.operator.confirm.v1"
+        },
+        "params": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "challenge_id",
+            "challenge_secret",
+            "explicit_consent",
+            "operation_id"
+          ],
+          "properties": {
+            "challenge_id": {
+              "$ref": "#/$defs/id"
+            },
+            "challenge_secret": {
+              "type": "string",
+              "maxLength": 512
+            },
+            "explicit_consent": {
+              "const": true
+            },
+            "operation_id": {
+              "$ref": "#/$defs/id"
+            }
+          }
+        }
+      }
+    },
+    "runtime_operator_confirm_v1_response": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "method",
+        "result",
+        "error"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "method": {
+          "const": "runtime.operator.confirm.v1"
+        },
+        "result": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "actor",
+                "credential",
+                "lease_ms",
+                "consent_revision"
+              ],
+              "properties": {
+                "actor": {
+                  "$ref": "#/$defs/actorMetadata"
+                },
+                "credential": {
+                  "type": "string",
+                  "maxLength": 512
+                },
+                "lease_ms": {
+                  "const": 600000
+                },
+                "consent_revision": {
+                  "$ref": "#/$defs/revision"
+                }
+              }
+            }
+          ]
+        },
+        "error": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/error"
+            }
+          ]
+        }
+      },
+      "oneOf": [
+        {
+          "properties": {
+            "result": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "actor",
+                "credential",
+                "lease_ms",
+                "consent_revision"
+              ],
+              "properties": {
+                "actor": {
+                  "$ref": "#/$defs/actorMetadata"
+                },
+                "credential": {
+                  "type": "string",
+                  "maxLength": 512
+                },
+                "lease_ms": {
+                  "const": 600000
+                },
+                "consent_revision": {
+                  "$ref": "#/$defs/revision"
+                }
+              }
+            },
+            "error": {
+              "type": "null"
+            }
+          }
+        },
+        {
+          "properties": {
+            "result": {
+              "type": "null"
+            },
+            "error": {
+              "$ref": "#/$defs/error"
+            }
+          }
+        }
+      ]
+    },
+    "runtime_actor_ticket_v1_request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "method",
+        "params"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "method": {
+          "const": "runtime.actor.ticket.v1"
+        },
+        "params": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "execution",
+            "scopes",
+            "expected_consent_revision",
+            "operation_id"
+          ],
+          "properties": {
+            "execution": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "execution_id",
+                "epoch"
+              ],
+              "properties": {
+                "execution_id": {
+                  "$ref": "#/$defs/id"
+                },
+                "epoch": {
+                  "$ref": "#/$defs/revision"
+                }
+              }
+            },
+            "scopes": {
+              "type": "array",
+              "maxItems": 32,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "namespace",
+                  "capabilities"
+                ],
+                "properties": {
+                  "namespace": {
+                    "$ref": "#/$defs/namespace"
+                  },
+                  "capabilities": {
+                    "type": "array",
+                    "maxItems": 32,
+                    "items": {
+                      "type": "string",
+                      "maxLength": 128
+                    }
+                  }
+                }
+              }
+            },
+            "expected_consent_revision": {
+              "$ref": "#/$defs/revision"
+            },
+            "operation_id": {
+              "$ref": "#/$defs/id"
+            }
+          }
+        }
+      }
+    },
+    "runtime_actor_ticket_v1_response": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "method",
+        "result",
+        "error"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "method": {
+          "const": "runtime.actor.ticket.v1"
+        },
+        "result": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "ticket_id",
+                "execution",
+                "consent_revision",
+                "expires_in_ms"
+              ],
+              "properties": {
+                "ticket_id": {
+                  "$ref": "#/$defs/id"
+                },
+                "execution": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "execution_id",
+                    "epoch"
+                  ],
+                  "properties": {
+                    "execution_id": {
+                      "$ref": "#/$defs/id"
+                    },
+                    "epoch": {
+                      "$ref": "#/$defs/revision"
+                    }
+                  }
+                },
+                "consent_revision": {
+                  "$ref": "#/$defs/revision"
+                },
+                "expires_in_ms": {
+                  "const": 60000
+                }
+              }
+            }
+          ]
+        },
+        "error": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/error"
+            }
+          ]
+        }
+      },
+      "oneOf": [
+        {
+          "properties": {
+            "result": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "ticket_id",
+                "execution",
+                "consent_revision",
+                "expires_in_ms"
+              ],
+              "properties": {
+                "ticket_id": {
+                  "$ref": "#/$defs/id"
+                },
+                "execution": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "execution_id",
+                    "epoch"
+                  ],
+                  "properties": {
+                    "execution_id": {
+                      "$ref": "#/$defs/id"
+                    },
+                    "epoch": {
+                      "$ref": "#/$defs/revision"
+                    }
+                  }
+                },
+                "consent_revision": {
+                  "$ref": "#/$defs/revision"
+                },
+                "expires_in_ms": {
+                  "const": 60000
+                }
+              }
+            },
+            "error": {
+              "type": "null"
+            }
+          }
+        },
+        {
+          "properties": {
+            "result": {
+              "type": "null"
+            },
+            "error": {
+              "$ref": "#/$defs/error"
+            }
+          }
+        }
+      ]
+    },
+    "runtime_actor_ticket_take_v1_request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "method",
+        "params"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "method": {
+          "const": "runtime.actor.ticket.take.v1"
+        },
+        "params": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "expected_execution"
+          ],
+          "properties": {
+            "expected_execution": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "execution_id",
+                "epoch"
+              ],
+              "properties": {
+                "execution_id": {
+                  "$ref": "#/$defs/id"
+                },
+                "epoch": {
+                  "$ref": "#/$defs/revision"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "runtime_actor_ticket_take_v1_response": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "method",
+        "result",
+        "error"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "method": {
+          "const": "runtime.actor.ticket.take.v1"
+        },
+        "result": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "ticket_id",
+                "ticket_secret",
+                "expires_in_ms"
+              ],
+              "properties": {
+                "ticket_id": {
+                  "$ref": "#/$defs/id"
+                },
+                "ticket_secret": {
+                  "type": "string",
+                  "maxLength": 512
+                },
+                "expires_in_ms": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 60000
+                }
+              }
+            }
+          ]
+        },
+        "error": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/error"
+            }
+          ]
+        }
+      },
+      "oneOf": [
+        {
+          "properties": {
+            "result": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "ticket_id",
+                "ticket_secret",
+                "expires_in_ms"
+              ],
+              "properties": {
+                "ticket_id": {
+                  "$ref": "#/$defs/id"
+                },
+                "ticket_secret": {
+                  "type": "string",
+                  "maxLength": 512
+                },
+                "expires_in_ms": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 60000
+                }
+              }
+            },
+            "error": {
+              "type": "null"
+            }
+          }
+        },
+        {
+          "properties": {
+            "result": {
+              "type": "null"
+            },
+            "error": {
+              "$ref": "#/$defs/error"
+            }
+          }
+        }
+      ]
+    },
+    "runtime_actor_bind_v1_request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "method",
+        "params"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "method": {
+          "const": "runtime.actor.bind.v1"
+        },
+        "params": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "ticket_id",
+            "ticket_secret",
+            "expected_execution",
+            "operation_id"
+          ],
+          "properties": {
+            "ticket_id": {
+              "$ref": "#/$defs/id"
+            },
+            "ticket_secret": {
+              "type": "string",
+              "maxLength": 512
+            },
+            "expected_execution": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "execution_id",
+                "epoch"
+              ],
+              "properties": {
+                "execution_id": {
+                  "$ref": "#/$defs/id"
+                },
+                "epoch": {
+                  "$ref": "#/$defs/revision"
+                }
+              }
+            },
+            "operation_id": {
+              "$ref": "#/$defs/id"
+            }
+          }
+        }
+      }
+    },
+    "runtime_actor_bind_v1_response": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "method",
+        "result",
+        "error"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "method": {
+          "const": "runtime.actor.bind.v1"
+        },
+        "result": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "actor",
+                "credential",
+                "lease_ms"
+              ],
+              "properties": {
+                "actor": {
+                  "$ref": "#/$defs/actorMetadata"
+                },
+                "credential": {
+                  "type": "string",
+                  "maxLength": 512
+                },
+                "lease_ms": {
+                  "const": 600000
+                }
+              }
+            }
+          ]
+        },
+        "error": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/error"
+            }
+          ]
+        }
+      },
+      "oneOf": [
+        {
+          "properties": {
+            "result": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "actor",
+                "credential",
+                "lease_ms"
+              ],
+              "properties": {
+                "actor": {
+                  "$ref": "#/$defs/actorMetadata"
+                },
+                "credential": {
+                  "type": "string",
+                  "maxLength": 512
+                },
+                "lease_ms": {
+                  "const": 600000
+                }
+              }
+            },
+            "error": {
+              "type": "null"
+            }
+          }
+        },
+        {
+          "properties": {
+            "result": {
+              "type": "null"
+            },
+            "error": {
+              "$ref": "#/$defs/error"
+            }
+          }
+        }
+      ]
+    },
+    "runtime_actor_credential_recover_v1_request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "method",
+        "params"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "method": {
+          "const": "runtime.actor.credential.recover.v1"
+        },
+        "params": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "expected_execution",
+            "operation_id"
+          ],
+          "properties": {
+            "expected_execution": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "execution_id",
+                "epoch"
+              ],
+              "properties": {
+                "execution_id": {
+                  "$ref": "#/$defs/id"
+                },
+                "epoch": {
+                  "$ref": "#/$defs/revision"
+                }
+              }
+            },
+            "operation_id": {
+              "$ref": "#/$defs/id"
+            }
+          }
+        }
+      }
+    },
+    "runtime_actor_credential_recover_v1_response": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "method",
+        "result",
+        "error"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "method": {
+          "const": "runtime.actor.credential.recover.v1"
+        },
+        "result": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "actor",
+                "credential",
+                "lease_ms"
+              ],
+              "properties": {
+                "actor": {
+                  "$ref": "#/$defs/actorMetadata"
+                },
+                "credential": {
+                  "type": "string",
+                  "maxLength": 512
+                },
+                "lease_ms": {
+                  "const": 600000
+                }
+              }
+            }
+          ]
+        },
+        "error": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/error"
+            }
+          ]
+        }
+      },
+      "oneOf": [
+        {
+          "properties": {
+            "result": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "actor",
+                "credential",
+                "lease_ms"
+              ],
+              "properties": {
+                "actor": {
+                  "$ref": "#/$defs/actorMetadata"
+                },
+                "credential": {
+                  "type": "string",
+                  "maxLength": 512
+                },
+                "lease_ms": {
+                  "const": 600000
+                }
+              }
+            },
+            "error": {
+              "type": "null"
+            }
+          }
+        },
+        {
+          "properties": {
+            "result": {
+              "type": "null"
+            },
+            "error": {
+              "$ref": "#/$defs/error"
+            }
+          }
+        }
+      ]
+    },
+    "runtime_actor_renew_v1_request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "method",
+        "params"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "method": {
+          "const": "runtime.actor.renew.v1"
+        },
+        "params": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "actor_id",
+            "expected_consent_revision"
+          ],
+          "properties": {
+            "actor_id": {
+              "$ref": "#/$defs/id"
+            },
+            "expected_consent_revision": {
+              "$ref": "#/$defs/revision"
+            }
+          }
+        }
+      }
+    },
+    "runtime_actor_renew_v1_response": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "method",
+        "result",
+        "error"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "method": {
+          "const": "runtime.actor.renew.v1"
+        },
+        "result": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "actor",
+                "credential",
+                "lease_ms"
+              ],
+              "properties": {
+                "actor": {
+                  "$ref": "#/$defs/actorMetadata"
+                },
+                "credential": {
+                  "type": "string",
+                  "maxLength": 512
+                },
+                "lease_ms": {
+                  "const": 600000
+                }
+              }
+            }
+          ]
+        },
+        "error": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/error"
+            }
+          ]
+        }
+      },
+      "oneOf": [
+        {
+          "properties": {
+            "result": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "actor",
+                "credential",
+                "lease_ms"
+              ],
+              "properties": {
+                "actor": {
+                  "$ref": "#/$defs/actorMetadata"
+                },
+                "credential": {
+                  "type": "string",
+                  "maxLength": 512
+                },
+                "lease_ms": {
+                  "const": 600000
+                }
+              }
+            },
+            "error": {
+              "type": "null"
+            }
+          }
+        },
+        {
+          "properties": {
+            "result": {
+              "type": "null"
+            },
+            "error": {
+              "$ref": "#/$defs/error"
+            }
+          }
+        }
+      ]
+    },
+    "runtime_actor_get_v1_request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "method",
+        "params"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "method": {
+          "const": "runtime.actor.get.v1"
+        },
+        "params": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "actor_id"
+          ],
+          "properties": {
+            "actor_id": {
+              "$ref": "#/$defs/id"
+            }
+          }
+        }
+      }
+    },
+    "runtime_actor_get_v1_response": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "method",
+        "result",
+        "error"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "method": {
+          "const": "runtime.actor.get.v1"
+        },
+        "result": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "actor"
+              ],
+              "properties": {
+                "actor": {
+                  "$ref": "#/$defs/actorMetadata"
+                }
+              }
+            }
+          ]
+        },
+        "error": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/error"
+            }
+          ]
+        }
+      },
+      "oneOf": [
+        {
+          "properties": {
+            "result": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "actor"
+              ],
+              "properties": {
+                "actor": {
+                  "$ref": "#/$defs/actorMetadata"
+                }
+              }
+            },
+            "error": {
+              "type": "null"
+            }
+          }
+        },
+        {
+          "properties": {
+            "result": {
+              "type": "null"
+            },
+            "error": {
+              "$ref": "#/$defs/error"
+            }
+          }
+        }
+      ]
+    },
+    "runtime_actor_checkpoint_get_v1_request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "method",
+        "params"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "method": {
+          "const": "runtime.actor.checkpoint.get.v1"
+        },
+        "params": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "actor_id",
+            "namespace"
+          ],
+          "properties": {
+            "actor_id": {
+              "$ref": "#/$defs/id"
+            },
+            "namespace": {
+              "$ref": "#/$defs/namespace"
+            }
+          }
+        }
+      }
+    },
+    "runtime_actor_checkpoint_get_v1_response": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "method",
+        "result",
+        "error"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "method": {
+          "const": "runtime.actor.checkpoint.get.v1"
+        },
+        "result": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "actor_id",
+                "execution",
+                "revision",
+                "opaque"
+              ],
+              "properties": {
+                "actor_id": {
+                  "$ref": "#/$defs/id"
+                },
+                "execution": {
+                  "oneOf": [
+                    {
+                      "type": "null"
+                    },
+                    {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": [
+                        "execution_id",
+                        "epoch"
+                      ],
+                      "properties": {
+                        "execution_id": {
+                          "$ref": "#/$defs/id"
+                        },
+                        "epoch": {
+                          "$ref": "#/$defs/revision"
+                        }
+                      }
+                    }
+                  ]
+                },
+                "revision": {
+                  "$ref": "#/$defs/revision"
+                },
+                "opaque": {
+                  "oneOf": [
+                    {
+                      "type": "null"
+                    },
+                    {
+                      "type": "object"
+                    }
+                  ]
+                }
+              }
+            }
+          ]
+        },
+        "error": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/error"
+            }
+          ]
+        }
+      },
+      "oneOf": [
+        {
+          "properties": {
+            "result": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "actor_id",
+                "execution",
+                "revision",
+                "opaque"
+              ],
+              "properties": {
+                "actor_id": {
+                  "$ref": "#/$defs/id"
+                },
+                "execution": {
+                  "oneOf": [
+                    {
+                      "type": "null"
+                    },
+                    {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": [
+                        "execution_id",
+                        "epoch"
+                      ],
+                      "properties": {
+                        "execution_id": {
+                          "$ref": "#/$defs/id"
+                        },
+                        "epoch": {
+                          "$ref": "#/$defs/revision"
+                        }
+                      }
+                    }
+                  ]
+                },
+                "revision": {
+                  "$ref": "#/$defs/revision"
+                },
+                "opaque": {
+                  "oneOf": [
+                    {
+                      "type": "null"
+                    },
+                    {
+                      "type": "object"
+                    }
+                  ]
+                }
+              }
+            },
+            "error": {
+              "type": "null"
+            }
+          }
+        },
+        {
+          "properties": {
+            "result": {
+              "type": "null"
+            },
+            "error": {
+              "$ref": "#/$defs/error"
+            }
+          }
+        }
+      ]
+    },
+    "runtime_actor_checkpoint_put_v1_request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "method",
+        "params"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "method": {
+          "const": "runtime.actor.checkpoint.put.v1"
+        },
+        "params": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "actor_id",
+            "namespace",
+            "expected_revision",
+            "operation_id",
+            "opaque"
+          ],
+          "properties": {
+            "actor_id": {
+              "$ref": "#/$defs/id"
+            },
+            "namespace": {
+              "$ref": "#/$defs/namespace"
+            },
+            "expected_revision": {
+              "$ref": "#/$defs/revision"
+            },
+            "operation_id": {
+              "$ref": "#/$defs/id"
+            },
+            "opaque": {
+              "type": "object"
+            }
+          }
+        }
+      }
+    },
+    "runtime_actor_checkpoint_put_v1_response": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "method",
+        "result",
+        "error"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "method": {
+          "const": "runtime.actor.checkpoint.put.v1"
+        },
+        "result": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "actor_id",
+                "execution",
+                "revision",
+                "input_digest"
+              ],
+              "properties": {
+                "actor_id": {
+                  "$ref": "#/$defs/id"
+                },
+                "execution": {
+                  "oneOf": [
+                    {
+                      "type": "null"
+                    },
+                    {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": [
+                        "execution_id",
+                        "epoch"
+                      ],
+                      "properties": {
+                        "execution_id": {
+                          "$ref": "#/$defs/id"
+                        },
+                        "epoch": {
+                          "$ref": "#/$defs/revision"
+                        }
+                      }
+                    }
+                  ]
+                },
+                "revision": {
+                  "$ref": "#/$defs/revision"
+                },
+                "input_digest": {
+                  "$ref": "#/$defs/digest"
+                }
+              }
+            }
+          ]
+        },
+        "error": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/error"
+            }
+          ]
+        }
+      },
+      "oneOf": [
+        {
+          "properties": {
+            "result": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "actor_id",
+                "execution",
+                "revision",
+                "input_digest"
+              ],
+              "properties": {
+                "actor_id": {
+                  "$ref": "#/$defs/id"
+                },
+                "execution": {
+                  "oneOf": [
+                    {
+                      "type": "null"
+                    },
+                    {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": [
+                        "execution_id",
+                        "epoch"
+                      ],
+                      "properties": {
+                        "execution_id": {
+                          "$ref": "#/$defs/id"
+                        },
+                        "epoch": {
+                          "$ref": "#/$defs/revision"
+                        }
+                      }
+                    }
+                  ]
+                },
+                "revision": {
+                  "$ref": "#/$defs/revision"
+                },
+                "input_digest": {
+                  "$ref": "#/$defs/digest"
+                }
+              }
+            },
+            "error": {
+              "type": "null"
+            }
+          }
+        },
+        {
+          "properties": {
+            "result": {
+              "type": "null"
+            },
+            "error": {
+              "$ref": "#/$defs/error"
+            }
+          }
+        }
+      ]
+    },
+    "extension_interfaces_list_v1_request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "method",
+        "params"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "method": {
+          "const": "extension.interfaces.list.v1"
+        },
+        "params": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "namespace"
+          ],
+          "properties": {
+            "namespace": {
+              "oneOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "$ref": "#/$defs/namespace"
+                }
+              ]
+            }
+          }
+        }
+      }
+    },
+    "extension_interfaces_list_v1_response": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "method",
+        "result",
+        "error"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "method": {
+          "const": "extension.interfaces.list.v1"
+        },
+        "result": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "lookup_domains",
+                "interfaces"
+              ],
+              "properties": {
+                "lookup_domains": {
+                  "type": "array",
+                  "maxItems": 128,
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "namespace",
+                      "action_receipts",
+                      "mailbox_receipts"
+                    ],
+                    "properties": {
+                      "namespace": {
+                        "$ref": "#/$defs/namespace"
+                      },
+                      "action_receipts": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": [
+                          "store_id",
+                          "store_generation"
+                        ],
+                        "properties": {
+                          "store_id": {
+                            "$ref": "#/$defs/id"
+                          },
+                          "store_generation": {
+                            "$ref": "#/$defs/revision"
+                          }
+                        }
+                      },
+                      "mailbox_receipts": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": [
+                          "store_id",
+                          "store_generation"
+                        ],
+                        "properties": {
+                          "store_id": {
+                            "$ref": "#/$defs/id"
+                          },
+                          "store_generation": {
+                            "$ref": "#/$defs/revision"
+                          }
+                        }
+                      }
+                    }
+                  }
+                },
+                "interfaces": {
+                  "type": "array",
+                  "maxItems": 128,
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "namespace",
+                      "service_id",
+                      "provider_generation",
+                      "interface_kind",
+                      "interface_id",
+                      "contract_id",
+                      "schema_digest",
+                      "capability"
+                    ],
+                    "properties": {
+                      "namespace": {
+                        "$ref": "#/$defs/namespace"
+                      },
+                      "service_id": {
+                        "$ref": "#/$defs/id"
+                      },
+                      "provider_generation": {
+                        "$ref": "#/$defs/revision"
+                      },
+                      "interface_kind": {
+                        "enum": [
+                          "action",
+                          "query",
+                          "decision",
+                          "form",
+                          "recovery"
+                        ]
+                      },
+                      "interface_id": {
+                        "$ref": "#/$defs/id"
+                      },
+                      "contract_id": {
+                        "type": "string",
+                        "maxLength": 128
+                      },
+                      "schema_digest": {
+                        "$ref": "#/$defs/digest"
+                      },
+                      "capability": {
+                        "type": "string",
+                        "maxLength": 128
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          ]
+        },
+        "error": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/error"
+            }
+          ]
+        }
+      },
+      "oneOf": [
+        {
+          "properties": {
+            "result": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "lookup_domains",
+                "interfaces"
+              ],
+              "properties": {
+                "lookup_domains": {
+                  "type": "array",
+                  "maxItems": 128,
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "namespace",
+                      "action_receipts",
+                      "mailbox_receipts"
+                    ],
+                    "properties": {
+                      "namespace": {
+                        "$ref": "#/$defs/namespace"
+                      },
+                      "action_receipts": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": [
+                          "store_id",
+                          "store_generation"
+                        ],
+                        "properties": {
+                          "store_id": {
+                            "$ref": "#/$defs/id"
+                          },
+                          "store_generation": {
+                            "$ref": "#/$defs/revision"
+                          }
+                        }
+                      },
+                      "mailbox_receipts": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": [
+                          "store_id",
+                          "store_generation"
+                        ],
+                        "properties": {
+                          "store_id": {
+                            "$ref": "#/$defs/id"
+                          },
+                          "store_generation": {
+                            "$ref": "#/$defs/revision"
+                          }
+                        }
+                      }
+                    }
+                  }
+                },
+                "interfaces": {
+                  "type": "array",
+                  "maxItems": 128,
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "namespace",
+                      "service_id",
+                      "provider_generation",
+                      "interface_kind",
+                      "interface_id",
+                      "contract_id",
+                      "schema_digest",
+                      "capability"
+                    ],
+                    "properties": {
+                      "namespace": {
+                        "$ref": "#/$defs/namespace"
+                      },
+                      "service_id": {
+                        "$ref": "#/$defs/id"
+                      },
+                      "provider_generation": {
+                        "$ref": "#/$defs/revision"
+                      },
+                      "interface_kind": {
+                        "enum": [
+                          "action",
+                          "query",
+                          "decision",
+                          "form",
+                          "recovery"
+                        ]
+                      },
+                      "interface_id": {
+                        "$ref": "#/$defs/id"
+                      },
+                      "contract_id": {
+                        "type": "string",
+                        "maxLength": 128
+                      },
+                      "schema_digest": {
+                        "$ref": "#/$defs/digest"
+                      },
+                      "capability": {
+                        "type": "string",
+                        "maxLength": 128
+                      }
+                    }
+                  }
+                }
+              }
+            },
+            "error": {
+              "type": "null"
+            }
+          }
+        },
+        {
+          "properties": {
+            "result": {
+              "type": "null"
+            },
+            "error": {
+              "$ref": "#/$defs/error"
+            }
+          }
+        }
+      ]
+    },
+    "extension_query_invoke_v1_request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "method",
+        "params"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "method": {
+          "const": "extension.query.invoke.v1"
+        },
+        "params": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "namespace",
+            "service_id",
+            "query",
+            "expected_provider_generation",
+            "input"
+          ],
+          "properties": {
+            "namespace": {
+              "$ref": "#/$defs/namespace"
+            },
+            "service_id": {
+              "$ref": "#/$defs/id"
+            },
+            "query": {
+              "type": "string",
+              "maxLength": 128
+            },
+            "expected_provider_generation": {
+              "$ref": "#/$defs/revision"
+            },
+            "input": {
+              "type": "object"
+            }
+          }
+        }
+      }
+    },
+    "extension_query_invoke_v1_response": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "method",
+        "result",
+        "error"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "method": {
+          "const": "extension.query.invoke.v1"
+        },
+        "result": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "namespace",
+                "service_id",
+                "provider_generation",
+                "result"
+              ],
+              "properties": {
+                "namespace": {
+                  "$ref": "#/$defs/namespace"
+                },
+                "service_id": {
+                  "$ref": "#/$defs/id"
+                },
+                "provider_generation": {
+                  "$ref": "#/$defs/revision"
+                },
+                "result": {
+                  "type": "object"
+                }
+              }
+            }
+          ]
+        },
+        "error": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/error"
+            }
+          ]
+        }
+      },
+      "oneOf": [
+        {
+          "properties": {
+            "result": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "namespace",
+                "service_id",
+                "provider_generation",
+                "result"
+              ],
+              "properties": {
+                "namespace": {
+                  "$ref": "#/$defs/namespace"
+                },
+                "service_id": {
+                  "$ref": "#/$defs/id"
+                },
+                "provider_generation": {
+                  "$ref": "#/$defs/revision"
+                },
+                "result": {
+                  "type": "object"
+                }
+              }
+            },
+            "error": {
+              "type": "null"
+            }
+          }
+        },
+        {
+          "properties": {
+            "result": {
+              "type": "null"
+            },
+            "error": {
+              "$ref": "#/$defs/error"
+            }
+          }
+        }
+      ]
+    },
+    "extension_action_invoke_v1_request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "method",
+        "params"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "method": {
+          "const": "extension.action.invoke.v1"
+        },
+        "params": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "namespace",
+            "service_id",
+            "action",
+            "expected_provider_generation",
+            "expected_lookup_domain",
+            "operation_id",
+            "input"
+          ],
+          "properties": {
+            "namespace": {
+              "$ref": "#/$defs/namespace"
+            },
+            "service_id": {
+              "$ref": "#/$defs/id"
+            },
+            "action": {
+              "type": "string",
+              "maxLength": 128
+            },
+            "expected_provider_generation": {
+              "$ref": "#/$defs/revision"
+            },
+            "expected_lookup_domain": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "store_id",
+                "store_generation"
+              ],
+              "properties": {
+                "store_id": {
+                  "$ref": "#/$defs/id"
+                },
+                "store_generation": {
+                  "$ref": "#/$defs/revision"
+                }
+              }
+            },
+            "operation_id": {
+              "$ref": "#/$defs/id"
+            },
+            "input": {
+              "type": "object"
+            }
+          }
+        }
+      }
+    },
+    "extension_action_invoke_v1_response": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "method",
+        "result",
+        "error"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "method": {
+          "const": "extension.action.invoke.v1"
+        },
+        "result": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "receipt"
+              ],
+              "properties": {
+                "receipt": {
+                  "$ref": "#/$defs/admission"
+                }
+              }
+            }
+          ]
+        },
+        "error": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/error"
+            }
+          ]
+        }
+      },
+      "oneOf": [
+        {
+          "properties": {
+            "result": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "receipt"
+              ],
+              "properties": {
+                "receipt": {
+                  "$ref": "#/$defs/admission"
+                }
+              }
+            },
+            "error": {
+              "type": "null"
+            }
+          }
+        },
+        {
+          "properties": {
+            "result": {
+              "type": "null"
+            },
+            "error": {
+              "$ref": "#/$defs/error"
+            }
+          }
+        }
+      ]
+    },
+    "extension_action_receipt_v1_request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "method",
+        "params"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "method": {
+          "const": "extension.action.receipt.v1"
+        },
+        "params": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "namespace",
+            "original_actor_id",
+            "operation_id",
+            "expected_lookup_domain"
+          ],
+          "properties": {
+            "namespace": {
+              "$ref": "#/$defs/namespace"
+            },
+            "original_actor_id": {
+              "$ref": "#/$defs/id"
+            },
+            "operation_id": {
+              "$ref": "#/$defs/id"
+            },
+            "expected_lookup_domain": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "store_id",
+                "store_generation"
+              ],
+              "properties": {
+                "store_id": {
+                  "$ref": "#/$defs/id"
+                },
+                "store_generation": {
+                  "$ref": "#/$defs/revision"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "extension_action_receipt_v1_response": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "method",
+        "result",
+        "error"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "method": {
+          "const": "extension.action.receipt.v1"
+        },
+        "result": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "receipt"
+              ],
+              "properties": {
+                "receipt": {
+                  "$ref": "#/$defs/actionLookup"
+                }
+              }
+            }
+          ]
+        },
+        "error": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/error"
+            }
+          ]
+        }
+      },
+      "oneOf": [
+        {
+          "properties": {
+            "result": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "receipt"
+              ],
+              "properties": {
+                "receipt": {
+                  "$ref": "#/$defs/actionLookup"
+                }
+              }
+            },
+            "error": {
+              "type": "null"
+            }
+          }
+        },
+        {
+          "properties": {
+            "result": {
+              "type": "null"
+            },
+            "error": {
+              "$ref": "#/$defs/error"
+            }
+          }
+        }
+      ]
+    },
+    "extension_recovery_invoke_v1_request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "method",
+        "params"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "method": {
+          "const": "extension.recovery.invoke.v1"
+        },
+        "params": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "namespace",
+            "service_id",
+            "expected_provider_generation",
+            "operation_id",
+            "intent_cursor",
+            "manifest_index"
+          ],
+          "properties": {
+            "namespace": {
+              "$ref": "#/$defs/namespace"
+            },
+            "service_id": {
+              "$ref": "#/$defs/id"
+            },
+            "expected_provider_generation": {
+              "$ref": "#/$defs/revision"
+            },
+            "operation_id": {
+              "$ref": "#/$defs/id"
+            },
+            "intent_cursor": {
+              "$ref": "#/$defs/cursor"
+            },
+            "manifest_index": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 15
+            }
+          }
+        }
+      }
+    },
+    "extension_recovery_invoke_v1_response": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "method",
+        "result",
+        "error"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "method": {
+          "const": "extension.recovery.invoke.v1"
+        },
+        "result": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "invocation"
+              ],
+              "properties": {
+                "invocation": {
+                  "$ref": "#/$defs/invocation"
+                }
+              }
+            }
+          ]
+        },
+        "error": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/error"
+            }
+          ]
+        }
+      },
+      "oneOf": [
+        {
+          "properties": {
+            "result": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "invocation"
+              ],
+              "properties": {
+                "invocation": {
+                  "$ref": "#/$defs/invocation"
+                }
+              }
+            },
+            "error": {
+              "type": "null"
+            }
+          }
+        },
+        {
+          "properties": {
+            "result": {
+              "type": "null"
+            },
+            "error": {
+              "$ref": "#/$defs/error"
+            }
+          }
+        }
+      ]
+    },
+    "namespace_journal_read_v1_request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "method",
+        "params"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "method": {
+          "const": "namespace.journal.read.v1"
+        },
+        "params": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "namespace",
+            "store_id",
+            "store_generation",
+            "record_ids",
+            "page"
+          ],
+          "properties": {
+            "namespace": {
+              "$ref": "#/$defs/namespace"
+            },
+            "store_id": {
+              "oneOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "$ref": "#/$defs/id"
+                }
+              ]
+            },
+            "store_generation": {
+              "oneOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "$ref": "#/$defs/revision"
+                }
+              ]
+            },
+            "record_ids": {
+              "oneOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "type": "array",
+                  "maxItems": 128,
+                  "items": {
+                    "$ref": "#/$defs/id"
+                  }
+                }
+              ]
+            },
+            "page": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "after",
+                "limit"
+              ],
+              "properties": {
+                "after": {
+                  "oneOf": [
+                    {
+                      "type": "null"
+                    },
+                    {
+                      "$ref": "#/$defs/revision"
+                    }
+                  ]
+                },
+                "limit": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 128
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "namespace_journal_read_v1_response": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "method",
+        "result",
+        "error"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "method": {
+          "const": "namespace.journal.read.v1"
+        },
+        "result": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "store_id",
+                "store_generation",
+                "head",
+                "records",
+                "next",
+                "checkpoint"
+              ],
+              "properties": {
+                "store_id": {
+                  "$ref": "#/$defs/id"
+                },
+                "store_generation": {
+                  "$ref": "#/$defs/revision"
+                },
+                "head": {
+                  "$ref": "#/$defs/revision"
+                },
+                "records": {
+                  "type": "array",
+                  "maxItems": 128,
+                  "items": {
+                    "$ref": "#/$defs/journalRecord"
+                  }
+                },
+                "next": {
+                  "oneOf": [
+                    {
+                      "type": "null"
+                    },
+                    {
+                      "$ref": "#/$defs/revision"
+                    }
+                  ]
+                },
+                "checkpoint": {
+                  "oneOf": [
+                    {
+                      "type": "null"
+                    },
+                    {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": [
+                        "head",
+                        "chunk_cursors",
+                        "checkpoint_digest",
+                        "byte_count"
+                      ],
+                      "properties": {
+                        "head": {
+                          "$ref": "#/$defs/cursor"
+                        },
+                        "chunk_cursors": {
+                          "type": "array",
+                          "maxItems": 32,
+                          "items": {
+                            "$ref": "#/$defs/cursor"
+                          }
+                        },
+                        "checkpoint_digest": {
+                          "$ref": "#/$defs/digest"
+                        },
+                        "byte_count": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 1048576
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          ]
+        },
+        "error": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/error"
+            }
+          ]
+        }
+      },
+      "oneOf": [
+        {
+          "properties": {
+            "result": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "store_id",
+                "store_generation",
+                "head",
+                "records",
+                "next",
+                "checkpoint"
+              ],
+              "properties": {
+                "store_id": {
+                  "$ref": "#/$defs/id"
+                },
+                "store_generation": {
+                  "$ref": "#/$defs/revision"
+                },
+                "head": {
+                  "$ref": "#/$defs/revision"
+                },
+                "records": {
+                  "type": "array",
+                  "maxItems": 128,
+                  "items": {
+                    "$ref": "#/$defs/journalRecord"
+                  }
+                },
+                "next": {
+                  "oneOf": [
+                    {
+                      "type": "null"
+                    },
+                    {
+                      "$ref": "#/$defs/revision"
+                    }
+                  ]
+                },
+                "checkpoint": {
+                  "oneOf": [
+                    {
+                      "type": "null"
+                    },
+                    {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": [
+                        "head",
+                        "chunk_cursors",
+                        "checkpoint_digest",
+                        "byte_count"
+                      ],
+                      "properties": {
+                        "head": {
+                          "$ref": "#/$defs/cursor"
+                        },
+                        "chunk_cursors": {
+                          "type": "array",
+                          "maxItems": 32,
+                          "items": {
+                            "$ref": "#/$defs/cursor"
+                          }
+                        },
+                        "checkpoint_digest": {
+                          "$ref": "#/$defs/digest"
+                        },
+                        "byte_count": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 1048576
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            },
+            "error": {
+              "type": "null"
+            }
+          }
+        },
+        {
+          "properties": {
+            "result": {
+              "type": "null"
+            },
+            "error": {
+              "$ref": "#/$defs/error"
+            }
+          }
+        }
+      ]
+    },
+    "namespace_journal_append_v1_request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "method",
+        "params"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "method": {
+          "const": "namespace.journal.append.v1"
+        },
+        "params": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "namespace",
+            "store_id",
+            "store_generation",
+            "expected_sequence",
+            "operation_id",
+            "opaque",
+            "deferred_deliveries"
+          ],
+          "properties": {
+            "namespace": {
+              "$ref": "#/$defs/namespace"
+            },
+            "store_id": {
+              "$ref": "#/$defs/id"
+            },
+            "store_generation": {
+              "$ref": "#/$defs/revision"
+            },
+            "expected_sequence": {
+              "$ref": "#/$defs/revision"
+            },
+            "operation_id": {
+              "$ref": "#/$defs/id"
+            },
+            "opaque": {
+              "type": "object"
+            },
+            "deferred_deliveries": {
+              "type": "array",
+              "maxItems": 16,
+              "items": {
+                "$ref": "#/$defs/deferred"
+              }
+            }
+          }
+        }
+      }
+    },
+    "namespace_journal_append_v1_response": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "method",
+        "result",
+        "error"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "method": {
+          "const": "namespace.journal.append.v1"
+        },
+        "result": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "cursor",
+                "input_digest",
+                "actor_id",
+                "principal_id",
+                "deferred_deliveries"
+              ],
+              "properties": {
+                "cursor": {
+                  "$ref": "#/$defs/cursor"
+                },
+                "input_digest": {
+                  "$ref": "#/$defs/digest"
+                },
+                "actor_id": {
+                  "$ref": "#/$defs/id"
+                },
+                "principal_id": {
+                  "$ref": "#/$defs/id"
+                },
+                "deferred_deliveries": {
+                  "type": "array",
+                  "maxItems": 16,
+                  "items": {
+                    "$ref": "#/$defs/deliveryIntent"
+                  }
+                }
+              }
+            }
+          ]
+        },
+        "error": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/error"
+            }
+          ]
+        }
+      },
+      "oneOf": [
+        {
+          "properties": {
+            "result": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "cursor",
+                "input_digest",
+                "actor_id",
+                "principal_id",
+                "deferred_deliveries"
+              ],
+              "properties": {
+                "cursor": {
+                  "$ref": "#/$defs/cursor"
+                },
+                "input_digest": {
+                  "$ref": "#/$defs/digest"
+                },
+                "actor_id": {
+                  "$ref": "#/$defs/id"
+                },
+                "principal_id": {
+                  "$ref": "#/$defs/id"
+                },
+                "deferred_deliveries": {
+                  "type": "array",
+                  "maxItems": 16,
+                  "items": {
+                    "$ref": "#/$defs/deliveryIntent"
+                  }
+                }
+              }
+            },
+            "error": {
+              "type": "null"
+            }
+          }
+        },
+        {
+          "properties": {
+            "result": {
+              "type": "null"
+            },
+            "error": {
+              "$ref": "#/$defs/error"
+            }
+          }
+        }
+      ]
+    },
+    "namespace_journal_checkpoint_v1_request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "method",
+        "params"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "method": {
+          "const": "namespace.journal.checkpoint.v1"
+        },
+        "params": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "namespace",
+            "store_id",
+            "store_generation",
+            "expected_sequence",
+            "operation_id",
+            "chunk_cursors",
+            "checkpoint_digest"
+          ],
+          "properties": {
+            "namespace": {
+              "$ref": "#/$defs/namespace"
+            },
+            "store_id": {
+              "$ref": "#/$defs/id"
+            },
+            "store_generation": {
+              "$ref": "#/$defs/revision"
+            },
+            "expected_sequence": {
+              "$ref": "#/$defs/revision"
+            },
+            "operation_id": {
+              "$ref": "#/$defs/id"
+            },
+            "chunk_cursors": {
+              "type": "array",
+              "maxItems": 32,
+              "items": {
+                "$ref": "#/$defs/cursor"
+              }
+            },
+            "checkpoint_digest": {
+              "$ref": "#/$defs/digest"
+            }
+          }
+        }
+      }
+    },
+    "namespace_journal_checkpoint_v1_response": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "method",
+        "result",
+        "error"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "method": {
+          "const": "namespace.journal.checkpoint.v1"
+        },
+        "result": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "cursor",
+                "checkpoint_digest"
+              ],
+              "properties": {
+                "cursor": {
+                  "$ref": "#/$defs/cursor"
+                },
+                "checkpoint_digest": {
+                  "$ref": "#/$defs/digest"
+                }
+              }
+            }
+          ]
+        },
+        "error": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/error"
+            }
+          ]
+        }
+      },
+      "oneOf": [
+        {
+          "properties": {
+            "result": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "cursor",
+                "checkpoint_digest"
+              ],
+              "properties": {
+                "cursor": {
+                  "$ref": "#/$defs/cursor"
+                },
+                "checkpoint_digest": {
+                  "$ref": "#/$defs/digest"
+                }
+              }
+            },
+            "error": {
+              "type": "null"
+            }
+          }
+        },
+        {
+          "properties": {
+            "result": {
+              "type": "null"
+            },
+            "error": {
+              "$ref": "#/$defs/error"
+            }
+          }
+        }
+      ]
+    },
+    "namespace_journal_pin_v1_request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "method",
+        "params"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "method": {
+          "const": "namespace.journal.pin.v1"
+        },
+        "params": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "namespace",
+            "store_id",
+            "store_generation",
+            "expected_sequence",
+            "operation_id",
+            "record_ids",
+            "pinned"
+          ],
+          "properties": {
+            "namespace": {
+              "$ref": "#/$defs/namespace"
+            },
+            "store_id": {
+              "$ref": "#/$defs/id"
+            },
+            "store_generation": {
+              "$ref": "#/$defs/revision"
+            },
+            "expected_sequence": {
+              "$ref": "#/$defs/revision"
+            },
+            "operation_id": {
+              "$ref": "#/$defs/id"
+            },
+            "record_ids": {
+              "type": "array",
+              "maxItems": 128,
+              "items": {
+                "$ref": "#/$defs/id"
+              }
+            },
+            "pinned": {
+              "type": "boolean"
+            }
+          }
+        }
+      }
+    },
+    "namespace_journal_pin_v1_response": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "method",
+        "result",
+        "error"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "method": {
+          "const": "namespace.journal.pin.v1"
+        },
+        "result": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "head",
+                "pins_digest"
+              ],
+              "properties": {
+                "head": {
+                  "$ref": "#/$defs/cursor"
+                },
+                "pins_digest": {
+                  "$ref": "#/$defs/digest"
+                }
+              }
+            }
+          ]
+        },
+        "error": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/error"
+            }
+          ]
+        }
+      },
+      "oneOf": [
+        {
+          "properties": {
+            "result": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "head",
+                "pins_digest"
+              ],
+              "properties": {
+                "head": {
+                  "$ref": "#/$defs/cursor"
+                },
+                "pins_digest": {
+                  "$ref": "#/$defs/digest"
+                }
+              }
+            },
+            "error": {
+              "type": "null"
+            }
+          }
+        },
+        {
+          "properties": {
+            "result": {
+              "type": "null"
+            },
+            "error": {
+              "$ref": "#/$defs/error"
+            }
+          }
+        }
+      ]
+    },
+    "namespace_journal_archive_v1_request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "method",
+        "params"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "method": {
+          "const": "namespace.journal.archive.v1"
+        },
+        "params": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "namespace",
+            "store_id",
+            "store_generation",
+            "expected_sequence",
+            "operation_id",
+            "record_ids"
+          ],
+          "properties": {
+            "namespace": {
+              "$ref": "#/$defs/namespace"
+            },
+            "store_id": {
+              "$ref": "#/$defs/id"
+            },
+            "store_generation": {
+              "$ref": "#/$defs/revision"
+            },
+            "expected_sequence": {
+              "$ref": "#/$defs/revision"
+            },
+            "operation_id": {
+              "$ref": "#/$defs/id"
+            },
+            "record_ids": {
+              "type": "array",
+              "maxItems": 128,
+              "items": {
+                "$ref": "#/$defs/id"
+              }
+            }
+          }
+        }
+      }
+    },
+    "namespace_journal_archive_v1_response": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "method",
+        "result",
+        "error"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "method": {
+          "const": "namespace.journal.archive.v1"
+        },
+        "result": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "head",
+                "archived_record_ids",
+                "retained_receipts"
+              ],
+              "properties": {
+                "head": {
+                  "$ref": "#/$defs/cursor"
+                },
+                "archived_record_ids": {
+                  "type": "array",
+                  "maxItems": 128,
+                  "items": {
+                    "$ref": "#/$defs/id"
+                  }
+                },
+                "retained_receipts": {
+                  "const": true
+                }
+              }
+            }
+          ]
+        },
+        "error": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/error"
+            }
+          ]
+        }
+      },
+      "oneOf": [
+        {
+          "properties": {
+            "result": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "head",
+                "archived_record_ids",
+                "retained_receipts"
+              ],
+              "properties": {
+                "head": {
+                  "$ref": "#/$defs/cursor"
+                },
+                "archived_record_ids": {
+                  "type": "array",
+                  "maxItems": 128,
+                  "items": {
+                    "$ref": "#/$defs/id"
+                  }
+                },
+                "retained_receipts": {
+                  "const": true
+                }
+              }
+            },
+            "error": {
+              "type": "null"
+            }
+          }
+        },
+        {
+          "properties": {
+            "result": {
+              "type": "null"
+            },
+            "error": {
+              "$ref": "#/$defs/error"
+            }
+          }
+        }
+      ]
+    },
+    "namespace_journal_export_v1_request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "method",
+        "params"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "method": {
+          "const": "namespace.journal.export.v1"
+        },
+        "params": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "namespace",
+            "store_id",
+            "store_generation",
+            "expected_sequence",
+            "export_id",
+            "page"
+          ],
+          "properties": {
+            "namespace": {
+              "$ref": "#/$defs/namespace"
+            },
+            "store_id": {
+              "$ref": "#/$defs/id"
+            },
+            "store_generation": {
+              "$ref": "#/$defs/revision"
+            },
+            "expected_sequence": {
+              "$ref": "#/$defs/revision"
+            },
+            "export_id": {
+              "oneOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "$ref": "#/$defs/id"
+                }
+              ]
+            },
+            "page": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "after",
+                "limit"
+              ],
+              "properties": {
+                "after": {
+                  "oneOf": [
+                    {
+                      "type": "null"
+                    },
+                    {
+                      "$ref": "#/$defs/revision"
+                    }
+                  ]
+                },
+                "limit": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 128
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "namespace_journal_export_v1_response": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "method",
+        "result",
+        "error"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "method": {
+          "const": "namespace.journal.export.v1"
+        },
+        "result": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "export_id",
+                "head",
+                "records",
+                "next",
+                "complete",
+                "sha256",
+                "pins_digest",
+                "record_count"
+              ],
+              "properties": {
+                "export_id": {
+                  "$ref": "#/$defs/id"
+                },
+                "head": {
+                  "$ref": "#/$defs/cursor"
+                },
+                "records": {
+                  "type": "array",
+                  "maxItems": 128,
+                  "items": {
+                    "$ref": "#/$defs/journalRecord"
+                  }
+                },
+                "next": {
+                  "oneOf": [
+                    {
+                      "type": "null"
+                    },
+                    {
+                      "$ref": "#/$defs/revision"
+                    }
+                  ]
+                },
+                "complete": {
+                  "type": "boolean"
+                },
+                "sha256": {
+                  "oneOf": [
+                    {
+                      "type": "null"
+                    },
+                    {
+                      "$ref": "#/$defs/digest"
+                    }
+                  ]
+                },
+                "pins_digest": {
+                  "$ref": "#/$defs/digest"
+                },
+                "record_count": {
+                  "$ref": "#/$defs/revision"
+                }
+              }
+            }
+          ]
+        },
+        "error": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/error"
+            }
+          ]
+        }
+      },
+      "oneOf": [
+        {
+          "properties": {
+            "result": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "export_id",
+                "head",
+                "records",
+                "next",
+                "complete",
+                "sha256",
+                "pins_digest",
+                "record_count"
+              ],
+              "properties": {
+                "export_id": {
+                  "$ref": "#/$defs/id"
+                },
+                "head": {
+                  "$ref": "#/$defs/cursor"
+                },
+                "records": {
+                  "type": "array",
+                  "maxItems": 128,
+                  "items": {
+                    "$ref": "#/$defs/journalRecord"
+                  }
+                },
+                "next": {
+                  "oneOf": [
+                    {
+                      "type": "null"
+                    },
+                    {
+                      "$ref": "#/$defs/revision"
+                    }
+                  ]
+                },
+                "complete": {
+                  "type": "boolean"
+                },
+                "sha256": {
+                  "oneOf": [
+                    {
+                      "type": "null"
+                    },
+                    {
+                      "$ref": "#/$defs/digest"
+                    }
+                  ]
+                },
+                "pins_digest": {
+                  "$ref": "#/$defs/digest"
+                },
+                "record_count": {
+                  "$ref": "#/$defs/revision"
+                }
+              }
+            },
+            "error": {
+              "type": "null"
+            }
+          }
+        },
+        {
+          "properties": {
+            "result": {
+              "type": "null"
+            },
+            "error": {
+              "$ref": "#/$defs/error"
+            }
+          }
+        }
+      ]
+    },
+    "namespace_journal_reset_v1_request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "method",
+        "params"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "method": {
+          "const": "namespace.journal.reset.v1"
+        },
+        "params": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "namespace",
+            "store_id",
+            "store_generation",
+            "expected_sequence",
+            "operation_id",
+            "saved_export",
+            "explicit_reset_consent",
+            "pinned_disposition",
+            "reason"
+          ],
+          "properties": {
+            "namespace": {
+              "$ref": "#/$defs/namespace"
+            },
+            "store_id": {
+              "$ref": "#/$defs/id"
+            },
+            "store_generation": {
+              "$ref": "#/$defs/revision"
+            },
+            "expected_sequence": {
+              "$ref": "#/$defs/revision"
+            },
+            "operation_id": {
+              "$ref": "#/$defs/id"
+            },
+            "saved_export": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "export_id",
+                "head",
+                "sha256",
+                "pins_digest",
+                "writer_fsync_hash_verified"
+              ],
+              "properties": {
+                "export_id": {
+                  "$ref": "#/$defs/id"
+                },
+                "head": {
+                  "$ref": "#/$defs/cursor"
+                },
+                "sha256": {
+                  "$ref": "#/$defs/digest"
+                },
+                "pins_digest": {
+                  "$ref": "#/$defs/digest"
+                },
+                "writer_fsync_hash_verified": {
+                  "const": true
+                }
+              }
+            },
+            "explicit_reset_consent": {
+              "const": true
+            },
+            "pinned_disposition": {
+              "enum": [
+                "none",
+                "abandon_all_exported_pins"
+              ]
+            },
+            "reason": {
+              "type": "string",
+              "maxLength": 1024
+            }
+          }
+        }
+      }
+    },
+    "namespace_journal_reset_v1_response": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "method",
+        "result",
+        "error"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "method": {
+          "const": "namespace.journal.reset.v1"
+        },
+        "result": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "old_store_id",
+                "old_generation",
+                "new_store_id",
+                "new_generation",
+                "retired_lookup"
+              ],
+              "properties": {
+                "old_store_id": {
+                  "$ref": "#/$defs/id"
+                },
+                "old_generation": {
+                  "$ref": "#/$defs/revision"
+                },
+                "new_store_id": {
+                  "$ref": "#/$defs/id"
+                },
+                "new_generation": {
+                  "$ref": "#/$defs/revision"
+                },
+                "retired_lookup": {
+                  "const": true
+                }
+              }
+            }
+          ]
+        },
+        "error": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/error"
+            }
+          ]
+        }
+      },
+      "oneOf": [
+        {
+          "properties": {
+            "result": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "old_store_id",
+                "old_generation",
+                "new_store_id",
+                "new_generation",
+                "retired_lookup"
+              ],
+              "properties": {
+                "old_store_id": {
+                  "$ref": "#/$defs/id"
+                },
+                "old_generation": {
+                  "$ref": "#/$defs/revision"
+                },
+                "new_store_id": {
+                  "$ref": "#/$defs/id"
+                },
+                "new_generation": {
+                  "$ref": "#/$defs/revision"
+                },
+                "retired_lookup": {
+                  "const": true
+                }
+              }
+            },
+            "error": {
+              "type": "null"
+            }
+          }
+        },
+        {
+          "properties": {
+            "result": {
+              "type": "null"
+            },
+            "error": {
+              "$ref": "#/$defs/error"
+            }
+          }
+        }
+      ]
+    },
+    "mailbox_enqueue_v1_request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "method",
+        "params"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "method": {
+          "const": "mailbox.enqueue.v1"
+        },
+        "params": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "namespace",
+            "delivery_id",
+            "recipient_actor_id",
+            "expected_lookup_domain",
+            "payload",
+            "operation_id"
+          ],
+          "properties": {
+            "namespace": {
+              "$ref": "#/$defs/namespace"
+            },
+            "delivery_id": {
+              "$ref": "#/$defs/id"
+            },
+            "recipient_actor_id": {
+              "$ref": "#/$defs/id"
+            },
+            "expected_lookup_domain": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "store_id",
+                "store_generation"
+              ],
+              "properties": {
+                "store_id": {
+                  "$ref": "#/$defs/id"
+                },
+                "store_generation": {
+                  "$ref": "#/$defs/revision"
+                }
+              }
+            },
+            "payload": {
+              "type": "object"
+            },
+            "operation_id": {
+              "$ref": "#/$defs/id"
+            }
+          }
+        }
+      }
+    },
+    "mailbox_enqueue_v1_response": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "method",
+        "result",
+        "error"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "method": {
+          "const": "mailbox.enqueue.v1"
+        },
+        "result": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "receipt"
+              ],
+              "properties": {
+                "receipt": {
+                  "$ref": "#/$defs/deliveryReceipt"
+                }
+              }
+            }
+          ]
+        },
+        "error": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/error"
+            }
+          ]
+        }
+      },
+      "oneOf": [
+        {
+          "properties": {
+            "result": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "receipt"
+              ],
+              "properties": {
+                "receipt": {
+                  "$ref": "#/$defs/deliveryReceipt"
+                }
+              }
+            },
+            "error": {
+              "type": "null"
+            }
+          }
+        },
+        {
+          "properties": {
+            "result": {
+              "type": "null"
+            },
+            "error": {
+              "$ref": "#/$defs/error"
+            }
+          }
+        }
+      ]
+    },
+    "mailbox_intent_recover_v1_request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "method",
+        "params"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "method": {
+          "const": "mailbox.intent.recover.v1"
+        },
+        "params": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "namespace",
+            "intent_cursor",
+            "manifest_index",
+            "operation_id"
+          ],
+          "properties": {
+            "namespace": {
+              "$ref": "#/$defs/namespace"
+            },
+            "intent_cursor": {
+              "$ref": "#/$defs/cursor"
+            },
+            "manifest_index": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 15
+            },
+            "operation_id": {
+              "$ref": "#/$defs/id"
+            }
+          }
+        }
+      }
+    },
+    "mailbox_intent_recover_v1_response": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "method",
+        "result",
+        "error"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "method": {
+          "const": "mailbox.intent.recover.v1"
+        },
+        "result": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "receipt"
+              ],
+              "properties": {
+                "receipt": {
+                  "$ref": "#/$defs/deliveryReceipt"
+                }
+              }
+            }
+          ]
+        },
+        "error": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/error"
+            }
+          ]
+        }
+      },
+      "oneOf": [
+        {
+          "properties": {
+            "result": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "receipt"
+              ],
+              "properties": {
+                "receipt": {
+                  "$ref": "#/$defs/deliveryReceipt"
+                }
+              }
+            },
+            "error": {
+              "type": "null"
+            }
+          }
+        },
+        {
+          "properties": {
+            "result": {
+              "type": "null"
+            },
+            "error": {
+              "$ref": "#/$defs/error"
+            }
+          }
+        }
+      ]
+    },
+    "mailbox_intent_abandon_v1_request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "method",
+        "params"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "method": {
+          "const": "mailbox.intent.abandon.v1"
+        },
+        "params": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "namespace",
+            "intent_cursor",
+            "manifest_index",
+            "expected_delivery_version",
+            "operation_id",
+            "explicit_consent",
+            "reason"
+          ],
+          "properties": {
+            "namespace": {
+              "$ref": "#/$defs/namespace"
+            },
+            "intent_cursor": {
+              "$ref": "#/$defs/cursor"
+            },
+            "manifest_index": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 15
+            },
+            "expected_delivery_version": {
+              "$ref": "#/$defs/revision"
+            },
+            "operation_id": {
+              "$ref": "#/$defs/id"
+            },
+            "explicit_consent": {
+              "const": true
+            },
+            "reason": {
+              "type": "string",
+              "maxLength": 1024
+            }
+          }
+        }
+      }
+    },
+    "mailbox_intent_abandon_v1_response": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "method",
+        "result",
+        "error"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "method": {
+          "const": "mailbox.intent.abandon.v1"
+        },
+        "result": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "receipt",
+                "transport_pin_released"
+              ],
+              "properties": {
+                "receipt": {
+                  "$ref": "#/$defs/deliveryReceipt"
+                },
+                "transport_pin_released": {
+                  "type": "boolean"
+                }
+              }
+            }
+          ]
+        },
+        "error": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/error"
+            }
+          ]
+        }
+      },
+      "oneOf": [
+        {
+          "properties": {
+            "result": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "receipt",
+                "transport_pin_released"
+              ],
+              "properties": {
+                "receipt": {
+                  "$ref": "#/$defs/deliveryReceipt"
+                },
+                "transport_pin_released": {
+                  "type": "boolean"
+                }
+              }
+            },
+            "error": {
+              "type": "null"
+            }
+          }
+        },
+        {
+          "properties": {
+            "result": {
+              "type": "null"
+            },
+            "error": {
+              "$ref": "#/$defs/error"
+            }
+          }
+        }
+      ]
+    },
+    "mailbox_list_v1_request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "method",
+        "params"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "method": {
+          "const": "mailbox.list.v1"
+        },
+        "params": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "namespace",
+            "recipient_actor_id",
+            "page"
+          ],
+          "properties": {
+            "namespace": {
+              "$ref": "#/$defs/namespace"
+            },
+            "recipient_actor_id": {
+              "$ref": "#/$defs/id"
+            },
+            "page": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "after",
+                "limit"
+              ],
+              "properties": {
+                "after": {
+                  "oneOf": [
+                    {
+                      "type": "null"
+                    },
+                    {
+                      "$ref": "#/$defs/revision"
+                    }
+                  ]
+                },
+                "limit": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 128
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "mailbox_list_v1_response": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "method",
+        "result",
+        "error"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "method": {
+          "const": "mailbox.list.v1"
+        },
+        "result": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "envelopes",
+                "next"
+              ],
+              "properties": {
+                "envelopes": {
+                  "type": "array",
+                  "maxItems": 128,
+                  "items": {
+                    "$ref": "#/$defs/mailboxEnvelope"
+                  }
+                },
+                "next": {
+                  "oneOf": [
+                    {
+                      "type": "null"
+                    },
+                    {
+                      "$ref": "#/$defs/revision"
+                    }
+                  ]
+                }
+              }
+            }
+          ]
+        },
+        "error": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/error"
+            }
+          ]
+        }
+      },
+      "oneOf": [
+        {
+          "properties": {
+            "result": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "envelopes",
+                "next"
+              ],
+              "properties": {
+                "envelopes": {
+                  "type": "array",
+                  "maxItems": 128,
+                  "items": {
+                    "$ref": "#/$defs/mailboxEnvelope"
+                  }
+                },
+                "next": {
+                  "oneOf": [
+                    {
+                      "type": "null"
+                    },
+                    {
+                      "$ref": "#/$defs/revision"
+                    }
+                  ]
+                }
+              }
+            },
+            "error": {
+              "type": "null"
+            }
+          }
+        },
+        {
+          "properties": {
+            "result": {
+              "type": "null"
+            },
+            "error": {
+              "$ref": "#/$defs/error"
+            }
+          }
+        }
+      ]
+    },
+    "mailbox_read_v1_request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "method",
+        "params"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "method": {
+          "const": "mailbox.read.v1"
+        },
+        "params": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "namespace",
+            "delivery_id",
+            "expected_version"
+          ],
+          "properties": {
+            "namespace": {
+              "$ref": "#/$defs/namespace"
+            },
+            "delivery_id": {
+              "$ref": "#/$defs/id"
+            },
+            "expected_version": {
+              "$ref": "#/$defs/revision"
+            }
+          }
+        }
+      }
+    },
+    "mailbox_read_v1_response": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "method",
+        "result",
+        "error"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "method": {
+          "const": "mailbox.read.v1"
+        },
+        "result": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "envelope"
+              ],
+              "properties": {
+                "envelope": {
+                  "$ref": "#/$defs/mailboxEnvelope"
+                }
+              }
+            }
+          ]
+        },
+        "error": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/error"
+            }
+          ]
+        }
+      },
+      "oneOf": [
+        {
+          "properties": {
+            "result": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "envelope"
+              ],
+              "properties": {
+                "envelope": {
+                  "$ref": "#/$defs/mailboxEnvelope"
+                }
+              }
+            },
+            "error": {
+              "type": "null"
+            }
+          }
+        },
+        {
+          "properties": {
+            "result": {
+              "type": "null"
+            },
+            "error": {
+              "$ref": "#/$defs/error"
+            }
+          }
+        }
+      ]
+    },
+    "mailbox_edit_v1_request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "method",
+        "params"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "method": {
+          "const": "mailbox.edit.v1"
+        },
+        "params": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "namespace",
+            "delivery_id",
+            "expected_version",
+            "operation_id",
+            "payload"
+          ],
+          "properties": {
+            "namespace": {
+              "$ref": "#/$defs/namespace"
+            },
+            "delivery_id": {
+              "$ref": "#/$defs/id"
+            },
+            "expected_version": {
+              "$ref": "#/$defs/revision"
+            },
+            "operation_id": {
+              "$ref": "#/$defs/id"
+            },
+            "payload": {
+              "type": "object"
+            }
+          }
+        }
+      }
+    },
+    "mailbox_edit_v1_response": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "method",
+        "result",
+        "error"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "method": {
+          "const": "mailbox.edit.v1"
+        },
+        "result": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "receipt"
+              ],
+              "properties": {
+                "receipt": {
+                  "$ref": "#/$defs/deliveryReceipt"
+                }
+              }
+            }
+          ]
+        },
+        "error": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/error"
+            }
+          ]
+        }
+      },
+      "oneOf": [
+        {
+          "properties": {
+            "result": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "receipt"
+              ],
+              "properties": {
+                "receipt": {
+                  "$ref": "#/$defs/deliveryReceipt"
+                }
+              }
+            },
+            "error": {
+              "type": "null"
+            }
+          }
+        },
+        {
+          "properties": {
+            "result": {
+              "type": "null"
+            },
+            "error": {
+              "$ref": "#/$defs/error"
+            }
+          }
+        }
+      ]
+    },
+    "mailbox_claim_v1_request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "method",
+        "params"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "method": {
+          "const": "mailbox.claim.v1"
+        },
+        "params": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "namespace",
+            "delivery_id",
+            "expected_lookup_domain",
+            "expected_version",
+            "operation_id"
+          ],
+          "properties": {
+            "namespace": {
+              "$ref": "#/$defs/namespace"
+            },
+            "delivery_id": {
+              "$ref": "#/$defs/id"
+            },
+            "expected_lookup_domain": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "store_id",
+                "store_generation"
+              ],
+              "properties": {
+                "store_id": {
+                  "$ref": "#/$defs/id"
+                },
+                "store_generation": {
+                  "$ref": "#/$defs/revision"
+                }
+              }
+            },
+            "expected_version": {
+              "$ref": "#/$defs/revision"
+            },
+            "operation_id": {
+              "$ref": "#/$defs/id"
+            }
+          }
+        }
+      }
+    },
+    "mailbox_claim_v1_response": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "method",
+        "result",
+        "error"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "method": {
+          "const": "mailbox.claim.v1"
+        },
+        "result": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "claim"
+              ],
+              "properties": {
+                "claim": {
+                  "$ref": "#/$defs/claim"
+                }
+              }
+            }
+          ]
+        },
+        "error": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/error"
+            }
+          ]
+        }
+      },
+      "oneOf": [
+        {
+          "properties": {
+            "result": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "claim"
+              ],
+              "properties": {
+                "claim": {
+                  "$ref": "#/$defs/claim"
+                }
+              }
+            },
+            "error": {
+              "type": "null"
+            }
+          }
+        },
+        {
+          "properties": {
+            "result": {
+              "type": "null"
+            },
+            "error": {
+              "$ref": "#/$defs/error"
+            }
+          }
+        }
+      ]
+    },
+    "mailbox_claim_renew_v1_request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "method",
+        "params"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "method": {
+          "const": "mailbox.claim.renew.v1"
+        },
+        "params": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "namespace",
+            "delivery_id",
+            "expected_lookup_domain",
+            "claim_id",
+            "expected_version",
+            "operation_id"
+          ],
+          "properties": {
+            "namespace": {
+              "$ref": "#/$defs/namespace"
+            },
+            "delivery_id": {
+              "$ref": "#/$defs/id"
+            },
+            "expected_lookup_domain": {
+              "$ref": "#/$defs/lookupDomain"
+            },
+            "claim_id": {
+              "$ref": "#/$defs/id"
+            },
+            "expected_version": {
+              "$ref": "#/$defs/revision"
+            },
+            "operation_id": {
+              "$ref": "#/$defs/id"
+            }
+          }
+        }
+      }
+    },
+    "mailbox_claim_renew_v1_response": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "method",
+        "result",
+        "error"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "method": {
+          "const": "mailbox.claim.renew.v1"
+        },
+        "result": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "claim"
+              ],
+              "properties": {
+                "claim": {
+                  "$ref": "#/$defs/claim"
+                }
+              }
+            }
+          ]
+        },
+        "error": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/error"
+            }
+          ]
+        }
+      },
+      "oneOf": [
+        {
+          "properties": {
+            "result": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "claim"
+              ],
+              "properties": {
+                "claim": {
+                  "$ref": "#/$defs/claim"
+                }
+              }
+            },
+            "error": {
+              "type": "null"
+            }
+          }
+        },
+        {
+          "properties": {
+            "result": {
+              "type": "null"
+            },
+            "error": {
+              "$ref": "#/$defs/error"
+            }
+          }
+        }
+      ]
+    },
+    "mailbox_ack_v1_request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "method",
+        "params"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "method": {
+          "const": "mailbox.ack.v1"
+        },
+        "params": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "namespace",
+            "delivery_id",
+            "expected_lookup_domain",
+            "claim_id",
+            "expected_version",
+            "operation_id",
+            "disposition"
+          ],
+          "properties": {
+            "namespace": {
+              "$ref": "#/$defs/namespace"
+            },
+            "delivery_id": {
+              "$ref": "#/$defs/id"
+            },
+            "expected_lookup_domain": {
+              "$ref": "#/$defs/lookupDomain"
+            },
+            "claim_id": {
+              "$ref": "#/$defs/id"
+            },
+            "expected_version": {
+              "$ref": "#/$defs/revision"
+            },
+            "operation_id": {
+              "$ref": "#/$defs/id"
+            },
+            "disposition": {
+              "enum": [
+                "consumed",
+                "released"
+              ]
+            }
+          }
+        }
+      }
+    },
+    "mailbox_ack_v1_response": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "method",
+        "result",
+        "error"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "method": {
+          "const": "mailbox.ack.v1"
+        },
+        "result": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "receipt"
+              ],
+              "properties": {
+                "receipt": {
+                  "$ref": "#/$defs/deliveryReceipt"
+                }
+              }
+            }
+          ]
+        },
+        "error": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/error"
+            }
+          ]
+        }
+      },
+      "oneOf": [
+        {
+          "properties": {
+            "result": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "receipt"
+              ],
+              "properties": {
+                "receipt": {
+                  "$ref": "#/$defs/deliveryReceipt"
+                }
+              }
+            },
+            "error": {
+              "type": "null"
+            }
+          }
+        },
+        {
+          "properties": {
+            "result": {
+              "type": "null"
+            },
+            "error": {
+              "$ref": "#/$defs/error"
+            }
+          }
+        }
+      ]
+    },
+    "mailbox_receipt_v1_request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "method",
+        "params"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "method": {
+          "const": "mailbox.receipt.v1"
+        },
+        "params": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "namespace",
+            "delivery_id",
+            "expected_lookup_domain"
+          ],
+          "properties": {
+            "namespace": {
+              "$ref": "#/$defs/namespace"
+            },
+            "delivery_id": {
+              "$ref": "#/$defs/id"
+            },
+            "expected_lookup_domain": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "store_id",
+                "store_generation"
+              ],
+              "properties": {
+                "store_id": {
+                  "$ref": "#/$defs/id"
+                },
+                "store_generation": {
+                  "$ref": "#/$defs/revision"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "mailbox_receipt_v1_response": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "method",
+        "result",
+        "error"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "method": {
+          "const": "mailbox.receipt.v1"
+        },
+        "result": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "receipt"
+              ],
+              "properties": {
+                "receipt": {
+                  "$ref": "#/$defs/deliveryLookup"
+                }
+              }
+            }
+          ]
+        },
+        "error": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/error"
+            }
+          ]
+        }
+      },
+      "oneOf": [
+        {
+          "properties": {
+            "result": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "receipt"
+              ],
+              "properties": {
+                "receipt": {
+                  "$ref": "#/$defs/deliveryLookup"
+                }
+              }
+            },
+            "error": {
+              "type": "null"
+            }
+          }
+        },
+        {
+          "properties": {
+            "result": {
+              "type": "null"
+            },
+            "error": {
+              "$ref": "#/$defs/error"
+            }
+          }
+        }
+      ]
+    },
+    "mailbox_run_bind_v1_request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "method",
+        "params"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "method": {
+          "const": "mailbox.run.bind.v1"
+        },
+        "params": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "namespace",
+            "delivery_id",
+            "expected_lookup_domain",
+            "claim_id",
+            "expected_version",
+            "operation_id"
+          ],
+          "properties": {
+            "namespace": {
+              "$ref": "#/$defs/namespace"
+            },
+            "delivery_id": {
+              "$ref": "#/$defs/id"
+            },
+            "expected_lookup_domain": {
+              "$ref": "#/$defs/lookupDomain"
+            },
+            "claim_id": {
+              "$ref": "#/$defs/id"
+            },
+            "expected_version": {
+              "$ref": "#/$defs/revision"
+            },
+            "operation_id": {
+              "$ref": "#/$defs/id"
+            }
+          }
+        }
+      }
+    },
+    "mailbox_run_bind_v1_response": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "method",
+        "result",
+        "error"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "method": {
+          "const": "mailbox.run.bind.v1"
+        },
+        "result": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "run"
+              ],
+              "properties": {
+                "run": {
+                  "$ref": "#/$defs/runReceipt"
+                }
+              }
+            }
+          ]
+        },
+        "error": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/error"
+            }
+          ]
+        }
+      },
+      "oneOf": [
+        {
+          "properties": {
+            "result": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "run"
+              ],
+              "properties": {
+                "run": {
+                  "$ref": "#/$defs/runReceipt"
+                }
+              }
+            },
+            "error": {
+              "type": "null"
+            }
+          }
+        },
+        {
+          "properties": {
+            "result": {
+              "type": "null"
+            },
+            "error": {
+              "$ref": "#/$defs/error"
+            }
+          }
+        }
+      ]
+    },
+    "mailbox_run_start_ack_v1_request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "method",
+        "params"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "method": {
+          "const": "mailbox.run.start.ack.v1"
+        },
+        "params": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "namespace",
+            "run_id",
+            "expected_lookup_domain",
+            "expected_run_revision",
+            "operation_id"
+          ],
+          "properties": {
+            "namespace": {
+              "$ref": "#/$defs/namespace"
+            },
+            "run_id": {
+              "$ref": "#/$defs/id"
+            },
+            "expected_lookup_domain": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "store_id",
+                "store_generation"
+              ],
+              "properties": {
+                "store_id": {
+                  "$ref": "#/$defs/id"
+                },
+                "store_generation": {
+                  "$ref": "#/$defs/revision"
+                }
+              }
+            },
+            "expected_run_revision": {
+              "$ref": "#/$defs/revision"
+            },
+            "operation_id": {
+              "$ref": "#/$defs/id"
+            }
+          }
+        }
+      }
+    },
+    "mailbox_run_start_ack_v1_response": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "method",
+        "result",
+        "error"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "method": {
+          "const": "mailbox.run.start.ack.v1"
+        },
+        "result": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "run"
+              ],
+              "properties": {
+                "run": {
+                  "$ref": "#/$defs/runReceipt"
+                }
+              }
+            }
+          ]
+        },
+        "error": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/error"
+            }
+          ]
+        }
+      },
+      "oneOf": [
+        {
+          "properties": {
+            "result": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "run"
+              ],
+              "properties": {
+                "run": {
+                  "$ref": "#/$defs/runReceipt"
+                }
+              }
+            },
+            "error": {
+              "type": "null"
+            }
+          }
+        },
+        {
+          "properties": {
+            "result": {
+              "type": "null"
+            },
+            "error": {
+              "$ref": "#/$defs/error"
+            }
+          }
+        }
+      ]
+    },
+    "mailbox_run_receipt_v1_request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "method",
+        "params"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "method": {
+          "const": "mailbox.run.receipt.v1"
+        },
+        "params": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "namespace",
+            "run_id",
+            "expected_lookup_domain"
+          ],
+          "properties": {
+            "namespace": {
+              "$ref": "#/$defs/namespace"
+            },
+            "run_id": {
+              "$ref": "#/$defs/id"
+            },
+            "expected_lookup_domain": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "store_id",
+                "store_generation"
+              ],
+              "properties": {
+                "store_id": {
+                  "$ref": "#/$defs/id"
+                },
+                "store_generation": {
+                  "$ref": "#/$defs/revision"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "mailbox_run_receipt_v1_response": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "method",
+        "result",
+        "error"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "method": {
+          "const": "mailbox.run.receipt.v1"
+        },
+        "result": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "run"
+              ],
+              "properties": {
+                "run": {
+                  "oneOf": [
+                    {
+                      "$ref": "#/$defs/runReceipt"
+                    },
+                    {
+                      "oneOf": [
+                        {
+                          "type": "object",
+                          "additionalProperties": false,
+                          "required": [
+                            "state",
+                            "lookup_key",
+                            "lookup_domain",
+                            "assurance"
+                          ],
+                          "properties": {
+                            "state": {
+                              "const": "absent"
+                            },
+                            "lookup_key": {
+                              "type": "object",
+                              "additionalProperties": false,
+                              "required": [
+                                "namespace",
+                                "run_id"
+                              ],
+                              "properties": {
+                                "namespace": {
+                                  "$ref": "#/$defs/namespace"
+                                },
+                                "run_id": {
+                                  "$ref": "#/$defs/id"
+                                }
+                              }
+                            },
+                            "lookup_domain": {
+                              "type": "object",
+                              "additionalProperties": false,
+                              "required": [
+                                "store_id",
+                                "store_generation"
+                              ],
+                              "properties": {
+                                "store_id": {
+                                  "$ref": "#/$defs/id"
+                                },
+                                "store_generation": {
+                                  "$ref": "#/$defs/revision"
+                                }
+                              }
+                            },
+                            "assurance": {
+                              "const": "authoritative_absent"
+                            }
+                          }
+                        },
+                        {
+                          "type": "object",
+                          "additionalProperties": false,
+                          "required": [
+                            "state",
+                            "lookup_key",
+                            "lookup_domain",
+                            "assurance"
+                          ],
+                          "properties": {
+                            "state": {
+                              "enum": [
+                                "unknown",
+                                "retired",
+                                "repair_required"
+                              ]
+                            },
+                            "lookup_key": {
+                              "type": "object",
+                              "additionalProperties": false,
+                              "required": [
+                                "namespace",
+                                "run_id"
+                              ],
+                              "properties": {
+                                "namespace": {
+                                  "$ref": "#/$defs/namespace"
+                                },
+                                "run_id": {
+                                  "$ref": "#/$defs/id"
+                                }
+                              }
+                            },
+                            "lookup_domain": {
+                              "type": "object",
+                              "additionalProperties": false,
+                              "required": [
+                                "store_id",
+                                "store_generation"
+                              ],
+                              "properties": {
+                                "store_id": {
+                                  "$ref": "#/$defs/id"
+                                },
+                                "store_generation": {
+                                  "$ref": "#/$defs/revision"
+                                }
+                              }
+                            },
+                            "assurance": {
+                              "const": "not_authoritative"
+                            }
+                          }
+                        }
+                      ]
+                    }
+                  ]
+                }
+              }
+            }
+          ]
+        },
+        "error": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/error"
+            }
+          ]
+        }
+      },
+      "oneOf": [
+        {
+          "properties": {
+            "result": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "run"
+              ],
+              "properties": {
+                "run": {
+                  "oneOf": [
+                    {
+                      "$ref": "#/$defs/runReceipt"
+                    },
+                    {
+                      "oneOf": [
+                        {
+                          "type": "object",
+                          "additionalProperties": false,
+                          "required": [
+                            "state",
+                            "lookup_key",
+                            "lookup_domain",
+                            "assurance"
+                          ],
+                          "properties": {
+                            "state": {
+                              "const": "absent"
+                            },
+                            "lookup_key": {
+                              "type": "object",
+                              "additionalProperties": false,
+                              "required": [
+                                "namespace",
+                                "run_id"
+                              ],
+                              "properties": {
+                                "namespace": {
+                                  "$ref": "#/$defs/namespace"
+                                },
+                                "run_id": {
+                                  "$ref": "#/$defs/id"
+                                }
+                              }
+                            },
+                            "lookup_domain": {
+                              "type": "object",
+                              "additionalProperties": false,
+                              "required": [
+                                "store_id",
+                                "store_generation"
+                              ],
+                              "properties": {
+                                "store_id": {
+                                  "$ref": "#/$defs/id"
+                                },
+                                "store_generation": {
+                                  "$ref": "#/$defs/revision"
+                                }
+                              }
+                            },
+                            "assurance": {
+                              "const": "authoritative_absent"
+                            }
+                          }
+                        },
+                        {
+                          "type": "object",
+                          "additionalProperties": false,
+                          "required": [
+                            "state",
+                            "lookup_key",
+                            "lookup_domain",
+                            "assurance"
+                          ],
+                          "properties": {
+                            "state": {
+                              "enum": [
+                                "unknown",
+                                "retired",
+                                "repair_required"
+                              ]
+                            },
+                            "lookup_key": {
+                              "type": "object",
+                              "additionalProperties": false,
+                              "required": [
+                                "namespace",
+                                "run_id"
+                              ],
+                              "properties": {
+                                "namespace": {
+                                  "$ref": "#/$defs/namespace"
+                                },
+                                "run_id": {
+                                  "$ref": "#/$defs/id"
+                                }
+                              }
+                            },
+                            "lookup_domain": {
+                              "type": "object",
+                              "additionalProperties": false,
+                              "required": [
+                                "store_id",
+                                "store_generation"
+                              ],
+                              "properties": {
+                                "store_id": {
+                                  "$ref": "#/$defs/id"
+                                },
+                                "store_generation": {
+                                  "$ref": "#/$defs/revision"
+                                }
+                              }
+                            },
+                            "assurance": {
+                              "const": "not_authoritative"
+                            }
+                          }
+                        }
+                      ]
+                    }
+                  ]
+                }
+              }
+            },
+            "error": {
+              "type": "null"
+            }
+          }
+        },
+        {
+          "properties": {
+            "result": {
+              "type": "null"
+            },
+            "error": {
+              "$ref": "#/$defs/error"
+            }
+          }
+        }
+      ]
+    }
+  }
+}

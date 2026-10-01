@@ -104,8 +104,13 @@ public-semantic-documents-test:
     {{python}} extensions/public-facts.test.py
     bun test extensions/public-activity/pi-role-status.test.ts
 
+# Slice2A contract/reference checks only; no broker, sessions, auth or model.
+work-contract-test:
+    node --test contracts/work-v1/*.test.mjs
+    {{python}} contracts/work-v1/canonical.test.py
+
 # Test bundled agent integration assets
-integration-assets-test: public-semantic-documents-test
+integration-assets-test: public-semantic-documents-test work-contract-test
     bun test src/integration/assets/herdr-agent-state.test.ts
     bun test src/integration/assets/opencode/herdr-agent-state.test.ts
     bun test src/integration/assets/opencode/herdr-tui-session.test.ts

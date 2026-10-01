@@ -1,0 +1,40 @@
+{
+ "$schema":"https://json-schema.org/draft/2020-12/schema",
+ "$id":"urn:vqro:neutral-broker-contract:v1",
+ "title":"Proposed neutral actor/action/journal/mailbox envelopes; no task fields",
+ "oneOf":[{"$ref":"#/$defs/invoke"},{"$ref":"#/$defs/journalAppend"},{"$ref":"#/$defs/deliveryIntent"},{"$ref":"#/$defs/mailboxEnvelope"},{"$ref":"#/$defs/claim"}],
+ "$defs":{
+  "id":{"type":"string","minLength":1,"maxLength":128,"pattern":"^[A-Za-z0-9][A-Za-z0-9._:-]*$"},
+  "namespace":{"type":"string","maxLength":128,"pattern":"^[a-z0-9_-]+(?:\\.[a-z0-9_-]+)+$"},
+  "revision":{"type":"string","maxLength":20,"pattern":"^(0|[1-9][0-9]*)$"},
+  "digest":{"type":"string","pattern":"^[a-f0-9]{64}$"},
+  "cursor":{"type":"object","additionalProperties":false,"required":["store_id","store_generation","sequence","record_id"],"properties":{"store_id":{"$ref":"#/$defs/id"},"store_generation":{"$ref":"#/$defs/revision"},"sequence":{"$ref":"#/$defs/revision"},"record_id":{"$ref":"#/$defs/id"}}},
+  "lookupDomain":{"type":"object","additionalProperties":false,"required":["store_id","store_generation"],"properties":{"store_id":{"$ref":"#/$defs/id"},"store_generation":{"$ref":"#/$defs/revision"}}},
+  "invoke":{
+   "type":"object","additionalProperties":false,"required":["contract","namespace","service_id","action","expected_provider_generation","expected_lookup_domain","operation_id","input"],
+   "properties":{"contract":{"const":"vqro.extension.action.invoke.v1"},"namespace":{"$ref":"#/$defs/namespace"},"service_id":{"$ref":"#/$defs/id"},"action":{"type":"string","maxLength":128},"expected_provider_generation":{"$ref":"#/$defs/revision"},"expected_lookup_domain":{"$ref":"#/$defs/lookupDomain"},"operation_id":{"$ref":"#/$defs/id"},"input":{"type":"object"}},
+   "description":"Actor/caller from authenticated transport, never JSON params. Registered action schema validates input; opaque to host. <=64KiB UTF-8 JSON."
+  },
+  "journalAppend":{
+   "type":"object","additionalProperties":false,"required":["contract","namespace","store_id","store_generation","expected_sequence","operation_id","opaque","deferred_deliveries"],
+   "properties":{"contract":{"const":"vqro.namespace.journal.append.v1"},"namespace":{"$ref":"#/$defs/namespace"},"store_id":{"$ref":"#/$defs/id"},"store_generation":{"$ref":"#/$defs/revision"},"expected_sequence":{"$ref":"#/$defs/revision"},"operation_id":{"$ref":"#/$defs/id"},"opaque":{"type":"object"},"deferred_deliveries":{"type":"array","maxItems":16,"items":{"$ref":"#/$defs/deferred"}}},
+   "description":"Owner invocation lease required. Host atomically stamps immutable attribution, digest, operation receipt and deferred delivery manifest; append defaults pinned. <=64KiB charged payload including manifest."
+  },
+  "deferred":{"type":"object","additionalProperties":false,"required":["delivery_id","recipient_actor_id","payload_pointer"],"properties":{"delivery_id":{"$ref":"#/$defs/id"},"recipient_actor_id":{"$ref":"#/$defs/id"},"payload_pointer":{"type":"string","minLength":1,"maxLength":1024,"pattern":"^/"}},"description":"RFC6901 pointer within this append's opaque JSON, must resolve to bounded object. Host computes/stamps digest and original actor under current send grant."},
+  "deliveryIntent":{
+   "type":"object","additionalProperties":false,"required":["contract","namespace","delivery_id","recipient_actor_id","original_actor_id","original_principal_id","payload_digest","mailbox_lookup_domain","cursor","manifest_index"],
+   "properties":{"contract":{"const":"vqro.mailbox.intent.v1"},"namespace":{"$ref":"#/$defs/namespace"},"delivery_id":{"$ref":"#/$defs/id"},"recipient_actor_id":{"$ref":"#/$defs/id"},"original_actor_id":{"$ref":"#/$defs/id"},"original_principal_id":{"$ref":"#/$defs/id"},"payload_digest":{"$ref":"#/$defs/digest"},"mailbox_lookup_domain":{"$ref":"#/$defs/lookupDomain"},"cursor":{"$ref":"#/$defs/cursor"},"manifest_index":{"type":"integer","minimum":0,"maximum":15}},
+   "description":"Host-produced immutable evidence. Recovery accepts cursor/index only, never caller replacement sender/body/digest."
+  },
+  "mailboxEnvelope":{
+   "type":"object","additionalProperties":false,"required":["contract","namespace","lookup_domain","delivery_id","sender_actor_id","recipient_actor_id","original_principal_id","recovery_principal_id","version","state","payload","payload_digest","intent"],
+   "properties":{"contract":{"const":"vqro.mailbox.envelope.v1"},"namespace":{"$ref":"#/$defs/namespace"},"lookup_domain":{"$ref":"#/$defs/lookupDomain"},"delivery_id":{"$ref":"#/$defs/id"},"sender_actor_id":{"$ref":"#/$defs/id"},"recipient_actor_id":{"$ref":"#/$defs/id"},"original_principal_id":{"$ref":"#/$defs/id"},"recovery_principal_id":{"oneOf":[{"type":"null"},{"$ref":"#/$defs/id"}]},"version":{"$ref":"#/$defs/revision"},"state":{"enum":["waiting","held_offline","held_unknown","claimed","consumed","cancelled","recipient_retired","repair_required"]},"payload":{"type":"object"},"payload_digest":{"$ref":"#/$defs/digest"},"intent":{"oneOf":[{"type":"null"},{"$ref":"#/$defs/deliveryIntent"}]}},
+   "description":"Opaque payload; host never treats consumed as task acceptance. Registered offline/unknown addresses may queue held without wake; retired cannot newly enqueue."
+  },
+  "claim":{
+   "type":"object","additionalProperties":false,"required":["contract","namespace","lookup_domain","delivery_id","version","claim_id","actor_id","execution_id","execution_epoch","lease_ms"],
+   "properties":{"contract":{"const":"vqro.mailbox.claim.v1"},"namespace":{"$ref":"#/$defs/namespace"},"lookup_domain":{"$ref":"#/$defs/lookupDomain"},"delivery_id":{"$ref":"#/$defs/id"},"version":{"$ref":"#/$defs/revision"},"claim_id":{"$ref":"#/$defs/id"},"actor_id":{"$ref":"#/$defs/id"},"execution_id":{"$ref":"#/$defs/id"},"execution_epoch":{"$ref":"#/$defs/revision"},"lease_ms":{"type":"integer","minimum":1,"maximum":30000}},
+   "description":"Atomic waiting-version CAS and exact recipient execution; expiry is not run failure or permission for automatic replay. Human read never starts Pi run."
+  }
+ }
+}
