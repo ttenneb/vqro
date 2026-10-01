@@ -225,6 +225,13 @@ impl App {
                 let _ = respond_to.send(response);
                 return Vec::new();
             }
+            AppEvent::HostDocumentProviderRetired {
+                namespace,
+                generation,
+            } => {
+                self.retire_host_document_provider(&namespace, generation);
+                return Vec::new();
+            }
             AppEvent::HostRelationshipsDocumentFinished(result) => {
                 self.handle_host_relationships_document_result(*result);
                 return Vec::new();

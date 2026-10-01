@@ -603,6 +603,14 @@ impl ExtensionRuntime for ProcessRuntime {
         }
     }
 
+    fn probe_exit(&mut self) -> Result<(), ExtensionServiceError> {
+        let child = self.child.as_mut().ok_or(ExtensionServiceError::Exited)?;
+        match child.try_wait().map_err(ExtensionServiceError::Io)? {
+            Some(_) => Err(ExtensionServiceError::Exited),
+            None => Ok(()),
+        }
+    }
+
     fn stop(&mut self, _reason: RuntimeStopReason) {
         self.writes.take();
         self.frames.take();

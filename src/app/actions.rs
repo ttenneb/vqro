@@ -1735,6 +1735,7 @@ impl AppState {
             | AppEvent::CollectionsCreateCheckpointPersisted(_)
             | AppEvent::ExtensionServiceFinished(_)
             | AppEvent::HostDocumentFinished(_)
+            | AppEvent::HostDocumentProviderRetired { .. }
             | AppEvent::HostRelationshipsDocumentFinished(_)
             | AppEvent::HostAgentActivityDocumentFinished(_)
             | AppEvent::HostDocumentRetryDue { .. }

@@ -380,6 +380,12 @@ pub(crate) trait ExtensionRuntime: Send {
         ))
     }
 
+    /// Non-consuming lifecycle check, called only by the owning service worker.
+    /// Components have no independently exiting child.
+    fn probe_exit(&mut self) -> Result<(), RuntimeError> {
+        Ok(())
+    }
+
     fn stop(&mut self, reason: RuntimeStopReason);
 }
 
@@ -924,6 +930,10 @@ impl ExtensionRuntimeDispatcher {
             );
         }
         result
+    }
+
+    pub(crate) fn probe_exit(&mut self) -> Result<(), RuntimeError> {
+        self.runtime.probe_exit()
     }
 
     pub(crate) fn stop(&mut self, reason: RuntimeStopReason) {
