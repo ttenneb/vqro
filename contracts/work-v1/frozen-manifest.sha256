@@ -1,0 +1,9 @@
+1281bf59f95a255a2e75c878b466ae2870d769600e25476539b34e8805b6e6c8  contracts/work-v1/FROZEN-SURFACE.md
+2be89b06eb7a0eae91418253da5b63450266cfa5b3daebaf9b4727df1f60564f  contracts/work-v1/api.schema.json
+d613b78347b473ff7c0203cb0fae8977f3b3f48d636edd4e764a56f448d159ca  contracts/work-v1/broker.schema.json
+71986a235038ce45225069343b6d81243f03e0312abf2dcc9e86e0ed6a1e6c87  contracts/work-v1/decision.schema.json
+945d30a1adede7714bef183fc3da777f1e65e54bc571c926936f92a21db80d8c  contracts/work-v1/proposal.schema.json
+525e915cfba2c7f00a9d260dbf35a17f6e3a0975dcd28241654bedca4fb87b15  contracts/work-v1/work.schema.json
+8c9f0f8cb205cd611f506c1256f4aec625ea3ddda2de9f503d11e79537caefc1  docs/next/api/v1-work-contract.md
+c95da40db999ee316765e007ff6c74f2d57c67d07177a9c490c9690569f6340a  docs/next/api/v1-neutral-mechanics.md
+67f10cf4da39687a636998c8b1db40f0d6d65d038d2aa9b49b40868c95159bfe  docs/next/api/v1-decision-contract.md

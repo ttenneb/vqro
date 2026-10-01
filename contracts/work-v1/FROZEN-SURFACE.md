@@ -13,6 +13,10 @@ Freeze candidate deadline:2026-10-01 00:15UTC. Actual accepted commit/hash is re
 
 `docs/next/api/v1-work-contract.md` and `v1-decision-contract.md` explain these inputs. Extended failure/retention/bootstrap explanations in `v1-neutral-mechanics.md` are qualification guidance, not evidence of implementation. Do not expand2A further to specify all failure cases.
 
+## Approved additive amendment: proposal preview
+
+`proposal.schema.json` defines separately advertised `work.proposal.read.v1` request/result contracts, called through existing `extension.query.invoke.v1`. Operator/human actor + actual read grant, read-only, scope-filtered, <=64KiB, generation/snapshot-fenced. Existing `work.read.v1`, original Work schemas and all generation1 host codecs/methods stay unchanged. Exact chosen action/current preconditions are visible before existing human confirmation; this query grants no mutation/auto-accept/wake. Unknown proposal lookup is not an operation-receipt absence assurance. Producer→preview→valid confirmation and rejection of changed/unauthorized confirmation need independent QA before availability. Free-thread later task attachment remains an explicitV1 limit.
+
 ## Short2B/3 qualification obligation list (not2A implementation)
 
 - Actual ordinary non-reserved service grants/invocation/recovery; peer identity/actor ticket/credential fences, unsupported platform behavior.

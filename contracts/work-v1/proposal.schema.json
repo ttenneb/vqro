@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vqro.dev/contracts/work-v1/proposal.schema.json",
+  "title": "Additive operator-scoped Work proposal preview, unavailable until qualified",
+  "description": "Separately advertised work.proposal.read.v1 through extension.query.invoke.v1. Not a mutation or an extension of frozen work.read.v1. Immutable host human actor + current operator/read grant required; no actor/class assertion in input. Total result including framing <=64KiB and <=128 records; snapshot/store/generation-bound ordinals, grant-filtered before paging.",
+  "oneOf": [
+    {"$ref": "#/$defs/request"},
+    {"$ref": "#/$defs/result"}
+  ],
+  "$defs": {
+    "id": {"$ref": "urn:vqro:work-contract:v1#/$defs/id"},
+    "revision": {"$ref": "urn:vqro:work-contract:v1#/$defs/revision"},
+    "cursor": {"$ref": "urn:vqro:work-contract:v1#/$defs/readCursor"},
+    "nullableId": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/id"}]},
+    "request": {
+      "type": "object", "additionalProperties": false,
+      "required": ["contract", "proposal_id", "after_cursor", "limit"],
+      "properties": {
+        "contract": {"const": "vqro.work.proposal.read.request.v1"},
+        "proposal_id": {"$ref": "#/$defs/nullableId"},
+        "after_cursor": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/cursor"}]},
+        "limit": {"type": "integer", "minimum": 1, "maximum": 128}
+      },
+      "allOf": [{"if": {"properties": {"proposal_id": {"type": "string"}}}, "then": {"properties": {"after_cursor": {"type": "null"}}}}],
+      "description": "proposal_id=null lists scoped pending proposals; exact ID returns at most one scoped proposal. Exact-ID requests require after_cursor=null. No disclosure of existence outside grant scope. Read does not refresh a proposal or authorize a later confirmation."
+    },
+    "proposal": {
+      "type": "object", "additionalProperties": false,
+      "required": ["proposal_id", "input_revision", "proposer_actor_id", "decision_id", "task_id", "thread_id", "status", "chosen_action", "current_preconditions", "reason"],
+      "properties": {
+        "proposal_id": {"$ref": "#/$defs/id"},
+        "input_revision": {"$ref": "#/$defs/revision"},
+        "proposer_actor_id": {"$ref": "#/$defs/id"},
+        "decision_id": {"$ref": "#/$defs/nullableId"},
+        "task_id": {"$ref": "#/$defs/nullableId"},
+        "thread_id": {"$ref": "#/$defs/nullableId"},
+        "status": {"enum": ["pending", "confirmed", "stale"]},
+        "chosen_action": {"allOf": [{"$ref": "urn:vqro:work-contract:v1#/$defs/action"}, {"properties": {"action": {"not": {"enum": ["work.proposal.confirm.v1", "work.decision.override.v1"]}}}}]},
+        "current_preconditions": {"$ref": "urn:vqro:work-contract:v1#/$defs/preconditions"},
+        "reason": {"$ref": "urn:vqro:work-contract:v1#/$defs/text"}
+      },
+      "description": "chosen_action is the immutable recorded proposal, not a rewritten current action. current_preconditions is diagnostic only. Confirmation sends exact proposal_id/input_revision/chosen_action and repeats human grant, hard policy and all revisions in the consequential CAS. Stale/changed choice is rejected, not silently rebased. Preview carries no claim/run/credential secrets."
+    },
+    "result": {
+      "type": "object", "additionalProperties": false,
+      "required": ["contract", "store_id", "store_generation", "snapshot_revision", "next_cursor", "proposals"],
+      "properties": {
+        "contract": {"const": "vqro.work.proposal.read.result.v1"},
+        "store_id": {"$ref": "#/$defs/id"},
+        "store_generation": {"$ref": "#/$defs/revision"},
+        "snapshot_revision": {"$ref": "#/$defs/revision"},
+        "next_cursor": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/cursor"}]},
+        "proposals": {"type": "array", "maxItems": 128, "items": {"$ref": "#/$defs/proposal"}}
+      },
+      "description": "Grant filtering and byte cap apply before returning records/cursor. Oversized single record fails locally, never truncates chosen_action. Unknown scoped ID returns empty proposals, not fabricated metadata; retired/stale domains fail locally, not authoritative absence. Empty result is not an operation receipt absence assurance."
+    }
+  }
+}
