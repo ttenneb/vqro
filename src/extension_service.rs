@@ -3910,6 +3910,150 @@ sleep 2
             .contains("revoked"));
     }
 
+    fn recv_test_document_event(
+        rx: &mut tokio::sync::mpsc::Receiver<crate::events::AppEvent>,
+    ) -> crate::events::AppEvent {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Ok(event) = rx.try_recv() {
+                return event;
+            }
+            assert!(Instant::now() < deadline, "document event deadline");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn executable_document_retirement_survives_full_channel_and_rejects_queued_action() {
+        for saturated in [true, false] {
+            let root = std::env::temp_dir().join(format!(
+                "vqro-document-worker-{}",
+                next_service_generation()
+            ));
+            std::fs::create_dir_all(&root).unwrap();
+            let (tx, mut rx) = tokio::sync::mpsc::channel(if saturated { 1 } else { 16 });
+            let catalog = HostDocumentServiceCatalog::for_test_document_specs(
+                vec![(
+                    ExtensionServiceSpec {
+                        id: "example.docs".into(),
+                        command: vec![
+                            "python3".into(),
+                            format!(
+                                "{}/tests/fixtures/document-exit-provider.py",
+                                env!("CARGO_MANIFEST_DIR")
+                            ),
+                            "example.docs".into(),
+                            root.display().to_string(),
+                        ],
+                        cwd: root.clone(),
+                        priority: 0,
+                        granted_capabilities: vec![
+                            crate::api::schema::ExtensionServiceCapability::HostDocument,
+                        ],
+                    },
+                    7,
+                    crate::api::schema::HostDocumentSourceKind::TerminalGroups,
+                )],
+                tx.clone(),
+            );
+            let mut snapshot = crate::extension_contract::HostTerminalGroupsV1 {
+                contract: "host.terminal-groups.v1".into(),
+                generation: 7,
+                revision: 1,
+                scope_id: "tab-1".into(),
+                groups: Vec::new(),
+                ungrouped: Vec::new(),
+            };
+            catalog.request("example.docs", snapshot.clone()).unwrap();
+            assert!(
+                matches!(recv_test_document_event(&mut rx), crate::events::AppEvent::HostDocumentFinished(result) if result.result.is_ok())
+            );
+            if saturated {
+                tx.try_send(crate::events::AppEvent::HostDocumentRetryDue {
+                    namespace: "filler".into(),
+                    scope_id: "filler".into(),
+                    generation: 1,
+                    revision: 1,
+                })
+                .unwrap();
+                std::fs::write(root.join("exit"), "").unwrap();
+                let deadline = Instant::now() + Duration::from_secs(5);
+                while !catalog.requests["example.docs"]
+                    .desired_revisions
+                    .lock()
+                    .unwrap()
+                    .is_empty()
+                {
+                    assert!(
+                        Instant::now() < deadline,
+                        "worker failed to observe exit while channel full"
+                    );
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                assert!(matches!(
+                    rx.try_recv().unwrap(),
+                    crate::events::AppEvent::HostDocumentRetryDue { .. }
+                ));
+                assert!(matches!(
+                    recv_test_document_event(&mut rx),
+                    crate::events::AppEvent::HostDocumentProviderRetired { generation: 7, .. }
+                ));
+            } else {
+                std::fs::remove_file(root.join("render-started")).unwrap();
+                std::fs::write(root.join("hold-render"), "").unwrap();
+                snapshot.revision = 2;
+                catalog.request("example.docs", snapshot.clone()).unwrap();
+                let deadline = Instant::now() + Duration::from_millis(500);
+                while !root.join("render-started").exists() {
+                    assert!(Instant::now() < deadline, "render did not start");
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                let action = crate::extension_contract::HostDocumentExtensionActionV1 {
+                    contract: crate::extension_contract::HOST_DOCUMENT_CONTRACT_V1.into(),
+                    namespace: "example.docs".into(),
+                    generation: 7,
+                    revision: 2,
+                    scope_id: "tab-1".into(),
+                    action_id: "sentinel".into(),
+                    name: "sentinel".into(),
+                    subject_id: None,
+                };
+                let response = catalog.request_action(snapshot.clone(), action).unwrap();
+                std::fs::write(root.join("exit"), "").unwrap();
+                let error = response
+                    .recv_timeout(Duration::from_secs(2))
+                    .unwrap()
+                    .unwrap_err();
+                assert!(error.contains("stale") || error.contains("superseded"));
+                assert!(!root.join("action-ran").exists());
+                std::fs::remove_file(root.join("exit")).unwrap();
+                std::fs::remove_file(root.join("hold-render")).unwrap();
+                // Leave actor events unconsumed until after a healthy same-catalog respawn.
+                std::thread::sleep(Duration::from_millis(300));
+                snapshot.revision = 3;
+                catalog.request("example.docs", snapshot).unwrap();
+                assert!(matches!(
+                    recv_test_document_event(&mut rx),
+                    crate::events::AppEvent::HostDocumentProviderRetired { generation: 7, .. }
+                ));
+                loop {
+                    if let crate::events::AppEvent::HostDocumentFinished(result) =
+                        recv_test_document_event(&mut rx)
+                    {
+                        if result.snapshot.revision == 3 {
+                            assert!(result.result.is_ok());
+                            break;
+                        }
+                    }
+                }
+                assert!(!root.join("action-ran").exists());
+            }
+            drop(catalog);
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
     #[test]
     fn document_retirement_slot_survives_saturation_and_precedes_scope_results() {
         let (tx, mut rx) = tokio::sync::mpsc::channel(1);
