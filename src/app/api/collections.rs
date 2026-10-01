@@ -3456,6 +3456,7 @@ mod tests {
         assert!(!bounded.chars().any(char::is_control));
     }
 
+    #[cfg(unix)]
     fn next_document_event(
         rx: &mut tokio::sync::mpsc::Receiver<crate::events::AppEvent>,
     ) -> crate::events::AppEvent {
@@ -3472,6 +3473,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     fn apply_document_event(app: &mut App, event: crate::events::AppEvent) {
         match event {
             crate::events::AppEvent::HostDocumentFinished(result) => {

@@ -3910,6 +3910,16 @@ sleep 2
             .contains("revoked"));
     }
 
+    #[test]
+    fn empty_document_worker_catalog_creates_no_processes() {
+        let (tx, _) = tokio::sync::mpsc::channel(1);
+        let catalog = HostDocumentServiceCatalog::for_test_document_specs(Vec::new(), tx);
+        assert!(catalog.generations.is_empty());
+        assert!(catalog.requests.is_empty());
+        assert!(catalog.complete_catalog);
+    }
+
+    #[cfg(unix)]
     fn recv_test_document_event(
         rx: &mut tokio::sync::mpsc::Receiver<crate::events::AppEvent>,
     ) -> crate::events::AppEvent {
