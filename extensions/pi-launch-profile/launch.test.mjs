@@ -97,6 +97,34 @@ describe('Vqro Pi role-launch extension', () => {
     }), /do not retry blindly/);
   });
 
+  for (const [label, failure, expected] of [
+    ['transport timeout', new Error('injected ETIMEDOUT'), /ETIMEDOUT/],
+    ['malformed JSON', '{not-json', /invalid Vqro pane response/],
+    ['API rejection', json({ error: { code: 'injected_rejection' } }), /rejected: injected_rejection/],
+  ]) {
+    it(`warns before retry after post-send ${label}, retaining the cause and exactly one send`, async () => {
+      const opts = parseLaunchArgs(flags, env);
+      const replies = [pane(), processInfo(), ''];
+      let sends = 0;
+      await assert.rejects(launchPi(opts, async (_bin, args) => {
+        if (args[1] === 'run') sends++;
+        if (replies.length) {
+          const reply = replies.shift();
+          return typeof reply === 'string' ? reply : json(reply);
+        }
+        if (failure instanceof Error) throw failure;
+        return failure;
+      }), (error) => {
+        assert.match(error.message, /may already be running; inspect before retry/);
+        assert.match(error.message, expected);
+        assert.match(error.cause.message, expected);
+        if (failure instanceof Error) assert.equal(error.cause, failure);
+        return true;
+      });
+      assert.equal(sends, 1);
+    });
+  }
+
   it('reports unconfirmed launch; it never calls a second pane.run', async () => {
     const opts = parseLaunchArgs(flags, env);
     let calls = 0;
@@ -105,7 +133,11 @@ describe('Vqro Pi role-launch extension', () => {
       if (args[1] === 'run') calls++;
       const reply = replies.shift();
       return typeof reply === 'string' ? reply : json(reply);
-    }, async () => {}, 0), /may have started/);
+    }, async () => {}, 0), (error) => {
+      assert.match(error.message, /may already be running; inspect before retry/);
+      assert.match(error.cause.message, /confirmation timed out/);
+      return true;
+    });
     assert.equal(calls, 1);
   });
 });
