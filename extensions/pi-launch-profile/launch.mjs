@@ -123,24 +123,29 @@ export async function launchPi(options, invoke = async (binary, args) => {
     throw new Error(`Pi launch uncertain for ${options.pane}; inspect pane before retry`);
   }
 
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    const current = paneResponse(await invoke(options.vqroBinary, ['pane', 'get', options.pane]), 'pane', options.pane);
-    if (current.terminal_id !== pane.terminal_id) throw new Error('target pane terminal changed after launch; do not retry blindly');
-    if (current.agent === 'pi' && ['idle', 'working', 'blocked'].includes(current.agent_status)) {
-      return {
-        pane_id: options.pane,
-        terminal_id: pane.terminal_id,
-        local_label: options.name,
-        name_registered: false,
-        role: 'requested',
-        profile_source: 'pi --append-system-prompt',
-        status: 'Pi activity reported via public pane API; inspect /system-prompt before claiming role loaded',
-      };
+  try {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const current = paneResponse(await invoke(options.vqroBinary, ['pane', 'get', options.pane]), 'pane', options.pane);
+      if (current.terminal_id !== pane.terminal_id) throw new Error('target pane terminal changed after launch; do not retry blindly');
+      if (current.agent === 'pi' && ['idle', 'working', 'blocked'].includes(current.agent_status)) {
+        return {
+          pane_id: options.pane,
+          terminal_id: pane.terminal_id,
+          local_label: options.name,
+          name_registered: false,
+          role: 'requested',
+          profile_source: 'pi --append-system-prompt',
+          status: 'Pi activity reported via public pane API; inspect /system-prompt before claiming role loaded',
+        };
+      }
+      await pause(PAUSE_MS);
     }
-    await pause(PAUSE_MS);
+    throw new Error('Pi launch confirmation timed out');
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    throw new Error(`Pi launch unconfirmed for ${options.pane}; may already be running; inspect before retry: ${reason}`, { cause: error });
   }
-  throw new Error(`Pi launch unconfirmed for ${options.pane}; command may have started. Inspect pane before retry`);
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {

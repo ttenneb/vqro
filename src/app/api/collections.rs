@@ -858,6 +858,71 @@ impl App {
         }
     }
 
+    pub(crate) fn retire_host_document_provider(&mut self, namespace: &str, generation: u64) {
+        if self.host_document_services.generation(namespace) != Some(generation) {
+            return;
+        }
+        self.host_document_services
+            .retire_desired_revisions(namespace);
+        let retired = self
+            .host_document_caches
+            .iter()
+            .filter(|((owner, _), _)| owner == namespace)
+            .filter_map(|(key, cache)| {
+                cache
+                    .current()
+                    .map(|document| (key.clone(), document.revision))
+            })
+            .collect::<Vec<_>>();
+        for (key, revision) in retired {
+            self.disable_host_document_projection(&key, generation, revision);
+        }
+        self.host_document_caches
+            .retain(|(owner, _), _| owner != namespace);
+        self.host_document_request_watermarks
+            .retain(|(owner, _), _| owner != namespace);
+        self.host_document_retry_snapshots
+            .retain(|(owner, _), _| owner != namespace);
+        self.host_document_retry_order
+            .retain(|(owner, _)| owner != namespace);
+        self.host_document_retry_scheduled
+            .retain(|(owner, _, _, _)| owner != namespace);
+        self.host_document_retry_attempts
+            .retain(|(owner, _, _, _), _| owner != namespace);
+        self.host_document_confirmation_grants
+            .retain(|(owner, _, _, _, _), _| owner != namespace);
+        self.host_relationships_last_desired.remove(namespace);
+        self.host_agent_activity_last_desired.remove(namespace);
+        // Invalidate already-scheduled semantic retries, but retain their bounded attempt count.
+        let epoch = self
+            .host_semantic_retry_epochs
+            .entry(namespace.into())
+            .or_insert(1);
+        *epoch = epoch.saturating_add(1).max(1);
+        self.host_semantic_retry_scheduled.remove(namespace);
+        if self.host_document_services.source(namespace)
+            == Some(crate::api::schema::HostDocumentSourceKind::TerminalGroups)
+        {
+            // Fresh revisions fence both pre-exit results and a respawn raced ahead of retirement.
+            // Reuse the existing bounded per-scope retry rather than refreshing other namespaces.
+            for ws_idx in 0..self.state.workspaces.len() {
+                for tab_idx in 0..self.state.workspaces[ws_idx].tabs.len() {
+                    let revision = self.next_host_document_revision();
+                    if let Ok(snapshot) =
+                        self.legacy_terminal_groups_snapshot(ws_idx, tab_idx, generation, revision)
+                    {
+                        let key = (namespace.to_string(), snapshot.scope_id.clone());
+                        self.host_document_request_watermarks
+                            .insert(key.clone(), (generation, revision));
+                        self.schedule_host_document_render_retry(key, snapshot);
+                    }
+                }
+            }
+        } else {
+            self.schedule_host_semantic_retry(namespace);
+        }
+    }
+
     fn disable_host_document_projection(
         &mut self,
         key: &(String, String),
@@ -1176,6 +1241,7 @@ impl App {
             self.host_document_retry_order
                 .retain(|queued| queued != &request_key);
         }
+        let retry_snapshot = result.result.is_err().then(|| result.snapshot.clone());
         let available = {
             let cache = self
                 .host_document_caches
@@ -1223,6 +1289,9 @@ impl App {
             result.snapshot.revision,
             available,
         );
+        if let Some(snapshot) = retry_snapshot {
+            return self.schedule_host_document_render_retry(request_key, snapshot);
+        }
         false
     }
 
@@ -3385,6 +3454,209 @@ mod tests {
             crate::extension_contract::MAX_DOCUMENT_TEXT_CHARS
         );
         assert!(!bounded.chars().any(char::is_control));
+    }
+
+    #[cfg(unix)]
+    fn next_document_event(
+        rx: &mut tokio::sync::mpsc::Receiver<crate::events::AppEvent>,
+    ) -> crate::events::AppEvent {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            if let Ok(event) = rx.try_recv() {
+                return event;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "document event deadline"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+
+    #[cfg(unix)]
+    fn apply_document_event(app: &mut App, event: crate::events::AppEvent) {
+        match event {
+            crate::events::AppEvent::HostDocumentFinished(result) => {
+                app.handle_host_document_result(*result)
+            }
+            crate::events::AppEvent::HostDocumentProviderRetired {
+                namespace,
+                generation,
+            } => {
+                app.retire_host_document_provider(&namespace, generation);
+            }
+            _ => panic!("unexpected provider event"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn executable_provider_exit_retires_context_without_source_change() {
+        for during_request in [false, true] {
+            let mut app = app_with_workspace();
+            let namespace = "example.exit-context";
+            let other = "example.still-live";
+            let root = std::env::temp_dir().join(format!(
+                "vqro-document-exit-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            std::fs::create_dir_all(root.join("dead")).unwrap();
+            std::fs::create_dir_all(root.join("live")).unwrap();
+            let specs = [(namespace, "dead", 7), (other, "live", 8)]
+                .into_iter()
+                .map(|(name, control, generation)| {
+                    (
+                        crate::extension_service::ExtensionServiceSpec {
+                            id: name.into(),
+                            command: vec![
+                                "python3".into(),
+                                format!(
+                                    "{}/tests/fixtures/document-exit-provider.py",
+                                    env!("CARGO_MANIFEST_DIR")
+                                ),
+                                name.into(),
+                                root.join(control).display().to_string(),
+                            ],
+                            cwd: root.clone(),
+                            priority: 100,
+                            granted_capabilities: vec![
+                                crate::api::schema::ExtensionServiceCapability::HostDocument,
+                            ],
+                        },
+                        generation,
+                        crate::api::schema::HostDocumentSourceKind::TerminalGroups,
+                    )
+                })
+                .collect();
+            let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+            app.host_document_services =
+                crate::extension_service::HostDocumentServiceCatalog::for_test_document_specs(
+                    specs, tx,
+                );
+            app.refresh_collection_document(0, 0);
+            for _ in 0..2 {
+                apply_document_event(&mut app, next_document_event(&mut rx));
+            }
+            assert_eq!(app.host_documents().len(), 2);
+            let key = (namespace.to_string(), app.public_tab_id(0, 0).unwrap());
+            let published = app.host_document_caches[&key].current().unwrap().clone();
+            let source = app
+                .legacy_terminal_groups_snapshot(0, 0, 7, published.revision)
+                .unwrap();
+            if during_request {
+                std::fs::write(root.join("dead/die-on-render"), "").unwrap();
+                let mut snapshot = source.clone();
+                snapshot.revision = app.next_host_document_revision();
+                app.host_document_request_watermarks
+                    .insert(key.clone(), (7, snapshot.revision));
+                app.host_document_services
+                    .request(namespace, snapshot)
+                    .unwrap();
+            } else {
+                std::fs::write(root.join("dead/exit"), "").unwrap();
+            }
+            loop {
+                let event = next_document_event(&mut rx);
+                let retired = matches!(&event, crate::events::AppEvent::HostDocumentProviderRetired { namespace: name, generation: 7 } if name == namespace);
+                apply_document_event(&mut app, event);
+                if retired {
+                    break;
+                }
+            }
+            let response = app.handle_host_document_list(
+                "after-exit".into(),
+                crate::api::schema::HostDocumentListParams {
+                    namespace: None,
+                    scope_id: None,
+                },
+            );
+            let response: crate::api::schema::SuccessResponse =
+                serde_json::from_str(&response).unwrap();
+            let crate::api::schema::ResponseResult::HostDocumentList { documents } =
+                response.result
+            else {
+                panic!("document list");
+            };
+            assert_eq!(documents.len(), 1);
+            assert_eq!(documents[0].document.namespace, other);
+            assert_eq!(
+                serde_json::to_value(&source).unwrap(),
+                serde_json::to_value(
+                    app.legacy_terminal_groups_snapshot(0, 0, 7, published.revision)
+                        .unwrap()
+                )
+                .unwrap()
+            );
+            // A pre-exit success delivered after retirement cannot revive cached authority.
+            app.handle_host_document_result(crate::extension_service::HostDocumentAsyncResult {
+                _render_slot: None,
+                namespace: namespace.into(),
+                provider_priority: 100,
+                snapshot: source,
+                result: Ok(published),
+                grants: std::collections::HashSet::new(),
+            });
+            assert!(!app
+                .host_documents()
+                .iter()
+                .any(|entry| entry.document.namespace == namespace));
+            assert!(app.event_hub.events_after(0).iter().any(|(_, event)| matches!(&event.data,
+                crate::api::schema::EventData::HostDocumentUpdated { namespace: name, available: false, .. } if name == namespace)));
+            for marker in ["dead/exit", "dead/die-on-render"] {
+                let _ = std::fs::remove_file(root.join(marker));
+            }
+            // Drive the first queued retry while the same supervisor is still in Backoff.
+            // Its failed completion must retain a bounded retry, not strand a quiet source.
+            app.retry_one_host_document_render();
+            let recovery_deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while !app
+                .host_documents()
+                .iter()
+                .any(|entry| entry.document.namespace == namespace)
+            {
+                while let Ok(event) = rx.try_recv() {
+                    apply_document_event(&mut app, event);
+                }
+                while let Ok(event) = app.event_rx.try_recv() {
+                    app.handle_internal_event(event);
+                }
+                assert!(
+                    std::time::Instant::now() < recovery_deadline,
+                    "provider did not recover"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            assert_eq!(app.host_documents().len(), 2);
+            drop(app);
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn host_document_retirement_fences_reenable_and_respawn_race() {
+        let mut app = app_with_workspace();
+        let namespace = "example.activity";
+        app.host_document_services = crate::extension_service::HostDocumentServiceCatalog::with_test_document_source_provider(namespace, 8, crate::api::schema::HostDocumentSourceKind::AgentActivity);
+        let key = (
+            namespace.to_string(),
+            crate::spaces_extension_contract::SPACES_SCOPE_ID.to_string(),
+        );
+        app.host_document_request_watermarks
+            .insert(key.clone(), (8, 10));
+        app.retire_host_document_provider(namespace, 7);
+        assert_eq!(
+            app.host_document_request_watermarks.get(&key),
+            Some(&(8, 10))
+        );
+        // A healthy respawn result racing ahead of the exit event is conservatively retired too.
+        app.retire_host_document_provider(namespace, 8);
+        assert!(!app.host_document_request_watermarks.contains_key(&key));
+        assert!(app.host_semantic_retry_scheduled.contains(namespace));
+        assert_eq!(app.host_semantic_retry_attempts.get(namespace), Some(&1));
     }
 
     #[test]

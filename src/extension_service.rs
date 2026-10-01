@@ -297,6 +297,8 @@ struct HostDocumentWorkerHandle {
 
 #[derive(Default)]
 struct HostDocumentEventPending {
+    // Namespace-wide loss must neither be overwritten by a render nor wait behind one.
+    retirement: Option<crate::events::AppEvent>,
     by_scope: std::collections::HashMap<String, crate::events::AppEvent>,
     order: std::collections::VecDeque<String>,
 }
@@ -310,16 +312,27 @@ impl HostDocumentEventPending {
     }
 
     #[cfg_attr(test, allow(dead_code))]
-    fn pop(&mut self) -> Option<(String, crate::events::AppEvent)> {
+    fn pop(&mut self) -> Option<(Option<String>, crate::events::AppEvent)> {
+        if let Some(event) = self.retirement.take() {
+            return Some((None, event));
+        }
         while let Some(scope_id) = self.order.pop_front() {
             if let Some(event) = self.by_scope.remove(&scope_id) {
-                return Some((scope_id, event));
+                return Some((Some(scope_id), event));
             }
         }
         None
     }
 
-    fn retry_if_not_superseded(&mut self, scope_id: String, event: crate::events::AppEvent) {
+    fn retry_if_not_superseded(
+        &mut self,
+        scope_id: Option<String>,
+        event: crate::events::AppEvent,
+    ) {
+        let Some(scope_id) = scope_id else {
+            self.retirement.get_or_insert(event);
+            return;
+        };
         if !self.by_scope.contains_key(&scope_id) {
             self.order.push_back(scope_id.clone());
             self.by_scope.insert(scope_id, event);
@@ -381,6 +394,36 @@ struct HostDocumentProvider {
     generation: u64,
     supervisor: ExtensionServiceSupervisor,
     grants: std::collections::HashSet<crate::extension_contract::HostCapability>,
+}
+
+impl HostDocumentProvider {
+    fn publish_runtime_loss(
+        &self,
+        namespace: &str,
+        last_retired_runtime: &mut u64,
+        desired_revisions: &Mutex<std::collections::HashMap<String, (u64, u64)>>,
+        events: &Arc<(Mutex<HostDocumentEventPending>, std::sync::Condvar)>,
+    ) {
+        if self.supervisor.runtime.is_some()
+            || self.supervisor.runtime_generation == 0
+            || self.supervisor.runtime_generation == *last_retired_runtime
+        {
+            return;
+        }
+        *last_retired_runtime = self.supervisor.runtime_generation;
+        desired_revisions
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clear();
+        let (lock, ready) = &**events;
+        lock.lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .retirement = Some(crate::events::AppEvent::HostDocumentProviderRetired {
+            namespace: namespace.to_string(),
+            generation: self.generation,
+        });
+        ready.notify_one();
+    }
 }
 
 // Fields are consumed by the production worker, omitted from unit-test catalogs.
@@ -954,6 +997,48 @@ impl HostDocumentServiceCatalog {
                 tracing::error!(%error, "cannot resolve host binary for bundled extensions")
             }
         }
+        Self::for_providers(providers, event_tx)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test_document_specs(
+        specs: Vec<(
+            ExtensionServiceSpec,
+            u64,
+            crate::api::schema::HostDocumentSourceKind,
+        )>,
+        event_tx: tokio::sync::mpsc::Sender<crate::events::AppEvent>,
+    ) -> Self {
+        Self::for_providers(
+            specs
+                .into_iter()
+                .map(|(spec, generation, source)| {
+                    let namespace = spec.id.clone();
+                    let grants = spec
+                        .granted_capabilities
+                        .iter()
+                        .filter_map(protocol_grant_to_host_capability)
+                        .collect();
+                    (
+                        namespace,
+                        HostDocumentProvider {
+                            priority: spec.priority,
+                            source,
+                            generation,
+                            supervisor: ExtensionServiceSupervisor::new(spec).unwrap(),
+                            grants,
+                        },
+                    )
+                })
+                .collect(),
+            event_tx,
+        )
+    }
+
+    fn for_providers(
+        providers: std::collections::BTreeMap<String, HostDocumentProvider>,
+        event_tx: tokio::sync::mpsc::Sender<crate::events::AppEvent>,
+    ) -> Self {
         let mut generations: std::collections::BTreeMap<String, u64> = providers
             .iter()
             .map(|(namespace, provider)| (namespace.clone(), provider.generation))
@@ -990,6 +1075,7 @@ impl HostDocumentServiceCatalog {
                         let mut queue =
                             lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
                         while queue.by_scope.is_empty()
+                            && queue.retirement.is_none()
                             && !publisher_revoked.load(Ordering::Acquire)
                         {
                             queue = ready
@@ -1030,16 +1116,25 @@ impl HostDocumentServiceCatalog {
             let worker_revoked = revoked.clone();
             let worker_events = event_pending.clone();
             let thread_name = format!("vqro-host-document-{namespace}");
+            let worker_namespace = namespace.clone();
+            let mut last_retired_runtime = 0;
             if let Ok(join) = std::thread::Builder::new()
                 .name(thread_name)
                 .spawn(move || loop {
+                    provider.supervisor.probe_exit();
+                    provider.publish_runtime_loss(
+                        &worker_namespace,
+                        &mut last_retired_runtime,
+                        &worker_desired_revisions,
+                        &worker_events,
+                    );
                     let request = {
                         let (lock, ready) = &*worker_pending;
                         let mut queue =
                             lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-                        while queue.is_empty() && !worker_revoked.load(Ordering::Acquire) {
-                            queue = ready
-                                .wait(queue)
+                        if queue.is_empty() && !worker_revoked.load(Ordering::Acquire) {
+                            (queue, _) = ready
+                                .wait_timeout(queue, Duration::from_secs(1))
                                 .unwrap_or_else(|poisoned| poisoned.into_inner());
                         }
                         if worker_revoked.load(Ordering::Acquire) {
@@ -1124,6 +1219,12 @@ impl HostDocumentServiceCatalog {
                             Err("document action generation or revision is stale".into())
                         };
                         let action_scope_id = request.snapshot.scope_id().to_string();
+                        provider.publish_runtime_loss(
+                            &worker_namespace,
+                            &mut last_retired_runtime,
+                            &worker_desired_revisions,
+                            &worker_events,
+                        );
                         complete_host_document_action(result, action_response, action_completion);
                         worker_active_actions
                             .lock()
@@ -1202,6 +1303,12 @@ impl HostDocumentServiceCatalog {
                             Err("document snapshot revision was superseded".into())
                         }
                     };
+                    provider.publish_runtime_loss(
+                        &worker_namespace,
+                        &mut last_retired_runtime,
+                        &worker_desired_revisions,
+                        &worker_events,
+                    );
                     let scope_id = request.snapshot.scope_id().to_string();
                     let event = match request.snapshot {
                         HostDocumentSnapshotV1::TerminalGroups(snapshot) => {
@@ -1296,6 +1403,16 @@ impl HostDocumentServiceCatalog {
 
     pub fn generation(&self, namespace: &str) -> Option<u64> {
         self.generations.get(namespace).copied()
+    }
+
+    pub(crate) fn retire_desired_revisions(&self, namespace: &str) {
+        if let Some(handle) = self.requests.get(namespace) {
+            handle
+                .desired_revisions
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clear();
+        }
     }
 
     #[cfg(test)]
@@ -2898,6 +3015,16 @@ impl ExtensionServiceSupervisor {
         result
     }
 
+    /// Only the document worker calls this; never query processes from App/render.
+    fn probe_exit(&mut self) {
+        let Some(runtime) = self.runtime.as_mut() else {
+            return;
+        };
+        if let Err(error) = runtime.probe_exit() {
+            self.record_failure(&error);
+        }
+    }
+
     fn record_success(&mut self) {
         self.failures = 0;
         self.status = ExtensionServiceStatus::Running;
@@ -3781,6 +3908,284 @@ sleep 2
             .unwrap()
             .unwrap_err()
             .contains("revoked"));
+    }
+
+    #[test]
+    fn empty_document_worker_catalog_creates_no_processes() {
+        let (tx, _) = tokio::sync::mpsc::channel(1);
+        let catalog = HostDocumentServiceCatalog::for_test_document_specs(Vec::new(), tx);
+        assert!(catalog.generations.is_empty());
+        assert!(catalog.requests.is_empty());
+        assert!(catalog.complete_catalog);
+    }
+
+    #[cfg(unix)]
+    fn recv_test_document_event(
+        rx: &mut tokio::sync::mpsc::Receiver<crate::events::AppEvent>,
+    ) -> crate::events::AppEvent {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Ok(event) = rx.try_recv() {
+                return event;
+            }
+            assert!(Instant::now() < deadline, "document event deadline");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn executable_document_retirement_survives_full_channel_and_rejects_queued_action() {
+        for saturated in [true, false] {
+            let root = std::env::temp_dir().join(format!(
+                "vqro-document-worker-{}",
+                next_service_generation()
+            ));
+            std::fs::create_dir_all(&root).unwrap();
+            let (tx, mut rx) = tokio::sync::mpsc::channel(if saturated { 1 } else { 16 });
+            let catalog = HostDocumentServiceCatalog::for_test_document_specs(
+                vec![(
+                    ExtensionServiceSpec {
+                        id: "example.docs".into(),
+                        command: vec![
+                            "python3".into(),
+                            format!(
+                                "{}/tests/fixtures/document-exit-provider.py",
+                                env!("CARGO_MANIFEST_DIR")
+                            ),
+                            "example.docs".into(),
+                            root.display().to_string(),
+                        ],
+                        cwd: root.clone(),
+                        priority: 0,
+                        granted_capabilities: vec![
+                            crate::api::schema::ExtensionServiceCapability::HostDocument,
+                        ],
+                    },
+                    7,
+                    crate::api::schema::HostDocumentSourceKind::TerminalGroups,
+                )],
+                tx.clone(),
+            );
+            let mut snapshot = crate::extension_contract::HostTerminalGroupsV1 {
+                contract: "host.terminal-groups.v1".into(),
+                generation: 7,
+                revision: 1,
+                scope_id: "tab-1".into(),
+                groups: Vec::new(),
+                ungrouped: Vec::new(),
+            };
+            catalog.request("example.docs", snapshot.clone()).unwrap();
+            assert!(
+                matches!(recv_test_document_event(&mut rx), crate::events::AppEvent::HostDocumentFinished(result) if result.result.is_ok())
+            );
+            if saturated {
+                tx.try_send(crate::events::AppEvent::HostDocumentRetryDue {
+                    namespace: "filler".into(),
+                    scope_id: "filler".into(),
+                    generation: 1,
+                    revision: 1,
+                })
+                .unwrap();
+                std::fs::write(root.join("exit"), "").unwrap();
+                let deadline = Instant::now() + Duration::from_secs(5);
+                while !catalog.requests["example.docs"]
+                    .desired_revisions
+                    .lock()
+                    .unwrap()
+                    .is_empty()
+                {
+                    assert!(
+                        Instant::now() < deadline,
+                        "worker failed to observe exit while channel full"
+                    );
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                assert!(matches!(
+                    rx.try_recv().unwrap(),
+                    crate::events::AppEvent::HostDocumentRetryDue { .. }
+                ));
+                assert!(matches!(
+                    recv_test_document_event(&mut rx),
+                    crate::events::AppEvent::HostDocumentProviderRetired { generation: 7, .. }
+                ));
+            } else {
+                std::fs::remove_file(root.join("render-started")).unwrap();
+                std::fs::write(root.join("hold-render"), "").unwrap();
+                snapshot.revision = 2;
+                catalog.request("example.docs", snapshot.clone()).unwrap();
+                let deadline = Instant::now() + Duration::from_millis(500);
+                while !root.join("render-started").exists() {
+                    assert!(Instant::now() < deadline, "render did not start");
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                let action = crate::extension_contract::HostDocumentExtensionActionV1 {
+                    contract: crate::extension_contract::HOST_DOCUMENT_CONTRACT_V1.into(),
+                    namespace: "example.docs".into(),
+                    generation: 7,
+                    revision: 2,
+                    scope_id: "tab-1".into(),
+                    action_id: "sentinel".into(),
+                    name: "sentinel".into(),
+                    subject_id: None,
+                };
+                let response = catalog.request_action(snapshot.clone(), action).unwrap();
+                std::fs::write(root.join("exit"), "").unwrap();
+                let error = response
+                    .recv_timeout(Duration::from_secs(2))
+                    .unwrap()
+                    .unwrap_err();
+                assert!(error.contains("stale") || error.contains("superseded"));
+                assert!(!root.join("action-ran").exists());
+                std::fs::remove_file(root.join("exit")).unwrap();
+                std::fs::remove_file(root.join("hold-render")).unwrap();
+                // Leave actor events unconsumed until after a healthy same-catalog respawn.
+                std::thread::sleep(Duration::from_millis(300));
+                snapshot.revision = 3;
+                catalog.request("example.docs", snapshot).unwrap();
+                assert!(matches!(
+                    recv_test_document_event(&mut rx),
+                    crate::events::AppEvent::HostDocumentProviderRetired { generation: 7, .. }
+                ));
+                loop {
+                    if let crate::events::AppEvent::HostDocumentFinished(result) =
+                        recv_test_document_event(&mut rx)
+                    {
+                        if result.snapshot.revision == 3 {
+                            assert!(result.result.is_ok());
+                            break;
+                        }
+                    }
+                }
+                assert!(!root.join("action-ran").exists());
+            }
+            drop(catalog);
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn document_retirement_slot_survives_saturation_and_precedes_scope_results() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        let retirement = || crate::events::AppEvent::HostDocumentProviderRetired {
+            namespace: "example.docs".into(),
+            generation: 7,
+        };
+        tx.try_send(retirement()).unwrap();
+        let mut pending = HostDocumentEventPending::default();
+        pending.push(
+            "tab-1".into(),
+            crate::events::AppEvent::HostDocumentRetryDue {
+                namespace: "example.docs".into(),
+                scope_id: "tab-1".into(),
+                generation: 7,
+                revision: 1,
+            },
+        );
+        pending.retirement = Some(retirement());
+        let (scope, event) = pending.pop().unwrap();
+        let Err(tokio::sync::mpsc::error::TrySendError::Full(event)) = tx.try_send(event) else {
+            panic!("full channel");
+        };
+        pending.retry_if_not_superseded(scope, event);
+        pending.push(
+            "tab-1".into(),
+            crate::events::AppEvent::HostDocumentRetryDue {
+                namespace: "example.docs".into(),
+                scope_id: "tab-1".into(),
+                generation: 7,
+                revision: 2,
+            },
+        );
+        rx.try_recv().unwrap();
+        let (scope, event) = pending.pop().unwrap();
+        assert!(scope.is_none());
+        tx.try_send(event).unwrap();
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            crate::events::AppEvent::HostDocumentProviderRetired { generation: 7, .. }
+        ));
+        assert!(matches!(
+            pending.pop().unwrap().1,
+            crate::events::AppEvent::HostDocumentRetryDue { revision: 2, .. }
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn document_runtime_loss_retires_once_and_exhausts_existing_restart_budget() {
+        let script = r#"
+printf '%s\n' '{"type":"hello","protocol":2,"service_id":"example.docs","requested_capabilities":["host_document"],"methods":["host.document.render"]}'
+read welcome
+read request
+exit 0
+"#;
+        let mut provider = HostDocumentProvider {
+            source: crate::api::schema::HostDocumentSourceKind::TerminalGroups,
+            priority: 0,
+            generation: 7,
+            grants: std::collections::HashSet::new(),
+            supervisor: ExtensionServiceSupervisor::new(ExtensionServiceSpec {
+                id: "example.docs".into(),
+                command: vec!["sh".into(), "-c".into(), script.into()],
+                cwd: PathBuf::from("."),
+                priority: 0,
+                granted_capabilities: vec![
+                    crate::api::schema::ExtensionServiceCapability::HostDocument,
+                ],
+            })
+            .unwrap(),
+        };
+        let snapshot = HostDocumentSnapshotV1::TerminalGroups(
+            crate::extension_contract::HostTerminalGroupsV1 {
+                contract: "host.terminal-groups.v1".into(),
+                generation: 7,
+                revision: 1,
+                scope_id: "tab-1".into(),
+                groups: Vec::new(),
+                ungrouped: Vec::new(),
+            },
+        );
+        let desired = Mutex::new(std::collections::HashMap::new());
+        let events = Arc::new((
+            Mutex::new(HostDocumentEventPending::default()),
+            std::sync::Condvar::new(),
+        ));
+        let mut retired = 0;
+        for incarnation in 1..=MAX_RESTARTS + 1 {
+            provider.supervisor.expire_backoff_for_test();
+            assert!(provider
+                .supervisor
+                .render_host_document_cancellable(&snapshot, &AtomicBool::new(false))
+                .is_err());
+            assert_eq!(provider.supervisor.failures, incarnation);
+            desired.lock().unwrap().insert("tab-1".into(), (7, 1));
+            provider.publish_runtime_loss("example.docs", &mut retired, &desired, &events);
+            assert!(desired.lock().unwrap().is_empty());
+            assert!(matches!(
+                events.0.lock().unwrap().pop().unwrap().1,
+                crate::events::AppEvent::HostDocumentProviderRetired { generation: 7, .. }
+            ));
+            provider.supervisor.probe_exit();
+            provider.publish_runtime_loss("example.docs", &mut retired, &desired, &events);
+            assert!(events.0.lock().unwrap().pop().is_none());
+        }
+        assert!(matches!(
+            provider.supervisor.status,
+            ExtensionServiceStatus::Failed(_)
+        ));
+        assert!(matches!(
+            provider
+                .supervisor
+                .render_host_document_cancellable(&snapshot, &AtomicBool::new(false)),
+            Err(ExtensionServiceError::RestartBudget(_))
+        ));
+        assert_eq!(
+            provider.supervisor.runtime_generation,
+            u64::from(MAX_RESTARTS + 1)
+        );
+        // Old queued actions cannot invoke a lazy respawn after desired revisions are cleared.
+        assert!(!host_document_action_is_current(&desired, &snapshot));
     }
 
     #[test]
