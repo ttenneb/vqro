@@ -104,9 +104,9 @@ public-semantic-documents-test:
     {{python}} extensions/public-facts.test.py
     bun test extensions/public-activity/pi-role-status.test.ts
 
-# Slice2A contract/reference checks only; no broker, sessions, auth or model.
+# Frozen Work references and no-model decision fake-broker checks; no production broker, auth or model.
 work-contract-test:
-    node --test contracts/work-v1/*.test.mjs
+    node --test contracts/work-v1/*.test.mjs extensions/work-decisions-v1/*.test.mjs
     {{python}} contracts/work-v1/canonical.test.py
 
 # Test bundled agent integration assets
