@@ -46,52 +46,25 @@ export function assistantText(message: any): string {
 
 /**
  * True when a bash command's output contains one successful `vqro agent prompt`
- * response whose own target is `from`. Each JSON object is parsed and bound
- * structurally, so a name from one response cannot combine with a send to
- * another. Reading the CLI's own confirmation avoids shell parsing entirely.
+ * response whose own target is `from`. The CLI prints each response as one
+ * compact JSON line, so each line is parsed and bound on its own; a name from
+ * one response cannot combine with a send to another. This avoids shell parsing.
  */
 export function promptConfirmsOrigin(output: string, from: string): boolean {
-  for (const value of jsonObjects(output)) {
-    const agent = value?.result?.agent;
-    if (value?.result?.type === "agent_prompted" && (agent?.name === from || agent?.pane_id === from)) {
-      return true;
+  for (const line of output.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith("{")) continue;
+    try {
+      const value = JSON.parse(trimmed);
+      const agent = value?.result?.agent;
+      if (value?.result?.type === "agent_prompted" && (agent?.name === from || agent?.pane_id === from)) {
+        return true;
+      }
+    } catch {
+      // not a single-line response; ignore it
     }
   }
   return false;
-}
-
-/** Top-level JSON objects in `text`, each parsed independently (strings aware). */
-function jsonObjects(text: string): any[] {
-  const objects: any[] = [];
-  let depth = 0;
-  let start = -1;
-  let quote: string | null = null;
-  let escaped = false;
-  for (let index = 0; index < text.length; index += 1) {
-    const ch = text[index];
-    if (quote) {
-      if (escaped) escaped = false;
-      else if (ch === "\\") escaped = true;
-      else if (ch === quote) quote = null;
-      continue;
-    }
-    if (ch === '"') quote = ch;
-    else if (ch === "{") {
-      if (depth === 0) start = index;
-      depth += 1;
-    } else if (ch === "}") {
-      depth -= 1;
-      if (depth === 0 && start >= 0) {
-        try {
-          objects.push(JSON.parse(text.slice(start, index + 1)));
-        } catch {
-          // ignore a malformed object; a later complete one may still confirm
-        }
-        start = -1;
-      }
-    }
-  }
-  return objects;
 }
 
 export default function (pi: ExtensionAPI) {
