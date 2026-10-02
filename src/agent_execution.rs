@@ -31,6 +31,9 @@ struct Probe {
 }
 impl Probe {
     fn observe(&self, deadline: Instant) -> Option<String> {
+        if Instant::now() >= deadline || self.root_birth.is_none() || self.known_agent.is_none() {
+            return None;
+        }
         let foreground = (self.foreground)()?;
         if Instant::now() >= deadline {
             return None;
@@ -80,6 +83,7 @@ pub(crate) fn respond(
         let _ = tx.send(response);
         return;
     };
+    let deadline = Instant::now() + Duration::from_secs(2);
     let probes = agents
         .iter()
         .take(128)
@@ -92,15 +96,18 @@ pub(crate) fn respond(
                 index,
                 terminal_id: agent.terminal_id.clone(),
                 root_pid: runtime.child_pid()?,
-                root_birth: runtime.invocation_root_birth(),
-                known_agent: terminal.effective_known_agent(),
+                root_birth: Some(runtime.invocation_root_birth()?),
+                known_agent: Some(terminal.effective_known_agent()?),
                 foreground: runtime.invocation_foreground_reader(),
             })
         })
         .collect::<Vec<_>>();
+    if probes.is_empty() {
+        let _ = tx.send(response);
+        return;
+    }
     tokio::task::spawn_blocking(move || {
         let _slot = slot;
-        let deadline = Instant::now() + Duration::from_secs(2);
         if let Some(agents) = agents_mut(&mut parsed.result) {
             for probe in probes {
                 if Instant::now() >= deadline {
@@ -128,5 +135,54 @@ mod tests {
         assert!(ReadSlot::acquire().is_none());
         drop(slots);
         assert!(ReadSlot::acquire().is_some());
+        let unwind = std::panic::catch_unwind(|| {
+            let _slot = ReadSlot::acquire().expect("panic slot");
+            panic!("test drop on worker panic");
+        });
+        assert!(unwind.is_err());
+        assert_eq!(READS.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn expired_or_unprovable_probe_never_queries_foreground() {
+        for (birth, known, expired) in [
+            (Some(1), Some(crate::detect::Agent::Pi), true),
+            (None, Some(crate::detect::Agent::Pi), false),
+            (Some(1), None, false),
+        ] {
+            let probe = Probe {
+                index: 0,
+                terminal_id: "terminal".into(),
+                root_pid: 1,
+                root_birth: birth,
+                known_agent: known,
+                foreground: Box::new(|| panic!("must not query")),
+            };
+            let deadline = if expired {
+                Instant::now()
+            } else {
+                Instant::now() + Duration::from_secs(2)
+            };
+            assert_eq!(probe.observe(deadline), None);
+        }
+    }
+
+    #[test]
+    fn delayed_foreground_does_not_start_process_capture_after_deadline() {
+        let probe = Probe {
+            index: 0,
+            terminal_id: "terminal".into(),
+            root_pid: 1,
+            root_birth: Some(1),
+            known_agent: Some(crate::detect::Agent::Pi),
+            foreground: Box::new(|| {
+                std::thread::sleep(Duration::from_millis(15));
+                Some(u32::MAX)
+            }),
+        };
+        assert_eq!(
+            probe.observe(Instant::now() + Duration::from_millis(5)),
+            None
+        );
     }
 }

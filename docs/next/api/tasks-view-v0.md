@@ -64,8 +64,10 @@ or a proved different execution means only **not current/available here**.
 
 These reads capture narrow host facts/PTY readers on the App actor, then perform
 process capture and foreground/currentness checks off actor. They are limited to
-eight concurrent observation jobs, 128 probes/read and a nominal two-second
-probe loop; a foreground query can finish after that loop deadline. Normal API
+eight concurrent observation jobs, 128 candidates/read and a nominal two-second
+probe budget set before blocking-job scheduling; expired jobs and unprovable
+roots/types skip process queries. A foreground query can finish after the budget
+deadline. Normal API
 response timeouts still apply. No work is added to render, detection, PTY parsing
 or frame fanout, and no PID-only identity cache is introduced. Frozen generation-1
 client codecs are unchanged. Older responses lacking the optional field remain
