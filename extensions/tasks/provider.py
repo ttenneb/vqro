@@ -11,6 +11,8 @@ import sys
 import uuid
 
 import graph
+import decision_queue
+import select
 
 SERVICE = "vqro.tasks.core"
 MAX_RECORDS = 10000
@@ -61,11 +63,12 @@ def binding(caller):
 
 
 class Store:
-    def __init__(self, directory):
+    def __init__(self, directory, decision_delay_seconds=900):
         Path(directory).mkdir(parents=True, exist_ok=True, mode=0o700)
         self.db = sqlite3.connect(Path(directory) / "tasks.sqlite", timeout=1, isolation_level=None)
         self.db.row_factory = sqlite3.Row
-        if self.db.execute("PRAGMA user_version").fetchone()[0] > 2:
+        self.decisions = decision_queue.Queue(self, decision_delay_seconds, OutcomeUnknown)
+        if self.db.execute("PRAGMA user_version").fetchone()[0] > 3:
             self.db.close()
             raise ValueError("unsupported future Tasks database version; no migration attempted")
         self.db.execute("PRAGMA journal_mode=WAL")
@@ -91,7 +94,7 @@ class Store:
 
     def migrate(self):
         # Successful migration is atomic; don't repeat historical backfill on restarts.
-        if self.db.execute("PRAGMA user_version").fetchone()[0] == 2:
+        if self.db.execute("PRAGMA user_version").fetchone()[0] == 3:
             return
         # Only this extension owns this database. Preserve original spike bindings.
         self.db.execute("BEGIN IMMEDIATE")
@@ -113,7 +116,8 @@ class Store:
                 PRIMARY KEY(task_id,prerequisite), CHECK(task_id<>prerequisite))""")
             self.db.execute("CREATE INDEX IF NOT EXISTS dependency_prerequisite ON dependencies(prerequisite)")
             self.db.execute("UPDATE tasks SET started_at=(SELECT at FROM transitions WHERE task_id=tasks.id AND state='in_progress' ORDER BY seq LIMIT 1) WHERE started_at IS NULL")
-            self.db.execute("PRAGMA user_version=2")
+            self.decisions.migrate(columns)
+            self.db.execute("PRAGMA user_version=3")
             self.commit()
         except OutcomeUnknown:
             raise
@@ -126,6 +130,9 @@ class Store:
         if row is None:
             raise ValueError("task not found")
         value = dict(row)
+        value["decision"] = self.decisions.describe(value)
+        value.pop("decision_due_at")
+        value.pop("decision_timer_revision")
         for key in ("owner", "creator", "delegator"):
             value[key] = json.loads(value[key]) if value[key] is not None else None
         if value["state"] in FINAL_STATES:
@@ -358,6 +365,15 @@ class Store:
         if type(revision) is not int or revision != task["revision"]:
             raise ValueError("stale task revision")
         action = payload["action"]
+        if action in ("decision_timer", "decision_revert"):
+            destination, detail = self.decisions.change(task, payload, caller, at)
+            self.db.execute("UPDATE tasks SET state=?,detail=?,revision=revision+1,updated_at=? WHERE id=? AND revision=?", (destination, detail, at, task["id"], revision))
+            self.db.execute("INSERT INTO transitions(task_id,state,at,caller) VALUES (?,?,?,?)", (task["id"], destination, at, canonical(caller)))
+            if action == "decision_revert":
+                self.decisions.event(task["id"], "revert", {"at": at, "caller": caller, "policy_result": task["decision"]["resolution"], "affected_work": self.decisions.affected(task["id"])})
+            else:
+                self.decisions.event(task["id"], "timer", {"at": at, "caller": caller, "auto_at": self.task(task["id"])["decision"]["auto_at"], "delay_floor_seconds": self.decisions.delay_seconds})
+            return task["id"]
         human = caller["class"] == "human_unverified"
         if action == "answer" and not human:
             raise ValueError("human-only answer (cooperative, unverified)")
@@ -404,7 +420,11 @@ class Store:
             raise ValueError("unfinished dependencies must be accepted/done first")
         if action in ("report", "answer", "done") and self.db.execute("SELECT 1 FROM tasks WHERE parent=? AND state NOT IN ('accepted','done') LIMIT 1", (task["id"],)).fetchone():
             raise ValueError("unfinished children must be accepted/done first")
-        if action in ("block", "report", "answer"):
+        structured_answer = action == "answer" and task["decision"] is not None
+        decision_result = None
+        if structured_answer:
+            detail, decision_result = self.decisions.choice(task, payload, at, "human")
+        elif action in ("block", "report", "answer"):
             detail = payload.get("text")
             if not isinstance(detail, str) or not detail.strip() or len(detail.encode()) > 4096:
                 raise ValueError("text must be nonempty and at most 4096 bytes")
@@ -423,6 +443,10 @@ class Store:
         self.db.execute("UPDATE tasks SET state=?,owner=?,delegator=?,detail=?,revision=revision+1,updated_at=? WHERE id=? AND revision=?",
                         (destination, canonical(owner), canonical(delegator) if delegator else None, detail, at, task["id"], revision))
         self.db.execute("INSERT INTO transitions(task_id,state,at,caller) VALUES (?,?,?,?)", (task["id"], destination, at, canonical(caller)))
+        if task["kind"] == "decision" and action in ("update", "depends"):
+            self.decisions.cancel(task["id"])
+        if decision_result:
+            self.decisions.event(task["id"], "human", decision_result)
         return task["id"]
 
     def create_task(self, payload, caller, at, task_id=None, importing=False):
@@ -442,6 +466,11 @@ class Store:
         self.db.execute("INSERT INTO tasks(id,parent,title,kind,owner,state,revision,created_at,updated_at,creator,detail) VALUES (?,?,?,?,?,'open',1,?,?,?,'')",
                         (task_id, parent, title.strip(), kind, canonical(owner), at, at, canonical(caller)))
         self.set_metadata(task_id, values)
+        if decision_queue.FIELDS & payload.keys() and kind != "decision":
+            raise ValueError("decision fields require kind decision")
+        if kind == "decision":
+            terms, due = self.decisions.initial(payload, at)
+            self.db.execute("UPDATE tasks SET decision=?,decision_due_at=?,decision_timer_revision=? WHERE id=?", (canonical(terms) if terms else None, due, 1 if due else None, task_id))
         self.db.execute("INSERT INTO transitions(task_id,state,at,caller) VALUES (?,?,?,?)", (task_id, "open", at, canonical(caller)))
         if "depends_on" in payload and not importing:
             self.set_dependencies(task_id, payload["depends_on"])
@@ -457,17 +486,24 @@ class Store:
         fields = {
             "list": {"action", "after"}, "ready": {"action", "after"}, "get": {"action", "id"},
             "whoami": {"action"}, "status": {"action"},
+            "decision_log": {"action", "after"}, "decision_config": {"action"},
             "op": {"action", "operation_id", "lookup_caller"},
             "create": {"action", "operation_id", "title", "parent", "kind", "expected_caller", "depends_on"} | graph.META_FIELDS,
-            "decision": {"action", "operation_id", "title", "parent", "expected_caller", "depends_on"} | graph.META_FIELDS,
+            "decision": {"action", "operation_id", "title", "parent", "expected_caller", "depends_on"} | graph.META_FIELDS | decision_queue.FIELDS,
+            "decision_timer": {"action", "operation_id", "id", "revision", "auto_at", "expected_caller"},
+            "decision_revert": {"action", "operation_id", "id", "revision", "expected_caller"},
             "plan": {"action", "operation_id", "nodes", "parent", "revision", "expected_caller"},
             "depends": {"action", "operation_id", "id", "revision", "depends_on", "expected_caller"},
             "update": {"action", "operation_id", "id", "revision", "expected_caller"} | graph.META_FIELDS,
-            **{action: {"action", "operation_id", "id", "revision", "expected_caller"} | ({"owner"} if action == "delegate" else {"text"} if action in ("block", "report", "answer", "done") else set())
+            **{action: {"action", "operation_id", "id", "revision", "expected_caller"} | ({"owner"} if action == "delegate" else {"option", "text"} if action == "answer" else {"text"} if action in ("block", "report", "done") else set())
                for action in ("delegate", "start", "block", "report", "accept", "done", "answer")},
         }
         if action not in fields or set(payload) - fields[action]:
             raise ValueError("unknown action or field (actor flags are not accepted)")
+        if action == "decision_log":
+            return self.decisions.log(payload.get("after", 0))
+        if action == "decision_config":
+            return {"delay_floor_seconds": self.decisions.delay_seconds}
         if action == "status":
             return {"revision": self.db.execute("SELECT COALESCE(MAX(seq),0) FROM transitions").fetchone()[0]}
         if action == "whoami":
@@ -501,9 +537,14 @@ class Store:
                 result = self.import_plan(payload, owner, at)
             else:
                 tables = ("tasks", "operations", "transitions") if action in ("create", "decision") else ("operations", "transitions")
-                self.quota(dict.fromkeys(tables, 1))
+                counts = dict.fromkeys(tables, 1)
+                if action in ("decision_revert", "decision_timer") or (action == "answer" and self.task(payload.get("id"))["decision"] is not None):
+                    counts["decision_log"] = 1
+                self.quota(counts)
                 task_id = self.create_task(payload, owner, at) if action in ("create", "decision") else self.transition(payload, owner, at)
                 result = {"task": self.task(task_id)}
+                if action == "decision_revert":
+                    result["affected_work"] = self.decisions.affected(task_id)
             outcome = {**result, "operation_id": op, "caller": owner}
             if len(canonical(outcome).encode()) > MAX_REPLY_BYTES:
                 raise ValueError("operation outcome exceeds response budget")
@@ -525,14 +566,47 @@ def emit(value):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--data-dir")
+    parser.add_argument("--decision-delay-seconds", type=int, default=900)
     args = parser.parse_args()
     directory = args.data_dir or str(Path(os.environ.get("XDG_STATE_HOME", str(Path.home() / ".local/state"))) / "vqro/extensions/vqro.tasks")
-    store = Store(directory)
+    store = Store(directory, args.decision_delay_seconds)
     emit({"type": "hello", "protocol": 2, "service_id": SERVICE, "requested_capabilities": ["action_invoke"], "methods": ["action.invoke.v1"]})
-    welcome = json.loads(sys.stdin.readline())
+    pending = bytearray()
+    def read_line(timeout):
+        if b"\n" not in pending:
+            if not select.select([sys.stdin.fileno()], [], [], timeout)[0]:
+                return None
+            block = os.read(sys.stdin.fileno(), 65536)
+            if not block:
+                raise EOFError("provider input closed")
+            pending.extend(block)
+            if len(pending) > 262144:
+                raise ValueError("provider input frame exceeds bound")
+        if b"\n" not in pending:
+            return None
+        line, _, rest = pending.partition(b"\n")
+        pending[:] = rest
+        return line
+    welcome_line = None
+    while welcome_line is None:
+        welcome_line = read_line(None)
+    welcome = json.loads(welcome_line)
     if welcome.get("type") != "welcome" or welcome.get("granted_capabilities") != ["action_invoke"] or "action.invoke.v1" not in welcome.get("methods", []):
         raise ValueError("action capability not granted")
-    for line in sys.stdin:
+    while True:
+        try:
+            store.decisions.apply_due(timestamp())
+        except OutcomeUnknown:
+            raise  # Never retry an uncertain internal commit in this process.
+        except (ValueError, sqlite3.Error) as error:
+            # Keep read-only inspection usable when a bounded policy tick cannot write.
+            print("decision policy delayed: " + str(error), file=sys.stderr)
+        try:
+            line = read_line(store.decisions.next_delay(timestamp()))
+        except EOFError:
+            return
+        if line is None:
+            continue
         request = json.loads(line)
         if request.get("type") != "request" or request.get("method") != "action.invoke.v1":
             raise ValueError("unexpected request")
