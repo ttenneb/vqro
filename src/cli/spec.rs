@@ -96,7 +96,7 @@ fn task_command() -> Command {
         ),
         ("decision", "File a human-decision task"),
     ] {
-        command = command.subcommand(task_metadata_options(
+        let mut subcommand = task_metadata_options(
             Command::new(action)
                 .about(description)
                 .arg(required("title", "TITLE"))
@@ -105,7 +105,16 @@ fn task_command() -> Command {
                 .arg(option("op", "ID").requires("caller"))
                 .arg(option("caller", "JSON")),
             true,
-        ));
+        );
+        if action == "decision" {
+            subcommand = subcommand
+                .arg(option("options", "JSON"))
+                .arg(option("default", "KEY"))
+                .arg(option("reversible", "BOOL"))
+                .arg(option("waiting-cost", "TEXT"))
+                .arg(option("auto-at", "UTC"));
+        }
+        command = command.subcommand(subcommand);
     }
     for (action, description) in [
         ("start", "Start or resume owned work"),
@@ -147,7 +156,62 @@ fn task_command() -> Command {
                 .arg(option("caller", "JSON")),
         );
     }
+    for (action, description) in [
+        (
+            "choose",
+            "Human selects a structured decision option (records only)",
+        ),
+        (
+            "revert",
+            "Guardedly reopen a reversible policy answer; no external undo",
+        ),
+        (
+            "decision-timer",
+            "Exact filer/human reschedules or cancels an open decision timer",
+        ),
+    ] {
+        let mut subcommand = Command::new(action)
+            .about(description)
+            .arg(required("id", "ID"))
+            .arg(option("rev", "N").required(true))
+            .arg(option("op", "ID").requires("caller"))
+            .arg(option("caller", "JSON"));
+        if action == "choose" {
+            subcommand = subcommand
+                .arg(required("option", "KEY"))
+                .arg(option("note", "TEXT"));
+        } else if action == "decision-timer" {
+            subcommand = subcommand.arg(option("auto-at", "UTC").required(true));
+        }
+        command = command.subcommand(subcommand);
+    }
     command
+        .subcommand(
+            Command::new("decisions")
+                .about("Read bounded human decision digest; never acknowledges"),
+        )
+        .subcommand(
+            Command::new("decision-config")
+                .about("Read the provider-configured automatic delay floor"),
+        )
+        .subcommand(
+            Command::new("decision-log")
+                .about("Read immutable decision policy history")
+                .arg(option("after", "SEQ")),
+        )
+        .subcommand(
+            Command::new("decision-receipt")
+                .about("Read original immutable policy outcome")
+                .arg(required("id", "ID"))
+                .arg(option("policy-rev", "N").required(true)),
+        )
+        .subcommand(
+            Command::new("decisions-seen")
+                .about("Explicit human per-UID last-look acknowledgement")
+                .arg(option("through", "SEQ").required(true))
+                .arg(option("op", "ID").requires("caller"))
+                .arg(option("caller", "JSON")),
+        )
         .subcommand(
             Command::new("ready")
                 .about("Read open tasks whose dependencies are accepted/done")

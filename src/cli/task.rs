@@ -147,7 +147,18 @@ fn decode_reply(response: &Value) -> TaskReply {
 }
 
 fn parse_payload(args: &[String]) -> Result<(Value, bool), String> {
-    let action = args.first().map(String::as_str).ok_or_else(usage)?;
+    let command = args.first().map(String::as_str).ok_or_else(usage)?;
+    let action = match command {
+        "decisions" => "decision_digest",
+        "decisions-seen" => "decision_seen",
+        "decision-log" => "decision_log",
+        "decision-receipt" => "decision_receipt",
+        "decision-config" => "decision_config",
+        "decision-timer" => "decision_timer",
+        "revert" => "decision_revert",
+        "choose" => "answer",
+        other => other,
+    };
     let mut payload = json!({"action": action});
     let mutation = matches!(
         action,
@@ -160,12 +171,23 @@ fn parse_payload(args: &[String]) -> Result<(Value, bool), String> {
             | "accept"
             | "done"
             | "answer"
+            | "decision_seen"
+            | "decision_timer"
+            | "decision_revert"
             | "plan"
             | "depends"
             | "update"
     );
     let remaining = match (action, args.get(1)) {
-        ("list" | "ready" | "whoami", _) => &args[1..],
+        (
+            "list" | "ready" | "whoami" | "decision_digest" | "decision_seen" | "decision_log"
+            | "decision_config",
+            _,
+        ) => &args[1..],
+        ("decision_receipt" | "decision_timer" | "decision_revert", Some(id)) => {
+            payload["id"] = id.clone().into();
+            &args[2..]
+        }
         ("plan", Some(path)) => {
             payload["nodes"] = read_plan(path)?;
             &args[2..]
@@ -188,7 +210,11 @@ fn parse_payload(args: &[String]) -> Result<(Value, bool), String> {
         }
         ("block" | "report" | "answer", Some(id)) if args.len() >= 3 => {
             payload["id"] = id.clone().into();
-            payload["text"] = args[2].clone().into();
+            payload[if command == "choose" {
+                "option"
+            } else {
+                "text"
+            }] = args[2].clone().into();
             &args[3..]
         }
         _ => return Err(usage()),
@@ -202,6 +228,43 @@ fn parse_payload(args: &[String]) -> Result<(Value, bool), String> {
             return Err("duplicate option".into());
         }
         match (action, flag.as_str()) {
+            ("decision", "--options") => {
+                payload["options"] = serde_json::from_str(value).map_err(|_| {
+                    "--options must be a JSON list of key/label objects".to_string()
+                })?;
+            }
+            ("decision", "--default" | "--waiting-cost") => {
+                payload[&flag.trim_start_matches("--").replace('-', "_")] = value.clone().into();
+            }
+            ("decision", "--reversible") => {
+                payload["reversible"] = value
+                    .parse::<bool>()
+                    .map_err(|_| "--reversible must be true or false".to_string())?
+                    .into();
+            }
+            ("decision" | "decision_timer", "--auto-at") => {
+                payload["auto_at"] = if value.is_empty() {
+                    Value::Null
+                } else {
+                    value.clone().into()
+                };
+            }
+            ("answer", "--note") if command == "choose" => payload["text"] = value.clone().into(),
+            ("decision_seen", "--through")
+            | ("decision_receipt", "--policy-rev")
+            | ("decision_log", "--after") => {
+                let key = match action {
+                    "decision_seen" => "through",
+                    "decision_receipt" => "policy_revision",
+                    _ => "after",
+                };
+                payload[key] = value
+                    .parse::<u64>()
+                    .map_err(|_| {
+                        "decision sequence/revision must be an unsigned integer".to_string()
+                    })?
+                    .into();
+            }
             ("create" | "decision" | "plan", "--parent") => {
                 payload["parent"] = value.clone().into()
             }
@@ -266,7 +329,7 @@ fn parse_payload(args: &[String]) -> Result<(Value, bool), String> {
         return Err("an explicit --op requires --caller with the original attempt's binding (use task whoami for a fresh explicit ID)".into());
     }
     if mutation
-        && !matches!(action, "create" | "decision")
+        && !matches!(action, "create" | "decision" | "decision_seen")
         && (action != "plan" || payload.get("parent").is_some())
         && payload.get("revision").is_none()
     {
@@ -279,6 +342,35 @@ fn parse_payload(args: &[String]) -> Result<(Value, bool), String> {
         && payload.get("operation_id").is_none()
     {
         return Err("--done-when is required: 1-3 observable lines".into());
+    }
+    if action == "decision"
+        && payload.get("operation_id").is_none()
+        && ["options", "default", "reversible", "waiting_cost"]
+            .iter()
+            .any(|key| payload.get(*key).is_none())
+    {
+        return Err("decision requires --options, --default, --reversible and --waiting-cost; --auto-at is optional".into());
+    }
+    for (action_name, field, message) in [
+        (
+            "decision_seen",
+            "through",
+            "--through is required: explicitly acknowledge the observed sequence",
+        ),
+        (
+            "decision_receipt",
+            "policy_revision",
+            "--policy-rev is required: original timed revision",
+        ),
+        (
+            "decision_timer",
+            "auto_at",
+            "--auto-at is required: UTC deadline or empty to cancel",
+        ),
+    ] {
+        if action == action_name && payload.get(field).is_none() {
+            return Err(message.into());
+        }
     }
     if action == "depends" && payload.get("depends_on").is_none() {
         return Err("--on is required: JSON list of prerequisite task IDs".into());
@@ -448,7 +540,7 @@ fn render_tree(tasks: &[Value]) -> Result<String, String> {
 }
 
 fn usage() -> String {
-    "usage: vqro task <create/decision TITLE --done-when TEXT [--parent ID]|plan FILE [--parent ID --rev N]|depends ID --on JSON --rev N|update ID --rev N [metadata options]|delegate ID --owner JSON --rev N|start/accept/done ID --rev N [done --evidence TEXT]|block/report/answer ID TEXT --rev N|list/ready [--after ID]|tree [--json]|whoami|get ID|op ID [--caller JSON]>; explicit --op ID requires --caller JSON from the original attempt".into()
+    "usage: vqro task <create/decision TITLE --done-when TEXT [--parent ID]|plan FILE [--parent ID --rev N]|depends ID --on JSON --rev N|update ID --rev N [metadata options]|delegate ID --owner JSON --rev N|start/accept/done ID --rev N [done --evidence TEXT]|block/report/answer ID TEXT --rev N|choose ID KEY --rev N [--note TEXT]|revert ID --rev N|decision-timer ID --rev N --auto-at UTC|decisions|decisions-seen --through SEQ|decision-log [--after SEQ]|decision-receipt ID --policy-rev N|decision-config|list/ready [--after ID]|tree [--json]|whoami|get ID|op ID [--caller JSON]>; new decision also requires --options JSON --default KEY --reversible BOOL --waiting-cost TEXT [--auto-at UTC]; explicit --op ID requires --caller JSON from the original attempt".into()
 }
 
 #[cfg(test)]
@@ -554,6 +646,91 @@ mod tests {
         assert!(text.contains("(depth 19)"));
         assert!(!text.contains('\u{1b}'));
         assert!(!text.lines().any(|line| line.starts_with(&" ".repeat(35))));
+    }
+
+    #[test]
+    fn structured_decision_filing_and_option_answer_stay_extension_payloads() {
+        assert!(parse_payload(
+            &["decision", "Question?", "--done-when", "Choice recorded."].map(String::from)
+        )
+        .is_err());
+        let (payload, mutation) = parse_payload(
+            &[
+                "decision",
+                "Question?",
+                "--done-when",
+                "Choice recorded.",
+                "--options",
+                r#"[{"key":"yes","label":"Proceed"},{"key":"no","label":"Wait"}]"#,
+                "--default",
+                "yes",
+                "--reversible",
+                "true",
+                "--waiting-cost",
+                "Work waits.",
+                "--auto-at",
+                "2026-10-02T20:00:00+00:00",
+            ]
+            .map(String::from),
+        )
+        .unwrap();
+        assert!(mutation);
+        assert_eq!(payload["options"].as_array().unwrap().len(), 2);
+        assert_eq!(payload["reversible"], true);
+        let (answer, mutation) = parse_payload(
+            &[
+                "choose",
+                "task_a",
+                "yes",
+                "--rev",
+                "1",
+                "--note",
+                "Verified.",
+            ]
+            .map(String::from),
+        )
+        .unwrap();
+        assert!(mutation);
+        assert_eq!(answer["action"], "answer");
+        assert_eq!(answer["option"], "yes");
+        assert_eq!(answer["text"], "Verified.");
+    }
+
+    #[test]
+    fn digest_and_policy_receipt_reads_never_ack_and_seen_requires_explicit_sequence() {
+        let (digest, mutation) = parse_payload(&["decisions"].map(String::from)).unwrap();
+        assert!(!mutation);
+        assert_eq!(digest["action"], "decision_digest");
+        assert!(parse_payload(&["decisions-seen"].map(String::from)).is_err());
+        let (seen, mutation) =
+            parse_payload(&["decisions-seen", "--through", "17"].map(String::from)).unwrap();
+        assert!(mutation);
+        assert_eq!(seen["through"], 17);
+        let (receipt, mutation) =
+            parse_payload(&["decision-receipt", "task_a", "--policy-rev", "1"].map(String::from))
+                .unwrap();
+        assert!(!mutation);
+        assert_eq!(receipt["policy_revision"], 1);
+        assert!(receipt.get("lookup_caller").is_none());
+    }
+
+    #[test]
+    fn timer_and_revert_require_current_revision_without_implicit_external_effects() {
+        assert!(parse_payload(&["revert", "task_a"].map(String::from)).is_err());
+        let (revert, mutation) =
+            parse_payload(&["revert", "task_a", "--rev", "2"].map(String::from)).unwrap();
+        assert!(mutation);
+        assert_eq!(revert["action"], "decision_revert");
+        let (timer, mutation) = parse_payload(
+            &["decision-timer", "task_a", "--rev", "3", "--auto-at", ""].map(String::from),
+        )
+        .unwrap();
+        assert!(mutation);
+        assert_eq!(timer["auto_at"], Value::Null);
+        assert!(parse_payload(
+            &["decisions-seen", "--through", "17", "--op", "ack-1"].map(String::from)
+        )
+        .is_err());
     }
 
     #[test]
