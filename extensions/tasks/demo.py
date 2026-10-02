@@ -32,6 +32,8 @@ class Demo:
         self.process = None
         self.server = None
         self.owned = {}
+        self.agent_bindings = {}
+        self.human_binding = None
         for directory in ("bin", "home", "config", "state", "run", "work", "commands", "receipts"):
             (root / directory).mkdir(mode=0o700)
         (root / "bin/vqro").symlink_to(vqro)
@@ -131,6 +133,8 @@ export default function(pi:any) {
         raise RuntimeError(f"private demo result did not arrive: {path}")
 
     def agent(self, name, token, args=None, expected=0, drop=None):
+        if args and "--op" in args and "--caller" not in args:
+            args = [*args, "--caller", json.dumps(self.agent_bindings[name])]
         self.save(f"commands/{token}.json", {"args": args, **({"drop": drop} if drop else {})})
         self.cli("agent", "prompt", name, f"/taskcore {token}")
         result_file = self.root / f"receipts/{token}.json"
@@ -139,10 +143,15 @@ export default function(pi:any) {
         if result["code"] != expected:
             raise RuntimeError(f"agent action {token}: {result}")
         if result.get("stdout", "").strip().startswith("{"):
-            return json.loads(result["stdout"])
+            value = json.loads(result["stdout"])
+            if args == ["whoami"]:
+                self.agent_bindings.setdefault(name, value["caller"])
+            return value
         return result
 
     def human(self, pane, token, args):
+        if "--op" in args and "--caller" not in args:
+            args = [*args, "--caller", json.dumps(self.human_binding)]
         output, error, status = [self.root / f"receipts/{token}.{suffix}" for suffix in ("out", "err", "status")]
         command = shlex.join(["vqro", "task", *args]) + f" > {shlex.quote(str(output))} 2> {shlex.quote(str(error))}; printf '%s' \"$?\" > {shlex.quote(str(status))}"
         self.cli("pane", "run", pane, command)
@@ -151,7 +160,10 @@ export default function(pi:any) {
         self.save(f"receipts/{token}.json", result)
         if result["code"] != 0:
             raise RuntimeError(f"human-shell action {token}: {result}")
-        return json.loads(result["stdout"])
+        value = json.loads(result["stdout"])
+        if args == ["whoami"]:
+            self.human_binding = value["caller"]
+        return value
 
     def launch(self, name, pane):
         self.cli("pane", "wait-output", pane, "--regex", r"\$", "--timeout", "5000")
@@ -234,6 +246,9 @@ export default function(pi:any) {
         assert replacement["terminal_id"] == owner_a["terminal_id"] and replacement["execution"] != owner_a["execution"]
         refused = self.agent("task-replacement", "replacement-denied", ["start", lost["id"], "--rev", "1"], expected=1)
         assert "not owned" in refused["stderr"]
+        retry_refused = self.agent("task-replacement", "replacement-create-retry-denied", ["create", "Lost reply root", "--op", "lost-reply", "--caller", json.dumps(owner_a)], expected=1)
+        assert "original caller changed" in retry_refused["stderr"]
+        assert len(self.cli("task", "tree", "--json")["tasks"]) == 4
         reassigned = self.human(human, "human-reassign", ["delegate", lost["id"], "--owner", json.dumps(replacement), "--rev", "1", "--op", "human-reassign"])["task"]
         assert reassigned["creator"] == owner_a and reassigned["owner"] == replacement
         self.agent("task-replacement", "replacement-start", ["start", lost["id"], "--rev", "2", "--op", "replacement-start"])

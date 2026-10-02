@@ -58,45 +58,77 @@ pub(super) fn command() -> Command {
 fn task_command() -> Command {
     let mut command = Command::new("task")
         .about("Use the enabled trusted Tasks extension")
-        .subcommand(Command::new("list").arg(option("after", "ID")))
-        .subcommand(Command::new("tree").arg(flag("json")))
-        .subcommand(Command::new("whoami"))
-        .subcommand(Command::new("get").arg(required("id", "ID")))
+        .subcommand(
+            Command::new("list")
+                .about("Read a bounded task page")
+                .arg(option("after", "ID")),
+        )
+        .subcommand(
+            Command::new("tree")
+                .about("Read task hierarchy and extension-derived debts")
+                .arg(flag("json")),
+        )
+        .subcommand(Command::new("whoami").about("Inspect the host-observed caller binding"))
+        .subcommand(
+            Command::new("get")
+                .about("Read one task")
+                .arg(required("id", "ID")),
+        )
         .subcommand(
             Command::new("op")
+                .about("Inspect the original caller's operation outcome")
                 .arg(required("id", "ID"))
                 .arg(option("caller", "JSON")),
         )
         .subcommand(
             Command::new("delegate")
+                .about("Explicitly assign an exact caller binding")
                 .arg(required("id", "ID"))
                 .arg(option("owner", "JSON").required(true))
                 .arg(option("rev", "N").required(true))
-                .arg(option("op", "ID")),
+                .arg(option("op", "ID").requires("caller"))
+                .arg(option("caller", "JSON")),
         );
-    for action in ["create", "decision"] {
+    for (action, description) in [
+        ("create", "Create owned work"),
+        ("decision", "File a human-decision task"),
+    ] {
         command = command.subcommand(
             Command::new(action)
+                .about(description)
                 .arg(required("title", "TITLE"))
                 .arg(option("parent", "ID"))
-                .arg(option("op", "ID")),
+                .arg(option("op", "ID").requires("caller"))
+                .arg(option("caller", "JSON")),
         );
     }
-    for action in ["start", "accept", "done"] {
+    for (action, description) in [
+        ("start", "Start or resume owned work"),
+        ("accept", "Cooperative human acceptance of a report"),
+        ("done", "Close accepted work"),
+    ] {
         command = command.subcommand(
             Command::new(action)
+                .about(description)
                 .arg(required("id", "ID"))
                 .arg(option("rev", "N").required(true))
-                .arg(option("op", "ID")),
+                .arg(option("op", "ID").requires("caller"))
+                .arg(option("caller", "JSON")),
         );
     }
-    for action in ["block", "report", "answer"] {
+    for (action, description) in [
+        ("block", "Record an owned task's blocker"),
+        ("report", "Report owned work for human acceptance"),
+        ("answer", "Cooperative human answer to a decision"),
+    ] {
         command = command.subcommand(
             Command::new(action)
+                .about(description)
                 .arg(required("id", "ID"))
                 .arg(required("text", "TEXT"))
                 .arg(option("rev", "N").required(true))
-                .arg(option("op", "ID")),
+                .arg(option("op", "ID").requires("caller"))
+                .arg(option("caller", "JSON")),
         );
     }
     command

@@ -226,6 +226,18 @@ fn generic_lost_receiver_does_not_retry_and_releases_slot() {
 }
 
 #[test]
+fn generic_action_can_outlive_unchanged_render_timeout() {
+    let fixture = Fixture::new();
+    let manager = fixture.manager();
+    let response = invoke(&manager, "durable", true);
+    fixture.wait_entered("durable");
+    // Supporting timeout separation, not a performance/CI speed threshold.
+    std::thread::sleep(crate::extension_runtime::REQUEST_TIMEOUT + Duration::from_millis(150));
+    fixture.release("durable");
+    assert_eq!(reply(response)["result"]["value"]["tag"], "durable");
+}
+
+#[test]
 fn generic_payload_and_provider_admission_reject_before_spawn() {
     let fixture = Fixture::new();
     let manager = fixture.manager();

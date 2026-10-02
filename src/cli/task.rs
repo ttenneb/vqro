@@ -55,6 +55,15 @@ pub(super) fn run_task_command(args: &[String]) -> std::io::Result<i32> {
         None
     };
     if let Some(caller) = &original_caller {
+        if payload
+            .get("expected_caller")
+            .is_some_and(|original| original != caller)
+        {
+            eprintln!(
+                "original caller changed; no write attempted; inspect the original operation scope"
+            );
+            return Ok(1);
+        }
         payload["expected_caller"] = caller.clone();
     }
     let reply = match invoke(&client, payload) {
@@ -187,6 +196,10 @@ fn parse_payload(args: &[String]) -> Result<(Value, bool), String> {
         match (action, flag.as_str()) {
             ("create" | "decision", "--parent") => payload["parent"] = value.clone().into(),
             (_, "--op") if mutation => payload["operation_id"] = value.clone().into(),
+            (_, "--caller") if mutation => {
+                payload["expected_caller"] = serde_json::from_str(value)
+                    .map_err(|_| "--caller must be the original binding JSON".to_string())?;
+            }
             (_, "--rev") if mutation && !matches!(action, "create" | "decision") => {
                 let revision = value
                     .parse::<u64>()
@@ -208,6 +221,10 @@ fn parse_payload(args: &[String]) -> Result<(Value, bool), String> {
             }
             _ => return Err(usage()),
         }
+    }
+    if mutation && payload.get("operation_id").is_some() && payload.get("expected_caller").is_none()
+    {
+        return Err("an explicit --op requires --caller with the original attempt's binding (use task whoami for a fresh explicit ID)".into());
     }
     if mutation && !matches!(action, "create" | "decision") && payload.get("revision").is_none() {
         return Err("--rev is required; inspect the task before writing".into());
@@ -354,7 +371,7 @@ fn render_tree(tasks: &[Value]) -> Result<String, String> {
 }
 
 fn usage() -> String {
-    "usage: vqro task <create/decision TITLE [--parent ID]|delegate ID --owner JSON --rev N|start/accept/done ID --rev N|block/report/answer ID TEXT --rev N|list [--after ID]|tree [--json]|whoami|get ID|op ID [--caller JSON]>; writes accept --op ID for the same original caller".into()
+    "usage: vqro task <create/decision TITLE [--parent ID]|delegate ID --owner JSON --rev N|start/accept/done ID --rev N|block/report/answer ID TEXT --rev N|list [--after ID]|tree [--json]|whoami|get ID|op ID [--caller JSON]>; explicit --op ID requires --caller JSON from the original attempt".into()
 }
 
 #[cfg(test)]
@@ -377,25 +394,33 @@ mod tests {
             assert!(mutation);
             assert_eq!(payload["revision"], 2);
         }
-        let (payload, mutation) = parse_payload(
-            &[
-                "answer",
-                "task_a",
-                "smaller path",
-                "--rev",
-                "1",
-                "--op",
-                "answer-1",
-            ]
-            .map(String::from),
-        )
-        .unwrap();
+        let (payload, mutation) =
+            parse_payload(&["answer", "task_a", "smaller path", "--rev", "1"].map(String::from))
+                .unwrap();
         assert!(mutation);
         assert_eq!(payload["text"], "smaller path");
         assert!(parse_payload(
             &["start", "task_a", "--rev", "1", "--actor", "human"].map(String::from)
         )
         .is_err());
+    }
+
+    #[test]
+    fn explicit_operation_requires_original_binding_not_current_preflight() {
+        assert!(parse_payload(&["create", "retry", "--op", "old"].map(String::from)).is_err());
+        let original =
+            json!({"class":"agent","terminal_id":"term_a","agent":"pi","execution":"boot:10:100"});
+        let (payload, mutation) = parse_payload(&[
+            "create".into(),
+            "retry".into(),
+            "--op".into(),
+            "old".into(),
+            "--caller".into(),
+            original.to_string(),
+        ])
+        .unwrap();
+        assert!(mutation);
+        assert_eq!(payload["expected_caller"], original);
     }
 
     fn tree_task(id: &str, parent: Option<&str>, kind: &str, state: &str, owes: Value) -> Value {

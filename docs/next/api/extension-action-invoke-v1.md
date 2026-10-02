@@ -62,18 +62,22 @@ human-gesture verification. Handoff roots without original birth proof stay
 unknown; generic terminal recovery remains usable.
 
 Capture bounds: 64 ancestors, 8192 bytes per process stat and 16384 bytes per
-command line. Root birth is cached on fresh terminal creation. Presentation and
-PTY parsing do not perform this work; it runs only for explicit action requests.
-Unrelated terminal roots do not allocate evidence or query foreground state.
+command line. Root birth is cached on fresh terminal creation. The initial
+single peer-birth `/proc` read occurs on every local API connection, before its
+method is known; ancestry capture and foreground classification are action-only.
+Presentation and PTY parsing do not perform this work. Unrelated terminal roots
+do not allocate evidence or query foreground state.
 
 ## Bounds and uncertainty
 
 - Client payload: at most 64 KiB serialized JSON.
 - Existing global work-slot bound, eight queued requests per worker, existing
   provider-count limit; admission failure is definitive before execution.
-- Queue **start** deadline: three seconds from worker admission. This is not an
+- Queue **start** deadline: two seconds from worker admission. This is not an
   atomic effect deadline or client-submission-time guarantee.
-- Existing bounded executable request timeout and cancellation; no worker retry.
+- Action deadline: 2.5 seconds including startup, independent of the unchanged
+  750 ms render timeout; existing cancellation, no worker retry. Queue + action
+  budgets remain below the API's five-second response and CLI's six-second waits.
 - Generation/revocation checks before dispatch and after execution. Retirement
   cancels active work and rejects queued requests, even with a full channel.
 

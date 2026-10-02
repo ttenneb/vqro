@@ -2236,7 +2236,7 @@ impl ExtensionServiceManager {
         };
         let action = GenericActionRequest {
             generation: worker.generation.load(Ordering::Acquire),
-            deadline: Instant::now() + Duration::from_secs(3),
+            deadline: Instant::now() + Duration::from_secs(2),
             params: serde_json::json!({"caller": caller, "payload": request.payload}),
             request_id,
             respond_to,
@@ -3094,6 +3094,9 @@ impl ExtensionServiceSupervisor {
                 "action_invoke capability not granted".into(),
             ));
         }
+        // Durable extension work is not a render: include startup in a separate
+        // bounded deadline, long enough for SQLite's one-second lock wait.
+        let deadline = Instant::now() + Duration::from_millis(2500);
         self.ensure_running_cancellable(Instant::now(), canceled)?;
         let runtime = self
             .runtime
@@ -3104,7 +3107,13 @@ impl ExtensionServiceSupervisor {
                 "service did not advertise action.invoke.v1".into(),
             ));
         }
-        let result = runtime.request_cancellable("action.invoke.v1", params, canceled);
+        let result = runtime.invoke(
+            "action.invoke.v1",
+            params,
+            self.runtime_generation,
+            deadline,
+            canceled,
+        );
         self.finish_request(result)
     }
 

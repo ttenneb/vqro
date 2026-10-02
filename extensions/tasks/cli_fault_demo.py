@@ -56,7 +56,7 @@ def run_case(binary, name, replies, expected_calls, expected_stderr):
             thread = threading.Thread(target=serve)
             thread.start()
             try:
-                result = subprocess.run([str(binary), "task", "create", "Boundary fixture", "--op", "boundary-op"], env=env, cwd=root, capture_output=True, text=True, timeout=18)
+                result = subprocess.run([str(binary), "task", "create", "Boundary fixture", "--op", "boundary-op", "--caller", json.dumps(SCOPE)], env=env, cwd=root, capture_output=True, text=True, timeout=18)
             finally:
                 stop.set()
                 thread.join(timeout=6)
@@ -82,6 +82,7 @@ def main():
     cases = [
         ("unknown_preflight_never_writes", [success({"caller": {"class": "unknown"}})], 1, "no write attempted"),
         ("lost_preflight_never_writes", [None], 1, "no write attempted"),
+        ("replacement_preflight_never_retries_original_create", [success({"caller": {**SCOPE, "execution": "fixture:11:101"}})], 1, "original caller changed; no write attempted"),
         ("preflight_drift_never_rebinds_or_retries", [success({"caller": SCOPE}), response({"ok": False, "error": "caller changed before mutation"})], 2, "caller changed before mutation"),
         ("lost_write_reply_preserves_original_scope_no_retry", [success({"caller": SCOPE}), None], 2, "outcome unknown; op boundary-op"),
     ]

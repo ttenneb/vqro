@@ -36,6 +36,10 @@ vqro task get ID
 vqro task op OPERATION_ID [--caller JSON]
 ```
 
+An explicit `--op ID` on any write requires `--caller JSON` containing the
+**original attempt's binding**. For a fresh explicitly chosen ID, obtain it with
+`task whoami`; without `--op`, the CLI mints an ID and captures that binding.
+
 Use the intended assignee's `task whoami` **caller binding**, not a pane ID or
 agent name, as `--owner`. Assignment chooses an exact binding; it does not prove
 that target is still alive. Every state/assignment write requires the inspected
@@ -107,8 +111,11 @@ selects the original scope, including from an unknown/replacement execution;
 it grants no mutation authority. Absence is a point-in-time store observation,
 not proof that a previously queued invocation cannot still run.
 
-The CLI captures a read-only `whoami` preflight, sends that binding as a write
-precondition, and never silently retries. Lost/malformed/in-flight replies print
+The CLI captures a read-only `whoami` preflight and never silently retries.
+Explicit operation IDs must carry the original `--caller`; a replacement caller
+fails before any write instead of selecting a new dedupe scope. The original
+binding is also sent as the extension's write precondition, catching drift
+between preflight and dispatch. Lost/malformed/in-flight replies print
 `outcome unknown; op <id>`, the original binding and its lookup command. Inspect
 that scope first. A retry must retain the **same operation ID, same original
 caller, same intent and still-valid revision**. Do not mint a new operation ID
