@@ -3363,6 +3363,17 @@ impl PaneRuntime {
         crate::platform::process_cwd(pid)
     }
 
+    pub(crate) fn invocation_foreground_process_group(&self) -> Option<u32> {
+        #[cfg(unix)]
+        {
+            self.io.foreground_process_group_id()
+        }
+        #[cfg(not(unix))]
+        {
+            None
+        }
+    }
+
     pub fn child_pid(&self) -> Option<u32> {
         let pid = self.child_pid.load(Ordering::Acquire);
         (pid > 0).then_some(pid)

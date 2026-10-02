@@ -9,6 +9,112 @@ use std::{
 
 pub(super) const REMOTE_BRIDGE_CLOCK: libc::clockid_t = libc::CLOCK_BOOTTIME;
 
+pub(crate) fn socket_peer_birth(stream: &crate::ipc::LocalStream) -> Option<(u32, u64)> {
+    use interprocess::local_socket::traits::StreamCommon;
+    let credentials = stream.peer_creds().ok()?;
+    let pid = u32::try_from(credentials.pid()?).ok()?;
+    Some((pid, invocation_process_birth(pid)?))
+}
+
+pub(crate) fn invocation_peer(
+    stream: &crate::ipc::LocalStream,
+) -> Option<crate::action_invocation::InvocationPeer> {
+    use interprocess::local_socket::traits::StreamCommon;
+    let credentials = stream.peer_creds().ok()?;
+    let uid = credentials.euid()?;
+    // SAFETY: geteuid has no arguments or memory preconditions.
+    if uid != unsafe { libc::geteuid() } {
+        return None;
+    }
+    let mut pid = u32::try_from(credentials.pid()?).ok()?;
+    let boot_id = std::fs::read_to_string("/proc/sys/kernel/random/boot_id")
+        .ok()?
+        .trim()
+        .to_owned();
+    let mut ancestry = Vec::new();
+    for _ in 0..64 {
+        if pid == 0
+            || ancestry
+                .iter()
+                .any(|entry: &crate::action_invocation::InvocationProcess| entry.pid == pid)
+        {
+            break;
+        }
+        let entry = invocation_process(pid)?;
+        pid = entry.parent_pid;
+        ancestry.push(entry);
+    }
+    let peer = crate::action_invocation::InvocationPeer {
+        uid,
+        boot_id,
+        ancestry,
+    };
+    invocation_peer_is_current(&peer).then_some(peer)
+}
+
+fn invocation_process(pid: u32) -> Option<crate::action_invocation::InvocationProcess> {
+    let mut stat = String::new();
+    std::fs::File::open(format!("/proc/{pid}/stat"))
+        .ok()?
+        .take(8192)
+        .read_to_string(&mut stat)
+        .ok()?;
+    let start = stat.find('(')?;
+    let end = stat.rfind(')')?;
+    let fields: Vec<_> = stat.get(end + 2..)?.split_whitespace().collect();
+    let parent_pid = fields.get(1)?.parse().ok()?;
+    let birth = fields.get(19)?.parse().ok()?;
+    let mut command = Vec::new();
+    std::fs::File::open(format!("/proc/{pid}/cmdline"))
+        .ok()?
+        .take(16385)
+        .read_to_end(&mut command)
+        .ok()?;
+    if command.len() > 16384 {
+        return None;
+    }
+    let argv: Vec<_> = command
+        .split(|byte| *byte == 0)
+        .filter(|part| !part.is_empty())
+        .map(|part| String::from_utf8_lossy(part).into_owned())
+        .collect();
+    Some(crate::action_invocation::InvocationProcess {
+        pid,
+        parent_pid,
+        birth,
+        process: ForegroundProcess {
+            pid,
+            name: stat.get(start + 1..end)?.to_string(),
+            argv0: argv.first().cloned(),
+            cmdline: Some(argv.join(" ")),
+            argv: Some(argv),
+        },
+    })
+}
+
+pub(crate) fn invocation_process_birth(pid: u32) -> Option<u64> {
+    let mut stat = String::new();
+    std::fs::File::open(format!("/proc/{pid}/stat"))
+        .ok()?
+        .take(8192)
+        .read_to_string(&mut stat)
+        .ok()?;
+    stat.get(stat.rfind(')')? + 2..)?
+        .split_whitespace()
+        .nth(19)?
+        .parse()
+        .ok()
+}
+
+pub(crate) fn invocation_peer_is_current(peer: &crate::action_invocation::InvocationPeer) -> bool {
+    !peer.ancestry.is_empty()
+        && peer.ancestry.iter().all(|entry| {
+            invocation_process(entry.pid).is_some_and(|current| {
+                current.birth == entry.birth && current.parent_pid == entry.parent_pid
+            })
+        })
+}
+
 use super::{
     read_limited_reader, ClipboardCommand, ClipboardImage, ForegroundJob, ForegroundProcess,
     LimitedRead, ProcessTelemetry, Signal, TerminalTelemetrySample,

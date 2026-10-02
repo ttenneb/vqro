@@ -743,7 +743,8 @@
             "host_document",
             "action_choices",
             "focus_terminal",
-            "terminal_interrupt"
+            "terminal_interrupt",
+            "action_invoke"
           ],
           "type": "string"
         },
@@ -780,7 +781,8 @@
           "enum": [
             "pane_inspector",
             "host_document",
-            "action_choices"
+            "action_choices",
+            "action_invoke"
           ],
           "type": "string"
         },
@@ -1319,6 +1321,7 @@
                 "action_choices",
                 "focus_terminal",
                 "terminal_interrupt",
+                "action_invoke",
                 "unknown"
               ],
               "type": "string"
@@ -1421,6 +1424,7 @@
                 "action_choices",
                 "focus_terminal",
                 "terminal_interrupt",
+                "action_invoke",
                 "unknown"
               ],
               "type": "string"

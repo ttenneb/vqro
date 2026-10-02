@@ -18,6 +18,7 @@
             "action_choices",
             "focus_terminal",
             "terminal_interrupt",
+            "action_invoke",
             "unknown"
           ],
           "type": "string"
@@ -120,6 +121,7 @@
             "action_choices",
             "focus_terminal",
             "terminal_interrupt",
+            "action_invoke",
             "unknown"
           ],
           "type": "string"

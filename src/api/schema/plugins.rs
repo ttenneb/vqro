@@ -328,6 +328,7 @@ pub enum PluginServiceCapability {
     PaneInspector,
     HostDocument,
     ActionChoices,
+    ActionInvoke,
     #[serde(other)]
     Unknown,
 }
@@ -340,6 +341,7 @@ pub enum ExtensionServiceCapability {
     ActionChoices,
     FocusTerminal,
     TerminalInterrupt,
+    ActionInvoke,
     #[serde(other)]
     Unknown,
 }

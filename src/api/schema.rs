@@ -38,6 +38,13 @@ pub use tabs::*;
 pub use workspaces::*;
 pub use worktrees::*;
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ExtensionActionInvokeParams {
+    pub service_id: String,
+    pub payload: serde_json::Value,
+}
+
 fn is_false(value: &bool) -> bool {
     !*value
 }
@@ -368,6 +375,8 @@ pub enum Method {
     ExtensionServiceBindingInvoke(ExtensionServiceBindingInvokeParams),
     #[serde(rename = "extension.doctor")]
     ExtensionDoctor(ExtensionDoctorParams),
+    #[serde(rename = "extension.action.invoke")]
+    ExtensionActionInvoke(ExtensionActionInvokeParams),
 }
 
 #[cfg(test)]

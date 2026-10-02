@@ -1630,7 +1630,9 @@ impl App {
             Method::ExtensionServiceBindingRevoke(params) => {
                 return self.handle_extension_service_binding_revoke(request.id, params);
             }
-            Method::ExtensionServiceBindingInvoke(_) | Method::ExtensionDoctor(_) => {
+            Method::ExtensionServiceBindingInvoke(_)
+            | Method::ExtensionDoctor(_)
+            | Method::ExtensionActionInvoke(_) => {
                 return responses::encode_error(
                     request.id,
                     crate::service_fabric::stable_r1_error_code("service_binding_unavailable"),

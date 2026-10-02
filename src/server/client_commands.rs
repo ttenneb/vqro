@@ -74,6 +74,7 @@ pub(crate) const CLIENT_SHELL_OPTIONAL_METHODS: &[&str] = &[
     "delegation.reparent",
     "delegation.root",
     "delegation.tree",
+    "extension.action.invoke",
     "extension.data.delete",
     "extension.enable",
     "extension.install",
@@ -388,6 +389,12 @@ mod tests {
             .filter(|method| method.starts_with("extension."))
             .collect::<Vec<_>>();
         let mut actual = endpoint_method_shape_digests(&methods);
+        // This new optional method is separate from every published generation-1
+        // and pre-existing extension method expectation below.
+        assert_eq!(
+            actual.remove("extension.action.invoke").as_deref(),
+            Some("8f6a921fed93464104d14d1a019b9056d3a0cf6f819688f8f82509c89c9c59f9")
+        );
         let additive: BTreeMap<String, String> = serde_json::from_value(serde_json::json!({
             "extension.package.disable": "135f469b07ad4cc2d8385ede5fdd9093486d72b48157d1abea512eff05404b56",
             "extension.package.enable": "7a494a42a8353fa7e3048677543dabe7d46d03573ed3c938054b4cfc9f6dcde0",
