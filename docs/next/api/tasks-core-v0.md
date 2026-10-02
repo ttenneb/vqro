@@ -233,6 +233,13 @@ same op/caller/intent/still-valid revision; never mint a new ID or rebind to a n
 execution to resolve uncertainty. CLI permits missing criteria only on an explicit
 historical-op replay; a fresh missing-criteria write still rejects at the provider.
 
+## Agent instructions
+
+`vqro --skill` ships the task/communication workflow, including graph proposals,
+human root imports, owned ready/start, criteria/evidence and independent acceptance.
+See [agent task and communication conventions](task-conventions.md) for the
+record-versus-notification distinction and model-free assurance boundary.
+
 ## Evidence / boundaries
 
 `just task-core-test` covers migration/rollback, original receipts, quotas,
@@ -249,7 +256,7 @@ replies for CLI mechanics only, not host/task acceptance.
 
 The experimental [task pane/filter consumer](tasks-view-v0.md) is separate from
 this core acceptance evidence. Not included: critical path/badges/decision queue
-UI, skill conventions, Pi todo integration, secure human authentication,
-non-Linux acceptance, package-fabric tasks, messaging/wake/planner infrastructure
-or a frozen contract. Provider failure removes task authority only; host terminals
-and generic recovery survive.
+UI, Pi todo integration, secure human authentication, non-Linux acceptance,
+package-fabric tasks, messaging/wake/planner infrastructure or a frozen contract.
+Provider failure removes task authority only; host terminals and generic recovery
+survive.
