@@ -43,6 +43,7 @@ pub(super) fn command() -> Command {
         .subcommand(collection_command())
         .subcommand(service_binding_command())
         .subcommand(extension_command())
+        .subcommand(task_command())
         .subcommand(delegation_command())
         .subcommand(notification_command())
         .subcommand(agent_command())
@@ -52,6 +53,20 @@ pub(super) fn command() -> Command {
         .subcommand(integration_command())
         .subcommand(plugin_command());
     configure_help(command, 0)
+}
+
+fn task_command() -> Command {
+    Command::new("task")
+        .about("Use the enabled trusted Tasks extension")
+        .subcommand(
+            Command::new("create")
+                .arg(required("title", "TITLE"))
+                .arg(option("parent", "ID"))
+                .arg(option("op", "ID")),
+        )
+        .subcommand(Command::new("list"))
+        .subcommand(Command::new("get").arg(required("id", "ID")))
+        .subcommand(Command::new("op").arg(required("id", "ID")))
 }
 
 fn configure_help(command: Command, depth: usize) -> Command {

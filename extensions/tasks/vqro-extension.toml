@@ -1,0 +1,12 @@
+manifest_version = 1
+id = "vqro.tasks"
+name = "Tasks"
+version = "0.1.0"
+min_vqro_version = "0.9.0"
+platforms = ["linux"]
+
+[[services]]
+id = "core"
+provides = ["action_invoke"]
+capabilities = ["action_invoke"]
+command = ["python3", "provider.py"]

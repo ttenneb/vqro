@@ -42,6 +42,7 @@ mod spec;
 mod status;
 mod tab;
 mod target;
+mod task;
 mod workspace;
 mod worktree;
 
@@ -133,6 +134,7 @@ pub fn maybe_run(args: &[String]) -> std::io::Result<CommandOutcome> {
         "collection" => collection::run_collection_command(&args[2..])?,
         "service-binding" => service_binding::run_service_binding_command(&args[2..])?,
         "extension" => extension::run_extension_command(&args[2..])?,
+        "task" => task::run_task_command(&args[2..])?,
         "delegation" => delegation::run_delegation_command(&args[2..])?,
         "notification" => notification::run_notification_command(&args[2..])?,
         "agent" => agent::run_agent_command(&args[2..])?,
