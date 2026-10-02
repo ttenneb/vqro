@@ -3363,6 +3363,25 @@ impl PaneRuntime {
         crate::platform::process_cwd(pid)
     }
 
+    /// A narrow cloned reader for explicit API observation, never render/fanout.
+    pub(crate) fn invocation_foreground_reader(&self) -> Box<dyn Fn() -> Option<u32> + Send> {
+        #[cfg(unix)]
+        {
+            match &self.io {
+                PaneRuntimeIo::Actor(actor) => {
+                    let actor = actor.clone();
+                    Box::new(move || actor.foreground_process_group_id())
+                }
+                #[cfg(test)]
+                PaneRuntimeIo::TestChannel { .. } => Box::new(|| None),
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            Box::new(|| None)
+        }
+    }
+
     pub(crate) fn invocation_foreground_process_group(&self) -> Option<u32> {
         #[cfg(unix)]
         {

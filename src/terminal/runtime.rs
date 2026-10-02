@@ -28,6 +28,10 @@ impl TerminalRuntime {
         self.1
     }
 
+    pub(crate) fn invocation_foreground_reader(&self) -> Box<dyn Fn() -> Option<u32> + Send> {
+        self.0.invocation_foreground_reader()
+    }
+
     pub(crate) fn invocation_foreground_process_group(&self) -> Option<u32> {
         self.0.invocation_foreground_process_group()
     }

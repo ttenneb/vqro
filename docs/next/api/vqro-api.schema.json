@@ -8486,6 +8486,13 @@
                 "null"
               ]
             },
+            "execution": {
+              "description": "Cooperative process-lifetime proof on explicit list/get only; absent if unprovable.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "focused": {
               "type": "boolean"
             },

@@ -66,6 +66,14 @@ pub(crate) fn invocation_peer(
 }
 
 #[cfg(not(target_os = "linux"))]
+pub(crate) fn invocation_peer_for_process(
+    _pid: u32,
+    _uid: u32,
+) -> Option<crate::action_invocation::InvocationPeer> {
+    None
+}
+
+#[cfg(not(target_os = "linux"))]
 pub(crate) fn invocation_peer_is_current(_peer: &crate::action_invocation::InvocationPeer) -> bool {
     false
 }

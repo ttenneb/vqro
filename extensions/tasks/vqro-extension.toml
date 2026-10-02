@@ -10,3 +10,10 @@ id = "core"
 provides = ["action_invoke"]
 capabilities = ["action_invoke"]
 command = ["python3", "provider.py"]
+
+[[panes]]
+id = "tree"
+title = "Tasks"
+description = "Read-only task tree and exact-owner navigation"
+placement = "tab"
+command = ["python3", "view.py"]

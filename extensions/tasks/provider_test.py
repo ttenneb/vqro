@@ -71,6 +71,20 @@ class StoreTests(unittest.TestCase):
         return self.invoke({"action": action, "id": task["id"], "revision": task["revision"],
                             "operation_id": op or f"{action}-{task['revision']}-{task['id']}", **extra}, caller)["task"]
 
+    def test_status_tracks_only_committed_transitions_not_reads_or_replay(self):
+        self.assertEqual({"revision": 0}, self.invoke({"action": "status"}, UNKNOWN))
+        task = self.create()["task"]
+        self.assertEqual({"revision": 1}, self.invoke({"action": "status"}, UNKNOWN))
+        self.create()
+        self.invoke({"action": "list"}, UNKNOWN)
+        self.lookup()
+        self.assertEqual({"revision": 1}, self.invoke({"action": "status"}, UNKNOWN))
+        self.change(task, "start")
+        self.assertEqual({"revision": 2}, self.invoke({"action": "status"}, UNKNOWN))
+        self.store.db.close()
+        self.store = provider.Store(self.root.name)
+        self.assertEqual({"revision": 2}, self.invoke({"action": "status"}, UNKNOWN))
+
     def test_delegated_child_report_human_acceptance_and_debts(self):
         root = self.create()["task"]
         child = self.create("child", parent=root["id"])["task"]

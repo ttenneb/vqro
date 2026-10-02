@@ -26,7 +26,13 @@ pub(crate) fn invocation_peer(
     if uid != unsafe { libc::geteuid() } {
         return None;
     }
-    let mut pid = u32::try_from(credentials.pid()?).ok()?;
+    invocation_peer_for_process(u32::try_from(credentials.pid()?).ok()?, uid)
+}
+
+pub(crate) fn invocation_peer_for_process(
+    mut pid: u32,
+    uid: u32,
+) -> Option<crate::action_invocation::InvocationPeer> {
     let boot_id = std::fs::read_to_string("/proc/sys/kernel/random/boot_id")
         .ok()?
         .trim()
