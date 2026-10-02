@@ -9,19 +9,18 @@ import uuid
 
 MAX_BODY_BYTES = 32 * 1024
 MAX_PAGE = 32
-MAX_LIST_BYTES = 64 * 1024
-# One claim stays well under the provider's 128 KiB reply budget; the adapter
-# drains the rest on its next pickup.
+# Bounds count encoded record JSON (the real result bytes), not just bodies.
+MAX_LIST_BYTES = 32 * 1024
 MAX_CLAIM = 8
-MAX_CLAIM_BYTES = 64 * 1024
+MAX_CLAIM_BYTES = 48 * 1024
 STATES = ("waiting", "claimed")
 
 
-def _bounded(records):
+def _bounded(canonical, records, budget):
     kept, total = [], 0
-    for record in records[:MAX_PAGE]:
-        size = len(record["body"].encode())
-        if kept and total + size > MAX_LIST_BYTES:
+    for record in records:
+        size = len(canonical(record).encode())
+        if kept and total + size > budget:
             break
         total += size
         kept.append(record)
@@ -97,13 +96,15 @@ class Messages:
                 "SELECT * FROM messages WHERE recipient_execution=? AND state='waiting' ORDER BY created_at ASC, id ASC LIMIT ?",
                 (binding["execution"], MAX_PAGE),
             ).fetchall()
-            # The waiting inbox stays visible independently of sender history.
-            waiting = _bounded([self._record(row) for row in rows])
+            # The waiting inbox stays visible independently of sender history and
+            # shares one encoded-byte budget with it.
+            waiting = _bounded(self.store.canonical, [self._record(row) for row in rows], MAX_LIST_BYTES)
         rows = self.db.execute(
             f"SELECT * FROM messages WHERE {clause} ORDER BY created_at DESC, id DESC LIMIT ?",
             (*params, MAX_PAGE),
         ).fetchall()
-        return {"activation": self.activation(), "waiting": waiting, "messages": _bounded([self._record(row) for row in rows])}
+        messages = _bounded(self.store.canonical, [self._record(row) for row in rows], MAX_LIST_BYTES)
+        return {"activation": self.activation(), "waiting": waiting, "messages": messages}
 
     def mutate(self, payload, caller, at):
         action = payload["action"]
@@ -148,19 +149,17 @@ class Messages:
             if payload.get("idle") and not self.activation():
                 return {"claimed": [], "activation": False}
             rows = self.db.execute(
-                "SELECT * FROM messages WHERE recipient_execution=? AND state='waiting' ORDER BY created_at ASC, id ASC",
-                (binding["execution"],),
+                "SELECT * FROM messages WHERE recipient_execution=? AND state='waiting' ORDER BY created_at ASC, id ASC LIMIT ?",
+                (binding["execution"], MAX_CLAIM),
             ).fetchall()
-            claimed, total = [], 0
-            for row in rows:
-                if len(claimed) >= MAX_CLAIM or total + len(row["body"].encode()) > MAX_CLAIM_BYTES:
-                    break
-                total += len(row["body"].encode())
+            records = _bounded(self.store.canonical, [self._record(row) for row in rows], MAX_CLAIM_BYTES)
+            claimed = []
+            for record in records:
                 self.db.execute(
                     "UPDATE messages SET state='claimed',claimed_at=?,revision=revision+1,updated_at=? WHERE id=? AND state='waiting'",
-                    (at, at, row["id"]),
+                    (at, at, record["id"]),
                 )
-                claimed.append(self._record(self.db.execute("SELECT * FROM messages WHERE id=?", (row["id"],)).fetchone()))
+                claimed.append(self._record(self.db.execute("SELECT * FROM messages WHERE id=?", (record["id"],)).fetchone()))
             return {"claimed": claimed, "activation": self.activation()}
         if action == "message_activation":
             if binding.get("class") != "human_unverified":

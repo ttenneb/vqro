@@ -52,6 +52,9 @@ function harness(exec?: (args: string[]) => any): Harness {
     sendUserMessage(text: string) {
       sent.push(text);
     },
+    sendMessage(message: any) {
+      sent.push(String(message?.content ?? ""));
+    },
     async exec(_bin: string, args: string[]) {
       calls.push({ args });
       if (exec) return exec(args);
@@ -273,7 +276,7 @@ test("activation on: the idle mailbox poll claims and starts a turn", async () =
     const claimed = [{ id: "m1", body: "wake up", sender_address: "alpha" }];
     const h = harness((args) => {
       if (args[0] === "agent" && args[1] === "get") return { code: 0, stdout: JSON.stringify({ result: { agent: { name: "beta", execution: "exec-beta" } } }), stderr: "" };
-      if (args[0] === "message" && args[1] === "list") return { code: 0, stdout: JSON.stringify({ activation: true, messages: [{ id: "m1", state: "waiting", recipient_execution: "exec-beta" }] }), stderr: "" };
+      if (args[0] === "message" && args[1] === "list") return { code: 0, stdout: JSON.stringify({ activation: true, waiting: [{ id: "m1", state: "waiting", recipient_execution: "exec-beta" }], messages: [] }), stderr: "" };
       if (args[0] === "message" && args[1] === "claim") return { code: 0, stdout: JSON.stringify({ claimed }), stderr: "" };
       return { code: 0, stdout: "", stderr: "" };
     });
@@ -281,6 +284,24 @@ test("activation on: the idle mailbox poll claims and starts a turn", async () =
     jest.advanceTimersByTime(MAILBOX_POLL_MS + 5);
     for (let i = 0; i < 20; i += 1) await Promise.resolve();
     expect(h.sent.join("\n")).toContain("wake up");  } finally {
+    jest.useRealTimers();
+  }
+});
+
+test("activation off: the preflight never claims", async () => {
+  jest.useFakeTimers();
+  try {
+    const h = harness((args) => {
+      if (args[0] === "agent" && args[1] === "get") return { code: 0, stdout: JSON.stringify({ result: { agent: { name: "beta", execution: "exec-beta" } } }), stderr: "" };
+      if (args[0] === "message" && args[1] === "list") return { code: 0, stdout: JSON.stringify({ activation: false, waiting: [{ id: "m1", state: "waiting", recipient_execution: "exec-beta" }], messages: [] }), stderr: "" };
+      return { code: 0, stdout: "", stderr: "" };
+    });
+    await h.emit("session_start", {});
+    jest.advanceTimersByTime(MAILBOX_POLL_MS + 5);
+    for (let i = 0; i < 20; i += 1) await Promise.resolve();
+    expect(h.calls.filter((call) => call.args[1] === "claim")).toHaveLength(0);
+    expect(h.sent).toHaveLength(0);
+  } finally {
     jest.useRealTimers();
   }
 });

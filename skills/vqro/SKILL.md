@@ -186,7 +186,7 @@ vqro message edit MESSAGE_ID "..." --rev N
 vqro message activation on|off   # human only; one recorded setting
 ```
 
-The target must be a detected agent process (a name or pane that currently hosts one). `claim` binds the exact recipient execution, so a restarted or moved agent cannot claim an old address and the sender resends. `edit` works only for the original sender while the message is waiting. With activation on, a waiting message may start an idle recipient's turn at the adapter's next poll; a stopped agent is never relaunched, and `claim` is not a run, reply or acceptance. A reply is a `send` with `--reply-to`.
+The target must be a detected agent process (a name or pane that currently hosts one). `claim` binds the exact recipient execution, so a restarted agent (a new process execution) cannot claim an old address and the sender resends; a moved pane with the same execution still can. `edit` works only for the original sender while the message is waiting. With activation on, a waiting message may start an idle recipient's turn at the adapter's next poll; a stopped agent is never relaunched, and `claim` is not a run, reply or acceptance. A reply is a `send` with `--reply-to`.
 
 ## Spaces and collections
 

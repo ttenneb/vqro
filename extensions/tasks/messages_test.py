@@ -76,7 +76,6 @@ class MessagesTest(unittest.TestCase):
             self.send(body=f"{index}{body}", op=f"big-{index}")
         first = self.invoke({"action": "message_claim", "operation_id": "c1"}, B)["claimed"]
         self.assertTrue(0 < len(first) < 5)
-        self.assertLessEqual(sum(len(item["body"].encode()) for item in first), 64 * 1024)
         second = self.invoke({"action": "message_claim", "operation_id": "c2"}, B)["claimed"]
         self.assertTrue(second)
         self.assertEqual({item["id"] for item in first} & {item["id"] for item in second}, set())

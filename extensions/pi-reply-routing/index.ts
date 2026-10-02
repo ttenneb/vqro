@@ -74,7 +74,7 @@ export function renderMessage(message: any): string {
   let sender = "an agent";
   try {
     const binding = JSON.parse(message?.sender ?? "{}");
-    if (binding.class === "agent") sender = `agent ${String(binding.execution ?? "unknown").slice(0, 24)}`;
+    if (binding.class === "agent") sender = `agent ${String(binding.execution ?? "unknown")}`;
     else if (binding.class === "human_unverified") sender = "a human";
   } catch {
     // keep the generic sender label
@@ -104,6 +104,8 @@ export default function (pi: ExtensionAPI) {
   let selfExecution: string | undefined;
   let poll: ReturnType<typeof setInterval> | undefined;
   let checking = false;
+  let shutDown = false;
+  let turnActive = false;
   let turnGeneration = 0;
   let metadataSeq = Date.now() * 1000;
 
@@ -151,13 +153,18 @@ export default function (pi: ExtensionAPI) {
 
   async function deliverClaimed(messages: any[], activate: boolean) {
     if (!messages.length) return;
-    pi.appendEntry("vqro-reply-routing", {
+    record({
       kind: "messages-claimed",
       ids: messages.map((message) => message.id),
-      at: new Date().toISOString(),
     });
     if (!activate) return; // a starting turn injects them via before_agent_start
-    for (const message of messages) pi.sendUserMessage(renderMessage(message));
+    const content = messages.map(renderMessage).join("\n\n");
+    // One delivery; queue safely instead of submitting while a turn is running.
+    if (turnActive) {
+      pi.sendMessage({ customType: "vqro-message", content, display: true }, { deliverAs: "followUp" });
+    } else {
+      pi.sendUserMessage(content);
+    }
   }
 
   function stopPoll() {
@@ -174,12 +181,27 @@ export default function (pi: ExtensionAPI) {
   async function checkMailbox() {
     // Single-flight and turn-fenced: an in-flight poll must not deliver after a
     // turn has started or after the adapter is torn down.
-    if (!enabled || !selfExecution || checking) return;
+    if (!enabled || !selfExecution || checking || shutDown) return;
     const generation = turnGeneration;
     checking = true;
     try {
+      // Read-only preflight so an empty or policy-off poll records no operation.
+      const listed = await run(["message", "list"], 4000);
+      if (!listed || listed.code !== 0) return;
+      let value: any;
+      try {
+        value = JSON.parse(listed.stdout);
+      } catch {
+        return;
+      }
+      if (value?.activation !== true || !(value.waiting?.length > 0)) return;
+      if (shutDown || generation !== turnGeneration) return;
       const claimed = await claimMessages(true);
-      if (!claimed.length || generation !== turnGeneration) return;
+      if (!claimed.length) return;
+      if (shutDown) {
+        record({ kind: "messages-undelivered", ids: claimed.map((message) => message.id) });
+        return;
+      }
       await deliverClaimed(claimed, true);
     } finally {
       checking = false;
@@ -218,17 +240,20 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("session_start", async () => {
     if (!enabled) return;
+    turnActive = false;
     await resolveSelf();
     startPoll();
   });
 
   pi.on("session_shutdown", async () => {
+    shutDown = true;
     stopPoll();
   });
 
   pi.on("before_agent_start", async (event) => {
     stopPoll();
     turnGeneration += 1;
+    turnActive = true;
     runOrigin = parseProvenanceLabel(event.prompt);
     runText = "";
     explicitSend = false;
@@ -261,6 +286,7 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("agent_settled", async () => {
     // Idle again: resume the bounded mailbox poll while activation is on.
+    turnActive = false;
     startPoll();
     const current = runOrigin;
     const text = runText;
