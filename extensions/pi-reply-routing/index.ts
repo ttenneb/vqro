@@ -45,35 +45,16 @@ export function assistantText(message: any): string {
 }
 
 /**
- * True when the whole bash command is a single direct `vqro agent prompt <from>`
- * call. Any top-level shell syntax (compound `&&`/`||`/`;`/pipe, heredoc newline,
- * redirection, substitution) disqualifies it, because shell success then does not
- * prove this call was accepted. Deliberately conservative: a missed recognition
- * only risks a duplicate reply, never a dropped one.
+ * True when a bash command's output is a successful `vqro agent prompt` response
+ * for `from`. Reading the CLI's own confirmation avoids shell parsing entirely:
+ * a quoted/heredoc/failed or compound command cannot produce agent_prompted for
+ * this target, so no required reply is dropped.
  */
-export function targetsAgentPrompt(command: string, from: string): boolean {
-  if (hasTopLevelShellSyntax(command)) return false;
-  const match =
-    /^\s*(?:env\s+)?(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*(?:[^\s;&|()]*\/)?vqro\s+agent\s+prompt\s+['"]?([^\s'"]+)['"]?/.exec(
-      command,
-    );
-  return match?.[1] === from;
-}
-
-function hasTopLevelShellSyntax(command: string): boolean {
-  let quote: string | null = null;
-  for (const ch of command) {
-    if (quote) {
-      if (ch === quote) quote = null;
-      continue;
-    }
-    if (ch === '"' || ch === "'") {
-      quote = ch;
-      continue;
-    }
-    if (";&|\n`()<>".includes(ch)) return true;
-  }
-  return false;
+export function promptConfirmsOrigin(output: string, from: string): boolean {
+  if (!/"type"\s*:\s*"agent_prompted"/.test(output)) return false;
+  const name = /"name"\s*:\s*"([^"]*)"/.exec(output)?.[1];
+  const pane = /"pane_id"\s*:\s*"([^"]*)"/.exec(output)?.[1];
+  return name === from || pane === from;
 }
 
 export default function (pi: ExtensionAPI) {
@@ -94,7 +75,6 @@ export default function (pi: ExtensionAPI) {
   let runOrigin: Origin | null = null;
   let runText = "";
   let explicitSend = false;
-  const pendingExplicit = new Set<string>();
   let self: string | undefined;
   let metadataSeq = Date.now() * 1000;
 
@@ -162,7 +142,6 @@ export default function (pi: ExtensionAPI) {
     runOrigin = parseProvenanceLabel(event.prompt);
     runText = "";
     explicitSend = false;
-    pendingExplicit.clear();
   });
 
   pi.on("turn_end", async (event) => {
@@ -171,16 +150,12 @@ export default function (pi: ExtensionAPI) {
     runText = assistantText(event.message).trim();
   });
 
-  pi.on("tool_call", async (event) => {
-    if (event.toolName !== "bash" || !runOrigin) return;
-    const command = typeof event.input?.command === "string" ? event.input.command : "";
-    if (targetsAgentPrompt(command, runOrigin.from)) pendingExplicit.add(event.toolCallId);
-  });
-
   pi.on("tool_result", async (event) => {
-    if (event.toolName !== "bash" || !pendingExplicit.delete(event.toolCallId)) return;
-    // Only a bash command that actually succeeded counts as an explicit send.
-    if (!event.isError) explicitSend = true;
+    // A2: only the CLI's own success response for the origin counts as sent.
+    if (event.toolName !== "bash" || !runOrigin || explicitSend) return;
+    if (promptConfirmsOrigin(assistantText({ content: event.content }), runOrigin.from)) {
+      explicitSend = true;
+    }
   });
 
   pi.on("agent_settled", async () => {

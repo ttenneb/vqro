@@ -3,7 +3,7 @@ import extension, {
   assistantText,
   boundedReplyBytes,
   parseProvenanceLabel,
-  targetsAgentPrompt,
+  promptConfirmsOrigin,
   MAX_REPLY_BYTES,
 } from "./index";
 
@@ -88,19 +88,15 @@ test("provenance labels distinguish agent requests, replies, and human input", (
   expect(parseProvenanceLabel("[agentalpha] nope")).toBeNull();
 });
 
-test("A2 recognises only a direct vqro agent prompt call to the exact target", () => {
-  expect(targetsAgentPrompt('vqro agent prompt alpha "done"', "alpha")).toBe(true);
-  expect(targetsAgentPrompt('./vqro agent prompt alpha "done"', "alpha")).toBe(true);
-  expect(targetsAgentPrompt('env A=1 vqro agent prompt alpha "done"', "alpha")).toBe(true);
-  expect(targetsAgentPrompt('vqro agent prompt alpha "see; vqro agent prompt beta"', "alpha")).toBe(true);
-  expect(targetsAgentPrompt('vqro agent prompt gamma "alpha was mentioned"', "alpha")).toBe(false);
-  expect(targetsAgentPrompt('vqro agent prompt betamax', "beta")).toBe(false);
-  expect(targetsAgentPrompt('echo vqro agent prompt alpha', "alpha")).toBe(false);
-  expect(targetsAgentPrompt('echo "vqro agent prompt alpha"', "alpha")).toBe(false);
-  expect(targetsAgentPrompt('cd /x && vqro agent prompt alpha', "alpha")).toBe(false);
-  expect(targetsAgentPrompt('vqro agent prompt alpha done || true', "alpha")).toBe(false);
-  expect(targetsAgentPrompt('cat <<EOF\nvqro agent prompt alpha\nEOF', "alpha")).toBe(false);
-  expect(targetsAgentPrompt('printf \'x; vqro agent prompt alpha\'', "alpha")).toBe(false);
+test("A2 trusts only the CLI's own successful prompt response for the origin", () => {
+  const success = JSON.stringify({ result: { type: "agent_prompted", agent: { name: "alpha", pane_id: "w1:p2" } } });
+  expect(promptConfirmsOrigin(success, "alpha")).toBe(true);
+  expect(promptConfirmsOrigin(success, "w1:p2")).toBe(true);
+  expect(promptConfirmsOrigin(success, "gamma")).toBe(false);
+  const error = JSON.stringify({ error: { code: "agent_not_ready", message: "alpha" } });
+  expect(promptConfirmsOrigin(error, "alpha")).toBe(false);
+  expect(promptConfirmsOrigin('echo "vqro agent prompt alpha"', "alpha")).toBe(false);
+  expect(promptConfirmsOrigin("", "alpha")).toBe(false);
 });
 
 test("reply bytes are capped without splitting a character", () => {
@@ -185,30 +181,27 @@ test("human and unlabelled input are never routed", async () => {
 test("a successful explicit message to the origin suppresses the automatic reply", async () => {
   const h = harness();
   await h.emit("before_agent_start", { prompt: "[agent alpha · reply expected] summarise X" });
-  await h.emit("tool_call", { toolName: "bash", toolCallId: "t1", input: { command: 'vqro agent prompt alpha "done"' } });
-  await h.emit("tool_result", { toolName: "bash", toolCallId: "t1", isError: false });
+  const confirmed = JSON.stringify({ result: { type: "agent_prompted", agent: { name: "alpha" } } });
+  await h.emit("tool_result", { toolName: "bash", toolCallId: "t1", content: [{ type: "text", text: confirmed }], isError: false });
   await h.emit("turn_end", turnText("also this"));
   await h.emit("agent_settled", {});
   expect(prompts(h)).toHaveLength(0);
   expect(h.entries[0]?.data).toMatchObject({ kind: "explicit", from: "alpha" });
 });
 
-test("A2 does not suppress on a failed send or a mentioned name", async () => {
-  const failed = harness();
-  await failed.emit("before_agent_start", { prompt: "[agent alpha · reply expected] x" });
-  await failed.emit("tool_call", { toolName: "bash", toolCallId: "t1", input: { command: 'vqro agent prompt alpha "done"' } });
-  await failed.emit("tool_result", { toolName: "bash", toolCallId: "t1", isError: true });
-  await failed.emit("turn_end", turnText("answer"));
-  await failed.emit("agent_settled", {});
-  expect(prompts(failed)).toHaveLength(1);
-
-  const mentioned = harness();
-  await mentioned.emit("before_agent_start", { prompt: "[agent alpha · reply expected] x" });
-  await mentioned.emit("tool_call", { toolName: "bash", toolCallId: "t1", input: { command: 'vqro agent prompt gamma "alpha was mentioned"' } });
-  await mentioned.emit("tool_result", { toolName: "bash", toolCallId: "t1", isError: false });
-  await mentioned.emit("turn_end", turnText("answer"));
-  await mentioned.emit("agent_settled", {});
-  expect(prompts(mentioned)).toHaveLength(1);
+test("A2 does not suppress on a failed send or a mention", async () => {
+  for (const output of [
+    JSON.stringify({ error: { code: "agent_not_ready", message: "alpha" } }),
+    JSON.stringify({ result: { type: "agent_prompted", agent: { name: "gamma" } } }),
+    'echo "vqro agent prompt alpha"',
+  ]) {
+    const h = harness();
+    await h.emit("before_agent_start", { prompt: "[agent alpha · reply expected] x" });
+    await h.emit("tool_result", { toolName: "bash", toolCallId: "t1", content: [{ type: "text", text: output }], isError: false });
+    await h.emit("turn_end", turnText("answer"));
+    await h.emit("agent_settled", {});
+    expect(prompts(h)).toHaveLength(1);
+  }
 });
 
 test("unknown or self identity fails closed", async () => {
