@@ -49,6 +49,37 @@ class ViewTests(unittest.TestCase):
         self.assertEqual({"working"}, view.categories(task(), set(), {"term_a": agent(status="working")}, {}, 100))
         self.assertEqual({"blocked", "idle"}, view.categories(task(state="blocked"), set(), {"term_a": agent()}, {}, 100))
 
+    def test_legacy_debtor_shape_keeps_human_and_exact_agent_meaning(self):
+        role = {"role": "human_unverified"}
+        self.assertEqual([role], view.debtors(role))
+        self.assertEqual("human (unverified)", view.label(role, {}))
+        self.assertIn("waiting on me", view.categories(task(state="reported", owed_to=role, owed_action="accept"), set(), {}, {}, 100))
+        self.assertEqual([B], view.debtors(B))
+        self.assertEqual("b", view.label(B, {"term_b": agent(B)}))
+        self.assertNotIn("waiting on me", view.categories(task(owed_to=B), set(), {}, {}, 100))
+        self.assertEqual([], view.debtors(None))
+
+    def test_acceptor_set_shape_uses_only_provider_bindings_not_inferred_humans(self):
+        agents = {"term_a": agent(), "term_b": agent(B)}
+        owed = {"role": "acceptors", "bindings": [A, H]}
+        self.assertEqual([A, H], view.debtors(owed))
+        self.assertEqual("acceptors: a, human (unverified)", view.label(owed, agents))
+        current = task(owner=B, state="reported", owed_to=owed, owed_action="accept")
+        before = copy.deepcopy(current)
+        self.assertIn("waiting on me", view.categories(current, set(), agents, {}, 100))
+        self.assertEqual(before, current)
+        current.update(owed_to={"role": "acceptors", "bindings": [A]}, creator=H, delegator=H)
+        self.assertNotIn("waiting on me", view.categories(current, set(), agents, {}, 100))
+        current["owed_to"]["bindings"] = []
+        self.assertNotIn("waiting on me", view.categories(current, set(), agents, {}, 100))
+        self.assertEqual("acceptors: none", view.label(current["owed_to"], agents))
+        current["owed_action"] = "acceptor_missing"
+        self.assertEqual(B, view.recipient(current, {}))
+        current.update(kind="decision", owed_action="answer")
+        self.assertIn("waiting on me", view.categories(current, set(), agents, {}, 100))
+        current["state"] = "done"
+        self.assertEqual({"done/accepted"}, view.categories(current, set(), agents, {}, 100))
+
     def test_recipient_composition_preserves_delegator_and_decision_creator(self):
         tasks = {"root": task()}
         self.assertEqual(A, view.recipient(task("child", B, parent="root"), tasks))

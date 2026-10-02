@@ -26,8 +26,12 @@ human installation still requires appropriate approval.
 - Parent/child tree with owner links, durable state, whose move, owed action,
   recipient and UTC debt time. `owed_to` remains the debtor. Report recipient is
   the delegator, otherwise parent owner; acceptance recipient is reporting owner;
-  decision-answer recipient is decision creator. Human-only accept/answer policy
-  is unchanged and cooperative/unverified.
+  decision-answer recipient is decision creator. The pane reads both the legacy
+  debtor shape and graph `{role:acceptors, bindings}` shape. It displays only the
+  provider's acceptor set, never infers one from creator/delegator/parent. Waiting
+  on me means a human debtor/in that set or an unanswered decision. The current
+  core's human-only acceptance and graph's delegator/parent acceptance stay
+  provider-owned; human classification remains cooperative/unverified.
 - Seven toggles: waiting on me, stalled, blocked, working, idle, done/accepted,
   old. Default attention includes human debt, stalled, durable task blockers or
   verified current owner prompts, and positively unavailable owners. Returning

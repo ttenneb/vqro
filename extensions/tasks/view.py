@@ -78,9 +78,20 @@ def availability(owner, agents):
     return "current" if exact(owner, agent) else "unavailable here"
 
 
+def debtors(owed):
+    if not owed:
+        return []
+    if owed.get("role") == "acceptors":
+        return owed.get("bindings", [])
+    return [owed]
+
+
 def label(owner, agents):
     if not owner:
         return "—"
+    if owner.get("role") == "acceptors":
+        names = ", ".join(label(binding, agents) for binding in debtors(owner))
+        return "acceptors: " + (names or "none")
     if owner.get("role") == "human_unverified" or owner.get("class") == "human_unverified":
         return "human (unverified)"
     agent = (agents or {}).get(owner.get("terminal_id"))
@@ -92,7 +103,7 @@ def label(owner, agents):
 def recipient(task, tasks):
     if task.get("owed_action") == "answer":
         return task.get("creator")
-    if task.get("owed_action") == "accept":
+    if task.get("owed_action") in ("accept", "acceptor_missing"):
         return task.get("owner")
     parent = tasks.get(task.get("parent"), {})
     return task.get("delegator") or parent.get("owner") or task.get("creator")
@@ -112,8 +123,8 @@ def categories(task, pending_parents, agents, idle_since, now):
     result = set()
     if task["state"] in FINAL:
         return {"done/accepted"}
-    owed = task.get("owed_to") or {}
-    if owed.get("role") == "human_unverified" or owed.get("class") == "human_unverified":
+    owed = debtors(task.get("owed_to"))
+    if any(binding.get("role") == "human_unverified" or binding.get("class") == "human_unverified" for binding in owed) or (task.get("kind") == "decision" and task.get("owed_action") == "answer"):
         result.add("waiting on me")
     if task["state"] == "blocked":
         result.add("blocked")
