@@ -5,6 +5,7 @@ from pathlib import Path
 import sqlite3
 import tempfile
 import unittest
+from unittest import mock
 
 import provider
 
@@ -49,6 +50,39 @@ class MigrationTests(unittest.TestCase):
                 self.assertEqual(1, store.db.execute("SELECT COUNT(*) FROM transitions").fetchone()[0])
             finally:
                 store.db.close()
+
+    def test_legacy_first_start_uses_sequence_not_backwards_wall_clock(self):
+        with tempfile.TemporaryDirectory() as root:
+            db = sqlite3.connect(Path(root) / "tasks.sqlite")
+            db.executescript("""
+                CREATE TABLE tasks (id TEXT PRIMARY KEY,parent TEXT,title TEXT,kind TEXT,owner TEXT,state TEXT,
+                  revision INTEGER,created_at TEXT,updated_at TEXT,creator TEXT,delegator TEXT,detail TEXT);
+                CREATE TABLE transitions (seq INTEGER PRIMARY KEY,task_id TEXT,state TEXT,at TEXT,caller TEXT);
+                CREATE TABLE operations (caller TEXT,operation_id TEXT,payload TEXT,outcome TEXT,at TEXT,PRIMARY KEY(caller,operation_id));
+                PRAGMA user_version=1;
+            """)
+            caller = {"class": "human_unverified", "terminal_id": "legacy-human", "uid": 1000}
+            encoded = provider.canonical(caller)
+            first, resume = "2026-01-01T10:00:00+00:00", "2026-01-01T09:00:00+00:00"
+            db.execute("INSERT INTO tasks VALUES ('timing',NULL,'Timing','task',?,'blocked',4,?,?,?,NULL,'pause')", (encoded, first, resume, encoded))
+            for seq, state, at in ((1, "in_progress", first), (2, "blocked", first), (3, "in_progress", resume), (4, "blocked", resume)):
+                db.execute("INSERT INTO transitions VALUES (?,'timing',?,?,?)", (seq, state, at, encoded))
+            historical = json.dumps({"task": {"id": "timing", "state": "blocked", "revision": 4}}, indent=2)
+            db.execute("INSERT INTO operations VALUES (?,'old','old-hash',?,'old-at')", (encoded, historical))
+            db.commit()
+            db.close()
+            store = provider.Store(root)
+            self.assertEqual(first, store.task("timing")["started_at"])
+            self.assertEqual(("old-hash", historical), tuple(store.db.execute("SELECT payload,outcome FROM operations WHERE operation_id='old'").fetchone()))
+            with mock.patch.object(provider, "timestamp", return_value="2026-01-01T08:00:00+00:00"):
+                result = store.invoke({"caller": caller, "payload": {"action": "start", "id": "timing", "revision": 4, "operation_id": "resume"}})
+            self.assertEqual(first, result["task"]["started_at"])
+            store.db.close()
+            reopened = provider.Store(root)
+            self.assertEqual(first, reopened.task("timing")["started_at"])
+            self.assertEqual(2, reopened.db.execute("PRAGMA user_version").fetchone()[0])
+            self.assertEqual(("old-hash", historical), tuple(reopened.db.execute("SELECT payload,outcome FROM operations WHERE operation_id='old'").fetchone()))
+            reopened.db.close()
 
     def test_failed_additive_migration_rolls_back_schema_data_and_version(self):
         class FailSQL:

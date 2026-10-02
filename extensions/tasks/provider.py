@@ -112,7 +112,7 @@ class Store:
                 task_id TEXT NOT NULL REFERENCES tasks(id), prerequisite TEXT NOT NULL REFERENCES tasks(id),
                 PRIMARY KEY(task_id,prerequisite), CHECK(task_id<>prerequisite))""")
             self.db.execute("CREATE INDEX IF NOT EXISTS dependency_prerequisite ON dependencies(prerequisite)")
-            self.db.execute("UPDATE tasks SET started_at=(SELECT MIN(at) FROM transitions WHERE task_id=tasks.id AND state='in_progress') WHERE started_at IS NULL")
+            self.db.execute("UPDATE tasks SET started_at=(SELECT at FROM transitions WHERE task_id=tasks.id AND state='in_progress' ORDER BY seq LIMIT 1) WHERE started_at IS NULL")
             self.db.execute("PRAGMA user_version=2")
             self.commit()
         except OutcomeUnknown:

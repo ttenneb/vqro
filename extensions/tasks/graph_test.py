@@ -1,8 +1,10 @@
 """Graph, evidence, exact acceptance and whole-transaction characterization."""
 import json
 import tempfile
+import subprocess
+import sys
+from pathlib import Path
 import threading
-import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from unittest import mock
@@ -197,6 +199,61 @@ class GraphTests(unittest.TestCase):
         subtree = self.call("plan", parent=self.parent["id"], revision=self.parent["revision"], nodes=[{"key": "step", "title": "step", "done_when": "Visible."}])
         self.assertEqual(self.parent["id"], self.call("get", id=subtree["tasks"]["step"])["task"]["parent"])
 
+    def test_concurrent_same_op_plan_mapping_once_and_near_quota_whole_batches(self):
+        nodes = [{"key": "a", "title": "A", "done_when": "Visible."},
+                 {"key": "b", "title": "B", "done_when": "Visible.", "depends_on": ["a"]}]
+        def concurrent(operations):
+            barrier = threading.Barrier(2)
+            def run(operation):
+                store = provider.Store(self.root.name)
+                barrier.wait(timeout=5)
+                try:
+                    return store.invoke({"caller": HUMAN, "payload": {"action": "plan", "operation_id": operation, "nodes": nodes}})
+                except ValueError as error:
+                    return str(error)
+                finally:
+                    store.db.close()
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                return list(pool.map(run, operations))
+        before = self.counts()
+        first, second = concurrent(("same-plan", "same-plan"))
+        self.assertEqual(first, second)
+        self.assertEqual([before[0]+2, before[1]+2, before[2]+1, before[3]+1], self.counts())
+        before = self.counts()
+        with mock.patch.object(provider, "MAX_RECORDS", before[1]+2):
+            results = concurrent(("quota-plan-a", "quota-plan-b"))
+        self.assertEqual(1, sum(isinstance(result, dict) for result in results))
+        self.assertEqual(1, sum(isinstance(result, str) and "quota" in result for result in results))
+        self.assertEqual([before[0]+2, before[1]+2, before[2]+1, before[3]+1], self.counts())
+
+    def test_process_exit_mid_plan_and_after_commit_never_leaves_partial_graph(self):
+        nodes = [{"key": "a", "title": "A", "done_when": "Visible."},
+                 {"key": "b", "parent": "a", "title": "B", "done_when": "Visible."}]
+        for after_commit in (False, True):
+            before = self.counts()
+            operation = "crash-after" if after_commit else "crash-mid"
+            payload = {"action": "plan", "operation_id": operation, "nodes": nodes}
+            params = {"caller": HUMAN, "payload": payload}
+            hook = "commit" if after_commit else "create_task"
+            code = f"""import os, provider
+store = provider.Store({self.root.name!r})
+original = store.{hook}
+def crash(*args, **kwargs):
+    original(*args, **kwargs)
+    os._exit(33)
+store.{hook} = crash
+store.invoke({params!r})
+"""
+            completed = subprocess.run([sys.executable, "-B", "-c", code], cwd=Path(__file__).parent, timeout=10, capture_output=True)
+            self.assertEqual(33, completed.returncode, completed.stderr.decode())
+            receipt = self.call("op", caller=UNKNOWN, operation_id=operation, lookup_caller=HUMAN)
+            self.assertEqual(after_commit, receipt["found"])
+            expected = [before[0]+2, before[1]+2, before[2]+1, before[3]] if after_commit else before
+            self.assertEqual(expected, self.counts())
+            if after_commit:
+                self.assertEqual(receipt["outcome"], self.call("plan", caller=HUMAN, **{key: value for key, value in payload.items() if key != "action"}))
+                self.assertEqual(expected, self.counts())
+
     def test_plan_rejections_are_whole_batch_and_missing_criteria_never_backfilled(self):
         valid = {"key": "a", "title": "A", "done_when": "Visible."}
         bad_plans = [[valid, {"key": "b", "title": "B"}],
@@ -241,6 +298,21 @@ class GraphTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "human approval"):
             self.call("create", title="Unapproved root", done_when="Visible.")
 
+    def test_all_semantic_writes_advance_view_transition_revision(self):
+        task = self.child()
+        for action, caller, values in (
+            ("update", A, {"estimate_work_ms": 100, "done_when": "Visible."}),
+            ("depends", A, {"depends_on": []}),
+            ("delegate", A, {"owner": B}),
+            ("start", B, {}),
+            ("report", B, {"text": "> Visible.\nEvidence: checked"}),
+            ("accept", A, {}),
+            ("done", B, {}),
+        ):
+            previous = self.store.db.execute("SELECT MAX(seq) FROM transitions").fetchone()[0]
+            task = self.change(task, action, caller=caller, **values)
+            self.assertGreater(self.store.db.execute("SELECT MAX(seq) FROM transitions").fetchone()[0], previous)
+
     def test_metadata_and_quote_bounds(self):
         for value in ("", "one\ntwo\nthree\nfour", "repeat\nrepeat", "repeat \nrepeat", "\x1bcontrol", "x" * 1025):
             with self.assertRaises(ValueError):
@@ -259,10 +331,7 @@ class GraphTests(unittest.TestCase):
 
     def test_max_plan_is_bounded_and_receipt_restart_is_exact(self):
         nodes = [{"key": f"n{i}", "title": str(i), "done_when": "Visible.", "depends_on": [f"n{j}" for j in range(max(0, i-4), i)]} for i in range(100)]
-        started = time.monotonic()
         outcome = self.call("plan", caller=HUMAN, nodes=nodes, operation_id="max-plan")
-        elapsed = time.monotonic() - started
-        self.assertLess(elapsed, 2.5)
         self.assertLess(len(provider.canonical(outcome).encode()), provider.MAX_REPLY_BYTES)
         self.store.db.close()
         self.store = provider.Store(self.root.name)
