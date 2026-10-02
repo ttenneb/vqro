@@ -93,6 +93,10 @@ class DecisionTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "policy answer"):
             self.call("decision_revert", caller=H, id=task["id"], revision=3)
         self.assertEqual(["auto", "revert"], [event["kind"] for event in self.call("decision_log")["events"]])
+        scheduled = self.call("decision_timer", id=task["id"], revision=3, auto_at=LATER)["task"]
+        self.assertEqual(result, self.store.invoke({"caller": H, "payload": payload}))
+        self.assertEqual(scheduled["decision"], self.store.task(task["id"])["decision"])
+        self.assertEqual(1, self.auto())
 
     def test_reschedule_exact_filer_and_every_time_floor_after_revert(self):
         task = self.create()

@@ -104,6 +104,8 @@ class Queue:
             raise ValueError("answer note must be at most 4096 bytes")
         result = {"by": by, "option": key, "note": note, "applied_at": at, "filer": task["creator"], "default": terms["default"], "deadline": terms["auto_at"]}
         if by == "policy":
+            result["operation_id"] = "decision-auto:" + task["id"] + ":" + str(task["revision"])
+            result["policy_caller"] = {"class": "decision_policy", "decision_id": task["id"], "revision": task["revision"]}
             result["late_ms"] = max(0, int((dt.datetime.fromisoformat(at) - dt.datetime.fromisoformat(terms["auto_at"])).total_seconds() * 1000))
         terms = {k: v for k, v in terms.items() if k not in ("auto_at", "timer_current")}
         terms["resolution"] = result
