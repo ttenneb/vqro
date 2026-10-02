@@ -1,9 +1,11 @@
 # Read-only Tasks pane
 
 Status: **experimental Linux trusted executable consumer**. The existing plugin
-pane, real TUI mouse and exact-owner navigation path is implemented; the full
-product audit is pending. This is not a frozen presentation ABI or sandboxed
-package admission claim.
+pane, real TUI mouse, exact-owner navigation and legacy-provider failure path
+have been independently audited within this Linux/trusted/cooperative-human
+scope. Dual-shape acceptor display has separate behavioral review; combined
+graph-provider runtime integration remains unvalidated. This is not a frozen
+presentation ABI or sandboxed package admission claim.
 
 The Tasks extension owns tree meaning, filters and terminal presentation. It
 reads `vqro.tasks.core` through [generic action invocation](extension-action-invoke-v1.md),
