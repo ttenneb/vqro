@@ -91,7 +91,11 @@ test("provenance labels distinguish agent requests, replies, and human input", (
 test("A2 recognises the exact vqro agent prompt target, not a mentioned name", () => {
   expect(targetsAgentPrompt('vqro agent prompt alpha "done"', "alpha")).toBe(true);
   expect(targetsAgentPrompt('./vqro agent prompt alpha "done"', "alpha")).toBe(true);
+  expect(targetsAgentPrompt('cd /x && vqro agent prompt alpha "done"', "alpha")).toBe(true);
+  expect(targetsAgentPrompt('env A=1 vqro agent prompt alpha "done"', "alpha")).toBe(true);
+  expect(targetsAgentPrompt('echo $(vqro agent prompt alpha "done")', "alpha")).toBe(true);
   expect(targetsAgentPrompt('vqro agent prompt gamma "alpha was mentioned"', "alpha")).toBe(false);
+  expect(targetsAgentPrompt('echo vqro agent prompt alpha', "alpha")).toBe(false);
   expect(targetsAgentPrompt('echo "vqro agent prompt alpha"', "alpha")).toBe(false);
   expect(targetsAgentPrompt("vqro agent prompt betamax", "beta")).toBe(false);
 });
@@ -143,6 +147,16 @@ test("no run text is not reused across runs", async () => {
   await h.emit("before_agent_start", { prompt: "[agent alpha · reply expected] two" });
   await h.emit("agent_settled", {});
   expect(h.entries.map((entry) => entry.data.kind)).toEqual(["replied", "no-reply"]);
+});
+
+test("an empty final turn does not reuse an intermediate turn's text", async () => {
+  const h = harness();
+  await h.emit("before_agent_start", { prompt: "[agent alpha · reply expected] x" });
+  await h.emit("turn_end", turnText("intermediate"));
+  await h.emit("turn_end", { message: { role: "assistant", content: [{ type: "toolCall" }] } });
+  await h.emit("agent_settled", {});
+  expect(prompts(h)).toHaveLength(0);
+  expect(h.entries[0]?.data).toMatchObject({ kind: "no-reply", from: "alpha" });
 });
 
 test("a queued human follow-up cannot claim the run", async () => {

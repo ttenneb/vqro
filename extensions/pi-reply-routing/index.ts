@@ -45,13 +45,15 @@ export function assistantText(message: any): string {
 }
 
 /**
- * True when the command invokes `vqro agent prompt <from>` with that exact
- * target. Deliberately narrow: a name merely mentioned in the body is not a send.
+ * True when the command runs `vqro agent prompt <from>` as its own shell command
+ * with that exact target. The executable must start a command segment, so a name
+ * merely mentioned in another command's arguments does not count.
  */
 export function targetsAgentPrompt(command: string, from: string): boolean {
-  const match = /(?:^|[\s;&|(])(?:[^\s;&|()]*\/)?vqro\s+agent\s+prompt\s+['"]?([^\s'"]+)['"]?/.exec(
-    command,
-  );
+  const match =
+    /(?:^|[;&|()]|\n)\s*(?:env\s+)?(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*(?:[^\s;&|()]*\/)?vqro\s+agent\s+prompt\s+['"]?([^\s'"]+)['"]?/.exec(
+      command,
+    );
   return match?.[1] === from;
 }
 
@@ -145,8 +147,9 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("turn_end", async (event) => {
-    const text = assistantText(event.message).trim();
-    if (text) runText = text;
+    // The run's final text is the last turn's text; an empty final turn means the
+    // agent produced no reply, never a reuse of an earlier turn's text.
+    runText = assistantText(event.message).trim();
   });
 
   pi.on("tool_call", async (event) => {

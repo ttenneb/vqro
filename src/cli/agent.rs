@@ -870,9 +870,10 @@ fn agent_sender_label(reply: bool) -> Option<String> {
         return None;
     }
     let pane = std::env::var(crate::product::PANE_ID_ENV).ok()?;
-    // Optional, silent, bounded observation: a failure just means no label, and
-    // must not print an extra error before the real prompt.
-    let response = resolve_agent_target_unchecked(pane.as_str(), "cli:agent:prompt:sender").ok()?;
+    // Optional, silent, bounded observation: a failure or timeout just means no
+    // label, and must not print an extra error or block the real prompt.
+    let request = agent_get_request(pane.as_str(), "cli:agent:prompt:sender");
+    let response = super::send_request_optional(&request, std::time::Duration::from_millis(1500))?;
     let agent = response.get("result")?.get("agent")?;
     let sender = agent
         .get("name")
@@ -883,14 +884,15 @@ fn agent_sender_label(reply: bool) -> Option<String> {
     Some(format!("[agent {sender} \u{b7} {qualifier}] "))
 }
 
-/// Prefix a prompt with a provenance label. A deliberate leading agent label is
-/// preserved, but an explicit `--reply` is authoritative: it always prepends the
-/// reply envelope so a body label cannot re-arm a reply-expecting message.
+/// Prefix a prompt with a provenance label. A deliberate leading agent or host
+/// label is preserved, but an explicit `--reply` is authoritative: it always
+/// prepends the reply envelope so a body label cannot re-arm a reply-expecting
+/// message.
 fn labelled_prompt_text(text: &str, label: Option<&str>, reply: bool) -> String {
     let Some(label) = label else {
         return text.to_string();
     };
-    if !reply && text.starts_with("[agent ") {
+    if !reply && (text.starts_with("[agent ") || text.starts_with("[host ")) {
         return text.to_string();
     }
     format!("{label}{text}")
@@ -1024,6 +1026,11 @@ mod tests {
         assert_eq!(
             labelled_prompt_text("[agent beta \u{b7} reply] done", expected, false),
             "[agent beta \u{b7} reply] done"
+        );
+        // A host notice must not acquire a reply-expecting agent label.
+        assert_eq!(
+            labelled_prompt_text("[host notice] restarted", expected, false),
+            "[host notice] restarted"
         );
     }
 
