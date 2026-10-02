@@ -571,6 +571,121 @@ mod tests {
         assert!(payload.get("caller").is_none());
     }
     #[test]
+    fn shipped_skill_task_examples_parse_with_current_cli() {
+        let skill = include_str!("../../skills/vqro/SKILL.md");
+        let mut nonce = [0u8; 8];
+        crate::platform::fill_secure_random(&mut nonce).unwrap();
+        let root = std::env::temp_dir().join(format!(
+            "vqro-skill-test-{:016x}",
+            u64::from_ne_bytes(nonce)
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let plan_file = root.join("plan.json");
+        std::fs::write(&plan_file, json!({"nodes": [{"key": "proof", "title": "proof", "done_when": "Proof file contains PASS."}]}).to_string()).unwrap();
+        // Only the documented single-line literal/variable quoting subset is accepted.
+        // No shell execution, expansion or new production parser is involved.
+        let words = regex::Regex::new(r#"'([^']*)'|"([^"]*)"|([^\s'"]+)"#).unwrap();
+        let binding =
+            r#"{"class":"agent","terminal_id":"term_fixture","agent":"pi","execution":"boot:1:2"}"#;
+        let mut actions = std::collections::BTreeSet::new();
+        let mut attached_plan = false;
+        let mut root_plan = false;
+        let mut own_evidence = false;
+        let mut original_retry = false;
+        for line in skill
+            .lines()
+            .filter_map(|line| line.strip_prefix("vqro task "))
+        {
+            let mut previous = 0;
+            let mut args = Vec::new();
+            for capture in words.captures_iter(line) {
+                let span = capture.get(0).unwrap();
+                assert!(
+                    line[previous..span.start()].trim().is_empty(),
+                    "unsupported example quoting: {line}"
+                );
+                previous = span.end();
+                let word = (1..=3)
+                    .find_map(|index| capture.get(index))
+                    .unwrap()
+                    .as_str();
+                args.push(match word {
+                    "$PARENT_ID" => "task_parent".into(),
+                    "$TASK_ID" => "task_child".into(),
+                    "$REV" => "3".into(),
+                    "$PARENT_REV" => "2".into(),
+                    "$OWNER" | "$CALLER" => binding.into(),
+                    "$CRITERIA" => "Proof file contains PASS.".into(),
+                    "$EVIDENCE" => {
+                        "> Proof file contains PASS.\nEvidence: result.txt checked".into()
+                    }
+                    "$CURSOR" => "task_cursor".into(),
+                    "$OP_ID" => "original-op".into(),
+                    "$PLAN_FILE" => plan_file.to_str().unwrap().into(),
+                    _ => word.replace("PREREQUISITE_ID", "task_proof"),
+                });
+            }
+            assert!(
+                line[previous..].trim().is_empty(),
+                "unsupported example quoting: {line}"
+            );
+            let (payload, _) = parse_payload(&args)
+                .unwrap_or_else(|error| panic!("skill example {line:?}: {error}"));
+            let action = payload["action"].as_str().unwrap();
+            actions.insert(action.to_string());
+            if matches!(action, "create" | "decision") {
+                assert!(
+                    payload.get("done_when").is_some(),
+                    "missing criteria: {line}"
+                );
+            }
+            if action == "plan" {
+                attached_plan |= payload.get("parent").is_some();
+                root_plan |= payload.get("parent").is_none();
+            }
+            own_evidence |= action == "done" && payload.get("text").is_some();
+            original_retry |= action == "report"
+                && payload.get("operation_id").is_some()
+                && payload.get("expected_caller").is_some();
+        }
+        for action in [
+            "whoami", "get", "create", "decision", "plan", "ready", "list", "start", "depends",
+            "update", "block", "delegate", "report", "accept", "done", "answer", "op",
+        ] {
+            assert!(
+                actions.contains(action),
+                "missing shipped example: {action}"
+            );
+        }
+        assert!(attached_plan && root_plan && own_evidence && original_retry);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn shipped_skill_keeps_task_authority_and_delivery_boundaries_explicit() {
+        let skill = include_str!("../../skills/vqro/SKILL.md");
+        for rule in [
+            "Pi todo stays **private scratch**",
+            "Agents never create/import ordinary roots",
+            "**not a reservation**",
+            "Start only your own task",
+            "`next_cursor`",
+            "prerequisite ownership alone grants no edit right",
+            "**Delegate/report record, do not deliver.**",
+            "an accept/done receipt can authoritatively record its historical committed outcome",
+            "by its assigned owner or cooperative human",
+            "**agents never self-accept**",
+            "task ID only",
+            "even a root decision is allowed",
+            "nothing automatically routes/delivers it",
+            "Never manufacture human classification",
+            "**not proof a queued invocation cannot still commit**",
+        ] {
+            assert!(skill.contains(rule), "missing skill boundary: {rule}");
+        }
+    }
+
+    #[test]
     fn graph_metadata_and_ready_commands_remain_extension_payloads() {
         let (payload, mutation) = parse_payload(
             &[

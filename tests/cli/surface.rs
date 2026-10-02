@@ -362,6 +362,24 @@ fn help_commands_exit_successfully() {
 }
 
 #[test]
+fn skill_command_prints_exact_shipped_instructions_without_a_server() {
+    let output = Command::new(env!("CARGO_BIN_EXE_vqro"))
+        .arg("--skill")
+        .env_remove("VQRO_SOCKET_PATH")
+        .env_remove("VQRO_CLIENT_SOCKET_PATH")
+        .env_remove("VQRO_ENV")
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert!(
+        output.stderr.is_empty(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(output.stdout, include_bytes!("../../skills/vqro/SKILL.md"));
+}
+
+#[test]
 fn root_and_command_group_help_point_agents_to_plain_text_docs() {
     for args in [&["--help"][..], &["agent", "--help"][..]] {
         let output = Command::new(env!("CARGO_BIN_EXE_vqro"))
