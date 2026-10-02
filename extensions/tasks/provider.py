@@ -456,7 +456,7 @@ class Store:
         action = payload.get("action")
         fields = {
             "list": {"action", "after"}, "ready": {"action", "after"}, "get": {"action", "id"},
-            "whoami": {"action"},
+            "whoami": {"action"}, "status": {"action"},
             "op": {"action", "operation_id", "lookup_caller"},
             "create": {"action", "operation_id", "title", "parent", "kind", "expected_caller", "depends_on"} | graph.META_FIELDS,
             "decision": {"action", "operation_id", "title", "parent", "expected_caller", "depends_on"} | graph.META_FIELDS,
@@ -468,6 +468,8 @@ class Store:
         }
         if action not in fields or set(payload) - fields[action]:
             raise ValueError("unknown action or field (actor flags are not accepted)")
+        if action == "status":
+            return {"revision": self.db.execute("SELECT COALESCE(MAX(seq),0) FROM transitions").fetchone()[0]}
         if action == "whoami":
             return {"caller": binding(caller) if caller.get("class") != "unknown" else {"class": "unknown"}}
         if action in ("list", "ready"):

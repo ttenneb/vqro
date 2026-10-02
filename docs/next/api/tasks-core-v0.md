@@ -49,6 +49,11 @@ have `class: human_unverified`, `terminal_id`, `uid`. Optional session metadata
 is not ownership. Unknown callers can read, not mutate. `--caller` is a scope
 selector/precondition, never an authority flag.
 
+The additional read-only `{"action":"status"}` returns the maximum committed
+transition `revision` for cached consumers; it changes neither tasks nor receipts.
+Graph metadata, dependencies and parent reassignment advance that global sequence.
+See the experimental [read-only task pane](tasks-view-v0.md).
+
 ## Hierarchy, dependencies and readiness
 
 Parent/child means decomposition/accountability. `depends_on` means prerequisites
@@ -242,7 +247,9 @@ no installs, credentials or model requests. Elapsed wall time is refreshed; dura
 restart fields and historical receipts remain exact. `cli_fault_demo.py` uses fixture
 replies for CLI mechanics only, not host/task acceptance.
 
-Not included: task view/critical path/badges/decision queue UI, skill conventions,
-Pi todo integration, secure human authentication, non-Linux acceptance, package-
-fabric tasks, messaging/wake/planner infrastructure or a frozen contract. Provider
-failure removes task authority only; host terminals and generic recovery survive.
+The experimental [task pane/filter consumer](tasks-view-v0.md) is separate from
+this core acceptance evidence. Not included: critical path/badges/decision queue
+UI, skill conventions, Pi todo integration, secure human authentication,
+non-Linux acceptance, package-fabric tasks, messaging/wake/planner infrastructure
+or a frozen contract. Provider failure removes task authority only; host terminals
+and generic recovery survive.

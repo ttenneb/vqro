@@ -3794,6 +3794,10 @@ impl HeadlessServer {
             self.app.state.view.terminal_area =
                 Rect::new(0, 0, self.effective_size.0, self.effective_size.1);
         }
+        let observe_execution = matches!(
+            &msg.request.method,
+            api::schema::Method::AgentList(_) | api::schema::Method::AgentGet(_)
+        );
         let mut response = if matches!(
             &msg.request.method,
             api::schema::Method::ServerReloadConfig(_)
@@ -3859,7 +3863,11 @@ impl HeadlessServer {
                 }
             }
         }
-        let _ = msg.respond_to.send(response);
+        if observe_execution {
+            crate::agent_execution::respond(&self.app, response, msg.respond_to);
+        } else {
+            let _ = msg.respond_to.send(response);
+        }
 
         if let Some(revision_before) = pane_graphics_revision_before {
             changed |= revision_before != self.app.pane_graphics.revision();

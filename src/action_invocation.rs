@@ -115,6 +115,31 @@ fn classify(peer: &InvocationPeer, terminal: TerminalEvidence<'_>) -> Option<Inv
     )
 }
 
+pub(crate) fn observed_execution(
+    peer: &InvocationPeer,
+    terminal_id: String,
+    root_pid: u32,
+    root_birth: Option<u64>,
+    foreground: u32,
+    known_agent: Option<crate::detect::Agent>,
+) -> Option<String> {
+    match classify(
+        peer,
+        TerminalEvidence {
+            terminal_id,
+            root_pid,
+            root_birth,
+            foreground: Some(foreground),
+            known_agent,
+            has_agent_label: true,
+            session: None,
+        },
+    ) {
+        Some(InvocationCaller::Agent { execution, .. }) => Some(execution),
+        _ => None,
+    }
+}
+
 impl crate::app::App {
     pub(crate) fn invocation_caller(&self, peer: &InvocationPeer) -> InvocationCaller {
         for (terminal_id, runtime) in self.terminal_runtimes.iter() {
@@ -167,6 +192,38 @@ mod tests {
             },
         }
     }
+    #[test]
+    fn execution_observation_reuses_original_root_and_foreground_rules() {
+        let peer = peer(vec![
+            process(20, 10, 200, "pi"),
+            process(10, 1, 100, "bash"),
+        ]);
+        assert_eq!(
+            observed_execution(&peer, "term".into(), 10, Some(100), 20, Some(Agent::Pi)),
+            Some("boot:20:200".into())
+        );
+        for (birth, foreground, agent) in [
+            (None, 20, Some(Agent::Pi)),
+            (Some(101), 20, Some(Agent::Pi)),
+            (Some(100), 21, Some(Agent::Pi)),
+            (Some(100), 20, None),
+            (Some(100), 20, Some(Agent::Codex)),
+        ] {
+            assert_eq!(
+                observed_execution(&peer, "term".into(), 10, birth, foreground, agent),
+                None
+            );
+        }
+        let shell = self::peer(vec![
+            process(20, 10, 200, "sh"),
+            process(10, 1, 100, "bash"),
+        ]);
+        assert_eq!(
+            observed_execution(&shell, "term".into(), 10, Some(100), 20, Some(Agent::Pi)),
+            None
+        );
+    }
+
     fn peer(ancestry: Vec<InvocationProcess>) -> InvocationPeer {
         InvocationPeer {
             uid: 1000,

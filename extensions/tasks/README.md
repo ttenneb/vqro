@@ -5,6 +5,7 @@ persistence live here; the host supplies neutral invocation/caller observations.
 Not sandboxed, not secure human authentication, not Pi todo integration.
 
 - [Tasks policy, CLI, receipts and limits](../../docs/next/api/tasks-core-v0.md)
+- [Read-only pane, filters and exact-owner navigation](../../docs/next/api/tasks-view-v0.md)
 - [Public generic invocation and authority boundary](../../docs/next/api/extension-action-invoke-v1.md)
 
 ```sh
@@ -23,6 +24,16 @@ records the source head and hashes of retained native binary/provider snapshots;
 the run never follows a subsequently rebuilt native target or edited provider. It verifies a private configuration canary and birth-checks
 owned processes for cleanup. Do not run it with a real user's HOME/socket/config.
 It never installs tools or changes the human's Pi/session files.
+
+Once explicitly admitted, open the read-only terminal tree with:
+
+```sh
+vqro plugin pane open --plugin vqro.tasks --entrypoint tree --placement tab
+```
+
+Click filters, expansion markers, age controls and owner links. Owner navigation
+requires a fresh exact execution observation; replacement/unknown owners never
+silently inherit a link. `q` exits the terminal UI. No tasks are mutated by it.
 
 Installing/linking this trusted provider on a real installation requires owner
 approval. No install or automatic activation is performed by these tests.
