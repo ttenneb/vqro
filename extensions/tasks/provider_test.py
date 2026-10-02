@@ -121,7 +121,9 @@ class StoreTests(unittest.TestCase):
         self.assertIsNone(root["owed_since"])
 
     def test_decision_is_a_task_kind_with_one_human_answer_path(self):
-        decision = self.invoke({"action": "decision", "operation_id": "decision-1", "title": "Which direction?"})["task"]
+        decision = self.invoke({"action": "decision", "operation_id": "decision-1", "title": "Which direction?",
+                                "options": [{"key": "smaller", "label": "Smaller path"}, {"key": "larger", "label": "Larger path"}],
+                                "default": "smaller", "reversible": True, "waiting_cost": "Work waits."})["task"]
         self.assertEqual("decision", decision["kind"])
         self.assertEqual(HUMAN, decision["creator"])
         self.assertEqual(provider.HUMAN_ROLE, decision["owner"])
@@ -131,9 +133,9 @@ class StoreTests(unittest.TestCase):
                 self.change(decision, "answer", caller=caller, text="agent cannot answer")
         with self.assertRaisesRegex(ValueError, "only by a human answer"):
             self.change(decision, "done", caller=HUMAN)
-        answered = self.change(decision, "answer", caller=HUMAN, text="Use the smaller path")
+        answered = self.change(decision, "answer", caller=HUMAN, option="smaller", text="Use the smaller path")
         self.assertEqual("done", answered["state"])
-        self.assertEqual("Use the smaller path", answered["detail"])
+        self.assertEqual("smaller: Use the smaller path", answered["detail"])
         self.assertIsNone(answered["owed_to"])
         self.assertEqual(2, self.store.db.execute("SELECT COUNT(*) FROM transitions").fetchone()[0])
         self.assertEqual(2, self.store.db.execute("SELECT COUNT(*) FROM operations").fetchone()[0])

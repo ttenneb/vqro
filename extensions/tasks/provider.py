@@ -315,7 +315,7 @@ class Store:
                 raise ValueError("stale plan parent revision")
         mapping, checked, edge_count = {}, {}, 0
         for node in nodes:
-            if not isinstance(node, dict) or set(node) - (graph.META_FIELDS | {"key", "title", "kind", "owner", "parent", "depends_on"}):
+            if not isinstance(node, dict) or set(node) - (graph.META_FIELDS | decision_queue.FIELDS | {"key", "title", "kind", "owner", "parent", "depends_on"}):
                 raise ValueError("unknown plan node field")
             key = node.get("key")
             if not isinstance(key, str) or not 1 <= len(key) <= 64 or not all(char.isascii() and (char.isalnum() or char in "_.-") for char in key) or key in mapping:
@@ -486,11 +486,10 @@ class Store:
         fields = {
             "list": {"action", "after"}, "ready": {"action", "after"}, "get": {"action", "id"},
             "whoami": {"action"}, "status": {"action"},
-            "decision_log": {"action", "after"}, "decision_config": {"action"}, "decision_digest": {"action"},
+            "decision_log": {"action", "after"}, "decision_digest": {"action"},
             "decision_seen": {"action", "operation_id", "through", "expected_caller"},
-            "decision_receipt": {"action", "id", "policy_revision"},
             "op": {"action", "operation_id", "lookup_caller"},
-            "create": {"action", "operation_id", "title", "parent", "kind", "expected_caller", "depends_on"} | graph.META_FIELDS,
+            "create": {"action", "operation_id", "title", "parent", "kind", "expected_caller", "depends_on"} | graph.META_FIELDS | decision_queue.FIELDS,
             "decision": {"action", "operation_id", "title", "parent", "expected_caller", "depends_on"} | graph.META_FIELDS | decision_queue.FIELDS,
             "decision_timer": {"action", "operation_id", "id", "revision", "auto_at", "expected_caller"},
             "decision_revert": {"action", "operation_id", "id", "revision", "expected_caller"},
@@ -502,14 +501,10 @@ class Store:
         }
         if action not in fields or set(payload) - fields[action]:
             raise ValueError("unknown action or field (actor flags are not accepted)")
-        if action == "decision_receipt":
-            return self.decisions.receipt(payload.get("id"), payload.get("policy_revision"))
         if action == "decision_digest":
             return self.decisions.digest(caller)
         if action == "decision_log":
             return self.decisions.log(payload.get("after", 0))
-        if action == "decision_config":
-            return {"delay_floor_seconds": self.decisions.delay_seconds}
         if action == "status":
             return {"revision": self.db.execute("SELECT COALESCE(MAX(seq),0) FROM transitions").fetchone()[0]}
         if action == "whoami":

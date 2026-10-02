@@ -55,8 +55,6 @@ class Queue:
         return value
 
     def initial(self, payload, at):
-        if not FIELDS & payload.keys():
-            return None, None  # Historical/free-text path, explicitly has no policy.
         if not (FIELDS - {"auto_at"}) <= payload.keys():
             raise ValueError("structured decisions require options, default, reversible and waiting_cost")
         options = payload["options"]
@@ -208,16 +206,6 @@ class Queue:
             raise ValueError("decision log entry exceeds reply bound")
         return {"events": events, "next_cursor": events[-1]["seq"] if len(rows) > len(events) else None}
 
-    def receipt(self, task_id, revision):
-        # A read-only selector is NOT admitted by any caller/owner binding validator.
-        if not isinstance(task_id, str) or not 1 <= len(task_id) <= 128 or type(revision) is not int or not 1 <= revision <= (1 << 53) - 1:
-            raise ValueError("policy receipt needs task id and positive policy revision")
-        scope = {"class": "decision_policy", "decision_id": task_id, "revision": revision}
-        key = json.dumps(scope, sort_keys=True, separators=(",", ":"))
-        op = "decision-auto:" + task_id + ":" + str(revision)
-        row = self.db.execute("SELECT outcome FROM operations WHERE caller=? AND operation_id=?", (key, op)).fetchone()
-        return {"caller": scope, "operation_id": op, "found": row is not None, "outcome": json.loads(row[0]) if row else None}
-
     def acknowledge(self, caller, through):
         if caller.get("class") != "human_unverified":
             raise ValueError("human-only explicit last-look acknowledgement")
@@ -239,21 +227,19 @@ class Queue:
             looked = self.db.execute("SELECT seq FROM decision_seen WHERE uid=?", (uid,)).fetchone() if uid is not None else None
             seen = looked[0] if looked else 0
             result = {"sequence": sequence, "seen_seq": seen, "last_look_known": uid is not None,
-                      "needs_you_now": [], "scheduled": [], "auto_since_look": [], "more": {},
+                      "needs_you_now": [], "auto_since_look": [], "more": {},
                       "counts": {kind: self.db.execute("SELECT COUNT(DISTINCT task_id) FROM decision_log WHERE kind=?", (kind,)).fetchone()[0] for kind in ("auto", "revert")}}
             oldest = self.db.execute("SELECT id,title,created_at FROM tasks WHERE kind='decision' AND state='open' ORDER BY created_at,id LIMIT 1").fetchone()
             result["oldest_waiting"] = dict(oldest) if oldest else None
-            for name, timed in (("needs_you_now", False), ("scheduled", True)):
-                predicate = "decision_due_at IS NOT NULL AND decision_timer_revision=revision" if timed else "(decision_due_at IS NULL OR decision_timer_revision<>revision)"
-                rows = self.db.execute(f"SELECT id FROM tasks WHERE kind='decision' AND state='open' AND {predicate} ORDER BY created_at,id LIMIT 17").fetchall()
-                used = 4096
-                for row in rows[:16]:
-                    task = self.store.task(row[0])
-                    size = len(json.dumps(task).encode()) + 1
-                    if used + size > 32768:
-                        break
-                    result[name].append(task); used += size
-                result["more"][name] = len(rows) > len(result[name])
+            rows = self.db.execute("SELECT id FROM tasks WHERE kind='decision' AND state='open' ORDER BY created_at,id LIMIT 17").fetchall()
+            used = 4096
+            for row in rows[:16]:
+                task = self.store.task(row[0])
+                size = len(json.dumps(task).encode()) + 1
+                if used + size > 32768:
+                    break
+                result["needs_you_now"].append(task); used += size
+            result["more"]["needs_you_now"] = len(rows) > len(result["needs_you_now"])
             rows = self.db.execute("SELECT * FROM decision_log WHERE seq>? AND seq<=? AND kind='auto' ORDER BY seq LIMIT 17", (seen, sequence)).fetchall()
             used = 4096
             for row in rows[:16]:

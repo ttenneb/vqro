@@ -191,19 +191,9 @@ fn task_command() -> Command {
                 .about("Read bounded human decision digest; never acknowledges"),
         )
         .subcommand(
-            Command::new("decision-config")
-                .about("Read the provider-configured automatic delay floor"),
-        )
-        .subcommand(
             Command::new("decision-log")
                 .about("Read immutable decision policy history")
                 .arg(option("after", "SEQ")),
-        )
-        .subcommand(
-            Command::new("decision-receipt")
-                .about("Read original immutable policy outcome")
-                .arg(required("id", "ID"))
-                .arg(option("policy-rev", "N").required(true)),
         )
         .subcommand(
             Command::new("decisions-seen")

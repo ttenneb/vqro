@@ -51,6 +51,43 @@ class MigrationTests(unittest.TestCase):
             finally:
                 store.db.close()
 
+    def test_legacy_v1_v2_decisions_keep_free_text_and_exact_old_receipts(self):
+        for version in (1, 2):
+            with self.subTest(version=version), tempfile.TemporaryDirectory() as root:
+                store = provider.Store(root)
+                human = {"class": "human_unverified", "terminal_id": "old-human", "uid": 1000}
+                encoded = provider.canonical(human)
+                # Reverse only the additive decision schema to form a pre-decision DB.
+                store.db.execute("DROP INDEX decision_due")
+                for column in ("decision", "decision_due_at", "decision_timer_revision"):
+                    store.db.execute(f"ALTER TABLE tasks DROP COLUMN {column}")
+                store.db.execute("DROP TABLE decision_log")
+                store.db.execute("DROP TABLE decision_seen")
+                store.db.execute(f"PRAGMA user_version={version}")
+                at = "2026-01-01T00:00:00+00:00"
+                for task_id, state, revision, detail in (("legacy-open", "open", 1, ""), ("legacy-final", "done", 2, "Original free text")):
+                    store.db.execute("INSERT INTO tasks(id,title,kind,owner,state,revision,created_at,updated_at,creator,detail) VALUES (?,?,'decision',?,?,?,?,?,?,?)",
+                                     (task_id, "Legacy question?", provider.canonical(provider.HUMAN_ROLE), state, revision, at, at, encoded, detail))
+                    store.db.execute("INSERT INTO transitions(task_id,state,at,caller) VALUES (?,?,?,?)", (task_id, state, at, encoded))
+                original = {"action": "decision", "operation_id": "old-decision", "title": "Legacy question?"}
+                historical = provider.canonical({"task": {"id": "legacy-open", "state": "open", "revision": 1}, "caller": human, "operation_id": "old-decision"})
+                digest = hashlib.sha256(provider.canonical(original).encode()).hexdigest()
+                store.db.execute("INSERT INTO operations VALUES (?,?,?,?,?)", (encoded, "old-decision", digest, historical, at))
+                store.db.close()
+                store = provider.Store(root)
+                try:
+                    for task_id in ("legacy-open", "legacy-final"):
+                        self.assertIsNone(store.task(task_id)["decision"])
+                    self.assertEqual("Original free text", store.task("legacy-final")["detail"])
+                    self.assertEqual(0, store.decisions.apply_due("2027-01-01T00:00:00+00:00"))
+                    self.assertEqual(json.loads(historical), store.invoke({"caller": human, "payload": original}))
+                    self.assertEqual((digest, historical), tuple(store.db.execute("SELECT payload,outcome FROM operations WHERE operation_id='old-decision'").fetchone()))
+                    answered = store.invoke({"caller": human, "payload": {"action": "answer", "id": "legacy-open", "revision": 1, "operation_id": "legacy-answer", "text": "Still free text"}})
+                    self.assertEqual("Still free text", answered["task"]["detail"])
+                    self.assertEqual("done", answered["task"]["state"])
+                finally:
+                    store.db.close()
+
     def test_legacy_first_start_uses_sequence_not_backwards_wall_clock(self):
         with tempfile.TemporaryDirectory() as root:
             db = sqlite3.connect(Path(root) / "tasks.sqlite")

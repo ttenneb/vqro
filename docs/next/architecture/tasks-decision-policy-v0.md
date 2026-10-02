@@ -19,7 +19,7 @@ Cheap guards:
   immutable history/receipts. Digest counts auto-applied versus later-reverted
   decisions. Stricter human arming remains a later option, not current policy.
 - Revert is human-only and policy-answer-only; it clears the timer. Reopening
-  requires an active parent and no reported/final dependents, else rejects with
+  requires an active parent **if present** and no reported/final dependents, else rejects with
   blockers. Existing in-progress work is not undone; completion waits for re-answer.
   Human answers are final; changing one means a new decision.
 

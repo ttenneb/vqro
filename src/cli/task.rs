@@ -152,8 +152,6 @@ fn parse_payload(args: &[String]) -> Result<(Value, bool), String> {
         "decisions" => "decision_digest",
         "decisions-seen" => "decision_seen",
         "decision-log" => "decision_log",
-        "decision-receipt" => "decision_receipt",
-        "decision-config" => "decision_config",
         "decision-timer" => "decision_timer",
         "revert" => "decision_revert",
         "choose" => "answer",
@@ -179,12 +177,10 @@ fn parse_payload(args: &[String]) -> Result<(Value, bool), String> {
             | "update"
     );
     let remaining = match (action, args.get(1)) {
-        (
-            "list" | "ready" | "whoami" | "decision_digest" | "decision_seen" | "decision_log"
-            | "decision_config",
-            _,
-        ) => &args[1..],
-        ("decision_receipt" | "decision_timer" | "decision_revert", Some(id)) => {
+        ("list" | "ready" | "whoami" | "decision_digest" | "decision_seen" | "decision_log", _) => {
+            &args[1..]
+        }
+        ("decision_timer" | "decision_revert", Some(id)) => {
             payload["id"] = id.clone().into();
             &args[2..]
         }
@@ -250,13 +246,11 @@ fn parse_payload(args: &[String]) -> Result<(Value, bool), String> {
                 };
             }
             ("answer", "--note") if command == "choose" => payload["text"] = value.clone().into(),
-            ("decision_seen", "--through")
-            | ("decision_receipt", "--policy-rev")
-            | ("decision_log", "--after") => {
-                let key = match action {
-                    "decision_seen" => "through",
-                    "decision_receipt" => "policy_revision",
-                    _ => "after",
+            ("decision_seen", "--through") | ("decision_log", "--after") => {
+                let key = if action == "decision_seen" {
+                    "through"
+                } else {
+                    "after"
                 };
                 payload[key] = value
                     .parse::<u64>()
@@ -356,11 +350,6 @@ fn parse_payload(args: &[String]) -> Result<(Value, bool), String> {
             "decision_seen",
             "through",
             "--through is required: explicitly acknowledge the observed sequence",
-        ),
-        (
-            "decision_receipt",
-            "policy_revision",
-            "--policy-rev is required: original timed revision",
         ),
         (
             "decision_timer",
@@ -540,7 +529,7 @@ fn render_tree(tasks: &[Value]) -> Result<String, String> {
 }
 
 fn usage() -> String {
-    "usage: vqro task <create/decision TITLE --done-when TEXT [--parent ID]|plan FILE [--parent ID --rev N]|depends ID --on JSON --rev N|update ID --rev N [metadata options]|delegate ID --owner JSON --rev N|start/accept/done ID --rev N [done --evidence TEXT]|block/report/answer ID TEXT --rev N|choose ID KEY --rev N [--note TEXT]|revert ID --rev N|decision-timer ID --rev N --auto-at UTC|decisions|decisions-seen --through SEQ|decision-log [--after SEQ]|decision-receipt ID --policy-rev N|decision-config|list/ready [--after ID]|tree [--json]|whoami|get ID|op ID [--caller JSON]>; new decision also requires --options JSON --default KEY --reversible BOOL --waiting-cost TEXT [--auto-at UTC]; explicit --op ID requires --caller JSON from the original attempt".into()
+    "usage: vqro task <create/decision TITLE --done-when TEXT [--parent ID]|plan FILE [--parent ID --rev N]|depends ID --on JSON --rev N|update ID --rev N [metadata options]|delegate ID --owner JSON --rev N|start/accept/done ID --rev N [done --evidence TEXT]|block/report/answer ID TEXT --rev N|choose ID KEY --rev N [--note TEXT]|revert ID --rev N|decision-timer ID --rev N --auto-at UTC|decisions|decisions-seen --through SEQ|decision-log [--after SEQ]|list/ready [--after ID]|tree [--json]|whoami|get ID|op ID [--caller JSON]>; new decision also requires --options JSON --default KEY --reversible BOOL --waiting-cost TEXT [--auto-at UTC]; explicit --op ID requires --caller JSON from the original attempt".into()
 }
 
 #[cfg(test)]
@@ -697,7 +686,7 @@ mod tests {
     }
 
     #[test]
-    fn digest_and_policy_receipt_reads_never_ack_and_seen_requires_explicit_sequence() {
+    fn digest_reads_never_ack_and_seen_requires_explicit_sequence() {
         let (digest, mutation) = parse_payload(&["decisions"].map(String::from)).unwrap();
         assert!(!mutation);
         assert_eq!(digest["action"], "decision_digest");
@@ -706,12 +695,6 @@ mod tests {
             parse_payload(&["decisions-seen", "--through", "17"].map(String::from)).unwrap();
         assert!(mutation);
         assert_eq!(seen["through"], 17);
-        let (receipt, mutation) =
-            parse_payload(&["decision-receipt", "task_a", "--policy-rev", "1"].map(String::from))
-                .unwrap();
-        assert!(!mutation);
-        assert_eq!(receipt["policy_revision"], 1);
-        assert!(receipt.get("lookup_caller").is_none());
     }
 
     #[test]

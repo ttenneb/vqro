@@ -36,10 +36,10 @@ class DecisionTests(unittest.TestCase):
 
     def call(self, action, caller=A, **fields):
         self.seq += 1
-        return self.store.invoke({"caller": caller, "payload": {"action": action, **({"operation_id": str(self.seq)} if action not in ("get", "status", "list", "decision_log", "decision_config", "decision_digest", "decision_receipt") else {}), **fields}})
+        return self.store.invoke({"caller": caller, "payload": {"action": action, **({"operation_id": str(self.seq)} if action not in ("get", "status", "list", "decision_log", "decision_digest") else {}), **fields}})
 
     def create(self, **fields):
-        return self.call("decision", title="Keep result?", done_when="Question answered.", **{**FIELDS, **fields})["task"]
+        return self.call("decision", **{"title": "Keep result?", "done_when": "Question answered.", **FIELDS, **fields})["task"]
 
     def auto(self, at=LATER):
         return self.store.decisions.apply_due(at)
@@ -52,7 +52,7 @@ class DecisionTests(unittest.TestCase):
         task = self.create(reversible=False, auto_at=None)
         self.assertEqual(0, self.auto())
         self.assertIsNone(task["decision"]["auto_at"])
-        self.assertEqual(5, self.call("decision_config")["delay_floor_seconds"])
+        self.assertEqual(5, self.store.decisions.delay_seconds)
 
     def test_exact_policy_log_and_receipt_atomic_once_after_restart(self):
         task = self.create()
@@ -71,21 +71,16 @@ class DecisionTests(unittest.TestCase):
         self.assertEqual(0, self.auto())
         self.assertEqual(answered["decision"], self.store.task(task["id"])["decision"])
 
-    def test_policy_receipt_selector_reads_original_result_without_granting_binding(self):
+    def test_policy_log_preserves_original_result_without_granting_binding(self):
         task = self.create(); self.auto()
-        first = self.call("decision_receipt", caller={"class": "unknown"}, id=task["id"], policy_revision=1)
-        self.assertTrue(first["found"])
-        self.assertEqual("done", first["outcome"]["task"]["state"])
+        first = self.call("decision_log", caller={"class": "unknown"})["events"][0]
         self.call("decision_revert", caller=H, id=task["id"], revision=2)
-        self.assertEqual(first, self.call("decision_receipt", caller=H, id=task["id"], policy_revision=1))
-        self.assertFalse(self.call("decision_receipt", id=task["id"], policy_revision=999)["found"])
-        for revision in (True, 0, -1, "1"):
-            with self.assertRaisesRegex(ValueError, "positive policy revision"):
-                self.call("decision_receipt", id=task["id"], policy_revision=revision)
+        self.assertEqual(first, self.call("decision_log", caller=H)["events"][0])
+        policy = first["result"]["policy_caller"]
         with self.assertRaisesRegex(ValueError, "invalid caller binding"):
-            self.call("op", caller=H, operation_id=first["operation_id"], lookup_caller=first["caller"])
+            self.call("op", caller=H, operation_id=first["result"]["operation_id"], lookup_caller=policy)
         with self.assertRaisesRegex(ValueError, "invalid caller binding"):
-            self.call("create", caller=H, title="ordinary", done_when="Verified.", expected_caller=first["caller"])
+            self.call("create", caller=H, title="ordinary", done_when="Verified.", expected_caller=policy)
 
     def test_human_answer_wins_and_is_not_revertible(self):
         task = self.create()
@@ -170,10 +165,10 @@ class DecisionTests(unittest.TestCase):
         self.assertEqual(1, len(self.call("decision_log")["events"]))
 
     def test_open_prerequisite_prevents_auto_apply_until_ready(self):
-        prior = self.call("decision", title="Prior?", done_when="Answered.")["task"]
+        prior = self.create(title="Prior?", auto_at=None)
         waiting = self.create(depends_on=[prior["id"]])
         self.assertEqual(0, self.auto())
-        self.call("answer", caller=H, id=prior["id"], revision=1, text="Settled.")
+        self.call("answer", caller=H, id=prior["id"], revision=1, option="keep", text="Settled.")
         self.assertEqual(1, self.auto())
         self.assertEqual("done", self.store.task(waiting["id"])["state"])
 
@@ -188,14 +183,21 @@ class DecisionTests(unittest.TestCase):
         self.assertLessEqual(len(provider.canonical(listed).encode()), provider.MAX_REPLY_BYTES)
         self.assertIsNotNone(listed["next_cursor"])
 
-    def test_legacy_has_no_invented_timer_and_unknown_cannot_mutate_or_spoof_policy(self):
-        task = self.call("decision", title="Legacy?", done_when="Answered.")["task"]
-        self.assertIsNone(task["decision"])
-        self.assertEqual(0, self.auto())
+    def test_new_filing_requires_terms_all_paths_and_unknown_cannot_spoof_policy(self):
+        for action, values in (("decision", {}), ("create", {"kind": "decision"})):
+            with self.subTest(action=action), self.assertRaisesRegex(ValueError, "structured decisions require"):
+                self.call(action, caller=H, title="New?", done_when="Answered.", **values)
+        with self.assertRaisesRegex(ValueError, "structured decisions require"):
+            self.call("plan", caller=H, nodes=[{"key": "q", "title": "New?", "kind": "decision", "done_when": "Answered."}])
+        self.assertEqual(0, self.store.db.execute("SELECT COUNT(*) FROM tasks").fetchone()[0])
+        self.assertEqual(0, self.store.db.execute("SELECT COUNT(*) FROM operations").fetchone()[0])
+        task = self.create(auto_at=None)
+        digest = self.call("decision_digest", caller=H)
+        self.assertEqual(task, digest["needs_you_now"][0])
         for caller in ({"class": "unknown"}, {"class": "decision_policy", "decision_id": task["id"], "revision": 1}):
             with self.assertRaisesRegex(ValueError, "unknown caller"):
                 self.call("answer", caller=caller, id=task["id"], revision=1, text="spoof")
-        self.assertEqual("done", self.call("answer", caller=H, id=task["id"], revision=1, text="Legacy answer")["task"]["state"])
+        self.assertEqual("done", self.call("answer", caller=H, id=task["id"], revision=1, option="keep")["task"]["state"])
 
     def test_digest_reads_never_ack_explicit_uid_cursor_is_monotone_not_future(self):
         self.create(); self.auto()
