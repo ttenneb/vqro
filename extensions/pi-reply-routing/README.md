@@ -14,7 +14,9 @@ scope.
   back with `vqro agent prompt <from> <text> --reply` (capped at `MAX_REPLY_BYTES`)
   and appends a session entry; an empty turn records `no reply to X` and an `idle`
   pane label. A turn that already messaged the sender does not send again.
-- It fails closed without the managed Vqro environment or a parsed label.
+- It fails closed without the managed Vqro environment, a parsed label, or a
+  provable self identity, and the run's origin and final text are frozen for that
+  run so a queued follow-up cannot claim it.
 
 ```text
 pi --extension <repo>/extensions/pi-reply-routing/index.ts

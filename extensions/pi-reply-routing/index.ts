@@ -14,9 +14,9 @@ export interface Origin {
 
 /**
  * Parse the provenance label that `vqro agent prompt` writes when it runs inside
- * an agent pane. Absent or unrecognized text is human input. The label is
- * self-declared and spoofable in trusted same-user scope, not authenticated
- * caller identity.
+ * an agent pane. Absent or unrecognized text is human input to be ignored. The
+ * label is self-declared and spoofable in trusted same-user scope, not
+ * authenticated caller identity.
  */
 export function parseProvenanceLabel(text: string): Origin | null {
   const match = /^\[agent ([^\]\s]+) · (reply expected|reply)\]\s?/.exec(text);
@@ -31,22 +31,28 @@ export function boundedReplyBytes(text: string, maxBytes = MAX_REPLY_BYTES): str
   return `${cut}\n[truncated by vqro reply routing at ${maxBytes} bytes]`;
 }
 
-/** The last assistant text on the active branch, or "" when the turn produced none. */
-export function finalAssistantText(ctx: any): string {
-  const branch = ctx?.sessionManager?.getBranch?.() ?? [];
-  for (let index = branch.length - 1; index >= 0; index -= 1) {
-    const entry = branch[index];
-    if (entry?.type !== "message" || entry?.message?.role !== "assistant") continue;
-    const content = entry.message.content;
-    if (typeof content === "string") return content;
-    if (Array.isArray(content)) {
-      return content
-        .filter((block: any) => block?.type === "text")
-        .map((block: any) => block.text)
-        .join("\n");
-    }
+/** Assistant text blocks of one message, or "" when it has none. */
+export function assistantText(message: any): string {
+  const content = message?.content;
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) {
+    return content
+      .filter((block: any) => block?.type === "text")
+      .map((block: any) => block.text)
+      .join("\n");
   }
   return "";
+}
+
+/**
+ * True when the command invokes `vqro agent prompt <from>` with that exact
+ * target. Deliberately narrow: a name merely mentioned in the body is not a send.
+ */
+export function targetsAgentPrompt(command: string, from: string): boolean {
+  const match = /(?:^|[\s;&|(])(?:[^\s;&|()]*\/)?vqro\s+agent\s+prompt\s+['"]?([^\s'"]+)['"]?/.exec(
+    command,
+  );
+  return match?.[1] === from;
 }
 
 export default function (pi: ExtensionAPI) {
@@ -62,9 +68,13 @@ export default function (pi: ExtensionAPI) {
     !process.env.HERDR_SOCKET_PATH &&
     !process.env.HERDR_CLIENT_SOCKET_PATH;
 
-  let origin: Origin | null = null;
+  // Frozen for the current run: set from the prompt that started it, cleared when
+  // it settles, so a queued human follow-up cannot inherit or overwrite it.
+  let runOrigin: Origin | null = null;
+  let runText = "";
   let explicitSend = false;
-  let selfName: string | undefined;
+  const pendingExplicit = new Set<string>();
+  let self: string | undefined;
   let metadataSeq = Date.now() * 1000;
 
   pi.registerEntryRenderer?.("vqro-reply-routing", (entry: any, _options: any, theme: any) => {
@@ -74,24 +84,27 @@ export default function (pi: ExtensionAPI) {
         ? `no reply to ${data.from}`
         : data.kind === "replied"
           ? `replied to ${data.from}`
-          : `reply routing: ${data.reason ?? "unknown"}`;
+          : `reply routing: ${data.kind ?? data.reason ?? "unknown"}`;
     return { render: () => [theme.fg("dim", `[vqro] ${label}`)] };
   });
 
-  async function resolveSelf() {
-    if (!enabled || selfName) return;
-    const result = await pi.exec(bin!, ["agent", "get", pane!], { timeout: 2000 }).catch(() => null);
-    if (result?.code === 0) {
-      try {
-        selfName = JSON.parse(result.stdout)?.result?.agent?.name ?? undefined;
-      } catch {
-        selfName = undefined;
-      }
-    }
-  }
-
   async function run(args: string[], timeout: number) {
     return pi.exec(bin!, args, { timeout }).catch(() => null);
+  }
+
+  /** This agent's name (or pane id); undefined when its identity cannot be proven. */
+  async function resolveSelf(): Promise<string | undefined> {
+    if (self) return self;
+    const result = await run(["agent", "get", pane!], 2000);
+    if (result?.code !== 0) return undefined;
+    try {
+      const agent = JSON.parse(result.stdout)?.result?.agent;
+      if (!agent) return undefined;
+      self = agent.name || pane!;
+      return self;
+    } catch {
+      return undefined;
+    }
   }
 
   async function reportNoReply(from: string) {
@@ -115,71 +128,69 @@ export default function (pi: ExtensionAPI) {
 
   async function clearNoReply() {
     await run(
-      [
-        "pane",
-        "report-metadata",
-        pane!,
-        "--source",
-        "vqro.reply-routing",
-        "--clear-state-labels",
-      ],
+      ["pane", "report-metadata", pane!, "--source", "vqro.reply-routing", "--clear-state-labels"],
       2000,
     );
   }
 
-  pi.on("input", async (event) => {
-    // Extension-injected input is neither a human gesture nor a routed agent
-    // message; leave the current turn origin untouched.
-    if (event.source === "extension") return { action: "continue" };
-    origin = parseProvenanceLabel(event.text);
+  function record(data: Record<string, unknown>) {
+    pi.appendEntry("vqro-reply-routing", { ...data, at: new Date().toISOString() });
+  }
+
+  pi.on("before_agent_start", async (event) => {
+    runOrigin = parseProvenanceLabel(event.prompt);
+    runText = "";
     explicitSend = false;
-    return { action: "continue" };
+    pendingExplicit.clear();
+  });
+
+  pi.on("turn_end", async (event) => {
+    const text = assistantText(event.message).trim();
+    if (text) runText = text;
   });
 
   pi.on("tool_call", async (event) => {
-    // A2: if the agent already messaged the origin during this turn, do not also
-    // send its final text. Best-effort match; on an unclear command we still route.
-    if (event.toolName !== "bash" || !origin?.from) return;
+    if (event.toolName !== "bash" || !runOrigin) return;
     const command = typeof event.input?.command === "string" ? event.input.command : "";
-    if (/(^|[\s;&|])agent\s+prompt(\s|$)/.test(command) && command.includes(origin.from)) {
-      explicitSend = true;
-    }
+    if (targetsAgentPrompt(command, runOrigin.from)) pendingExplicit.add(event.toolCallId);
   });
 
-  pi.on("agent_settled", async (_event, ctx) => {
-    const current = origin;
-    origin = null;
+  pi.on("tool_result", async (event) => {
+    if (event.toolName !== "bash" || !pendingExplicit.delete(event.toolCallId)) return;
+    // Only a bash command that actually succeeded counts as an explicit send.
+    if (!event.isError) explicitSend = true;
+  });
+
+  pi.on("agent_settled", async () => {
+    const current = runOrigin;
+    const text = runText;
+    runOrigin = null;
+    runText = "";
     if (!enabled || !current || !current.replyExpected) return;
     const from = current.from;
-    await resolveSelf();
-    if (from === selfName || from === pane) return;
-    if (explicitSend) {
-      pi.appendEntry("vqro-reply-routing", { kind: "explicit", from, at: new Date().toISOString() });
+    const selfIdentity = await resolveSelf();
+    if (!selfIdentity) {
+      // Fail closed rather than reply with unknown provenance.
+      record({ kind: "self-unknown", from });
       return;
     }
-    const text = finalAssistantText(ctx).trim();
+    if (from === selfIdentity) return;
+    if (explicitSend) {
+      record({ kind: "explicit", from });
+      return;
+    }
     if (!text) {
-      pi.appendEntry("vqro-reply-routing", { kind: "no-reply", from, at: new Date().toISOString() });
+      record({ kind: "no-reply", from });
       await reportNoReply(from);
       return;
     }
     const body = boundedReplyBytes(text);
     const result = await run(["agent", "prompt", from, body, "--reply"], 10_000);
     if (result?.code === 0) {
-      pi.appendEntry("vqro-reply-routing", {
-        kind: "replied",
-        from,
-        bytes: Buffer.byteLength(body, "utf8"),
-        at: new Date().toISOString(),
-      });
+      record({ kind: "replied", from, bytes: Buffer.byteLength(body, "utf8") });
       await clearNoReply();
     } else {
-      pi.appendEntry("vqro-reply-routing", {
-        kind: "no-reply",
-        from,
-        reason: result ? `agent prompt exited ${result.code}` : "agent prompt unavailable",
-        at: new Date().toISOString(),
-      });
+      record({ kind: "no-reply", from, reason: result ? `agent prompt exited ${result.code}` : "agent prompt unavailable" });
       await reportNoReply(from);
     }
   });

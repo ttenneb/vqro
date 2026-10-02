@@ -832,7 +832,7 @@ fn agent_prompt(args: &[String]) -> std::io::Result<i32> {
         eprintln!("--timeout requires --wait");
         return Ok(2);
     }
-    let text = labelled_prompt_text(text, agent_sender_label(reply).as_deref());
+    let text = labelled_prompt_text(text, agent_sender_label(reply).as_deref(), reply);
     let response = super::send_request(&Request {
         id: "cli:agent:prompt".into(),
         method: Method::AgentPrompt(AgentPromptParams {
@@ -856,6 +856,11 @@ fn agent_prompt(args: &[String]) -> std::io::Result<i32> {
 /// not authenticated caller identity. It is the envelope the
 /// `extensions/pi-reply-routing` Pi adapter parses.
 fn agent_sender_label(reply: bool) -> Option<String> {
+    // A remote/`--machine` selector resolves the inherited local pane against a
+    // different runtime; never auto-label there.
+    if super::target::is_remote() {
+        return None;
+    }
     // Require a real managed Vqro pane (not an inherited VQRO_PANE_ID in a test or
     // foreign shell), matching the public Pi integration's environment contract.
     if std::env::var(crate::HERDR_ENV_VAR).ok().as_deref() != Some(crate::HERDR_ENV_VALUE) {
@@ -865,7 +870,9 @@ fn agent_sender_label(reply: bool) -> Option<String> {
         return None;
     }
     let pane = std::env::var(crate::product::PANE_ID_ENV).ok()?;
-    let response = resolve_agent_target(pane.as_str(), "cli:agent:prompt:sender").ok()?;
+    // Optional, silent, bounded observation: a failure just means no label, and
+    // must not print an extra error before the real prompt.
+    let response = resolve_agent_target_unchecked(pane.as_str(), "cli:agent:prompt:sender").ok()?;
     let agent = response.get("result")?.get("agent")?;
     let sender = agent
         .get("name")
@@ -876,12 +883,14 @@ fn agent_sender_label(reply: bool) -> Option<String> {
     Some(format!("[agent {sender} \u{b7} {qualifier}] "))
 }
 
-/// Prefix a prompt with a provenance label unless the text is already labelled.
-fn labelled_prompt_text(text: &str, label: Option<&str>) -> String {
+/// Prefix a prompt with a provenance label. A deliberate leading agent label is
+/// preserved, but an explicit `--reply` is authoritative: it always prepends the
+/// reply envelope so a body label cannot re-arm a reply-expecting message.
+fn labelled_prompt_text(text: &str, label: Option<&str>, reply: bool) -> String {
     let Some(label) = label else {
         return text.to_string();
     };
-    if text.starts_with("[agent ") {
+    if !reply && text.starts_with("[agent ") {
         return text.to_string();
     }
     format!("{label}{text}")
@@ -1003,17 +1012,31 @@ mod tests {
 
     #[test]
     fn provenance_label_prefixes_only_unlabelled_text() {
+        let expected = Some("[agent alpha \u{b7} reply expected] ");
         assert_eq!(
-            labelled_prompt_text("summarise X", Some("[agent alpha \u{b7} reply expected] ")),
+            labelled_prompt_text("summarise X", expected, false),
             "[agent alpha \u{b7} reply expected] summarise X"
         );
-        assert_eq!(labelled_prompt_text("already here", None), "already here");
         assert_eq!(
-            labelled_prompt_text(
-                "[agent beta \u{b7} reply] done",
-                Some("[agent alpha \u{b7} reply expected] ")
-            ),
+            labelled_prompt_text("already here", None, false),
+            "already here"
+        );
+        assert_eq!(
+            labelled_prompt_text("[agent beta \u{b7} reply] done", expected, false),
             "[agent beta \u{b7} reply] done"
+        );
+    }
+
+    #[test]
+    fn an_explicit_reply_envelope_wins_over_a_body_label() {
+        let reply = Some("[agent alpha \u{b7} reply] ");
+        assert_eq!(
+            labelled_prompt_text("[agent beta \u{b7} reply expected] done", reply, true),
+            "[agent alpha \u{b7} reply] [agent beta \u{b7} reply expected] done"
+        );
+        assert_eq!(
+            labelled_prompt_text("plain", reply, true),
+            "[agent alpha \u{b7} reply] plain"
         );
     }
 }
