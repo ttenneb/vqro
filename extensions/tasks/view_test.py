@@ -82,6 +82,24 @@ class ViewTests(unittest.TestCase):
         current["state"] = "done"
         self.assertEqual({"done/accepted"}, view.categories(current, set(), agents, {}, 100))
 
+    def test_entirely_positive_stale_acceptance_debt_enters_default_attention_only(self):
+        current = task(owner=B, state="reported", owed_action="accept", owed_to={"role": "acceptors", "bindings": [A]})
+        agents = {"term_b": agent(B)}
+        args = ({"root": current}, agents, {}, view.DEFAULT, True, set(), 7, 100, WALL)
+        self.assertTrue(view.stale_acceptors(current, agents))
+        self.assertEqual([("root", 0, False, False)], view.project(*args))
+        self.assertNotIn("blocked", view.categories(current, set(), agents, {}, 100))
+        self.assertEqual([], view.project({"root": current}, agents, {}, {"blocked"}, False, set(), 7, 100, WALL))
+        for observed in (None, {**agents, "term_a": agent(execution=None)}, {**agents, "term_a": agent()}):
+            self.assertFalse(view.stale_acceptors(current, observed))
+            self.assertEqual([], view.project({"root": current}, observed, {}, view.DEFAULT, True, set(), 7, 100, WALL))
+        current["owed_to"]["bindings"] = [A, H]
+        self.assertFalse(view.stale_acceptors(current, agents))
+        current["owed_to"]["bindings"] = []
+        self.assertFalse(view.stale_acceptors(current, agents))
+        current.update(state="done", owed_to=None)
+        self.assertEqual([], view.project({"root": current}, agents, {}, view.DEFAULT, True, set(), 7, 100, WALL))
+
     def test_acceptor_display_distinguishes_stale_unknown_and_other_uid(self):
         owed = {"role": "acceptors", "bindings": [A]}
         self.assertEqual("acceptors: [stale here] pi @term_a", view.label(owed, {}))

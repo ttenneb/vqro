@@ -150,6 +150,12 @@ def categories(task, pending_parents, agents, idle_since, now):
     return result
 
 
+def stale_acceptors(task, agents):
+    owed = task.get("owed_to") or {}
+    bindings = debtors(owed) if owed.get("role") == "acceptors" else []
+    return bool(bindings) and all(availability(binding, agents) == "unavailable here" for binding in bindings)
+
+
 def since_label(value):
     if not value:
         return "—"
@@ -178,7 +184,7 @@ def project(tasks, agents, idle_since, selected, attention, collapsed, days, now
     for key, task in tasks.items():
         if "old" not in selected and old_final(task, days, wall):
             continue
-        if all_tasks or categories(task, pending_parents, agents, idle_since, now) & (selected - {"old"}) or (attention and task["state"] not in FINAL and availability(task["owner"], agents) == "unavailable here"):
+        if all_tasks or categories(task, pending_parents, agents, idle_since, now) & (selected - {"old"}) or (attention and task["state"] not in FINAL and (availability(task["owner"], agents) == "unavailable here" or stale_acceptors(task, agents))):
             visible.add(key)
     context = set(visible)
     for key in list(visible):
@@ -354,7 +360,7 @@ def run(screen):
                 attr = curses.A_DIM if context else 0
                 marker = "+" if task_id in collapsed else "−" if has_children else "·"
                 flags = categories(task, pending_parents, agents, idle_since, now)
-                state = f" [{task['state']}]" + (" [acceptor missing]" if task.get("owed_action") == "acceptor_missing" else " [stalled]" if "stalled" in flags else "")
+                state = f" [{task['state']}]" + (" [acceptor missing]" if task.get("owed_action") == "acceptor_missing" else " [stale acceptors]" if stale_acceptors(task, agents) else " [stalled]" if "stalled" in flags else "")
                 title = clip(task["title"], max(1, width - indent - len(state) - 4))
                 draw(line, indent, marker + " " + title + state, attr)
                 owner = task["owner"]
