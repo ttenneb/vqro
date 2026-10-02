@@ -3,9 +3,10 @@
 Status: **experimental Linux trusted executable consumer**. The existing plugin
 pane, real TUI mouse, exact-owner navigation and legacy-provider failure path
 have been independently audited within this Linux/trusted/cooperative-human
-scope. Dual-shape acceptor display has separate behavioral review; combined
-graph-provider runtime integration remains unvalidated. This is not a frozen
-presentation ABI or sandboxed package admission claim.
+scope. Dual-shape acceptor display and the merged graph-provider status/list/
+parent-only debt refresh have separate behavioral and real endpoint/reader
+composition audits. This does not claim a repeated full graph-backed TUI audit,
+a frozen presentation ABI or sandboxed package admission.
 
 The Tasks extension owns tree meaning, filters and terminal presentation. It
 reads `vqro.tasks.core` through [generic action invocation](extension-action-invoke-v1.md),
@@ -36,9 +37,10 @@ human installation still requires appropriate approval.
   rewritten. Non-current agent acceptors are marked stale here, missing proof
   unknown. An empty acceptor set shows unknown; `acceptor_missing` remains visible
   as blocked attention. Global status changes refresh complete derived debts even
-  when an individual child revision is unchanged. The current
-  core's human-only acceptance and graph's delegator/parent acceptance stay
-  provider-owned; human classification remains cooperative/unverified.
+  when an individual child revision is unchanged. Acceptance stays provider-owned:
+  current graph policy uses independent delegator/parent acceptors; legacy receipt
+  policy is not rewritten. Decision answers remain human-only; human classification
+  remains cooperative/unverified.
 - Seven toggles: waiting on me, stalled, blocked, working, idle, done/accepted,
   old. Default attention includes human debt, stalled, durable task blockers or
   verified current owner prompts, positively unavailable owners, and acceptance
