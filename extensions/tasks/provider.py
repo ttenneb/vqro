@@ -12,6 +12,32 @@ import uuid
 
 SERVICE = "vqro.tasks.core"
 MAX_RECORDS = 10000
+PAGE_SIZE = 32
+MAX_REPLY_BYTES = 128 * 1024
+
+
+class OutcomeUnknown(Exception):
+    """A commit/rollback error cannot be reported as a safe-to-retry rejection."""
+
+
+def operation_id(value):
+    if not isinstance(value, str) or not 1 <= len(value) <= 128 or not all(char.isascii() and (char.isalnum() or char in "._:-") for char in value):
+        raise ValueError("operation_id must be 1..128 ASCII letters, digits, . _ : or -")
+    return value
+
+
+def checked_binding(value):
+    if not isinstance(value, dict):
+        raise ValueError("caller binding must be an object")
+    keys = {"class", "terminal_id", "agent", "execution"} if value.get("class") == "agent" else {"class", "terminal_id", "uid"}
+    if set(value) != keys or value.get("class") not in ("agent", "human_unverified"):
+        raise ValueError("invalid caller binding")
+    for key in keys - {"uid"}:
+        if not isinstance(value[key], str) or not 1 <= len(value[key].encode()) <= 256:
+            raise ValueError("invalid caller binding field")
+    if "uid" in keys and (type(value["uid"]) is not int or not 0 <= value["uid"] <= 0xffffffff):
+        raise ValueError("invalid caller uid")
+    return value
 
 
 def canonical(value):
@@ -38,6 +64,7 @@ class Store:
         self.db.execute("PRAGMA journal_mode=WAL")
         self.db.execute("PRAGMA synchronous=FULL")
         self.db.execute("PRAGMA foreign_keys=ON")
+        self.db.execute("PRAGMA max_page_count=262144")
         self.db.executescript("""
             CREATE TABLE IF NOT EXISTS tasks (
                 id TEXT PRIMARY KEY, parent TEXT REFERENCES tasks(id), title TEXT NOT NULL,
@@ -62,6 +89,57 @@ class Store:
         value["owner"] = json.loads(value["owner"])
         return value
 
+    def commit(self):
+        try:
+            self.db.execute("COMMIT")
+        except sqlite3.Error as error:
+            self.db.close()
+            raise OutcomeUnknown("commit outcome unknown; inspect the original caller's operation") from error
+
+    def rollback(self):
+        try:
+            if self.db.in_transaction:
+                self.db.execute("ROLLBACK")
+        except sqlite3.Error as error:
+            self.db.close()
+            raise OutcomeUnknown("rollback outcome unknown; inspect the original caller's operation") from error
+
+    def list_tasks(self, after=None):
+        if after is not None and (not isinstance(after, str) or len(after) > 128):
+            raise ValueError("invalid task cursor")
+        rows = self.db.execute("SELECT id FROM tasks WHERE id>? ORDER BY id LIMIT ?", (after or "", PAGE_SIZE + 1)).fetchall()
+        tasks, used = [], 4096
+        for row in rows[:PAGE_SIZE]:
+            task = self.task(row["id"])
+            size = len(canonical(task).encode()) + 1
+            if used + size > MAX_REPLY_BYTES:
+                break
+            tasks.append(task)
+            used += size
+        if rows and not tasks:
+            raise ValueError("task exceeds response budget")
+        more = len(rows) > len(tasks)
+        return {"tasks": tasks, "next_cursor": tasks[-1]["id"] if more else None}
+
+    def lookup(self, payload, caller):
+        op = operation_id(payload.get("operation_id"))
+        explicit = "lookup_caller" in payload
+        selected = checked_binding(payload["lookup_caller"]) if explicit else binding(caller)
+        key = canonical(selected)
+        self.db.execute("BEGIN IMMEDIATE")
+        try:
+            row = self.db.execute("SELECT outcome FROM operations WHERE caller=? AND operation_id=?", (key, op)).fetchone()
+            other = self.db.execute("SELECT 1 FROM operations WHERE operation_id=? AND caller<>? LIMIT 1", (op, key)).fetchone() is not None
+            self.commit()
+            return {"operation_id": op, "caller": selected, "found": row is not None,
+                    "authoritative": explicit or row is not None or not other,
+                    "other_caller_exists": other, "outcome": json.loads(row["outcome"]) if row else None}
+        except OutcomeUnknown:
+            raise
+        except Exception:
+            self.rollback()
+            raise
+
     def invoke(self, params):
         if set(params) != {"caller", "payload"}:
             raise ValueError("invalid host action envelope")
@@ -70,33 +148,36 @@ class Store:
             raise ValueError("payload must be an object")
         action = payload.get("action")
         fields = {
-            "list": {"action"}, "get": {"action", "id"},
-            "op": {"action", "operation_id"},
-            "create": {"action", "operation_id", "title", "parent", "kind"},
+            "list": {"action", "after"}, "get": {"action", "id"},
+            "whoami": {"action"},
+            "op": {"action", "operation_id", "lookup_caller"},
+            "create": {"action", "operation_id", "title", "parent", "kind", "expected_caller"},
         }
         if action not in fields or set(payload) - fields[action]:
             raise ValueError("unknown action or field (actor flags are not accepted)")
+        if action == "whoami":
+            return {"caller": binding(caller) if caller.get("class") != "unknown" else {"class": "unknown"}}
         if action == "list":
-            ids = self.db.execute("SELECT id FROM tasks ORDER BY created_at,id").fetchall()
-            return {"tasks": [self.task(row["id"]) for row in ids], "caller": caller}
+            return self.list_tasks(payload.get("after"))
         if action == "get":
             return {"task": self.task(payload["id"])}
         if action == "op":
-            rows = self.db.execute("SELECT caller,outcome FROM operations WHERE operation_id=?", (payload["operation_id"],)).fetchall()
-            return {"found": bool(rows), "outcomes": [{"caller": json.loads(row["caller"]), "outcome": json.loads(row["outcome"])} for row in rows]}
+            return self.lookup(payload, caller)
         owner = binding(caller)
+        if "expected_caller" in payload and checked_binding(payload["expected_caller"]) != owner:
+            raise ValueError("caller changed; this is not the original operation scope")
         caller_key = canonical(owner)
-        operation_id = payload.get("operation_id")
-        if not isinstance(operation_id, str) or not 1 <= len(operation_id) <= 128:
-            raise ValueError("operation_id must be 1..128 characters")
-        payload_key = hashlib.sha256(canonical(payload).encode()).hexdigest()
+        op = operation_id(payload.get("operation_id"))
+        # Scope already keys the receipt. This client precondition is not new intent.
+        intent = {key: value for key, value in payload.items() if key != "expected_caller"}
+        payload_key = hashlib.sha256(canonical(intent).encode()).hexdigest()
         self.db.execute("BEGIN IMMEDIATE")
         try:
-            old = self.db.execute("SELECT payload,outcome FROM operations WHERE caller=? AND operation_id=?", (caller_key, operation_id)).fetchone()
+            old = self.db.execute("SELECT payload,outcome FROM operations WHERE caller=? AND operation_id=?", (caller_key, op)).fetchone()
             if old is not None:
                 if old["payload"] != payload_key:
                     raise ValueError("operation payload conflict")
-                self.db.execute("COMMIT")
+                self.commit()
                 return json.loads(old["outcome"])
             for table in ("tasks", "operations", "transitions"):
                 if self.db.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] >= MAX_RECORDS:
@@ -115,13 +196,14 @@ class Store:
             task_id, at = "task_" + uuid.uuid4().hex, timestamp()
             self.db.execute("INSERT INTO tasks VALUES (?,?,?,?,?,?,?,?,?)", (task_id, parent, title.strip(), kind, caller_key, "open", 1, at, at))
             self.db.execute("INSERT INTO transitions(task_id,state,at,caller) VALUES (?,?,?,?)", (task_id, "open", at, caller_key))
-            outcome = {"task": self.task(task_id), "operation_id": operation_id}
-            self.db.execute("INSERT INTO operations VALUES (?,?,?,?,?)", (caller_key, operation_id, payload_key, canonical(outcome), at))
-            self.db.execute("COMMIT")
+            outcome = {"task": self.task(task_id), "operation_id": op, "caller": owner}
+            self.db.execute("INSERT INTO operations VALUES (?,?,?,?,?)", (caller_key, op, payload_key, canonical(outcome), at))
+            self.commit()
             return outcome
+        except OutcomeUnknown:
+            raise
         except Exception:
-            if self.db.in_transaction:
-                self.db.execute("ROLLBACK")
+            self.rollback()
             raise
 
 
@@ -146,8 +228,14 @@ def main():
             raise ValueError("unexpected request")
         try:
             result = {"ok": True, "value": store.invoke(request["params"])}
+        except OutcomeUnknown as error:
+            emit({"type": "response", "id": request["id"], "error": str(error)})
+            return
         except (ValueError, KeyError, TypeError, sqlite3.Error) as error:
             result = {"ok": False, "error": str(error)}
+        if len(canonical(result).encode()) > MAX_REPLY_BYTES:
+            emit({"type": "response", "id": request["id"], "error": "response exceeds bounded task result; inspect operation"})
+            return
         # A successful mutation reaches this reply only after the FULL commit.
         emit({"type": "response", "id": request["id"], "result": result})
 

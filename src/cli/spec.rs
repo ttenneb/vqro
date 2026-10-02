@@ -64,9 +64,14 @@ fn task_command() -> Command {
                 .arg(option("parent", "ID"))
                 .arg(option("op", "ID")),
         )
-        .subcommand(Command::new("list"))
+        .subcommand(Command::new("list").arg(option("after", "ID")))
+        .subcommand(Command::new("whoami"))
         .subcommand(Command::new("get").arg(required("id", "ID")))
-        .subcommand(Command::new("op").arg(required("id", "ID")))
+        .subcommand(
+            Command::new("op")
+                .arg(required("id", "ID"))
+                .arg(option("caller", "JSON")),
+        )
 }
 
 fn configure_help(command: Command, depth: usize) -> Command {

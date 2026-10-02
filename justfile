@@ -10,11 +10,16 @@ test:
     just ui-hot-path-architecture-test
     just integration-assets-test
     just pi-launch-profile-test
+    just task-core-test
     just docs-contract-test
 
 # Run repository maintenance contract tests
 maintenance-test:
     {{python}} -m unittest scripts.test_agent_detection_manifest_check scripts.test_changelog scripts.test_config_reference_check scripts.test_docs_translation_parity scripts.test_hermes_integration_asset scripts.test_package_windows_conpty scripts.test_preview scripts.test_unix_installer scripts.test_vendor_libghostty_vt scripts.test_vendor_portable_pty scripts.test_windows_cross
+
+# Characterize the trusted Tasks extension's store, replay, and task policy.
+task-core-test:
+    {{python}} -B -m unittest discover -s extensions/tasks -p '*_test.py'
 
 # Run one nextest filter, e.g. `just test-one codex_stale_working`
 test-one filter:
@@ -55,6 +60,7 @@ ci-tests filter='all()':
     just ui-hot-path-architecture-test
     just integration-assets-test
     just pi-launch-profile-test
+    just task-core-test
 
 # Test the public-CLI Pi launch adapter without starting a server or model.
 pi-launch-profile-test:
