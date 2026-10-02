@@ -864,16 +864,7 @@ impl App {
                 .get(&key)
                 .and_then(|cache| cache.current())
                 .is_some_and(|document| {
-                    document.generation == generation
-                        && document.actions.is_empty()
-                        && document
-                            .items
-                            .iter()
-                            .any(|item| item.id.starts_with("context:attention.view:"))
-                        && document
-                            .items
-                            .iter()
-                            .all(|item| item.id.starts_with("context:attention."))
+                    document.generation == generation && document.actions.is_empty()
                 });
         snapshot.revision = self.next_host_agent_activity_document_revision();
         self.host_agent_activity_last_desired
@@ -1123,12 +1114,11 @@ impl App {
                 });
         if current {
             let publication = result.result.and_then(|document| {
-                let attention = document.actions.is_empty()
+                let observation = document.actions.is_empty()
                     && document.required_capabilities.is_empty()
                     && !document.items.is_empty()
                     && document.items.iter().all(|item| {
                         item.role == crate::extension_contract::HostItemRole::Section
-                            && item.id.starts_with("context:attention.")
                             && item.parent_id.is_none()
                             && item.action_ids.is_empty()
                             && item.terminal.as_ref().is_none_or(|terminal| {
@@ -1141,7 +1131,7 @@ impl App {
                     });
                 if document.revision != result.snapshot.revision
                     || document.target != crate::extension_contract::HostTarget::Session
-                    || !(attention
+                    || !(observation
                         || document.items.iter().all(|item| match item.role {
                             crate::extension_contract::HostItemRole::Group => {
                                 item.id.starts_with("activity:")
@@ -3297,7 +3287,7 @@ mod tests {
                 surface: crate::extension_contract::HostSurface::Navigation,
                 target: crate::extension_contract::HostTarget::Session,
                 items: vec![crate::extension_contract::HostDocumentItem {
-                    id: "context:attention.view:independent:read".into(),
+                    id: "context:independent.observation".into(),
                     parent_id: None,
                     role: crate::extension_contract::HostItemRole::Section,
                     label: label.into(),
