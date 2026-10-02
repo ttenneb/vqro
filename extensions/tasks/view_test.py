@@ -2,7 +2,9 @@
 import copy
 import datetime as dt
 import unittest
+import tempfile
 from unittest import mock
+import provider
 import view
 
 A = {"class": "agent", "terminal_id": "term_a", "agent": "pi", "execution": "boot:1:10"}
@@ -202,16 +204,44 @@ class ReaderTests(unittest.TestCase):
                 self.assertEqual(110, reader.refresh()["idle_since"][A["execution"]])
         self.assertEqual(1, calls.count("list"))
 
-    def test_global_status_refreshes_acceptors_without_child_revision_change(self):
-        old = task(state="reported", revision=1, owed_action="accept", owed_to={"role": "acceptors", "bindings": [A]})
-        new = {**old, "owed_to": {"role": "acceptors", "bindings": [H]}}
-        reader = view.Reader()
-        with mock.patch.object(view, "task_read", side_effect=[{"revision": 1}, {"tasks": [old], "next_cursor": None}, {"revision": 1}, {"revision": 2}, {"tasks": [new], "next_cursor": None}, {"revision": 2}]), mock.patch.object(view, "api", return_value={"agents": []}):
-            first = reader.refresh()["tasks"]["root"]
-            second = reader.refresh()["tasks"]["root"]
-        self.assertEqual(first["revision"], second["revision"])
-        self.assertNotIn("waiting on me", view.categories(first, set(), {}, {}, 100))
-        self.assertIn("waiting on me", view.categories(second, set(), {}, {}, 100))
+    def test_merged_provider_status_list_refresh_parent_only_acceptor_change(self):
+        # Real current provider/SQLite reads; only neutral agent facts are mocked.
+        with tempfile.TemporaryDirectory() as directory:
+            store = provider.Store(directory)
+            self.addCleanup(store.db.close)
+            operations = []
+            reads = []
+            def mutate(caller, action, **fields):
+                operations.append(action)
+                return store.invoke({"caller": caller, "payload": {"action": action, "operation_id": str(len(operations)), **fields}})["task"]
+            def read(action, **fields):
+                reads.append(action)
+                return store.invoke({"caller": {"class": "unknown"}, "payload": {"action": action, **fields}})
+            self.assertEqual({"revision": 0}, read("status"))
+            parent = mutate(H, "create", title="parent", done_when="Proof recorded.")
+            parent = mutate(H, "delegate", id=parent["id"], revision=parent["revision"], owner=A)
+            child = mutate(A, "create", title="child", parent=parent["id"], done_when="Proof recorded.")
+            child = mutate(A, "delegate", id=child["id"], revision=child["revision"], owner=B)
+            child = mutate(B, "start", id=child["id"], revision=child["revision"])
+            child = mutate(B, "report", id=child["id"], revision=child["revision"], text="> Proof recorded.\nLocal evidence.")
+            reader = view.Reader()
+            with mock.patch.object(view, "task_read", side_effect=read), mock.patch.object(view, "api", return_value={"agents": [agent(), agent(B)]}):
+                before = reader.refresh()
+                first = before["tasks"][child["id"]]
+                reader.refresh()
+                self.assertEqual(1, reads.count("list"))
+                mutate(H, "delegate", id=parent["id"], revision=parent["revision"], owner=H)
+                after = reader.refresh()
+                second = after["tasks"][child["id"]]
+            self.assertGreater(after["revision"], before["revision"])
+            self.assertEqual(first["revision"], second["revision"])
+            self.assertEqual(first["updated_at"], second["updated_at"])
+            self.assertEqual([A], first["owed_to"]["bindings"])
+            self.assertEqual([A, H], second["owed_to"]["bindings"])
+            self.assertNotIn("waiting on me", view.categories(first, set(), {}, {}, 100))
+            self.assertIn("waiting on me", view.categories(second, set(), {}, {}, 100))
+            self.assertEqual(2, reads.count("list"))
+            self.assertEqual(after["revision"], read("status")["revision"])
 
     def test_changed_revision_retains_previous_task_snapshot(self):
         reader = view.Reader()
