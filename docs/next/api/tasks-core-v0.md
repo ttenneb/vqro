@@ -115,7 +115,11 @@ acceptance. Reassigning an active parent can restore a replaced child acceptor.
 
 Reported debts expose the acceptor binding set, not a fabricated waiting-on-human.
 An empty set is `acceptor_missing`. Exact stale bindings are not automatically
-replaced or declared alive. Reported orphan roots with no usable acceptor have no
+replaced or declared alive; a nonempty set can still contain only stale bindings.
+For a handed-off child, human re-delegation while active can establish a human
+delegator. Once reported, the child is frozen: reassign its **active parent** to an
+independent acceptor instead, without changing the child's owner/receipts.
+Reported orphan roots with no usable acceptor have no
 automatic reopen/adoption path; new work needs a human-approved replacement root.
 Human administrative re-delegation of active tasks remains available. There is no
 creator fallback for acceptance. A new independent handoff records its actual new
@@ -142,6 +146,9 @@ Evidence: result.txt contains PASS; checked with the stated command.
 > Regression passes.
 Evidence: named regression completed successfully; log is at the brief path.
 ```
+
+Evidence lines beginning with `>` must be known criterion quotes; prefix or
+indent shell prompts/quoted output used as evidence instead.
 
 The existing **4096-byte detail limit includes quotes and evidence**. Presence is
 validated, not truth; the authorized acceptor judges the result. Decisions require

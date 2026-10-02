@@ -112,6 +112,23 @@ class GraphTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "not allowed"):
             self.change(shared, "done", caller=replacement, text="> Visible.\nEvidence: checked")
 
+    def test_reported_stale_delegator_child_recovers_via_active_parent_not_child(self):
+        child = self.change(self.child(), "delegate", owner=B)
+        replacement = {**A, "execution": "boot:11:101"}
+        self.parent = self.change(self.parent, "delegate", caller=HUMAN, owner=replacement)
+        child = self.change(child, "delegate", caller=replacement, owner=replacement)
+        child = self.report(child, caller=replacement)
+        self.assertEqual([A], child["acceptors"])
+        with self.assertRaisesRegex(ValueError, "not allowed"):
+            self.change(child, "delegate", caller=HUMAN, owner=replacement)
+        with self.assertRaisesRegex(ValueError, "acceptor"):
+            self.change(child, "accept", caller=HUMAN)
+        self.parent = self.change(self.parent, "delegate", caller=HUMAN, owner=HUMAN)
+        child = self.change(child, "accept", caller=HUMAN)
+        self.assertEqual("accepted", child["state"])
+        self.assertEqual(A, child["delegator"])
+        self.assertEqual(replacement, child["owner"])
+
     def test_human_uid_authorization_does_not_normalize_receipt_scope(self):
         root = self.call("create", caller=HUMAN, title="root", done_when="Visible.")["task"]
         root = self.change(root, "delegate", caller=HUMAN, owner=B)
