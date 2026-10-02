@@ -146,17 +146,17 @@ No open/blocked/root/decision shortcut. Self-takeover preserves existing indepen
 If the human addressed you directly in your pane, ask them there (Pi `ask_user_question`, if available, is one example). Otherwise record a decision—even a root decision is allowed for an agent—with criteria stating what the human must settle:
 
 ```bash
-vqro task decision "Which approach is approved?" --done-when "Choice A or B is recorded."
-vqro task decision "Which approach is approved?" --parent "$PARENT_ID" --done-when "Choice A or B is recorded."
+vqro task decision "Which approach is approved?" --done-when "Choice A or B is recorded." --options '[{"key":"a","label":"Approach A"},{"key":"b","label":"Approach B"}]' --default a --reversible true --waiting-cost "Implementation waits on this choice."
+vqro task decision "Which approach is approved?" --parent "$PARENT_ID" --done-when "Choice A or B is recorded." --options '[{"key":"a","label":"Approach A"},{"key":"b","label":"Approach B"}]' --default a --reversible false --waiting-cost "Implementation waits on this choice."
 ```
 
 Human only (never answer your own decision or impersonate the human):
 
 ```bash
-vqro task answer "$TASK_ID" "A is approved" --rev "$REV"
+vqro task answer "$TASK_ID" a --rev "$REV" --note "A is approved"
 ```
 
-Decision answer is not quote-validated. Do not assume creating a decision notifies/wakes the human. Write your final reply for whoever started your turn; it stays in your own pane—nothing automatically routes/delivers it. If another agent must act, record report/decision as appropriate and explicitly notify them with the task ID. Keep human-needed decisions in Tasks; final prose is neither delivery proof nor a committed task receipt.
+Decisions need 2–4 options, a default, a reversible flag and a waiting cost; a reversible decision may also take `--auto-at` (see the decision policy). The answer selects an option key and is not quote-validated. Do not assume creating a decision notifies/wakes the human. Write your final reply for whoever started your turn; it stays in your own pane—nothing automatically routes/delivers it. If another agent must act, record report/decision as appropriate and explicitly notify them with the task ID. Keep human-needed decisions in Tasks; final prose is neither delivery proof nor a committed task receipt.
 
 ### Uncertain outcomes: lookup, never blind retry
 
