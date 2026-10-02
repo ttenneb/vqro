@@ -4,6 +4,12 @@ Linux trusted protocol-2 executable, Python 3 stdlib SQLite. Task policy and
 persistence live here; the host supplies neutral invocation/caller observations.
 Not sandboxed, not secure human authentication, not Pi todo integration.
 
+Durable addressed messages are a second record family in the same store
+(`messages.py`, schema v4): `vqro message send/list/claim/edit` with the sender
+taken from the host-supplied caller, exact-execution recipients, edit before
+claim, and one human-controlled activation setting. Delivery to Pi is the
+reply-routing adapter claiming at a turn boundary, never pane typing.
+
 - [Tasks policy, CLI, receipts and limits](../../docs/next/api/tasks-core-v0.md)
 - [Read-only pane, filters and exact-owner navigation](../../docs/next/api/tasks-view-v0.md)
 - [Public generic invocation and authority boundary](../../docs/next/api/extension-action-invoke-v1.md)

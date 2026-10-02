@@ -174,6 +174,20 @@ vqro task report "$TASK_ID" "$EVIDENCE" --rev "$REV" --op "$OP_ID" --caller "$CA
 
 Read current tasks for current state; operation receipts return historical outcomes. A replacement can inspect the original receipt via `--caller`, but cannot inherit its write authority.
 
+## Durable addressed messages
+
+Messages are their own durable record in the same trusted Tasks extension, with the sender taken from the host-observed connection (not a self-declared text label). They survive restarts, are editable until picked up, and reach Pi through the reply-routing adapter at a turn boundary, never by typing into a pane.
+
+```bash
+vqro message send <target> "..." [--reply-to MESSAGE_ID]
+vqro message list
+vqro message claim
+vqro message edit MESSAGE_ID "..." --rev N
+vqro message activation on|off   # human only; one recorded setting
+```
+
+The target must be a detected agent process (a name or pane that currently hosts one). `claim` binds the exact recipient execution, so a restarted or moved agent cannot claim an old address and the sender resends. `edit` works only for the original sender while the message is waiting. With activation on, a waiting message may start an idle recipient's turn at the adapter's next poll; a stopped agent is never relaunched, and `claim` is not a run, reply or acceptance. A reply is a `send` with `--reply-to`.
+
 ## Spaces and collections
 
 Repository identity and checkout grouping are shared server facts projected as Spaces. Non-Git workspaces remain valid. Use `vqro collection --help` and `vqro delegation --help` for orchestration. A collection is an ordered set of real panes with one selected preview. Its in-pane header exposes previous/next member controls, delegation provenance, and inspection. Splitting a selected member splits the collection leaf.
