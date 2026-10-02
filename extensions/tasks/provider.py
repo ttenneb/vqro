@@ -425,6 +425,8 @@ class Store:
         if structured_answer:
             detail, decision_result = self.decisions.choice(task, payload, at, "human")
         elif action in ("block", "report", "answer"):
+            if action == "answer" and "note" in payload:
+                raise ValueError("legacy answers use free text, not a structured option note")
             detail = payload.get("text")
             if not isinstance(detail, str) or not detail.strip() or len(detail.encode()) > 4096:
                 raise ValueError("text must be nonempty and at most 4096 bytes")
@@ -496,7 +498,7 @@ class Store:
             "plan": {"action", "operation_id", "nodes", "parent", "revision", "expected_caller"},
             "depends": {"action", "operation_id", "id", "revision", "depends_on", "expected_caller"},
             "update": {"action", "operation_id", "id", "revision", "expected_caller"} | graph.META_FIELDS,
-            **{action: {"action", "operation_id", "id", "revision", "expected_caller"} | ({"owner"} if action == "delegate" else {"option", "text"} if action == "answer" else {"text"} if action in ("block", "report", "done") else set())
+            **{action: {"action", "operation_id", "id", "revision", "expected_caller"} | ({"owner"} if action == "delegate" else {"option", "text", "note"} if action == "answer" else {"text"} if action in ("block", "report", "done") else set())
                for action in ("delegate", "start", "block", "report", "accept", "done", "answer")},
         }
         if action not in fields or set(payload) - fields[action]:

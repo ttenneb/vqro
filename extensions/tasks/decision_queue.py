@@ -94,10 +94,10 @@ class Queue:
 
     def choice(self, task, payload, at, by):
         terms = task["decision"]
-        key = payload.get("option")
+        key = payload.get("option", payload.get("text"))
         if key not in [option["key"] for option in terms["options"]]:
             raise ValueError("answer must name one listed option")
-        note = payload.get("text", "")
+        note = payload.get("note", payload.get("text", "") if "option" in payload else "")
         if not isinstance(note, str) or len(note.encode()) > 4096:
             raise ValueError("answer note must be at most 4096 bytes")
         result = {"by": by, "option": key, "note": note, "applied_at": at, "filer": task["creator"], "default": terms["default"], "deadline": terms["auto_at"]}
@@ -109,7 +109,8 @@ class Queue:
         terms["resolution"] = result
         self.db.execute("UPDATE tasks SET decision=? WHERE id=?", (json.dumps(terms, sort_keys=True), task["id"]))
         self.cancel(task["id"])
-        return key + (": " + note if note else ""), result
+        # Keep the task's bounded summary scalar; the full note lives in resolution/log.
+        return key, result
 
     def change(self, task, payload, caller, at):
         action = payload["action"]
@@ -229,8 +230,6 @@ class Queue:
             result = {"sequence": sequence, "seen_seq": seen, "last_look_known": uid is not None,
                       "needs_you_now": [], "auto_since_look": [], "more": {},
                       "counts": {kind: self.db.execute("SELECT COUNT(DISTINCT task_id) FROM decision_log WHERE kind=?", (kind,)).fetchone()[0] for kind in ("auto", "revert")}}
-            oldest = self.db.execute("SELECT id,title,created_at FROM tasks WHERE kind='decision' AND state='open' ORDER BY created_at,id LIMIT 1").fetchone()
-            result["oldest_waiting"] = dict(oldest) if oldest else None
             rows = self.db.execute("SELECT id FROM tasks WHERE kind='decision' AND state='open' ORDER BY created_at,id LIMIT 17").fetchall()
             used = 4096
             for row in rows[:16]:

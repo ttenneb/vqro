@@ -84,8 +84,10 @@ class DecisionTests(unittest.TestCase):
 
     def test_human_answer_wins_and_is_not_revertible(self):
         task = self.create()
-        result = self.call("answer", caller=H, id=task["id"], revision=task["revision"], option="change", text="Human chose.")["task"]
+        result = self.call("answer", caller=H, id=task["id"], revision=task["revision"], text="change", note="Human chose.")["task"]
         self.assertEqual("human", result["decision"]["resolution"]["by"])
+        self.assertEqual("change", result["decision"]["resolution"]["option"])
+        self.assertEqual("Human chose.", result["decision"]["resolution"]["note"])
         self.assertEqual(0, self.auto())
         with self.assertRaisesRegex(ValueError, "policy answer"):
             self.call("decision_revert", caller=H, id=task["id"], revision=result["revision"])
@@ -175,7 +177,9 @@ class DecisionTests(unittest.TestCase):
     def test_log_and_list_remain_byte_bounded_with_large_notes_and_options(self):
         for _ in range(32):
             task = self.create(auto_at=None, waiting_cost="w" * 512, options=[{"key": str(i), "label": "l" * 256} for i in range(4)], default="0")
-            self.call("answer", caller=H, id=task["id"], revision=1, option="1", text="n" * 4096)
+            answered = self.call("answer", caller=H, id=task["id"], revision=1, option="1", text="n" * 4096)["task"]
+            self.assertLessEqual(len(answered["detail"].encode()), 4096)
+            self.assertEqual(4096, len(answered["decision"]["resolution"]["note"].encode()))
         log = self.call("decision_log")
         self.assertLessEqual(len(provider.canonical(log).encode()), provider.MAX_REPLY_BYTES)
         self.assertIsNotNone(log["next_cursor"])

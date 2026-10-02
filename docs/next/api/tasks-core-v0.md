@@ -28,8 +28,7 @@ vqro task block ID REASON --rev N
 vqro task report ID EVIDENCE --rev N
 vqro task accept ID --rev N
 vqro task done ID --rev N [--evidence TEXT]
-vqro task answer ID ANSWER --rev N  # legacy free-text decisions only
-vqro task choose ID KEY --rev N [--note TEXT]
+vqro task answer ID KEY --rev N [--note TEXT]  # legacy decisions use free text
 vqro task decision-timer ID --rev N --auto-at UTC  # empty string cancels
 vqro task revert ID --rev N
 vqro task decisions
@@ -147,42 +146,28 @@ The root/own-step/same-UID rules are reversible product choices, not authenticat
 
 ## Structured decision queue
 
-This experimental path implements the [accepted default policy](../architecture/tasks-decision-policy-v0.md).
-Every **new** decision (also kind-decision create/plan nodes) requires 2–4
-`options` objects with distinct ASCII `key` (32 bytes) and printable `label`
-(256 bytes), one listed `default`, boolean `reversible`, and printable
-`waiting_cost` (512 bytes). Question remains the title. Existing legacy records
-retain free-text answers and original receipts; migration invents no defaults.
-`choose` records one option and optional note (4096 bytes). Human answers are final.
+See the [accepted default policy](../architecture/tasks-decision-policy-v0.md).
+New decisions (including kind-decision create/plan nodes) require 2–4 key/label
+options, one default, reversible boolean and waiting cost; legacy records retain
+free-text answers and exact old receipts. Keys/labels/cost/note are bounded to
+32/256/512/4096 bytes; terms are immutable. `answer` selects a listed option and
+optional note; human answers are final. UTC `auto_at` requires the provider's
+human window (default900s; trusted startup `--decision-delay-seconds`). Irreversible
+never auto-applies. Exact filer/cooperative human may reschedule; metadata or
+prerequisite edits cancel timers. First committed revision wins; defaults obey
+graph gates and use a distinct internal policy actor, never a model turn.
 
-Filer timers need no human arm. UTC `auto_at` must allow the provider's configured
-human window (default 900 seconds; trusted startup `--decision-delay-seconds`).
-Irreversible decisions never auto-apply. Exact original filer/cooperative human
-may reschedule an open decision; ordinary metadata/dependency edits cancel its
-timer. Options/default/reversibility are immutable. First committed revision wins
-between a human answer and deadline; no priority/grace is implied. Defaults obey
-normal graph prerequisites and record a distinct internal `decision_policy`,
-never a fabricated human caller or a model turn.
-
-`revert` changes **records only**, human-only for a reversible policy answer,
-cancels the timer, and rejects with blockers if a present parent is reported/final
-or a dependent is reported/final. Root revert is allowed. In-progress dependents
-are not undone; completion waits for re-answer. The public immutable policy
-record is paged `decision-log` (filer/default/deadline/actual time/lateness/op);
-internal policy receipt scopes cannot be used as public caller/owner bindings.
-
-`decisions` is a bounded digest: pending (including timed), auto since last look,
-oldest waiting and distinct auto/reverted counts. `more` warns of truncation;
-`ack_through` never suggests hiding unseen auto-log remainder. Only explicit
-human `decisions-seen --through SEQ` advances the per-UID cursor; future/regressing
-cursors reject. Original caller-scoped receipt replay cannot acknowledge newer
-state. Polling, focus and approval never acknowledge. Tasks-pane waiting-on-me
-remains unchanged; no new pane mutation UI/section is provided.
-
-The provider starts lazily: timers operate only while admitted/alive, catch up
-following downtime, and have **no on-time guarantee**. Logs record actual lateness.
-Deferred/quota ticks back off up to 30 seconds (requests wake them immediately).
-No host timer, supervisor, external execution/undo, messaging or activation exists.
+`revert` reopens **records only**, human-only for reversible policy answers; it
+cancels the timer, rejects reported/final parent/dependent blockers, and leaves
+in-progress work gated until re-answer. Root revert is allowed. Public immutable
+`decision-log` retains filer/default/deadline/actual time/lateness/op; policy scopes
+cannot be used as caller/owner bindings. `decisions` is a bounded text digest of
+pending, auto since explicit UID look, oldest pending and auto/reverted counts.
+Only `decisions-seen --through SEQ` acknowledges; future/regressing cursors reject,
+original receipt replay cannot acknowledge newer state, polling never ACKs.
+Truncation limits the suggested ACK to observed auto events. Existing pane is
+unchanged. Lazy/absent providers have **no on-time guarantee**; logs show lateness,
+deferred ticks back off up to30s. No host timer, supervisor or external undo.
 
 ## Plain criteria, brief and timing
 

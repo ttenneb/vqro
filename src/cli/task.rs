@@ -9,14 +9,7 @@ pub(super) fn run_task_command(args: &[String]) -> std::io::Result<i32> {
     if args.first().is_some_and(|arg| arg == "tree") {
         return run_tree(&args[1..]);
     }
-    let digest_json = args.first().is_some_and(|arg| arg == "decisions")
-        && args.get(1).is_some_and(|arg| arg == "--json");
-    let parse_args = if digest_json && args.len() == 2 {
-        &args[..1]
-    } else {
-        args
-    };
-    let (mut payload, mutation) = match parse_payload(parse_args) {
+    let (mut payload, mutation) = match parse_payload(args) {
         Ok(parsed) => parsed,
         Err(message) => {
             eprintln!("{message}");
@@ -80,7 +73,7 @@ pub(super) fn run_task_command(args: &[String]) -> std::io::Result<i32> {
     };
     match reply {
         TaskReply::Success(value) => {
-            if action == "decision_digest" && !digest_json {
+            if action == "decision_digest" {
                 println!("{}", render_decisions(&value));
             } else {
                 println!("{value}");
@@ -136,12 +129,12 @@ fn render_decisions(value: &Value) -> String {
         value["counts"]["auto"],
         value["counts"]["revert"]
     )];
-    if !value["oldest_waiting"].is_null() {
+    if let Some(oldest) = pending.first() {
         lines.push(format!(
             "Oldest waiting: {} {} ({})",
-            visible(&value["oldest_waiting"]["created_at"]),
-            visible(&value["oldest_waiting"]["title"]),
-            visible(&value["oldest_waiting"]["id"])
+            visible(&oldest["created_at"]),
+            visible(&oldest["title"]),
+            visible(&oldest["id"])
         ));
     }
     for task in pending {
@@ -268,7 +261,6 @@ fn parse_payload(args: &[String]) -> Result<(Value, bool), String> {
         "decision-log" => "decision_log",
         "decision-timer" => "decision_timer",
         "revert" => "decision_revert",
-        "choose" => "answer",
         other => other,
     };
     let mut payload = json!({"action": action});
@@ -320,11 +312,7 @@ fn parse_payload(args: &[String]) -> Result<(Value, bool), String> {
         }
         ("block" | "report" | "answer", Some(id)) if args.len() >= 3 => {
             payload["id"] = id.clone().into();
-            payload[if command == "choose" {
-                "option"
-            } else {
-                "text"
-            }] = args[2].clone().into();
+            payload["text"] = args[2].clone().into();
             &args[3..]
         }
         _ => return Err(usage()),
@@ -359,7 +347,7 @@ fn parse_payload(args: &[String]) -> Result<(Value, bool), String> {
                     value.clone().into()
                 };
             }
-            ("answer", "--note") if command == "choose" => payload["text"] = value.clone().into(),
+            ("answer", "--note") => payload["note"] = value.clone().into(),
             ("decision_seen", "--through") | ("decision_log", "--after") => {
                 let key = if action == "decision_seen" {
                     "through"
@@ -643,7 +631,7 @@ fn render_tree(tasks: &[Value]) -> Result<String, String> {
 }
 
 fn usage() -> String {
-    "usage: vqro task <create/decision TITLE --done-when TEXT [--parent ID]|plan FILE [--parent ID --rev N]|depends ID --on JSON --rev N|update ID --rev N [metadata options]|delegate ID --owner JSON --rev N|start/accept/done ID --rev N [done --evidence TEXT]|block/report/answer ID TEXT --rev N|choose ID KEY --rev N [--note TEXT]|revert ID --rev N|decision-timer ID --rev N --auto-at UTC|decisions|decisions-seen --through SEQ|decision-log [--after SEQ]|list/ready [--after ID]|tree [--json]|whoami|get ID|op ID [--caller JSON]>; new decision also requires --options JSON --default KEY --reversible BOOL --waiting-cost TEXT [--auto-at UTC]; explicit --op ID requires --caller JSON from the original attempt".into()
+    "usage: vqro task <create/decision TITLE --done-when TEXT [--parent ID]|plan FILE [--parent ID --rev N]|depends ID --on JSON --rev N|update ID --rev N [metadata options]|delegate ID --owner JSON --rev N|start/accept/done ID --rev N [done --evidence TEXT]|block/report/answer ID TEXT --rev N (answer uses an option KEY for structured decisions, with optional --note TEXT)|revert ID --rev N|decision-timer ID --rev N --auto-at UTC|decisions|decisions-seen --through SEQ|decision-log [--after SEQ]|list/ready [--after ID]|tree [--json]|whoami|get ID|op ID [--caller JSON]>; new decision also requires --options JSON --default KEY --reversible BOOL --waiting-cost TEXT [--auto-at UTC]; explicit --op ID requires --caller JSON from the original attempt".into()
 }
 
 #[cfg(test)]
@@ -782,7 +770,7 @@ mod tests {
         assert_eq!(payload["reversible"], true);
         let (answer, mutation) = parse_payload(
             &[
-                "choose",
+                "answer",
                 "task_a",
                 "yes",
                 "--rev",
@@ -795,8 +783,8 @@ mod tests {
         .unwrap();
         assert!(mutation);
         assert_eq!(answer["action"], "answer");
-        assert_eq!(answer["option"], "yes");
-        assert_eq!(answer["text"], "Verified.");
+        assert_eq!(answer["text"], "yes");
+        assert_eq!(answer["note"], "Verified.");
     }
 
     #[test]

@@ -144,23 +144,24 @@ fn task_command() -> Command {
             "report",
             "Report quoted criteria/evidence for independent acceptance",
         ),
-        ("answer", "Cooperative human answer to a decision"),
+        (
+            "answer",
+            "Human records an option key (legacy decisions use free text)",
+        ),
     ] {
-        command = command.subcommand(
-            Command::new(action)
-                .about(description)
-                .arg(required("id", "ID"))
-                .arg(required("text", "TEXT"))
-                .arg(option("rev", "N").required(true))
-                .arg(option("op", "ID").requires("caller"))
-                .arg(option("caller", "JSON")),
-        );
+        let mut subcommand = Command::new(action)
+            .about(description)
+            .arg(required("id", "ID"))
+            .arg(required("text", "TEXT"))
+            .arg(option("rev", "N").required(true))
+            .arg(option("op", "ID").requires("caller"))
+            .arg(option("caller", "JSON"));
+        if action == "answer" {
+            subcommand = subcommand.arg(option("note", "TEXT"));
+        }
+        command = command.subcommand(subcommand);
     }
     for (action, description) in [
-        (
-            "choose",
-            "Human selects a structured decision option (records only)",
-        ),
         (
             "revert",
             "Guardedly reopen a reversible policy answer; no external undo",
@@ -176,11 +177,7 @@ fn task_command() -> Command {
             .arg(option("rev", "N").required(true))
             .arg(option("op", "ID").requires("caller"))
             .arg(option("caller", "JSON"));
-        if action == "choose" {
-            subcommand = subcommand
-                .arg(required("option", "KEY"))
-                .arg(option("note", "TEXT"));
-        } else if action == "decision-timer" {
+        if action == "decision-timer" {
             subcommand = subcommand.arg(option("auto-at", "UTC").required(true));
         }
         command = command.subcommand(subcommand);
@@ -188,8 +185,7 @@ fn task_command() -> Command {
     command
         .subcommand(
             Command::new("decisions")
-                .about("Read bounded human decision digest; never acknowledges")
-                .arg(flag("json")),
+                .about("Read bounded human decision digest; never acknowledges"),
         )
         .subcommand(
             Command::new("decision-log")
