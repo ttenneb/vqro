@@ -1040,10 +1040,7 @@ mod tests {
             labelled_prompt_text("summarise X", Some("[agent alpha \u{b7} reply expected] ")),
             "[agent alpha \u{b7} reply expected] summarise X"
         );
-        assert_eq!(
-            labelled_prompt_text("already here", None),
-            "already here"
-        );
+        assert_eq!(labelled_prompt_text("already here", None), "already here");
         assert_eq!(
             labelled_prompt_text(
                 "[agent beta \u{b7} reply] done",
@@ -1052,7 +1049,10 @@ mod tests {
             "[agent beta \u{b7} reply] done"
         );
         assert_eq!(
-            labelled_prompt_text("[host notice] restart", Some("[agent alpha \u{b7} reply expected] ")),
+            labelled_prompt_text(
+                "[host notice] restart",
+                Some("[agent alpha \u{b7} reply expected] ")
+            ),
             "[host notice] restart"
         );
     }
