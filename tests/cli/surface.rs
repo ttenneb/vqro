@@ -748,3 +748,37 @@ fn removed_show_changelog_flag_fails_before_nested_guard() {
         "unknown flag should be rejected before nested guard: {stderr}"
     );
 }
+
+#[test]
+fn message_cli_rejects_invalid_grammar_locally() {
+    for args in [
+        &["message"][..],
+        &["message", "activation", "maybe"][..],
+        &["message", "send", "only-target"][..],
+        &["message", "edit", "msg_1", "text"][..],
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_vqro"))
+            .args(args)
+            .env_remove("VQRO_SOCKET_PATH")
+            .env_remove("VQRO_CLIENT_SOCKET_PATH")
+            .env_remove("VQRO_ENV")
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(2), "args: {args:?}");
+    }
+}
+
+#[test]
+fn message_help_lists_the_bounded_actions_without_a_server() {
+    let output = Command::new(env!("CARGO_BIN_EXE_vqro"))
+        .args(["message", "--help"])
+        .env_remove("VQRO_SOCKET_PATH")
+        .env_remove("VQRO_ENV")
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for expected in ["send", "list", "claim", "edit", "activation", "durable"] {
+        assert!(stdout.contains(expected), "missing {expected} in: {stdout}");
+    }
+}

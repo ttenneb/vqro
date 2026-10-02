@@ -30,6 +30,7 @@ mod delegation;
 mod extension;
 mod integration;
 mod machine;
+mod message;
 mod notification;
 mod pane;
 mod plugin;
@@ -135,6 +136,7 @@ pub fn maybe_run(args: &[String]) -> std::io::Result<CommandOutcome> {
         "service-binding" => service_binding::run_service_binding_command(&args[2..])?,
         "extension" => extension::run_extension_command(&args[2..])?,
         "task" => task::run_task_command(&args[2..])?,
+        "message" => message::run_message_command(&args[2..])?,
         "delegation" => delegation::run_delegation_command(&args[2..])?,
         "notification" => notification::run_notification_command(&args[2..])?,
         "agent" => agent::run_agent_command(&args[2..])?,

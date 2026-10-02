@@ -117,7 +117,7 @@ class MigrationTests(unittest.TestCase):
             store.db.close()
             reopened = provider.Store(root)
             self.assertEqual(first, reopened.task("timing")["started_at"])
-            self.assertEqual(3, reopened.db.execute("PRAGMA user_version").fetchone()[0])
+            self.assertEqual(4, reopened.db.execute("PRAGMA user_version").fetchone()[0])
             self.assertEqual(("old-hash", historical), tuple(reopened.db.execute("SELECT payload,outcome FROM operations WHERE operation_id='old'").fetchone()))
             reopened.db.close()
 
@@ -131,7 +131,7 @@ class MigrationTests(unittest.TestCase):
                 if self.needle in sql:
                     raise sqlite3.OperationalError("injected migration failure")
                 return self.db.execute(sql, *args)
-        for needle in ("ADD COLUMN actual_work_ms", "CREATE TABLE IF NOT EXISTS dependencies", "ADD COLUMN decision", "CREATE TABLE IF NOT EXISTS decision_log", "PRAGMA user_version=3"):
+        for needle in ("ADD COLUMN actual_work_ms", "CREATE TABLE IF NOT EXISTS dependencies", "ADD COLUMN decision", "CREATE TABLE IF NOT EXISTS decision_log", "CREATE TABLE IF NOT EXISTS messages", "PRAGMA user_version=4"):
             with self.subTest(needle=needle), tempfile.TemporaryDirectory() as root:
                 db = sqlite3.connect(Path(root) / "tasks.sqlite", isolation_level=None)
                 db.row_factory = sqlite3.Row
@@ -145,7 +145,9 @@ class MigrationTests(unittest.TestCase):
                 before = [tuple(row) for row in db.execute("SELECT name,sql FROM sqlite_master ORDER BY name")]
                 store = provider.Store.__new__(provider.Store)
                 store.db = FailSQL(db, needle)
+                store.initialized_at = provider.timestamp()
                 store.decisions = provider.decision_queue.Queue(store, 900, provider.OutcomeUnknown)
+                store.messages = provider.messages.Messages(store)
                 with self.assertRaisesRegex(sqlite3.Error, "injected"):
                     store.migrate()
                 self.assertFalse(db.in_transaction)
@@ -153,20 +155,20 @@ class MigrationTests(unittest.TestCase):
                 self.assertEqual(before, [tuple(row) for row in db.execute("SELECT name,sql FROM sqlite_master ORDER BY name")])
                 db.close()
                 reopened = provider.Store(root)
-                self.assertEqual(3, reopened.db.execute("PRAGMA user_version").fetchone()[0])
+                self.assertEqual(4, reopened.db.execute("PRAGMA user_version").fetchone()[0])
                 reopened.db.close()
 
     def test_future_database_version_rejected_without_schema_mutation(self):
         with tempfile.TemporaryDirectory() as root:
             db = sqlite3.connect(Path(root) / "tasks.sqlite")
-            db.execute("PRAGMA user_version=4")
+            db.execute("PRAGMA user_version=5")
             db.execute("CREATE TABLE future_data (value TEXT)")
             db.execute("INSERT INTO future_data VALUES ('preserve')")
             db.commit()
             before = db.execute("SELECT name,sql FROM sqlite_master").fetchall()
             with self.assertRaisesRegex(ValueError, "future"):
                 provider.Store(root)
-            self.assertEqual(4, db.execute("PRAGMA user_version").fetchone()[0])
+            self.assertEqual(5, db.execute("PRAGMA user_version").fetchone()[0])
             self.assertEqual(before, db.execute("SELECT name,sql FROM sqlite_master").fetchall())
             self.assertEqual("preserve", db.execute("SELECT value FROM future_data").fetchone()[0])
             db.close()

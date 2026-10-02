@@ -1,9 +1,12 @@
-import { afterEach, beforeEach, expect, test } from "bun:test";
+import { afterEach, beforeEach, expect, jest, test } from "bun:test";
 import extension, {
   assistantText,
   boundedReplyBytes,
   parseProvenanceLabel,
   promptConfirmsOrigin,
+  renderMessage,
+  waitingForMe,
+  MAILBOX_POLL_MS,
   MAX_REPLY_BYTES,
 } from "./index";
 
@@ -29,13 +32,15 @@ function clearVqroEnv() {
 interface Harness {
   entries: any[];
   calls: { args: string[] }[];
-  emit: (name: string, event: any, ctx?: any) => Promise<void>;
+  sent: string[];
+  emit: (name: string, event: any, ctx?: any) => Promise<any[]>;
 }
 
 function harness(exec?: (args: string[]) => any): Harness {
   const handlers = new Map<string, ((event: any, ctx: any) => Promise<any>)[]>();
   const entries: any[] = [];
   const calls: { args: string[] }[] = [];
+  const sent: string[] = [];
   const pi: any = {
     on(name: string, handler: (event: any, ctx: any) => Promise<any>) {
       const list = handlers.get(name) ?? [];
@@ -45,11 +50,14 @@ function harness(exec?: (args: string[]) => any): Harness {
     appendEntry(type: string, data: any) {
       entries.push({ type, data });
     },
+    sendUserMessage(text: string) {
+      sent.push(text);
+    },
     async exec(_bin: string, args: string[]) {
       calls.push({ args });
       if (exec) return exec(args);
       if (args[0] === "agent" && args[1] === "get") {
-        return { code: 0, stdout: JSON.stringify({ result: { agent: { name: "beta" } } }), stderr: "" };
+        return { code: 0, stdout: JSON.stringify({ result: { agent: { name: "beta", execution: "exec-beta" } } }), stderr: "" };
       }
       return { code: 0, stdout: "", stderr: "" };
     },
@@ -58,8 +66,11 @@ function harness(exec?: (args: string[]) => any): Harness {
   return {
     entries,
     calls,
+    sent,
     async emit(name, event, ctx = {}) {
-      for (const handler of handlers.get(name) ?? []) await handler(event, ctx);
+      const results: any[] = [];
+      for (const handler of handlers.get(name) ?? []) results.push(await handler(event, ctx));
+      return results;
     },
   };
 }
@@ -180,7 +191,7 @@ test("human and unlabelled input are never routed", async () => {
     await h.emit("turn_end", turnText("answer"));
     await h.emit("agent_settled", {});
   }
-  expect(h.calls).toHaveLength(0);
+  expect(prompts(h)).toHaveLength(0);
   expect(h.entries).toHaveLength(0);
 });
 
@@ -237,4 +248,52 @@ test("routing stays off without the managed Vqro environment", async () => {
   await h.emit("agent_settled", {});
   expect(h.calls).toHaveLength(0);
   expect(h.entries).toHaveLength(0);
+});
+
+test("waitingForMe selects only messages for this exact execution", () => {
+  const listed = {
+    messages: [
+      { id: "m1", state: "waiting", recipient_execution: "exec-beta" },
+      { id: "m2", state: "claimed", recipient_execution: "exec-beta" },
+      { id: "m3", state: "waiting", recipient_execution: "exec-other" },
+    ],
+  };
+  expect(waitingForMe(listed, "exec-beta").map((m: any) => m.id)).toEqual(["m1"]);
+  expect(waitingForMe(listed, undefined)).toEqual([]);
+});
+
+test("renderMessage names the sender address and carries the body", () => {
+  expect(renderMessage({ id: "m1", body: "please review", sender_address: "alpha" })).toContain("vqro message m1 from agent alpha");
+  expect(renderMessage({ id: "m2", body: "x" })).toContain("from an agent");
+});
+
+test("a waiting message is claimed into a starting turn", async () => {
+  const claimed = [{ id: "m1", body: "please review", sender_address: "alpha" }];
+  const h = harness((args) =>
+    args[0] === "message" && args[1] === "claim" ? { code: 0, stdout: JSON.stringify({ claimed }), stderr: "" } : { code: 0, stdout: "", stderr: "" },
+  );
+  const results = await h.emit("before_agent_start", { prompt: "just asking" });
+  const injected = results.find((result) => result?.message)?.message;
+  expect(injected?.content).toContain("please review");
+  expect(h.entries.some((entry) => entry.data.kind === "messages-claimed")).toBe(true);
+  expect(prompts(h)).toHaveLength(0);
+});
+
+test("activation on: the idle mailbox poll claims and starts a turn", async () => {
+  jest.useFakeTimers();
+  try {
+    const claimed = [{ id: "m1", body: "wake up", sender_address: "alpha" }];
+    const h = harness((args) => {
+      if (args[0] === "agent" && args[1] === "get") return { code: 0, stdout: JSON.stringify({ result: { agent: { name: "beta", execution: "exec-beta" } } }), stderr: "" };
+      if (args[0] === "message" && args[1] === "list") return { code: 0, stdout: JSON.stringify({ activation: true, messages: [{ id: "m1", state: "waiting", recipient_execution: "exec-beta" }] }), stderr: "" };
+      if (args[0] === "message" && args[1] === "claim") return { code: 0, stdout: JSON.stringify({ claimed }), stderr: "" };
+      return { code: 0, stdout: "", stderr: "" };
+    });
+    await h.emit("session_start", {});
+    jest.advanceTimersByTime(MAILBOX_POLL_MS + 5);
+    for (let i = 0; i < 20; i += 1) await Promise.resolve();
+    expect(h.sent.join("\n")).toContain("wake up");
+  } finally {
+    jest.useRealTimers();
+  }
 });

@@ -44,6 +44,7 @@ pub(super) fn command() -> Command {
         .subcommand(service_binding_command())
         .subcommand(extension_command())
         .subcommand(task_command())
+        .subcommand(message_command())
         .subcommand(delegation_command())
         .subcommand(notification_command())
         .subcommand(agent_command())
@@ -53,6 +54,32 @@ pub(super) fn command() -> Command {
         .subcommand(integration_command())
         .subcommand(plugin_command());
     configure_help(command, 0)
+}
+
+fn message_command() -> Command {
+    Command::new("message")
+        .about("Send and receive durable addressed messages through the Tasks extension")
+        .subcommand(
+            Command::new("send")
+                .about("Send a durable message to an exact agent process")
+                .arg(required("target", "TARGET"))
+                .arg(required("text", "TEXT"))
+                .arg(option("reply-to", "ID")),
+        )
+        .subcommand(Command::new("list").about("List your messages and the activation setting"))
+        .subcommand(Command::new("claim").about("Atomically claim waiting messages addressed to this process"))
+        .subcommand(
+            Command::new("edit")
+                .about("Edit a waiting message you sent")
+                .arg(required("id", "ID"))
+                .arg(required("text", "TEXT"))
+                .arg(option("rev", "N")),
+        )
+        .subcommand(
+            Command::new("activation")
+                .about("Turn message activation for an idle recipient on or off (human only)")
+                .arg(required("state", "on|off")),
+        )
 }
 
 fn task_command() -> Command {
