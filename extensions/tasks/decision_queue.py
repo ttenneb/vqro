@@ -207,3 +207,58 @@ class Queue:
         if rows and not events:
             raise ValueError("decision log entry exceeds reply bound")
         return {"events": events, "next_cursor": events[-1]["seq"] if len(rows) > len(events) else None}
+
+    def acknowledge(self, caller, through):
+        if caller.get("class") != "human_unverified":
+            raise ValueError("human-only explicit last-look acknowledgement")
+        current = self.db.execute("SELECT COALESCE(MAX(seq),0) FROM transitions").fetchone()[0]
+        previous = self.db.execute("SELECT seq FROM decision_seen WHERE uid=?", (caller["uid"],)).fetchone()
+        if type(through) is not int or through < 0 or through > current or (previous and through < previous[0]):
+            raise ValueError("last-look sequence cannot be future or regress")
+        if previous is None:
+            self.store.quota({"decision_seen": 1})
+        self.db.execute("INSERT INTO decision_seen VALUES (?,?) ON CONFLICT(uid) DO UPDATE SET seq=excluded.seq", (caller["uid"], through))
+        return {"uid": caller["uid"], "seen_seq": through}
+
+    def digest(self, caller):
+        # One read snapshot; policy writes run outside this handler. Polling never ACKs.
+        self.db.execute("BEGIN")
+        try:
+            sequence = self.db.execute("SELECT COALESCE(MAX(seq),0) FROM transitions").fetchone()[0]
+            uid = caller.get("uid") if caller.get("class") == "human_unverified" else None
+            looked = self.db.execute("SELECT seq FROM decision_seen WHERE uid=?", (uid,)).fetchone() if uid is not None else None
+            seen = looked[0] if looked else 0
+            result = {"sequence": sequence, "seen_seq": seen, "last_look_known": uid is not None,
+                      "needs_you_now": [], "scheduled": [], "auto_since_look": [], "more": {},
+                      "counts": {kind: self.db.execute("SELECT COUNT(DISTINCT task_id) FROM decision_log WHERE kind=?", (kind,)).fetchone()[0] for kind in ("auto", "revert")}}
+            oldest = self.db.execute("SELECT id,title,created_at FROM tasks WHERE kind='decision' AND state='open' ORDER BY created_at,id LIMIT 1").fetchone()
+            result["oldest_waiting"] = dict(oldest) if oldest else None
+            for name, timed in (("needs_you_now", False), ("scheduled", True)):
+                predicate = "decision_due_at IS NOT NULL AND decision_timer_revision=revision" if timed else "(decision_due_at IS NULL OR decision_timer_revision<>revision)"
+                rows = self.db.execute(f"SELECT id FROM tasks WHERE kind='decision' AND state='open' AND {predicate} ORDER BY created_at,id LIMIT 17").fetchall()
+                used = 4096
+                for row in rows[:16]:
+                    task = self.store.task(row[0])
+                    size = len(json.dumps(task).encode()) + 1
+                    if used + size > 32768:
+                        break
+                    result[name].append(task); used += size
+                result["more"][name] = len(rows) > len(result[name])
+            rows = self.db.execute("SELECT * FROM decision_log WHERE seq>? AND seq<=? AND kind='auto' ORDER BY seq LIMIT 17", (seen, sequence)).fetchall()
+            used = 4096
+            for row in rows[:16]:
+                event = {"seq": row["seq"], "id": row["task_id"], "result": json.loads(row["result"])}
+                size = len(json.dumps(event).encode()) + 1
+                if used + size > 32768:
+                    break
+                result["auto_since_look"].append(event); used += size
+            result["more"]["auto_since_look"] = len(rows) > len(result["auto_since_look"])
+            # A suggested ACK never hides unseen remainder of a truncated auto log.
+            result["ack_through"] = result["auto_since_look"][-1]["seq"] if result["more"]["auto_since_look"] else sequence
+            self.store.commit()
+            return result
+        except self.unknown_error:
+            raise
+        except Exception:
+            self.store.rollback()
+            raise

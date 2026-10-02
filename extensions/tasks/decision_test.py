@@ -36,7 +36,7 @@ class DecisionTests(unittest.TestCase):
 
     def call(self, action, caller=A, **fields):
         self.seq += 1
-        return self.store.invoke({"caller": caller, "payload": {"action": action, **({"operation_id": str(self.seq)} if action not in ("get", "status", "list", "decision_log", "decision_config") else {}), **fields}})
+        return self.store.invoke({"caller": caller, "payload": {"action": action, **({"operation_id": str(self.seq)} if action not in ("get", "status", "list", "decision_log", "decision_config", "decision_digest") else {}), **fields}})
 
     def create(self, **fields):
         return self.call("decision", title="Keep result?", done_when="Question answered.", **{**FIELDS, **fields})["task"]
@@ -180,6 +180,42 @@ class DecisionTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "unknown caller"):
                 self.call("answer", caller=caller, id=task["id"], revision=1, text="spoof")
         self.assertEqual("done", self.call("answer", caller=H, id=task["id"], revision=1, text="Legacy answer")["task"]["state"])
+
+    def test_digest_reads_never_ack_explicit_uid_cursor_is_monotone_not_future(self):
+        self.create(); self.auto()
+        first = self.call("decision_digest", caller=H)
+        self.assertEqual({"auto": 1, "revert": 0}, first["counts"])
+        self.assertEqual(1, len(first["auto_since_look"]))
+        self.assertEqual(first, self.call("decision_digest", caller=H))
+        self.assertEqual(2, self.store.db.execute("SELECT COUNT(*) FROM operations").fetchone()[0])
+        payload = {"action": "decision_seen", "through": first["ack_through"], "operation_id": "seen-first"}
+        receipt = self.store.invoke({"caller": H, "payload": payload})
+        self.assertEqual([], self.call("decision_digest", caller=H)["auto_since_look"])
+        self.assertEqual(1, len(self.call("decision_digest", caller={**H, "uid": 1001})["auto_since_look"]))
+        self.create(); self.auto()
+        later = self.call("decision_digest", caller=H)
+        self.assertEqual(1, len(later["auto_since_look"]))
+        self.call("decision_seen", caller=H, through=later["ack_through"])
+        self.assertEqual(receipt, self.store.invoke({"caller": H, "payload": payload}))
+        self.assertEqual(later["ack_through"], self.call("decision_digest", caller=H)["seen_seq"])
+        for through in (-1, first["ack_through"], later["sequence"] + 1, True):
+            with self.subTest(through=through), self.assertRaisesRegex(ValueError, "future or regress"):
+                self.call("decision_seen", caller=H, through=through)
+        with self.assertRaisesRegex(ValueError, "human-only"):
+            self.call("decision_seen", caller=A, through=later["sequence"])
+
+    def test_digest_reports_revert_count_and_truncation_without_hiding_unseen_events(self):
+        first = self.create(); self.auto()
+        self.call("decision_revert", caller=H, id=first["id"], revision=2)
+        for _ in range(20):
+            self.create()
+        while self.auto():
+            pass
+        digest = self.call("decision_digest", caller=H)
+        self.assertEqual({"auto": 21, "revert": 1}, digest["counts"])
+        self.assertTrue(digest["more"]["auto_since_look"])
+        self.assertLess(digest["ack_through"], digest["sequence"])
+        self.assertLessEqual(len(provider.canonical(digest).encode()), provider.MAX_REPLY_BYTES)
 
     def test_idle_overdue_deferral_backs_off_but_future_deadline_is_not_starved(self):
         task = self.create()

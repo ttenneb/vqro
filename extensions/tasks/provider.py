@@ -486,7 +486,8 @@ class Store:
         fields = {
             "list": {"action", "after"}, "ready": {"action", "after"}, "get": {"action", "id"},
             "whoami": {"action"}, "status": {"action"},
-            "decision_log": {"action", "after"}, "decision_config": {"action"},
+            "decision_log": {"action", "after"}, "decision_config": {"action"}, "decision_digest": {"action"},
+            "decision_seen": {"action", "operation_id", "through", "expected_caller"},
             "op": {"action", "operation_id", "lookup_caller"},
             "create": {"action", "operation_id", "title", "parent", "kind", "expected_caller", "depends_on"} | graph.META_FIELDS,
             "decision": {"action", "operation_id", "title", "parent", "expected_caller", "depends_on"} | graph.META_FIELDS | decision_queue.FIELDS,
@@ -500,6 +501,8 @@ class Store:
         }
         if action not in fields or set(payload) - fields[action]:
             raise ValueError("unknown action or field (actor flags are not accepted)")
+        if action == "decision_digest":
+            return self.decisions.digest(caller)
         if action == "decision_log":
             return self.decisions.log(payload.get("after", 0))
         if action == "decision_config":
@@ -533,7 +536,10 @@ class Store:
                 self.commit()
                 return json.loads(old["outcome"])
             at = timestamp()
-            if action == "plan":
+            if action == "decision_seen":
+                self.quota({"operations": 1})
+                result = self.decisions.acknowledge(owner, payload.get("through"))
+            elif action == "plan":
                 result = self.import_plan(payload, owner, at)
             else:
                 tables = ("tasks", "operations", "transitions") if action in ("create", "decision") else ("operations", "transitions")
