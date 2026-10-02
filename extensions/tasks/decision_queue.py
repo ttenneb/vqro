@@ -156,6 +156,8 @@ class Queue:
                 if task["state"] != "open" or not terms or not terms["reversible"] or not terms["timer_current"] or not terms["auto_at"] or terms["auto_at"] > at or task["waiting_on"]:
                     self.store.commit()
                     continue
+                # Defensive parity with manual completion for legacy/corrupt records;
+                # current graph admission forbids children of decisions.
                 if self.db.execute("SELECT 1 FROM tasks WHERE parent=? AND state NOT IN ('accepted','done') LIMIT 1", (task["id"],)).fetchone():
                     self.store.commit()
                     continue
@@ -178,9 +180,17 @@ class Queue:
                 raise
         return applied
 
-    def next_delay(self, at):
+    def next_delay(self, at, applied=0):
         row = self.db.execute("SELECT MIN(decision_due_at) FROM tasks WHERE kind='decision' AND state='open' AND decision_timer_revision=revision").fetchone()[0]
-        return None if row is None else max(1, min(30, (dt.datetime.fromisoformat(row) - dt.datetime.fromisoformat(at)).total_seconds()))
+        if row is None:
+            return None
+        delay = (dt.datetime.fromisoformat(row) - dt.datetime.fromisoformat(at)).total_seconds()
+        if delay <= 0 and applied < 8:
+            # Deferred prerequisites/quota must not turn idle time into a 1Hz loop.
+            # Requests wake select immediately; still honor an upcoming future deadline.
+            future = self.db.execute("SELECT MIN(decision_due_at) FROM tasks WHERE kind='decision' AND state='open' AND decision_timer_revision=revision AND decision_due_at>?", (at,)).fetchone()[0]
+            return 30 if future is None else max(1, min(30, (dt.datetime.fromisoformat(future) - dt.datetime.fromisoformat(at)).total_seconds()))
+        return max(1, min(30, delay))
 
     def log(self, after=0):
         if type(after) is not int or after < 0:

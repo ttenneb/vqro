@@ -594,15 +594,16 @@ def main():
     if welcome.get("type") != "welcome" or welcome.get("granted_capabilities") != ["action_invoke"] or "action.invoke.v1" not in welcome.get("methods", []):
         raise ValueError("action capability not granted")
     while True:
+        applied = 0
         try:
-            store.decisions.apply_due(timestamp())
+            applied = store.decisions.apply_due(timestamp())
         except OutcomeUnknown:
             raise  # Never retry an uncertain internal commit in this process.
         except (ValueError, sqlite3.Error) as error:
             # Keep read-only inspection usable when a bounded policy tick cannot write.
             print("decision policy delayed: " + str(error), file=sys.stderr)
         try:
-            line = read_line(store.decisions.next_delay(timestamp()))
+            line = read_line(store.decisions.next_delay(timestamp(), applied))
         except EOFError:
             return
         if line is None:

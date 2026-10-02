@@ -181,6 +181,13 @@ class DecisionTests(unittest.TestCase):
                 self.call("answer", caller=caller, id=task["id"], revision=1, text="spoof")
         self.assertEqual("done", self.call("answer", caller=H, id=task["id"], revision=1, text="Legacy answer")["task"]["state"])
 
+    def test_idle_overdue_deferral_backs_off_but_future_deadline_is_not_starved(self):
+        task = self.create()
+        self.assertEqual(30, self.store.decisions.next_delay(LATER))
+        self.assertEqual(1, self.store.decisions.next_delay(LATER, applied=8))
+        self.create(auto_at="2026-10-02T16:00:15.000+00:00")
+        self.assertEqual(5, self.store.decisions.next_delay(LATER))
+
     def test_late_policy_time_is_recorded_not_fabricated_on_time(self):
         task = self.create()
         self.auto("2026-10-03T16:00:10.000+00:00")
