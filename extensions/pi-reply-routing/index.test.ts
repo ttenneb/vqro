@@ -98,6 +98,7 @@ test("A2 recognises only a direct vqro agent prompt call to the exact target", (
   expect(targetsAgentPrompt('echo vqro agent prompt alpha', "alpha")).toBe(false);
   expect(targetsAgentPrompt('echo "vqro agent prompt alpha"', "alpha")).toBe(false);
   expect(targetsAgentPrompt('cd /x && vqro agent prompt alpha', "alpha")).toBe(false);
+  expect(targetsAgentPrompt('vqro agent prompt alpha done || true', "alpha")).toBe(false);
   expect(targetsAgentPrompt('cat <<EOF\nvqro agent prompt alpha\nEOF', "alpha")).toBe(false);
   expect(targetsAgentPrompt('printf \'x; vqro agent prompt alpha\'', "alpha")).toBe(false);
 });

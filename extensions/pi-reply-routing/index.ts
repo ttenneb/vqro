@@ -45,17 +45,35 @@ export function assistantText(message: any): string {
 }
 
 /**
- * True when the whole bash command is a direct `vqro agent prompt <from>` call.
- * Deliberately conservative: a compound command, heredoc body, quoted argument or
- * echo of the command is not evidence of a send, so the final reply is not
- * dropped. A missed recognition only risks a duplicate reply, not a lost one.
+ * True when the whole bash command is a single direct `vqro agent prompt <from>`
+ * call. Any top-level shell syntax (compound `&&`/`||`/`;`/pipe, heredoc newline,
+ * redirection, substitution) disqualifies it, because shell success then does not
+ * prove this call was accepted. Deliberately conservative: a missed recognition
+ * only risks a duplicate reply, never a dropped one.
  */
 export function targetsAgentPrompt(command: string, from: string): boolean {
+  if (hasTopLevelShellSyntax(command)) return false;
   const match =
     /^\s*(?:env\s+)?(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*(?:[^\s;&|()]*\/)?vqro\s+agent\s+prompt\s+['"]?([^\s'"]+)['"]?/.exec(
       command,
     );
   return match?.[1] === from;
+}
+
+function hasTopLevelShellSyntax(command: string): boolean {
+  let quote: string | null = null;
+  for (const ch of command) {
+    if (quote) {
+      if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch;
+      continue;
+    }
+    if (";&|\n`()<>".includes(ch)) return true;
+  }
+  return false;
 }
 
 export default function (pi: ExtensionAPI) {
