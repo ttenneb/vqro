@@ -516,7 +516,7 @@ class Store:
             "decision_seen": {"action", "operation_id", "through", "expected_caller"},
             "op": {"action", "operation_id", "lookup_caller"},
             "message_list": {"action"},
-            "message_send": {"action", "operation_id", "recipient", "body", "reply_to", "sender_address", "expected_caller"},
+            "message_send": {"action", "operation_id", "recipient", "body", "reply_to", "expected_caller"},
             "message_edit": {"action", "operation_id", "id", "revision", "body", "expected_caller"},
             "message_claim": {"action", "operation_id", "expected_caller"},
             "message_activation": {"action", "operation_id", "activation", "expected_caller"},

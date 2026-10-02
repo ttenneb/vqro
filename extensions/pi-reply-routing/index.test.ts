@@ -262,8 +262,9 @@ test("waitingForMe selects only messages for this exact execution", () => {
   expect(waitingForMe(listed, undefined)).toEqual([]);
 });
 
-test("renderMessage names the sender address and carries the body", () => {
-  expect(renderMessage({ id: "m1", body: "please review", sender_address: "alpha" })).toContain("vqro message m1 from agent alpha");
+test("renderMessage names the host-attributed sender and carries the body", () => {
+  const agentMessage = { id: "m1", body: "please review", sender: JSON.stringify({ class: "agent", execution: "boot:1:2" }) };
+  expect(renderMessage(agentMessage)).toContain("vqro message m1 from agent boot:1:2");
   expect(renderMessage({ id: "m2", body: "x" })).toContain("from an agent");
 });
 

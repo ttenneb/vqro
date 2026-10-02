@@ -836,6 +836,18 @@ pub(super) fn send_ok_request(method: Method) -> std::io::Result<i32> {
     Ok(0)
 }
 
+pub(super) fn random_operation_id(prefix: &str) -> std::io::Result<String> {
+    let mut bytes = [0_u8; 16];
+    crate::platform::fill_secure_random(&mut bytes)?;
+    Ok(format!(
+        "{prefix}{}",
+        bytes
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    ))
+}
+
 pub(super) fn send_request(request: &Request) -> std::io::Result<serde_json::Value> {
     let client = target::api_client()?;
     ensure_server_protocol_compatible(&client, &request.id)?;

@@ -26,10 +26,8 @@ pub(super) fn run_message_command(args: &[String]) -> std::io::Result<i32> {
 }
 
 fn operation_id() -> String {
-    let mut bytes = [0_u8; 16];
     // Random failure only means no id; the command then fails closed before sending.
-    let _ = crate::platform::fill_secure_random(&mut bytes);
-    format!("msg-op-{}", bytes.iter().map(|byte| format!("{byte:02x}")).collect::<String>())
+    super::random_operation_id("msg-op-").unwrap_or_default()
 }
 
 /// Resolve an exact agent-process recipient binding for a durable message.
@@ -38,13 +36,18 @@ fn recipient_binding(client: &ApiClient, target: &str) -> Result<Value, String> 
         .request_value_with_timeout(
             &Request {
                 id: "cli:message:resolve".into(),
-                method: Method::AgentGet(AgentTarget { target: target.to_string() }),
+                method: Method::AgentGet(AgentTarget {
+                    target: target.to_string(),
+                }),
             },
             Duration::from_secs(5),
         )
         .map_err(|error| error.to_string())?;
     if let Some(error) = response.get("error") {
-        return Err(error["message"].as_str().unwrap_or("agent not found").to_string());
+        return Err(error["message"]
+            .as_str()
+            .unwrap_or("agent not found")
+            .to_string());
     }
     let agent = &response["result"]["agent"];
     let (terminal_id, kind, execution) = (
@@ -65,21 +68,6 @@ fn recipient_binding(client: &ApiClient, target: &str) -> Result<Value, String> 
 }
 
 /// The sender's own reply address (agent name, else pane id), best effort.
-fn sender_address(client: &ApiClient) -> Option<String> {
-    let pane = std::env::var(crate::product::PANE_ID_ENV).ok()?;
-    let response = client
-        .request_value_with_timeout(
-            &Request {
-                id: "cli:message:self".into(),
-                method: Method::AgentGet(AgentTarget { target: pane.clone() }),
-            },
-            Duration::from_secs(5),
-        )
-        .ok()?;
-    let name = response["result"]["agent"]["name"].as_str();
-    Some(name.map(str::to_string).unwrap_or(pane))
-}
-
 fn message_send(args: &[String]) -> std::io::Result<i32> {
     let (Some(target), Some(text)) = (args.first(), args.get(1)) else {
         eprintln!("{USAGE}");
@@ -120,9 +108,6 @@ fn message_send(args: &[String]) -> std::io::Result<i32> {
     if let Some(reply_to) = reply_to {
         payload["reply_to"] = reply_to;
     }
-    if let Some(address) = sender_address(&client) {
-        payload["sender_address"] = json!(address);
-    }
     invoke_and_print(&client, payload)
 }
 
@@ -133,7 +118,10 @@ fn message_read(payload: Value) -> std::io::Result<i32> {
 
 fn message_claim() -> std::io::Result<i32> {
     let client = super::target::api_client()?;
-    invoke_and_print(&client, json!({"action": "message_claim", "operation_id": operation_id()}))
+    invoke_and_print(
+        &client,
+        json!({"action": "message_claim", "operation_id": operation_id()}),
+    )
 }
 
 fn message_edit(args: &[String]) -> std::io::Result<i32> {
@@ -146,7 +134,10 @@ fn message_edit(args: &[String]) -> std::io::Result<i32> {
     while index < args.len() {
         match args[index].as_str() {
             "--rev" => {
-                let Some(value) = args.get(index + 1).and_then(|value| value.parse::<u64>().ok()) else {
+                let Some(value) = args
+                    .get(index + 1)
+                    .and_then(|value| value.parse::<u64>().ok())
+                else {
                     eprintln!("--rev requires a message revision number");
                     return Ok(2);
                 };
@@ -180,7 +171,10 @@ fn message_activation(args: &[String]) -> std::io::Result<i32> {
         }
     };
     let client = super::target::api_client()?;
-    invoke_and_print(&client, json!({"action": "message_activation", "operation_id": operation_id(), "activation": activation}))
+    invoke_and_print(
+        &client,
+        json!({"action": "message_activation", "operation_id": operation_id(), "activation": activation}),
+    )
 }
 
 fn invoke_and_print(client: &ApiClient, payload: Value) -> std::io::Result<i32> {
@@ -197,15 +191,24 @@ fn invoke_and_print(client: &ApiClient, payload: Value) -> std::io::Result<i32> 
         )
         .map_err(|error| std::io::Error::other(error.to_string()))?;
     if response.get("error").is_some() {
-        eprintln!("{}", serde_json::to_string(&response).map_err(std::io::Error::other)?);
+        eprintln!(
+            "{}",
+            serde_json::to_string(&response).map_err(std::io::Error::other)?
+        );
         return Ok(1);
     }
     let value = &response["result"]["value"];
     if value["ok"] == true {
-        println!("{}", serde_json::to_string(&value["value"]).map_err(std::io::Error::other)?);
+        println!(
+            "{}",
+            serde_json::to_string(&value["value"]).map_err(std::io::Error::other)?
+        );
         Ok(0)
     } else {
-        eprintln!("{}", serde_json::to_string(&value["error"]).map_err(std::io::Error::other)?);
+        eprintln!(
+            "{}",
+            serde_json::to_string(&value["error"]).map_err(std::io::Error::other)?
+        );
         Ok(1)
     }
 }

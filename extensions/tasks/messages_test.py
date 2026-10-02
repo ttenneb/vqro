@@ -25,10 +25,9 @@ class MessagesTest(unittest.TestCase):
         return self.invoke({"action": "message_send", "operation_id": op, "recipient": recipient, "body": body, **extra}, caller)
 
     def test_send_edit_claim_reply_thread_and_provenance(self):
-        sent = self.send(body="first draft", sender_address="alpha")
+        sent = self.send(body="first draft")
         message = sent["message"]
         self.assertEqual(message["state"], "waiting")
-        self.assertEqual(message["sender_address"], "alpha")
         self.assertEqual(json.loads(message["sender"]), A)
 
         edited = self.invoke({"action": "message_edit", "operation_id": "edit1", "id": message["id"], "revision": message["revision"], "body": "final draft"}, A)
@@ -77,8 +76,8 @@ class MessagesTest(unittest.TestCase):
             self.invoke({"action": "message_activation", "operation_id": "agent-set", "activation": True}, A)
         self.assertTrue(self.invoke({"action": "message_activation", "operation_id": "human-on", "activation": True}, HUMAN)["activation"])
         self.assertTrue(self.invoke({"action": "message_list"}, A)["activation"])
-        log = self.store.db.execute("SELECT activation, caller FROM message_policy_log ORDER BY seq").fetchall()
-        self.assertEqual([(row["activation"], json.loads(row["caller"])) for row in log], [(1, HUMAN)])
+        row = self.store.db.execute("SELECT activation, updated_by FROM message_policy WHERE id=1").fetchone()
+        self.assertEqual((row["activation"], json.loads(row["updated_by"])), (1, HUMAN))
 
     def test_operation_dedupe_and_provider_restart_durability(self):
         sent = self.send(body="durable")

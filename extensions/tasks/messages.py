@@ -9,6 +9,10 @@ import uuid
 
 MAX_BODY_BYTES = 32 * 1024
 MAX_PAGE = 32
+# One claim stays well under the provider's 128 KiB reply budget; the adapter
+# drains the rest on its next pickup.
+MAX_CLAIM = 8
+MAX_CLAIM_BYTES = 64 * 1024
 STATES = ("waiting", "claimed")
 
 
@@ -44,17 +48,14 @@ class Messages:
         self.db.execute("""CREATE TABLE IF NOT EXISTS messages (
                 id TEXT PRIMARY KEY, sender TEXT NOT NULL, recipient TEXT NOT NULL,
                 recipient_execution TEXT NOT NULL, body TEXT NOT NULL, reply_to TEXT,
-                sender_address TEXT, state TEXT NOT NULL, revision INTEGER NOT NULL,
+                state TEXT NOT NULL, revision INTEGER NOT NULL,
                 created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
-                claimed_at TEXT, claimed_by TEXT)""")
+                claimed_at TEXT)""")
         self.db.execute("CREATE INDEX IF NOT EXISTS message_recipient_execution ON messages(recipient_execution, state)")
         self.db.execute("CREATE INDEX IF NOT EXISTS message_sender ON messages(sender, created_at)")
         self.db.execute("""CREATE TABLE IF NOT EXISTS message_policy (
                 id INTEGER PRIMARY KEY CHECK (id = 1), activation INTEGER NOT NULL,
                 updated_at TEXT NOT NULL, updated_by TEXT NOT NULL)""")
-        self.db.execute("""CREATE TABLE IF NOT EXISTS message_policy_log (
-                seq INTEGER PRIMARY KEY, activation INTEGER NOT NULL,
-                at TEXT NOT NULL, caller TEXT NOT NULL)""")
         if self.db.execute("SELECT 1 FROM message_policy WHERE id=1").fetchone() is None:
             self.db.execute(
                 "INSERT INTO message_policy(id,activation,updated_at,updated_by) VALUES (1,0,?,?)",
@@ -67,7 +68,7 @@ class Messages:
     def _record(self, row):
         return {
             "id": row["id"], "sender": row["sender"], "recipient": row["recipient"],
-            "recipient_execution": row["recipient_execution"], "sender_address": row["sender_address"],
+            "recipient_execution": row["recipient_execution"],
             "body": row["body"], "reply_to": row["reply_to"], "state": row["state"],
             "revision": row["revision"], "created_at": row["created_at"], "updated_at": row["updated_at"],
             "claimed_at": row["claimed_at"],
@@ -92,17 +93,14 @@ class Messages:
         if action == "message_send":
             recipient = _agent_binding(payload["recipient"])
             body = _text(payload["body"], "body")
-            sender_address = payload.get("sender_address")
-            if sender_address is not None and (not isinstance(sender_address, str) or not 1 <= len(sender_address.encode()) <= 256):
-                raise ValueError("sender_address must be 1..256 bytes")
             reply_to = payload.get("reply_to")
             if reply_to is not None:
                 if not isinstance(reply_to, str) or self.db.execute("SELECT 1 FROM messages WHERE id=?", (reply_to,)).fetchone() is None:
                     raise ValueError("reply_to must reference an existing message")
             message_id = "msg_" + uuid.uuid4().hex
             self.db.execute(
-                "INSERT INTO messages(id,sender,recipient,recipient_execution,body,reply_to,sender_address,state,revision,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-                (message_id, key, self.store.canonical(recipient), recipient["execution"], body, reply_to, sender_address, "waiting", 1, at, at),
+                "INSERT INTO messages(id,sender,recipient,recipient_execution,body,reply_to,state,revision,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (message_id, key, self.store.canonical(recipient), recipient["execution"], body, reply_to, "waiting", 1, at, at),
             )
             row = self.db.execute("SELECT * FROM messages WHERE id=?", (message_id,)).fetchone()
             return {"message": self._record(row)}
@@ -130,11 +128,14 @@ class Messages:
                 "SELECT * FROM messages WHERE recipient_execution=? AND state='waiting' ORDER BY created_at ASC, id ASC",
                 (binding["execution"],),
             ).fetchall()
-            claimed = []
+            claimed, total = [], 0
             for row in rows:
+                if len(claimed) >= MAX_CLAIM or total + len(row["body"].encode()) > MAX_CLAIM_BYTES:
+                    break
+                total += len(row["body"].encode())
                 self.db.execute(
-                    "UPDATE messages SET state='claimed',claimed_at=?,claimed_by=?,revision=revision+1,updated_at=? WHERE id=? AND state='waiting'",
-                    (at, key, at, row["id"]),
+                    "UPDATE messages SET state='claimed',claimed_at=?,revision=revision+1,updated_at=? WHERE id=? AND state='waiting'",
+                    (at, at, row["id"]),
                 )
                 claimed.append(self._record(self.db.execute("SELECT * FROM messages WHERE id=?", (row["id"],)).fetchone()))
             return {"claimed": claimed, "activation": self.activation()}
@@ -145,7 +146,5 @@ class Messages:
             if type(value) is not bool:
                 raise ValueError("activation must be true or false")
             self.db.execute("UPDATE message_policy SET activation=?,updated_at=?,updated_by=? WHERE id=1", (1 if value else 0, at, key))
-            seq = self.db.execute("SELECT COALESCE(MAX(seq),0)+1 FROM message_policy_log").fetchone()[0]
-            self.db.execute("INSERT INTO message_policy_log VALUES (?,?,?,?)", (seq, 1 if value else 0, at, key))
             return {"activation": value}
         raise ValueError("unknown message action")

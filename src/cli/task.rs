@@ -18,13 +18,7 @@ pub(super) fn run_task_command(args: &[String]) -> std::io::Result<i32> {
     };
     let action = payload["action"].as_str().unwrap_or("").to_string();
     if mutation && payload.get("operation_id").is_none() {
-        let mut bytes = [0_u8; 16];
-        crate::platform::fill_secure_random(&mut bytes)?;
-        payload["operation_id"] = bytes
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect::<String>()
-            .into();
+        payload["operation_id"] = super::random_operation_id("")?.into();
     }
     let op = payload["operation_id"].as_str().unwrap_or("").to_string();
     let client = super::target::api_client()?;

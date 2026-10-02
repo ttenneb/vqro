@@ -67,7 +67,10 @@ fn message_command() -> Command {
                 .arg(option("reply-to", "ID")),
         )
         .subcommand(Command::new("list").about("List your messages and the activation setting"))
-        .subcommand(Command::new("claim").about("Atomically claim waiting messages addressed to this process"))
+        .subcommand(
+            Command::new("claim")
+                .about("Atomically claim waiting messages addressed to this process"),
+        )
         .subcommand(
             Command::new("edit")
                 .about("Edit a waiting message you sent")

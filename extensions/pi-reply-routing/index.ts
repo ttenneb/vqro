@@ -6,7 +6,7 @@ export const MAX_REPLY_BYTES = 8192;
 /** The no-reply attention label is a volatile observation, not durable state. */
 export const METADATA_TTL_MS = 600_000;
 /** Idle mailbox poll while the activation setting is on; one bounded read per tick. */
-export const MAILBOX_POLL_MS = Number(process.env.VQRO_MESSAGING_POLL_MS) || 10_000;
+export const MAILBOX_POLL_MS = 10_000;
 
 export interface Origin {
   /** Agent name, or pane id when the sender had no registered name. */
@@ -78,8 +78,15 @@ export function waitingForMe(listed: any, execution: string | undefined): any[] 
 }
 
 export function renderMessage(message: any): string {
-  const from = message?.sender_address ? `agent ${message.sender_address}` : "an agent";
-  return `[vqro message ${message.id} from ${from}]\n${message.body}`;
+  let sender = "an agent";
+  try {
+    const binding = JSON.parse(message?.sender ?? "{}");
+    if (binding.class === "agent") sender = `agent ${String(binding.execution ?? "unknown").slice(0, 24)}`;
+    else if (binding.class === "human_unverified") sender = "a human";
+  } catch {
+    // keep the generic sender label
+  }
+  return `[vqro message ${message.id} from ${sender}]\n${message.body}`;
 }
 
 export default function (pi: ExtensionAPI) {
