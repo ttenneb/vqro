@@ -19,7 +19,7 @@ export interface Origin {
  * authenticated caller identity.
  */
 export function parseProvenanceLabel(text: string): Origin | null {
-  const match = /^\[agent ([^\]\s]+) · (reply expected|reply)\]\s?/.exec(text);
+  const match = /^\[agent ([^\]\s]+)(?: · (reply expected))?\]\s?/.exec(text);
   if (!match) return null;
   return { from: match[1], replyExpected: match[2] === "reply expected" };
 }
@@ -192,7 +192,7 @@ export default function (pi: ExtensionAPI) {
       return;
     }
     const body = boundedReplyBytes(text);
-    const result = await run(["agent", "prompt", from, body, "--reply"], 10_000);
+    const result = await run(["agent", "prompt", from, body, "--no-reply-expected"], 10_000);
     if (result?.code === 0) {
       record({ kind: "replied", from, bytes: Buffer.byteLength(body, "utf8") });
       await clearNoReply();

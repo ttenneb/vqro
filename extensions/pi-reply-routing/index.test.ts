@@ -79,7 +79,7 @@ test("provenance labels distinguish agent requests, replies, and human input", (
     from: "alpha",
     replyExpected: true,
   });
-  expect(parseProvenanceLabel("[agent w2P:pFM · reply] done")).toEqual({
+  expect(parseProvenanceLabel("[agent w2P:pFM] done")).toEqual({
     from: "w2P:pFM",
     replyExpected: false,
   });
@@ -118,18 +118,18 @@ test("assistantText reads only text blocks", () => {
   expect(assistantText({ content: [] })).toBe("");
 });
 
-test("an agent-started run routes its final text back with --reply", async () => {
+test("an agent-started run routes its final text back with --no-reply-expected", async () => {
   const h = harness();
   await h.emit("before_agent_start", { prompt: "[agent alpha · reply expected] summarise X" });
   await h.emit("turn_end", turnText("here is the summary"));
   await h.emit("agent_settled", {});
-  expect(prompts(h)[0]?.args).toEqual(["agent", "prompt", "alpha", "here is the summary", "--reply"]);
+  expect(prompts(h)[0]?.args).toEqual(["agent", "prompt", "alpha", "here is the summary", "--no-reply-expected"]);
   expect(h.entries).toEqual([expect.objectContaining({ data: expect.objectContaining({ kind: "replied", from: "alpha" }) })]);
 });
 
-test("a reply-labelled prompt never expects another reply", async () => {
+test("a no-reply-expected label never expects another reply", async () => {
   const h = harness();
-  await h.emit("before_agent_start", { prompt: "[agent alpha · reply] thanks" });
+  await h.emit("before_agent_start", { prompt: "[agent alpha] thanks" });
   await h.emit("turn_end", turnText("ok"));
   await h.emit("agent_settled", {});
   expect(prompts(h)).toHaveLength(0);

@@ -769,7 +769,7 @@ fn agent_rename(args: &[String]) -> std::io::Result<i32> {
 fn agent_prompt(args: &[String]) -> std::io::Result<i32> {
     let Some(target) = args.first() else {
         eprintln!(
-            "usage: vqro agent prompt <target> <text> [--reply] [--wait] [--until STATUS]... [--timeout MS]"
+            "usage: vqro agent prompt <target> <text> [--no-reply-expected] [--wait] [--until STATUS]... [--timeout MS]"
         );
         return Ok(2);
     };
@@ -780,12 +780,12 @@ fn agent_prompt(args: &[String]) -> std::io::Result<i32> {
     let mut wait = false;
     let mut until = Vec::new();
     let mut timeout_ms = None;
-    let mut reply = false;
+    let mut no_reply_expected = false;
     let mut index = 2;
     while index < args.len() {
         match args[index].as_str() {
-            "--reply" => {
-                reply = true;
+            "--no-reply-expected" => {
+                no_reply_expected = true;
                 index += 1;
             }
             "--wait" => {
@@ -832,7 +832,11 @@ fn agent_prompt(args: &[String]) -> std::io::Result<i32> {
         eprintln!("--timeout requires --wait");
         return Ok(2);
     }
-    let text = labelled_prompt_text(text, agent_sender_label(reply).as_deref(), reply);
+    let text = labelled_prompt_text(
+        text,
+        agent_sender_label(no_reply_expected).as_deref(),
+        no_reply_expected,
+    );
     let response = super::send_request(&Request {
         id: "cli:agent:prompt".into(),
         method: Method::AgentPrompt(AgentPromptParams {
@@ -855,7 +859,7 @@ fn agent_prompt(args: &[String]) -> std::io::Result<i32> {
 /// labels. The label is self-declared and spoofable in trusted same-user scope,
 /// not authenticated caller identity. It is the envelope the
 /// `extensions/pi-reply-routing` Pi adapter parses.
-fn agent_sender_label(reply: bool) -> Option<String> {
+fn agent_sender_label(no_reply_expected: bool) -> Option<String> {
     // A remote/`--machine` selector resolves the inherited local pane against a
     // different runtime; never auto-label there.
     if super::target::is_remote() {
@@ -880,19 +884,22 @@ fn agent_sender_label(reply: bool) -> Option<String> {
         .and_then(|value| value.as_str())
         .filter(|name| !name.is_empty())
         .unwrap_or(pane.as_str());
-    let qualifier = if reply { "reply" } else { "reply expected" };
-    Some(format!("[agent {sender} \u{b7} {qualifier}] "))
+    if no_reply_expected {
+        Some(format!("[agent {sender}] "))
+    } else {
+        Some(format!("[agent {sender} \u{b7} reply expected] "))
+    }
 }
 
 /// Prefix a prompt with a provenance label. A deliberate leading agent or host
-/// label is preserved, but an explicit `--reply` is authoritative: it always
-/// prepends the reply envelope so a body label cannot re-arm a reply-expecting
-/// message.
-fn labelled_prompt_text(text: &str, label: Option<&str>, reply: bool) -> String {
+/// label is preserved for ordinary prompts, but `--no-reply-expected` is
+/// authoritative: it always prepends the no-reply envelope so a body label cannot
+/// re-arm a reply-expecting message.
+fn labelled_prompt_text(text: &str, label: Option<&str>, no_reply_expected: bool) -> String {
     let Some(label) = label else {
         return text.to_string();
     };
-    if !reply && (text.starts_with("[agent ") || text.starts_with("[host ")) {
+    if !no_reply_expected && (text.starts_with("[agent ") || text.starts_with("[host ")) {
         return text.to_string();
     }
     format!("{label}{text}")
@@ -984,7 +991,7 @@ fn print_agent_help() {
     eprintln!("  vqro agent read <target> [--source visible|recent|recent-unwrapped|detection] [--lines N] [--format text|ansi] [--ansi]");
     eprintln!("  vqro agent send-keys <target> <key> [key ...]");
     eprintln!(
-        "  vqro agent prompt <target> <text> [--reply] [--wait] [--until STATUS]... [--timeout MS]"
+        "  vqro agent prompt <target> <text> [--no-reply-expected] [--wait] [--until STATUS]... [--timeout MS]"
     );
     eprintln!("  vqro agent rename <target> <name>|--clear");
     eprintln!("  vqro agent focus <target>");
@@ -1024,8 +1031,8 @@ mod tests {
             "already here"
         );
         assert_eq!(
-            labelled_prompt_text("[agent beta \u{b7} reply] done", expected, false),
-            "[agent beta \u{b7} reply] done"
+            labelled_prompt_text("[agent beta \u{b7} reply expected] done", expected, false),
+            "[agent beta \u{b7} reply expected] done"
         );
         // A host notice must not acquire a reply-expecting agent label.
         assert_eq!(
@@ -1035,15 +1042,19 @@ mod tests {
     }
 
     #[test]
-    fn an_explicit_reply_envelope_wins_over_a_body_label() {
-        let reply = Some("[agent alpha \u{b7} reply] ");
+    fn an_explicit_no_reply_envelope_wins_over_a_body_label() {
+        let none_expected = Some("[agent alpha] ");
         assert_eq!(
-            labelled_prompt_text("[agent beta \u{b7} reply expected] done", reply, true),
-            "[agent alpha \u{b7} reply] [agent beta \u{b7} reply expected] done"
+            labelled_prompt_text(
+                "[agent beta \u{b7} reply expected] done",
+                none_expected,
+                true
+            ),
+            "[agent alpha] [agent beta \u{b7} reply expected] done"
         );
         assert_eq!(
-            labelled_prompt_text("plain", reply, true),
-            "[agent alpha \u{b7} reply] plain"
+            labelled_prompt_text("plain", none_expected, true),
+            "[agent alpha] plain"
         );
     }
 }
