@@ -75,7 +75,17 @@ pub struct ExtensionRequestIdentity {
     pub contribution_revision: u64,
 }
 
+struct GenericActionRequest {
+    generation: u64,
+    deadline: Instant,
+    params: serde_json::Value,
+    request_id: String,
+    respond_to: std::sync::mpsc::Sender<String>,
+    _slot: ExtensionWorkSlotGuard,
+}
+
 enum ExtensionWorkerRequest {
+    Generic(GenericActionRequest),
     Render {
         service_generation: u64,
         identity: ExtensionRequestIdentity,
@@ -113,6 +123,7 @@ struct ExtensionWorker {
     _provider_slot: Option<PaneExtensionProviderSlotGuard>,
     join: Option<std::thread::JoinHandle<()>>,
     generation: Arc<std::sync::atomic::AtomicU64>,
+    revoked: Arc<AtomicBool>,
     granted_capabilities: Vec<crate::api::schema::ExtensionServiceCapability>,
     requests: mpsc::SyncSender<ExtensionWorkerRequest>,
     result_tx: tokio::sync::mpsc::Sender<crate::events::AppEvent>,
@@ -1870,6 +1881,7 @@ fn protocol_grant_to_host_capability(
         crate::api::schema::ExtensionServiceCapability::ViewContribution
         | crate::api::schema::ExtensionServiceCapability::HostDocument
         | crate::api::schema::ExtensionServiceCapability::ActionChoices
+        | crate::api::schema::ExtensionServiceCapability::ActionInvoke
         | crate::api::schema::ExtensionServiceCapability::Unknown => None,
     }
 }
@@ -1892,7 +1904,10 @@ pub fn manager_for_plugins(
                 .contains(&crate::api::schema::PluginServiceCapability::PaneInspector)
                 && !service
                     .provides
-                    .contains(&crate::api::schema::PluginServiceCapability::ActionChoices))
+                    .contains(&crate::api::schema::PluginServiceCapability::ActionChoices)
+                && !service
+                    .provides
+                    .contains(&crate::api::schema::PluginServiceCapability::ActionInvoke))
                 || !supports_current_platform(service.platforms.as_deref())
             {
                 continue;
@@ -1953,6 +1968,8 @@ fn manager_for_specs_with_order(
         let generation =
             std::sync::Arc::new(std::sync::atomic::AtomicU64::new(next_service_generation()));
         let thread_generation = generation.clone();
+        let revoked = Arc::new(AtomicBool::new(false));
+        let thread_revoked = revoked.clone();
         let granted_capabilities = supervisor.spec.granted_capabilities.clone();
         let service_id = supervisor.spec.id.clone();
         let (request_tx, request_rx) = mpsc::sync_channel(8);
@@ -1964,7 +1981,28 @@ fn manager_for_specs_with_order(
             .name(format!("vqro-ext-{}", service_id))
             .spawn(move || {
                 while let Ok(request) = request_rx.recv() {
+                    let request = match request {
+                        ExtensionWorkerRequest::Generic(action) => {
+                            let current = !thread_revoked.load(Ordering::Acquire)
+                                && thread_generation.load(Ordering::Acquire) == action.generation
+                                && Instant::now() < action.deadline;
+                            if !current {
+                                send_generic_action_response(&action, Err("action rejected before execution: expired or retired provider".into()), false);
+                                continue;
+                            }
+                            let result = supervisor.invoke_generic_action_cancellable(action.params.clone(), &thread_revoked).map_err(|error| error.to_string());
+                            let still_current = !thread_revoked.load(Ordering::Acquire)
+                                && thread_generation.load(Ordering::Acquire) == action.generation;
+                            if supervisor.runtime.is_none() {
+                                thread_generation.store(next_service_generation(), Ordering::Release);
+                            }
+                            send_generic_action_response(&action, if still_current { result } else { Err("provider retired during execution".into()) }, true);
+                            continue;
+                        }
+                        request => request,
+                    };
                     let (queued_generation, queued_identity, queued_canceled) = match &request {
+                        ExtensionWorkerRequest::Generic(_) => unreachable!("generic actions handled above"),
                         ExtensionWorkerRequest::Render {
                             service_generation,
                             identity,
@@ -1987,6 +2025,7 @@ fn manager_for_specs_with_order(
                     }
                     let (service_generation, identity, canceled, result_permit, kind) =
                         match request {
+                            ExtensionWorkerRequest::Generic(_) => unreachable!("generic actions handled above"),
                             ExtensionWorkerRequest::Render {
                                 service_generation,
                                 identity,
@@ -2093,6 +2132,7 @@ fn manager_for_specs_with_order(
                 _provider_slot: Some(provider_slot),
                 join: Some(join),
                 generation,
+                revoked,
                 granted_capabilities,
                 requests: request_tx,
                 result_tx: event_tx.clone(),
@@ -2145,7 +2185,82 @@ pub(crate) fn manager_for_test_specs(
     manager_for_specs(specs, event_tx)
 }
 
+fn send_generic_action_response(
+    action: &GenericActionRequest,
+    result: Result<serde_json::Value, String>,
+    executed: bool,
+) {
+    let response = match result {
+        Ok(value) => {
+            serde_json::json!({"id": action.request_id, "result": {"type": "extension_action_invoked", "value": value}})
+        }
+        Err(message) => {
+            serde_json::json!({"id": action.request_id, "error": {"code": if executed { "outcome_unknown" } else { "action_rejected" }, "message": message}})
+        }
+    };
+    let _ = action.respond_to.send(response.to_string());
+}
+
 impl ExtensionServiceManager {
+    pub(crate) fn request_generic_action(
+        &self,
+        request_id: String,
+        request: crate::api::schema::ExtensionActionInvokeParams,
+        caller: crate::action_invocation::InvocationCaller,
+        respond_to: std::sync::mpsc::Sender<String>,
+    ) {
+        let reject = |message: &str| {
+            let _ = respond_to.send(serde_json::json!({"id": request_id, "error": {"code": "action_rejected", "message": message}}).to_string());
+        };
+        if request.payload.to_string().len() > 65536 {
+            reject("action payload exceeds 64 KiB");
+            return;
+        }
+        let Some(worker) = self.workers.get(&request.service_id) else {
+            reject("enabled action provider not found");
+            return;
+        };
+        if !worker
+            .granted_capabilities
+            .contains(&crate::api::schema::ExtensionServiceCapability::ActionInvoke)
+        {
+            reject("action_invoke capability not granted");
+            return;
+        }
+        let slot = match ExtensionWorkSlotGuard::acquire() {
+            Ok(slot) => slot,
+            Err(error) => {
+                reject(&error);
+                return;
+            }
+        };
+        let action = GenericActionRequest {
+            generation: worker.generation.load(Ordering::Acquire),
+            deadline: Instant::now() + Duration::from_secs(3),
+            params: serde_json::json!({"caller": caller, "payload": request.payload}),
+            request_id,
+            respond_to,
+            _slot: slot,
+        };
+        if let Err(error) = worker
+            .requests
+            .try_send(ExtensionWorkerRequest::Generic(action))
+        {
+            let request = match error {
+                mpsc::TrySendError::Full(request) | mpsc::TrySendError::Disconnected(request) => {
+                    request
+                }
+            };
+            if let ExtensionWorkerRequest::Generic(action) = request {
+                send_generic_action_response(
+                    &action,
+                    Err("action queue full or provider unavailable".into()),
+                    false,
+                );
+            }
+        }
+    }
+
     pub fn is_complete(&self) -> bool {
         self.complete_catalog
     }
@@ -2389,6 +2504,7 @@ impl Drop for ExtensionServiceManager {
         let mut joins = Vec::new();
         let mut provider_slots = Vec::new();
         for worker in self.workers.values_mut() {
+            worker.revoked.store(true, Ordering::Release);
             joins.extend(worker.join.take());
             provider_slots.extend(worker._provider_slot.take());
         }
@@ -2962,6 +3078,34 @@ impl ExtensionServiceSupervisor {
                 })
             });
         self.finish_request(result.map(|response| response.effect))
+    }
+
+    fn invoke_generic_action_cancellable(
+        &mut self,
+        params: serde_json::Value,
+        canceled: &AtomicBool,
+    ) -> Result<serde_json::Value, ExtensionServiceError> {
+        if !self
+            .spec
+            .granted_capabilities
+            .contains(&crate::api::schema::ExtensionServiceCapability::ActionInvoke)
+        {
+            return Err(ExtensionServiceError::Protocol(
+                "action_invoke capability not granted".into(),
+            ));
+        }
+        self.ensure_running_cancellable(Instant::now(), canceled)?;
+        let runtime = self
+            .runtime
+            .as_mut()
+            .ok_or_else(|| ExtensionServiceError::Protocol("service is not running".into()))?;
+        if !runtime.methods().contains("action.invoke.v1") {
+            return Err(ExtensionServiceError::Protocol(
+                "service did not advertise action.invoke.v1".into(),
+            ));
+        }
+        let result = runtime.request_cancellable("action.invoke.v1", params, canceled);
+        self.finish_request(result)
     }
 
     pub(crate) fn conformance_request(

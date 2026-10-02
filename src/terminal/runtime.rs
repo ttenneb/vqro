@@ -14,9 +14,24 @@ use crate::layout::PaneId;
 /// The PTY implementation still delegates to the legacy pane runtime while the
 /// migration proceeds, but production code now depends on this terminal-layer
 /// type instead of the pane module's implementation detail.
-pub struct TerminalRuntime(crate::pane::PaneRuntime);
+pub struct TerminalRuntime(crate::pane::PaneRuntime, Option<u64>);
 
 impl TerminalRuntime {
+    fn wrap(runtime: crate::pane::PaneRuntime) -> Self {
+        let birth = runtime
+            .child_pid()
+            .and_then(crate::platform::invocation_process_birth);
+        Self(runtime, birth)
+    }
+
+    pub(crate) fn invocation_root_birth(&self) -> Option<u64> {
+        self.1
+    }
+
+    pub(crate) fn invocation_foreground_process_group(&self) -> Option<u32> {
+        self.0.invocation_foreground_process_group()
+    }
+
     pub fn shutdown(self) {
         self.0.shutdown();
     }
@@ -78,7 +93,9 @@ impl TerminalRuntime {
             render_notify,
             render_dirty,
         )
-        .map(Self)
+        // Imported roots do not carry an original process-birth proof. Terminal recovery
+        // remains usable, but action authority is unknown until a fresh owned runtime.
+        .map(|runtime| Self(runtime, None))
     }
 
     // Wrapper mirrors pane runtime construction arguments.
@@ -111,7 +128,7 @@ impl TerminalRuntime {
             render_notify,
             render_dirty,
         )
-        .map(Self)
+        .map(Self::wrap)
     }
 
     // Wrapper mirrors pane runtime construction arguments.
@@ -146,7 +163,7 @@ impl TerminalRuntime {
             render_notify,
             render_dirty,
         )
-        .map(Self)
+        .map(Self::wrap)
     }
 
     // Wrapper mirrors pane runtime construction arguments.
@@ -181,7 +198,7 @@ impl TerminalRuntime {
             render_notify,
             render_dirty,
         )
-        .map(Self)
+        .map(Self::wrap)
     }
 
     // Wrapper mirrors pane runtime construction arguments, including detection policy.
@@ -216,7 +233,7 @@ impl TerminalRuntime {
             render_notify,
             render_dirty,
         )
-        .map(Self)
+        .map(Self::wrap)
     }
 
     pub fn apply_host_terminal_theme(&self, theme: crate::terminal_theme::TerminalTheme) {
@@ -590,7 +607,7 @@ impl TerminalRuntime {
 
     pub(crate) fn test_with_channel(cols: u16, rows: u16) -> (Self, mpsc::Receiver<Bytes>) {
         let (runtime, rx) = crate::pane::PaneRuntime::test_with_channel(cols, rows);
-        (Self(runtime), rx)
+        (Self::wrap(runtime), rx)
     }
 
     pub(crate) fn test_with_channel_capacity(
@@ -600,11 +617,11 @@ impl TerminalRuntime {
     ) -> (Self, mpsc::Receiver<Bytes>) {
         let (runtime, rx) =
             crate::pane::PaneRuntime::test_with_channel_capacity(cols, rows, capacity);
-        (Self(runtime), rx)
+        (Self::wrap(runtime), rx)
     }
 
     pub(crate) fn test_with_screen_bytes(cols: u16, rows: u16, bytes: &[u8]) -> Self {
-        Self(crate::pane::PaneRuntime::test_with_screen_bytes(
+        Self::wrap(crate::pane::PaneRuntime::test_with_screen_bytes(
             cols, rows, bytes,
         ))
     }
@@ -619,7 +636,7 @@ impl TerminalRuntime {
         scrollback_limit_bytes: usize,
         bytes: &[u8],
     ) -> Self {
-        Self(crate::pane::PaneRuntime::test_with_scrollback_bytes(
+        Self::wrap(crate::pane::PaneRuntime::test_with_scrollback_bytes(
             cols,
             rows,
             scrollback_limit_bytes,
@@ -641,6 +658,6 @@ impl TerminalRuntime {
             bytes,
             channel_capacity,
         );
-        (Self(runtime), rx)
+        (Self::wrap(runtime), rx)
     }
 }

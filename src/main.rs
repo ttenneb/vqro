@@ -13,6 +13,7 @@ const NESTED_HERDR_MESSAGES: [&str; 6] = [
 
 pub mod acknowledgement;
 pub mod action_choices;
+mod action_invocation;
 mod admission;
 mod agent_resume;
 mod agent_view_eval;

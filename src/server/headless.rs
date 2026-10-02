@@ -3510,7 +3510,7 @@ impl HeadlessServer {
         skip_default_workspace_for_request: bool,
     ) -> bool {
         let origin = match &msg.origin {
-            api::ApiOrigin::LocalSocket => "local_socket",
+            api::ApiOrigin::LocalSocket | api::ApiOrigin::LocalSocketPeer(_) => "local_socket",
             api::ApiOrigin::NativeEndpoint { client_id, boot_id } => {
                 tracing::trace!(
                     client_id,
@@ -3547,6 +3547,20 @@ impl HeadlessServer {
                     .to_string()
             });
             let _ = msg.respond_to.send(response);
+            return false;
+        }
+
+        if let api::schema::Method::ExtensionActionInvoke(params) = &msg.request.method {
+            let caller = match &msg.origin {
+                api::ApiOrigin::LocalSocketPeer(peer) => self.app.invocation_caller(peer),
+                _ => crate::action_invocation::InvocationCaller::Unknown,
+            };
+            self.app.extension_services.request_generic_action(
+                msg.request.id.clone(),
+                params.clone(),
+                caller,
+                msg.respond_to,
+            );
             return false;
         }
 

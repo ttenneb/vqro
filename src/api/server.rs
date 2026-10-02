@@ -205,6 +205,7 @@ fn handle_connection_with_stop(
         debug!(err = %err, "api connection write timeout unavailable");
     }
 
+    let initial_peer_birth = crate::platform::socket_peer_birth(&stream);
     let Some(line) = read_initial_request_line(&mut stream)? else {
         return Ok(());
     };
@@ -312,6 +313,49 @@ fn handle_connection_with_stop(
             let response =
                 wait_for_output(request_id.clone(), params, &mut stream, api_tx, running)?;
             finish_wait_response(&mut stream, response, &request_id, method, changes_ui)
+        }
+        Method::ExtensionActionInvoke(params) => {
+            let Some(peer) = crate::platform::invocation_peer(&stream) else {
+                return write_text_line_allow_disconnect(
+                    &mut stream,
+                    &error_response_json(
+                        request_id,
+                        "caller_unknown",
+                        "local Linux peer identity is unavailable".into(),
+                    ),
+                );
+            };
+            if peer.ancestry.first().map(|entry| (entry.pid, entry.birth)) != initial_peer_birth {
+                return write_text_line_allow_disconnect(
+                    &mut stream,
+                    &error_response_json(
+                        request_id,
+                        "caller_unknown",
+                        "peer process incarnation changed during request".into(),
+                    ),
+                );
+            }
+            let (respond_to, response_rx) = std::sync::mpsc::channel();
+            let message = ApiRequestMessage {
+                origin: crate::api::ApiOrigin::LocalSocketPeer(peer),
+                request: Request {
+                    id: request_id.clone(),
+                    method: Method::ExtensionActionInvoke(params),
+                },
+                respond_to,
+                response_write_complete: None,
+                stream_active: None,
+            };
+            let response = if api_tx.send(message).is_err() {
+                error_response_json(
+                    request_id.clone(),
+                    "server_unavailable",
+                    "server is unavailable".into(),
+                )
+            } else {
+                response_rx.recv_timeout(APP_RESPONSE_TIMEOUT).unwrap_or_else(|_| error_response_json(request_id.clone(), "outcome_unknown", "action outcome unknown; inspect the extension operation before retrying".into()))
+            };
+            write_text_line_allow_disconnect(&mut stream, &response)
         }
         method_body => {
             let (response_write_tx, response_write_rx) = std::sync::mpsc::channel();
@@ -578,6 +622,7 @@ pub(crate) fn api_method_name(method: &Method) -> &'static str {
         Method::ExtensionServiceBindingRevoke(_) => "extension.service.binding.revoke",
         Method::ExtensionServiceBindingInvoke(_) => "extension.service.binding.invoke",
         Method::ExtensionDoctor(_) => "extension.doctor",
+        Method::ExtensionActionInvoke(_) => "extension.action.invoke",
     }
 }
 

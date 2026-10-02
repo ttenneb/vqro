@@ -116,6 +116,7 @@ pub(crate) fn request_changes_ui(request: &Request) -> bool {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ApiOrigin {
     LocalSocket,
+    LocalSocketPeer(crate::action_invocation::InvocationPeer),
     NativeEndpoint { client_id: u64, boot_id: String },
     LegacyEndpointV1 { client_id: u64, boot_id: String },
 }

@@ -53,6 +53,28 @@ pub(crate) fn sample_terminal_telemetry(
     TerminalTelemetrySample::Unsupported
 }
 
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn socket_peer_birth(_stream: &crate::ipc::LocalStream) -> Option<(u32, u64)> {
+    None
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn invocation_peer(
+    _stream: &crate::ipc::LocalStream,
+) -> Option<crate::action_invocation::InvocationPeer> {
+    None
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn invocation_peer_is_current(_peer: &crate::action_invocation::InvocationPeer) -> bool {
+    false
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn invocation_process_birth(_pid: u32) -> Option<u64> {
+    None
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Signal {
     Hangup,

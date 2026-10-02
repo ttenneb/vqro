@@ -333,6 +333,9 @@ pub enum ResponseResult {
     ExtensionDoctorDiagnostic {
         diagnostic: crate::extension_health::ExtensionDoctorDiagnosticV1,
     },
+    ExtensionActionInvoked {
+        value: serde_json::Value,
+    },
     PluginActionList {
         actions: Vec<PluginActionInfo>,
     },

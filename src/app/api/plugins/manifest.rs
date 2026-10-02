@@ -477,6 +477,18 @@ fn normalize_manifest_service(
             "action choice services must request action_choices".to_string(),
         ));
     }
+    if service
+        .provides
+        .contains(&PluginServiceCapability::ActionInvoke)
+        && !service
+            .capabilities
+            .contains(&ExtensionServiceCapability::ActionInvoke)
+    {
+        return Err((
+            "missing_plugin_service_capability",
+            "action invocation services must request action_invoke".into(),
+        ));
+    }
     let requested_capabilities = service.capabilities;
     // Linking and enabling trusted local code grants only this small protocol allowlist. It does
     // not sandbox the subprocess from the user's operating-system authority.

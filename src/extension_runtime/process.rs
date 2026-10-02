@@ -254,6 +254,7 @@ pub(crate) fn legacy_capability(
         "view_contribution" => Some(ExtensionServiceCapability::ViewContribution),
         "host_document" => Some(ExtensionServiceCapability::HostDocument),
         "action_choices" => Some(ExtensionServiceCapability::ActionChoices),
+        "action_invoke" => Some(ExtensionServiceCapability::ActionInvoke),
         "focus_terminal" => Some(ExtensionServiceCapability::FocusTerminal),
         "terminal_interrupt" => Some(ExtensionServiceCapability::TerminalInterrupt),
         _ => None,
@@ -463,6 +464,11 @@ impl ProcessRuntime {
             "host.document.render",
             "host.document.action",
         ];
+        if granted_capabilities
+            .contains(&crate::api::schema::ExtensionServiceCapability::ActionInvoke)
+        {
+            host_methods.push("action.invoke.v1");
+        }
         if requires_choices {
             host_methods.push(crate::action_choices::ACTION_CHOICES_LIST_METHOD_V1);
             host_methods.push(crate::action_choices::ACTION_CHOICE_INVOKE_METHOD_V1);
@@ -651,7 +657,14 @@ fn validate_negotiation(
             .contains(&crate::api::schema::ExtensionServiceCapability::TerminalInterrupt);
     let requires_choices = granted_capabilities
         .contains(&crate::api::schema::ExtensionServiceCapability::ActionChoices);
-    if (requires_view && !hello.methods.iter().any(|method| method == "view.render"))
+    let requires_generic_action = granted_capabilities
+        .contains(&crate::api::schema::ExtensionServiceCapability::ActionInvoke);
+    if (requires_generic_action
+        && !hello
+            .methods
+            .iter()
+            .any(|method| method == "action.invoke.v1"))
+        || (requires_view && !hello.methods.iter().any(|method| method == "view.render"))
         || (requires_document
             && !hello
                 .methods
