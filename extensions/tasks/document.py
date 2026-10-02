@@ -24,6 +24,8 @@ def project(store, snapshot):
     tasks = [store.task(row[0]) for row in store.db.execute("SELECT id FROM tasks ORDER BY id")]
     items = [{"id": PREFIX + "view:vqro.tasks:tree", "role": "section", "label": "Tasks",
               "detail": "Read-only durable attention · live status in full view"}]
+    items.extend({"id": PREFIX + f"measure:{index}", "role": "section", "label": text}
+                 for index, text in enumerate(("waiting on you", "blocked", "unavailable")))
     counts, rows = {}, []
     for task in tasks:
         categories = attention(task, placements)

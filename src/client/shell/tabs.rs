@@ -27,8 +27,8 @@ pub(crate) fn render_tab_bar(
         .map(|tab| {
             let label = tab_label(tab);
             let badge_width = attention
-                .and_then(|nav| nav.badges.get(&("tab".into(), tab.tab_id.clone())))
-                .map_or(0, |label| display_width(label).saturating_add(3));
+                .and_then(|nav| nav.badge("tab", &tab.tab_id))
+                .map_or(0, |label| display_width(&label.label).saturating_add(3));
             display_width(&label)
                 .saturating_add(badge_width)
                 .saturating_add(4)
@@ -130,12 +130,10 @@ pub(crate) fn render_tab_bar(
             right_padding = padding.saturating_sub(left) as usize,
         );
         put_text(buffer, rect.x, rect.y, rect.width, &text, style);
-        if let Some((nav, badge)) = attention.and_then(|nav| {
-            nav.badges
-                .get(&("tab".into(), tab.tab_id.clone()))
-                .map(|badge| (nav, badge))
-        }) {
-            let badge_width = display_width(badge)
+        if let Some((nav, badge)) =
+            attention.and_then(|nav| nav.badge("tab", &tab.tab_id).map(|badge| (nav, badge)))
+        {
+            let badge_width = display_width(&badge.label)
                 .saturating_add(2)
                 .min(rect.width.saturating_sub(2));
             let badge_rect = Rect::new(
@@ -149,16 +147,11 @@ pub(crate) fn render_tab_bar(
                 badge_rect.x,
                 badge_rect.y,
                 badge_rect.width,
-                &format!("[{badge}]"),
+                &format!("[{}]", badge.label),
                 Style::default().fg(palette.peach).bg(palette.surface0),
             );
-            hits.attention.push(AttentionHit {
-                rect: badge_rect,
-                plugin: nav.plugin.clone(),
-                entrypoint: nav.entrypoint.clone(),
-                kind: "tab".into(),
-                ids: vec![tab.tab_id.clone()],
-            });
+            hits.attention
+                .push(nav.hit(badge_rect, "tab", vec![tab.tab_id.clone()]));
         }
         hits.tabs.push((rect, tab.tab_id.clone()));
         first_visible.get_or_insert(index);

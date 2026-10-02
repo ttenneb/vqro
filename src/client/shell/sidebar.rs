@@ -470,6 +470,17 @@ pub(crate) fn render_sidebar(
                 upstream: checkout.and_then(|checkout| checkout.upstream.as_deref()),
             },
         );
+        super::attention::render_workspace_badge(
+            buffer,
+            rect,
+            endpoint
+                .filter(|endpoint| endpoint.current_host_documents().is_some())
+                .and_then(|endpoint| endpoint.attention.as_ref()),
+            &workspace.workspace_id,
+            (!entry.indented).then_some(repository).flatten(),
+            palette,
+            hits,
+        );
         if let Some((link_rect, path)) = rendered_links
             .repository
             .zip(repository.and_then(|repository| repository.repository_path.as_ref()))
@@ -610,15 +621,29 @@ pub(crate) fn render_sidebar(
         }
     }
 
-    super::render_agent_panel(
-        buffer,
-        detail_area,
-        snapshot,
-        config,
-        host_documents,
-        state.agent_scroll,
-        hits,
-    );
+    if state.show_agents {
+        super::render_agent_panel(
+            buffer,
+            detail_area,
+            snapshot,
+            config,
+            host_documents,
+            state.agent_scroll,
+            hits,
+        );
+        super::attention::render_agents_toggle(buffer, detail_area, config, hits);
+    } else {
+        super::attention::render_panel(
+            buffer,
+            detail_area,
+            endpoint
+                .filter(|endpoint| endpoint.current_host_documents().is_some())
+                .and_then(|endpoint| endpoint.attention.as_ref()),
+            config,
+            state.agent_scroll,
+            hits,
+        );
+    }
 
     hits.sidebar_toggle = Rect::new(
         area.right().saturating_sub(2),

@@ -1193,6 +1193,7 @@ fn agent_sidebar_honors_priority_symbols_tokens_and_stable_hits() {
     state.set_snapshot(Box::new(projected));
     state.set_pane_surface(surface());
 
+    state.show_agents = true; // Agents remain available behind the native Tasks toggle.
     let frame = state.compose(106, 30).expect("agent sidebar frame");
     let text = frame
         .cells
@@ -1297,6 +1298,7 @@ fn muted_agent_sidebar_rows_do_not_stack_terminal_faint() {
     let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
     state.set_snapshot(Box::new(projected));
     state.set_pane_surface(surface());
+    state.show_agents = true;
     let frame = state.compose(106, 30).expect("agent sidebar frame");
     let row = state.hits.agents.first().expect("agent row hit").0;
     let buffer = frame.to_ratatui_buffer().expect("agent sidebar buffer");
@@ -1399,6 +1401,7 @@ fn active_agent_view_controls_sidebar_order_and_focus_indices() {
     let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
     state.set_snapshot(Box::new(projected));
     state.set_pane_surface(surface());
+    state.show_agents = true;
     state.compose(106, 30).expect("filtered agent sidebar");
     assert_eq!(
         state
@@ -1472,6 +1475,7 @@ fn agent_sort_toggle_is_client_local_and_persists_per_endpoint() {
     let mut state = ClientShellState::new(config);
     state.set_snapshot(Box::new(projected));
     state.set_pane_surface(surface());
+    state.show_agents = true;
     state.compose(106, 30).expect("agent sidebar frame");
     let toggle = state.hits.agent_sort_toggle;
 

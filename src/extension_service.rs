@@ -2026,7 +2026,7 @@ fn manager_for_specs_with_documents(
                                     .and_then(|value| value["document_revision"].as_u64())
                                 {
                                     let version = (action.generation, revision);
-                                    if document_version.is_none_or(|previous: (u64, u64)| previous.0 != version.0 || previous.1 < version.1) {
+                                    if document_version_changed(document_version, version) {
                                         // Coalesce at the provider version, not per CLI read/client/frame.
                                         if document_events.blocking_send(crate::events::AppEvent::ExtensionDocumentRevisionChanged {
                                             namespace: namespace.clone(), service_id: thread_service_id.clone(), generation: action.generation, revision,
@@ -2223,6 +2223,11 @@ pub(crate) fn manager_for_test_specs(
     event_tx: tokio::sync::mpsc::Sender<crate::events::AppEvent>,
 ) -> ExtensionServiceManager {
     manager_for_specs(specs, event_tx)
+}
+
+// Provider revisions are opaque equality tokens, not monotonic sequence authority.
+fn document_version_changed(previous: Option<(u64, u64)>, current: (u64, u64)) -> bool {
+    previous != Some(current)
 }
 
 fn send_generic_action_response(
@@ -3340,6 +3345,94 @@ mod tests {
         assert!(manager
             .request_view(identity_for(1, "view", "w1:p1", 1), serde_json::json!({}))
             .is_err());
+    }
+
+    #[test]
+    fn opaque_document_versions_compare_equality_not_numeric_order() {
+        assert!(document_version_changed(None, (1, 9)));
+        assert!(!document_version_changed(Some((1, 9)), (1, 9)));
+        assert!(document_version_changed(Some((1, 9)), (1, 2)));
+        assert!(document_version_changed(Some((1, 9)), (2, 9)));
+    }
+
+    #[test]
+    fn generic_action_versions_coalesce_and_map_exact_document_namespace() {
+        let root = std::env::temp_dir().join(format!(
+            "vqro-document-version-{}-{}",
+            std::process::id(),
+            next_service_generation()
+        ));
+        std::fs::create_dir(&root).expect("private test store");
+        let (events, mut received) = tokio::sync::mpsc::channel(16);
+        let id = "vqro.tasks.core";
+        let manager = manager_for_specs_with_documents(
+            vec![ExtensionServiceSpec {
+                id: id.into(),
+                command: vec![
+                    "python3".into(),
+                    "-B".into(),
+                    "provider.py".into(),
+                    "--native-attention".into(),
+                    "--data-dir".into(),
+                    root.display().to_string(),
+                ],
+                cwd: std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("extensions/tasks"),
+                priority: 1,
+                granted_capabilities: vec![
+                    crate::api::schema::ExtensionServiceCapability::ActionInvoke,
+                    crate::api::schema::ExtensionServiceCapability::HostDocument,
+                ],
+            }],
+            &std::collections::HashMap::new(),
+            &std::collections::HashMap::from([(id.into(), "vqro.tasks".into())]),
+            events,
+        );
+        let invoke = |payload: serde_json::Value| {
+            let (tx, rx) = std::sync::mpsc::channel();
+            manager.request_generic_action(
+                "test".into(),
+                crate::api::schema::ExtensionActionInvokeParams {
+                    service_id: id.into(),
+                    payload,
+                },
+                crate::action_invocation::InvocationCaller::HumanUnverified {
+                    terminal_id: "term_fixture".into(),
+                    uid: 0,
+                },
+                tx,
+            );
+            let response: serde_json::Value = serde_json::from_str(
+                &rx.recv_timeout(std::time::Duration::from_secs(3))
+                    .expect("response"),
+            )
+            .expect("json");
+            assert_eq!(response["result"]["value"]["ok"], true, "{response}");
+            response["result"]["value"]["document_revision"]
+                .as_u64()
+                .expect("version")
+        };
+        assert_eq!(invoke(serde_json::json!({"action":"status"})), 0);
+        assert!(
+            matches!(received.try_recv().expect("first version"),crate::events::AppEvent::ExtensionDocumentRevisionChanged {namespace, service_id, revision:0,..} if namespace == "vqro.tasks" && service_id == id)
+        );
+        assert_eq!(invoke(serde_json::json!({"action":"status"})), 0);
+        assert!(
+            received.try_recv().is_err(),
+            "equal version must not schedule work"
+        );
+        let payload = serde_json::json!({"action":"decision","title":"quiet write","done_when":"Recorded.","operation_id":"same"});
+        assert_eq!(invoke(payload.clone()), 1);
+        assert!(matches!(
+            received.try_recv().expect("changed version"),
+            crate::events::AppEvent::ExtensionDocumentRevisionChanged { revision: 1, .. }
+        ));
+        assert_eq!(invoke(payload), 1);
+        assert!(
+            received.try_recv().is_err(),
+            "historical receipt replay must not reschedule work"
+        );
+        drop(manager);
+        std::fs::remove_dir_all(root).expect("remove private store");
     }
 
     #[test]

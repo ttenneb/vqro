@@ -606,6 +606,17 @@ def emit(value):
     sys.stdout.flush()
 
 
+def read_only_store(directory):
+    """Observation connection: never initialize, migrate or write the Tasks store."""
+    store = Store.__new__(Store)
+    store.db = sqlite3.connect((Path(directory) / "tasks.sqlite").resolve().as_uri() + "?mode=ro", uri=True, timeout=1, isolation_level=None)
+    store.db.row_factory = sqlite3.Row
+    if store.db.execute("PRAGMA user_version").fetchone()[0] != 2:
+        store.db.close()
+        raise ValueError("Tasks document requires current store version")
+    return store
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--data-dir")
@@ -660,9 +671,7 @@ def main():
             from document import project
             try:
                 if document_store is None:
-                    document_store = Store.__new__(Store)
-                    document_store.db = sqlite3.connect((Path(directory) / "tasks.sqlite").resolve().as_uri() + "?mode=ro", uri=True, timeout=1, isolation_level=None)
-                    document_store.db.row_factory = sqlite3.Row
+                    document_store = read_only_store(directory)
                 document_store.db.execute("BEGIN")
                 if document_store.db.execute("PRAGMA user_version").fetchone()[0] != 2:
                     raise ValueError("Tasks document requires current store version")

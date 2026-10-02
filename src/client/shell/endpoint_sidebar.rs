@@ -688,6 +688,19 @@ pub(super) fn render_expanded(
                         upstream: checkout.and_then(|checkout| checkout.upstream.as_deref()),
                     },
                 );
+                if &endpoint.endpoint_id == state.active_endpoint_id {
+                    super::attention::render_workspace_badge(
+                        buffer,
+                        rect,
+                        endpoint
+                            .current_host_documents()
+                            .and_then(|_| endpoint.attention.as_ref()),
+                        &workspace.workspace_id,
+                        (!entry.indented).then_some(repository).flatten(),
+                        palette,
+                        hits,
+                    );
+                }
                 if endpoint.endpoint_id.is_local() {
                     if let Some((link_rect, path)) = rendered_links
                         .repository
@@ -830,16 +843,27 @@ pub(super) fn render_expanded(
             }),
         );
     }
-    super::endpoint_agents::render_expanded(
-        buffer,
-        detail_area,
-        active_snapshot.and_then(|snapshot| snapshot.agent_view_label.as_deref()),
-        state.endpoints,
-        state.active_endpoint_id,
-        config,
-        state.agent_scroll,
-        hits,
-    );
+    if state.show_agents {
+        super::endpoint_agents::render_expanded(
+            buffer,
+            detail_area,
+            active_snapshot.and_then(|snapshot| snapshot.agent_view_label.as_deref()),
+            state.endpoints,
+            state.active_endpoint_id,
+            config,
+            state.agent_scroll,
+            hits,
+        );
+        super::attention::render_agents_toggle(buffer, detail_area, config, hits);
+    } else {
+        let nav = state
+            .endpoints
+            .iter()
+            .find(|endpoint| &endpoint.endpoint_id == state.active_endpoint_id)
+            .filter(|endpoint| endpoint.current_host_documents().is_some())
+            .and_then(|endpoint| endpoint.attention.as_ref());
+        super::attention::render_panel(buffer, detail_area, nav, config, state.agent_scroll, hits);
+    }
     hits.sidebar_toggle = Rect::new(
         area.right().saturating_sub(2),
         area.bottom().saturating_sub(1),

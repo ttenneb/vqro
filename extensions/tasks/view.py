@@ -116,13 +116,14 @@ def attention_scope():
     if not raw:
         return None
     value = json.loads(raw)
-    if value.get("kind") not in ("workspace", "tab", "session") or not isinstance(value.get("ids"), list) or not all(isinstance(key, str) for key in value["ids"]):
+    if value.get("kind") not in ("workspace", "tab", "session", "all") or not isinstance(value.get("ids"), list) or not all(isinstance(key, str) for key in value["ids"]):
         raise ValueError("invalid attention scope")
+    value["durable"] = True
     return value
 
 
 def in_scope(task, placements, scope):
-    if not scope:
+    if not scope or scope["kind"] == "all":
         return True
     placement = (placements or {}).get((task.get("owner") or {}).get("terminal_id"))
     if scope["kind"] == "session":
@@ -224,9 +225,12 @@ def project(tasks, agents, idle_since, selected, attention, collapsed, days, now
         if "old" not in selected and old_final(task, days, wall):
             continue
         if scope:
-            if in_scope(task, placements, scope) and (all_tasks or durable_attention(task, placements)):
-                visible.add(key)
-            continue
+            if not in_scope(task, placements, scope):
+                continue
+            if scope.get("durable", True):
+                if all_tasks or durable_attention(task, placements):
+                    visible.add(key)
+                continue
         if all_tasks or categories(task, pending_parents, agents, idle_since, now) & (selected - {"old"}) or (attention and task["state"] not in FINAL and (availability(task["owner"], agents) == "unavailable here" or stale_acceptors(task, agents))):
             visible.add(key)
     context = set(visible)
@@ -345,7 +349,7 @@ def run(screen):
     reader = Reader(scope)
     reader.start()
     model = {"tasks": {}, "agents": None, "idle_since": {}, "error": "Loading Tasks…", "revision": None}
-    selected, attention, collapsed, days, scroll, all_tasks = set(DEFAULT), True, set(), 7, 0, False
+    selected, attention, collapsed, days, scroll, all_tasks = (set(DEFAULT) if not scope else {"waiting on me", "blocked"}), True, set(), 7, 0, False
     notice = "Read only · click owner · q closes · idle observed locally"
     rows, pending_parents, dirty, projection_due = [], set(), True, 0
     try:
@@ -377,7 +381,7 @@ def run(screen):
             def button(y, x, text, action):
                 draw(y, x, text, curses.A_BOLD)
                 hits.append((y, x, x + len(text), action))
-            draw(0, 0, "Tasks · " + (f"{scope['kind']} {', '.join(scope['ids'])} · durable attention" if scope else "read-only · idle = observed lower bound"), curses.A_BOLD)
+            draw(0, 0, "Tasks · " + (f"{scope['kind']} {', '.join(scope['ids'])} · " + ("durable attention" if scope.get("durable", True) and not all_tasks else "scoped filters") if scope else "read-only · idle = observed lower bound"), curses.A_BOLD)
             y, x = 1, 0
             for text, action in [("[needs attention]", "default"), ("[all tasks]", "all"), (f"age {days}d", None), ("[-]", "age-"), ("[+]", "age+")]:
                 if x and x + len(text) >= width:
@@ -453,7 +457,9 @@ def run(screen):
                     for row, left, right, action in hits:
                         if row == my and left <= mx < right:
                             if action == "default":
-                                selected, attention, scroll, all_tasks = set(DEFAULT), True, 0, False
+                                selected, attention, scroll, all_tasks = (set(DEFAULT) if not scope else {"waiting on me", "blocked"}), True, 0, False
+                                if scope:
+                                    scope["durable"] = True
                             elif action == "all":
                                 selected = (set(FILTERS) - {"old"}) | (selected & {"old"})
                                 attention, scroll, all_tasks = False, 0, True
@@ -462,6 +468,8 @@ def run(screen):
                             elif action == "age+":
                                 days = min(365, days + 1)
                             else:
+                                if scope and action != "old":
+                                    scope["durable"] = False
                                 selected.symmetric_difference_update({action})
                                 if action != "old":
                                     all_tasks = False

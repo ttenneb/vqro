@@ -26,6 +26,7 @@ fn missing_attention_pane_method_disables_only_click() {
         entrypoint: "read".into(),
         kind: "tab".into(),
         ids: vec!["tab_1".into()],
+        document_key: ("independent.attention".into(), 7, 2),
     };
     let mut outcome = ClientShellInput::default();
     state.open_attention(hit.clone(), &mut outcome);
@@ -42,6 +43,51 @@ fn missing_attention_pane_method_disables_only_click() {
         "plugin.pane.open"
     );
     state.set_endpoint_methods(Some(vec!["pane.focus".into(), "plugin.pane.open".into()]));
-    state.open_attention(hit, &mut outcome);
+    state.open_attention(hit.clone(), &mut outcome);
     assert!(outcome.actions.iter().any(|action| matches!(action, ClientShellAction::Endpoint {request,..} if matches!(&request.method, crate::api::schema::Method::PluginPaneOpen(params) if params.env.get("VQRO_ATTENTION_SCOPE").is_some_and(|value| value.contains("tab_1"))))));
+    state.endpoints[0]
+        .attention
+        .as_mut()
+        .expect("cached nav")
+        .document_key
+        .1 += 1;
+    let mut stale = ClientShellInput::default();
+    state.open_attention(hit, &mut stale);
+    assert!(
+        stale.actions.is_empty(),
+        "replacement before redraw must reject old badge"
+    );
+}
+
+#[test]
+fn tasks_default_is_unavailable_not_zero_and_agents_toggle_keeps_recovery() {
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    state.set_snapshot(Box::new(snapshot()));
+    state.set_pane_surface(surface());
+    let frame = state.compose(106, 30).expect("frame");
+    let text = frame
+        .cells
+        .iter()
+        .map(|cell| cell.symbol.as_str())
+        .collect::<String>();
+    assert!(text.contains("Tasks unavailable"));
+    assert!(!text.contains("No durable attention"));
+    assert!(!state.show_agents);
+    let toggle = state.hits.attention_toggle;
+    state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: toggle.x,
+        row: toggle.y,
+        modifiers: KeyModifiers::empty(),
+    })]);
+    assert!(state.show_agents);
+    let frame = state.compose(106, 30).expect("agents frame");
+    let text = frame
+        .cells
+        .iter()
+        .map(|cell| cell.symbol.as_str())
+        .collect::<String>();
+    assert!(text.contains("agents"));
+    assert!(text.contains("[tasks]"));
+    assert!(state.snapshot.is_some());
 }
