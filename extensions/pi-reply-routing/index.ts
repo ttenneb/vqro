@@ -6,12 +6,9 @@ export const MAX_REPLY_BYTES = 8192;
 /** The no-reply attention label is a volatile observation, not durable state. */
 export const METADATA_TTL_MS = 600_000;
 
-export type SenderKind = "human" | "agent" | "host";
-
 export interface Origin {
-  kind: SenderKind;
   /** Agent name, or pane id when the sender had no registered name. */
-  from?: string;
+  from: string;
   replyExpected: boolean;
 }
 
@@ -22,12 +19,9 @@ export interface Origin {
  * caller identity.
  */
 export function parseProvenanceLabel(text: string): Origin | null {
-  if (/^\[host notice\]\s?/.test(text)) {
-    return { kind: "host", replyExpected: false };
-  }
   const match = /^\[agent ([^\]\s]+) · (reply expected|reply)\]\s?/.exec(text);
   if (!match) return null;
-  return { kind: "agent", from: match[1], replyExpected: match[2] === "reply expected" };
+  return { from: match[1], replyExpected: match[2] === "reply expected" };
 }
 
 export function boundedReplyBytes(text: string, maxBytes = MAX_REPLY_BYTES): string {
@@ -70,7 +64,6 @@ export default function (pi: ExtensionAPI) {
 
   let origin: Origin | null = null;
   let explicitSend = false;
-  let finished = false;
   let selfName: string | undefined;
   let metadataSeq = Date.now() * 1000;
 
@@ -138,9 +131,8 @@ export default function (pi: ExtensionAPI) {
     // Extension-injected input is neither a human gesture nor a routed agent
     // message; leave the current turn origin untouched.
     if (event.source === "extension") return { action: "continue" };
-    origin = parseProvenanceLabel(event.text) ?? { kind: "human", replyExpected: false };
+    origin = parseProvenanceLabel(event.text);
     explicitSend = false;
-    finished = false;
     return { action: "continue" };
   });
 
@@ -157,10 +149,8 @@ export default function (pi: ExtensionAPI) {
   pi.on("agent_settled", async (_event, ctx) => {
     const current = origin;
     origin = null;
-    if (!enabled || finished || !current || current.kind !== "agent" || !current.replyExpected) return;
-    finished = true;
+    if (!enabled || !current || !current.replyExpected) return;
     const from = current.from;
-    if (!from) return;
     await resolveSelf();
     if (from === selfName || from === pane) return;
     if (explicitSend) {

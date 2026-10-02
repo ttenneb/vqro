@@ -730,9 +730,6 @@ fn agent_command() -> Command {
                 .arg(flag("reply").help(
                     "Mark this as a reply to an agent message; the auto-label says no reply is expected",
                 ))
-                .arg(flag("no-label").help(
-                    "Do not auto-label with the sending agent's provenance when run inside an agent pane",
-                ))
                 .arg(
                     flag("wait")
                         .help("Wait for the first matching state observed after submission"),
@@ -750,7 +747,7 @@ fn agent_command() -> Command {
                         .help("Fail after this many milliseconds"),
                 )
                 .after_help(
-                    "If the agent is already blocked, submission is rejected with agent_blocked before any input is sent. When an accepted submission starts from another non-working state, --wait requires an observed working or blocked state within 5000ms; otherwise it returns agent_prompt_stalled. A caller timeout that expires first returns timeout. It then matches idle, done, or blocked by default, or any exact --until state. It does not track turns: if the agent is already working, that active turn's completion may match. When run from inside a pane that hosts a detected agent, the text is prefixed automatically with a readable provenance label naming the sender and whether a reply is expected; --reply marks a reply, --no-label suppresses the label. The label is self-declared, not authenticated caller identity.",
+                    "If the agent is already blocked, submission is rejected with agent_blocked before any input is sent. When an accepted submission starts from another non-working state, --wait requires an observed working or blocked state within 5000ms; otherwise it returns agent_prompt_stalled. A caller timeout that expires first returns timeout. It then matches idle, done, or blocked by default, or any exact --until state. It does not track turns: if the agent is already working, that active turn's completion may match. When run from inside a pane that hosts a detected agent, the text is prefixed automatically with a readable provenance label naming the sender and whether a reply is expected; --reply marks a reply. The label is self-declared, not authenticated caller identity.",
                 ),
         )
         .subcommand(

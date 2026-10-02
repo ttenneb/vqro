@@ -76,18 +76,16 @@ afterEach(() => {
   process.env = { ...savedEnv };
 });
 
-test("provenance labels distinguish human, agent, reply, and host", () => {
+test("provenance labels distinguish agent requests, replies, and human input", () => {
   expect(parseProvenanceLabel("[agent alpha · reply expected] summarise X")).toEqual({
-    kind: "agent",
     from: "alpha",
     replyExpected: true,
   });
   expect(parseProvenanceLabel("[agent w2P:pFM · reply] done")).toEqual({
-    kind: "agent",
     from: "w2P:pFM",
     replyExpected: false,
   });
-  expect(parseProvenanceLabel("[host notice] restarted")).toEqual({ kind: "host", replyExpected: false });
+  expect(parseProvenanceLabel("[host notice] restarted")).toBeNull();
   expect(parseProvenanceLabel("just a human typing")).toBeNull();
   expect(parseProvenanceLabel("[agentalpha] nope")).toBeNull();
 });
@@ -132,7 +130,7 @@ test("an empty agent-started turn records no reply and a volatile label", async 
   expect(metadata?.args).toContain("idle=no reply to alpha");
 });
 
-test("human and host input are never routed", async () => {
+test("human and unlabelled input are never routed", async () => {
   for (const text of ["just asking", "[host notice] restarted", "[agent alpha · reply] already a reply"]) {
     const h = harness();
     await h.emit("input", { source: "interactive", text });
