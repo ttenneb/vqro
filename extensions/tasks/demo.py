@@ -213,8 +213,10 @@ export default function(pi:any) {
         self.cli("plugin", "disable", "vqro.tasks")
         self.cli("task", "list", expected=1)
         # Generic terminal control remains usable while task authority is absent.
-        self.cli("pane", "run", human, "printf 'provider-independent terminal\\n'")
-        self.cli("pane", "wait-output", human, "--match", "provider-independent terminal", "--timeout", "5000")
+        terminal_marker = self.root / "terminal-independent.txt"
+        self.cli("pane", "run", human, f"printf '%s' provider-independent-terminal > {shlex.quote(str(terminal_marker))}")
+        self.wait_file(terminal_marker)
+        assert terminal_marker.read_text() == "provider-independent-terminal"
         self.cli("plugin", "enable", "vqro.tasks")
         after_provider = self.cli("task", "tree", "--json")
         assert before == after_provider

@@ -2736,6 +2736,20 @@
           ],
           "type": "object"
         },
+        "ExtensionActionInvokeParams": {
+          "additionalProperties": false,
+          "properties": {
+            "payload": true,
+            "service_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "service_id",
+            "payload"
+          ],
+          "type": "object"
+        },
         "ExtensionConfirmedParams": {
           "properties": {
             "confirmed": {
@@ -8195,6 +8209,22 @@
             "params"
           ],
           "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "extension.action.invoke",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/ExtensionActionInvokeParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
         }
       ],
       "properties": {
@@ -10141,6 +10171,7 @@
             "action_choices",
             "focus_terminal",
             "terminal_interrupt",
+            "action_invoke",
             "unknown"
           ],
           "type": "string"
@@ -12611,6 +12642,7 @@
             "pane_inspector",
             "host_document",
             "action_choices",
+            "action_invoke",
             "unknown"
           ],
           "type": "string"
@@ -14249,6 +14281,20 @@
               "required": [
                 "type",
                 "diagnostic"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "type": {
+                  "const": "extension_action_invoked",
+                  "type": "string"
+                },
+                "value": true
+              },
+              "required": [
+                "type",
+                "value"
               ],
               "type": "object"
             },

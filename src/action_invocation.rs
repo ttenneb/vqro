@@ -121,6 +121,11 @@ impl crate::app::App {
             let Some(root_pid) = runtime.child_pid() else {
                 continue;
             };
+            // This explicit invocation is not a render path. Still avoid allocations and
+            // PTY foreground queries for terminals outside the captured peer ancestry.
+            if !peer.ancestry.iter().any(|entry| entry.pid == root_pid) {
+                continue;
+            }
             let Some(terminal) = self.state.terminals.get(terminal_id) else {
                 continue;
             };

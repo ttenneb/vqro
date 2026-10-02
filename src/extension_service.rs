@@ -3236,6 +3236,10 @@ fn validate_service_id(id: &str) -> Result<(), ExtensionServiceError> {
     Ok(())
 }
 
+#[cfg(all(test, unix))]
+#[path = "extension_service/generic_tests.rs"]
+mod generic_tests;
+
 #[cfg(test)]
 mod tests {
     use super::*;
