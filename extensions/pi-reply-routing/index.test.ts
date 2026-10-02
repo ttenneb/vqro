@@ -97,6 +97,8 @@ test("A2 recognises the exact vqro agent prompt target, not a mentioned name", (
   expect(targetsAgentPrompt('vqro agent prompt gamma "alpha was mentioned"', "alpha")).toBe(false);
   expect(targetsAgentPrompt('echo vqro agent prompt alpha', "alpha")).toBe(false);
   expect(targetsAgentPrompt('echo "vqro agent prompt alpha"', "alpha")).toBe(false);
+  expect(targetsAgentPrompt('echo "text; vqro agent prompt alpha"', "alpha")).toBe(false);
+  expect(targetsAgentPrompt("printf 'x && vqro agent prompt alpha'", "alpha")).toBe(false);
   expect(targetsAgentPrompt("vqro agent prompt betamax", "beta")).toBe(false);
 });
 
