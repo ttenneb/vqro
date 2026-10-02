@@ -41,6 +41,10 @@ impl Fixture {
     }
 
     fn manager(&self) -> ExtensionServiceManager {
+        self.manager_with_startup(Duration::ZERO)
+    }
+
+    fn manager_with_startup(&self, delay: Duration) -> ExtensionServiceManager {
         let script = r#"
 import json,sys,time,pathlib
 root=pathlib.Path(sys.argv[1])
@@ -64,7 +68,10 @@ for line in sys.stdin:
                     "python3".into(),
                     "-B".into(),
                     "-c".into(),
-                    script.into(),
+                    format!(
+                        "import time; time.sleep({});\n{script}",
+                        delay.as_secs_f64()
+                    ),
                     self.root.path().display().to_string(),
                 ],
                 cwd: self.root.path().into(),
@@ -235,6 +242,18 @@ fn generic_action_can_outlive_unchanged_render_timeout() {
     std::thread::sleep(crate::extension_runtime::REQUEST_TIMEOUT + Duration::from_millis(150));
     fixture.release("durable");
     assert_eq!(reply(response)["result"]["value"]["tag"], "durable");
+}
+
+#[test]
+fn generic_slow_startup_overrun_is_unknown_without_action_dispatch() {
+    let fixture = Fixture::new();
+    let manager = fixture.manager_with_startup(Duration::from_millis(2600));
+    let response = reply(invoke(&manager, "expired-after-startup", false));
+    assert_eq!(response["error"]["code"], "outcome_unknown");
+    assert!(
+        fixture.calls().is_empty(),
+        "expired deadline must not dispatch an action"
+    );
 }
 
 #[test]
