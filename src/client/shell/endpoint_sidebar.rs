@@ -694,7 +694,7 @@ pub(super) fn render_expanded(
                         rect,
                         endpoint
                             .current_host_documents()
-                            .and_then(|_| endpoint.attention.as_ref()),
+                            .and(endpoint.attention.as_ref()),
                         &workspace.workspace_id,
                         (!entry.indented).then_some(repository).flatten(),
                         palette,
