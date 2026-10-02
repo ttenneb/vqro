@@ -488,6 +488,7 @@ class Store:
             "whoami": {"action"}, "status": {"action"},
             "decision_log": {"action", "after"}, "decision_config": {"action"}, "decision_digest": {"action"},
             "decision_seen": {"action", "operation_id", "through", "expected_caller"},
+            "decision_receipt": {"action", "id", "policy_revision"},
             "op": {"action", "operation_id", "lookup_caller"},
             "create": {"action", "operation_id", "title", "parent", "kind", "expected_caller", "depends_on"} | graph.META_FIELDS,
             "decision": {"action", "operation_id", "title", "parent", "expected_caller", "depends_on"} | graph.META_FIELDS | decision_queue.FIELDS,
@@ -501,6 +502,8 @@ class Store:
         }
         if action not in fields or set(payload) - fields[action]:
             raise ValueError("unknown action or field (actor flags are not accepted)")
+        if action == "decision_receipt":
+            return self.decisions.receipt(payload.get("id"), payload.get("policy_revision"))
         if action == "decision_digest":
             return self.decisions.digest(caller)
         if action == "decision_log":

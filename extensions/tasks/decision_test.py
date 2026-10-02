@@ -36,7 +36,7 @@ class DecisionTests(unittest.TestCase):
 
     def call(self, action, caller=A, **fields):
         self.seq += 1
-        return self.store.invoke({"caller": caller, "payload": {"action": action, **({"operation_id": str(self.seq)} if action not in ("get", "status", "list", "decision_log", "decision_config", "decision_digest") else {}), **fields}})
+        return self.store.invoke({"caller": caller, "payload": {"action": action, **({"operation_id": str(self.seq)} if action not in ("get", "status", "list", "decision_log", "decision_config", "decision_digest", "decision_receipt") else {}), **fields}})
 
     def create(self, **fields):
         return self.call("decision", title="Keep result?", done_when="Question answered.", **{**FIELDS, **fields})["task"]
@@ -70,6 +70,22 @@ class DecisionTests(unittest.TestCase):
         self.store = provider.Store(self.root.name, 5)
         self.assertEqual(0, self.auto())
         self.assertEqual(answered["decision"], self.store.task(task["id"])["decision"])
+
+    def test_policy_receipt_selector_reads_original_result_without_granting_binding(self):
+        task = self.create(); self.auto()
+        first = self.call("decision_receipt", caller={"class": "unknown"}, id=task["id"], policy_revision=1)
+        self.assertTrue(first["found"])
+        self.assertEqual("done", first["outcome"]["task"]["state"])
+        self.call("decision_revert", caller=H, id=task["id"], revision=2)
+        self.assertEqual(first, self.call("decision_receipt", caller=H, id=task["id"], policy_revision=1))
+        self.assertFalse(self.call("decision_receipt", id=task["id"], policy_revision=999)["found"])
+        for revision in (True, 0, -1, "1"):
+            with self.assertRaisesRegex(ValueError, "positive policy revision"):
+                self.call("decision_receipt", id=task["id"], policy_revision=revision)
+        with self.assertRaisesRegex(ValueError, "invalid caller binding"):
+            self.call("op", caller=H, operation_id=first["operation_id"], lookup_caller=first["caller"])
+        with self.assertRaisesRegex(ValueError, "invalid caller binding"):
+            self.call("create", caller=H, title="ordinary", done_when="Verified.", expected_caller=first["caller"])
 
     def test_human_answer_wins_and_is_not_revertible(self):
         task = self.create()

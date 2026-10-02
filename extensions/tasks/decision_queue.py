@@ -208,6 +208,16 @@ class Queue:
             raise ValueError("decision log entry exceeds reply bound")
         return {"events": events, "next_cursor": events[-1]["seq"] if len(rows) > len(events) else None}
 
+    def receipt(self, task_id, revision):
+        # A read-only selector is NOT admitted by any caller/owner binding validator.
+        if not isinstance(task_id, str) or not 1 <= len(task_id) <= 128 or type(revision) is not int or not 1 <= revision <= (1 << 53) - 1:
+            raise ValueError("policy receipt needs task id and positive policy revision")
+        scope = {"class": "decision_policy", "decision_id": task_id, "revision": revision}
+        key = json.dumps(scope, sort_keys=True, separators=(",", ":"))
+        op = "decision-auto:" + task_id + ":" + str(revision)
+        row = self.db.execute("SELECT outcome FROM operations WHERE caller=? AND operation_id=?", (key, op)).fetchone()
+        return {"caller": scope, "operation_id": op, "found": row is not None, "outcome": json.loads(row[0]) if row else None}
+
     def acknowledge(self, caller, through):
         if caller.get("class") != "human_unverified":
             raise ValueError("human-only explicit last-look acknowledgement")
