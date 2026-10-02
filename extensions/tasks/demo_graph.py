@@ -1,6 +1,5 @@
 """Real public CLI graph acceptance; Demo owns the private server/Pi lifecycle."""
 import json
-from pathlib import Path
 import shlex
 import time
 
@@ -9,7 +8,7 @@ CRITERION = "The observable result is recorded."
 
 def run(demo):
     demo.start()
-    demo.cli("plugin", "link", str(Path(__file__).resolve().parent))
+    demo.cli("plugin", "link", str(demo.package))
     human = demo.cli("workspace", "create", "--cwd", str(demo.root / "work"), "--no-focus")["result"]["root_pane"]["pane_id"]
     a = demo.cli("pane", "split", "--pane", human, "--direction", "right", "--no-focus")["result"]["pane"]["pane_id"]
     b = demo.cli("pane", "split", "--pane", human, "--direction", "down", "--no-focus")["result"]["pane"]["pane_id"]

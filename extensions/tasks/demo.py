@@ -3,6 +3,7 @@
 No installation, credentials, model calls, fake host, or human-session changes.
 """
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -16,6 +17,14 @@ import tempfile
 import time
 
 HERE = Path(__file__).resolve().parent
+
+
+def image_hash(path):
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
 
 
 def birth(pid):
@@ -36,7 +45,19 @@ class Demo:
         self.human_binding = None
         for directory in ("bin", "home", "config", "state", "run", "work", "commands", "receipts"):
             (root / directory).mkdir(mode=0o700)
-        (root / "bin/vqro").symlink_to(vqro)
+        # Retain exact images: a later build/source edit must not change this run.
+        native_hash = image_hash(vqro)
+        self.vqro = root / "bin/vqro"
+        shutil.copy2(vqro, self.vqro)
+        if image_hash(self.vqro) != native_hash:
+            raise RuntimeError("native image changed during private copy")
+        self.package = root / "package"
+        shutil.copytree(HERE, self.package, ignore=shutil.ignore_patterns("__pycache__"))
+        files = {str(path.relative_to(self.package)): image_hash(path) for path in sorted(self.package.rglob("*")) if path.is_file()}
+        source_head = subprocess.check_output(["git", "-C", str(HERE), "rev-parse", "HEAD"], text=True).strip()
+        self.save("IMAGES.json", {"source_head": source_head, "native_source": str(vqro),
+                                 "native_image": "bin/vqro", "native_sha256": native_hash,
+                                 "provider_package": "package", "package_sha256": files})
         (root / "bin/pi").symlink_to(pi)
         config = root / "config/config.toml"
         config.write_text("[session]\nresume_agents_on_restore = false\n[update]\nversion_check = false\nmanifest_check = false\n[advanced]\nscrollback_limit_bytes = 10000321\n")
