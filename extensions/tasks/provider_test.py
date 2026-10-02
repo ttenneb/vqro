@@ -144,7 +144,10 @@ class StoreTests(unittest.TestCase):
         started = self.change(root, "start")
         with self.assertRaisesRegex(ValueError, "stale"):
             self.change(root, "block", text="stale")
-        self.assertEqual(started, self.invoke({"action": "get", "id": root["id"]})["task"])
+        current = self.invoke({"action": "get", "id": root["id"]})["task"]
+        # Elapsed is a refreshed observation, not persisted mutation state.
+        self.assertEqual({key: value for key, value in started.items() if key != "elapsed_ms"},
+                         {key: value for key, value in current.items() if key != "elapsed_ms"})
         child = self.create("child", parent=root["id"])["task"]
         self.store.db.execute("UPDATE tasks SET parent=? WHERE id=?", (child["id"], root["id"]))
         with self.assertRaisesRegex(ValueError, "cycle"):
