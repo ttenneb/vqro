@@ -18,7 +18,7 @@ code on a human's real installation requires approval.
 ```text
 vqro task whoami
 vqro task create TITLE --done-when TEXT [--parent ID] [metadata options]
-vqro task decision QUESTION --done-when TEXT [--parent ID] [metadata options]
+vqro task decision QUESTION --done-when TEXT --options JSON --default KEY --reversible BOOL --waiting-cost TEXT [--auto-at UTC] [--parent ID]
 vqro task plan FILE [--parent ID --rev N]
 vqro task depends ID --on JSON --rev N
 vqro task update ID --rev N [metadata options]
@@ -28,7 +28,12 @@ vqro task block ID REASON --rev N
 vqro task report ID EVIDENCE --rev N
 vqro task accept ID --rev N
 vqro task done ID --rev N [--evidence TEXT]
-vqro task answer ID ANSWER --rev N
+vqro task answer ID KEY --rev N [--note TEXT]  # legacy decisions use free text
+vqro task decision-timer ID --rev N --auto-at UTC  # empty string cancels
+vqro task revert ID --rev N
+vqro task decisions
+vqro task decisions-seen --through SEQ
+vqro task decision-log [--after SEQ]
 vqro task list [--after ID]
 vqro task ready [--after ID]
 vqro task tree [--json]
@@ -40,7 +45,9 @@ Every write accepts `--op ID --caller JSON`. An explicit operation ID **requires
 its original binding**; obtain it with `whoami` for a fresh chosen ID. Otherwise
 the CLI mints an ID and captures the binding. Writes inspecting existing tasks
 require the inspected `--rev`; an attached plan requires the parent's revision.
-No automatic read-and-update, retry, activation or messaging occurs.
+No automatic read-and-update, client retry, activation or messaging occurs. The
+extension's recorded reversible decision defaults are the explicit policy exception
+below, not automatic work execution.
 
 `--owner` is the assignee's own `whoami` caller binding, not a pane/name. Assignment
 chooses an exact binding, not proof of liveness. Caller facts are host-derived:
@@ -50,7 +57,9 @@ is not ownership. Unknown callers can read, not mutate. `--caller` is a scope
 selector/precondition, never an authority flag.
 
 The additional read-only `{"action":"status"}` returns the maximum committed
-transition `revision` for cached consumers; it changes neither tasks nor receipts.
+transition `revision` for cached consumers; its handler changes neither tasks nor
+receipts. The independent admitted deadline loop may commit policy results before
+or between reads; read-only does not mean time-frozen state.
 Graph metadata, dependencies and parent reassignment advance that global sequence.
 See the experimental [read-only task pane](tasks-view-v0.md).
 
@@ -77,7 +86,7 @@ Parent completion also requires all children accepted/done. Cycle checks combine
 explicit prerequisite precedence with **child-before-parent completion**; a child
 cannot depend on its ancestor, nor can cross-branch dependencies form a completion
 cycle. Parent edges do not themselves gate readiness. Checks are iterative and
-bounded by store quotas; no render/process work or automatic scheduling is added.
+bounded by store quotas; no render/process work or automatic work scheduling is added.
 
 ## Authority, acceptance and own steps
 
@@ -108,7 +117,8 @@ if another role matches. A human stored delegator may accept a root delegated to
 an agent; an unrelated human has no global accept right. Human accept authorization
 matches the same UID across panes; **receipt scope, expected caller, stored bindings
 and transition callers remain terminal-exact**. Agent matches remain execution-exact.
-Decision answer stays human-only, not ordinary accept/report/done.
+Manual decision answer stays human-only, not ordinary accept/report/done. Recorded
+reversible defaults use a separate internal policy actor, described below.
 
 An own step is an ordinary child whose exact owner equals its current parent's
 owner and has no independent delegation. Its owner can finish directly from
@@ -133,6 +143,31 @@ delegator, including at a root; it does not fabricate permanent human oversight.
 **Human classification is cooperative and unverified.** Shell-mediated agents can
 impersonate it; this is not a same-user security boundary or human-presence check.
 The root/own-step/same-UID rules are reversible product choices, not authentication.
+
+## Structured decision queue
+
+See the [accepted default policy](../architecture/tasks-decision-policy-v0.md).
+New decisions (including kind-decision create/plan nodes) require 2–4 key/label
+options, one default, reversible boolean and waiting cost; legacy records retain
+free-text answers and exact old receipts. Keys/labels/cost/note are bounded to
+32/256/512/4096 bytes; terms are immutable. `answer` selects a listed option and
+optional note; human answers are final. UTC `auto_at` requires the provider's
+human window (default900s; trusted startup `--decision-delay-seconds`). Irreversible
+never auto-applies. Exact filer/cooperative human may reschedule; metadata or
+prerequisite edits cancel timers. First committed revision wins; defaults obey
+graph gates and use a distinct internal policy actor, never a model turn.
+
+`revert` reopens **records only**, human-only for reversible policy answers; it
+cancels the timer, rejects reported/final parent/dependent blockers, and leaves
+in-progress work gated until re-answer. Root revert is allowed. Public immutable
+`decision-log` retains filer/default/deadline/actual time/lateness/op; policy scopes
+cannot be used as caller/owner bindings. `decisions` is a bounded text digest of
+pending, auto since explicit UID look, oldest pending and auto/reverted counts.
+Only `decisions-seen --through SEQ` acknowledges; future/regressing cursors reject,
+original receipt replay cannot acknowledge newer state, polling never ACKs.
+Truncation limits the suggested ACK to observed auto events. Existing pane is
+unchanged. Lazy/absent providers have **no on-time guarantee**; logs show lateness,
+deferred ticks back off up to30s. No host timer, supervisor or external undo.
 
 ## Plain criteria, brief and timing
 

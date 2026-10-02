@@ -73,7 +73,11 @@ pub(super) fn run_task_command(args: &[String]) -> std::io::Result<i32> {
     };
     match reply {
         TaskReply::Success(value) => {
-            println!("{value}");
+            if action == "decision_digest" {
+                println!("{}", render_decisions(&value));
+            } else {
+                println!("{value}");
+            }
             if action == "op" && value["authoritative"] != true {
                 eprintln!("not an authoritative result for the original caller; use --caller with its binding");
                 return Ok(2);
@@ -97,6 +101,109 @@ pub(super) fn run_task_command(args: &[String]) -> std::io::Result<i32> {
             Ok(1)
         }
     }
+}
+
+fn render_decisions(value: &Value) -> String {
+    fn visible(value: &Value) -> String {
+        value
+            .as_str()
+            .unwrap_or("unknown")
+            .escape_debug()
+            .to_string()
+    }
+    let pending = value["needs_you_now"]
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    let automatic = value["auto_since_look"]
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    let more = |key: &str| if value["more"][key] == true { "+" } else { "" };
+    let mut lines = vec![format!(
+        "Decisions: {}{} pending; {}{} auto since last look. Total auto {}, reverted {}.",
+        pending.len(),
+        more("needs_you_now"),
+        automatic.len(),
+        more("auto_since_look"),
+        value["counts"]["auto"],
+        value["counts"]["revert"]
+    )];
+    if let Some(oldest) = pending.first() {
+        lines.push(format!(
+            "Oldest waiting: {} {} ({})",
+            visible(&oldest["created_at"]),
+            visible(&oldest["title"]),
+            visible(&oldest["id"])
+        ));
+    }
+    for task in pending {
+        lines.push(format!(
+            "{}: {}",
+            visible(&task["id"]),
+            visible(&task["title"])
+        ));
+        let decision = &task["decision"];
+        if decision.is_null() {
+            lines.push("  Legacy: human free-text answer; no automatic default.".into());
+            continue;
+        }
+        let reversible = if decision["reversible"] == true {
+            "reversible"
+        } else {
+            "irreversible"
+        };
+        let timer = if decision["auto_at"].is_null() {
+            "manual".into()
+        } else {
+            format!(
+                "auto at {} (no on-time guarantee)",
+                visible(&decision["auto_at"])
+            )
+        };
+        lines.push(format!(
+            "  Default {} | {reversible} | {timer}",
+            visible(&decision["default"])
+        ));
+        if let Some(options) = decision["options"].as_array() {
+            lines.push(format!(
+                "  Options: {}",
+                options
+                    .iter()
+                    .map(|option| format!(
+                        "{}={}",
+                        visible(&option["key"]),
+                        visible(&option["label"])
+                    ))
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            ));
+        }
+        lines.push(format!(
+            "  Waiting cost: {}",
+            visible(&decision["waiting_cost"])
+        ));
+    }
+    for event in automatic {
+        lines.push(format!(
+            "Auto {}: {} at {} (applied late by {} ms)",
+            visible(&event["id"]),
+            visible(&event["result"]["option"]),
+            visible(&event["result"]["applied_at"]),
+            event["result"]["late_ms"]
+        ));
+    }
+    if value["last_look_known"] == true {
+        lines.push(format!(
+            "Explicit last look: vqro task decisions-seen --through {}",
+            value["ack_through"]
+        ));
+    } else {
+        lines.push(
+            "Last-look UID unknown here; run the digest/acknowledgement from a human shell.".into(),
+        );
+    }
+    lines.join("\n")
 }
 
 fn invoke(client: &ApiClient, payload: Value) -> Result<Value, crate::api::client::ApiClientError> {
@@ -147,7 +254,15 @@ fn decode_reply(response: &Value) -> TaskReply {
 }
 
 fn parse_payload(args: &[String]) -> Result<(Value, bool), String> {
-    let action = args.first().map(String::as_str).ok_or_else(usage)?;
+    let command = args.first().map(String::as_str).ok_or_else(usage)?;
+    let action = match command {
+        "decisions" => "decision_digest",
+        "decisions-seen" => "decision_seen",
+        "decision-log" => "decision_log",
+        "decision-timer" => "decision_timer",
+        "revert" => "decision_revert",
+        other => other,
+    };
     let mut payload = json!({"action": action});
     let mutation = matches!(
         action,
@@ -160,12 +275,21 @@ fn parse_payload(args: &[String]) -> Result<(Value, bool), String> {
             | "accept"
             | "done"
             | "answer"
+            | "decision_seen"
+            | "decision_timer"
+            | "decision_revert"
             | "plan"
             | "depends"
             | "update"
     );
     let remaining = match (action, args.get(1)) {
-        ("list" | "ready" | "whoami", _) => &args[1..],
+        ("list" | "ready" | "whoami" | "decision_digest" | "decision_seen" | "decision_log", _) => {
+            &args[1..]
+        }
+        ("decision_timer" | "decision_revert", Some(id)) => {
+            payload["id"] = id.clone().into();
+            &args[2..]
+        }
         ("plan", Some(path)) => {
             payload["nodes"] = read_plan(path)?;
             &args[2..]
@@ -202,6 +326,41 @@ fn parse_payload(args: &[String]) -> Result<(Value, bool), String> {
             return Err("duplicate option".into());
         }
         match (action, flag.as_str()) {
+            ("decision", "--options") => {
+                payload["options"] = serde_json::from_str(value).map_err(|_| {
+                    "--options must be a JSON list of key/label objects".to_string()
+                })?;
+            }
+            ("decision", "--default" | "--waiting-cost") => {
+                payload[&flag.trim_start_matches("--").replace('-', "_")] = value.clone().into();
+            }
+            ("decision", "--reversible") => {
+                payload["reversible"] = value
+                    .parse::<bool>()
+                    .map_err(|_| "--reversible must be true or false".to_string())?
+                    .into();
+            }
+            ("decision" | "decision_timer", "--auto-at") => {
+                payload["auto_at"] = if value.is_empty() {
+                    Value::Null
+                } else {
+                    value.clone().into()
+                };
+            }
+            ("answer", "--note") => payload["note"] = value.clone().into(),
+            ("decision_seen", "--through") | ("decision_log", "--after") => {
+                let key = if action == "decision_seen" {
+                    "through"
+                } else {
+                    "after"
+                };
+                payload[key] = value
+                    .parse::<u64>()
+                    .map_err(|_| {
+                        "decision sequence/revision must be an unsigned integer".to_string()
+                    })?
+                    .into();
+            }
             ("create" | "decision" | "plan", "--parent") => {
                 payload["parent"] = value.clone().into()
             }
@@ -266,7 +425,7 @@ fn parse_payload(args: &[String]) -> Result<(Value, bool), String> {
         return Err("an explicit --op requires --caller with the original attempt's binding (use task whoami for a fresh explicit ID)".into());
     }
     if mutation
-        && !matches!(action, "create" | "decision")
+        && !matches!(action, "create" | "decision" | "decision_seen")
         && (action != "plan" || payload.get("parent").is_some())
         && payload.get("revision").is_none()
     {
@@ -279,6 +438,30 @@ fn parse_payload(args: &[String]) -> Result<(Value, bool), String> {
         && payload.get("operation_id").is_none()
     {
         return Err("--done-when is required: 1-3 observable lines".into());
+    }
+    if action == "decision"
+        && payload.get("operation_id").is_none()
+        && ["options", "default", "reversible", "waiting_cost"]
+            .iter()
+            .any(|key| payload.get(*key).is_none())
+    {
+        return Err("decision requires --options, --default, --reversible and --waiting-cost; --auto-at is optional".into());
+    }
+    for (action_name, field, message) in [
+        (
+            "decision_seen",
+            "through",
+            "--through is required: explicitly acknowledge the observed sequence",
+        ),
+        (
+            "decision_timer",
+            "auto_at",
+            "--auto-at is required: UTC deadline or empty to cancel",
+        ),
+    ] {
+        if action == action_name && payload.get(field).is_none() {
+            return Err(message.into());
+        }
     }
     if action == "depends" && payload.get("depends_on").is_none() {
         return Err("--on is required: JSON list of prerequisite task IDs".into());
@@ -448,7 +631,7 @@ fn render_tree(tasks: &[Value]) -> Result<String, String> {
 }
 
 fn usage() -> String {
-    "usage: vqro task <create/decision TITLE --done-when TEXT [--parent ID]|plan FILE [--parent ID --rev N]|depends ID --on JSON --rev N|update ID --rev N [metadata options]|delegate ID --owner JSON --rev N|start/accept/done ID --rev N [done --evidence TEXT]|block/report/answer ID TEXT --rev N|list/ready [--after ID]|tree [--json]|whoami|get ID|op ID [--caller JSON]>; explicit --op ID requires --caller JSON from the original attempt".into()
+    "usage: vqro task <create/decision TITLE --done-when TEXT [--parent ID]|plan FILE [--parent ID --rev N]|depends ID --on JSON --rev N|update ID --rev N [metadata options]|delegate ID --owner JSON --rev N|start/accept/done ID --rev N [done --evidence TEXT]|block/report/answer ID TEXT --rev N (answer uses an option KEY for structured decisions, with optional --note TEXT)|revert ID --rev N|decision-timer ID --rev N --auto-at UTC|decisions|decisions-seen --through SEQ|decision-log [--after SEQ]|list/ready [--after ID]|tree [--json]|whoami|get ID|op ID [--caller JSON]>; new decision also requires --options JSON --default KEY --reversible BOOL --waiting-cost TEXT [--auto-at UTC]; explicit --op ID requires --caller JSON from the original attempt".into()
 }
 
 #[cfg(test)]
@@ -554,6 +737,100 @@ mod tests {
         assert!(text.contains("(depth 19)"));
         assert!(!text.contains('\u{1b}'));
         assert!(!text.lines().any(|line| line.starts_with(&" ".repeat(35))));
+    }
+
+    #[test]
+    fn structured_decision_filing_and_option_answer_stay_extension_payloads() {
+        assert!(parse_payload(
+            &["decision", "Question?", "--done-when", "Choice recorded."].map(String::from)
+        )
+        .is_err());
+        let (payload, mutation) = parse_payload(
+            &[
+                "decision",
+                "Question?",
+                "--done-when",
+                "Choice recorded.",
+                "--options",
+                r#"[{"key":"yes","label":"Proceed"},{"key":"no","label":"Wait"}]"#,
+                "--default",
+                "yes",
+                "--reversible",
+                "true",
+                "--waiting-cost",
+                "Work waits.",
+                "--auto-at",
+                "2026-10-02T20:00:00+00:00",
+            ]
+            .map(String::from),
+        )
+        .unwrap();
+        assert!(mutation);
+        assert_eq!(payload["options"].as_array().unwrap().len(), 2);
+        assert_eq!(payload["reversible"], true);
+        let (answer, mutation) = parse_payload(
+            &[
+                "answer",
+                "task_a",
+                "yes",
+                "--rev",
+                "1",
+                "--note",
+                "Verified.",
+            ]
+            .map(String::from),
+        )
+        .unwrap();
+        assert!(mutation);
+        assert_eq!(answer["action"], "answer");
+        assert_eq!(answer["text"], "yes");
+        assert_eq!(answer["note"], "Verified.");
+    }
+
+    #[test]
+    fn digest_reads_never_ack_and_seen_requires_explicit_sequence() {
+        let (digest, mutation) = parse_payload(&["decisions"].map(String::from)).unwrap();
+        assert!(!mutation);
+        assert_eq!(digest["action"], "decision_digest");
+        assert!(parse_payload(&["decisions-seen"].map(String::from)).is_err());
+        let (seen, mutation) =
+            parse_payload(&["decisions-seen", "--through", "17"].map(String::from)).unwrap();
+        assert!(mutation);
+        assert_eq!(seen["through"], 17);
+    }
+
+    #[test]
+    fn decision_digest_is_glanceable_cached_text_and_escapes_controls() {
+        let digest = json!({"needs_you_now":[{"id":"task_choice", "title":"Keep?\u{1b}[31m", "decision":{"default":"keep", "reversible":true, "auto_at":null, "waiting_cost":"Work waits.", "options":[{"key":"keep","label":"Keep"},{"key":"change","label":"Change"}]}}], "auto_since_look":[{"id":"task_prior", "result":{"option":"keep","applied_at":"2026-10-02T16:00:00+00:00","late_ms":30000}}], "counts":{"auto":2,"revert":1}, "more":{}, "oldest_waiting":null, "last_look_known":true, "ack_through":17});
+        let before = digest.clone();
+        let text = render_decisions(&digest);
+        assert!(text.contains("1 pending; 1 auto since last look"));
+        assert!(text.contains("Total auto 2, reverted 1"));
+        assert!(text.contains("Default keep | reversible | manual"));
+        assert!(text.contains("keep=Keep; change=Change"));
+        assert!(text.contains("applied late by 30000 ms"));
+        assert!(text.contains("decisions-seen --through 17"));
+        assert!(!text.contains('\u{1b}'));
+        assert_eq!(before, digest);
+    }
+
+    #[test]
+    fn timer_and_revert_require_current_revision_without_implicit_external_effects() {
+        assert!(parse_payload(&["revert", "task_a"].map(String::from)).is_err());
+        let (revert, mutation) =
+            parse_payload(&["revert", "task_a", "--rev", "2"].map(String::from)).unwrap();
+        assert!(mutation);
+        assert_eq!(revert["action"], "decision_revert");
+        let (timer, mutation) = parse_payload(
+            &["decision-timer", "task_a", "--rev", "3", "--auto-at", ""].map(String::from),
+        )
+        .unwrap();
+        assert!(mutation);
+        assert_eq!(timer["auto_at"], Value::Null);
+        assert!(parse_payload(
+            &["decisions-seen", "--through", "17", "--op", "ack-1"].map(String::from)
+        )
+        .is_err());
     }
 
     #[test]

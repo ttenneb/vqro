@@ -290,10 +290,12 @@ store.invoke({params!r})
         self.assertEqual(10, child["actual_work_ms"])
         with self.assertRaisesRegex(ValueError, "frozen"):
             self.change(child, "update", done_when="Changed.")
-        decision = self.call("decision", title="Choice?", done_when="Choice A or B is recorded.")["task"]
+        decision = self.call("decision", title="Choice?", done_when="Choice A or B is recorded.",
+                             options=[{"key": "A", "label": "A"}, {"key": "B", "label": "B"}],
+                             default="A", reversible=True, waiting_cost="Work waits.")["task"]
         with self.assertRaisesRegex(ValueError, "human-only"):
             self.change(decision, "answer", text="A")
-        decision = self.change(decision, "answer", caller=HUMAN, text="A")
+        decision = self.change(decision, "answer", caller=HUMAN, option="A")
         self.assertEqual("done", decision["state"])
         with self.assertRaisesRegex(ValueError, "human approval"):
             self.call("create", title="Unapproved root", done_when="Visible.")
