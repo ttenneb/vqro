@@ -1736,6 +1736,7 @@ impl AppState {
             | AppEvent::ExtensionServiceFinished(_)
             | AppEvent::HostDocumentFinished(_)
             | AppEvent::HostDocumentProviderRetired { .. }
+            | AppEvent::ExtensionDocumentRevisionChanged { .. }
             | AppEvent::HostRelationshipsDocumentFinished(_)
             | AppEvent::HostAgentActivityDocumentFinished(_)
             | AppEvent::HostDocumentRetryDue { .. }

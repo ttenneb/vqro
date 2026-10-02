@@ -189,6 +189,12 @@ pub enum AppEvent {
     // Unit-test executables cannot recursively host the bundled service binary.
     #[cfg_attr(test, allow(dead_code))]
     HostDocumentFinished(Box<crate::extension_service::HostDocumentAsyncResult>),
+    /// An opaque provider-owned document version changed after a successful action.
+    ExtensionDocumentRevisionChanged {
+        namespace: String,
+        generation: u64,
+        revision: u64,
+    },
     /// Retire all cached scopes for the current catalog authority, off the render path.
     HostDocumentProviderRetired {
         namespace: String,

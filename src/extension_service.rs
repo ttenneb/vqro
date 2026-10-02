@@ -1977,9 +1977,11 @@ fn manager_for_specs_with_order(
         let thread_service_id = service_id.clone();
         let thread_manager_generation = manager_generation;
         let thread_grants = granted_capabilities.clone();
+        let document_events = event_tx.clone();
         let spawn = std::thread::Builder::new()
             .name(format!("vqro-ext-{}", service_id))
             .spawn(move || {
+                let mut document_version = None;
                 while let Ok(request) = request_rx.recv() {
                     let request = match request {
                         ExtensionWorkerRequest::Generic(action) => {
@@ -1995,6 +1997,21 @@ fn manager_for_specs_with_order(
                                 && thread_generation.load(Ordering::Acquire) == action.generation;
                             if supervisor.runtime.is_none() {
                                 thread_generation.store(next_service_generation(), Ordering::Release);
+                            }
+                            if still_current && thread_grants.contains(&crate::api::schema::ExtensionServiceCapability::HostDocument) {
+                                if let Some(revision) = result.as_ref().ok()
+                                    .and_then(|value| value["document_revision"].as_u64())
+                                {
+                                    let version = (action.generation, revision);
+                                    if document_version.is_none_or(|previous: (u64, u64)| previous.0 != version.0 || previous.1 < version.1) {
+                                        // Coalesce at the provider version, not per CLI read/client/frame.
+                                        if document_events.blocking_send(crate::events::AppEvent::ExtensionDocumentRevisionChanged {
+                                            namespace: thread_service_id.clone(), generation: action.generation, revision,
+                                        }).is_ok() {
+                                            document_version = Some(version);
+                                        }
+                                    }
+                                }
                             }
                             send_generic_action_response(&action, if still_current { result } else { Err("provider retired during execution".into()) }, true);
                             continue;
@@ -5017,6 +5034,7 @@ printf '%s\n' '{"type":"response","id":2,"result":{"accepted":true}}'
                 revision: 1,
                 scope_id: "session".into(),
                 activities: Vec::new(),
+                terminals: None,
             });
         assert!(host_document_target_matches(&relationships, &session));
         assert!(host_document_target_matches(&activity, &session));

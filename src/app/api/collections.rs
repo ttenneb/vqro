@@ -728,12 +728,37 @@ impl App {
         self.host_agent_activity_last_desired
             .retain(|namespace, _| namespaces.contains(namespace));
         for namespace in namespaces {
-            self.refresh_agent_activity_document_for_namespace(&namespace);
+            self.refresh_agent_activity_document_for_namespace(&namespace, false);
         }
     }
 
-    fn refresh_agent_activity_document_for_namespace(&mut self, namespace: &str) {
+    pub(crate) fn refresh_extension_document_revision(&mut self, namespace: &str, generation: u64) {
+        if !self
+            .extension_services
+            .matches_generation(namespace, generation)
+        {
+            return;
+        }
+        if self.host_document_services.source(namespace)
+            == Some(crate::api::schema::HostDocumentSourceKind::AgentActivity)
+        {
+            self.refresh_agent_activity_document_for_namespace(namespace, true);
+        }
+    }
+
+    fn refresh_agent_activity_document_for_namespace(&mut self, namespace: &str, force: bool) {
         let scope_id = crate::spaces_extension_contract::SPACES_SCOPE_ID.to_string();
+        if force
+            && self
+                .host_document_caches
+                .get(&(namespace.into(), scope_id.clone()))
+                .and_then(|cache| cache.current())
+                .is_some_and(|document| !document.actions.is_empty())
+        {
+            // Opaque state invalidation is the actionless observation path, not a way to
+            // silently stale previously published controls during a sampling attempt.
+            return;
+        }
         let Some(generation) = self.host_document_services.generation(namespace) else {
             self.host_document_caches
                 .remove(&(namespace.into(), scope_id.clone()));
@@ -744,6 +769,7 @@ impl App {
         };
         let mut seen = std::collections::HashSet::new();
         let mut activities = Vec::new();
+        let mut terminals = Vec::new();
         for workspace in &self.state.workspaces {
             for tab in &workspace.tabs {
                 for (pane_id, pane) in &tab.panes {
@@ -754,10 +780,11 @@ impl App {
                     if !seen.insert(terminal.id.clone()) {
                         continue;
                     }
-                    let Some(agent_label) = terminal.effective_agent_label() else {
+                    let Some(terminal_ref) = self.host_terminal_ref_for_pane(*pane_id) else {
                         continue;
                     };
-                    let Some(terminal_ref) = self.host_terminal_ref_for_pane(*pane_id) else {
+                    terminals.push(terminal_ref.clone());
+                    let Some(agent_label) = terminal.effective_agent_label() else {
                         continue;
                     };
                     let (source, evidence_kind) = terminal.effective_evidence_attribution();
@@ -810,6 +837,7 @@ impl App {
             revision: 1,
             scope_id: scope_id.clone(),
             activities,
+            terminals: Some(terminals),
         };
         let key = (namespace.to_string(), scope_id.clone());
         if snapshot.validate().is_err() {
@@ -819,14 +847,15 @@ impl App {
             self.host_agent_activity_last_desired.remove(namespace);
             return;
         }
-        if self
-            .host_agent_activity_last_desired
-            .get(namespace)
-            .is_some_and(|previous| {
-                let mut normalized = previous.clone();
-                normalized.revision = 1;
-                normalized == snapshot
-            })
+        if !force
+            && self
+                .host_agent_activity_last_desired
+                .get(namespace)
+                .is_some_and(|previous| {
+                    let mut normalized = previous.clone();
+                    normalized.revision = 1;
+                    normalized == snapshot
+                })
         {
             return;
         }
@@ -835,7 +864,11 @@ impl App {
             .insert(namespace.to_owned(), snapshot.clone());
         self.host_document_request_watermarks
             .insert(key.clone(), (generation, snapshot.revision));
-        self.disable_host_document_projection(&key, generation, snapshot.revision);
+        // Opaque extension-state invalidation preserves the current actionless observation
+        // until a different document is ready. Placement/source changes still retire it.
+        if !force {
+            self.disable_host_document_projection(&key, generation, snapshot.revision);
+        }
         match self
             .host_document_services
             .request_agent_activity(namespace, snapshot.clone())
@@ -1073,22 +1106,51 @@ impl App {
                 });
         if current {
             let publication = result.result.and_then(|document| {
+                let attention = document.actions.is_empty()
+                    && document.required_capabilities.is_empty()
+                    && !document.items.is_empty()
+                    && document.items.iter().all(|item| {
+                        item.role == crate::extension_contract::HostItemRole::Section
+                            && item.id.starts_with("context:attention.")
+                            && item.parent_id.is_none()
+                            && item.action_ids.is_empty()
+                            && item.terminal.as_ref().is_none_or(|terminal| {
+                                result
+                                    .snapshot
+                                    .terminals
+                                    .as_ref()
+                                    .is_some_and(|terminals| terminals.contains(terminal))
+                            })
+                    });
                 if document.revision != result.snapshot.revision
                     || document.target != crate::extension_contract::HostTarget::Session
-                    || !document.items.iter().all(|item| match item.role {
-                        crate::extension_contract::HostItemRole::Group => {
-                            item.id.starts_with("activity:")
-                        }
-                        crate::extension_contract::HostItemRole::Terminal => {
-                            !item.id.starts_with("relationship:")
-                                && !item.id.starts_with("context:")
-                        }
-                        _ => false,
-                    })
+                    || !(attention
+                        || document.items.iter().all(|item| match item.role {
+                            crate::extension_contract::HostItemRole::Group => {
+                                item.id.starts_with("activity:")
+                            }
+                            crate::extension_contract::HostItemRole::Terminal => {
+                                !item.id.starts_with("relationship:")
+                                    && !item.id.starts_with("context:")
+                            }
+                            _ => false,
+                        }))
                 {
                     return Err(
                         "activity document does not match its admitted source or revision".into(),
                     );
+                }
+                if let Some(current) = self
+                    .host_document_caches
+                    .get(&key)
+                    .and_then(|cache| cache.current())
+                {
+                    let mut normalized = document.clone();
+                    normalized.revision = current.revision;
+                    if normalized == *current {
+                        // Same output keeps published revision (and therefore actions) unchanged.
+                        return Ok(());
+                    }
                 }
                 self.host_document_caches
                     .entry(key)

@@ -610,10 +610,13 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--data-dir")
     parser.add_argument("--decision-delay-seconds", type=int, default=900)
+    parser.add_argument("--native-attention", action="store_true")
     args = parser.parse_args()
     directory = args.data_dir or str(Path(os.environ.get("XDG_STATE_HOME", str(Path.home() / ".local/state"))) / "vqro/extensions/vqro.tasks")
     store = Store(directory, args.decision_delay_seconds)
-    emit({"type": "hello", "protocol": 2, "service_id": SERVICE, "requested_capabilities": ["action_invoke"], "methods": ["action.invoke.v1"]})
+    capabilities = ["action_invoke", "host_document"] if args.native_attention else ["action_invoke"]
+    methods = ["action.invoke.v1", "host.document.render"] if args.native_attention else ["action.invoke.v1"]
+    emit({"type": "hello", "protocol": 2, "service_id": SERVICE, "requested_capabilities": capabilities, "methods": methods})
     pending = bytearray()
     def read_line(timeout):
         if b"\n" not in pending:
@@ -634,7 +637,7 @@ def main():
     while welcome_line is None:
         welcome_line = read_line(None)
     welcome = json.loads(welcome_line)
-    if welcome.get("type") != "welcome" or welcome.get("granted_capabilities") != ["action_invoke"] or "action.invoke.v1" not in welcome.get("methods", []):
+    if welcome.get("type") != "welcome" or set(welcome.get("granted_capabilities", [])) != set(capabilities) or not set(methods) <= set(welcome.get("methods", [])):
         raise ValueError("action capability not granted")
     while True:
         applied = 0
@@ -652,10 +655,22 @@ def main():
         if line is None:
             continue
         request = json.loads(line)
+        if request.get("type") == "request" and request.get("method") == "host.document.render" and args.native_attention:
+            from document import project
+            try:
+                store.db.execute("BEGIN")
+                document = project(store, request["params"])
+                store.db.rollback()
+                emit({"type": "response", "id": request["id"], "result": document})
+            except (ValueError, KeyError, TypeError, sqlite3.Error) as error:
+                store.db.rollback()
+                emit({"type": "response", "id": request["id"], "error": str(error)})
+            continue
         if request.get("type") != "request" or request.get("method") != "action.invoke.v1":
             raise ValueError("unexpected request")
         try:
-            result = {"ok": True, "value": store.invoke(request["params"])}
+            result = {"ok": True, "value": store.invoke(request["params"]),
+                      "document_revision": store.db.execute("SELECT COALESCE(MAX(seq),0) FROM transitions").fetchone()[0]}
         except OutcomeUnknown as error:
             emit({"type": "response", "id": request["id"], "error": str(error)})
             return

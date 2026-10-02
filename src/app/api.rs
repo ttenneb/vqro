@@ -225,6 +225,14 @@ impl App {
                 let _ = respond_to.send(response);
                 return Vec::new();
             }
+            AppEvent::ExtensionDocumentRevisionChanged {
+                namespace,
+                generation,
+                revision: _,
+            } => {
+                self.refresh_extension_document_revision(&namespace, generation);
+                return Vec::new();
+            }
             AppEvent::HostDocumentProviderRetired {
                 namespace,
                 generation,
