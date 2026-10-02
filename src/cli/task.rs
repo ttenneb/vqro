@@ -1,3 +1,4 @@
+use std::io::Read;
 use std::time::Duration;
 
 use crate::api::client::ApiClient;
@@ -159,9 +160,16 @@ fn parse_payload(args: &[String]) -> Result<(Value, bool), String> {
             | "accept"
             | "done"
             | "answer"
+            | "plan"
+            | "depends"
+            | "update"
     );
     let remaining = match (action, args.get(1)) {
-        ("list" | "whoami", _) => &args[1..],
+        ("list" | "ready" | "whoami", _) => &args[1..],
+        ("plan", Some(path)) => {
+            payload["nodes"] = read_plan(path)?;
+            &args[2..]
+        }
         ("get", Some(id)) if args.len() == 2 => {
             payload["id"] = id.clone().into();
             &args[2..]
@@ -174,7 +182,7 @@ fn parse_payload(args: &[String]) -> Result<(Value, bool), String> {
             payload["title"] = title.clone().into();
             &args[2..]
         }
-        ("delegate" | "start" | "accept" | "done", Some(id)) => {
+        ("delegate" | "start" | "accept" | "done" | "depends" | "update", Some(id)) => {
             payload["id"] = id.clone().into();
             &args[2..]
         }
@@ -194,7 +202,38 @@ fn parse_payload(args: &[String]) -> Result<(Value, bool), String> {
             return Err("duplicate option".into());
         }
         match (action, flag.as_str()) {
-            ("create" | "decision", "--parent") => payload["parent"] = value.clone().into(),
+            ("create" | "decision" | "plan", "--parent") => {
+                payload["parent"] = value.clone().into()
+            }
+            ("done", "--evidence") => payload["text"] = value.clone().into(),
+            ("depends", "--on") | ("create" | "decision", "--depends-on") => {
+                payload["depends_on"] = serde_json::from_str(value)
+                    .map_err(|_| "dependencies must be a JSON list of task IDs".to_string())?;
+                if !payload["depends_on"].is_array() {
+                    return Err("dependencies must be a JSON list".into());
+                }
+            }
+            ("create" | "decision" | "update", "--done-when" | "--brief-path" | "--due-at") => {
+                let key = flag.trim_start_matches("--").replace('-', "_");
+                payload[&key] = if value.is_empty() && flag != "--done-when" {
+                    Value::Null
+                } else {
+                    value.clone().into()
+                };
+            }
+            (
+                "create" | "decision" | "update",
+                "--estimate-work-ms" | "--estimate-wait-ms" | "--actual-work-ms"
+                | "--actual-wait-ms",
+            ) => {
+                let key = flag.trim_start_matches("--").replace('-', "_");
+                payload[&key] = value
+                    .parse::<u64>()
+                    .map_err(|_| {
+                        "task timing must be nonnegative integer milliseconds".to_string()
+                    })?
+                    .into();
+            }
             (_, "--op") if mutation => payload["operation_id"] = value.clone().into(),
             (_, "--caller") if mutation => {
                 payload["expected_caller"] = serde_json::from_str(value)
@@ -214,7 +253,7 @@ fn parse_payload(args: &[String]) -> Result<(Value, bool), String> {
                     "--owner must be the assignee's binding JSON from task whoami".to_string()
                 })?
             }
-            ("list", "--after") => payload["after"] = value.clone().into(),
+            ("list" | "ready", "--after") => payload["after"] = value.clone().into(),
             ("op", "--caller") => {
                 payload["lookup_caller"] = serde_json::from_str(value)
                     .map_err(|_| "--caller must be the original binding JSON".to_string())?
@@ -226,13 +265,51 @@ fn parse_payload(args: &[String]) -> Result<(Value, bool), String> {
     {
         return Err("an explicit --op requires --caller with the original attempt's binding (use task whoami for a fresh explicit ID)".into());
     }
-    if mutation && !matches!(action, "create" | "decision") && payload.get("revision").is_none() {
+    if mutation
+        && !matches!(action, "create" | "decision")
+        && (action != "plan" || payload.get("parent").is_some())
+        && payload.get("revision").is_none()
+    {
         return Err("--rev is required; inspect the task before writing".into());
+    }
+    // An exact historical explicit-op replay may predate required criteria. The provider
+    // looks up that receipt first; a fresh missing-criteria write still rejects there.
+    if matches!(action, "create" | "decision")
+        && payload.get("done_when").is_none()
+        && payload.get("operation_id").is_none()
+    {
+        return Err("--done-when is required: 1-3 observable lines".into());
+    }
+    if action == "depends" && payload.get("depends_on").is_none() {
+        return Err("--on is required: JSON list of prerequisite task IDs".into());
+    }
+    if action == "plan" && payload.get("revision").is_some() && payload.get("parent").is_none() {
+        return Err("plan --rev selects an existing --parent".into());
     }
     if action == "delegate" && payload.get("owner").is_none() {
         return Err("--owner is required; use the assignee's task whoami binding".into());
     }
     Ok((payload, mutation))
+}
+
+fn read_plan(path: &str) -> Result<Value, String> {
+    let file = std::fs::File::open(path).map_err(|error| format!("cannot read plan: {error}"))?;
+    let mut bytes = Vec::new();
+    file.take(64 * 1024 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("cannot read plan: {error}"))?;
+    if bytes.len() > 64 * 1024 {
+        return Err("plan exceeds 64 KiB request size".into());
+    }
+    let plan: Value =
+        serde_json::from_slice(&bytes).map_err(|error| format!("invalid plan JSON: {error}"))?;
+    let Some(object) = plan.as_object() else {
+        return Err("plan file must contain an object with only nodes".into());
+    };
+    if object.len() != 1 || !object.get("nodes").is_some_and(Value::is_array) {
+        return Err("plan file must contain an object with only nodes".into());
+    }
+    Ok(plan["nodes"].clone())
 }
 
 fn run_tree(args: &[String]) -> std::io::Result<i32> {
@@ -371,7 +448,7 @@ fn render_tree(tasks: &[Value]) -> Result<String, String> {
 }
 
 fn usage() -> String {
-    "usage: vqro task <create/decision TITLE [--parent ID]|delegate ID --owner JSON --rev N|start/accept/done ID --rev N|block/report/answer ID TEXT --rev N|list [--after ID]|tree [--json]|whoami|get ID|op ID [--caller JSON]>; explicit --op ID requires --caller JSON from the original attempt".into()
+    "usage: vqro task <create/decision TITLE --done-when TEXT [--parent ID]|plan FILE [--parent ID --rev N]|depends ID --on JSON --rev N|update ID --rev N [metadata options]|delegate ID --owner JSON --rev N|start/accept/done ID --rev N [done --evidence TEXT]|block/report/answer ID TEXT --rev N|list/ready [--after ID]|tree [--json]|whoami|get ID|op ID [--caller JSON]>; explicit --op ID requires --caller JSON from the original attempt".into()
 }
 
 #[cfg(test)]
@@ -417,6 +494,8 @@ mod tests {
             "old".into(),
             "--caller".into(),
             original.to_string(),
+            "--done-when".into(),
+            "Observable result".into(),
         ])
         .unwrap();
         assert!(mutation);
@@ -491,6 +570,110 @@ mod tests {
         assert!(payload.get("lookup_caller").is_some());
         assert!(payload.get("caller").is_none());
     }
+    #[test]
+    fn graph_metadata_and_ready_commands_remain_extension_payloads() {
+        let (payload, mutation) = parse_payload(
+            &[
+                "create",
+                "child",
+                "--parent",
+                "task_root",
+                "--done-when",
+                "File is verified.",
+                "--brief-path",
+                "brief.md",
+                "--estimate-work-ms",
+                "100",
+                "--actual-wait-ms",
+                "0",
+                "--depends-on",
+                "[\"task_proof\"]",
+            ]
+            .map(String::from),
+        )
+        .unwrap();
+        assert!(mutation);
+        assert_eq!(payload["done_when"], "File is verified.");
+        assert_eq!(payload["estimate_work_ms"], 100);
+        assert_eq!(payload["actual_wait_ms"], 0);
+        assert_eq!(payload["depends_on"], json!(["task_proof"]));
+        let (payload, mutation) =
+            parse_payload(&["ready", "--after", "task_a"].map(String::from)).unwrap();
+        assert!(!mutation);
+        assert_eq!(payload["action"], "ready");
+        assert_eq!(payload["after"], "task_a");
+    }
+
+    #[test]
+    fn criteria_required_but_original_legacy_intent_may_replay() {
+        assert!(parse_payload(&["create", "new"].map(String::from)).is_err());
+        let caller =
+            r#"{"class":"agent","terminal_id":"term_a","agent":"pi","execution":"boot:1:2"}"#;
+        let (payload, _) = parse_payload(
+            &["create", "old", "--op", "old-create", "--caller", caller].map(String::from),
+        )
+        .unwrap();
+        assert!(payload.get("done_when").is_none());
+        assert_eq!(payload["operation_id"], "old-create");
+    }
+
+    #[test]
+    fn dependency_evidence_and_timing_flags_require_original_revision() {
+        assert!(parse_payload(&["depends", "task_a", "--on", "[]"].map(String::from)).is_err());
+        let (payload, mutation) =
+            parse_payload(&["depends", "task_a", "--on", "[]", "--rev", "3"].map(String::from))
+                .unwrap();
+        assert!(mutation);
+        assert_eq!(payload["depends_on"], json!([]));
+        let (payload, _) = parse_payload(
+            &[
+                "done",
+                "task_a",
+                "--rev",
+                "3",
+                "--evidence",
+                "> File exists.\nEvidence: checked",
+            ]
+            .map(String::from),
+        )
+        .unwrap();
+        assert!(payload["text"].as_str().unwrap().contains("Evidence:"));
+        for value in ["-1", "true", "1.5"] {
+            assert!(parse_payload(
+                &["update", "task_a", "--rev", "3", "--actual-work-ms", value].map(String::from)
+            )
+            .is_err());
+        }
+    }
+
+    #[test]
+    fn plan_file_is_bounded_and_attachment_requires_revision() {
+        let mut nonce = [0u8; 8];
+        crate::platform::fill_secure_random(&mut nonce).unwrap();
+        let root =
+            std::env::temp_dir().join(format!("vqro-plan-test-{:016x}", u64::from_ne_bytes(nonce)));
+        std::fs::create_dir(&root).unwrap();
+        let file = root.join("plan.json");
+        std::fs::write(
+            &file,
+            r#"{"nodes":[{"key":"proof","title":"proof","done_when":"File exists."}]}"#,
+        )
+        .unwrap();
+        let path = file.to_str().unwrap();
+        let (payload, mutation) = parse_payload(&["plan", path].map(String::from)).unwrap();
+        assert!(mutation);
+        assert_eq!(payload["nodes"][0]["key"], "proof");
+        assert!(
+            parse_payload(&["plan", path, "--parent", "task_parent"].map(String::from)).is_err()
+        );
+        assert!(parse_payload(&["plan", path, "--rev", "1"].map(String::from)).is_err());
+        std::fs::write(&file, r#"{"nodes":[],"controller":true}"#).unwrap();
+        assert!(read_plan(path).is_err());
+        std::fs::write(&file, vec![b' '; 64 * 1024 + 1]).unwrap();
+        assert!(read_plan(path).unwrap_err().contains("64 KiB"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn lost_or_malformed_reply_never_becomes_definite_rejection() {
         for response in [

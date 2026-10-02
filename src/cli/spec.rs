@@ -90,35 +90,51 @@ fn task_command() -> Command {
                 .arg(option("caller", "JSON")),
         );
     for (action, description) in [
-        ("create", "Create owned work"),
+        (
+            "create",
+            "Create owned work (ordinary roots require a human)",
+        ),
         ("decision", "File a human-decision task"),
     ] {
-        command = command.subcommand(
+        command = command.subcommand(task_metadata_options(
             Command::new(action)
                 .about(description)
                 .arg(required("title", "TITLE"))
                 .arg(option("parent", "ID"))
+                .arg(option("depends-on", "JSON"))
                 .arg(option("op", "ID").requires("caller"))
                 .arg(option("caller", "JSON")),
-        );
+            true,
+        ));
     }
     for (action, description) in [
         ("start", "Start or resume owned work"),
-        ("accept", "Cooperative human acceptance of a report"),
-        ("done", "Close accepted work"),
+        (
+            "accept",
+            "Parent-owner/delegator acceptance; never agent self-accept",
+        ),
+        (
+            "done",
+            "Close accepted work or finish an own step with evidence",
+        ),
     ] {
-        command = command.subcommand(
-            Command::new(action)
-                .about(description)
-                .arg(required("id", "ID"))
-                .arg(option("rev", "N").required(true))
-                .arg(option("op", "ID").requires("caller"))
-                .arg(option("caller", "JSON")),
-        );
+        let mut subcommand = Command::new(action)
+            .about(description)
+            .arg(required("id", "ID"))
+            .arg(option("rev", "N").required(true))
+            .arg(option("op", "ID").requires("caller"))
+            .arg(option("caller", "JSON"));
+        if action == "done" {
+            subcommand = subcommand.arg(option("evidence", "TEXT"));
+        }
+        command = command.subcommand(subcommand);
     }
     for (action, description) in [
         ("block", "Record an owned task's blocker"),
-        ("report", "Report owned work for human acceptance"),
+        (
+            "report",
+            "Report quoted criteria/evidence for independent acceptance",
+        ),
         ("answer", "Cooperative human answer to a decision"),
     ] {
         command = command.subcommand(
@@ -130,6 +146,54 @@ fn task_command() -> Command {
                 .arg(option("op", "ID").requires("caller"))
                 .arg(option("caller", "JSON")),
         );
+    }
+    command
+        .subcommand(
+            Command::new("ready")
+                .about("Read open tasks whose dependencies are accepted/done")
+                .arg(option("after", "ID")),
+        )
+        .subcommand(
+            Command::new("plan")
+                .about("Atomically import a graph; human approves fresh roots")
+                .arg(required("file", "FILE"))
+                .arg(option("parent", "ID").requires("rev"))
+                .arg(option("rev", "N").requires("parent"))
+                .arg(option("op", "ID").requires("caller"))
+                .arg(option("caller", "JSON")),
+        )
+        .subcommand(
+            Command::new("depends")
+                .about("Replace a task's prerequisites atomically")
+                .arg(required("id", "ID"))
+                .arg(option("on", "JSON").required(true))
+                .arg(option("rev", "N").required(true))
+                .arg(option("op", "ID").requires("caller"))
+                .arg(option("caller", "JSON")),
+        )
+        .subcommand(task_metadata_options(
+            Command::new("update")
+                .about("Update active task criteria, path or budgets")
+                .arg(required("id", "ID"))
+                .arg(option("rev", "N").required(true))
+                .arg(option("op", "ID").requires("caller"))
+                .arg(option("caller", "JSON")),
+            false,
+        ))
+}
+
+fn task_metadata_options(command: Command, criteria_required: bool) -> Command {
+    let mut command = command
+        .arg(option("done-when", "TEXT").required(criteria_required))
+        .arg(option("brief-path", "PATH"))
+        .arg(option("due-at", "ISO8601"));
+    for field in [
+        "estimate-work-ms",
+        "estimate-wait-ms",
+        "actual-work-ms",
+        "actual-wait-ms",
+    ] {
+        command = command.arg(option(field, "MS"));
     }
     command
 }

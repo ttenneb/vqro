@@ -56,7 +56,7 @@ def run_case(binary, name, replies, expected_calls, expected_stderr):
             thread = threading.Thread(target=serve)
             thread.start()
             try:
-                result = subprocess.run([str(binary), "task", "create", "Boundary fixture", "--op", "boundary-op", "--caller", json.dumps(SCOPE)], env=env, cwd=root, capture_output=True, text=True, timeout=18)
+                result = subprocess.run([str(binary), "task", "create", "Boundary fixture", "--done-when", "Outcome is recorded.", "--op", "boundary-op", "--caller", json.dumps(SCOPE)], env=env, cwd=root, capture_output=True, text=True, timeout=18)
             finally:
                 stop.set()
                 thread.join(timeout=6)

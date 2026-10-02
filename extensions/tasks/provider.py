@@ -10,6 +10,8 @@ import sqlite3
 import sys
 import uuid
 
+import graph
+
 SERVICE = "vqro.tasks.core"
 MAX_RECORDS = 10000
 PAGE_SIZE = 32
@@ -63,6 +65,9 @@ class Store:
         Path(directory).mkdir(parents=True, exist_ok=True, mode=0o700)
         self.db = sqlite3.connect(Path(directory) / "tasks.sqlite", timeout=1, isolation_level=None)
         self.db.row_factory = sqlite3.Row
+        if self.db.execute("PRAGMA user_version").fetchone()[0] > 2:
+            self.db.close()
+            raise ValueError("unsupported future Tasks database version; no migration attempted")
         self.db.execute("PRAGMA journal_mode=WAL")
         self.db.execute("PRAGMA synchronous=FULL")
         self.db.execute("PRAGMA foreign_keys=ON")
@@ -85,6 +90,9 @@ class Store:
         self.migrate()
 
     def migrate(self):
+        # Successful migration is atomic; don't repeat historical backfill on restarts.
+        if self.db.execute("PRAGMA user_version").fetchone()[0] == 2:
+            return
         # Only this extension owns this database. Preserve original spike bindings.
         self.db.execute("BEGIN IMMEDIATE")
         try:
@@ -96,7 +104,16 @@ class Store:
             self.db.execute("CREATE INDEX IF NOT EXISTS task_transition ON transitions(task_id,seq)")
             self.db.execute("CREATE INDEX IF NOT EXISTS operation_lookup ON operations(operation_id,caller)")
             self.db.execute("UPDATE tasks SET creator=owner WHERE creator IS NULL")
-            self.db.execute("PRAGMA user_version=1")
+            for name in sorted(graph.META_FIELDS | {"started_at"}):
+                if name not in columns:
+                    definition = "INTEGER" if name in graph.MILLISECONDS else "TEXT"
+                    self.db.execute(f"ALTER TABLE tasks ADD COLUMN {name} {definition}")
+            self.db.execute("""CREATE TABLE IF NOT EXISTS dependencies (
+                task_id TEXT NOT NULL REFERENCES tasks(id), prerequisite TEXT NOT NULL REFERENCES tasks(id),
+                PRIMARY KEY(task_id,prerequisite), CHECK(task_id<>prerequisite))""")
+            self.db.execute("CREATE INDEX IF NOT EXISTS dependency_prerequisite ON dependencies(prerequisite)")
+            self.db.execute("UPDATE tasks SET started_at=(SELECT at FROM transitions WHERE task_id=tasks.id AND state='in_progress' ORDER BY seq LIMIT 1) WHERE started_at IS NULL")
+            self.db.execute("PRAGMA user_version=2")
             self.commit()
         except OutcomeUnknown:
             raise
@@ -116,11 +133,22 @@ class Store:
         elif value["kind"] == "decision":
             owed_to, owed_action = HUMAN_ROLE, "answer"
         elif value["state"] == "reported":
-            owed_to, owed_action = HUMAN_ROLE, "accept"
+            acceptors = self.acceptors(value)
+            owed_to = {"role": "acceptors", "bindings": acceptors}
+            owed_action = "accept" if acceptors else "acceptor_missing"
         else:
             owed_to = value["owner"]
             owed_action = {"open": "start", "in_progress": "work/report", "blocked": "unblock"}.get(value["state"])
         value.update(owed_to=owed_to, owed_action=owed_action, owed_since=value["updated_at"] if owed_to else None)
+        value["acceptors"] = self.acceptors(value)
+        value["depends_on"] = [row[0] for row in self.db.execute("SELECT prerequisite FROM dependencies WHERE task_id=? ORDER BY prerequisite", (task_id,))]
+        value["waiting_on"] = [row[0] for row in self.db.execute("SELECT prerequisite FROM dependencies JOIN tasks ON tasks.id=prerequisite WHERE task_id=? AND state NOT IN ('accepted','done') ORDER BY prerequisite", (task_id,))]
+        value["ready"] = value["kind"] == "task" and value["state"] == "open" and not value["waiting_on"]
+        value["criteria_missing"] = value["done_when"] is None
+        value["elapsed_ms"] = None
+        if value["started_at"]:
+            end = value["updated_at"] if value["state"] in FINAL_STATES else timestamp()
+            value["elapsed_ms"] = max(0, int((datetime.datetime.fromisoformat(end) - datetime.datetime.fromisoformat(value["started_at"])).total_seconds() * 1000))
         last = self.db.execute("SELECT state,at,caller FROM transitions WHERE task_id=? ORDER BY seq DESC LIMIT 1", (task_id,)).fetchone()
         value["last_transition"] = {"state": last["state"], "at": last["at"], "caller": json.loads(last["caller"])} if last else None
         return value
@@ -145,10 +173,13 @@ class Store:
             finally:
                 raise OutcomeUnknown("rollback outcome unknown; inspect the original caller's operation") from error
 
-    def list_tasks(self, after=None):
+    def list_tasks(self, after=None, ready=False):
         if after is not None and (not isinstance(after, str) or len(after) > 128):
             raise ValueError("invalid task cursor")
-        rows = self.db.execute("SELECT id FROM tasks WHERE id>? ORDER BY id LIMIT ?", (after or "", PAGE_SIZE + 1)).fetchall()
+        predicate = """AND kind='task' AND state='open' AND NOT EXISTS (
+            SELECT 1 FROM dependencies JOIN tasks AS prerequisite ON prerequisite.id=dependencies.prerequisite
+            WHERE task_id=tasks.id AND prerequisite.state NOT IN ('accepted','done'))""" if ready else ""
+        rows = self.db.execute(f"SELECT id FROM tasks WHERE id>? {predicate} ORDER BY id LIMIT ?", (after or "", PAGE_SIZE + 1)).fetchall()
         tasks, used = [], 4096
         for row in rows[:PAGE_SIZE]:
             task = self.task(row["id"])
@@ -181,13 +212,13 @@ class Store:
             self.rollback()
             raise
 
-    def parent_for_create(self, parent, caller):
+    def parent_for_create(self, parent, caller, check_owner=True):
         if parent is None:
             return
         task = self.task(parent)
         if task["kind"] != "task" or task["state"] not in ("open", "in_progress", "blocked"):
             raise ValueError("parent is not open for new work")
-        if caller["class"] == "agent" and task["owner"] != caller:
+        if check_owner and caller["class"] == "agent" and task["owner"] != caller:
             raise ValueError("parent is not owned by this execution")
         seen = set()
         while parent is not None:
@@ -207,6 +238,120 @@ class Store:
             return
         raise ValueError("task is not owned or delegated by this execution")
 
+    @staticmethod
+    def accept_match(left, right):
+        if left.get("class") == right.get("class") == "human_unverified":
+            return left["uid"] == right["uid"]
+        return left == right
+
+    def acceptors(self, task):
+        if task["kind"] == "decision":
+            return []
+        candidates = [task["delegator"]]
+        if task["parent"]:
+            row = self.db.execute("SELECT owner FROM tasks WHERE id=?", (task["parent"],)).fetchone()
+            candidates.append(json.loads(row[0]) if row else None)
+        if task["owner"].get("class") == "human_unverified":
+            candidates.append(task["owner"])
+        result = []
+        for candidate in candidates:
+            if not candidate or candidate.get("class") not in ("agent", "human_unverified"):
+                continue
+            if candidate.get("class") == "agent" and candidate == task["owner"]:
+                continue
+            if not any(self.accept_match(candidate, existing) for existing in result):
+                result.append(candidate)
+        return result
+
+    def own_step(self, task):
+        if task["kind"] != "task" or task["delegator"] is not None or task["parent"] is None:
+            return False
+        parent = self.db.execute("SELECT owner FROM tasks WHERE id=?", (task["parent"],)).fetchone()
+        return parent is not None and json.loads(parent[0]) == task["owner"]
+
+    def check_graph(self):
+        parents = {row[0]: row[1] for row in self.db.execute("SELECT id,parent FROM tasks")}
+        graph.check_cycles(parents, list(self.db.execute("SELECT task_id,prerequisite FROM dependencies")))
+
+    def set_dependencies(self, task_id, references, check=True):
+        references = graph.dependencies(references)
+        for prerequisite in references:
+            if prerequisite == task_id or self.db.execute("SELECT 1 FROM tasks WHERE id=?", (prerequisite,)).fetchone() is None:
+                raise ValueError("self or missing dependency rejected")
+        old = self.db.execute("SELECT COUNT(*) FROM dependencies WHERE task_id=?", (task_id,)).fetchone()[0]
+        self.quota({"dependencies": len(references) - old})
+        self.db.execute("DELETE FROM dependencies WHERE task_id=?", (task_id,))
+        self.db.executemany("INSERT INTO dependencies VALUES (?,?)", ((task_id, ref) for ref in references))
+        if check:
+            self.check_graph()
+
+    def set_metadata(self, task_id, values):
+        if values:
+            keys = sorted(values)
+            self.db.execute("UPDATE tasks SET " + ",".join(f"{key}=?" for key in keys) + " WHERE id=?", [*(values[key] for key in keys), task_id])
+
+    def quota(self, additions):
+        for table, count in additions.items():
+            if self.db.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] + count > MAX_RECORDS:
+                raise ValueError("store quota reached; no receipts are evicted")
+
+    def import_plan(self, payload, caller, at):
+        nodes = payload.get("nodes")
+        if not isinstance(nodes, list) or not 1 <= len(nodes) <= graph.MAX_PLAN_NODES:
+            raise ValueError("plan must contain 1-100 nodes (also bounded by 64 KiB request)")
+        parent = payload.get("parent")
+        if parent is None and caller["class"] != "human_unverified":
+            raise ValueError("root plan import requires human approval")
+        if parent is not None:
+            self.parent_for_create(parent, caller)
+            if type(payload.get("revision")) is not int or payload["revision"] != self.task(parent)["revision"]:
+                raise ValueError("stale plan parent revision")
+        mapping, checked, edge_count = {}, {}, 0
+        for node in nodes:
+            if not isinstance(node, dict) or set(node) - (graph.META_FIELDS | {"key", "title", "kind", "owner", "parent", "depends_on"}):
+                raise ValueError("unknown plan node field")
+            key = node.get("key")
+            if not isinstance(key, str) or not 1 <= len(key) <= 64 or not all(char.isascii() and (char.isalnum() or char in "_.-") for char in key) or key in mapping:
+                raise ValueError("plan keys must be unique bounded ASCII identifiers")
+            if self.db.execute("SELECT 1 FROM tasks WHERE id=?", (key,)).fetchone() is not None:
+                raise ValueError("local plan key collides with a durable task ID")
+            graph.metadata(node, required=True)
+            refs = graph.dependencies(node.get("depends_on", []))
+            edge_count += len(refs)
+            if "owner" in node:
+                checked_binding(node["owner"])
+                if node.get("kind") == "decision":
+                    raise ValueError("decision owner is the logical human role")
+            mapping[key] = "task_" + uuid.uuid4().hex
+            checked[key] = node
+        if edge_count > graph.MAX_PLAN_EDGES:
+            raise ValueError("plan exceeds 400 edges")
+        self.quota({"tasks": len(nodes), "transitions": len(nodes), "dependencies": edge_count, "operations": 1})
+        pending = dict(checked)
+        while pending:
+            progress = False
+            for key, node in list(pending.items()):
+                local_parent = node.get("parent")
+                if local_parent is not None and local_parent not in mapping:
+                    raise ValueError("plan parent must reference a local node")
+                if local_parent in pending:
+                    continue
+                actual_parent = mapping[local_parent] if local_parent is not None else parent
+                # Whole-import authority was checked at the existing attachment above. No node
+                # may attach elsewhere; newly created descendants can have explicitly chosen owners.
+                task_id = self.create_task({**node, "action": "decision" if node.get("kind") == "decision" else "create", "parent": actual_parent}, caller, at, task_id=mapping[key], importing=True)
+                if "owner" in node:
+                    owner = node["owner"]
+                    self.db.execute("UPDATE tasks SET owner=?,delegator=? WHERE id=?", (canonical(owner), canonical(caller) if owner != caller else None, task_id))
+                pending.pop(key)
+                progress = True
+            if not progress:
+                raise ValueError("plan parent cycle rejected")
+        for key, node in checked.items():
+            self.set_dependencies(mapping[key], [mapping.get(ref, ref) for ref in node.get("depends_on", [])], check=False)
+        self.check_graph()
+        return {"tasks": mapping, "counts": {"tasks": len(nodes), "dependencies": edge_count}}
+
     def transition(self, payload, caller, at):
         task = self.task(payload.get("id"))
         revision = payload.get("revision")
@@ -214,15 +359,33 @@ class Store:
             raise ValueError("stale task revision")
         action = payload["action"]
         human = caller["class"] == "human_unverified"
-        if action in ("accept", "answer") and not human:
-            raise ValueError("human-only acceptance/answer (cooperative, unverified)")
-        if task["kind"] == "decision" and action != "answer":
+        if action == "answer" and not human:
+            raise ValueError("human-only answer (cooperative, unverified)")
+        if action == "accept":
+            if caller["class"] == "agent" and task["owner"] == caller:
+                raise ValueError("agent cannot accept its own work")
+            if not any(self.accept_match(candidate, caller) for candidate in self.acceptors(task)):
+                raise ValueError("caller is not the parent owner or stored delegator acceptor")
+        if task["kind"] == "decision" and action not in ("answer", "update", "depends"):
             raise ValueError("decision tasks close only by a human answer")
         if task["kind"] != "decision" and action == "answer":
             raise ValueError("only a decision can be answered")
         if action not in ("accept", "answer"):
-            self.require_owner(task, caller, delegation=action == "delegate")
+            self.require_owner(task, caller, delegation=action in ("delegate", "depends", "update"))
         state, owner, delegator, detail = task["state"], task["owner"], task["delegator"], task["detail"]
+        if action in ("update", "depends"):
+            if state not in ("open", "in_progress", "blocked"):
+                raise ValueError("metadata/dependencies are frozen after reporting")
+            if action == "update":
+                values = graph.metadata(payload)
+                if not values:
+                    raise ValueError("update needs at least one metadata field")
+                self.set_metadata(task["id"], values)
+            else:
+                self.set_dependencies(task["id"], payload.get("depends_on"))
+            destination = state
+        else:
+            destination = None
         allowed = {
             "start": ({"open", "blocked"}, "in_progress"),
             "block": ({"open", "in_progress"}, "blocked"),
@@ -232,26 +395,37 @@ class Store:
             "answer": ({"open"}, "done"),
             "delegate": ({"open", "in_progress", "blocked"}, "open"),
         }
-        sources, destination = allowed[action]
-        if state not in sources:
-            raise ValueError(f"{action} is not allowed from {state}")
-        if action in ("report", "answer") and self.db.execute("SELECT 1 FROM tasks WHERE parent=? AND state NOT IN ('accepted','done') LIMIT 1", (task["id"],)).fetchone():
+        direct_done = action == "done" and state == "in_progress" and task["owner"] == caller and self.own_step(task)
+        if destination is None:
+            sources, destination = allowed[action]
+            if state not in sources and not direct_done:
+                raise ValueError(f"{action} is not allowed from {state}")
+        if action in ("start", "report", "answer", "done") and task["waiting_on"]:
+            raise ValueError("unfinished dependencies must be accepted/done first")
+        if action in ("report", "answer", "done") and self.db.execute("SELECT 1 FROM tasks WHERE parent=? AND state NOT IN ('accepted','done') LIMIT 1", (task["id"],)).fetchone():
             raise ValueError("unfinished children must be accepted/done first")
         if action in ("block", "report", "answer"):
             detail = payload.get("text")
             if not isinstance(detail, str) or not detail.strip() or len(detail.encode()) > 4096:
                 raise ValueError("text must be nonempty and at most 4096 bytes")
+        if action == "report" or direct_done:
+            detail = graph.evidence(task["done_when"], payload.get("text"))
+        if action == "report" and not self.acceptors(task):
+            raise ValueError("no independent acceptor; own steps finish with done and evidence")
         if action == "start":
             detail = ""
+            self.db.execute("UPDATE tasks SET started_at=COALESCE(started_at,?) WHERE id=?", (at, task["id"]))
         if action == "delegate":
             owner = checked_binding(payload.get("owner"))
-            delegator, detail = caller, ""
+            # Self-assignment is takeover, not a new independent handoff. Preserve prior
+            # oversight (including None on an own step); never erase a human delegator.
+            delegator, detail = (task["delegator"] if owner == caller else caller), ""
         self.db.execute("UPDATE tasks SET state=?,owner=?,delegator=?,detail=?,revision=revision+1,updated_at=? WHERE id=? AND revision=?",
                         (destination, canonical(owner), canonical(delegator) if delegator else None, detail, at, task["id"], revision))
         self.db.execute("INSERT INTO transitions(task_id,state,at,caller) VALUES (?,?,?,?)", (task["id"], destination, at, canonical(caller)))
         return task["id"]
 
-    def create_task(self, payload, caller, at):
+    def create_task(self, payload, caller, at, task_id=None, importing=False):
         title = payload.get("title")
         if not isinstance(title, str) or not title.strip() or len(title.encode()) > 1024:
             raise ValueError("title must be nonempty and at most 1024 bytes")
@@ -259,12 +433,18 @@ class Store:
         if kind not in ("task", "decision"):
             raise ValueError("invalid task kind")
         parent = payload.get("parent")
-        self.parent_for_create(parent, caller)
-        task_id = "task_" + uuid.uuid4().hex
+        if kind == "task" and parent is None and caller["class"] != "human_unverified" and not importing:
+            raise ValueError("ordinary root creation requires human approval")
+        self.parent_for_create(parent, caller, check_owner=not importing)
+        values = graph.metadata(payload, required=True)
+        task_id = task_id or "task_" + uuid.uuid4().hex
         owner = HUMAN_ROLE if kind == "decision" else caller
         self.db.execute("INSERT INTO tasks(id,parent,title,kind,owner,state,revision,created_at,updated_at,creator,detail) VALUES (?,?,?,?,?,'open',1,?,?,?,'')",
                         (task_id, parent, title.strip(), kind, canonical(owner), at, at, canonical(caller)))
+        self.set_metadata(task_id, values)
         self.db.execute("INSERT INTO transitions(task_id,state,at,caller) VALUES (?,?,?,?)", (task_id, "open", at, canonical(caller)))
+        if "depends_on" in payload and not importing:
+            self.set_dependencies(task_id, payload["depends_on"])
         return task_id
 
     def invoke(self, params):
@@ -275,24 +455,29 @@ class Store:
             raise ValueError("payload must be an object")
         action = payload.get("action")
         fields = {
-            "list": {"action", "after"}, "get": {"action", "id"},
+            "list": {"action", "after"}, "ready": {"action", "after"}, "get": {"action", "id"},
             "whoami": {"action"},
             "op": {"action", "operation_id", "lookup_caller"},
-            "create": {"action", "operation_id", "title", "parent", "kind", "expected_caller"},
-            "decision": {"action", "operation_id", "title", "parent", "expected_caller"},
-            **{action: {"action", "operation_id", "id", "revision", "expected_caller"} | ({"owner"} if action == "delegate" else {"text"} if action in ("block", "report", "answer") else set())
+            "create": {"action", "operation_id", "title", "parent", "kind", "expected_caller", "depends_on"} | graph.META_FIELDS,
+            "decision": {"action", "operation_id", "title", "parent", "expected_caller", "depends_on"} | graph.META_FIELDS,
+            "plan": {"action", "operation_id", "nodes", "parent", "revision", "expected_caller"},
+            "depends": {"action", "operation_id", "id", "revision", "depends_on", "expected_caller"},
+            "update": {"action", "operation_id", "id", "revision", "expected_caller"} | graph.META_FIELDS,
+            **{action: {"action", "operation_id", "id", "revision", "expected_caller"} | ({"owner"} if action == "delegate" else {"text"} if action in ("block", "report", "answer", "done") else set())
                for action in ("delegate", "start", "block", "report", "accept", "done", "answer")},
         }
         if action not in fields or set(payload) - fields[action]:
             raise ValueError("unknown action or field (actor flags are not accepted)")
         if action == "whoami":
             return {"caller": binding(caller) if caller.get("class") != "unknown" else {"class": "unknown"}}
-        if action == "list":
-            return self.list_tasks(payload.get("after"))
+        if action in ("list", "ready"):
+            return self.list_tasks(payload.get("after"), ready=action == "ready")
         if action == "get":
             return {"task": self.task(payload["id"])}
         if action == "op":
             return self.lookup(payload, caller)
+        if len(canonical(payload).encode()) > 64 * 1024:
+            raise ValueError("plan/action exceeds 64 KiB request size")
         owner = binding(caller)
         if "expected_caller" in payload and checked_binding(payload["expected_caller"]) != owner:
             raise ValueError("caller changed; this is not the original operation scope")
@@ -309,13 +494,17 @@ class Store:
                     raise ValueError("operation payload conflict")
                 self.commit()
                 return json.loads(old["outcome"])
-            tables = ("tasks", "operations", "transitions") if action in ("create", "decision") else ("operations", "transitions")
-            for table in tables:
-                if self.db.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] >= MAX_RECORDS:
-                    raise ValueError("store quota reached; no receipts are evicted")
             at = timestamp()
-            task_id = self.create_task(payload, owner, at) if action in ("create", "decision") else self.transition(payload, owner, at)
-            outcome = {"task": self.task(task_id), "operation_id": op, "caller": owner}
+            if action == "plan":
+                result = self.import_plan(payload, owner, at)
+            else:
+                tables = ("tasks", "operations", "transitions") if action in ("create", "decision") else ("operations", "transitions")
+                self.quota(dict.fromkeys(tables, 1))
+                task_id = self.create_task(payload, owner, at) if action in ("create", "decision") else self.transition(payload, owner, at)
+                result = {"task": self.task(task_id)}
+            outcome = {**result, "operation_id": op, "caller": owner}
+            if len(canonical(outcome).encode()) > MAX_REPLY_BYTES:
+                raise ValueError("operation outcome exceeds response budget")
             self.db.execute("INSERT INTO operations VALUES (?,?,?,?,?)", (caller_key, op, payload_key, canonical(outcome), at))
             self.commit()
             return outcome
