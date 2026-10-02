@@ -56,15 +56,10 @@ pub(super) fn command() -> Command {
 }
 
 fn task_command() -> Command {
-    Command::new("task")
+    let mut command = Command::new("task")
         .about("Use the enabled trusted Tasks extension")
-        .subcommand(
-            Command::new("create")
-                .arg(required("title", "TITLE"))
-                .arg(option("parent", "ID"))
-                .arg(option("op", "ID")),
-        )
         .subcommand(Command::new("list").arg(option("after", "ID")))
+        .subcommand(Command::new("tree").arg(flag("json")))
         .subcommand(Command::new("whoami"))
         .subcommand(Command::new("get").arg(required("id", "ID")))
         .subcommand(
@@ -72,6 +67,39 @@ fn task_command() -> Command {
                 .arg(required("id", "ID"))
                 .arg(option("caller", "JSON")),
         )
+        .subcommand(
+            Command::new("delegate")
+                .arg(required("id", "ID"))
+                .arg(option("owner", "JSON").required(true))
+                .arg(option("rev", "N").required(true))
+                .arg(option("op", "ID")),
+        );
+    for action in ["create", "decision"] {
+        command = command.subcommand(
+            Command::new(action)
+                .arg(required("title", "TITLE"))
+                .arg(option("parent", "ID"))
+                .arg(option("op", "ID")),
+        );
+    }
+    for action in ["start", "accept", "done"] {
+        command = command.subcommand(
+            Command::new(action)
+                .arg(required("id", "ID"))
+                .arg(option("rev", "N").required(true))
+                .arg(option("op", "ID")),
+        );
+    }
+    for action in ["block", "report", "answer"] {
+        command = command.subcommand(
+            Command::new(action)
+                .arg(required("id", "ID"))
+                .arg(required("text", "TEXT"))
+                .arg(option("rev", "N").required(true))
+                .arg(option("op", "ID")),
+        );
+    }
+    command
 }
 
 fn configure_help(command: Command, depth: usize) -> Command {

@@ -5,6 +5,9 @@ use crate::api::schema::{ExtensionActionInvokeParams, Method, Request};
 use serde_json::{json, Value};
 
 pub(super) fn run_task_command(args: &[String]) -> std::io::Result<i32> {
+    if args.first().is_some_and(|arg| arg == "tree") {
+        return run_tree(&args[1..]);
+    }
     let (mut payload, mutation) = match parse_payload(args) {
         Ok(parsed) => parsed,
         Err(message) => {
@@ -136,7 +139,18 @@ fn decode_reply(response: &Value) -> TaskReply {
 fn parse_payload(args: &[String]) -> Result<(Value, bool), String> {
     let action = args.first().map(String::as_str).ok_or_else(usage)?;
     let mut payload = json!({"action": action});
-    let mutation = action == "create";
+    let mutation = matches!(
+        action,
+        "create"
+            | "decision"
+            | "delegate"
+            | "start"
+            | "block"
+            | "report"
+            | "accept"
+            | "done"
+            | "answer"
+    );
     let remaining = match (action, args.get(1)) {
         ("list" | "whoami", _) => &args[1..],
         ("get", Some(id)) if args.len() == 2 => {
@@ -147,9 +161,18 @@ fn parse_payload(args: &[String]) -> Result<(Value, bool), String> {
             payload["operation_id"] = id.clone().into();
             &args[2..]
         }
-        ("create", Some(title)) => {
+        ("create" | "decision", Some(title)) => {
             payload["title"] = title.clone().into();
             &args[2..]
+        }
+        ("delegate" | "start" | "accept" | "done", Some(id)) => {
+            payload["id"] = id.clone().into();
+            &args[2..]
+        }
+        ("block" | "report" | "answer", Some(id)) if args.len() >= 3 => {
+            payload["id"] = id.clone().into();
+            payload["text"] = args[2].clone().into();
+            &args[3..]
         }
         _ => return Err(usage()),
     };
@@ -162,8 +185,22 @@ fn parse_payload(args: &[String]) -> Result<(Value, bool), String> {
             return Err("duplicate option".into());
         }
         match (action, flag.as_str()) {
-            ("create", "--parent") => payload["parent"] = value.clone().into(),
-            ("create", "--op") => payload["operation_id"] = value.clone().into(),
+            ("create" | "decision", "--parent") => payload["parent"] = value.clone().into(),
+            (_, "--op") if mutation => payload["operation_id"] = value.clone().into(),
+            (_, "--rev") if mutation && !matches!(action, "create" | "decision") => {
+                let revision = value
+                    .parse::<u64>()
+                    .map_err(|_| "--rev must be a positive integer".to_string())?;
+                if revision == 0 {
+                    return Err("--rev must be positive".into());
+                }
+                payload["revision"] = revision.into();
+            }
+            ("delegate", "--owner") => {
+                payload["owner"] = serde_json::from_str(value).map_err(|_| {
+                    "--owner must be the assignee's binding JSON from task whoami".to_string()
+                })?
+            }
             ("list", "--after") => payload["after"] = value.clone().into(),
             ("op", "--caller") => {
                 payload["lookup_caller"] = serde_json::from_str(value)
@@ -172,16 +209,249 @@ fn parse_payload(args: &[String]) -> Result<(Value, bool), String> {
             _ => return Err(usage()),
         }
     }
+    if mutation && !matches!(action, "create" | "decision") && payload.get("revision").is_none() {
+        return Err("--rev is required; inspect the task before writing".into());
+    }
+    if action == "delegate" && payload.get("owner").is_none() {
+        return Err("--owner is required; use the assignee's task whoami binding".into());
+    }
     Ok((payload, mutation))
 }
 
+fn run_tree(args: &[String]) -> std::io::Result<i32> {
+    let json_output = match args {
+        [] => false,
+        [flag] if flag == "--json" => true,
+        _ => {
+            eprintln!("usage: vqro task tree [--json]");
+            return Ok(2);
+        }
+    };
+    let client = super::target::api_client()?;
+    let mut tasks = Vec::new();
+    let mut cursor = None::<String>;
+    loop {
+        let mut payload = json!({"action": "list"});
+        if let Some(after) = &cursor {
+            payload["after"] = after.clone().into();
+        }
+        let response = match invoke(&client, payload) {
+            Ok(response) => response,
+            Err(error) => {
+                eprintln!("task tree unavailable: {error}");
+                return Ok(1);
+            }
+        };
+        let page = match decode_reply(&response) {
+            TaskReply::Success(value) => value,
+            TaskReply::Rejected(message) | TaskReply::Unknown(message) => {
+                eprintln!("task tree unavailable: {message}");
+                return Ok(1);
+            }
+        };
+        let Some(rows) = page["tasks"].as_array() else {
+            eprintln!("invalid task page");
+            return Ok(1);
+        };
+        tasks.extend(rows.iter().cloned());
+        if tasks.len() > 10000 {
+            eprintln!("task tree exceeds extension quota");
+            return Ok(1);
+        }
+        let next = page["next_cursor"].as_str().map(str::to_string);
+        if let Some(next) = next {
+            if cursor.as_ref().is_some_and(|old| old >= &next) || rows.is_empty() {
+                eprintln!("non-progressing task cursor");
+                return Ok(1);
+            }
+            cursor = Some(next);
+        } else {
+            break;
+        }
+    }
+    let text = match render_tree(&tasks) {
+        Ok(text) => text,
+        Err(error) => {
+            eprintln!("task tree unavailable: {error}");
+            return Ok(1);
+        }
+    };
+    if json_output {
+        println!("{}", json!({"tasks": tasks}));
+    } else {
+        print!("{text}");
+    }
+    Ok(0)
+}
+
+fn render_tree(tasks: &[Value]) -> Result<String, String> {
+    use std::collections::{BTreeMap, HashSet};
+    let mut records = BTreeMap::new();
+    let mut children = BTreeMap::<Option<String>, Vec<String>>::new();
+    for task in tasks {
+        let id = task["id"].as_str().ok_or("missing task id")?.to_string();
+        if records.insert(id.clone(), task).is_some() {
+            return Err("duplicate task id".into());
+        }
+        let parent = match &task["parent"] {
+            Value::Null => None,
+            Value::String(parent) => Some(parent.clone()),
+            _ => return Err("invalid parent".into()),
+        };
+        children.entry(parent).or_default().push(id);
+    }
+    for parent in children.keys().flatten() {
+        if !records.contains_key(parent) {
+            return Err("missing parent; tree may have changed during paginated read".into());
+        }
+    }
+    for ids in children.values_mut() {
+        ids.sort();
+    }
+    let mut stack = children
+        .get(&None)
+        .into_iter()
+        .flatten()
+        .rev()
+        .map(|id| (id.clone(), 0_usize))
+        .collect::<Vec<_>>();
+    let mut visited = HashSet::new();
+    let mut text = String::new();
+    while let Some((id, depth)) = stack.pop() {
+        if !visited.insert(id.clone()) {
+            return Err("task cycle".into());
+        }
+        let task = records.get(&id).ok_or("missing task")?;
+        let indent = "  ".repeat(depth.min(16));
+        let depth_note = if depth > 16 {
+            format!(" (depth {depth})")
+        } else {
+            String::new()
+        };
+        text.push_str(&format!(
+            "{indent}{} [{} / {} r{}]{depth_note} {}\n",
+            id.escape_default(),
+            task["kind"],
+            task["state"],
+            task["revision"],
+            task["title"]
+        ));
+        text.push_str(&format!(
+            "{indent}  owner {} | owes {} {} since {}\n",
+            task["owner"], task["owed_to"], task["owed_action"], task["owed_since"]
+        ));
+        if let Some(ids) = children.get(&Some(id)) {
+            stack.extend(ids.iter().rev().map(|id| (id.clone(), depth + 1)));
+        }
+    }
+    if visited.len() != records.len() {
+        return Err("task cycle or disconnected parent graph".into());
+    }
+    if tasks.is_empty() {
+        text.push_str("(no tasks)\n");
+    }
+    Ok(text)
+}
+
 fn usage() -> String {
-    "usage: vqro task <create TITLE [--parent ID] [--op ID]|list [--after ID]|whoami|get ID|op ID [--caller JSON]>".into()
+    "usage: vqro task <create/decision TITLE [--parent ID]|delegate ID --owner JSON --rev N|start/accept/done ID --rev N|block/report/answer ID TEXT --rev N|list [--after ID]|tree [--json]|whoami|get ID|op ID [--caller JSON]>; writes accept --op ID for the same original caller".into()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn task_writes_require_explicit_revision_and_delegation_binding() {
+        for args in [
+            vec!["start", "task_a"],
+            vec!["accept", "task_a", "--rev", "0"],
+            vec!["delegate", "task_a", "--rev", "1"],
+        ] {
+            assert!(
+                parse_payload(&args.into_iter().map(String::from).collect::<Vec<_>>()).is_err()
+            );
+        }
+        for action in ["start", "accept", "done"] {
+            let (payload, mutation) =
+                parse_payload(&[action, "task_a", "--rev", "2"].map(String::from)).unwrap();
+            assert!(mutation);
+            assert_eq!(payload["revision"], 2);
+        }
+        let (payload, mutation) = parse_payload(
+            &[
+                "answer",
+                "task_a",
+                "smaller path",
+                "--rev",
+                "1",
+                "--op",
+                "answer-1",
+            ]
+            .map(String::from),
+        )
+        .unwrap();
+        assert!(mutation);
+        assert_eq!(payload["text"], "smaller path");
+        assert!(parse_payload(
+            &["start", "task_a", "--rev", "1", "--actor", "human"].map(String::from)
+        )
+        .is_err());
+    }
+
+    fn tree_task(id: &str, parent: Option<&str>, kind: &str, state: &str, owes: Value) -> Value {
+        json!({"id": id, "parent": parent, "kind": kind, "state": state, "revision": 1, "title": "evidence", "owner": {"class":"agent","terminal_id":"term_a"}, "owed_to": owes, "owed_action": "accept", "owed_since": "2026-10-02T00:00:00+00:00"})
+    }
+
+    #[test]
+    fn task_tree_projects_extension_supplied_debts_and_rejects_bad_graphs() {
+        let root = tree_task(
+            "root",
+            None,
+            "task",
+            "in_progress",
+            json!({"class":"agent"}),
+        );
+        let child = tree_task(
+            "child",
+            Some("root"),
+            "task",
+            "reported",
+            json!({"role":"human_unverified"}),
+        );
+        let text = render_tree(&[child.clone(), root.clone()]).unwrap();
+        assert!(text.find("root [").unwrap() < text.find("  child [").unwrap());
+        assert!(text.contains("human_unverified"));
+        assert!(text.contains("2026-10-02T00:00:00+00:00"));
+        assert!(render_tree(std::slice::from_ref(&child)).is_err());
+        assert!(render_tree(&[root.clone(), root]).is_err());
+        let cycle = [
+            tree_task("a", Some("b"), "task", "open", Value::Null),
+            tree_task("b", Some("a"), "task", "open", Value::Null),
+        ];
+        assert!(render_tree(&cycle).is_err());
+    }
+
+    #[test]
+    fn deep_tree_indent_is_bounded_and_control_text_is_escaped() {
+        let mut tasks = Vec::new();
+        for depth in 0..20 {
+            let parent = (depth > 0).then(|| format!("task_{}", depth - 1));
+            let mut task = tree_task(
+                &format!("task_{depth}"),
+                parent.as_deref(),
+                "task",
+                "open",
+                Value::Null,
+            );
+            task["title"] = "unsafe\u{1b}[31m\ntext".into();
+            tasks.push(task);
+        }
+        let text = render_tree(&tasks).unwrap();
+        assert!(text.contains("(depth 19)"));
+        assert!(!text.contains('\u{1b}'));
+        assert!(!text.lines().any(|line| line.starts_with(&" ".repeat(35))));
+    }
+
     #[test]
     fn receipt_lookup_selector_is_not_a_caller_authority_flag() {
         let args = [

@@ -4,6 +4,11 @@ from pathlib import Path
 import sqlite3
 import tempfile
 import unittest
+import os
+import subprocess
+import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from unittest import mock
 
 import provider
@@ -11,16 +16,25 @@ import provider
 A = {"class": "agent", "terminal_id": "term_a", "agent": "pi", "execution": "boot:10:100"}
 B = {"class": "agent", "terminal_id": "term_b", "agent": "pi", "execution": "boot:20:200"}
 UNKNOWN = {"class": "unknown"}
+HUMAN = {"class": "human_unverified", "terminal_id": "term_human", "uid": 1000}
 
 
 class FaultCommit:
-    def __init__(self, db, after):
+    def __init__(self, db, after, close_error=False, rollback_error=False):
         self.db, self.after = db, after
+        self.close_error, self.rollback_error = close_error, rollback_error
 
     def __getattr__(self, name):
         return getattr(self.db, name)
 
+    def close(self):
+        self.db.close()
+        if self.close_error:
+            raise sqlite3.OperationalError("injected cleanup failure")
+
     def execute(self, sql, *args):
+        if sql == "ROLLBACK" and self.rollback_error:
+            raise sqlite3.OperationalError("injected rollback failure")
         if sql == "COMMIT":
             if self.after:
                 self.db.execute(sql)
@@ -48,6 +62,159 @@ class StoreTests(unittest.TestCase):
 
     def lookup(self, op="create-1", caller=A, **extra):
         return self.invoke({"action": "op", "operation_id": op, **extra}, caller)
+
+    def change(self, task, action, caller=A, op=None, **extra):
+        return self.invoke({"action": action, "id": task["id"], "revision": task["revision"],
+                            "operation_id": op or f"{action}-{task['revision']}-{task['id']}", **extra}, caller)["task"]
+
+    def test_delegated_child_report_human_acceptance_and_debts(self):
+        root = self.create()["task"]
+        child = self.create("child", parent=root["id"])["task"]
+        with self.assertRaisesRegex(ValueError, "unfinished children"):
+            self.change(root, "report", text="parent report")
+        child = self.change(child, "delegate", owner=B)
+        self.assertEqual(B, child["owner"])
+        self.assertEqual(A, child["creator"])
+        self.assertEqual(A, child["delegator"])
+        self.assertEqual(B, child["owed_to"])
+        child = self.change(child, "start", caller=B)
+        self.assertEqual("work/report", child["owed_action"])
+        child = self.change(child, "block", caller=B, text="needs input")
+        self.assertEqual("unblock", child["owed_action"])
+        self.assertEqual(child["updated_at"], child["owed_since"])
+        with self.assertRaisesRegex(ValueError, "not owned"):
+            self.change(child, "report", text="forged other-agent report")
+        child = self.change(child, "report", caller=B, text="proof complete")
+        self.assertEqual(provider.HUMAN_ROLE, child["owed_to"])
+        self.assertEqual("accept", child["owed_action"])
+        for caller in (A, B):
+            with self.assertRaisesRegex(ValueError, "human-only"):
+                self.change(child, "accept", caller=caller)
+        child = self.change(child, "accept", caller=HUMAN)
+        self.assertEqual("accepted", child["state"])
+        self.assertEqual(HUMAN, child["last_transition"]["caller"])
+        self.assertIsNone(child["owed_to"])
+        self.assertEqual("proof complete", child["detail"])
+        child = self.change(child, "done", caller=B)
+        self.assertEqual("done", child["state"])
+        root = self.change(root, "report", text="child outcome accepted")
+        self.assertEqual("accept", root["owed_action"])
+        root = self.change(root, "accept", caller=HUMAN)
+        self.assertIsNone(root["owed_since"])
+
+    def test_decision_is_a_task_kind_with_one_human_answer_path(self):
+        decision = self.invoke({"action": "decision", "operation_id": "decision-1", "title": "Which direction?"})["task"]
+        self.assertEqual("decision", decision["kind"])
+        self.assertEqual(A, decision["creator"])
+        self.assertEqual(provider.HUMAN_ROLE, decision["owner"])
+        self.assertEqual("answer", decision["owed_action"])
+        for caller in (A, B):
+            with self.assertRaisesRegex(ValueError, "human-only"):
+                self.change(decision, "answer", caller=caller, text="agent cannot answer")
+        with self.assertRaisesRegex(ValueError, "only by a human answer"):
+            self.change(decision, "done", caller=HUMAN)
+        answered = self.change(decision, "answer", caller=HUMAN, text="Use the smaller path")
+        self.assertEqual("done", answered["state"])
+        self.assertEqual("Use the smaller path", answered["detail"])
+        self.assertIsNone(answered["owed_to"])
+        self.assertEqual(2, self.store.db.execute("SELECT COUNT(*) FROM transitions").fetchone()[0])
+        self.assertEqual(2, self.store.db.execute("SELECT COUNT(*) FROM operations").fetchone()[0])
+
+    def test_replacement_never_inherits_but_explicit_reassignment_works(self):
+        root = self.create()["task"]
+        child = self.create("child", parent=root["id"])["task"]
+        child = self.change(child, "delegate", owner=B)
+        replacement = {**B, "execution": "boot:21:201"}
+        with self.assertRaisesRegex(ValueError, "not owned"):
+            self.change(child, "start", caller=replacement)
+        child = self.change(child, "delegate", owner=replacement)
+        self.assertEqual(replacement, child["owner"])
+        self.assertEqual(A, child["creator"])
+        with self.assertRaisesRegex(ValueError, "not owned"):
+            self.change(child, "start", caller=B)
+        child = self.change(child, "start", caller=replacement)
+        self.assertEqual("in_progress", child["state"])
+
+    def test_stale_revision_and_parent_cycle_reject_without_partial_writes(self):
+        root = self.create()["task"]
+        started = self.change(root, "start")
+        with self.assertRaisesRegex(ValueError, "stale"):
+            self.change(root, "block", text="stale")
+        self.assertEqual(started, self.invoke({"action": "get", "id": root["id"]})["task"])
+        child = self.create("child", parent=root["id"])["task"]
+        self.store.db.execute("UPDATE tasks SET parent=? WHERE id=?", (child["id"], root["id"]))
+        with self.assertRaisesRegex(ValueError, "cycle"):
+            self.create("cycle", parent=root["id"])
+        self.assertEqual(2, self.store.db.execute("SELECT COUNT(*) FROM tasks").fetchone()[0])
+
+    def test_two_concurrent_revisions_have_one_winner(self):
+        task = self.create()["task"]
+        barrier = threading.Barrier(2)
+        def writer(action):
+            store = provider.Store(self.root.name)
+            barrier.wait(timeout=5)
+            try:
+                return store.invoke({"caller": A, "payload": {"action": action, "id": task["id"], "revision": 1, "operation_id": action, **({"text": "blocked"} if action == "block" else {})}})
+            except ValueError as error:
+                return str(error)
+            finally:
+                store.db.close()
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(writer, ("start", "block")))
+        self.assertEqual(1, sum(isinstance(result, dict) for result in results))
+        self.assertEqual(1, sum("stale task revision" in str(result) for result in results))
+        self.assertEqual(2, self.store.db.execute("SELECT COUNT(*) FROM operations").fetchone()[0])
+
+    def test_two_concurrent_same_operations_commit_once(self):
+        barrier = threading.Barrier(2)
+        def writer(_):
+            store = provider.Store(self.root.name)
+            barrier.wait(timeout=5)
+            try:
+                return store.invoke({"caller": A, "payload": {"action": "create", "title": "once", "operation_id": "same"}})
+            finally:
+                store.db.close()
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(writer, (1, 2)))
+        self.assertEqual(results[0], results[1])
+        for table in ("tasks", "transitions", "operations"):
+            self.assertEqual(1, self.store.db.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
+
+    def test_subprocess_crash_before_and_after_commit_recovers_atomic_outcome(self):
+        for after in (False, True):
+            with self.subTest(after=after), tempfile.TemporaryDirectory() as directory:
+                code = '''import os,sys,provider
+s=provider.Store(sys.argv[1])
+a={"class":"agent","terminal_id":"term_a","agent":"pi","execution":"boot:10:100"}
+p={"action":"create","title":"crash","operation_id":"crash"}
+if sys.argv[2]=="after": s.invoke({"caller":a,"payload":p})
+else:
+ s.db.execute("BEGIN IMMEDIATE")
+ s.create_task(p,a,provider.timestamp())
+os._exit(17)
+'''
+                result = subprocess.run([sys.executable, "-B", "-c", code, directory, "after" if after else "before"], env={"PYTHONPATH": str(Path(__file__).parent.resolve())}, timeout=10, capture_output=True)
+                self.assertEqual(17, result.returncode, result.stderr)
+                store = provider.Store(directory)
+                receipt = store.invoke({"caller": A, "payload": {"action": "op", "operation_id": "crash"}})
+                self.assertEqual(after, receipt["found"])
+                for table in ("tasks", "transitions", "operations"):
+                    self.assertEqual(int(after), store.db.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
+                store.db.close()
+
+    def test_large_report_pages_stay_under_frame_budget(self):
+        for index in range(40):
+            task = self.create(f"large-{index}", title="雪" * 300)["task"]
+            self.change(task, "report", text="雪" * 1300)
+        cursor, count = None, 0
+        while True:
+            page = self.invoke({"action": "list", **({"after": cursor} if cursor else {})}, UNKNOWN)
+            self.assertLess(len(provider.canonical(page).encode()), provider.MAX_REPLY_BYTES)
+            count += len(page["tasks"])
+            cursor = page["next_cursor"]
+            if cursor is None:
+                break
+        self.assertEqual(40, count)
 
     def test_replay_is_once_and_changed_payload_conflicts(self):
         first = self.create()
@@ -130,6 +297,24 @@ class StoreTests(unittest.TestCase):
                 self.assertEqual(after, result["found"])
                 self.assertTrue(result["authoritative"])
                 reopened.db.close()
+
+    def test_commit_and_cleanup_fault_preserves_unknown_not_rejection(self):
+        self.store.db = FaultCommit(self.store.db, True, close_error=True)
+        with self.assertRaises(provider.OutcomeUnknown):
+            self.create("uncertain-cleanup")
+        reopened = provider.Store(self.root.name)
+        result = reopened.invoke({"caller": A, "payload": {"action": "op", "operation_id": "uncertain-cleanup"}})
+        self.assertTrue(result["found"])
+        reopened.db.close()
+
+    def test_rollback_and_cleanup_fault_preserves_unknown_not_rejection(self):
+        self.store.db = FaultCommit(self.store.db, False, close_error=True, rollback_error=True)
+        with self.assertRaises(provider.OutcomeUnknown):
+            self.create("rollback-cleanup", title="")
+        reopened = provider.Store(self.root.name)
+        result = reopened.invoke({"caller": A, "payload": {"action": "op", "operation_id": "rollback-cleanup"}})
+        self.assertFalse(result["found"])
+        reopened.db.close()
 
     def test_wal_full_and_reopen_preserve_exact_receipt(self):
         self.assertEqual("wal", self.store.db.execute("PRAGMA journal_mode").fetchone()[0])
