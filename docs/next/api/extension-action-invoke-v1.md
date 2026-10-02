@@ -75,9 +75,13 @@ do not allocate evidence or query foreground state.
   provider-count limit; admission failure is definitive before execution.
 - Queue **start** deadline: two seconds from worker admission. This is not an
   atomic effect deadline or client-submission-time guarantee.
-- Action deadline: 2.5 seconds including startup, independent of the unchanged
-  750 ms render timeout; existing cancellation, no worker retry. Queue + action
-  budgets remain below the API's five-second response and CLI's six-second waits.
+- Action invocation receives an absolute 2.5-second deadline computed before
+  startup, independent of the unchanged 750 ms render timeout. Startup still has
+  its separately bounded three-second handshake and can overrun that nominal
+  budget after queue wait. The invocation/API may then return `outcome_unknown`;
+  do not assume the nominal 4.5-second queue+action budget is a hard end-to-end
+  guarantee. API response wait is five seconds; CLI wait is six seconds.
+- Existing cancellation; no worker retry.
 - Generation/revocation checks before dispatch and after execution. Retirement
   cancels active work and rejects queued requests, even with a full channel.
 
