@@ -97,6 +97,12 @@ test("A2 trusts only the CLI's own successful prompt response for the origin", (
   expect(promptConfirmsOrigin(error, "alpha")).toBe(false);
   expect(promptConfirmsOrigin('echo "vqro agent prompt alpha"', "alpha")).toBe(false);
   expect(promptConfirmsOrigin("", "alpha")).toBe(false);
+  // A mention of alpha in one response must not combine with a send to gamma.
+  const combined =
+    JSON.stringify({ id: "cli:agent:get", result: { agent: { name: "alpha" } } }) +
+    "\n" +
+    JSON.stringify({ result: { type: "agent_prompted", agent: { name: "gamma" } } });
+  expect(promptConfirmsOrigin(combined, "alpha")).toBe(false);
 });
 
 test("reply bytes are capped without splitting a character", () => {

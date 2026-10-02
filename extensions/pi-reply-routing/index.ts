@@ -45,16 +45,53 @@ export function assistantText(message: any): string {
 }
 
 /**
- * True when a bash command's output is a successful `vqro agent prompt` response
- * for `from`. Reading the CLI's own confirmation avoids shell parsing entirely:
- * a quoted/heredoc/failed or compound command cannot produce agent_prompted for
- * this target, so no required reply is dropped.
+ * True when a bash command's output contains one successful `vqro agent prompt`
+ * response whose own target is `from`. Each JSON object is parsed and bound
+ * structurally, so a name from one response cannot combine with a send to
+ * another. Reading the CLI's own confirmation avoids shell parsing entirely.
  */
 export function promptConfirmsOrigin(output: string, from: string): boolean {
-  if (!/"type"\s*:\s*"agent_prompted"/.test(output)) return false;
-  const name = /"name"\s*:\s*"([^"]*)"/.exec(output)?.[1];
-  const pane = /"pane_id"\s*:\s*"([^"]*)"/.exec(output)?.[1];
-  return name === from || pane === from;
+  for (const value of jsonObjects(output)) {
+    const agent = value?.result?.agent;
+    if (value?.result?.type === "agent_prompted" && (agent?.name === from || agent?.pane_id === from)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/** Top-level JSON objects in `text`, each parsed independently (strings aware). */
+function jsonObjects(text: string): any[] {
+  const objects: any[] = [];
+  let depth = 0;
+  let start = -1;
+  let quote: string | null = null;
+  let escaped = false;
+  for (let index = 0; index < text.length; index += 1) {
+    const ch = text[index];
+    if (quote) {
+      if (escaped) escaped = false;
+      else if (ch === "\\") escaped = true;
+      else if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === '"') quote = ch;
+    else if (ch === "{") {
+      if (depth === 0) start = index;
+      depth += 1;
+    } else if (ch === "}") {
+      depth -= 1;
+      if (depth === 0 && start >= 0) {
+        try {
+          objects.push(JSON.parse(text.slice(start, index + 1)));
+        } catch {
+          // ignore a malformed object; a later complete one may still confirm
+        }
+        start = -1;
+      }
+    }
+  }
+  return objects;
 }
 
 export default function (pi: ExtensionAPI) {
