@@ -98,6 +98,10 @@ def recipient(task, tasks):
     return task.get("delegator") or parent.get("owner") or task.get("creator")
 
 
+def attention_filters(selected):
+    return selected - {"old"} == DEFAULT
+
+
 def activity(agent):
     # Existing API "done" means idle-but-unseen (pane_agent_status), NOT task done.
     status = agent.get("agent_status")
@@ -117,7 +121,7 @@ def categories(task, pending_parents, agents, idle_since, now):
     if availability(owner, agents) == "current":
         agent = agents[owner["terminal_id"]]
         state = activity(agent)
-        if state in ("working", "idle"):
+        if state in ("working", "idle", "blocked"):
             result.add(state)
         children = task["id"] in pending_parents
         since = idle_since.get(owner.get("execution"))
@@ -340,7 +344,7 @@ def run(screen):
                 idle_start = idle_since.get(owner.get("execution"))
                 detail = avail
                 if avail == "current":
-                    detail = state + (f" ≥{int(now - idle_start)}s observed" if idle_start is not None else "")
+                    detail = ("blocked (agent prompt)" if state == "blocked" else state) + (f" ≥{int(now - idle_start)}s observed" if idle_start is not None else "")
                 owner_label = owner_label[:max(4, width - indent - len(detail) - 13)]
                 draw(line + 1, indent + 2, "owner: " + owner_label + " (" + detail + ")", attr | (curses.A_UNDERLINE if avail == "current" else 0))
                 action = task.get("owed_action") or "—"
@@ -388,7 +392,8 @@ def run(screen):
                             else:
                                 selected.symmetric_difference_update({action})
                                 if action != "old":
-                                    attention, all_tasks = False, False
+                                    all_tasks = False
+                                attention = attention_filters(selected) and not all_tasks
                                 scroll = 0
                             dirty = True
                     if body_y <= my < body_y + page * 4 and scroll + (my - body_y) // 4 < len(rows):

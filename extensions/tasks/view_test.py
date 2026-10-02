@@ -69,6 +69,25 @@ class ViewTests(unittest.TestCase):
         self.assertEqual(1, len(view.project(tasks, {}, {}, view.DEFAULT, True, set(), 7, 100, WALL)))
         self.assertEqual([], view.project(tasks, None, {}, view.DEFAULT, True, set(), 7, 100, WALL))
 
+    def test_attention_filter_round_trip_restores_unavailable_rows(self):
+        selected = set(view.DEFAULT)
+        selected.symmetric_difference_update({"stalled"})
+        self.assertFalse(view.attention_filters(selected))
+        selected.symmetric_difference_update({"stalled"})
+        self.assertTrue(view.attention_filters(selected))
+        selected.add("old")
+        self.assertTrue(view.attention_filters(selected))
+        self.assertEqual(1, len(view.project({"root": task()}, {}, {}, selected, view.attention_filters(selected), set(), 7, 100, WALL)))
+
+    def test_verified_owner_prompt_is_blocked_without_changing_task_debt(self):
+        current = task()
+        before = copy.deepcopy(current)
+        self.assertIn("blocked", view.categories(current, set(), {"term_a": agent(status="blocked")}, {}, 100))
+        self.assertNotIn("blocked", view.categories(current, set(), {"term_a": agent(status="blocked", execution="replacement")}, {}, 100))
+        self.assertNotIn("blocked", view.categories(current, set(), None, {}, 100))
+        self.assertEqual(before, current)
+        self.assertEqual({"done/accepted"}, view.categories(task(state="done"), set(), {"term_a": agent(status="blocked")}, {}, 100))
+
     def test_age_never_hides_unfinished_debt_or_needed_ancestor(self):
         old = "2020-01-01T00:00:00+00:00"
         self.assertFalse(view.old_final(task(updated_at=old), 7, WALL))

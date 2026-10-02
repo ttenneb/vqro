@@ -29,8 +29,10 @@ human installation still requires appropriate approval.
   decision-answer recipient is decision creator. Human-only accept/answer policy
   is unchanged and cooperative/unverified.
 - Seven toggles: waiting on me, stalled, blocked, working, idle, done/accepted,
-  old. Default attention includes human debt, stalled, blocked and positively
-  unavailable owners. All-tasks mode also exposes unknown owners. Ancestors stay
+  old. Default attention includes human debt, stalled, durable task blockers or
+  verified current owner prompts, and positively unavailable owners. Returning
+  the category toggles to that default also restores unavailable-owner rows.
+  A live owner prompt does not rewrite the task's debtor/action. All-tasks mode also exposes unknown owners. Ancestors stay
   dimmed as context; expansion, scrolling and age are local presentation only.
 - Stalled means open/in-progress, no unfinished children, exact owner observed
   idle for at least 60 seconds. Idle age is a **view-local sampled lower bound**,
