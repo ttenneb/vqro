@@ -24,9 +24,13 @@ convention introduces no host API, Pi tool, task delivery or activation mechanis
   directly in its pane. Pi's question tool is only an example for that direct case;
   the convention is agent-neutral. Creating a decision does not promise a wake or
   notification. Never exploit cooperative human classification through a shell.
-- Final prose is written for whoever started the turn, but remains in the agent's
-  own pane. Automatic origin routing/delivery is **not shipped**. Remote action
-  needs the corresponding task record and an explicit agent notification. Final
+- Final prose is written for whoever started the turn. The Pi reply-routing adapter
+  sends an agent-started turn's final text back to that agent by default, records it
+  in the session and labels a missing reply on the pane. `vqro agent prompt`
+  auto-labels from the sending agent's pane (`[agent <name> · reply expected]`,
+  `[agent <name>]`); anything not an agent label is treated as human and a
+  human-started turn is never routed. Remote action still needs the corresponding
+  task record and an explicit agent notification. Final
   prose and delegate/report receipts are not independent acceptance; accept/done
   receipts may authoritatively record historical committed outcomes. Read `get`
   for current state.

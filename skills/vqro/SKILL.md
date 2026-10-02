@@ -156,7 +156,7 @@ Human only (never answer your own decision or impersonate the human):
 vqro task answer "$TASK_ID" a --rev "$REV" --note "A is approved"
 ```
 
-Decisions need 2–4 options, a default, a reversible flag and a waiting cost; a reversible decision may also take `--auto-at` (see the decision policy). The answer selects an option key and is not quote-validated. Do not assume creating a decision notifies/wakes the human. Write your final reply for whoever started your turn; it stays in your own pane—nothing automatically routes/delivers it. If another agent must act, record report/decision as appropriate and explicitly notify them with the task ID. Keep human-needed decisions in Tasks; final prose is neither delivery proof nor a committed task receipt.
+Decisions need 2–4 options, a default, a reversible flag and a waiting cost; a reversible decision may also take `--auto-at` (see the decision policy). The answer selects an option key and is not quote-validated. Do not assume creating a decision notifies/wakes the human. Write your final reply for whoever started your turn: when an agent's message started it, the reply-routing adapter sends that final text back to that agent automatically and records it; a human-started turn stays a normal chat. A message you send with `vqro agent prompt` is auto-labelled from your pane (`[agent <name> · reply expected]`; `--no-reply-expected` drops the reply expectation); anything not labelled as an agent message is treated as human and never routed. To reach anyone else, record a report/decision and explicitly notify them with the task ID. Keep human-needed decisions in Tasks; final prose is neither delivery proof nor a committed task receipt.
 
 ### Uncertain outcomes: lookup, never blind retry
 

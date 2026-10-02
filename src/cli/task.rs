@@ -954,7 +954,8 @@ mod tests {
             "**agents never self-accept**",
             "task ID only",
             "even a root decision is allowed",
-            "nothing automatically routes/delivers it",
+            "the reply-routing adapter sends that final text back to that agent automatically",
+            "anything not labelled as an agent message is treated as human and never routed",
             "Never manufacture human classification",
             "**not proof a queued invocation cannot still commit**",
         ] {
