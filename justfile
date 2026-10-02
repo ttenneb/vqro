@@ -10,6 +10,7 @@ test:
     just ui-hot-path-architecture-test
     just integration-assets-test
     just pi-launch-profile-test
+    just pi-reply-routing-test
     just task-core-test
     just docs-contract-test
 
@@ -60,11 +61,16 @@ ci-tests filter='all()':
     just ui-hot-path-architecture-test
     just integration-assets-test
     just pi-launch-profile-test
+    just pi-reply-routing-test
     just task-core-test
 
 # Test the public-CLI Pi launch adapter without starting a server or model.
 pi-launch-profile-test:
     node --test extensions/pi-launch-profile/launch.test.mjs
+
+# Test the Pi reply-routing adapter without a server or model.
+pi-reply-routing-test:
+    bun test extensions/pi-reply-routing/index.test.ts
 
 # Download the Windows SDK once (requires xwin; prompts for Microsoft's SDK license)
 [unix]

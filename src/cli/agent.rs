@@ -769,7 +769,7 @@ fn agent_rename(args: &[String]) -> std::io::Result<i32> {
 fn agent_prompt(args: &[String]) -> std::io::Result<i32> {
     let Some(target) = args.first() else {
         eprintln!(
-            "usage: vqro agent prompt <target> <text> [--wait] [--until STATUS]... [--timeout MS]"
+            "usage: vqro agent prompt <target> <text> [--reply] [--no-label] [--wait] [--until STATUS]... [--timeout MS]"
         );
         return Ok(2);
     };
@@ -780,9 +780,19 @@ fn agent_prompt(args: &[String]) -> std::io::Result<i32> {
     let mut wait = false;
     let mut until = Vec::new();
     let mut timeout_ms = None;
+    let mut reply = false;
+    let mut no_label = false;
     let mut index = 2;
     while index < args.len() {
         match args[index].as_str() {
+            "--reply" => {
+                reply = true;
+                index += 1;
+            }
+            "--no-label" => {
+                no_label = true;
+                index += 1;
+            }
             "--wait" => {
                 wait = true;
                 index += 1;
@@ -827,11 +837,16 @@ fn agent_prompt(args: &[String]) -> std::io::Result<i32> {
         eprintln!("--timeout requires --wait");
         return Ok(2);
     }
+    let text = if no_label {
+        text.clone()
+    } else {
+        labelled_prompt_text(text, agent_sender_label(reply).as_deref())
+    };
     let response = super::send_request(&Request {
         id: "cli:agent:prompt".into(),
         method: Method::AgentPrompt(AgentPromptParams {
             target: target.clone(),
-            text: text.clone(),
+            text,
             wait: wait.then_some(AgentPromptWaitOptions {
                 until,
                 timeout_ms,
@@ -840,6 +855,59 @@ fn agent_prompt(args: &[String]) -> std::io::Result<i32> {
         }),
     })?;
     super::print_response(&response)
+}
+
+/// A readable provenance label for an agent-originated prompt: the sender kind,
+/// its agent name (or pane id when unnamed), and whether a reply is expected.
+/// Present only when this CLI runs inside a known public Vqro pane that currently
+/// hosts a detected agent; otherwise `None` and the prompt is sent unchanged, so a
+/// human shell never labels. The label is self-declared and spoofable in trusted
+/// same-user scope, not authenticated caller identity. It is the envelope the
+/// `extensions/pi-reply-routing` Pi adapter parses.
+fn agent_sender_label(reply: bool) -> Option<String> {
+    // Require a real managed Vqro pane (not an inherited VQRO_PANE_ID in a test or
+    // foreign shell), matching the public Pi integration's environment contract.
+    if std::env::var(crate::HERDR_ENV_VAR).ok().as_deref() != Some(crate::HERDR_ENV_VALUE) {
+        return None;
+    }
+    if std::env::var(crate::api::SOCKET_PATH_ENV_VAR).is_err() {
+        return None;
+    }
+    let pane = std::env::var(crate::product::PANE_ID_ENV).ok()?;
+    if !is_public_pane_id(&pane) {
+        return None;
+    }
+    let response = resolve_agent_target(pane.as_str(), "cli:agent:prompt:sender").ok()?;
+    let agent = response.get("result")?.get("agent")?;
+    let sender = agent
+        .get("name")
+        .and_then(|value| value.as_str())
+        .filter(|name| !name.is_empty())
+        .unwrap_or(pane.as_str());
+    let qualifier = if reply { "reply" } else { "reply expected" };
+    Some(format!("[agent {sender} \u{b7} {qualifier}] "))
+}
+
+/// Prefix a prompt with a provenance label unless the text is already labelled.
+fn labelled_prompt_text(text: &str, label: Option<&str>) -> String {
+    let Some(label) = label else {
+        return text.to_string();
+    };
+    if text.starts_with("[agent ") || text.starts_with("[host ") {
+        return text.to_string();
+    }
+    format!("{label}{text}")
+}
+
+fn is_public_pane_id(value: &str) -> bool {
+    let Some((workspace, pane)) = value.split_once(':') else {
+        return false;
+    };
+    let segment = |raw: &str, prefix: char| {
+        raw.strip_prefix(prefix)
+            .is_some_and(|rest| !rest.is_empty() && rest.chars().all(|c| c.is_ascii_alphanumeric()))
+    };
+    segment(workspace, 'w') && segment(pane, 'p')
 }
 
 fn agent_send_keys(args: &[String]) -> std::io::Result<i32> {
@@ -927,7 +995,7 @@ fn print_agent_help() {
     eprintln!("  vqro agent get <target>");
     eprintln!("  vqro agent read <target> [--source visible|recent|recent-unwrapped|detection] [--lines N] [--format text|ansi] [--ansi]");
     eprintln!("  vqro agent send-keys <target> <key> [key ...]");
-    eprintln!("  vqro agent prompt <target> <text> [--wait] [--until STATUS]... [--timeout MS]");
+    eprintln!("  vqro agent prompt <target> <text> [--reply] [--no-label] [--wait] [--until STATUS]... [--timeout MS]");
     eprintln!("  vqro agent rename <target> <name>|--clear");
     eprintln!("  vqro agent focus <target>");
     eprintln!("  vqro agent wait <target> [--until STATUS]... [--timeout MS]");
@@ -948,4 +1016,44 @@ fn parse_timeout(value: &str) -> Result<u64, i32> {
         eprintln!("{err}");
         2
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{is_public_pane_id, labelled_prompt_text};
+
+    #[test]
+    fn public_pane_ids_are_bounded() {
+        assert!(is_public_pane_id("w1:p1"));
+        assert!(is_public_pane_id("w2P:pFN"));
+        assert!(!is_public_pane_id(""));
+        assert!(!is_public_pane_id("w1"));
+        assert!(!is_public_pane_id("x1:p1"));
+        assert!(!is_public_pane_id("w1:x1"));
+        assert!(!is_public_pane_id("w1:"));
+        assert!(!is_public_pane_id("w:"));
+    }
+
+    #[test]
+    fn provenance_label_prefixes_only_unlabelled_text() {
+        assert_eq!(
+            labelled_prompt_text("summarise X", Some("[agent alpha \u{b7} reply expected] ")),
+            "[agent alpha \u{b7} reply expected] summarise X"
+        );
+        assert_eq!(
+            labelled_prompt_text("already here", None),
+            "already here"
+        );
+        assert_eq!(
+            labelled_prompt_text(
+                "[agent beta \u{b7} reply] done",
+                Some("[agent alpha \u{b7} reply expected] ")
+            ),
+            "[agent beta \u{b7} reply] done"
+        );
+        assert_eq!(
+            labelled_prompt_text("[host notice] restart", Some("[agent alpha \u{b7} reply expected] ")),
+            "[host notice] restart"
+        );
+    }
 }
