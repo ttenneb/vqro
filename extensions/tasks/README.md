@@ -15,8 +15,10 @@ python3 -B extensions/tasks/demo.py --vqro /absolute/path/to/vqro --pi /absolute
 python3 -B extensions/tasks/cli_fault_demo.py --vqro /absolute/path/to/vqro
 ```
 
-The real demo uses two model-free Pi processes and retains receipts and its
-SQLite database. It verifies a private configuration canary and birth-checks
+The real graph demo uses two model-free Pi processes and retains receipts and its
+SQLite database. It exercises atomic human-approved import, readiness, quoted
+criteria/evidence, independent acceptance, own steps, restart and exact execution
+replacement, then measures a separate 100-node/400-edge import. It verifies a private configuration canary and birth-checks
 owned processes for cleanup. Do not run it with a real user's HOME/socket/config.
 It never installs tools or changes the human's Pi/session files.
 

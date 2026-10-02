@@ -54,16 +54,20 @@ class StoreTests(unittest.TestCase):
             pass
         self.root.cleanup()
 
-    def invoke(self, payload, caller=A):
+    def invoke(self, payload, caller=HUMAN):
+        if payload["action"] in ("create", "decision"):
+            payload = {"done_when": "Result is recorded.", **payload}
         return self.store.invoke({"caller": caller, "payload": payload})
 
-    def create(self, op="create-1", caller=A, **extra):
+    def create(self, op="create-1", caller=HUMAN, **extra):
         return self.invoke({"action": "create", "operation_id": op, "title": "work", **extra}, caller)
 
-    def lookup(self, op="create-1", caller=A, **extra):
+    def lookup(self, op="create-1", caller=HUMAN, **extra):
         return self.invoke({"action": "op", "operation_id": op, **extra}, caller)
 
-    def change(self, task, action, caller=A, op=None, **extra):
+    def change(self, task, action, caller=HUMAN, op=None, **extra):
+        if action == "report" and "text" in extra:
+            extra["text"] = "> " + task["done_when"] + "\n" + extra["text"]
         return self.invoke({"action": action, "id": task["id"], "revision": task["revision"],
                             "operation_id": op or f"{action}-{task['revision']}-{task['id']}", **extra}, caller)["task"]
 
@@ -74,8 +78,8 @@ class StoreTests(unittest.TestCase):
             self.change(root, "report", text="parent report")
         child = self.change(child, "delegate", owner=B)
         self.assertEqual(B, child["owner"])
-        self.assertEqual(A, child["creator"])
-        self.assertEqual(A, child["delegator"])
+        self.assertEqual(HUMAN, child["creator"])
+        self.assertEqual(HUMAN, child["delegator"])
         self.assertEqual(B, child["owed_to"])
         child = self.change(child, "start", caller=B)
         self.assertEqual("work/report", child["owed_action"])
@@ -83,18 +87,18 @@ class StoreTests(unittest.TestCase):
         self.assertEqual("unblock", child["owed_action"])
         self.assertEqual(child["updated_at"], child["owed_since"])
         with self.assertRaisesRegex(ValueError, "not owned"):
-            self.change(child, "report", text="forged other-agent report")
+            self.change(child, "report", caller=A, text="forged other-agent report")
         child = self.change(child, "report", caller=B, text="proof complete")
-        self.assertEqual(provider.HUMAN_ROLE, child["owed_to"])
+        self.assertEqual({"role": "acceptors", "bindings": [HUMAN]}, child["owed_to"])
         self.assertEqual("accept", child["owed_action"])
         for caller in (A, B):
-            with self.assertRaisesRegex(ValueError, "human-only"):
+            with self.assertRaisesRegex(ValueError, "own work|acceptor"):
                 self.change(child, "accept", caller=caller)
         child = self.change(child, "accept", caller=HUMAN)
         self.assertEqual("accepted", child["state"])
         self.assertEqual(HUMAN, child["last_transition"]["caller"])
         self.assertIsNone(child["owed_to"])
-        self.assertEqual("proof complete", child["detail"])
+        self.assertEqual("> Result is recorded.\nproof complete", child["detail"])
         child = self.change(child, "done", caller=B)
         self.assertEqual("done", child["state"])
         root = self.change(root, "report", text="child outcome accepted")
@@ -105,7 +109,7 @@ class StoreTests(unittest.TestCase):
     def test_decision_is_a_task_kind_with_one_human_answer_path(self):
         decision = self.invoke({"action": "decision", "operation_id": "decision-1", "title": "Which direction?"})["task"]
         self.assertEqual("decision", decision["kind"])
-        self.assertEqual(A, decision["creator"])
+        self.assertEqual(HUMAN, decision["creator"])
         self.assertEqual(provider.HUMAN_ROLE, decision["owner"])
         self.assertEqual("answer", decision["owed_action"])
         for caller in (A, B):
@@ -129,7 +133,7 @@ class StoreTests(unittest.TestCase):
             self.change(child, "start", caller=replacement)
         child = self.change(child, "delegate", owner=replacement)
         self.assertEqual(replacement, child["owner"])
-        self.assertEqual(A, child["creator"])
+        self.assertEqual(HUMAN, child["creator"])
         with self.assertRaisesRegex(ValueError, "not owned"):
             self.change(child, "start", caller=B)
         child = self.change(child, "start", caller=replacement)
@@ -154,7 +158,7 @@ class StoreTests(unittest.TestCase):
             store = provider.Store(self.root.name)
             barrier.wait(timeout=5)
             try:
-                return store.invoke({"caller": A, "payload": {"action": action, "id": task["id"], "revision": 1, "operation_id": action, **({"text": "blocked"} if action == "block" else {})}})
+                return store.invoke({"caller": HUMAN, "payload": {"action": action, "id": task["id"], "revision": 1, "operation_id": action, **({"text": "blocked"} if action == "block" else {})}})
             except ValueError as error:
                 return str(error)
             finally:
@@ -171,7 +175,7 @@ class StoreTests(unittest.TestCase):
             store = provider.Store(self.root.name)
             barrier.wait(timeout=5)
             try:
-                return store.invoke({"caller": A, "payload": {"action": "create", "title": "once", "operation_id": "same"}})
+                return store.invoke({"caller": HUMAN, "payload": {"action": "create", "title": "once", "done_when": "Result is recorded.", "operation_id": "same"}})
             finally:
                 store.db.close()
         with ThreadPoolExecutor(max_workers=2) as pool:
@@ -185,8 +189,8 @@ class StoreTests(unittest.TestCase):
             with self.subTest(after=after), tempfile.TemporaryDirectory() as directory:
                 code = '''import os,sys,provider
 s=provider.Store(sys.argv[1])
-a={"class":"agent","terminal_id":"term_a","agent":"pi","execution":"boot:10:100"}
-p={"action":"create","title":"crash","operation_id":"crash"}
+a={"class":"human_unverified","terminal_id":"term_human","uid":1000}
+p={"action":"create","title":"crash","done_when":"Result is recorded.","operation_id":"crash"}
 if sys.argv[2]=="after": s.invoke({"caller":a,"payload":p})
 else:
  s.db.execute("BEGIN IMMEDIATE")
@@ -196,7 +200,7 @@ os._exit(17)
                 result = subprocess.run([sys.executable, "-B", "-c", code, directory, "after" if after else "before"], env={"PYTHONPATH": str(Path(__file__).parent.resolve())}, timeout=10, capture_output=True)
                 self.assertEqual(17, result.returncode, result.stderr)
                 store = provider.Store(directory)
-                receipt = store.invoke({"caller": A, "payload": {"action": "op", "operation_id": "crash"}})
+                receipt = store.invoke({"caller": HUMAN, "payload": {"action": "op", "operation_id": "crash"}})
                 self.assertEqual(after, receipt["found"])
                 for table in ("tasks", "transitions", "operations"):
                     self.assertEqual(int(after), store.db.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
@@ -231,20 +235,21 @@ os._exit(17)
         self.assertFalse(lookup["found"])
         self.assertFalse(lookup["authoritative"])
         self.assertTrue(lookup["other_caller_exists"])
-        second = self.create(caller=B)
+        other = {**HUMAN, "terminal_id": "another-human-pane"}
+        second = self.create(caller=other)
         self.assertNotEqual(first["task"]["id"], second["task"]["id"])
         self.assertEqual(first, self.lookup()["outcome"])
-        self.assertEqual(second, self.lookup(caller=B)["outcome"])
+        self.assertEqual(second, self.lookup(caller=other)["outcome"])
 
     def test_unknown_read_requires_explicit_original_operation_scope(self):
         first = self.create()
         with self.assertRaisesRegex(ValueError, "unknown caller"):
             self.lookup(caller=UNKNOWN)
-        result = self.lookup(caller=UNKNOWN, lookup_caller=A)
+        result = self.lookup(caller=UNKNOWN, lookup_caller=HUMAN)
         self.assertTrue(result["authoritative"])
-        self.assertEqual(A, result["caller"])
+        self.assertEqual(HUMAN, result["caller"])
         self.assertEqual(first, result["outcome"])
-        absent = self.lookup("absent", caller=UNKNOWN, lookup_caller=A)
+        absent = self.lookup("absent", caller=UNKNOWN, lookup_caller=HUMAN)
         self.assertTrue(absent["authoritative"])
         self.assertFalse(absent["found"])
 
@@ -253,7 +258,7 @@ os._exit(17)
             self.create(expected_caller=B)
         with self.assertRaisesRegex(ValueError, "unknown caller"):
             self.create(caller=UNKNOWN, expected_caller=A)
-        self.assertEqual(A, self.create(expected_caller=A)["caller"])
+        self.assertEqual(HUMAN, self.create(expected_caller=HUMAN)["caller"])
 
     def test_quota_never_evicts_receipts_and_replay_still_works(self):
         first = self.create()
@@ -291,9 +296,9 @@ os._exit(17)
                 store = provider.Store(directory)
                 store.db = FaultCommit(store.db, after)
                 with self.assertRaises(provider.OutcomeUnknown):
-                    store.invoke({"caller": A, "payload": {"action": "create", "operation_id": "uncertain", "title": "work"}})
+                    store.invoke({"caller": HUMAN, "payload": {"action": "create", "operation_id": "uncertain", "title": "work", "done_when": "Result is recorded."}})
                 reopened = provider.Store(directory)
-                result = reopened.invoke({"caller": A, "payload": {"action": "op", "operation_id": "uncertain"}})
+                result = reopened.invoke({"caller": HUMAN, "payload": {"action": "op", "operation_id": "uncertain"}})
                 self.assertEqual(after, result["found"])
                 self.assertTrue(result["authoritative"])
                 reopened.db.close()
@@ -303,7 +308,7 @@ os._exit(17)
         with self.assertRaises(provider.OutcomeUnknown):
             self.create("uncertain-cleanup")
         reopened = provider.Store(self.root.name)
-        result = reopened.invoke({"caller": A, "payload": {"action": "op", "operation_id": "uncertain-cleanup"}})
+        result = reopened.invoke({"caller": HUMAN, "payload": {"action": "op", "operation_id": "uncertain-cleanup"}})
         self.assertTrue(result["found"])
         reopened.db.close()
 
@@ -312,7 +317,7 @@ os._exit(17)
         with self.assertRaises(provider.OutcomeUnknown):
             self.create("rollback-cleanup", title="")
         reopened = provider.Store(self.root.name)
-        result = reopened.invoke({"caller": A, "payload": {"action": "op", "operation_id": "rollback-cleanup"}})
+        result = reopened.invoke({"caller": HUMAN, "payload": {"action": "op", "operation_id": "rollback-cleanup"}})
         self.assertFalse(result["found"])
         reopened.db.close()
 
