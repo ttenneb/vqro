@@ -188,7 +188,8 @@ fn task_command() -> Command {
     command
         .subcommand(
             Command::new("decisions")
-                .about("Read bounded human decision digest; never acknowledges"),
+                .about("Read bounded human decision digest; never acknowledges")
+                .arg(flag("json")),
         )
         .subcommand(
             Command::new("decision-log")

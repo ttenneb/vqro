@@ -9,7 +9,14 @@ pub(super) fn run_task_command(args: &[String]) -> std::io::Result<i32> {
     if args.first().is_some_and(|arg| arg == "tree") {
         return run_tree(&args[1..]);
     }
-    let (mut payload, mutation) = match parse_payload(args) {
+    let digest_json = args.first().is_some_and(|arg| arg == "decisions")
+        && args.get(1).is_some_and(|arg| arg == "--json");
+    let parse_args = if digest_json && args.len() == 2 {
+        &args[..1]
+    } else {
+        args
+    };
+    let (mut payload, mutation) = match parse_payload(parse_args) {
         Ok(parsed) => parsed,
         Err(message) => {
             eprintln!("{message}");
@@ -73,7 +80,11 @@ pub(super) fn run_task_command(args: &[String]) -> std::io::Result<i32> {
     };
     match reply {
         TaskReply::Success(value) => {
-            println!("{value}");
+            if action == "decision_digest" && !digest_json {
+                println!("{}", render_decisions(&value));
+            } else {
+                println!("{value}");
+            }
             if action == "op" && value["authoritative"] != true {
                 eprintln!("not an authoritative result for the original caller; use --caller with its binding");
                 return Ok(2);
@@ -97,6 +108,109 @@ pub(super) fn run_task_command(args: &[String]) -> std::io::Result<i32> {
             Ok(1)
         }
     }
+}
+
+fn render_decisions(value: &Value) -> String {
+    fn visible(value: &Value) -> String {
+        value
+            .as_str()
+            .unwrap_or("unknown")
+            .escape_debug()
+            .to_string()
+    }
+    let pending = value["needs_you_now"]
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    let automatic = value["auto_since_look"]
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    let more = |key: &str| if value["more"][key] == true { "+" } else { "" };
+    let mut lines = vec![format!(
+        "Decisions: {}{} pending; {}{} auto since last look. Total auto {}, reverted {}.",
+        pending.len(),
+        more("needs_you_now"),
+        automatic.len(),
+        more("auto_since_look"),
+        value["counts"]["auto"],
+        value["counts"]["revert"]
+    )];
+    if !value["oldest_waiting"].is_null() {
+        lines.push(format!(
+            "Oldest waiting: {} {} ({})",
+            visible(&value["oldest_waiting"]["created_at"]),
+            visible(&value["oldest_waiting"]["title"]),
+            visible(&value["oldest_waiting"]["id"])
+        ));
+    }
+    for task in pending {
+        lines.push(format!(
+            "{}: {}",
+            visible(&task["id"]),
+            visible(&task["title"])
+        ));
+        let decision = &task["decision"];
+        if decision.is_null() {
+            lines.push("  Legacy: human free-text answer; no automatic default.".into());
+            continue;
+        }
+        let reversible = if decision["reversible"] == true {
+            "reversible"
+        } else {
+            "irreversible"
+        };
+        let timer = if decision["auto_at"].is_null() {
+            "manual".into()
+        } else {
+            format!(
+                "auto at {} (no on-time guarantee)",
+                visible(&decision["auto_at"])
+            )
+        };
+        lines.push(format!(
+            "  Default {} | {reversible} | {timer}",
+            visible(&decision["default"])
+        ));
+        if let Some(options) = decision["options"].as_array() {
+            lines.push(format!(
+                "  Options: {}",
+                options
+                    .iter()
+                    .map(|option| format!(
+                        "{}={}",
+                        visible(&option["key"]),
+                        visible(&option["label"])
+                    ))
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            ));
+        }
+        lines.push(format!(
+            "  Waiting cost: {}",
+            visible(&decision["waiting_cost"])
+        ));
+    }
+    for event in automatic {
+        lines.push(format!(
+            "Auto {}: {} at {} (applied late by {} ms)",
+            visible(&event["id"]),
+            visible(&event["result"]["option"]),
+            visible(&event["result"]["applied_at"]),
+            event["result"]["late_ms"]
+        ));
+    }
+    if value["last_look_known"] == true {
+        lines.push(format!(
+            "Explicit last look: vqro task decisions-seen --through {}",
+            value["ack_through"]
+        ));
+    } else {
+        lines.push(
+            "Last-look UID unknown here; run the digest/acknowledgement from a human shell.".into(),
+        );
+    }
+    lines.join("\n")
 }
 
 fn invoke(client: &ApiClient, payload: Value) -> Result<Value, crate::api::client::ApiClientError> {
@@ -695,6 +809,21 @@ mod tests {
             parse_payload(&["decisions-seen", "--through", "17"].map(String::from)).unwrap();
         assert!(mutation);
         assert_eq!(seen["through"], 17);
+    }
+
+    #[test]
+    fn decision_digest_is_glanceable_cached_text_and_escapes_controls() {
+        let digest = json!({"needs_you_now":[{"id":"task_choice", "title":"Keep?\u{1b}[31m", "decision":{"default":"keep", "reversible":true, "auto_at":null, "waiting_cost":"Work waits.", "options":[{"key":"keep","label":"Keep"},{"key":"change","label":"Change"}]}}], "auto_since_look":[{"id":"task_prior", "result":{"option":"keep","applied_at":"2026-10-02T16:00:00+00:00","late_ms":30000}}], "counts":{"auto":2,"revert":1}, "more":{}, "oldest_waiting":null, "last_look_known":true, "ack_through":17});
+        let before = digest.clone();
+        let text = render_decisions(&digest);
+        assert!(text.contains("1 pending; 1 auto since last look"));
+        assert!(text.contains("Total auto 2, reverted 1"));
+        assert!(text.contains("Default keep | reversible | manual"));
+        assert!(text.contains("keep=Keep; change=Change"));
+        assert!(text.contains("applied late by 30000 ms"));
+        assert!(text.contains("decisions-seen --through 17"));
+        assert!(!text.contains('\u{1b}'));
+        assert_eq!(before, digest);
     }
 
     #[test]
