@@ -69,14 +69,7 @@ export function promptConfirmsOrigin(output: string, from: string): boolean {
   return false;
 }
 
-/** Waiting durable messages addressed to this exact process execution. */
-export function waitingForMe(listed: any, execution: string | undefined): any[] {
-  if (!execution) return [];
-  return (listed?.messages ?? []).filter(
-    (message: any) => message.state === "waiting" && message.recipient_execution === execution,
-  );
-}
-
+/** Render a claimed message with its host-attributed sender class/execution. */
 export function renderMessage(message: any): string {
   let sender = "an agent";
   try {
@@ -110,6 +103,8 @@ export default function (pi: ExtensionAPI) {
   let self: string | undefined;
   let selfExecution: string | undefined;
   let poll: ReturnType<typeof setInterval> | undefined;
+  let checking = false;
+  let turnGeneration = 0;
   let metadataSeq = Date.now() * 1000;
 
   pi.registerEntryRenderer?.("vqro-reply-routing", (entry: any, _options: any, theme: any) => {
@@ -143,9 +138,9 @@ export default function (pi: ExtensionAPI) {
     }
   }
 
-  async function claimMessages(): Promise<any[]> {
+  async function claimMessages(idle: boolean): Promise<any[]> {
     if (!enabled) return [];
-    const result = await run(["message", "claim"], 6000);
+    const result = await run(idle ? ["message", "claim", "--idle"] : ["message", "claim"], 6000);
     if (!result || result.code !== 0) return [];
     try {
       return JSON.parse(result.stdout)?.claimed ?? [];
@@ -177,19 +172,18 @@ export default function (pi: ExtensionAPI) {
 
   /** With activation on, a waiting message addressed to this process starts a turn. */
   async function checkMailbox() {
-    if (!enabled || !selfExecution) return;
-    const listed = await run(["message", "list"], 4000);
-    if (!listed || listed.code !== 0) return;
-    let value: any;
+    // Single-flight and turn-fenced: an in-flight poll must not deliver after a
+    // turn has started or after the adapter is torn down.
+    if (!enabled || !selfExecution || checking) return;
+    const generation = turnGeneration;
+    checking = true;
     try {
-      value = JSON.parse(listed.stdout);
-    } catch {
-      return;
+      const claimed = await claimMessages(true);
+      if (!claimed.length || generation !== turnGeneration) return;
+      await deliverClaimed(claimed, true);
+    } finally {
+      checking = false;
     }
-    if (value?.activation !== true) return;
-    const waiting = waitingForMe(value, selfExecution);
-    if (!waiting.length) return;
-    await deliverClaimed(await claimMessages(), true);
   }
 
   async function reportNoReply(from: string) {
@@ -228,13 +222,18 @@ export default function (pi: ExtensionAPI) {
     startPoll();
   });
 
+  pi.on("session_shutdown", async () => {
+    stopPoll();
+  });
+
   pi.on("before_agent_start", async (event) => {
     stopPoll();
+    turnGeneration += 1;
     runOrigin = parseProvenanceLabel(event.prompt);
     runText = "";
     explicitSend = false;
     // A turn is starting: pick up waiting durable messages into it.
-    const claimed = await claimMessages();
+    const claimed = await claimMessages(false);
     if (!claimed.length) return;
     await deliverClaimed(claimed, false);
     return {

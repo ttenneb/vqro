@@ -9,11 +9,23 @@ import uuid
 
 MAX_BODY_BYTES = 32 * 1024
 MAX_PAGE = 32
+MAX_LIST_BYTES = 64 * 1024
 # One claim stays well under the provider's 128 KiB reply budget; the adapter
 # drains the rest on its next pickup.
 MAX_CLAIM = 8
 MAX_CLAIM_BYTES = 64 * 1024
 STATES = ("waiting", "claimed")
+
+
+def _bounded(records):
+    kept, total = [], 0
+    for record in records[:MAX_PAGE]:
+        size = len(record["body"].encode())
+        if kept and total + size > MAX_LIST_BYTES:
+            break
+        total += size
+        kept.append(record)
+    return kept
 
 
 def _text(value, name, limit=MAX_BODY_BYTES):
@@ -77,14 +89,21 @@ class Messages:
     def read(self, payload, caller):
         binding = self.store.binding(caller)
         key = self.store.canonical(binding)
+        waiting = []
         clause, params = "sender=?", [key]
         if binding.get("class") == "agent":
             clause, params = "(sender=? OR recipient_execution=?)", [key, binding["execution"]]
+            rows = self.db.execute(
+                "SELECT * FROM messages WHERE recipient_execution=? AND state='waiting' ORDER BY created_at ASC, id ASC LIMIT ?",
+                (binding["execution"], MAX_PAGE),
+            ).fetchall()
+            # The waiting inbox stays visible independently of sender history.
+            waiting = _bounded([self._record(row) for row in rows])
         rows = self.db.execute(
             f"SELECT * FROM messages WHERE {clause} ORDER BY created_at DESC, id DESC LIMIT ?",
             (*params, MAX_PAGE),
         ).fetchall()
-        return {"activation": self.activation(), "messages": [self._record(row) for row in rows]}
+        return {"activation": self.activation(), "waiting": waiting, "messages": _bounded([self._record(row) for row in rows])}
 
     def mutate(self, payload, caller, at):
         action = payload["action"]
@@ -124,6 +143,10 @@ class Messages:
         if action == "message_claim":
             if binding.get("class") != "agent":
                 raise ValueError("only the addressed agent process can claim messages")
+            # An idle activation wake is gated atomicly on the current policy at
+            # claim time; a turn already starting is a different pickup path.
+            if payload.get("idle") and not self.activation():
+                return {"claimed": [], "activation": False}
             rows = self.db.execute(
                 "SELECT * FROM messages WHERE recipient_execution=? AND state='waiting' ORDER BY created_at ASC, id ASC",
                 (binding["execution"],),

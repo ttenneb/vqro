@@ -5,13 +5,16 @@ use crate::api::schema::{AgentTarget, ExtensionActionInvokeParams, Method, Reque
 use serde_json::{json, Value};
 
 const SERVICE: &str = "vqro.tasks.core";
-const USAGE: &str = "usage: vqro message <send TARGET TEXT [--reply-to ID]|list|claim|edit ID TEXT --rev N|activation on|off>";
+const USAGE: &str = "usage: vqro message <send TARGET TEXT [--reply-to ID] [--op ID]|list|claim [--idle] [--op ID]|edit ID TEXT --rev N [--op ID]|activation on|off [--op ID]>";
 
 pub(super) fn run_message_command(args: &[String]) -> std::io::Result<i32> {
     match args.first().map(String::as_str) {
         Some("send") => message_send(&args[1..]),
-        Some("list") => message_read(json!({"action": "message_list"})),
-        Some("claim") => message_claim(),
+        Some("list") => {
+            let client = super::target::api_client()?;
+            invoke_and_print(&client, json!({"action": "message_list"}))
+        }
+        Some("claim") => message_claim(&args[1..]),
         Some("edit") => message_edit(&args[1..]),
         Some("activation") => message_activation(&args[1..]),
         Some("help" | "--help" | "-h") => {
@@ -25,9 +28,22 @@ pub(super) fn run_message_command(args: &[String]) -> std::io::Result<i32> {
     }
 }
 
-fn operation_id() -> String {
-    // Random failure only means no id; the command then fails closed before sending.
-    super::random_operation_id("msg-op-").unwrap_or_default()
+/// A caller-supplied operation id makes an uncertain retry idempotent; otherwise a
+/// fresh id is generated and printed in the outcome. Entropy failure fails closed
+/// before any effect.
+fn operation_id(supplied: Option<String>) -> std::io::Result<String> {
+    match supplied {
+        Some(id) if !id.is_empty() => Ok(id),
+        Some(_) => Err(std::io::Error::other("--op id must not be empty")),
+        None => super::random_operation_id("msg-op-"),
+    }
+}
+
+fn flag_value(args: &[String], index: usize, name: &str) -> Result<String, i32> {
+    args.get(index + 1).cloned().ok_or_else(|| {
+        eprintln!("{name} requires a value");
+        2
+    })
 }
 
 /// Resolve an exact agent-process recipient binding for a durable message.
@@ -67,22 +83,27 @@ fn recipient_binding(client: &ApiClient, target: &str) -> Result<Value, String> 
     }))
 }
 
-/// The sender's own reply address (agent name, else pane id), best effort.
 fn message_send(args: &[String]) -> std::io::Result<i32> {
     let (Some(target), Some(text)) = (args.first(), args.get(1)) else {
         eprintln!("{USAGE}");
         return Ok(2);
     };
-    let mut reply_to = None;
+    let (mut reply_to, mut op) = (None, None);
     let mut index = 2;
     while index < args.len() {
         match args[index].as_str() {
             "--reply-to" => {
-                let Some(value) = args.get(index + 1) else {
-                    eprintln!("--reply-to requires a message id");
+                let Ok(value) = flag_value(args, index, "--reply-to") else {
                     return Ok(2);
                 };
                 reply_to = Some(json!(value));
+                index += 2;
+            }
+            "--op" => {
+                let Ok(value) = flag_value(args, index, "--op") else {
+                    return Ok(2);
+                };
+                op = Some(value);
                 index += 2;
             }
             other => {
@@ -101,7 +122,7 @@ fn message_send(args: &[String]) -> std::io::Result<i32> {
     };
     let mut payload = json!({
         "action": "message_send",
-        "operation_id": operation_id(),
+        "operation_id": operation_id(op)?,
         "recipient": recipient,
         "body": text,
     });
@@ -111,17 +132,34 @@ fn message_send(args: &[String]) -> std::io::Result<i32> {
     invoke_and_print(&client, payload)
 }
 
-fn message_read(payload: Value) -> std::io::Result<i32> {
+fn message_claim(args: &[String]) -> std::io::Result<i32> {
+    let (mut idle, mut op) = (false, None);
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--idle" => {
+                idle = true;
+                index += 1;
+            }
+            "--op" => {
+                let Ok(value) = flag_value(args, index, "--op") else {
+                    return Ok(2);
+                };
+                op = Some(value);
+                index += 2;
+            }
+            other => {
+                eprintln!("unknown option: {other}");
+                return Ok(2);
+            }
+        }
+    }
     let client = super::target::api_client()?;
+    let mut payload = json!({"action": "message_claim", "operation_id": operation_id(op)?});
+    if idle {
+        payload["idle"] = json!(true);
+    }
     invoke_and_print(&client, payload)
-}
-
-fn message_claim() -> std::io::Result<i32> {
-    let client = super::target::api_client()?;
-    invoke_and_print(
-        &client,
-        json!({"action": "message_claim", "operation_id": operation_id()}),
-    )
 }
 
 fn message_edit(args: &[String]) -> std::io::Result<i32> {
@@ -129,19 +167,26 @@ fn message_edit(args: &[String]) -> std::io::Result<i32> {
         eprintln!("{USAGE}");
         return Ok(2);
     };
-    let mut revision = None;
+    let (mut revision, mut op) = (None, None);
     let mut index = 2;
     while index < args.len() {
         match args[index].as_str() {
             "--rev" => {
-                let Some(value) = args
-                    .get(index + 1)
-                    .and_then(|value| value.parse::<u64>().ok())
-                else {
+                let Ok(value) = flag_value(args, index, "--rev") else {
+                    return Ok(2);
+                };
+                let Ok(parsed) = value.parse::<u64>() else {
                     eprintln!("--rev requires a message revision number");
                     return Ok(2);
                 };
-                revision = Some(value);
+                revision = Some(parsed);
+                index += 2;
+            }
+            "--op" => {
+                let Ok(value) = flag_value(args, index, "--op") else {
+                    return Ok(2);
+                };
+                op = Some(value);
                 index += 2;
             }
             other => {
@@ -157,7 +202,7 @@ fn message_edit(args: &[String]) -> std::io::Result<i32> {
     let client = super::target::api_client()?;
     invoke_and_print(
         &client,
-        json!({"action": "message_edit", "operation_id": operation_id(), "id": id, "revision": revision, "body": text}),
+        json!({"action": "message_edit", "operation_id": operation_id(op)?, "id": id, "revision": revision, "body": text}),
     )
 }
 
@@ -166,14 +211,31 @@ fn message_activation(args: &[String]) -> std::io::Result<i32> {
         Some("on") => true,
         Some("off") => false,
         _ => {
-            eprintln!("usage: vqro message activation on|off");
+            eprintln!("usage: vqro message activation on|off [--op ID]");
             return Ok(2);
         }
     };
+    let mut op = None;
+    let mut index = 1;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--op" => {
+                let Ok(value) = flag_value(args, index, "--op") else {
+                    return Ok(2);
+                };
+                op = Some(value);
+                index += 2;
+            }
+            other => {
+                eprintln!("unknown option: {other}");
+                return Ok(2);
+            }
+        }
+    }
     let client = super::target::api_client()?;
     invoke_and_print(
         &client,
-        json!({"action": "message_activation", "operation_id": operation_id(), "activation": activation}),
+        json!({"action": "message_activation", "operation_id": operation_id(op)?, "activation": activation}),
     )
 }
 

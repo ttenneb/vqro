@@ -5,7 +5,6 @@ import extension, {
   parseProvenanceLabel,
   promptConfirmsOrigin,
   renderMessage,
-  waitingForMe,
   MAILBOX_POLL_MS,
   MAX_REPLY_BYTES,
 } from "./index";
@@ -250,18 +249,6 @@ test("routing stays off without the managed Vqro environment", async () => {
   expect(h.entries).toHaveLength(0);
 });
 
-test("waitingForMe selects only messages for this exact execution", () => {
-  const listed = {
-    messages: [
-      { id: "m1", state: "waiting", recipient_execution: "exec-beta" },
-      { id: "m2", state: "claimed", recipient_execution: "exec-beta" },
-      { id: "m3", state: "waiting", recipient_execution: "exec-other" },
-    ],
-  };
-  expect(waitingForMe(listed, "exec-beta").map((m: any) => m.id)).toEqual(["m1"]);
-  expect(waitingForMe(listed, undefined)).toEqual([]);
-});
-
 test("renderMessage names the host-attributed sender and carries the body", () => {
   const agentMessage = { id: "m1", body: "please review", sender: JSON.stringify({ class: "agent", execution: "boot:1:2" }) };
   expect(renderMessage(agentMessage)).toContain("vqro message m1 from agent boot:1:2");
@@ -293,8 +280,7 @@ test("activation on: the idle mailbox poll claims and starts a turn", async () =
     await h.emit("session_start", {});
     jest.advanceTimersByTime(MAILBOX_POLL_MS + 5);
     for (let i = 0; i < 20; i += 1) await Promise.resolve();
-    expect(h.sent.join("\n")).toContain("wake up");
-  } finally {
+    expect(h.sent.join("\n")).toContain("wake up");  } finally {
     jest.useRealTimers();
   }
 });

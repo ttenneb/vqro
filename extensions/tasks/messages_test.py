@@ -70,6 +70,28 @@ class MessagesTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.invoke({"action": "message_send", "operation_id": "human-recipient", "recipient": HUMAN, "body": "hi"}, A)
 
+    def test_a_large_inbox_is_claimed_in_bounded_batches(self):
+        body = "x" * (MAX_BODY_BYTES - 2)
+        for index in range(5):
+            self.send(body=f"{index}{body}", op=f"big-{index}")
+        first = self.invoke({"action": "message_claim", "operation_id": "c1"}, B)["claimed"]
+        self.assertTrue(0 < len(first) < 5)
+        self.assertLessEqual(sum(len(item["body"].encode()) for item in first), 64 * 1024)
+        second = self.invoke({"action": "message_claim", "operation_id": "c2"}, B)["claimed"]
+        self.assertTrue(second)
+        self.assertEqual({item["id"] for item in first} & {item["id"] for item in second}, set())
+
+    def test_idle_claim_is_gated_on_the_current_activation_policy(self):
+        self.send(body="wake")
+        listed = self.invoke({"action": "message_list"}, B)
+        self.assertEqual([item["body"] for item in listed["waiting"]], ["wake"])
+        idle_off = self.invoke({"action": "message_claim", "operation_id": "idle-off", "idle": True}, B)
+        self.assertEqual(idle_off["claimed"], [])
+        self.assertFalse(idle_off["activation"])
+        self.invoke({"action": "message_activation", "operation_id": "on", "activation": True}, HUMAN)
+        idle_on = self.invoke({"action": "message_claim", "operation_id": "idle-on", "idle": True}, B)
+        self.assertEqual([item["body"] for item in idle_on["claimed"]], ["wake"])
+
     def test_activation_is_one_recorded_human_setting(self):
         self.assertFalse(self.invoke({"action": "message_list"}, A)["activation"])
         with self.assertRaises(ValueError):

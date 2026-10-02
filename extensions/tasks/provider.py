@@ -518,7 +518,7 @@ class Store:
             "message_list": {"action"},
             "message_send": {"action", "operation_id", "recipient", "body", "reply_to", "expected_caller"},
             "message_edit": {"action", "operation_id", "id", "revision", "body", "expected_caller"},
-            "message_claim": {"action", "operation_id", "expected_caller"},
+            "message_claim": {"action", "operation_id", "idle", "expected_caller"},
             "message_activation": {"action", "operation_id", "activation", "expected_caller"},
             "create": {"action", "operation_id", "title", "parent", "kind", "expected_caller", "depends_on"} | graph.META_FIELDS | decision_queue.FIELDS,
             "decision": {"action", "operation_id", "title", "parent", "expected_caller", "depends_on"} | graph.META_FIELDS | decision_queue.FIELDS,

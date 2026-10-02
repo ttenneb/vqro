@@ -64,24 +64,29 @@ fn message_command() -> Command {
                 .about("Send a durable message to an exact agent process")
                 .arg(required("target", "TARGET"))
                 .arg(required("text", "TEXT"))
-                .arg(option("reply-to", "ID")),
+                .arg(option("reply-to", "ID"))
+                .arg(option("op", "ID")),
         )
         .subcommand(Command::new("list").about("List your messages and the activation setting"))
         .subcommand(
             Command::new("claim")
-                .about("Atomically claim waiting messages addressed to this process"),
+                .about("Atomically claim waiting messages addressed to this process")
+                .arg(flag("idle").help("Only claim when the activation setting is currently on"))
+                .arg(option("op", "ID")),
         )
         .subcommand(
             Command::new("edit")
                 .about("Edit a waiting message you sent")
                 .arg(required("id", "ID"))
                 .arg(required("text", "TEXT"))
-                .arg(option("rev", "N")),
+                .arg(option("rev", "N"))
+                .arg(option("op", "ID")),
         )
         .subcommand(
             Command::new("activation")
                 .about("Turn message activation for an idle recipient on or off (human only)")
-                .arg(required("state", "on|off")),
+                .arg(required("state", "on|off"))
+                .arg(option("op", "ID")),
         )
 }
 
