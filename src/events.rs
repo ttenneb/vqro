@@ -192,6 +192,7 @@ pub enum AppEvent {
     /// An opaque provider-owned document version changed after a successful action.
     ExtensionDocumentRevisionChanged {
         namespace: String,
+        service_id: String,
         generation: u64,
         revision: u64,
     },

@@ -12,6 +12,7 @@ pub(crate) fn render_tab_bar(
     tab_scroll: &mut usize,
     reveal_focused_tab: &mut bool,
     tab_drag_insert_index: Option<usize>,
+    attention: Option<&super::attention::AttentionNavigation>,
     hits: &mut ShellHitMap,
 ) {
     let palette = &config.palette;
@@ -25,7 +26,13 @@ pub(crate) fn render_tab_bar(
         .iter()
         .map(|tab| {
             let label = tab_label(tab);
-            display_width(&label).saturating_add(4).max(MIN_TAB_WIDTH)
+            let badge_width = attention
+                .and_then(|nav| nav.badges.get(&("tab".into(), tab.tab_id.clone())))
+                .map_or(0, |label| display_width(label).saturating_add(3));
+            display_width(&label)
+                .saturating_add(badge_width)
+                .saturating_add(4)
+                .max(MIN_TAB_WIDTH)
         })
         .collect::<Vec<_>>();
     let content = tab_bar_content_area(snapshot, area);
@@ -123,6 +130,36 @@ pub(crate) fn render_tab_bar(
             right_padding = padding.saturating_sub(left) as usize,
         );
         put_text(buffer, rect.x, rect.y, rect.width, &text, style);
+        if let Some((nav, badge)) = attention.and_then(|nav| {
+            nav.badges
+                .get(&("tab".into(), tab.tab_id.clone()))
+                .map(|badge| (nav, badge))
+        }) {
+            let badge_width = display_width(badge)
+                .saturating_add(2)
+                .min(rect.width.saturating_sub(2));
+            let badge_rect = Rect::new(
+                rect.right().saturating_sub(badge_width + 1),
+                rect.y,
+                badge_width,
+                1,
+            );
+            put_text(
+                buffer,
+                badge_rect.x,
+                badge_rect.y,
+                badge_rect.width,
+                &format!("[{badge}]"),
+                Style::default().fg(palette.peach).bg(palette.surface0),
+            );
+            hits.attention.push(AttentionHit {
+                rect: badge_rect,
+                plugin: nav.plugin.clone(),
+                entrypoint: nav.entrypoint.clone(),
+                kind: "tab".into(),
+                ids: vec![tab.tab_id.clone()],
+            });
+        }
         hits.tabs.push((rect, tab.tab_id.clone()));
         first_visible.get_or_insert(index);
         last_visible = Some(index);

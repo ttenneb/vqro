@@ -1892,6 +1892,7 @@ pub fn manager_for_plugins(
 ) -> ExtensionServiceManager {
     let mut specs = Vec::new();
     let mut load_order = std::collections::HashMap::new();
+    let mut document_namespaces = std::collections::HashMap::new();
     for plugin in plugins.values().filter(|plugin| {
         plugin.enabled && crate::persist::plugin_registry::manifest_available(plugin)
     }) {
@@ -1914,6 +1915,12 @@ pub fn manager_for_plugins(
             }
             let service_id = format!("{}.{}", plugin.plugin_id, service.id);
             load_order.insert(service_id.clone(), plugin.load_order);
+            if service
+                .provides
+                .contains(&crate::api::schema::PluginServiceCapability::HostDocument)
+            {
+                document_namespaces.insert(service_id.clone(), plugin.plugin_id.clone());
+            }
             specs.push(ExtensionServiceSpec {
                 id: service_id,
                 command: service.command.clone(),
@@ -1923,7 +1930,7 @@ pub fn manager_for_plugins(
             });
         }
     }
-    manager_for_specs_with_order(specs, &load_order, event_tx)
+    manager_for_specs_with_documents(specs, &load_order, &document_namespaces, event_tx)
 }
 
 #[cfg(test)]
@@ -1934,9 +1941,24 @@ fn manager_for_specs(
     manager_for_specs_with_order(specs, &std::collections::HashMap::new(), event_tx)
 }
 
+#[cfg(test)]
 fn manager_for_specs_with_order(
+    specs: Vec<ExtensionServiceSpec>,
+    load_order: &std::collections::HashMap<String, u64>,
+    event_tx: tokio::sync::mpsc::Sender<crate::events::AppEvent>,
+) -> ExtensionServiceManager {
+    manager_for_specs_with_documents(
+        specs,
+        load_order,
+        &std::collections::HashMap::new(),
+        event_tx,
+    )
+}
+
+fn manager_for_specs_with_documents(
     mut specs: Vec<ExtensionServiceSpec>,
     load_order: &std::collections::HashMap<String, u64>,
+    document_namespaces: &std::collections::HashMap<String, String>,
     event_tx: tokio::sync::mpsc::Sender<crate::events::AppEvent>,
 ) -> ExtensionServiceManager {
     specs.sort_by(|left, right| {
@@ -1972,6 +1994,7 @@ fn manager_for_specs_with_order(
         let thread_revoked = revoked.clone();
         let granted_capabilities = supervisor.spec.granted_capabilities.clone();
         let service_id = supervisor.spec.id.clone();
+        let document_namespace = document_namespaces.get(&service_id).cloned();
         let (request_tx, request_rx) = mpsc::sync_channel(8);
         let thread_admissions = admissions.clone();
         let thread_service_id = service_id.clone();
@@ -1998,7 +2021,7 @@ fn manager_for_specs_with_order(
                             if supervisor.runtime.is_none() {
                                 thread_generation.store(next_service_generation(), Ordering::Release);
                             }
-                            if still_current && thread_grants.contains(&crate::api::schema::ExtensionServiceCapability::HostDocument) {
+                            if let Some(namespace) = document_namespace.as_ref().filter(|_| still_current && thread_grants.contains(&crate::api::schema::ExtensionServiceCapability::HostDocument)) {
                                 if let Some(revision) = result.as_ref().ok()
                                     .and_then(|value| value["document_revision"].as_u64())
                                 {
@@ -2006,7 +2029,7 @@ fn manager_for_specs_with_order(
                                     if document_version.is_none_or(|previous: (u64, u64)| previous.0 != version.0 || previous.1 < version.1) {
                                         // Coalesce at the provider version, not per CLI read/client/frame.
                                         if document_events.blocking_send(crate::events::AppEvent::ExtensionDocumentRevisionChanged {
-                                            namespace: thread_service_id.clone(), generation: action.generation, revision,
+                                            namespace: namespace.clone(), service_id: thread_service_id.clone(), generation: action.generation, revision,
                                         }).is_ok() {
                                             document_version = Some(version);
                                         }

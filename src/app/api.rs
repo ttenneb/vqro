@@ -227,10 +227,17 @@ impl App {
             }
             AppEvent::ExtensionDocumentRevisionChanged {
                 namespace,
+                service_id,
                 generation,
-                revision: _,
+                revision,
             } => {
-                self.refresh_extension_document_revision(&namespace, generation);
+                tracing::debug!(%namespace, revision, "extension document version changed");
+                if self
+                    .extension_services
+                    .matches_generation(&service_id, generation)
+                {
+                    self.refresh_extension_document_revision(&namespace);
+                }
                 return Vec::new();
             }
             AppEvent::HostDocumentProviderRetired {

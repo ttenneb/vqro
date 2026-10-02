@@ -91,6 +91,45 @@ def human_debtor(binding):
     return (binding.get("role") == "human_unverified" or binding.get("class") == "human_unverified") and binding.get("uid", os.geteuid()) == os.geteuid()
 
 
+def durable_attention(task, placements):
+    """Extension-owned durable categories; placement does not prove execution."""
+    if task["state"] in ("accepted", "done"):
+        return set()
+    result = set()
+    owed = task.get("owed_to") or {}
+    if task.get("owed_action") in ("answer", "accept") and any(human_debtor(binding) for binding in debtors(owed)):
+        result.add("human")
+    if task["state"] == "blocked" or task.get("owed_action") == "acceptor_missing":
+        result.add("blocked")
+    if placements is not None:
+        owner = task.get("owner") or {}
+        if owner.get("terminal_id") and owner["terminal_id"] not in placements:
+            result.add("unavailable")
+        bindings = debtors(owed) if owed.get("role") == "acceptors" else []
+        if bindings and all(binding.get("class") == "agent" and binding.get("terminal_id") not in placements for binding in bindings):
+            result.add("unavailable")
+    return result
+
+
+def attention_scope():
+    raw = os.environ.get("VQRO_ATTENTION_SCOPE")
+    if not raw:
+        return None
+    value = json.loads(raw)
+    if value.get("kind") not in ("workspace", "tab", "session") or not isinstance(value.get("ids"), list) or not all(isinstance(key, str) for key in value["ids"]):
+        raise ValueError("invalid attention scope")
+    return value
+
+
+def in_scope(task, placements, scope):
+    if not scope:
+        return True
+    placement = (placements or {}).get((task.get("owner") or {}).get("terminal_id"))
+    if scope["kind"] == "session":
+        return placement is None
+    return placement is not None and placement[scope["kind"] + "_id"] in scope["ids"]
+
+
 def label(owner, agents):
     if not owner:
         return "—"
@@ -177,12 +216,16 @@ def old_final(task, days, wall):
         return False
 
 
-def project(tasks, agents, idle_since, selected, attention, collapsed, days, now, wall, all_tasks=False):
+def project(tasks, agents, idle_since, selected, attention, collapsed, days, now, wall, all_tasks=False, scope=None, placements=None):
     """Pure cached projection; iterative traversal also handles maximum-depth trees."""
     visible = set()
     pending_parents = {t.get("parent") for t in tasks.values() if t["state"] not in FINAL}
     for key, task in tasks.items():
         if "old" not in selected and old_final(task, days, wall):
+            continue
+        if scope:
+            if in_scope(task, placements, scope) and (all_tasks or durable_attention(task, placements)):
+                visible.add(key)
             continue
         if all_tasks or categories(task, pending_parents, agents, idle_since, now) & (selected - {"old"}) or (attention and task["state"] not in FINAL and (availability(task["owner"], agents) == "unavailable here" or stale_acceptors(task, agents))):
             visible.add(key)
@@ -219,8 +262,9 @@ def live_facts(model, now):
 
 
 class Reader(threading.Thread):
-    def __init__(self):
+    def __init__(self, scope=None):
         super().__init__(daemon=True)
+        self.scope = scope
         self.stop = threading.Event()
         self.requests = queue.Queue(maxsize=1)
         self.results = queue.Queue(maxsize=2)
@@ -256,6 +300,7 @@ class Reader(threading.Thread):
                 raise RuntimeError("Tasks changed during read; retaining previous snapshot")
             self.tasks, self.revision = staged, revision
         agents = {a["terminal_id"]: a for a in api("agent.list")["agents"]}
+        placements = {pane["terminal_id"]: pane for pane in api("pane.list")["panes"]} if self.scope else None
         now, idles = time.monotonic(), {}
         for agent in agents.values():
             execution = agent.get("execution")
@@ -265,7 +310,7 @@ class Reader(threading.Thread):
                 since = previous[0] if previous and previous[1] == seq and now - previous[2] <= 5 else now
                 idles[execution] = (since, seq, now)
         self.idles = idles
-        return {"tasks": self.tasks, "agents": agents, "idle_since": {key: v[0] for key, v in idles.items()}, "error": None, "revision": revision, "observed_at": now}
+        return {"tasks": self.tasks, "agents": agents, "placements": placements, "idle_since": {key: v[0] for key, v in idles.items()}, "error": None, "revision": revision, "observed_at": now}
 
     def run(self):
         due, delay = 0, 2
@@ -296,7 +341,8 @@ def run(screen):
     curses.mousemask(curses.BUTTON1_PRESSED | curses.BUTTON4_PRESSED | getattr(curses, "BUTTON5_PRESSED", 0))
     curses.mouseinterval(0)
     screen.timeout(100)
-    reader = Reader()
+    scope = attention_scope()
+    reader = Reader(scope)
     reader.start()
     model = {"tasks": {}, "agents": None, "idle_since": {}, "error": "Loading Tasks…", "revision": None}
     selected, attention, collapsed, days, scroll, all_tasks = set(DEFAULT), True, set(), 7, 0, False
@@ -317,7 +363,7 @@ def run(screen):
             now = time.monotonic()
             agents, idle_since = live_facts(model, now)
             if dirty or now >= projection_due:
-                rows = project(model["tasks"], agents, idle_since, selected, attention, collapsed, days, now, time.time(), all_tasks)
+                rows = project(model["tasks"], agents, idle_since, selected, attention, collapsed, days, now, time.time(), all_tasks, scope, model.get("placements") if agents is not None else None)
                 dirty, projection_due = False, now + 1
             height, width = screen.getmaxyx()
             screen.erase()
@@ -331,7 +377,7 @@ def run(screen):
             def button(y, x, text, action):
                 draw(y, x, text, curses.A_BOLD)
                 hits.append((y, x, x + len(text), action))
-            draw(0, 0, "Tasks · read-only · idle = observed lower bound", curses.A_BOLD)
+            draw(0, 0, "Tasks · " + (f"{scope['kind']} {', '.join(scope['ids'])} · durable attention" if scope else "read-only · idle = observed lower bound"), curses.A_BOLD)
             y, x = 1, 0
             for text, action in [("[needs attention]", "default"), ("[all tasks]", "all"), (f"age {days}d", None), ("[-]", "age-"), ("[+]", "age+")]:
                 if x and x + len(text) >= width:

@@ -4,28 +4,9 @@ Terminal placement is a host observation, not execution/acceptance authority.
 Live-owner categories deliberately remain in the full terminal view.
 """
 from collections import Counter
-from view import clean, debtors, human_debtor, label
+from view import clean, durable_attention as attention, label
 
 PREFIX = "context:attention."
-
-
-def attention(task, placements):
-    if task["state"] in ("accepted", "done"):
-        return set()
-    result = set()
-    owed = task.get("owed_to") or {}
-    if any(human_debtor(binding) for binding in debtors(owed)) or task.get("owed_action") == "answer":
-        result.add("human")
-    if task["state"] == "blocked" or task.get("owed_action") == "acceptor_missing":
-        result.add("blocked")
-    if placements is not None:
-        owner = task.get("owner") or {}
-        if owner.get("terminal_id") and owner["terminal_id"] not in placements:
-            result.add("unavailable")
-        bindings = debtors(owed) if owed.get("role") == "acceptors" else []
-        if bindings and all(binding.get("class") == "agent" and binding.get("terminal_id") not in placements for binding in bindings):
-            result.add("unavailable")
-    return result
 
 
 def badge_text(counts):
@@ -67,6 +48,6 @@ def project(store, snapshot):
         items.append({"id": PREFIX + "overflow:tasks", "role": "section", "label": f"{len(rows) - room} more · open full Tasks view"})
     if len(items) > 256:
         raise ValueError("attention scopes exceed document item bound")
-    return {"contract": "host.document.v1", "namespace": "vqro.tasks.core", "generation": snapshot["generation"],
+    return {"contract": "host.document.v1", "namespace": "vqro.tasks", "generation": snapshot["generation"],
             "revision": snapshot["revision"], "surface": "navigation", "target": {"kind": "session"},
             "items": items, "actions": [], "required_capabilities": []}

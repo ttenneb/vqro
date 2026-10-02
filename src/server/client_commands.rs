@@ -94,6 +94,7 @@ pub(crate) const CLIENT_SHELL_OPTIONAL_METHODS: &[&str] = &[
     "extension.update",
     "host.document.action",
     "pane.telemetry",
+    "plugin.pane.open",
 ];
 
 pub(crate) fn supported_client_shell_method_names() -> &'static [&'static str] {

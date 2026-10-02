@@ -732,13 +732,7 @@ impl App {
         }
     }
 
-    pub(crate) fn refresh_extension_document_revision(&mut self, namespace: &str, generation: u64) {
-        if !self
-            .extension_services
-            .matches_generation(namespace, generation)
-        {
-            return;
-        }
+    pub(crate) fn refresh_extension_document_revision(&mut self, namespace: &str) {
         if self.host_document_services.source(namespace)
             == Some(crate::api::schema::HostDocumentSourceKind::AgentActivity)
         {

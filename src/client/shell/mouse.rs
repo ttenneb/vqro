@@ -2698,6 +2698,16 @@ impl ClientShellState {
                     self.persist_chrome_preferences(outcome);
                     return;
                 }
+                if let Some(launch) = self
+                    .hits
+                    .attention
+                    .iter()
+                    .find(|hit| super::contains(hit.rect, point))
+                    .cloned()
+                {
+                    self.open_attention(launch, outcome);
+                    return;
+                }
                 // Some terminals reserve Shift for selection and report a
                 // Ctrl+Shift click to mouse-aware applications as Ctrl-only.
                 let space_link = mouse

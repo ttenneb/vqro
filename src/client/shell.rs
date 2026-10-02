@@ -20,6 +20,7 @@ mod endpoint_sidebar;
 mod endpoints;
 mod extension_context;
 pub(super) use endpoints::*;
+mod attention;
 mod extensions;
 mod global_menu;
 mod graphics;
@@ -42,6 +43,7 @@ mod word_selection;
 mod worktrees;
 use word_selection::ClientWordSelection;
 
+use attention::AttentionHit;
 pub(in crate::client::shell) use render::sidebar;
 pub(crate) use state::*;
 #[cfg(test)]
