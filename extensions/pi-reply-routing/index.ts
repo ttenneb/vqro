@@ -45,48 +45,17 @@ export function assistantText(message: any): string {
 }
 
 /**
- * Split a shell command into segments at separators that are outside quotes, so
- * a quoted string that merely contains `; vqro agent prompt x` is not a command.
- */
-function shellSegments(command: string): string[] {
-  const segments: string[] = [];
-  let current = "";
-  let quote: string | null = null;
-  for (const ch of command) {
-    if (quote) {
-      current += ch;
-      if (ch === quote) quote = null;
-      continue;
-    }
-    if (ch === '"' || ch === "'") {
-      quote = ch;
-      current += ch;
-      continue;
-    }
-    if (ch === "\n" || ch === ";" || ch === "&" || ch === "|" || ch === "(" || ch === ")") {
-      segments.push(current);
-      current = "";
-      continue;
-    }
-    current += ch;
-  }
-  segments.push(current);
-  return segments;
-}
-
-/**
- * True when the command runs `vqro agent prompt <from>` as its own shell command
- * with that exact target. The executable must start a command segment, so a name
- * mentioned in another command's arguments or inside quotes does not count.
+ * True when the whole bash command is a direct `vqro agent prompt <from>` call.
+ * Deliberately conservative: a compound command, heredoc body, quoted argument or
+ * echo of the command is not evidence of a send, so the final reply is not
+ * dropped. A missed recognition only risks a duplicate reply, not a lost one.
  */
 export function targetsAgentPrompt(command: string, from: string): boolean {
-  return shellSegments(command).some((segment) => {
-    const match =
-      /^\s*(?:env\s+)?(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*(?:[^\s;&|()]*\/)?vqro\s+agent\s+prompt\s+['"]?([^\s'"]+)['"]?/.exec(
-        segment,
-      );
-    return match?.[1] === from;
-  });
+  const match =
+    /^\s*(?:env\s+)?(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*(?:[^\s;&|()]*\/)?vqro\s+agent\s+prompt\s+['"]?([^\s'"]+)['"]?/.exec(
+      command,
+    );
+  return match?.[1] === from;
 }
 
 export default function (pi: ExtensionAPI) {

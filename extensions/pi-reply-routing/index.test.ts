@@ -88,18 +88,18 @@ test("provenance labels distinguish agent requests, replies, and human input", (
   expect(parseProvenanceLabel("[agentalpha] nope")).toBeNull();
 });
 
-test("A2 recognises the exact vqro agent prompt target, not a mentioned name", () => {
+test("A2 recognises only a direct vqro agent prompt call to the exact target", () => {
   expect(targetsAgentPrompt('vqro agent prompt alpha "done"', "alpha")).toBe(true);
   expect(targetsAgentPrompt('./vqro agent prompt alpha "done"', "alpha")).toBe(true);
-  expect(targetsAgentPrompt('cd /x && vqro agent prompt alpha "done"', "alpha")).toBe(true);
   expect(targetsAgentPrompt('env A=1 vqro agent prompt alpha "done"', "alpha")).toBe(true);
-  expect(targetsAgentPrompt('echo $(vqro agent prompt alpha "done")', "alpha")).toBe(true);
+  expect(targetsAgentPrompt('vqro agent prompt alpha "see; vqro agent prompt beta"', "alpha")).toBe(true);
   expect(targetsAgentPrompt('vqro agent prompt gamma "alpha was mentioned"', "alpha")).toBe(false);
+  expect(targetsAgentPrompt('vqro agent prompt betamax', "beta")).toBe(false);
   expect(targetsAgentPrompt('echo vqro agent prompt alpha', "alpha")).toBe(false);
   expect(targetsAgentPrompt('echo "vqro agent prompt alpha"', "alpha")).toBe(false);
-  expect(targetsAgentPrompt('echo "text; vqro agent prompt alpha"', "alpha")).toBe(false);
-  expect(targetsAgentPrompt("printf 'x && vqro agent prompt alpha'", "alpha")).toBe(false);
-  expect(targetsAgentPrompt("vqro agent prompt betamax", "beta")).toBe(false);
+  expect(targetsAgentPrompt('cd /x && vqro agent prompt alpha', "alpha")).toBe(false);
+  expect(targetsAgentPrompt('cat <<EOF\nvqro agent prompt alpha\nEOF', "alpha")).toBe(false);
+  expect(targetsAgentPrompt('printf \'x; vqro agent prompt alpha\'', "alpha")).toBe(false);
 });
 
 test("reply bytes are capped without splitting a character", () => {
