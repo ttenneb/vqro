@@ -192,8 +192,8 @@ class Queue:
         return max(1, min(30, delay))
 
     def log(self, after=0):
-        if type(after) is not int or after < 0:
-            raise ValueError("decision log cursor must be a nonnegative sequence")
+        if type(after) is not int or not 0 <= after <= (1 << 63) - 1:
+            raise ValueError("decision log cursor must be a nonnegative signed-64-bit sequence")
         rows = self.db.execute("SELECT * FROM decision_log WHERE seq>? ORDER BY seq LIMIT 33", (after,)).fetchall()
         events, used = [], 4096
         for row in rows[:32]:

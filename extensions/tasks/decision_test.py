@@ -239,6 +239,13 @@ class DecisionTests(unittest.TestCase):
         self.assertLess(digest["ack_through"], digest["sequence"])
         self.assertLessEqual(len(provider.canonical(digest).encode()), provider.MAX_REPLY_BYTES)
 
+    def test_log_cursor_range_rejects_before_sqlite_binding(self):
+        for cursor in (1 << 63, 1 << 64, -1, True):
+            with self.subTest(cursor=cursor), self.assertRaisesRegex(ValueError, "signed-64-bit"):
+                self.call("decision_log", after=cursor)
+        self.assertEqual([], self.call("decision_log", after=(1 << 63) - 1)["events"])
+        self.assertEqual({"revision": 0}, self.call("status"))
+
     def test_idle_overdue_deferral_backs_off_but_future_deadline_is_not_starved(self):
         task = self.create()
         self.assertEqual(30, self.store.decisions.next_delay(LATER))
@@ -258,6 +265,17 @@ class DecisionTests(unittest.TestCase):
             try:
                 self.assertEqual("hello", json.loads(process.stdout.readline())["type"])
                 process.stdin.write(json.dumps({"type": "welcome", "granted_capabilities": ["action_invoke"], "methods": ["action.invoke.v1"]}) + "\n")
+                # Out-of-range public cursor must reject without retiring/crashing the worker.
+                for token, payload in (("bad-cursor", {"action": "decision_log", "after": 1 << 63}), ("still-alive", {"action": "status"})):
+                    process.stdin.write(json.dumps({"type": "request", "id": token, "method": "action.invoke.v1", "params": {"caller": A, "payload": payload}}) + "\n")
+                    process.stdin.flush()
+                    reply = json.loads(process.stdout.readline())["result"]
+                    if token == "bad-cursor":
+                        self.assertFalse(reply["ok"])
+                        self.assertIn("signed-64-bit", reply["error"])
+                    else:
+                        self.assertEqual({"revision": 0}, reply["value"])
+                self.assertIsNone(process.poll())
                 deadline = (dt.datetime.now(dt.timezone.utc) + dt.timedelta(seconds=2)).isoformat(timespec="milliseconds")
                 process.stdin.write(json.dumps({"type": "request", "id": "one", "method": "action.invoke.v1", "params": {"caller": A, "payload": {"action": "decision", "operation_id": "one", "title": "Idle timer", "done_when": "Answered.", **FIELDS, "auto_at": deadline}}}) + "\n")
                 process.stdin.flush()
