@@ -86,14 +86,23 @@ def debtors(owed):
     return [owed]
 
 
+def human_debtor(binding):
+    # Presentation only: this neither authorizes acceptance nor rewrites bindings.
+    return (binding.get("role") == "human_unverified" or binding.get("class") == "human_unverified") and binding.get("uid", os.geteuid()) == os.geteuid()
+
+
 def label(owner, agents):
     if not owner:
         return "—"
     if owner.get("role") == "acceptors":
-        names = ", ".join(label(binding, agents) for binding in debtors(owner))
-        return "acceptors: " + (names or "none")
+        names = []
+        for binding in debtors(owner):
+            status = availability(binding, agents)
+            mark = "[stale here] " if status == "unavailable here" else "[unknown] " if status == "unknown" else ""
+            names.append(mark + label(binding, agents))
+        return "acceptors: " + (", ".join(names) or "unknown")
     if owner.get("role") == "human_unverified" or owner.get("class") == "human_unverified":
-        return "human (unverified)"
+        return "human (unverified)" if human_debtor(owner) else f"human (unverified, uid {owner.get('uid')})"
     agent = (agents or {}).get(owner.get("terminal_id"))
     if exact(owner, agent):
         return clean(agent.get("name") or owner.get("agent") or "agent")
@@ -124,9 +133,9 @@ def categories(task, pending_parents, agents, idle_since, now):
     if task["state"] in FINAL:
         return {"done/accepted"}
     owed = debtors(task.get("owed_to"))
-    if any(binding.get("role") == "human_unverified" or binding.get("class") == "human_unverified" for binding in owed) or (task.get("kind") == "decision" and task.get("owed_action") == "answer"):
+    if any(human_debtor(binding) for binding in owed) or (task.get("kind") == "decision" and task.get("owed_action") == "answer"):
         result.add("waiting on me")
-    if task["state"] == "blocked":
+    if task["state"] == "blocked" or task.get("owed_action") == "acceptor_missing":
         result.add("blocked")
     owner = task["owner"]
     if availability(owner, agents) == "current":
@@ -345,7 +354,7 @@ def run(screen):
                 attr = curses.A_DIM if context else 0
                 marker = "+" if task_id in collapsed else "−" if has_children else "·"
                 flags = categories(task, pending_parents, agents, idle_since, now)
-                state = f" [{task['state']}]" + (" [stalled]" if "stalled" in flags else "")
+                state = f" [{task['state']}]" + (" [acceptor missing]" if task.get("owed_action") == "acceptor_missing" else " [stalled]" if "stalled" in flags else "")
                 title = clip(task["title"], max(1, width - indent - len(state) - 4))
                 draw(line, indent, marker + " " + title + state, attr)
                 owner = task["owner"]

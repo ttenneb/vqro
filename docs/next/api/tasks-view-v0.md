@@ -29,7 +29,12 @@ human installation still requires appropriate approval.
   decision-answer recipient is decision creator. The pane reads both the legacy
   debtor shape and graph `{role:acceptors, bindings}` shape. It displays only the
   provider's acceptor set, never infers one from creator/delegator/parent. Waiting
-  on me means a human debtor/in that set or an unanswered decision. The current
+  on me means this UID's human debtor/in that set or an unanswered decision.
+  UID comparison is presentation only, never authorization; bindings are not
+  rewritten. Non-current agent acceptors are marked stale here, missing proof
+  unknown. An empty acceptor set shows unknown; `acceptor_missing` remains visible
+  as blocked attention. Global status changes refresh complete derived debts even
+  when an individual child revision is unchanged. The current
   core's human-only acceptance and graph's delegator/parent acceptance stay
   provider-owned; human classification remains cooperative/unverified.
 - Seven toggles: waiting on me, stalled, blocked, working, idle, done/accepted,

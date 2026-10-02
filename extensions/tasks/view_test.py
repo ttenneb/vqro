@@ -7,7 +7,7 @@ import view
 
 A = {"class": "agent", "terminal_id": "term_a", "agent": "pi", "execution": "boot:1:10"}
 B = {**A, "terminal_id": "term_b", "execution": "boot:2:20"}
-H = {"class": "human_unverified", "terminal_id": "human", "uid": 1000}
+H = {"class": "human_unverified", "terminal_id": "human", "uid": view.os.geteuid()}
 STAMP = "2026-10-01T01:02:03.000+00:00"
 WALL = dt.datetime(2026, 10, 2, tzinfo=dt.timezone.utc).timestamp()
 
@@ -72,13 +72,26 @@ class ViewTests(unittest.TestCase):
         self.assertNotIn("waiting on me", view.categories(current, set(), agents, {}, 100))
         current["owed_to"]["bindings"] = []
         self.assertNotIn("waiting on me", view.categories(current, set(), agents, {}, 100))
-        self.assertEqual("acceptors: none", view.label(current["owed_to"], agents))
+        self.assertEqual("acceptors: unknown", view.label(current["owed_to"], agents))
         current["owed_action"] = "acceptor_missing"
         self.assertEqual(B, view.recipient(current, {}))
+        self.assertIn("blocked", view.categories(current, set(), agents, {}, 100))
+        self.assertEqual([("root", 0, False, False)], view.project({"root": current}, agents, {}, view.DEFAULT, True, set(), 7, 100, WALL))
         current.update(kind="decision", owed_action="answer")
         self.assertIn("waiting on me", view.categories(current, set(), agents, {}, 100))
         current["state"] = "done"
         self.assertEqual({"done/accepted"}, view.categories(current, set(), agents, {}, 100))
+
+    def test_acceptor_display_distinguishes_stale_unknown_and_other_uid(self):
+        owed = {"role": "acceptors", "bindings": [A]}
+        self.assertEqual("acceptors: [stale here] pi @term_a", view.label(owed, {}))
+        self.assertEqual("acceptors: [stale here] pi @term_a", view.label(owed, {"term_a": agent(execution="replacement")}))
+        self.assertEqual("acceptors: [unknown] pi @term_a", view.label(owed, None))
+        self.assertEqual("acceptors: [unknown] pi @term_a", view.label(owed, {"term_a": agent(execution=None)}))
+        foreign = {**H, "uid": H["uid"] + 1}
+        owed["bindings"] = [foreign]
+        self.assertIn(f"uid {foreign['uid']}", view.label(owed, {}))
+        self.assertNotIn("waiting on me", view.categories(task(owed_to=owed), set(), {}, {}, 100))
 
     def test_recipient_composition_preserves_delegator_and_decision_creator(self):
         tasks = {"root": task()}
@@ -170,6 +183,17 @@ class ReaderTests(unittest.TestCase):
                 self.assertEqual(104, reader.refresh()["idle_since"][A["execution"]])
                 self.assertEqual(110, reader.refresh()["idle_since"][A["execution"]])
         self.assertEqual(1, calls.count("list"))
+
+    def test_global_status_refreshes_acceptors_without_child_revision_change(self):
+        old = task(state="reported", revision=1, owed_action="accept", owed_to={"role": "acceptors", "bindings": [A]})
+        new = {**old, "owed_to": {"role": "acceptors", "bindings": [H]}}
+        reader = view.Reader()
+        with mock.patch.object(view, "task_read", side_effect=[{"revision": 1}, {"tasks": [old], "next_cursor": None}, {"revision": 1}, {"revision": 2}, {"tasks": [new], "next_cursor": None}, {"revision": 2}]), mock.patch.object(view, "api", return_value={"agents": []}):
+            first = reader.refresh()["tasks"]["root"]
+            second = reader.refresh()["tasks"]["root"]
+        self.assertEqual(first["revision"], second["revision"])
+        self.assertNotIn("waiting on me", view.categories(first, set(), {}, {}, 100))
+        self.assertIn("waiting on me", view.categories(second, set(), {}, {}, 100))
 
     def test_changed_revision_retains_previous_task_snapshot(self):
         reader = view.Reader()
