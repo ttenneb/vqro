@@ -606,14 +606,31 @@ def emit(value):
     sys.stdout.flush()
 
 
+def read_only_store(directory):
+    """Observation connection: never initialize, migrate or write the Tasks store."""
+    store = Store.__new__(Store)
+    store.db = sqlite3.connect((Path(directory) / "tasks.sqlite").resolve().as_uri() + "?mode=ro", uri=True, timeout=1, isolation_level=None)
+    store.db.row_factory = sqlite3.Row
+    store.decisions = decision_queue.Queue(store, 900, OutcomeUnknown)
+    if store.db.execute("PRAGMA user_version").fetchone()[0] != 4:
+        store.db.close()
+        raise ValueError("Tasks document requires current store version")
+    return store
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--data-dir")
     parser.add_argument("--decision-delay-seconds", type=int, default=900)
+    parser.add_argument("--native-attention", action="store_true")
     args = parser.parse_args()
+    # Validate policy configuration without opening the store in document-only runtimes.
+    decision_queue.Queue(None, args.decision_delay_seconds, OutcomeUnknown)
     directory = args.data_dir or str(Path(os.environ.get("XDG_STATE_HOME", str(Path.home() / ".local/state"))) / "vqro/extensions/vqro.tasks")
-    store = Store(directory, args.decision_delay_seconds)
-    emit({"type": "hello", "protocol": 2, "service_id": SERVICE, "requested_capabilities": ["action_invoke"], "methods": ["action.invoke.v1"]})
+    store, document_store = None, None
+    capabilities = ["action_invoke", "host_document"] if args.native_attention else ["action_invoke"]
+    methods = ["action.invoke.v1", "host.document.render"] if args.native_attention else ["action.invoke.v1"]
+    emit({"type": "hello", "protocol": 2, "service_id": SERVICE, "requested_capabilities": capabilities, "methods": methods})
     pending = bytearray()
     def read_line(timeout):
         if b"\n" not in pending:
@@ -634,28 +651,54 @@ def main():
     while welcome_line is None:
         welcome_line = read_line(None)
     welcome = json.loads(welcome_line)
-    if welcome.get("type") != "welcome" or welcome.get("granted_capabilities") != ["action_invoke"] or "action.invoke.v1" not in welcome.get("methods", []):
+    if welcome.get("type") != "welcome" or set(welcome.get("granted_capabilities", [])) != set(capabilities) or not set(methods) <= set(welcome.get("methods", [])):
         raise ValueError("action capability not granted")
     while True:
         applied = 0
         try:
-            applied = store.decisions.apply_due(timestamp())
+            if store is not None:
+                applied = store.decisions.apply_due(timestamp())
         except OutcomeUnknown:
             raise  # Never retry an uncertain internal commit in this process.
         except (ValueError, sqlite3.Error) as error:
             # Keep read-only inspection usable when a bounded policy tick cannot write.
             print("decision policy delayed: " + str(error), file=sys.stderr)
         try:
-            line = read_line(store.decisions.next_delay(timestamp(), applied))
+            line = read_line(store.decisions.next_delay(timestamp(), applied) if store is not None else None)
         except EOFError:
             return
         if line is None:
             continue
         request = json.loads(line)
+        if request.get("type") == "request" and request.get("method") == "host.document.render" and args.native_attention:
+            from document import project
+            try:
+                if document_store is None:
+                    document_store = read_only_store(directory)
+                document_store.db.execute("BEGIN")
+                if document_store.db.execute("PRAGMA user_version").fetchone()[0] != 4:
+                    raise ValueError("Tasks document requires current store version")
+                document = project(document_store, request["params"])
+                document_store.db.rollback()
+                emit({"type": "response", "id": request["id"], "result": document})
+            except (ValueError, KeyError, TypeError, sqlite3.Error) as error:
+                if document_store is not None and hasattr(document_store, "db"):
+                    document_store.db.rollback()
+                else:
+                    document_store = None
+                emit({"type": "response", "id": request["id"], "error": str(error)})
+            continue
         if request.get("type") != "request" or request.get("method") != "action.invoke.v1":
             raise ValueError("unexpected request")
         try:
-            result = {"ok": True, "value": store.invoke(request["params"])}
+            if store is None:
+                store = Store(directory, args.decision_delay_seconds)
+                try:
+                    store.decisions.apply_due(timestamp())
+                except (ValueError, sqlite3.Error) as error:
+                    print("decision policy delayed: " + str(error), file=sys.stderr)
+            result = {"ok": True, "value": store.invoke(request["params"]),
+                      "document_revision": store.db.execute("SELECT COALESCE(MAX(seq),0) FROM transitions").fetchone()[0]}
         except OutcomeUnknown as error:
             emit({"type": "response", "id": request["id"], "error": str(error)})
             return

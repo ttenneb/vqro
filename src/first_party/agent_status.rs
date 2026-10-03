@@ -124,6 +124,7 @@ mod tests {
             generation: 8,
             revision: 21,
             scope_id: "session_alpha".into(),
+            terminals: None,
             activities: vec![
                 activity("term_idle", HostAgentActivityState::Idle, 3, "Research"),
                 activity("term_blocked", HostAgentActivityState::Blocked, 9, "Review"),

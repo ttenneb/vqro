@@ -728,12 +728,31 @@ impl App {
         self.host_agent_activity_last_desired
             .retain(|namespace, _| namespaces.contains(namespace));
         for namespace in namespaces {
-            self.refresh_agent_activity_document_for_namespace(&namespace);
+            self.refresh_agent_activity_document_for_namespace(&namespace, false);
         }
     }
 
-    fn refresh_agent_activity_document_for_namespace(&mut self, namespace: &str) {
+    pub(crate) fn refresh_extension_document_revision(&mut self, namespace: &str) {
+        if self.host_document_services.source(namespace)
+            == Some(crate::api::schema::HostDocumentSourceKind::AgentActivity)
+        {
+            self.refresh_agent_activity_document_for_namespace(namespace, true);
+        }
+    }
+
+    fn refresh_agent_activity_document_for_namespace(&mut self, namespace: &str, force: bool) {
         let scope_id = crate::spaces_extension_contract::SPACES_SCOPE_ID.to_string();
+        if force
+            && self
+                .host_document_caches
+                .get(&(namespace.into(), scope_id.clone()))
+                .and_then(|cache| cache.current())
+                .is_some_and(|document| !document.actions.is_empty())
+        {
+            // Opaque state invalidation is the actionless observation path, not a way to
+            // silently stale previously published controls during a sampling attempt.
+            return;
+        }
         let Some(generation) = self.host_document_services.generation(namespace) else {
             self.host_document_caches
                 .remove(&(namespace.into(), scope_id.clone()));
@@ -744,6 +763,7 @@ impl App {
         };
         let mut seen = std::collections::HashSet::new();
         let mut activities = Vec::new();
+        let mut terminals = Vec::new();
         for workspace in &self.state.workspaces {
             for tab in &workspace.tabs {
                 for (pane_id, pane) in &tab.panes {
@@ -754,10 +774,11 @@ impl App {
                     if !seen.insert(terminal.id.clone()) {
                         continue;
                     }
-                    let Some(agent_label) = terminal.effective_agent_label() else {
+                    let Some(terminal_ref) = self.host_terminal_ref_for_pane(*pane_id) else {
                         continue;
                     };
-                    let Some(terminal_ref) = self.host_terminal_ref_for_pane(*pane_id) else {
+                    terminals.push(terminal_ref.clone());
+                    let Some(agent_label) = terminal.effective_agent_label() else {
                         continue;
                     };
                     let (source, evidence_kind) = terminal.effective_evidence_attribution();
@@ -810,6 +831,7 @@ impl App {
             revision: 1,
             scope_id: scope_id.clone(),
             activities,
+            terminals: Some(terminals),
         };
         let key = (namespace.to_string(), scope_id.clone());
         if snapshot.validate().is_err() {
@@ -819,23 +841,41 @@ impl App {
             self.host_agent_activity_last_desired.remove(namespace);
             return;
         }
-        if self
-            .host_agent_activity_last_desired
-            .get(namespace)
-            .is_some_and(|previous| {
-                let mut normalized = previous.clone();
-                normalized.revision = 1;
-                normalized == snapshot
-            })
+        if !force
+            && self
+                .host_agent_activity_last_desired
+                .get(namespace)
+                .is_some_and(|previous| {
+                    let mut normalized = previous.clone();
+                    normalized.revision = 1;
+                    normalized == snapshot
+                })
         {
             return;
         }
+        let retain_observation = self
+            .host_agent_activity_last_desired
+            .get(namespace)
+            .is_some_and(|previous| {
+                previous.generation == generation && previous.terminals == snapshot.terminals
+            })
+            && self
+                .host_document_caches
+                .get(&key)
+                .and_then(|cache| cache.current())
+                .is_some_and(|document| {
+                    document.generation == generation && document.actions.is_empty()
+                });
         snapshot.revision = self.next_host_agent_activity_document_revision();
         self.host_agent_activity_last_desired
             .insert(namespace.to_owned(), snapshot.clone());
         self.host_document_request_watermarks
             .insert(key.clone(), (generation, snapshot.revision));
-        self.disable_host_document_projection(&key, generation, snapshot.revision);
+        // Activity-only changes and opaque invalidation preserve an actionless observation
+        // until different output is ready. Even forced refresh retires changed placement.
+        if !retain_observation {
+            self.disable_host_document_projection(&key, generation, snapshot.revision);
+        }
         match self
             .host_document_services
             .request_agent_activity(namespace, snapshot.clone())
@@ -852,6 +892,7 @@ impl App {
             }
             Err(error) => {
                 self.host_agent_activity_last_desired.remove(namespace);
+                self.disable_host_document_projection(&key, generation, snapshot.revision);
                 self.schedule_host_semantic_retry(namespace);
                 tracing::warn!(%error, "Agent Status provider unavailable; using native fallback");
             }
@@ -1073,22 +1114,50 @@ impl App {
                 });
         if current {
             let publication = result.result.and_then(|document| {
+                let observation = document.actions.is_empty()
+                    && document.required_capabilities.is_empty()
+                    && !document.items.is_empty()
+                    && document.items.iter().all(|item| {
+                        item.role == crate::extension_contract::HostItemRole::Section
+                            && item.parent_id.is_none()
+                            && item.action_ids.is_empty()
+                            && item.terminal.as_ref().is_none_or(|terminal| {
+                                result
+                                    .snapshot
+                                    .terminals
+                                    .as_ref()
+                                    .is_some_and(|terminals| terminals.contains(terminal))
+                            })
+                    });
                 if document.revision != result.snapshot.revision
                     || document.target != crate::extension_contract::HostTarget::Session
-                    || !document.items.iter().all(|item| match item.role {
-                        crate::extension_contract::HostItemRole::Group => {
-                            item.id.starts_with("activity:")
-                        }
-                        crate::extension_contract::HostItemRole::Terminal => {
-                            !item.id.starts_with("relationship:")
-                                && !item.id.starts_with("context:")
-                        }
-                        _ => false,
-                    })
+                    || !(observation
+                        || document.items.iter().all(|item| match item.role {
+                            crate::extension_contract::HostItemRole::Group => {
+                                item.id.starts_with("activity:")
+                            }
+                            crate::extension_contract::HostItemRole::Terminal => {
+                                !item.id.starts_with("relationship:")
+                                    && !item.id.starts_with("context:")
+                            }
+                            _ => false,
+                        }))
                 {
                     return Err(
                         "activity document does not match its admitted source or revision".into(),
                     );
+                }
+                if let Some(current) = self
+                    .host_document_caches
+                    .get(&key)
+                    .and_then(|cache| cache.current())
+                {
+                    let mut normalized = document.clone();
+                    normalized.revision = current.revision;
+                    if normalized == *current {
+                        // Same output keeps published revision (and therefore actions) unchanged.
+                        return Ok(());
+                    }
                 }
                 self.host_document_caches
                     .entry(key)
@@ -1108,6 +1177,11 @@ impl App {
                 Err(error) => {
                     self.host_agent_activity_last_desired
                         .remove(&result.namespace);
+                    self.disable_host_document_projection(
+                        &(result.namespace.clone(), result.snapshot.scope_id.clone()),
+                        result.snapshot.generation,
+                        result.snapshot.revision,
+                    );
                     self.schedule_host_semantic_retry(&result.namespace);
                     tracing::warn!(%error, "Agent Status document render failed; using native fallback");
                 }
@@ -3197,6 +3271,130 @@ mod tests {
             18
         );
         assert!(app.host_relationships_last_desired.is_empty());
+    }
+
+    #[test]
+    fn actionless_attention_equal_samples_keep_publication_and_failed_samples_retire() {
+        let mut app = app_with_workspace();
+        let namespace = "independent.attention";
+        app.host_document_services=crate::extension_service::HostDocumentServiceCatalog::with_test_document_source_provider(namespace,31,crate::api::schema::HostDocumentSourceKind::AgentActivity);
+        let document = |snapshot: &crate::extension_contract::HostAgentActivityV1, label: &str| {
+            crate::extension_contract::HostDocumentV1 {
+                contract: crate::extension_contract::HOST_DOCUMENT_CONTRACT_V1.into(),
+                namespace: namespace.into(),
+                generation: snapshot.generation,
+                revision: snapshot.revision,
+                surface: crate::extension_contract::HostSurface::Navigation,
+                target: crate::extension_contract::HostTarget::Session,
+                items: vec![crate::extension_contract::HostDocumentItem {
+                    id: "context:independent.observation".into(),
+                    parent_id: None,
+                    role: crate::extension_contract::HostItemRole::Section,
+                    label: label.into(),
+                    detail: None,
+                    terminal: None,
+                    action_ids: Vec::new(),
+                    flags: Default::default(),
+                }],
+                actions: Vec::new(),
+                required_capabilities: Vec::new(),
+            }
+        };
+        let publish =
+            |app: &mut App, snapshot: crate::extension_contract::HostAgentActivityV1, result| {
+                app.handle_host_agent_activity_document_result(
+                    crate::extension_service::HostAgentActivityDocumentAsyncResult {
+                        _render_slot: None,
+                        namespace: namespace.into(),
+                        provider_priority: 1,
+                        snapshot,
+                        result,
+                        grants: std::collections::HashSet::new(),
+                    },
+                )
+            };
+        app.refresh_agent_activity_document();
+        let first = app.host_agent_activity_last_desired[namespace].clone();
+        publish(&mut app, first.clone(), Ok(document(&first, "Work")));
+        let key = (namespace.into(), first.scope_id.clone());
+        let original = app.host_document_caches[&key]
+            .current()
+            .expect("published")
+            .clone();
+        // Characterize an agent evidence publisher disappearing while its terminal stays.
+        let terminal = first.terminals.as_ref().expect("complete placements")[0].clone();
+        app.host_agent_activity_last_desired
+            .get_mut(namespace)
+            .expect("source")
+            .activities
+            .push(crate::extension_contract::HostAgentActivityRecord {
+                terminal,
+                activity: crate::extension_contract::HostAgentActivityState::Idle,
+                source: "previous.agent".into(),
+                evidence_kind: "test".into(),
+                state_change_seq: 1,
+                labels: Default::default(),
+            });
+        app.refresh_agent_activity_document_for_namespace(namespace, false);
+        let ordinary = app.host_agent_activity_last_desired[namespace].clone();
+        assert!(ordinary.revision > first.revision);
+        assert_eq!(
+            app.host_document_caches[&key].current(),
+            Some(&original),
+            "activity-only changes must not flicker"
+        );
+        publish(&mut app, ordinary.clone(), Ok(document(&ordinary, "Work")));
+        assert_eq!(app.host_document_caches[&key].current(), Some(&original));
+        app.refresh_agent_activity_document_for_namespace(namespace, true);
+        let equal = app.host_agent_activity_last_desired[namespace].clone();
+        assert!(equal.revision > first.revision);
+        assert_eq!(
+            app.host_document_caches[&key].current(),
+            Some(&original),
+            "sampling must not remove existing observation"
+        );
+        publish(&mut app, equal.clone(), Ok(document(&equal, "Work")));
+        assert_eq!(
+            app.host_document_caches[&key].current(),
+            Some(&original),
+            "equal output keeps published/action revision"
+        );
+        app.refresh_agent_activity_document_for_namespace(namespace, true);
+        let changed = app.host_agent_activity_last_desired[namespace].clone();
+        publish(&mut app, changed.clone(), Ok(document(&changed, "Changed")));
+        assert_eq!(
+            app.host_document_caches[&key]
+                .current()
+                .expect("changed")
+                .revision,
+            changed.revision
+        );
+        // A late equal result cannot overwrite the changed publication.
+        publish(&mut app, equal.clone(), Ok(document(&equal, "Work")));
+        assert_eq!(
+            app.host_document_caches[&key]
+                .current()
+                .expect("still changed")
+                .items[0]
+                .label,
+            "Changed"
+        );
+        // Even a forced opaque refresh must retire observation with changed placement.
+        app.host_agent_activity_last_desired
+            .get_mut(namespace)
+            .expect("source")
+            .terminals = None;
+        app.refresh_agent_activity_document_for_namespace(namespace, true);
+        let moved = app.host_agent_activity_last_desired[namespace].clone();
+        assert!(app.host_document_caches[&key].current().is_none());
+        publish(&mut app, moved.clone(), Ok(document(&moved, "Changed")));
+        app.refresh_agent_activity_document_for_namespace(namespace, true);
+        let failed = app.host_agent_activity_last_desired[namespace].clone();
+        publish(&mut app, failed, Err("provider unavailable".into()));
+        assert!(
+            app.host_document_caches[&key].current().is_none(),
+            "failed refresh must not leave healthy-looking stale observation"
+        );
     }
 
     #[test]

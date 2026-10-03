@@ -2698,6 +2698,23 @@ impl ClientShellState {
                     self.persist_chrome_preferences(outcome);
                     return;
                 }
+                if super::contains(self.hits.attention_toggle, point) {
+                    self.show_agents = !self.show_agents;
+                    self.agent_scroll = 0;
+                    self.invalidate_pane_surface();
+                    outcome.repaint = true;
+                    return;
+                }
+                if let Some(launch) = self
+                    .hits
+                    .attention
+                    .iter()
+                    .find(|hit| super::contains(hit.rect, point))
+                    .cloned()
+                {
+                    self.open_attention(launch, outcome);
+                    return;
+                }
                 // Some terminals reserve Shift for selection and report a
                 // Ctrl+Shift click to mouse-aware applications as Ctrl-only.
                 let space_link = mouse

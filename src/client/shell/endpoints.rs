@@ -20,6 +20,7 @@ pub(crate) struct ClientShellEndpoint {
     pub(crate) structure_generation: Option<u64>,
     pub(crate) host_documents: Option<Box<crate::protocol::endpoint::HostDocumentsProjectionV1>>,
     pub(crate) host_documents_generation: Option<u64>,
+    pub(super) attention: Option<super::attention::AttentionNavigation>,
     pub(crate) agent_recency: HashMap<String, u64>,
     pub(super) agent_presentation: super::endpoint_agent_state::EndpointAgentPresentation,
     pub(crate) agent_view_projection: Option<ClientEndpointAgentViewProjection>,
@@ -103,6 +104,7 @@ impl ClientShellState {
                 host_documents: previous.and_then(|endpoint| endpoint.host_documents.clone()),
                 host_documents_generation: previous
                     .and_then(|endpoint| endpoint.host_documents_generation),
+                attention: previous.and_then(|endpoint| endpoint.attention.clone()),
                 agent_recency: previous
                     .map(|endpoint| endpoint.agent_recency.clone())
                     .unwrap_or_default(),
@@ -992,6 +994,7 @@ impl ClientShellState {
                 current.boot_id == projection.boot_id && current.revision > projection.revision
             });
         if !stale {
+            endpoint.attention = super::attention::navigation(&projection);
             endpoint.host_documents = Some(projection);
             endpoint.host_documents_generation = Some(generation);
         }
@@ -1137,6 +1140,7 @@ pub(super) fn local_endpoint() -> ClientShellEndpoint {
         structure_generation: None,
         host_documents: None,
         host_documents_generation: None,
+        attention: None,
         agent_recency: HashMap::new(),
         agent_presentation: Default::default(),
         agent_view_projection: None,

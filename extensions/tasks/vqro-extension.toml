@@ -7,9 +7,10 @@ platforms = ["linux"]
 
 [[services]]
 id = "core"
-provides = ["action_invoke"]
-capabilities = ["action_invoke"]
-command = ["python3", "provider.py"]
+provides = ["action_invoke", "host_document"]
+capabilities = ["action_invoke", "host_document"]
+document_source = "agent_activity"
+command = ["python3", "provider.py", "--native-attention"]
 
 [[panes]]
 id = "tree"

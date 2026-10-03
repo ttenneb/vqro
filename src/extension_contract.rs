@@ -112,6 +112,10 @@ pub struct HostAgentActivityV1 {
     pub scope_id: String,
     #[serde(default)]
     pub activities: Vec<HostAgentActivityRecord>,
+    /// Complete current placements, including non-agent terminals. Absence is unknown.
+    /// Placement never proves an execution is current or grants task authority.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminals: Option<Vec<HostTerminalRef>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -532,6 +536,25 @@ impl HostAgentActivityV1 {
             for (key, value) in &activity.labels {
                 validate_local_id(key)?;
                 validate_text(value)?;
+            }
+        }
+        if let Some(terminals) = &self.terminals {
+            if terminals.len() > MAX_AGENT_ACTIVITIES {
+                return invalid("agent activity snapshot has too many terminal placements");
+            }
+            let mut ids = HashSet::with_capacity(terminals.len());
+            for terminal in terminals {
+                validate_terminal_ref(terminal)?;
+                if terminal.placement.is_none() || !ids.insert(&terminal.terminal_id) {
+                    return invalid("terminal placements must be complete and unique");
+                }
+            }
+            if self
+                .activities
+                .iter()
+                .any(|activity| !terminals.contains(&activity.terminal))
+            {
+                return invalid("agent activity is outside current terminal placements");
             }
         }
         if serde_json::to_vec(self)
@@ -1053,6 +1076,7 @@ mod tests {
             generation: 1,
             revision: 1,
             scope_id: "session".into(),
+            terminals: None,
             activities: (0..MAX_AGENT_ACTIVITIES)
                 .map(|index| HostAgentActivityRecord {
                     terminal: HostTerminalRef {
@@ -1093,6 +1117,7 @@ mod tests {
             revision: 5,
             scope_id: "session_alpha".into(),
             activities: vec![record.clone()],
+            terminals: None,
         };
         snapshot.validate().unwrap();
         let decoded: HostAgentActivityV1 =

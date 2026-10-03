@@ -223,6 +223,7 @@ pub(super) struct ShellRenderState<'a> {
     pub(super) remote_collapsed_groups: &'a HashMap<ClientEndpointId, HashSet<String>>,
     pub(super) workspace_scroll: &'a mut usize,
     pub(super) agent_scroll: &'a mut usize,
+    pub(super) show_agents: bool,
     pub(super) tab_scroll: &'a mut usize,
     pub(super) reveal_focused_workspace: &'a mut bool,
     pub(super) reveal_focused_tab: &'a mut bool,
@@ -311,6 +312,12 @@ pub(super) fn render_shell(
             state.tab_scroll,
             state.reveal_focused_tab,
             state.tab_drag_insert_index,
+            state
+                .endpoints
+                .iter()
+                .find(|endpoint| &endpoint.endpoint_id == state.active_endpoint_id)
+                .filter(|endpoint| endpoint.current_host_documents().is_some())
+                .and_then(|endpoint| endpoint.attention.as_ref()),
             &mut hits,
         );
     }
@@ -324,6 +331,8 @@ pub(super) fn render_shell(
         hits.machines.clear();
         hits.workspaces.clear();
         hits.agents.clear();
+        hits.attention.clear();
+        hits.attention_toggle = Rect::default();
         hits.endpoint_agents.clear();
         hits.tab_scroll_left = Rect::default();
         hits.tab_scroll_right = Rect::default();

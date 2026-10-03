@@ -1892,6 +1892,7 @@ pub fn manager_for_plugins(
 ) -> ExtensionServiceManager {
     let mut specs = Vec::new();
     let mut load_order = std::collections::HashMap::new();
+    let mut document_namespaces = std::collections::HashMap::new();
     for plugin in plugins.values().filter(|plugin| {
         plugin.enabled && crate::persist::plugin_registry::manifest_available(plugin)
     }) {
@@ -1914,6 +1915,12 @@ pub fn manager_for_plugins(
             }
             let service_id = format!("{}.{}", plugin.plugin_id, service.id);
             load_order.insert(service_id.clone(), plugin.load_order);
+            if service
+                .provides
+                .contains(&crate::api::schema::PluginServiceCapability::HostDocument)
+            {
+                document_namespaces.insert(service_id.clone(), plugin.plugin_id.clone());
+            }
             specs.push(ExtensionServiceSpec {
                 id: service_id,
                 command: service.command.clone(),
@@ -1923,7 +1930,7 @@ pub fn manager_for_plugins(
             });
         }
     }
-    manager_for_specs_with_order(specs, &load_order, event_tx)
+    manager_for_specs_with_documents(specs, &load_order, &document_namespaces, event_tx)
 }
 
 #[cfg(test)]
@@ -1934,9 +1941,24 @@ fn manager_for_specs(
     manager_for_specs_with_order(specs, &std::collections::HashMap::new(), event_tx)
 }
 
+#[cfg(test)]
 fn manager_for_specs_with_order(
+    specs: Vec<ExtensionServiceSpec>,
+    load_order: &std::collections::HashMap<String, u64>,
+    event_tx: tokio::sync::mpsc::Sender<crate::events::AppEvent>,
+) -> ExtensionServiceManager {
+    manager_for_specs_with_documents(
+        specs,
+        load_order,
+        &std::collections::HashMap::new(),
+        event_tx,
+    )
+}
+
+fn manager_for_specs_with_documents(
     mut specs: Vec<ExtensionServiceSpec>,
     load_order: &std::collections::HashMap<String, u64>,
+    document_namespaces: &std::collections::HashMap<String, String>,
     event_tx: tokio::sync::mpsc::Sender<crate::events::AppEvent>,
 ) -> ExtensionServiceManager {
     specs.sort_by(|left, right| {
@@ -1972,14 +1994,17 @@ fn manager_for_specs_with_order(
         let thread_revoked = revoked.clone();
         let granted_capabilities = supervisor.spec.granted_capabilities.clone();
         let service_id = supervisor.spec.id.clone();
+        let document_namespace = document_namespaces.get(&service_id).cloned();
         let (request_tx, request_rx) = mpsc::sync_channel(8);
         let thread_admissions = admissions.clone();
         let thread_service_id = service_id.clone();
         let thread_manager_generation = manager_generation;
         let thread_grants = granted_capabilities.clone();
+        let document_events = event_tx.clone();
         let spawn = std::thread::Builder::new()
             .name(format!("vqro-ext-{}", service_id))
             .spawn(move || {
+                let mut document_version = None;
                 while let Ok(request) = request_rx.recv() {
                     let request = match request {
                         ExtensionWorkerRequest::Generic(action) => {
@@ -1995,6 +2020,21 @@ fn manager_for_specs_with_order(
                                 && thread_generation.load(Ordering::Acquire) == action.generation;
                             if supervisor.runtime.is_none() {
                                 thread_generation.store(next_service_generation(), Ordering::Release);
+                            }
+                            if let Some(namespace) = document_namespace.as_ref().filter(|_| still_current && thread_grants.contains(&crate::api::schema::ExtensionServiceCapability::HostDocument)) {
+                                if let Some(revision) = result.as_ref().ok()
+                                    .and_then(|value| value["document_revision"].as_u64())
+                                {
+                                    let version = (action.generation, revision);
+                                    if document_version_changed(document_version, version) {
+                                        // Coalesce at the provider version, not per CLI read/client/frame.
+                                        if document_events.blocking_send(crate::events::AppEvent::ExtensionDocumentRevisionChanged {
+                                            namespace: namespace.clone(), service_id: thread_service_id.clone(), generation: action.generation, revision,
+                                        }).is_ok() {
+                                            document_version = Some(version);
+                                        }
+                                    }
+                                }
                             }
                             send_generic_action_response(&action, if still_current { result } else { Err("provider retired during execution".into()) }, true);
                             continue;
@@ -2183,6 +2223,11 @@ pub(crate) fn manager_for_test_specs(
     event_tx: tokio::sync::mpsc::Sender<crate::events::AppEvent>,
 ) -> ExtensionServiceManager {
     manager_for_specs(specs, event_tx)
+}
+
+// Provider revisions are opaque equality tokens, not monotonic sequence authority.
+fn document_version_changed(previous: Option<(u64, u64)>, current: (u64, u64)) -> bool {
+    previous != Some(current)
 }
 
 fn send_generic_action_response(
@@ -3300,6 +3345,95 @@ mod tests {
         assert!(manager
             .request_view(identity_for(1, "view", "w1:p1", 1), serde_json::json!({}))
             .is_err());
+    }
+
+    #[test]
+    fn opaque_document_versions_compare_equality_not_numeric_order() {
+        assert!(document_version_changed(None, (1, 9)));
+        assert!(!document_version_changed(Some((1, 9)), (1, 9)));
+        assert!(document_version_changed(Some((1, 9)), (1, 2)));
+        assert!(document_version_changed(Some((1, 9)), (2, 9)));
+    }
+
+    #[test]
+    fn generic_action_versions_coalesce_and_map_exact_document_namespace() {
+        let root = std::env::temp_dir().join(format!(
+            "vqro-document-version-{}-{}",
+            std::process::id(),
+            next_service_generation()
+        ));
+        std::fs::create_dir(&root).expect("private test store");
+        let (events, mut received) = tokio::sync::mpsc::channel(16);
+        let id = "vqro.tasks.core";
+        let manager = manager_for_specs_with_documents(
+            vec![ExtensionServiceSpec {
+                id: id.into(),
+                command: vec![
+                    "python3".into(),
+                    "-B".into(),
+                    "provider.py".into(),
+                    "--native-attention".into(),
+                    "--data-dir".into(),
+                    root.display().to_string(),
+                ],
+                cwd: std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("extensions/tasks"),
+                priority: 1,
+                granted_capabilities: vec![
+                    crate::api::schema::ExtensionServiceCapability::ActionInvoke,
+                    crate::api::schema::ExtensionServiceCapability::HostDocument,
+                ],
+            }],
+            &std::collections::HashMap::new(),
+            &std::collections::HashMap::from([(id.into(), "vqro.tasks".into())]),
+            events,
+        );
+        let invoke = |payload: serde_json::Value| {
+            let (tx, rx) = std::sync::mpsc::channel();
+            manager.request_generic_action(
+                "test".into(),
+                crate::api::schema::ExtensionActionInvokeParams {
+                    service_id: id.into(),
+                    payload,
+                },
+                crate::action_invocation::InvocationCaller::HumanUnverified {
+                    terminal_id: "term_fixture".into(),
+                    uid: 0,
+                },
+                tx,
+            );
+            let response: serde_json::Value = serde_json::from_str(
+                &rx.recv_timeout(std::time::Duration::from_secs(3))
+                    .expect("response"),
+            )
+            .expect("json");
+            assert_eq!(response["result"]["value"]["ok"], true, "{response}");
+            response["result"]["value"]["document_revision"]
+                .as_u64()
+                .expect("version")
+        };
+        assert_eq!(invoke(serde_json::json!({"action":"status"})), 0);
+        assert!(
+            matches!(received.try_recv().expect("first version"),crate::events::AppEvent::ExtensionDocumentRevisionChanged {namespace, service_id, revision:0,..} if namespace == "vqro.tasks" && service_id == id)
+        );
+        assert_eq!(invoke(serde_json::json!({"action":"status"})), 0);
+        assert!(
+            received.try_recv().is_err(),
+            "equal version must not schedule work"
+        );
+        let payload = serde_json::json!({"action":"decision","title":"quiet write","done_when":"Recorded.","operation_id":"same",
+            "options":[{"key":"yes","label":"Yes"},{"key":"no","label":"No"}],"default":"yes","reversible":true,"waiting_cost":"Pending human choice"});
+        assert_eq!(invoke(payload.clone()), 1);
+        assert!(matches!(
+            received.try_recv().expect("changed version"),
+            crate::events::AppEvent::ExtensionDocumentRevisionChanged { revision: 1, .. }
+        ));
+        assert_eq!(invoke(payload), 1);
+        assert!(
+            received.try_recv().is_err(),
+            "historical receipt replay must not reschedule work"
+        );
+        drop(manager);
+        std::fs::remove_dir_all(root).expect("remove private store");
     }
 
     #[test]
@@ -5017,6 +5151,7 @@ printf '%s\n' '{"type":"response","id":2,"result":{"accepted":true}}'
                 revision: 1,
                 scope_id: "session".into(),
                 activities: Vec::new(),
+                terminals: None,
             });
         assert!(host_document_target_matches(&relationships, &session));
         assert!(host_document_target_matches(&activity, &session));
