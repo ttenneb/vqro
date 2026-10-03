@@ -18,7 +18,9 @@
 //! Known limits (documented, not handled): a package source written with `./`,
 //! `../` or another non-prefix parent-path form that normalizes outside the agent
 //! dir, a package path under an entry the profile does not mirror, and a read-only
-//! profile directory whose content still matches its marker.
+//! profile directory whose content still matches its marker. An unreadable human
+//! `settings.json` (any read error, not only a missing file) is treated as the
+//! empty settings, so that case builds a profile without the human's settings.
 
 use std::io;
 use std::path::{Path, PathBuf};
