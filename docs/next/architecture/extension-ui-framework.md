@@ -8,6 +8,38 @@ performance, and keeps a built-in fallback so terminals stay reachable when
 every extension is broken. This note records the owner's decisions as they are
 made. It becomes an implementation mandate only when accepted.
 
+The decisions below describe the target framework. The
+[first version](#first-version-scope) is a deliberately cut-down subset of it.
+
+## First version scope
+
+Accepted by the owner on 2026-10-03 (relayed by the pilot coordinator).
+
+**In v1:**
+
+- the new view format and pipeline ([Pipeline](#pipeline));
+- pane **split** panels and **popovers**; the task and messages panels are the
+  first users;
+- **badges** on the pane border, the tab and the sidebar row;
+- building blocks: section, row (state chip, count or age, detail line, link,
+  actions, children), terminal link with live agent state, age from a
+  timestamp, tones, a 2–4 option choice, a one-line text input (the
+  rename-dialog field), and the loading, empty, unavailable and "unsupported"
+  states;
+- fixed panel sizes, scrolling, persisted display state, the
+  `vqro pane panel` command, the "show when an agent starts" rule, in-view
+  action errors, and the reference extension with render tests.
+
+**Deferred:**
+
+| Deferred item | Comes with |
+|---|---|
+| Extension- or user-defined layouts, layout selection, exclusive-region owner config. v1 has **one built-in layout**. | A later layout step |
+| The sidebar (and its tabs) and the terminal tab bar as extension views | After the panels |
+| Overlay placement | Later; v1 is split plus popover |
+| Drag-to-reorder, rename as an action (the rename dialog's text field is still used for text input), extension context-menu items, selection | The sidebar step |
+| Text, key-value and table blocks | The Terminal Inspector migration |
+
 ## Vocabulary
 
 - **View:** what an extension publishes: bounded data describing content and
@@ -39,6 +71,32 @@ made. It becomes an implementation mandate only when accepted.
 | 2026-10-03 | **Display state is per client**: collapsed rows, selection, region sizes and the active tab. Only extension data is shared. |
 | 2026-10-03 | **Migration order**: task and messages panels; then the sidebar (agents, attention list, tab switcher); then the tab bar; then Collections chrome and Terminal Inspector. Retire the full-tab Tasks view once the panels work. |
 | 2026-10-03 | Scaling rules are **on hold**; this round covers UI design and architecture only. |
+| 2026-10-03 | **Pipeline: one new, separately named, versioned view format** built on the existing live host-document path and absorbing `ViewDocument`'s blocks. `host.document.v1`/`v2` and `ViewDocument` stay frozen until their consumers migrate. See [Pipeline](#pipeline). |
+| 2026-10-03 | **Panel size comes from the layout or the user, never from content.** Content scrolls. The terminal resizes only on open, close or user resize (once, on drag release). A pane too small for a panel keeps it closed and shows a border badge that opens it as a popover; the current fallback to a full-pane view (`src/client/shell/contributions.rs`) is retired. |
+| 2026-10-03 | **Scrolling** is Vqro-owned in every panel and sidebar tab (wheel and scrollbars, reusing existing scrollbar code), anchored on an item ID across updates, per client. |
+| 2026-10-03 | **Display state persists** in the client preferences file (`src/client/shell/preferences.rs`), keyed by terminal ID: open panels, collapsed rows, sizes and the active sidebar tab. Reattach restores it. |
+| 2026-10-03 | **Show/hide command**: `vqro pane panel show\|hide\|toggle <pane> [<view>]`, passed by the server to attached clients as an optional, advertised display request that older clients ignore. The "show when an agent starts" rule is a client setting that runs in the client. |
+| 2026-10-03 | **Action errors** appear in the originating view as a one-line message at the bottom of the panel or popover. Repeated failures go to Vqro's existing notices. Never in the terminal. |
+| 2026-10-03 | **Badges are in v1** on the pane border, the tab and the sidebar row; clicking one opens the panel or popover. This formalizes the existing tab badges (`src/client/shell/tabs.rs`). |
+| 2026-10-03 | **Testing**: grow `extensions/reference-host-document` into a reference extension exercising every block, placement and action, plus render tests per block without real terminals and a test for the "unsupported" fallback. |
+| 2026-10-03 | **Text input for decision answers** uses the same one-line field as the rename dialog. |
+| 2026-10-03 | **Filters and notifications are not in v1.** |
+| 2026-10-03 | **Cut-down first version accepted** (relayed by the pilot coordinator): one built-in layout; sidebar and tab bar views after the panels; no overlay in v1; reorder, rename as an action, extension context-menu items and selection deferred; text, key-value and table blocks deferred to the Terminal Inspector migration. See [First version scope](#first-version-scope). |
+
+## Pipeline
+
+- **Format:** one new, separately named, versioned format. It keeps the live
+  path, the tree, terminal references and the action envelope of
+  `HostDocumentV1`, and adds `ViewDocument`'s content blocks. Old formats stay
+  frozen until their consumers migrate (compatibility rules in `AGENTS.md`).
+- **Updates:** the extension signals "changed"; Vqro fetches the latest
+  version at its own pace.
+- **Actions on a changed view:** each action already carries the view
+  generation, revision, item and action ID (`HostDocumentExtensionActionV1`).
+  Vqro drops the click if the item no longer exists; otherwise it sends the
+  revision the user saw, and the extension decides whether it still applies.
+- **Compatibility:** an unknown block type shows "unsupported" in place; new
+  fields are optional and older clients ignore them.
 
 ## Layout
 
@@ -80,7 +138,7 @@ A pane uses the same model:
   ● = live agent state joined by Vqro
 ```
 
-## Building blocks (proposed; to be finalized)
+## Building blocks (target set; v1 subset in [First version scope](#first-version-scope))
 
 - **Section:** titled and collapsible.
 - **Row:** a label with an optional state chip, count or age, detail line,
@@ -115,7 +173,5 @@ A pane uses the same model:
 
 ## Open questions
 
-- Finalize the building-block set.
-- Filters and notifications (proposed: not in v1).
-- Text input: approved in principle through the rename dialog; confirm it also
-  serves decision answers.
+- Confirm the v1 building blocks with a mockup pass over the task and messages
+  panels. The sidebar-tab mockup moves to the sidebar step.
