@@ -150,6 +150,8 @@ class ReadinessDemo(Demo):
         assert answered["state"] in ("accepted", "done") or answered.get("owed_action") != "answer", answered["state"]
 
         # R6: a durable message crosses the two real Pi panes and is claimed by name.
+        state = self.agent("task-a", "msg-state", ["list"], tool="message")
+        assert state["activation"] is False, f"activation must stay off: {state}"
         sent = self.agent("task-a", "msg-send", ["send", "task-b", "Readiness message from task-a", "--op", "msg-send"], tool="message")
         message_id = sent["message"]["id"]
         claimed = self.agent("task-b", "msg-claim", ["claim", "--op", "msg-claim"], tool="message")

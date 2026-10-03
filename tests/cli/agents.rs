@@ -326,13 +326,34 @@ fn agent_start_command_works() {
         run_cli_json(&socket_path, &["pane", "get", &pane_id])["result"]["pane"]["label"],
         "shell-pane"
     );
-    assert_eq!(started["result"]["argv"][0], "pi");
-    assert_eq!(started["result"]["argv"][1], "--name");
-    assert_eq!(started["result"]["argv"][2], "scratch");
-    assert_eq!(started["result"]["argv"][3], "--no-session");
+    // Vqro starts Pi with the bundled reply-routing adapter and skill ahead of the
+    // caller's own arguments; the caller's `--name`/`--no-session` are preserved.
+    let argv: Vec<&str> = started["result"]["argv"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|value| value.as_str().unwrap())
+        .collect();
+    let bundled_pi = config_home.join("vqro-dev").join("bundled").join("pi");
+    assert_eq!(
+        &argv[..5],
+        &[
+            "pi",
+            "--extension",
+            bundled_pi.join("vqro-reply-routing.ts").to_str().unwrap(),
+            "--skill",
+            bundled_pi
+                .join("skills")
+                .join("vqro")
+                .join("SKILL.md")
+                .to_str()
+                .unwrap(),
+        ]
+    );
+    assert_eq!(&argv[5..], &["--name", "scratch", "--no-session"]);
     assert_eq!(
         fs::read_to_string(&captured_args).unwrap(),
-        "--name\nscratch\n--no-session\n"
+        format!("{}\n", argv[1..].join("\n"))
     );
 
     let literal_flag_prompt = run_cli(&socket_path, &["agent", "prompt", "main", "--wait"]);
