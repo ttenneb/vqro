@@ -1128,6 +1128,47 @@ fn retained_surface_patch_recomposes_client_owned_mode_and_diagnostic_rows() {
 }
 
 #[test]
+fn retained_surface_patch_recomposes_rows_for_a_server_notice_only() {
+    // Control: with no banner rows the same patch takes the direct terminal
+    // path; a notice alone must force the recompose, or the patch would draw
+    // over the banner.
+    for notice in [false, true] {
+        let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+        state.set_snapshot(Box::new(snapshot()));
+        let pane_surface = surface();
+        let mut updated_pane = pane_surface.panes[0].clone();
+        updated_pane.content_revision = 2;
+        state.set_pane_surface(pane_surface);
+        state.compose(100, 30).expect("initial composed frame");
+        if notice {
+            state.server_notice = Some("the running vqro server is a different build".into());
+        }
+        let patch = crate::protocol::PaneSurfacePatch {
+            boot_id: "boot-1".into(),
+            projection_revision: 1,
+            base_surface_revision: 1,
+            surface_revision: 2,
+            rows: Vec::new(),
+            panes: vec![updated_pane],
+            cursor: None,
+        };
+
+        let outcome = state.apply_pane_surface_patch(patch);
+        if notice {
+            assert!(
+                matches!(outcome, ClientPaneSurfacePatchOutcome::Applied(None)),
+                "a notice must block the direct patch path"
+            );
+        } else {
+            assert!(
+                matches!(outcome, ClientPaneSurfacePatchOutcome::Applied(Some(_))),
+                "without banner rows the direct patch path still applies"
+            );
+        }
+    }
+}
+
+#[test]
 fn retained_surface_patch_updates_scrollbar_cells_and_pane_hit_metadata() {
     let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
     state.set_snapshot(Box::new(snapshot()));

@@ -520,6 +520,35 @@ fn server_notice_wraps_its_restart_command_at_a_narrow_width() {
     assert!(!text.contains("is older"), "{text}");
 }
 
+/// A long socket override makes the command wider than the row; the frame must
+/// still carry every cell of it.
+#[test]
+fn server_notice_keeps_a_long_socket_override_visible() {
+    let command = "VQRO_SOCKET_PATH=/home/someone/.local/share/herdr/scratch/deep/nested/root/sock vqro server stop";
+    let notice = format!(
+        "the running vqro server is a different build (server 0.9.0-dev.561da0e3, client 0.9.0)\nrestart it yourself: `{command}`; stopping it exits its pane processes, and this client never restarts it."
+    );
+    let config =
+        ClientShellConfig::from_config(&Config::default()).with_startup_server_notice(Some(notice));
+    let mut state = ClientShellState::new(config);
+    state.set_snapshot(Box::new(snapshot()));
+    state.set_pane_surface(surface());
+    let text = frame_text(&mut state, 106, 20);
+    // A long override is split across rows, so assert the two fragments that
+    // straddle the break: the override's tail and the command's tail with the
+    // warning. Losing any cell of the command would drop one of them.
+    assert!(
+        text.contains(
+            "VQRO_SOCKET_PATH=/home/someone/.local/share/herdr/scratch/deep/nested/root/sock"
+        ),
+        "{text}"
+    );
+    assert!(
+        text.contains("vqro server stop`; stopping it exits its pane processes"),
+        "{text}"
+    );
+}
+
 /// A config reload replaces the config diagnostic, and must not remove a notice
 /// about a server that has not changed.
 #[test]
