@@ -43,42 +43,68 @@ def epoch(value):
         return None
 
 
-def open_tasks(tasks):
-    """Tasks that still owe someone something, oldest debt first."""
-    pending = [task for task in tasks if task["state"] not in ("accepted", "done")]
-    return sorted(pending, key=lambda task: (task["state"] != "blocked", task.get("owed_since") or task.get("updated_at") or ""))
+def final(task):
+    return task["state"] in ("accepted", "done")
 
 
-def pane_rows(tasks, placements):
-    """Per-pane rows: the agent in a pane owes, and waits for, these tasks.
+def state_name(task):
+    """The fixed state Vqro draws a Pi-style glyph for."""
+    return {"open": "open", "in_progress": "in_progress", "blocked": "blocked", "reported": "reported",
+            "accepted": "done", "done": "done"}.get(task["state"], "open")
 
-    A pane's slice is keyed by the pane its agent's terminal is placed in. Each
-    task appears in its owner's pane as a debt, and in the creditor's pane as
-    something they are waiting for. No placement, no row.
+
+def count_word(task):
+    if final(task):
+        return "done"
+    if task["state"] == "blocked":
+        return "blocked"
+    if task["state"] == "in_progress":
+        return "active"
+    return "ready" if task.get("ready") else "waiting"
+
+
+def summary(counts):
+    """The panel header's own summary of the slice, in the todo widget's shape."""
+    parts = [f"{counts['done']}/{sum(counts.values())} done"]
+    parts.extend(f"{counts[word]} {word}" for word in ("active", "blocked", "ready", "waiting") if counts[word])
+    return " · ".join(parts)
+
+
+def pane_slices(tasks, placements):
+    """Per-pane slices: counts over the whole slice, rows for open work.
+
+    A task appears in its owner's pane as that agent's debt, and in the pane of
+    the agent it is owed to as something they are waiting for. No placement, no
+    row: the host's placement is an observation, never a guess.
     """
     by_id = {task["id"]: task for task in tasks}
     slices = {}
-    for task in open_tasks(tasks):
+    for task in tasks:
         owner = task.get("owner") or {}
-        owed_text = OWED_TEXT.get(task.get("owed_action") or "", "work")
-        owner_placement = (placements or {}).get(owner.get("terminal_id"))
         creditor = recipient(task, by_id) or {}
+        owner_placement = (placements or {}).get(owner.get("terminal_id"))
         creditor_placement = (placements or {}).get(creditor.get("terminal_id"))
-        row = {
-            "task": task,
-            "state": task["state"],
-            "chip": CHIP_TEXT.get(task["state"], task["state"]),
-            "tone": CHIP_TONE.get(task["state"], "muted"),
-            "since": epoch(task.get("owed_since") or task.get("updated_at")),
-        }
+        owed = OWED_TEXT.get(task.get("owed_action") or "", "work")
+        entries = []
         if owner_placement:
-            slices.setdefault(owner_placement["pane_id"], []).append({
-                **row, "detail": f"you owe {owed_text}",
-                "counterparty": creditor, "counterparty_placement": creditor_placement})
+            entries.append((owner_placement["pane_id"], f"you owe {owed}", creditor, creditor_placement))
         if creditor_placement and creditor_placement["pane_id"] != (owner_placement or {}).get("pane_id"):
-            slices.setdefault(creditor_placement["pane_id"], []).append({
-                **row, "detail": f"owes {owed_text}",
-                "counterparty": owner, "counterparty_placement": owner_placement})
+            entries.append((creditor_placement["pane_id"], f"owes {owed}", owner, owner_placement))
+        for pane_id, detail, counterparty, counterparty_placement in entries:
+            bucket = slices.setdefault(pane_id, {"counts": Counter(), "rows": []})
+            bucket["counts"][count_word(task)] += 1
+            if not final(task):
+                bucket["rows"].append({
+                    "task": task,
+                    "state": state_name(task),
+                    "detail": detail,
+                    "counterparty": counterparty,
+                    "counterparty_placement": counterparty_placement,
+                    "since": epoch(task.get("owed_since") or task.get("updated_at")),
+                })
+    for bucket in slices.values():
+        bucket["rows"].sort(key=lambda row: (row["task"]["state"] != "blocked",
+                                             row["task"].get("owed_since") or row["task"].get("updated_at") or ""))
     return slices
 
 
@@ -93,26 +119,27 @@ def panel_terminal(binding, placement):
 def panel_items(tasks, placements, room):
     """One panel view per pane with rows, bounded by the remaining item room."""
     items = []
-    for pane_id, rows in sorted(pane_rows(tasks, placements).items()):
+    for pane_id, bucket in sorted(pane_slices(tasks, placements).items()):
         if len(items) + 2 > room:
             break
         root_id = f"panel:{pane_id}:{PANEL_VIEW}"
-        total = len(rows)
-        rows = rows[:PANEL_ROW_LIMIT]
+        rows = bucket["rows"][:PANEL_ROW_LIMIT]
         in_slice = {row["task"]["id"] for row in rows}
-        items.append({"id": root_id, "role": "section", "label": "Tasks", "view": {
-            "pane_id": pane_id, "view_id": PANEL_VIEW, "edge": "right", "count": total}})
+        items.append({"id": root_id, "role": "section", "label": "Tasks",
+                      "detail": summary(bucket["counts"]), "view": {
+                          "pane_id": pane_id, "view_id": PANEL_VIEW,
+                          "state": "in_progress" if bucket["counts"]["active"] else "open"}})
         for row in rows:
             if len(items) + 1 >= room:
                 break
             task = row["task"]
             item = {"id": f"panel:{pane_id}:task:{task['id']}", "role": "section",
                     "label": bounded(task["title"]), "detail": bounded(row["detail"]),
-                    "view": {"chip": {"text": row["chip"], "tone": row["tone"]}}}
+                    "view": {"state": row["state"]}}
             if row["since"] is not None:
                 item["view"]["since"] = row["since"]
             parent = task.get("parent")
-            item["parent_id"] = (f"panel:{pane_id}:task:{parent}" if parent in in_slice else root_id)
+            item["parent_id"] = f"panel:{pane_id}:task:{parent}" if parent in in_slice else root_id
             terminal = panel_terminal(row["counterparty"], row["counterparty_placement"])
             if terminal is not None:
                 item["terminal"] = terminal

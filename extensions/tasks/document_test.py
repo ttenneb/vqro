@@ -42,15 +42,17 @@ class DocumentTests(unittest.TestCase):
         refs=[{"terminal_id":"a","placement":panel_a},{"terminal_id":"b","placement":panel_b}]
         items=document.project(self.store,self.snapshot(refs))["items"]
         a_root=next(row for row in items if row["id"]=="panel:w1:p1:tasks")
-        self.assertEqual({"pane_id":"w1:p1","view_id":"tasks","edge":"right","count":2},a_root["view"])
+        self.assertEqual({"pane_id":"w1:p1","view_id":"tasks","state":"in_progress"},a_root["view"])
+        # The header counts the whole slice; rows carry the open work only.
+        self.assertEqual("0/2 done · 1 active · 1 ready",a_root["detail"])
         a_child=next(row for row in items if row["id"]==f"panel:w1:p1:task:{child['id']}")
         self.assertEqual("owes start",a_child["detail"])
         self.assertEqual({"terminal_id":"b","placement":panel_b},a_child["terminal"])
         self.assertEqual(f"panel:w1:p1:task:{root['id']}",a_child["parent_id"])
-        self.assertEqual("open",a_child["view"]["chip"]["text"])
+        self.assertEqual("open",a_child["view"]["state"])
         self.assertIsInstance(a_child["view"]["since"],int)
         b_root=next(row for row in items if row["id"]=="panel:w1:p2:tasks")
-        self.assertEqual(1,b_root["view"]["count"])
+        self.assertEqual("0/1 done · 1 ready",b_root["detail"])
         b_child=next(row for row in items if row["id"]==f"panel:w1:p2:task:{child['id']}")
         self.assertEqual("you owe start",b_child["detail"])
         self.assertEqual({"terminal_id":"a","placement":panel_a},b_child["terminal"])

@@ -14,7 +14,6 @@ pub const HOST_DOCUMENT_CONTRACT_V1: &str = "host.document.v1";
 /// client ignores the added item/action fields, so this stays append-only.
 pub const HOST_VIEW_CONTRACT_V1: &str = "host.view.v1";
 pub const MAX_VIEW_DEPTH: usize = 8;
-pub const MAX_VIEW_CHIP_CHARS: usize = 32;
 pub const MAX_VIEW_CHOICES: usize = 4;
 pub const MIN_VIEW_CHOICES: usize = 2;
 pub const MAX_VIEW_INPUT_CHARS: usize = 240;
@@ -257,20 +256,22 @@ pub struct HostDocumentItem {
 /// "unsupported" instead of rejecting the view.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct HostViewItem {
-    /// A panel root: the pane whose panel stack this item's subtree fills.
-    /// Only a root item (no parent) may set it.
+    /// A panel root: the pane whose panel this item's subtree fills. Only a
+    /// root item (no parent) may set it. Vqro draws the pane's bottom edge slot.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pane_id: Option<String>,
     /// A panel root: the stable id of this view inside the pane's panel stack,
     /// as the user names it to `vqro pane panel`. Only a root may set it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub view_id: Option<String>,
-    /// A panel root: the edge this view prefers. Vqro may override it to fit.
+    /// A row state, or a panel root's aggregate state for its header glyph.
+    /// Vqro draws the fixed Pi-style glyph and its tone; the extension owns
+    /// only which state the row or panel is in.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub edge: Option<HostViewEdge>,
-    /// A short state chip. Its presence makes the item a row.
+    pub state: Option<HostViewState>,
+    /// Override the tone the state would use. Only the existing tone set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub chip: Option<HostViewChip>,
+    pub tone: Option<HostViewTone>,
     /// A count shown in a section header or panel title.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub count: Option<u32>,
@@ -280,22 +281,24 @@ pub struct HostViewItem {
     pub since: Option<u64>,
 }
 
+/// The fixed state vocabulary Vqro draws a glyph and tone for: the same set the
+/// Pi todo widget uses, so panels read like the rest of the UI.
 #[derive(
     Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
 )]
 #[serde(rename_all = "snake_case")]
-pub enum HostViewEdge {
+pub enum HostViewState {
+    /// Not started or unblocked: `○`.
     #[default]
-    Right,
-    Bottom,
-}
-
-/// A bounded state chip: text plus one of the existing tones.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct HostViewChip {
-    pub text: String,
-    #[serde(default)]
-    pub tone: HostViewTone,
+    Open,
+    /// Being worked on: `◐`.
+    InProgress,
+    /// Cannot proceed: `⊘`.
+    Blocked,
+    /// Waiting for someone to accept it: `◎`.
+    Reported,
+    /// Finished: `●`.
+    Done,
 }
 
 #[derive(
@@ -1079,15 +1082,6 @@ fn validate_view_item_fields(
     }
     if let Some(view_id) = &view.view_id {
         validate_local_id(view_id)?;
-    }
-    if view.edge.is_some() && view.pane_id.is_none() {
-        return invalid("only a panel root may name an edge");
-    }
-    if let Some(chip) = &view.chip {
-        if chip.text.trim().is_empty() || chip.text.chars().count() > MAX_VIEW_CHIP_CHARS {
-            return invalid("invalid view chip text");
-        }
-        validate_text(&chip.text)?;
     }
     Ok(())
 }

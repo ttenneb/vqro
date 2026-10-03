@@ -45,21 +45,29 @@ class PanelViewDemo(ReadinessDemo):
     def screen(self):
         return demo_capture.replay((self.root / "client.log").read_bytes())
 
-    def locate(self, text, screen=None):
-        """The (column, row) of `text` in the current screen, 0-based."""
+    def locate(self, text, within=None, screen=None):
+        """The rightmost (column, row) of `text`, 0-based.
+
+        `within` must appear on the same screen row: the panel and another
+        pane's terminal text share rows, so the demo only clicks text that the
+        panel's own row proves is the panel's.
+        """
+        found = None
         for row, line in enumerate((screen or self.screen()).rows):
             cells = "".join(cell[0] for cell in line)
+            if within is not None and within not in cells:
+                continue
             column = cells.find(text)
             if column >= 0:
-                return column, row
-        return None
+                found = (column, row)
+        return found
 
     def wait_screen(self, text, seconds=30):
         deadline = time.monotonic() + seconds
         polls = 0
         while time.monotonic() < deadline:
             screen = self.screen()
-            if self.locate(text, screen):
+            if self.locate(text, screen=screen):
                 return screen
             polls += 1
             if polls % 25 == 0:
@@ -113,36 +121,53 @@ class PanelViewDemo(ReadinessDemo):
         self.human(human, "panel-human-identity", ["whoami"])
 
         plan = {"nodes": [
-            {"key": "root", "title": "Panel root", "owner": "panel-a", "done_when": CRITERION},
-            {"key": "child", "parent": "root", "title": "Panel child", "owner": "panel-a", "done_when": CRITERION},
+            {"key": "root", "title": "Panel panels layout", "owner": "panel-a", "done_when": CRITERION},
+            {"key": "child", "parent": "root", "title": "Spike fix", "owner": "panel-a", "done_when": CRITERION},
         ]}
         self.save("panel-plan.json", plan)
         imported = self.human(human, "panel-plan", ["plan", str(self.root / "panel-plan.json"), "--op", "panel-plan"])
         root = self.cli("task", "get", imported["tasks"]["root"])["task"]
         child = self.cli("task", "get", imported["tasks"]["child"])["task"]
 
-        # A starts its root and delegates the child to B; B reports back blocked.
-        root = self.agent("panel-a", "a-start", ["start", root["id"], "--rev", str(root["revision"]), "--op", "a-start"])["task"]
+        # A starts its root and delegates the child to B; B blocks it and, on its
+        # own, creates a subtask of the blocked child and hands that back to A.
+        self.agent("panel-a", "a-start", ["start", root["id"], "--rev", str(root["revision"]), "--op", "a-start"])
         child = self.agent("panel-a", "a-delegate", ["delegate", child["id"], "--owner", json.dumps(owner_b),
                                                      "--rev", str(child["revision"]), "--op", "a-delegate"])["task"]
         child = self.agent("panel-b", "b-block", ["block", child["id"], "waiting on the panel",
                                                   "--rev", str(child["revision"]), "--op", "b-block"])["task"]
+        subtask = self.agent("panel-b", "b-subtask", ["create", "Nested check row", "--parent", child["id"],
+                                                     "--done-when", CRITERION, "--op", "b-subtask"])["task"]
+        subtask = self.agent("panel-b", "b-subtask-delegate", ["delegate", subtask["id"], "--owner", json.dumps(owner_a),
+                                                              "--rev", str(subtask["revision"]), "--op", "b-subtask-delegate"])["task"]
         document = self.wait_panel_rows()
 
         # The panel opens on the pane the user is in (a stand-in until the
         # `vqro pane panel` toggle lands): focus A and read what Vqro drew.
         self.api("pane.focus", {"pane_id": a})
         assert self.focused_pane() == a, self.focused_pane()
-        screen = self.wait_screen(child["title"])
-        self.cli("task", "list")
         screen = self.wait_screen("owes unblock")
-        text_path, png_path = demo_capture.capture(self.root / "client.log", self.root / "capture", "panel-a")
-        panel_a_text = Path(text_path).read_text()
+        self.cli("task", "list")
+        screen = self.wait_screen(subtask["title"])
         self.wait_screen("panel-b")  # Vqro joins the live owner name, not the extension
+        assert self.locate("0/3 done", screen=screen), "the panel header summary is missing"
+        expanded_text, expanded_png = demo_capture.capture(self.root / "client.log", self.root / "capture", "panel-expanded")
 
-        # Click the row's detail line: only the panel draws it, so the click
-        # cannot land in another pane's terminal text.
-        row = self.locate("owes unblock", screen)
+        # A row marker collapses that row's subtasks; the header collapses the
+        # whole panel to its summary line.
+        marker = self.locate("⊘", within="└─")
+        assert marker is not None, "the blocked row glyph is not on screen"
+        self.click(marker[0] - 2, marker[1])
+        self.wait_screen("▸ ")
+        subtask_text, subtask_png = demo_capture.capture(self.root / "client.log", self.root / "capture", "panel-subtask")
+        self.click(*self.locate("Tasks", within="⊟"))
+        self.wait_screen("▸ ● Tasks")
+        collapsed_text, collapsed_png = demo_capture.capture(self.root / "client.log", self.root / "capture", "panel-collapsed")
+        self.click(*self.locate("Tasks", within="⊟"))
+        self.wait_screen("▾ ● Tasks")
+
+        # Clicking a row with a terminal link jumps to that pane.
+        row = self.locate("owes unblock", within="└─")
         assert row is not None and row[0] > 120, f"the panel row is not on screen: {row}"
         before = self.focused_pane()
         assert before == a, (before, a)
@@ -162,17 +187,24 @@ class PanelViewDemo(ReadinessDemo):
         root_panel = next(item for item in document["items"] if item["id"].startswith(f"panel:{a}:") and "task:" not in item["id"])
         child_panel = next(item for item in document["items"] if item["id"] == f"panel:{a}:task:{child['id']}")
         assert child_panel["detail"] == "owes unblock" and child_panel["terminal"]["terminal_id"] == owner_b["terminal_id"], child_panel
-        assert child_panel["view"]["chip"]["text"] == "blocked", child_panel
+        assert child_panel["view"]["state"] == "blocked", child_panel
 
+        expanded = Path(expanded_text).read_text()
         result = {"result": "passed", "real_pi_agents": 2, "model_calls": 0,
                   "contract": document["contract"], "panel_views": root_panel["view"],
-                  "a_panel_shows_child": "Panel child" in panel_a_text,
+                  "header_summary": root_panel["detail"],
+                  "a_panel_shows_subtask": child["title"] in expanded and subtask["title"] in expanded,
                   "a_panel_row": {"label": child_panel["label"], "detail": child_panel["detail"],
-                                  "chip": child_panel["view"]["chip"], "age": child_panel["view"].get("since") is not None},
+                                  "state": child_panel["view"]["state"], "age": child_panel["view"].get("since") is not None},
                   "attention_badges_still_admitted": badges,
+                  "collapse": {"panel": "▸ ● Tasks" in Path(collapsed_text).read_text(),
+                               "subtask": "▸ " in Path(subtask_text).read_text()},
                   "click_focused_assignee": {"focused_before": before, "focused_after": after},
                   "b_panel_shows_own_debt": "you owe unblock" in Path(text_b).read_text(),
-                  "captures": {"a_text": str(text_path), "a_png": str(png_path), "b_png": str(png_b)}}
+                  "captures": {"expanded": str(expanded_png), "collapsed": str(collapsed_png),
+                               "subtask": str(subtask_png), "b_png": str(png_b),
+                               "texts": {"expanded": str(expanded_text), "collapsed": str(collapsed_text),
+                                         "subtask": str(subtask_text)}}}
         self.save("RESULT.json", result)
         return result
 

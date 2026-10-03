@@ -689,22 +689,6 @@
           },
           "type": "object"
         },
-        "HostViewChip": {
-          "description": "A bounded state chip: text plus one of the existing tones.",
-          "properties": {
-            "text": {
-              "type": "string"
-            },
-            "tone": {
-              "$ref": "#/schemas/host_document/$defs/HostViewTone",
-              "default": "default"
-            }
-          },
-          "required": [
-            "text"
-          ],
-          "type": "object"
-        },
         "HostViewChoice": {
           "properties": {
             "default_key": {
@@ -746,13 +730,6 @@
           ],
           "type": "object"
         },
-        "HostViewEdge": {
-          "enum": [
-            "right",
-            "bottom"
-          ],
-          "type": "string"
-        },
         "HostViewInput": {
           "properties": {
             "placeholder": {
@@ -773,17 +750,6 @@
         "HostViewItem": {
           "description": "The view blocks of one item. Every field is optional: an item with no view\nblock is a plain group, and an unknown future block degrades to\n\"unsupported\" instead of rejecting the view.",
           "properties": {
-            "chip": {
-              "anyOf": [
-                {
-                  "$ref": "#/schemas/host_document/$defs/HostViewChip"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "description": "A short state chip. Its presence makes the item a row."
-            },
             "count": {
               "description": "A count shown in a section header or panel title.",
               "format": "uint32",
@@ -793,19 +759,8 @@
                 "null"
               ]
             },
-            "edge": {
-              "anyOf": [
-                {
-                  "$ref": "#/schemas/host_document/$defs/HostViewEdge"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "description": "A panel root: the edge this view prefers. Vqro may override it to fit."
-            },
             "pane_id": {
-              "description": "A panel root: the pane whose panel stack this item's subtree fills.\nOnly a root item (no parent) may set it.",
+              "description": "A panel root: the pane whose panel this item's subtree fills. Only a\nroot item (no parent) may set it. Vqro draws the pane's bottom edge slot.",
               "type": [
                 "string",
                 "null"
@@ -820,6 +775,28 @@
                 "null"
               ]
             },
+            "state": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/host_document/$defs/HostViewState"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "A row state, or a panel root's aggregate state for its header glyph.\nVqro draws the fixed Pi-style glyph and its tone; the extension owns\nonly which state the row or panel is in."
+            },
+            "tone": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/host_document/$defs/HostViewTone"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Override the tone the state would use. Only the existing tone set."
+            },
             "view_id": {
               "description": "A panel root: the stable id of this view inside the pane's panel stack,\nas the user names it to `vqro pane panel`. Only a root may set it.",
               "type": [
@@ -829,6 +806,36 @@
             }
           },
           "type": "object"
+        },
+        "HostViewState": {
+          "description": "The fixed state vocabulary Vqro draws a glyph and tone for: the same set the\nPi todo widget uses, so panels read like the rest of the UI.",
+          "oneOf": [
+            {
+              "const": "open",
+              "description": "Not started or unblocked: `○`.",
+              "type": "string"
+            },
+            {
+              "const": "in_progress",
+              "description": "Being worked on: `◐`.",
+              "type": "string"
+            },
+            {
+              "const": "blocked",
+              "description": "Cannot proceed: `⊘`.",
+              "type": "string"
+            },
+            {
+              "const": "reported",
+              "description": "Waiting for someone to accept it: `◎`.",
+              "type": "string"
+            },
+            {
+              "const": "done",
+              "description": "Finished: `●`.",
+              "type": "string"
+            }
+          ]
         },
         "HostViewTone": {
           "enum": [

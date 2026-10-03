@@ -21,12 +21,14 @@ Accepted by the owner on 2026-10-03 (relayed by the pilot coordinator).
 - pane **split** panels and **popovers**; the task and messages panels are the
   first users;
 - **badges** on the pane border, the tab and the sidebar row;
-- **v1 building blocks** (final, 2026-10-03): section with an optional count
-  in its header; row with a state chip (toned with the existing `ViewTone`
-  set), a count, an age, a detail line (for example owed/since), a terminal
-  link with live agent state, and children that expand and collapse; actions; a 2–4 option choice; a one-line text input through the
-  rename dialog. Vqro also draws the loading, empty, unavailable and
-  "unsupported" states (pipeline behavior, not blocks);
+- **v1 building blocks** (final, 2026-10-03; panel look revised by the owner
+  on 2026-10-03): section with an optional summary in its header; row with a
+  state glyph from the fixed Pi set (toned with the existing `ViewTone` set),
+  a count, an age, a detail line (for example owed/since), a terminal link with
+  live agent state, and children that expand and collapse; **one line per row**,
+  truncated with an ellipsis; actions; a 2–4 option choice; a one-line text
+  input through the rename dialog. Vqro also draws the loading, empty,
+  unavailable and "unsupported" states (pipeline behavior, not blocks);
 - fixed panel sizes, scrolling, persisted display state, the
   `vqro pane panel` command, the "show when an agent starts" rule, in-view
   action errors, and the reference extension with render tests.
@@ -83,6 +85,9 @@ Accepted by the owner on 2026-10-03 (relayed by the pilot coordinator).
 | 2026-10-03 | **Text input for decision answers** uses the same one-line field as the rename dialog. |
 | 2026-10-03 | **Filters and notifications are not in v1.** |
 | 2026-10-03 | **Cut-down first version accepted** (relayed by the pilot coordinator): one built-in layout; sidebar and tab bar views after the panels; no overlay in v1; reorder, rename as an action, extension context-menu items and selection deferred; text, key-value and table blocks deferred to the Terminal Inspector migration. See [First version scope](#first-version-scope). |
+| 2026-10-03 | **A pane's split panel is its bottom edge slot**, full pane width, and reads like the Pi todo widget above the editor. A right-side column is not v1. Fixed height; the terminal resizes once, on open, close or user resize. |
+| 2026-10-03 | **Panels follow the Pi widget's look** (owner review of the first spike): header line `▾ ● Title ⊟ · summary`, one line per row, Pi-style tree connectors (`├─`, `└─`, `│` lanes), per-row `▾`/`▸` for children, the fixed state-glyph set (○ open, ◐ in progress, ⊘ blocked, ◎ reported, ● done) toned with the existing tone set, the title truncated with an ellipsis, and the assignee with its live state, the owed text and the age right-aligned and dim. Clicking the header collapses the panel, a row's marker collapses that row, and clicking a row's assignee jumps to that pane. |
+| 2026-10-03 | **The panel's own summary is the extension's**, drawn after the header title (done/total and the non-zero states). Vqro draws the glyphs, connectors, tones and the age. |
 | 2026-10-03 | **v1 building blocks fixed without a separate mockup pass** (relayed by the pilot coordinator): the cut-down set in [First version scope](#first-version-scope). The visual review is the building owner's first spike screenshot, which the owner must approve before more is built. |
 
 ## Pipeline
@@ -142,12 +147,14 @@ A pane uses the same model:
 
 ## Building blocks (target set; v1 subset in [First version scope](#first-version-scope))
 
-- **Section:** titled and collapsible.
-- **Row:** a label with an optional state chip, count or age, detail line,
-  link, actions and children (a tree, expanded and collapsed by Vqro).
+- **Section:** titled and collapsible, with an extension-authored summary.
+- **Row:** a label on one line, with a state glyph from the fixed set (○ open,
+  ◐ in progress, ⊘ blocked, ◎ reported, ● done), an optional count or age, a
+  detail line, a link, actions and children (a tree, expanded and collapsed by
+  Vqro, drawn with `├─`/`└─`/`│` lanes and a `▾`/`▸` marker per row).
 - **Terminal link:** the extension names a terminal; Vqro supplies the live
   name and agent state, and a click focuses it.
-- **Age:** the extension sends a timestamp and Vqro displays the elapsed time.
+- **Age:** the extension sends an instant and Vqro displays the elapsed time.
 - **Text, key-value list, table:** for migrating Terminal Inspector.
 - **Tones:** default, muted, accent, success, warning, danger. No custom colors.
 - **Interaction:** a primary click; row and section actions with Vqro-drawn

@@ -1111,6 +1111,8 @@ pub(crate) struct ClientShellState {
     pub(super) collection_list_views: HashSet<String>,
     pub(super) collection_expanded_members: HashMap<String, HashSet<String>>,
     pub(super) collection_preview_heights: HashMap<String, u16>,
+    /// Panel collapse state per pane: per client, never shared.
+    pub(super) pane_panel_display: HashMap<String, super::pane_panel::PanePanelDisplay>,
     pub(super) collection_entered_pane: Option<String>,
     pub(super) collection_maximized_pane: Option<(String, String)>,
     /// Stable local presentation preferences; never carries connection/action authority.
@@ -1303,6 +1305,7 @@ impl ClientShellState {
             collection_list_views: HashSet::new(),
             collection_expanded_members: HashMap::new(),
             collection_preview_heights: HashMap::new(),
+            pane_panel_display: HashMap::new(),
             collection_entered_pane: None,
             collection_maximized_pane: None,
             recovery_presentations: HashMap::new(),
@@ -1566,6 +1569,7 @@ impl ClientShellState {
         self.collection_list_views.clear();
         self.collection_expanded_members.clear();
         self.collection_preview_heights.clear();
+        self.pane_panel_display.clear();
         self.collection_entered_pane = None;
         self.collection_maximized_pane = None;
         self.terminal_view_surfaces.clear();

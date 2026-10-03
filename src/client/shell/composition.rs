@@ -632,6 +632,12 @@ impl ClientShellState {
             if self
                 .supports_endpoint_capability(crate::protocol::endpoint::PANE_VIEWPORT_CAPABILITY)
             {
+                let display = snapshot
+                    .focused_pane_id
+                    .as_deref()
+                    .and_then(|pane_id| self.pane_panel_display.get(pane_id))
+                    .cloned()
+                    .unwrap_or_default();
                 pane_panel::render(
                     &mut composed,
                     documents,
@@ -639,6 +645,7 @@ impl ClientShellState {
                     &self.hits.panes,
                     snapshot.focused_pane_id.as_deref(),
                     inspector_pane,
+                    &display,
                     &self.config.palette,
                     &mut panel_render,
                 );

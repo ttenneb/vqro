@@ -2715,21 +2715,40 @@ impl ClientShellState {
                     self.open_attention(launch, outcome);
                     return;
                 }
-                // A panel row that names a terminal link focuses that terminal's
-                // pane. Vqro owns the click; the extension only named the link.
-                if let Some(target) = self
+                // Panel clicks are Vqro's: the header collapses the panel, a
+                // row marker collapses that row, and a row that names a
+                // terminal link focuses that terminal's pane.
+                if let Some(hit) = self
                     .hits
                     .pane_panels
                     .iter()
                     .find(|hit| super::contains(hit.rect, point))
-                    .and_then(|hit| hit.target_pane.clone())
+                    .cloned()
                 {
-                    self.push_endpoint_method(
-                        crate::api::schema::Method::PaneFocus(crate::api::schema::PaneTarget {
-                            pane_id: target,
-                        }),
-                        outcome,
-                    );
+                    let display = self
+                        .pane_panel_display
+                        .entry(hit.pane_id.clone())
+                        .or_default();
+                    match hit.action {
+                        super::pane_panel::PanePanelAction::TogglePanel => {
+                            display.collapsed = !display.collapsed;
+                            display.collapsed_rows.clear();
+                        }
+                        super::pane_panel::PanePanelAction::ToggleRow(item_id) => {
+                            if !display.collapsed_rows.remove(&item_id) {
+                                display.collapsed_rows.insert(item_id);
+                            }
+                        }
+                        super::pane_panel::PanePanelAction::FocusPane(pane_id) => {
+                            self.push_endpoint_method(
+                                crate::api::schema::Method::PaneFocus(
+                                    crate::api::schema::PaneTarget { pane_id },
+                                ),
+                                outcome,
+                            );
+                        }
+                    }
+                    outcome.repaint = true;
                     return;
                 }
                 // Some terminals reserve Shift for selection and report a

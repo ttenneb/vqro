@@ -1,36 +1,42 @@
 //! Pane split panels: Vqro lays out and draws views that extensions publish.
 //!
 //! Meaning, hierarchy and state text belong to the publishing extension. This
-//! module only selects the views published for a pane, lays them out on the
-//! pane's right or bottom edge, draws cached content and joins the live
-//! terminal and agent facts Vqro owns. Nothing here reads a terminal, the
-//! filesystem or a process tree: the work is bounded by the panes on screen and
-//! the rows that fit.
-use std::collections::HashMap;
+//! module only selects the views published for a pane, lays them out in the
+//! pane's bottom edge slot, draws cached content in the same shape as the
+//! surrounding UI (tree connectors, state glyphs, one line per row) and joins
+//! the live terminal and agent facts Vqro owns. Nothing here reads a terminal,
+//! the filesystem or a process tree: the work is bounded by the panes on screen
+//! and the rows that fit.
+use std::collections::{BTreeSet, HashMap};
 
 use super::render::{display_width, put_text};
 use super::*;
-use crate::extension_contract::{HostDocumentItem, HostViewEdge, HostViewTone};
+use crate::extension_contract::{HostDocumentItem, HostViewState, HostViewTone};
 use crate::protocol::endpoint::HostDocumentsProjectionV1;
 
 /// Panel size comes from the layout, never from content.
-const PANEL_DEFAULT_WIDTH: u16 = 34;
-const PANEL_MIN_WIDTH: u16 = 22;
-const PANEL_MAX_WIDTH: u16 = 48;
-const PANEL_DEFAULT_HEIGHT: u16 = 11;
-const PANEL_MIN_HEIGHT: u16 = 7;
-const TERMINAL_MIN_WIDTH: u16 = 24;
-const TERMINAL_MIN_HEIGHT: u16 = 5;
-/// Below this width the panel moves to the bottom edge.
-const BOTTOM_EDGE_BELOW_WIDTH: u16 = 56;
-const ROW_LINES: u16 = 2;
+const PANEL_DEFAULT_HEIGHT: u16 = 10;
+const PANEL_MIN_HEIGHT: u16 = 3;
+const TERMINAL_MIN_HEIGHT: u16 = 4;
+/// The one quiet glyph the header carries after its title.
+const HEADER_MARK: &str = "⊟";
 
 /// A clickable cell inside a panel.
 #[derive(Clone)]
 pub(super) struct PanePanelHit {
     pub(super) rect: Rect,
-    /// Focus this pane; `None` is a non-interactive cell.
-    pub(super) target_pane: Option<String>,
+    pub(super) pane_id: String,
+    pub(super) action: PanePanelAction,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub(super) enum PanePanelAction {
+    /// Collapse or expand the whole panel.
+    TogglePanel,
+    /// Collapse or expand one row's children.
+    ToggleRow(String),
+    /// Focus the pane this row's terminal link names.
+    FocusPane(String),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -38,6 +44,15 @@ pub(super) struct PanePanelGeometry {
     pub(super) terminal: Rect,
     pub(super) divider: Rect,
     pub(super) panel: Rect,
+}
+
+/// The panel's own display state, per client. Persistence and the toggle
+/// command arrive with the `vqro pane panel` step; this keeps the interactions
+/// real until then.
+#[derive(Clone, Default)]
+pub(super) struct PanePanelDisplay {
+    pub(super) collapsed: bool,
+    pub(super) collapsed_rows: BTreeSet<String>,
 }
 
 /// What one pane's panel needs from the caller: the terminal rect to claim as
@@ -48,81 +63,75 @@ pub(super) struct PanePanelRender {
     pub(super) claimed: Option<(String, Rect)>,
 }
 
-/// A published view that fills one pane's panel edge.
+/// A published view that fills one pane's panel slot.
 struct PanelView<'a> {
     title: &'a str,
-    count: Option<u32>,
-    edge: HostViewEdge,
-    /// The root's descendants in document order, with their depth. Collapsing a
-    /// section is per-client display state and arrives with the toggle step.
-    rows: Vec<(&'a HostDocumentItem, u16)>,
+    /// The extension's own summary of the slice, drawn after the title.
+    summary: &'a str,
+    /// The panel's aggregate state, drawn as a glyph before the title.
+    state: Option<HostViewState>,
+    rows: Vec<FlatRow<'a>>,
 }
 
-/// Split a pane's inner area into a terminal, a divider and the panel, keeping
-/// the terminal usable. `None` means the pane is too small for a panel; the
+/// One visible row with the tree lanes needed to draw its connector.
+struct FlatRow<'a> {
+    item: &'a HostDocumentItem,
+    /// One flag per ancestor lane: true when that ancestor still has a sibling
+    /// below, so the lane continues with `│`.
+    lanes: Vec<bool>,
+    is_last: bool,
+    children: usize,
+}
+
+/// The pane's bottom edge slot: a fixed height band, full pane width, with the
+/// terminal above it. `None` means the pane is too small for a panel; the
 /// caller keeps it closed (a border badge opens it as a popover in a later
 /// step).
-pub(super) fn geometry(area: Rect, edge: HostViewEdge) -> Option<PanePanelGeometry> {
-    let edge = match edge {
-        HostViewEdge::Bottom => HostViewEdge::Bottom,
-        HostViewEdge::Right if area.width < BOTTOM_EDGE_BELOW_WIDTH => HostViewEdge::Bottom,
-        HostViewEdge::Right => HostViewEdge::Right,
-    };
-    match edge {
-        HostViewEdge::Right => {
-            if area.height < TERMINAL_MIN_HEIGHT + 2 {
-                return None;
-            }
-            let width = PANEL_DEFAULT_WIDTH
-                .clamp(PANEL_MIN_WIDTH, PANEL_MAX_WIDTH)
-                .min(area.width.saturating_sub(TERMINAL_MIN_WIDTH + 1));
-            if width < PANEL_MIN_WIDTH {
-                return None;
-            }
-            let terminal_width = area.width.saturating_sub(width + 1);
-            Some(PanePanelGeometry {
-                terminal: Rect::new(area.x, area.y, terminal_width, area.height),
-                divider: Rect::new(
-                    area.x.saturating_add(terminal_width),
-                    area.y,
-                    1,
-                    area.height,
-                ),
-                panel: Rect::new(
-                    area.x.saturating_add(terminal_width + 1),
-                    area.y,
-                    width,
-                    area.height,
-                ),
-            })
-        }
-        HostViewEdge::Bottom => {
-            if area.width < TERMINAL_MIN_WIDTH {
-                return None;
-            }
-            let height = PANEL_DEFAULT_HEIGHT
-                .clamp(PANEL_MIN_HEIGHT, area.height)
-                .min(area.height.saturating_sub(TERMINAL_MIN_HEIGHT + 1));
-            if height < PANEL_MIN_HEIGHT {
-                return None;
-            }
-            let terminal_height = area.height.saturating_sub(height + 1);
-            Some(PanePanelGeometry {
-                terminal: Rect::new(area.x, area.y, area.width, terminal_height),
-                divider: Rect::new(
-                    area.x,
-                    area.y.saturating_add(terminal_height),
-                    area.width,
-                    1,
-                ),
-                panel: Rect::new(
-                    area.x,
-                    area.y.saturating_add(terminal_height + 1),
-                    area.width,
-                    height,
-                ),
-            })
-        }
+pub(super) fn geometry(area: Rect) -> Option<PanePanelGeometry> {
+    if area.width < 12 {
+        return None;
+    }
+    let height = PANEL_DEFAULT_HEIGHT.min(area.height.saturating_sub(TERMINAL_MIN_HEIGHT + 1));
+    if height < PANEL_MIN_HEIGHT {
+        return None;
+    }
+    let terminal_height = area.height.saturating_sub(height + 1);
+    Some(PanePanelGeometry {
+        terminal: Rect::new(area.x, area.y, area.width, terminal_height),
+        divider: Rect::new(
+            area.x,
+            area.y.saturating_add(terminal_height),
+            area.width,
+            1,
+        ),
+        panel: Rect::new(
+            area.x,
+            area.y.saturating_add(terminal_height + 1),
+            area.width,
+            height,
+        ),
+    })
+}
+
+/// The fixed Pi-style glyph for a row state.
+fn state_glyph(state: HostViewState) -> &'static str {
+    match state {
+        HostViewState::Open => "○",
+        HostViewState::InProgress => "◐",
+        HostViewState::Blocked => "⊘",
+        HostViewState::Reported => "◎",
+        HostViewState::Done => "●",
+    }
+}
+
+/// The tone a state uses unless the extension overrides it.
+fn state_tone(state: HostViewState) -> HostViewTone {
+    match state {
+        HostViewState::Open => HostViewTone::Muted,
+        HostViewState::InProgress => HostViewTone::Warning,
+        HostViewState::Blocked => HostViewTone::Danger,
+        HostViewState::Reported => HostViewTone::Accent,
+        HostViewState::Done => HostViewTone::Success,
     }
 }
 
@@ -136,19 +145,6 @@ fn tone_style(tone: HostViewTone, palette: &Palette) -> Style {
         HostViewTone::Danger => palette.red,
     };
     Style::default().fg(color)
-}
-
-fn agent_status_style(
-    status: crate::api::schema::AgentStatus,
-    palette: &Palette,
-) -> (Style, &'static str) {
-    match status {
-        crate::api::schema::AgentStatus::Working => (Style::default().fg(palette.green), "●"),
-        crate::api::schema::AgentStatus::Blocked => (Style::default().fg(palette.red), "●"),
-        crate::api::schema::AgentStatus::Idle => (Style::default().fg(palette.yellow), "○"),
-        crate::api::schema::AgentStatus::Done => (Style::default().fg(palette.teal), "○"),
-        crate::api::schema::AgentStatus::Unknown => (Style::default().fg(palette.overlay0), "·"),
-    }
 }
 
 /// Elapsed time as the view's age. Vqro owns the rendering of a published
@@ -170,6 +166,7 @@ fn age_label(since: u64) -> Option<String> {
     })
 }
 
+/// Truncate to `width` display columns with an ellipsis.
 fn truncate(text: &str, width: u16) -> String {
     if width == 0 {
         return String::new();
@@ -185,15 +182,72 @@ fn truncate(text: &str, width: u16) -> String {
             break;
         }
         out.push(character);
-        used += size;
+        used = used.saturating_add(size);
     }
     out.push('…');
     out
 }
 
+/// Pi-style tree prefix: the ancestor lanes that must continue, then this row's
+/// own connector.
+fn row_prefix(lanes: &[bool], is_last: bool) -> String {
+    let mut out = String::new();
+    for lane in lanes {
+        out.push_str(if *lane { "│  " } else { "   " });
+    }
+    out.push_str(if is_last { "└─ " } else { "├─ " });
+    out
+}
+
+/// Descend the root's children in document order, honouring collapsed rows.
+fn flatten<'a>(
+    children: &HashMap<&str, Vec<&'a HostDocumentItem>>,
+    root: &str,
+    collapsed: &BTreeSet<String>,
+) -> Vec<FlatRow<'a>> {
+    let mut rows = Vec::new();
+    // (item, ancestor lanes, is last child), pushed in reverse so the next pop
+    // is the first child in document order.
+    let mut stack: Vec<(&HostDocumentItem, Vec<bool>, bool)> = Vec::new();
+    for (index, item) in children
+        .get(root)
+        .map(Vec::as_slice)
+        .unwrap_or_default()
+        .iter()
+        .enumerate()
+        .rev()
+    {
+        let total = children.get(root).map(Vec::len).unwrap_or(0);
+        stack.push((item, Vec::new(), index == total - 1));
+    }
+    while let Some((item, lanes, is_last)) = stack.pop() {
+        let descendants = children.get(item.id.as_str()).cloned().unwrap_or_default();
+        rows.push(FlatRow {
+            item,
+            lanes: lanes.clone(),
+            is_last,
+            children: descendants.len(),
+        });
+        if descendants.is_empty() || collapsed.contains(item.id.as_str()) {
+            continue;
+        }
+        let mut child_lanes = lanes;
+        child_lanes.push(!is_last);
+        let total = descendants.len();
+        for (index, child) in descendants.into_iter().enumerate().rev() {
+            stack.push((child, child_lanes.clone(), index == total - 1));
+        }
+    }
+    rows
+}
+
 /// Select the panel views published for one pane. Items that name a pane and a
-/// view are roots; their descendants are the rows.
-fn panel_views<'a>(documents: &'a HostDocumentsProjectionV1, pane_id: &str) -> Vec<PanelView<'a>> {
+/// view id are roots; their descendants are the rows.
+fn panel_views<'a>(
+    documents: &'a HostDocumentsProjectionV1,
+    pane_id: &str,
+    collapsed: &BTreeSet<String>,
+) -> Vec<PanelView<'a>> {
     let mut views = Vec::new();
     let mut entries = documents.documents.iter().collect::<Vec<_>>();
     entries.sort_by(|left, right| {
@@ -205,15 +259,12 @@ fn panel_views<'a>(documents: &'a HostDocumentsProjectionV1, pane_id: &str) -> V
     for entry in entries {
         let document = &entry.document;
         let items = &document.items;
-        let children: HashMap<&str, Vec<&HostDocumentItem>> = {
-            let mut children: HashMap<&str, Vec<&HostDocumentItem>> = HashMap::new();
-            for item in items {
-                if let Some(parent) = item.parent_id.as_deref() {
-                    children.entry(parent).or_default().push(item);
-                }
+        let mut children: HashMap<&str, Vec<&HostDocumentItem>> = HashMap::new();
+        for item in items {
+            if let Some(parent) = item.parent_id.as_deref() {
+                children.entry(parent).or_default().push(item);
             }
-            children
-        };
+        }
         for item in items {
             let Some(view) = item.view.as_ref() else {
                 continue;
@@ -223,43 +274,43 @@ fn panel_views<'a>(documents: &'a HostDocumentsProjectionV1, pane_id: &str) -> V
             else {
                 continue;
             };
-            if item_pane != pane_id || item.flags.disabled || item.flags.selected == false && false
-            {
+            if item_pane != pane_id || item.flags.disabled {
                 continue;
-            }
-            if item.flags.disabled {
-                continue;
-            }
-            let mut rows = Vec::new();
-            let mut stack = children
-                .get(item.id.as_str())
-                .cloned()
-                .unwrap_or_default()
-                .into_iter()
-                .rev()
-                .map(|child| (child, 1_u16))
-                .collect::<Vec<_>>();
-            while let Some((row, depth)) = stack.pop() {
-                rows.push((row, depth));
-                for child in children
-                    .get(row.id.as_str())
-                    .cloned()
-                    .unwrap_or_default()
-                    .into_iter()
-                    .rev()
-                {
-                    stack.push((child, depth.saturating_add(1)));
-                }
             }
             views.push(PanelView {
                 title: item.label.as_str(),
-                count: view.count,
-                edge: view.edge.unwrap_or_default(),
-                rows,
+                summary: item.detail.as_deref().unwrap_or_default(),
+                state: view.state,
+                rows: flatten(&children, item.id.as_str(), collapsed),
             });
         }
     }
     views
+}
+
+/// The right-aligned, quiet end of a row: who is on the hook, what they owe and
+/// how long it has been that way. The live name and state are Vqro's own facts.
+struct RowTail {
+    name: Option<String>,
+    status: Option<crate::api::schema::AgentStatus>,
+    detail: Option<String>,
+    age: Option<String>,
+}
+
+impl RowTail {
+    fn text(&self) -> String {
+        let mut parts: Vec<String> = Vec::new();
+        if let Some(name) = self.name.as_deref() {
+            parts.push(name.to_owned());
+        }
+        if let Some(detail) = self.detail.as_deref() {
+            parts.push(detail.to_owned());
+        }
+        if let Some(age) = self.age.as_deref() {
+            parts.push(age.to_owned());
+        }
+        parts.join(" · ")
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -270,6 +321,7 @@ pub(super) fn render(
     panes: &[PaneHit],
     focused_pane: Option<&str>,
     inspector_pane: Option<&str>,
+    display: &PanePanelDisplay,
     palette: &Palette,
     out: &mut PanePanelRender,
 ) {
@@ -285,215 +337,283 @@ pub(super) fn render(
     if inspector_pane == Some(pane.pane_id.as_str()) {
         return;
     }
-    let views = panel_views(documents, &pane.pane_id);
+    let views = panel_views(documents, &pane.pane_id, &display.collapsed_rows);
     if views.is_empty() {
         return;
     }
     // The pane's full inner rect, including a scrollback lane: the panel owns
     // that edge, so the terminal's own lane must not paint inside the panel.
     let area = pane.projected_inner_rect.intersection(buffer.area);
-    if area.is_empty() {
-        return;
-    }
-    let Some(geometry) = geometry(area, views[0].edge) else {
+    let collapsed = display.collapsed;
+    let body = if collapsed { 1 } else { 0 };
+    let Some(mut geometry) = geometry(area) else {
         return;
     };
-    let agents: HashMap<&str, &crate::protocol::ClientShellAgent> = snapshot
-        .agents
-        .iter()
-        .map(|agent| (agent.pane_id.as_str(), agent))
-        .collect();
-    super::render::render_pane_contribution_divider(buffer, geometry.divider, palette);
-    let panel_style = Style::default()
+    if collapsed {
+        // Collapsed to the header line alone, so the terminal keeps its space.
+        geometry.panel.height = body.max(1).min(geometry.panel.height);
+        geometry.panel.y = geometry.panel.bottom().saturating_sub(1);
+        geometry.divider.y = geometry.panel.y.saturating_sub(1);
+        geometry.terminal.height = geometry.divider.y.saturating_sub(area.y);
+        // A collapsed panel is a header line only: no divider band of its own.
+        geometry.terminal.height = geometry.panel.y.saturating_sub(area.y);
+    }
+    if geometry.panel.height == 0 || geometry.terminal.height == 0 {
+        return;
+    }
+    let base = Style::default()
         .fg(palette.subtext0)
-        .bg(palette.panel_bg)
-        .remove_modifier(Modifier::DIM);
+        .bg(ratatui::style::Color::Reset);
+    super::render::render_pane_contribution_divider(buffer, geometry.divider, palette);
+    for y in geometry.panel.y..geometry.panel.bottom() {
+        for x in geometry.panel.x..geometry.panel.right() {
+            put_text(buffer, x, y, 1, " ", base);
+        }
+    }
     // The panel takes the pane's edge, so the terminal's scrollback lane, which
     // the server still draws at the layout edge, is cleared with it.
     if let Some(lane) = pane.scrollbar_rect {
         let lane = lane.intersection(buffer.area);
         for y in lane.y..lane.bottom() {
             for x in lane.x..lane.right() {
-                put_text(buffer, x, y, 1, " ", panel_style);
+                put_text(buffer, x, y, 1, " ", base);
             }
         }
     }
-    for y in geometry.panel.y..geometry.panel.bottom() {
-        for x in geometry.panel.x..geometry.panel.right() {
-            put_text(buffer, x, y, 1, " ", panel_style);
-        }
-    }
-    let mut y = geometry.panel.y;
+    let agents: HashMap<&str, &crate::protocol::ClientShellAgent> = snapshot
+        .agents
+        .iter()
+        .map(|agent| (agent.pane_id.as_str(), agent))
+        .collect();
     let width = geometry.panel.width;
+    let mut y = geometry.panel.y;
     for view in &views {
         if y >= geometry.panel.bottom() {
             break;
         }
-        let count = view
-            .count
-            .map(|count| format!("{count} "))
-            .unwrap_or_default();
-        let rule = width
-            .saturating_sub(display_width(view.title))
-            .saturating_sub(display_width(&count))
-            .saturating_sub(3);
-        let title = format!(" {} {}", view.title, "─".repeat(usize::from(rule)));
+        let header_rect = Rect::new(geometry.panel.x, y, width, 1);
+        let marker = if collapsed { "▸" } else { "▾" };
+        let state = view.state.unwrap_or_default();
+        // The header's own glyph reads as live only while work is in progress.
+        let (aggregate, aggregate_color) = if state == HostViewState::InProgress {
+            (state_glyph(HostViewState::Done), palette.accent)
+        } else {
+            (state_glyph(HostViewState::Open), palette.overlay0)
+        };
+        let dim = Style::default().fg(palette.overlay0);
+        let right = format!("{HEADER_MARK} · {}", view.summary);
+        let right_width = display_width(&right);
+        let right_fits = right_width.saturating_add(8) < width;
+        put_text(buffer, header_rect.x, y, 1, marker, dim);
         put_text(
             buffer,
-            geometry.panel.x,
+            header_rect.x.saturating_add(2),
             y,
-            width,
-            &truncate(&title, width),
+            1,
+            aggregate,
+            Style::default().fg(aggregate_color),
+        );
+        put_text(
+            buffer,
+            header_rect.x.saturating_add(4),
+            y,
+            if right_fits {
+                width.saturating_sub(4).saturating_sub(right_width)
+            } else {
+                width.saturating_sub(4)
+            },
+            view.title,
             Style::default()
                 .fg(palette.text)
-                .bg(palette.panel_bg)
                 .add_modifier(Modifier::BOLD),
         );
-        if !count.is_empty() {
+        if right_fits {
             put_text(
                 buffer,
-                geometry
-                    .panel
+                header_rect
                     .x
-                    .saturating_add(width.saturating_sub(display_width(&count))),
+                    .saturating_add(width.saturating_sub(right_width)),
                 y,
-                display_width(&count),
-                &count,
-                Style::default().fg(palette.overlay0).bg(palette.panel_bg),
+                right_width,
+                &right,
+                dim,
             );
         }
+        out.hits.push(PanePanelHit {
+            rect: header_rect,
+            pane_id: pane.pane_id.clone(),
+            action: PanePanelAction::TogglePanel,
+        });
         y = y.saturating_add(1);
-        let mut hidden_rows = 0_u16;
-        for (row, depth) in &view.rows {
-            if y + ROW_LINES > geometry.panel.bottom() {
-                hidden_rows = hidden_rows.saturating_add(1);
-                continue;
-            }
-            let row_rect = Rect::new(geometry.panel.x, y, width, ROW_LINES);
-            let row_view = row.view.as_ref();
-            let chip = row_view.and_then(|view| view.chip.as_ref());
-            let indent = depth.saturating_sub(1).min(3);
-            let indent_x = 1_u16.saturating_add(indent);
-            // The live end of the row: Vqro's own agent facts, joined here. The
-            // extension named the link; the name and state are not its to send.
-            let target_pane = row
-                .terminal
-                .as_ref()
-                .and_then(|terminal| terminal.placement.as_ref())
-                .map(|placement| placement.pane_id.clone());
-            let live = target_pane
-                .as_deref()
-                .and_then(|pane_id| agents.get(pane_id))
-                .and_then(|agent| {
-                    let anchor = row
-                        .terminal
-                        .as_ref()
-                        .and_then(|terminal| terminal.placement.as_ref())?;
-                    (agent.pane_id == anchor.pane_id).then(|| {
-                        (
-                            agent
-                                .name
-                                .as_deref()
-                                .or(agent.terminal_title_stripped.as_deref())
-                                .unwrap_or(agent.pane_id.as_str()),
-                            agent.agent_status,
-                        )
-                    })
-                });
-            let live_width = live
-                .map(|(name, _)| display_width(name).saturating_add(3))
-                .unwrap_or(0);
-            let headline = format!("{}{}", " ".repeat(usize::from(indent_x)), row.label);
-            put_text(
-                buffer,
-                row_rect.x,
-                y,
-                width,
-                &truncate(
-                    &headline,
-                    width.saturating_sub(1).saturating_sub(live_width),
-                ),
-                Style::default().fg(palette.text).bg(palette.panel_bg),
-            );
-            if let Some((name, status)) = live {
-                let (status_style, marker) = agent_status_style(status, palette);
-                let x = row_rect
-                    .x
-                    .saturating_add(width.saturating_sub(display_width(name)).saturating_sub(3));
-                put_text(buffer, x, y, 2, marker, status_style.bg(palette.panel_bg));
-                put_text(
-                    buffer,
-                    x.saturating_add(2),
-                    y,
-                    display_width(name),
-                    &truncate(name, display_width(name)),
-                    Style::default().fg(palette.subtext0).bg(palette.panel_bg),
-                );
-            }
-            let mut detail_x = indent_x;
-            if let Some(chip) = chip {
-                let text = format!("{} ", chip.text);
-                let chip_width = display_width(&text);
-                put_text(
-                    buffer,
-                    row_rect.x.saturating_add(indent_x),
-                    y.saturating_add(1),
-                    chip_width.min(width.saturating_sub(indent_x)),
-                    &text,
-                    tone_style(chip.tone, palette).bg(palette.panel_bg),
-                );
-                detail_x = detail_x.saturating_add(chip_width).saturating_add(1);
-            }
-            let age = row_view.and_then(|view| view.since).and_then(age_label);
-            let age_text = age.map(|age| format!("{age} ")).unwrap_or_default();
-            let age_width = display_width(&age_text);
-            let detail = row
-                .detail
-                .as_deref()
-                .map(|detail| {
-                    truncate(
-                        detail,
-                        width.saturating_sub(detail_x).saturating_sub(age_width),
-                    )
-                })
-                .unwrap_or_default();
-            if !detail.is_empty() {
-                put_text(
-                    buffer,
-                    row_rect.x.saturating_add(detail_x),
-                    y.saturating_add(1),
-                    width.saturating_sub(detail_x),
-                    &detail,
-                    Style::default().fg(palette.overlay0).bg(palette.panel_bg),
-                );
-            }
-            if !age_text.is_empty() {
-                put_text(
-                    buffer,
-                    row_rect.x.saturating_add(width.saturating_sub(age_width)),
-                    y.saturating_add(1),
-                    age_width,
-                    &age_text,
-                    Style::default()
-                        .fg(palette.overlay0)
-                        .bg(palette.panel_bg)
-                        .remove_modifier(Modifier::DIM),
-                );
-            }
-            out.hits.push(PanePanelHit {
-                rect: row_rect,
-                target_pane,
-            });
-            y = y.saturating_add(ROW_LINES);
+        if collapsed {
+            continue;
         }
-        if hidden_rows > 0 && y < geometry.panel.bottom() {
+        if view.rows.is_empty() {
             put_text(
                 buffer,
                 geometry.panel.x,
                 y,
                 width,
-                &truncate(&format!(" +{hidden_rows} more"), width),
-                Style::default().fg(palette.overlay0).bg(palette.panel_bg),
+                &truncate("└─ nothing to show", width),
+                dim,
+            );
+            y = y.saturating_add(1);
+            continue;
+        }
+        let mut hidden = 0_u16;
+        for row in &view.rows {
+            if y >= geometry.panel.bottom() {
+                hidden = hidden.saturating_add(1);
+                continue;
+            }
+            let row_view = row.item.view.as_ref();
+            let state = row_view.and_then(|view| view.state).unwrap_or_default();
+            let tone = row_view
+                .and_then(|view| view.tone)
+                .unwrap_or_else(|| state_tone(state));
+            let prefix = row_prefix(&row.lanes, row.is_last);
+            let expandable = row.children > 0;
+            let expanded = expandable && !display.collapsed_rows.contains(row.item.id.as_str());
+            let marker = if !expandable {
+                "  "
+            } else if expanded {
+                "▾ "
+            } else {
+                "▸ "
+            };
+            let target = row
+                .item
+                .terminal
+                .as_ref()
+                .and_then(|terminal| terminal.placement.as_ref())
+                .map(|placement| placement.pane_id.clone());
+            let live = target.as_deref().and_then(|pane_id| agents.get(pane_id));
+            let tail = RowTail {
+                name: live.map(|agent| {
+                    agent
+                        .name
+                        .as_deref()
+                        .or(agent.terminal_title_stripped.as_deref())
+                        .unwrap_or(agent.pane_id.as_str())
+                        .to_owned()
+                }),
+                status: live.map(|agent| agent.agent_status),
+                detail: row.item.detail.clone(),
+                age: row_view.and_then(|view| view.since).and_then(age_label),
+            };
+            let tail_text = tail.text();
+            let tail_width = display_width(&tail_text);
+            let tail_fits = !tail_text.is_empty() && tail_width.saturating_add(8) < width;
+            let head_width = display_width(&prefix).saturating_add(4);
+            let title = truncate(
+                &row.item.label,
+                width
+                    .saturating_sub(head_width)
+                    .saturating_sub(if tail_fits {
+                        tail_width.saturating_add(2)
+                    } else {
+                        0
+                    }),
+            );
+            let title_style = Style::default().fg(match state {
+                HostViewState::InProgress => palette.accent,
+                HostViewState::Done => palette.overlay0,
+                _ => palette.text,
+            });
+            let row_rect = Rect::new(geometry.panel.x, y, width, 1);
+            let prefix_width = display_width(&prefix);
+            put_text(buffer, row_rect.x, y, prefix_width, &prefix, dim);
+            put_text(
+                buffer,
+                row_rect.x.saturating_add(prefix_width),
+                y,
+                2,
+                marker,
+                dim,
+            );
+            put_text(
+                buffer,
+                row_rect.x.saturating_add(prefix_width).saturating_add(2),
+                y,
+                1,
+                state_glyph(state),
+                tone_style(tone, palette),
+            );
+            put_text(
+                buffer,
+                row_rect.x.saturating_add(prefix_width).saturating_add(4),
+                y,
+                width.saturating_sub(prefix_width).saturating_sub(4),
+                &title,
+                title_style,
+            );
+            if tail_fits {
+                // One column of margin at the pane's edge, then the live dot
+                // and its space before the text itself.
+                let tail_x = row_rect
+                    .x
+                    .saturating_add(width.saturating_sub(tail_width).saturating_sub(3));
+                let mut text_x = tail_x;
+                if let Some(status) = tail.status {
+                    let (glyph, color) = match status {
+                        crate::api::schema::AgentStatus::Working => ("●", palette.green),
+                        crate::api::schema::AgentStatus::Blocked => ("●", palette.red),
+                        crate::api::schema::AgentStatus::Idle => ("○", palette.yellow),
+                        crate::api::schema::AgentStatus::Done => ("○", palette.teal),
+                        crate::api::schema::AgentStatus::Unknown => ("·", palette.overlay0),
+                    };
+                    put_text(
+                        buffer,
+                        text_x,
+                        y,
+                        2,
+                        &format!("{glyph} "),
+                        Style::default().fg(color),
+                    );
+                    text_x = text_x.saturating_add(2);
+                }
+                put_text(
+                    buffer,
+                    text_x,
+                    y,
+                    width.saturating_sub(text_x.saturating_sub(row_rect.x)),
+                    &tail_text,
+                    dim,
+                );
+            }
+            // Row clicks: the marker toggles, the rest of the row jumps to the
+            // linked pane when the extension named one.
+            let primary = match (&target, expandable) {
+                (Some(target), _) => Some(PanePanelAction::FocusPane(target.clone())),
+                (None, true) => Some(PanePanelAction::ToggleRow(row.item.id.clone())),
+                (None, false) => None,
+            };
+            // The expand marker is pushed first so a click on it toggles the
+            // row even though the whole row is also a target.
+            if expandable {
+                out.hits.push(PanePanelHit {
+                    rect: Rect::new(row_rect.x.saturating_add(prefix_width), y, 2, 1),
+                    pane_id: pane.pane_id.clone(),
+                    action: PanePanelAction::ToggleRow(row.item.id.clone()),
+                });
+            }
+            if let Some(action) = primary {
+                out.hits.push(PanePanelHit {
+                    rect: row_rect,
+                    pane_id: pane.pane_id.clone(),
+                    action,
+                });
+            }
+            y = y.saturating_add(1);
+        }
+        if hidden > 0 && y < geometry.panel.bottom() {
+            put_text(
+                buffer,
+                geometry.panel.x,
+                y,
+                width,
+                &truncate(&format!("└─ +{hidden} more"), width),
+                dim,
             );
             y = y.saturating_add(1);
         }
@@ -510,87 +630,41 @@ pub(super) fn render(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::extension_contract::{
-        HostDocumentItemFlags, HostDocumentV1, HostItemRole, HostTarget, HostViewChip,
-        HostViewItem, HOST_VIEW_CONTRACT_V1,
-    };
-    use crate::protocol::endpoint::HostDocumentProjectionEntryV1;
-
-    fn row(id: &str, parent: Option<&str>, label: &str, pane: &str) -> HostDocumentItem {
-        HostDocumentItem {
-            id: id.into(),
-            parent_id: parent.map(str::to_owned),
-            role: HostItemRole::Section,
-            label: label.into(),
-            detail: Some("owes report".into()),
-            terminal: None,
-            action_ids: Vec::new(),
-            flags: HostDocumentItemFlags::default(),
-            view: Some(HostViewItem {
-                pane_id: parent.is_none().then(|| pane.to_owned()),
-                view_id: parent.is_none().then(|| "tasks".to_owned()),
-                edge: parent.is_none().then_some(HostViewEdge::Right),
-                chip: parent.is_some().then(|| HostViewChip {
-                    text: "blocked".into(),
-                    tone: HostViewTone::Danger,
-                }),
-                count: parent.is_none().then_some(1),
-                since: parent.is_some().then_some(1_700_000_000),
-            }),
-        }
-    }
-
-    fn documents() -> HostDocumentsProjectionV1 {
-        HostDocumentsProjectionV1 {
-            boot_id: "boot".into(),
-            revision: 1,
-            documents: vec![HostDocumentProjectionEntryV1 {
-                provider_priority: 1,
-                document: HostDocumentV1 {
-                    contract: HOST_VIEW_CONTRACT_V1.into(),
-                    namespace: "example.view".into(),
-                    generation: 1,
-                    revision: 1,
-                    surface: crate::extension_contract::HostSurface::Navigation,
-                    target: HostTarget::Session,
-                    items: vec![
-                        row("tasks:w1:p1", None, "Tasks", "w1:p1"),
-                        row("tasks:w1:p1:child", Some("tasks:w1:p1"), "Child", "w1:p1"),
-                        row("tasks:w1:p2", None, "Other", "w1:p2"),
-                    ],
-                    actions: Vec::new(),
-                    required_capabilities: Vec::new(),
-                },
-                confirmation_tokens: Default::default(),
-            }],
-        }
-    }
 
     #[test]
-    fn selects_only_the_views_published_for_one_pane() {
-        let documents = documents();
-        let views = panel_views(&documents, "w1:p1");
-        assert_eq!(views.len(), 1);
-        assert_eq!(views[0].title, "Tasks");
-        assert_eq!(views[0].count, Some(1));
-        assert_eq!(views[0].rows.len(), 1);
-        assert_eq!(views[0].rows[0].0.label, "Child");
-        assert_eq!(views[0].rows[0].1, 1);
-        assert!(panel_views(&documents, "w1:p9").is_empty());
-    }
-
-    #[test]
-    fn panel_geometry_keeps_the_terminal_usable() {
-        let wide = geometry(Rect::new(0, 0, 100, 30), HostViewEdge::Right).unwrap();
-        assert_eq!(wide.panel.width, PANEL_DEFAULT_WIDTH);
-        assert!(wide.terminal.width >= TERMINAL_MIN_WIDTH);
-        assert_eq!(wide.divider.width, 1);
-        // A narrow pane moves the panel to the bottom edge.
-        let narrow = geometry(Rect::new(0, 0, 40, 30), HostViewEdge::Right).unwrap();
-        assert_eq!(narrow.panel.height, PANEL_DEFAULT_HEIGHT);
-        assert_eq!(narrow.panel.width, 40);
+    fn geometry_keeps_the_terminal_and_a_fixed_bottom_band() {
+        let area = Rect::new(3, 4, 100, 30);
+        let layout = geometry(area).unwrap();
+        assert_eq!(layout.panel.width, 100);
+        assert_eq!(layout.panel.height, PANEL_DEFAULT_HEIGHT);
+        assert_eq!(layout.panel.bottom(), area.bottom());
+        assert_eq!(layout.divider.width, 100);
+        assert!(layout.terminal.height >= TERMINAL_MIN_HEIGHT);
         // A pane too small for a panel stays closed.
-        assert!(geometry(Rect::new(0, 0, 30, 12), HostViewEdge::Right).is_none());
+        assert!(geometry(Rect::new(0, 0, 40, 6)).is_none());
+        assert!(geometry(Rect::new(0, 0, 10, 30)).is_none());
+    }
+
+    #[test]
+    fn prefixes_draw_continuation_lanes_like_the_todo_widget() {
+        assert_eq!("├─ ", row_prefix(&[], false));
+        assert_eq!("└─ ", row_prefix(&[], true));
+        assert_eq!("│  └─ ", row_prefix(&[true], true));
+        assert_eq!("   ├─ ", row_prefix(&[false], false));
+    }
+
+    #[test]
+    fn states_map_to_the_pi_glyphs_and_tones() {
+        assert_eq!("○", state_glyph(HostViewState::Open));
+        assert_eq!("◐", state_glyph(HostViewState::InProgress));
+        assert_eq!("⊘", state_glyph(HostViewState::Blocked));
+        assert_eq!("◎", state_glyph(HostViewState::Reported));
+        assert_eq!("●", state_glyph(HostViewState::Done));
+        assert_eq!(HostViewTone::Muted, state_tone(HostViewState::Open));
+        assert_eq!(HostViewTone::Warning, state_tone(HostViewState::InProgress));
+        assert_eq!(HostViewTone::Danger, state_tone(HostViewState::Blocked));
+        assert_eq!(HostViewTone::Accent, state_tone(HostViewState::Reported));
+        assert_eq!(HostViewTone::Success, state_tone(HostViewState::Done));
     }
 
     #[test]
@@ -605,5 +679,36 @@ mod tests {
         assert_eq!(age_label(now - 3 * 3600), Some("3h".into()));
         assert_eq!(age_label(now - 2 * 86_400), Some("2d".into()));
         assert!(age_label(now + 600).is_none());
+    }
+
+    #[test]
+    fn rows_truncate_with_an_ellipsis() {
+        assert_eq!("short", truncate("short", 10));
+        assert_eq!("shor…", truncate("shortening", 5));
+        assert_eq!("", truncate("short", 0));
+    }
+
+    #[test]
+    fn tails_join_only_the_parts_they_have() {
+        assert_eq!(
+            "panel-b · owes unblock · 12m",
+            RowTail {
+                name: Some("panel-b".into()),
+                status: None,
+                detail: Some("owes unblock".into()),
+                age: Some("12m".into()),
+            }
+            .text()
+        );
+        assert_eq!(
+            "",
+            RowTail {
+                name: None,
+                status: None,
+                detail: None,
+                age: None,
+            }
+            .text()
+        );
     }
 }
