@@ -31,12 +31,16 @@ pub(crate) fn apply_pane_base_env(cmd: &mut CommandBuilder) {
         cmd.env(crate::product::BIN_PATH_ENV, executable);
     }
     // A Pi Vqro starts in this pane (agent start, a restored pane, or a
-    // hand-typed `pi`) uses the Vqro-only profile when it is available.
+    // hand-typed `pi`) uses the Vqro-only profile when it is available. A failed
+    // profile is a literal fallback: clear an inherited override rather than
+    // leaving Pi on a directory Vqro did not choose.
     if crate::pi_profile::profile_ready() {
         cmd.env(
             PI_CODING_AGENT_DIR_ENV_VAR,
             crate::pi_profile::profile_dir(),
         );
+    } else if !crate::pi_profile::opted_out() {
+        cmd.env_remove(PI_CODING_AGENT_DIR_ENV_VAR);
     }
 }
 
