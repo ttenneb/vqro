@@ -183,8 +183,11 @@ class GraphTests(unittest.TestCase):
         nodes = [{"key": "leaf", "parent": "root", "title": "leaf", "owner": B, "done_when": "Visible.", "depends_on": ["peer"]},
                  {"key": "root", "title": "root", "owner": A, "done_when": "Children checked."},
                  {"key": "peer", "parent": "root", "title": "peer", "done_when": "Visible."}]
-        with self.assertRaisesRegex(ValueError, "human approval"):
-            self.call("plan", nodes=nodes)
+        agent_plan = self.call("plan", nodes=nodes, operation_id="agent-approved-plan")
+        self.assertEqual(agent_plan, self.call("plan", nodes=nodes, operation_id="agent-approved-plan"))
+        agent_root = self.call("get", id=agent_plan["tasks"]["root"])["task"]
+        self.assertEqual(provider.HUMAN_ACCEPTOR, agent_root["delegator"])
+        self.assertEqual(A, agent_root["creator"])
         plan = self.call("plan", caller=HUMAN, nodes=nodes, operation_id="approved-plan")
         self.assertEqual(plan, self.call("plan", caller=HUMAN, nodes=nodes, operation_id="approved-plan"))
         self.assertEqual({"tasks": 3, "dependencies": 1}, plan["counts"])
@@ -297,8 +300,41 @@ store.invoke({params!r})
             self.change(decision, "answer", text="A")
         decision = self.change(decision, "answer", caller=HUMAN, option="A")
         self.assertEqual("done", decision["state"])
-        with self.assertRaisesRegex(ValueError, "human approval"):
-            self.call("create", title="Unapproved root", done_when="Visible.")
+        root = self.call("create", title="Directed root", done_when="Visible.")["task"]
+        self.assertEqual(A, root["creator"])
+        self.assertEqual(provider.HUMAN_ACCEPTOR, root["delegator"])
+
+    def test_agent_roots_keep_human_acceptance_across_owner_override_and_delegation(self):
+        root = self.call("create", title="Human-directed root", done_when="Visible.")["task"]
+        root = self.change(root, "start")
+        with self.assertRaisesRegex(ValueError, "done is not allowed"):
+            self.change(root, "done", text="> Visible.\nEvidence: observed")
+        root = self.change(root, "delegate", owner=B)
+        self.assertEqual(provider.HUMAN_ACCEPTOR, root["delegator"])
+        root = self.change(root, "delegate", caller=B, owner=A)
+        self.assertEqual(provider.HUMAN_ACCEPTOR, root["delegator"])
+        root = self.report(root, caller=A)
+        with self.assertRaisesRegex(ValueError, "own work"):
+            self.change(root, "accept", caller=A)
+        with self.assertRaisesRegex(ValueError, "acceptor"):
+            self.change(root, "accept", caller=B)
+        accepted = self.change(root, "accept", caller=HUMAN)
+        self.assertEqual("accepted", accepted["state"])
+        human_root = self.call("create", caller=HUMAN, title="Actual human root", done_when="Visible.")["task"]
+        human_root = self.change(human_root, "delegate", caller=HUMAN, owner=A)
+        human_root = self.change(human_root, "delegate", caller=A, owner=B)
+        self.assertEqual(A, human_root["delegator"])
+        self.assertEqual(A, accepted["creator"])
+        plan = self.call("plan", nodes=[{"key":"root", "title":"Other owner", "owner":B, "done_when":"Visible."}])
+        imported = self.call("get", id=plan["tasks"]["root"])["task"]
+        self.assertEqual(B, imported["owner"])
+        self.assertEqual(provider.HUMAN_ACCEPTOR, imported["delegator"])
+        self.assertTrue(self.store.accept_match(provider.HUMAN_ACCEPTOR, HUMAN))
+        self.assertFalse(self.store.accept_match(provider.HUMAN_ACCEPTOR, A))
+        self.store.db.close()
+        self.store = provider.Store(self.root.name)
+        self.assertEqual(imported["creator"], self.call("get", id=imported["id"])["task"]["creator"])
+        self.assertEqual(provider.HUMAN_ACCEPTOR, self.call("get", id=imported["id"])["task"]["delegator"])
 
     def test_all_semantic_writes_advance_view_transition_revision(self):
         task = self.child()

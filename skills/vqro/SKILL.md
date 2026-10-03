@@ -58,7 +58,7 @@ Pi todo stays **private scratch**; do not use its delegation/report features for
 
 The controller proposes a plan one or two levels ahead: parent/child for decomposition/accountability, `depends_on` for prerequisites, an exact owner at each level, work/wait estimates, required `done_when`, and optional brief path. The plan file contains only `{"nodes":[...]}`; each node has a unique local `key`, `title`, `done_when`, optional local `parent`, exact `owner`, prerequisites and budgets. The CLI also accepts an agent name as a plan node's `owner` and resolves it through the current exact-binding lookup before import; core/API calls still require binding objects. Unknown, ambiguous or unprovable targets reject before writing. For explicit objects, copy the agent's own `whoami`; never synthesize a binding from names/panes. Existing prerequisites are read-only; parent/ancestor completion cycles reject. Import returns local-key→durable-ID mapping; use those IDs thereafter.
 
-**The human approves and imports ordinary root plans. Agents never create/import ordinary roots.** Agents may add children/import additions only beneath an existing active ordinary task they own, not a foreign descendant, closed task or decision. Re-plan through authorized active-task updates; import adds tasks, not replacements/re-parenting. Every new task/decision needs 1–3 distinct observable `done_when` lines (≤1024 UTF-8 bytes). A brief path is display-only, not evaluated. Never manufacture human classification via shell mediation, `pane run` into a human shell, or caller/actor flags.
+**Agents may create/import ordinary roots only after the human has directed or approved them in conversation, or via a human-answered `vqro task decision`. An auto-applied default alone is not human direction. Otherwise propose the plan as a decision first.** This is a convention, not an enforced approval gate: the API allows root creation/import by a known agent. Agent-created roots record their exact creator/execution and keep a logical human-class acceptor; the agent reports, only a host-classified human accepts. Human-created roots keep the existing actual-new-handoff policy; their actual human binding acceptors retain UID-specific matching. Children still use their current parent owner/stored delegator, and agents may attach additions only beneath an existing active ordinary task they own, not a foreign descendant, closed task or decision. Re-plan through authorized active-task updates; import adds tasks, not replacements/re-parenting. Every new task/decision needs 1–3 distinct observable `done_when` lines (≤1024 UTF-8 bytes). A brief path is display-only, not evaluated. Never manufacture human classification via shell mediation, `pane run` into a human shell, or caller/actor flags.
 
 Below, shell variables are placeholders populated from current outputs: `PARENT_ID` is your active task, `TASK_ID` the selected child, `REV` its inspected revision, `PARENT_REV` the attachment revision, `OWNER` the assignee's own caller JSON, `CALLER` the original operation binding. `PLAN_FILE` is the proposed JSON file, `CRITERIA` its observable lines, and `EVIDENCE` the quoted report below. Commands are individual examples, **not a batch to run against one revision**.
 
@@ -69,9 +69,10 @@ vqro task create "Produce proof" --parent "$PARENT_ID" --done-when "$CRITERIA" -
 vqro task plan "$PLAN_FILE" --parent "$PARENT_ID" --rev "$PARENT_REV"
 ```
 
-Human-only root approval/import (controller proposes the file, waits for approval; never run this on the human's behalf):
+After the human directs or approves the top-level plan, the human or the instructed agent may import it without a parent (do not impersonate a human caller):
 
 ```bash
+vqro task create "Human-directed root" --done-when "$CRITERIA"
 vqro task plan "$PLAN_FILE"
 ```
 
@@ -128,7 +129,7 @@ Then notify the delegator/lead with the task ID only; they read current task sta
 vqro agent prompt <lead> "task $TASK_ID reported; inspect vqro task get $TASK_ID"
 ```
 
-**Delegate/report record, do not deliver.** Notifications, waits and final prose are not independent acceptance. A delegate/report receipt records that write, not independent acceptance; an accept/done receipt can authoritatively record its historical committed outcome. Use `get` for current state. The current parent owner or stored delegator may accept a report after checking each criterion, but **agents never self-accept**, even with a role match. Read the computed `acceptors`; there is no creator fallback or unrelated-human-admin accept right. A human-owned/delegated top level needs its authorized human acceptor. Human acceptance matches UID across panes, but original operation scopes remain exact.
+**Delegate/report record, do not deliver.** Notifications, waits and final prose are not independent acceptance. A delegate/report receipt records that write, not independent acceptance; an accept/done receipt can authoritatively record its historical committed outcome. Use `get` for current state. The current parent owner or stored delegator may accept a report after checking each criterion, but **agents never self-accept**, even with a role match. Read the computed `acceptors`; there is no creator fallback or unrelated-human-admin accept right. Actual human binding acceptors match UID across panes; an agent-created root's logical human-class acceptor instead matches any fresh host-classified human. Human-created roots keep existing handoff rules. Original operation scopes remain exact.
 
 ```bash
 vqro task accept "$TASK_ID" --rev "$REV"

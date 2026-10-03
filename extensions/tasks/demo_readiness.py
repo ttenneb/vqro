@@ -245,12 +245,14 @@ class ReadinessDemo(Demo):
         assert owner_a["class"] == owner_b["class"] == "agent" and owner_a != owner_b
         self.human(human, "human-identity", ["whoami"])
 
-        # R3/R4: the literal named-owner import, delegation and blocker examples.
+        # R3/R4: human-directed agent import, exact creators, delegation/blocker.
+        self.guide_agent("task-a", "agent-a")
         imported = json.loads((self.root / "work/first-plan-result.json").read_text())
         root = self.cli("task", "get", imported["tasks"]["root"])["task"]
         delegated_task = self.cli("task", "get", imported["tasks"]["work"])["task"]
-        assert root["owner"] == delegated_task["owner"] == owner_a
-        self.guide_agent("task-a", "agent-a")
+        assert root["owner"] == root["creator"] == delegated_task["creator"] == owner_a
+        assert root["delegator"] == {"class": "human_unverified"}
+        assert delegated_task["owner"] == owner_b and delegated_task["delegator"] == owner_a
         self.guide_agent("task-b", "agent-b")
         delegated_task = self.cli("task", "get", delegated_task["id"])["task"]
         assert delegated_task["owner"] == owner_b and delegated_task["state"] == "blocked"
@@ -277,7 +279,7 @@ class ReadinessDemo(Demo):
         back = self.agent("task-a", "msg-back", ["claim", "--op", "msg-back"], tool="message")
         assert reply["message"]["id"] in [item["id"] for item in back["claimed"]], back
 
-        self.change("task-b", "delegate-resume", self.cli("task", "get", delegated_task["id"])["task"], "start")
+        resumed = self.change("task-b", "delegate-resume", self.cli("task", "get", delegated_task["id"])["task"], "start")
 
         # Existing names must not create orphan panes. Failed name resolution
         # must not change an owner or partially import a plan.
@@ -299,6 +301,23 @@ class ReadinessDemo(Demo):
         self.cli("task", "plan", "bad-plan.json", expected=1)
         assert len(self.cli("task", "list")["tasks"]) == count
 
+        # R7: child accepted by its actual delegator; root only by human.
+        reported = self.change("task-b", "child-report", resumed, "report", "> " + resumed["done_when"] + "\nEvidence: the recorded blocker and human answer were inspected.")
+        self.change("task-a", "child-accept", reported, "accept")
+        root = self.cli("task", "get", root["id"])["task"]
+        denied_done = self.agent("task-a", "root-direct-done-denied", ["done", root["id"], "--rev", str(root["revision"]), "--evidence", "> " + root["done_when"] + "\nEvidence: checked."], expected=1)
+        assert denied_done["code"] == 1
+        root = self.change("task-a", "root-report", root, "report", "> " + root["done_when"] + "\nEvidence: the human decision is answered and both durable messages are claimed.")
+        denied = self.agent("task-a", "root-self-accept-denied", ["accept", root["id"], "--rev", str(root["revision"])], expected=1)
+        assert denied["code"] == 1
+        self.agent("task-b", "root-other-agent-accept-denied", ["accept", root["id"], "--rev", str(root["revision"])], expected=1)
+        accepted = self.human(human, "root-human-accept", ["accept", root["id"], "--rev", str(root["revision"])])["task"]
+        assert accepted["state"] == "accepted" and accepted["creator"] == owner_a
+        tree = self.cli("task", "tree")
+        assert "creator" in tree and owner_a["execution"] in tree
+        direct = self.agent("task-a", "direct-root-create", ["create", "Human-directed follow-up", "--done-when", "The outcome is independently checked."])["task"]
+        assert direct["creator"] == owner_a and direct["delegator"] == {"class": "human_unverified"}
+
         result = {"result": "passed", "real_pi_agents": 2, "model_calls": 0,
                   "defaults_auto_linked": True,
                   "adapter_skill_evidence": "covered by just pi-profile-demo",
@@ -306,7 +325,9 @@ class ReadinessDemo(Demo):
                   "empty_full_tasks_before_first_task": True, "named_agent_panes": True,
                   "named_plan_owners_and_delegation": True, "name_failures_write_nothing": True,
                   "existing_name_creates_no_pane": True, "blocked_badge": counts, "decision_human_only": True,
-                  "durable_message_claimed_by_name": True}
+                  "durable_message_claimed_by_name": True, "agent_root_create_and_import": True,
+                  "child_accepted_by_agent_delegator": True, "root_agent_accept_and_done_denied": True,
+                  "root_human_accepted": True, "creator_execution_in_get_and_tree": True}
         self.save("RESULT.json", result)
         return result
 

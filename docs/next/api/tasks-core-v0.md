@@ -90,10 +90,17 @@ bounded by store quotas; no render/process work or automatic work scheduling is 
 
 ## Authority, acceptance and own steps
 
-Ordinary root **create/import is human-only**. A controller proposes a plan file;
-the cooperative human running `task plan FILE` is its approval. Agents may create
-children/import additions beneath an existing active ordinary task they currently
-own, never attach to an existing foreign-owned/closed/decision parent. Newly
+Ordinary root **create/import is allowed for known agents and humans**. By
+convention, an agent does so only after human direction/approval in conversation
+or a human-answered `vqro task decision`; an auto-applied default alone is not
+human direction. Otherwise it proposes a decision first.
+The API does not enforce approval proof. Each root retains its exact creator
+(actor/execution) in `get` and the CLI tree. Agent-created ordinary roots store
+`{"class":"human_unverified"}` as a logical human-class delegator: no guessed
+UID/terminal/caller, and only a host-classified human can accept the reported root.
+This semantic acceptor survives plan owner overrides and later root delegation.
+Agents may create children/import additions beneath an existing active ordinary
+task they currently own, never attach to an existing foreign-owned/closed/decision parent. Newly
 planned descendants may have explicit owners. Root decisions remain agent-allowed.
 Parents cannot be changed. Replacement executions never inherit ownership or
 acceptance; re-delegation is an explicit revisioned transition.
@@ -114,8 +121,10 @@ acceptance; re-delegation is an explicit revisioned transition.
 Acceptors are the **current immediate parent owner or stored delegator**; a human
 may also accept human-owned work. An agent **never accepts its own task**, even
 if another role matches. A human stored delegator may accept a root delegated to
-an agent; an unrelated human has no global accept right. Human accept authorization
-matches the same UID across panes; **receipt scope, expected caller, stored bindings
+an agent. Actual human binding acceptors match the same UID across panes; an
+unrelated human has no global accept right for those records. The logical human
+class on an agent-created root instead matches any host-classified human caller
+(cooperative same-user context, not authenticated approval/presence). For both, **receipt scope, expected caller, stored bindings
 and transition callers remain terminal-exact**. Agent matches remain execution-exact.
 Manual decision answer stays human-only, not ordinary accept/report/done. Recorded
 reversible defaults use a separate internal policy actor, described below.
@@ -138,7 +147,8 @@ Reported orphan roots with no usable acceptor have no
 automatic reopen/adoption path; new work needs a human-approved replacement root.
 Human administrative re-delegation of active tasks remains available. There is no
 creator fallback for acceptance. A new independent handoff records its actual new
-delegator, including at a root; it does not fabricate permanent human oversight.
+delegator, including at a human-created root. Agent-created ordinary roots retain
+their explicit logical human-class oversight, without manufacturing human caller facts.
 
 **Human classification is cooperative and unverified.** Shell-mediated agents can
 impersonate it; this is not a same-user security boundary or human-presence check.
@@ -271,7 +281,7 @@ historical-op replay; a fresh missing-criteria write still rejects at the provid
 ## Agent instructions
 
 `vqro --skill` ships the task/communication workflow, including graph proposals,
-human root imports, owned ready/start, criteria/evidence and independent acceptance.
+human-directed root imports by either actor, owned ready/start, criteria/evidence and independent acceptance.
 See [agent task and communication conventions](task-conventions.md) for the
 record-versus-notification distinction and model-free assurance boundary.
 

@@ -21,6 +21,8 @@ PAGE_SIZE = 32
 MAX_REPLY_BYTES = 128 * 1024
 FINAL_STATES = {"accepted", "done"}
 HUMAN_ROLE = {"role": "human_unverified"}
+# Semantic acceptor, not a caller binding or a guessed human terminal/UID.
+HUMAN_ACCEPTOR = {"class": "human_unverified"}
 
 
 class OutcomeUnknown(Exception):
@@ -272,7 +274,7 @@ class Store:
     @staticmethod
     def accept_match(left, right):
         if left.get("class") == right.get("class") == "human_unverified":
-            return left["uid"] == right["uid"]
+            return left == HUMAN_ACCEPTOR or right == HUMAN_ACCEPTOR or left["uid"] == right["uid"]
         return left == right
 
     def acceptors(self, task):
@@ -331,8 +333,6 @@ class Store:
         if not isinstance(nodes, list) or not 1 <= len(nodes) <= graph.MAX_PLAN_NODES:
             raise ValueError("plan must contain 1-100 nodes (also bounded by 64 KiB request)")
         parent = payload.get("parent")
-        if parent is None and caller["class"] != "human_unverified":
-            raise ValueError("root plan import requires human approval")
         if parent is not None:
             self.parent_for_create(parent, caller)
             if type(payload.get("revision")) is not int or payload["revision"] != self.task(parent)["revision"]:
@@ -373,7 +373,8 @@ class Store:
                 task_id = self.create_task({**node, "action": "decision" if node.get("kind") == "decision" else "create", "parent": actual_parent}, caller, at, task_id=mapping[key], importing=True)
                 if "owner" in node:
                     owner = node["owner"]
-                    self.db.execute("UPDATE tasks SET owner=?,delegator=? WHERE id=?", (canonical(owner), canonical(caller) if owner != caller else None, task_id))
+                    delegator = HUMAN_ACCEPTOR if actual_parent is None and node.get("kind", "task") == "task" and caller["class"] == "agent" else (caller if owner != caller else None)
+                    self.db.execute("UPDATE tasks SET owner=?,delegator=? WHERE id=?", (canonical(owner), canonical(delegator) if delegator else None, task_id))
                 pending.pop(key)
                 progress = True
             if not progress:
@@ -465,7 +466,8 @@ class Store:
             owner = checked_binding(payload.get("owner"))
             # Self-assignment is takeover, not a new independent handoff. Preserve prior
             # oversight (including None on an own step); never erase a human delegator.
-            delegator, detail = (task["delegator"] if owner == caller else caller), ""
+            agent_root = task["parent"] is None and task["kind"] == "task" and task["creator"].get("class") == "agent"
+            delegator, detail = (task["delegator"] if owner == caller or (agent_root and task["delegator"] == HUMAN_ACCEPTOR) else caller), ""
         self.db.execute("UPDATE tasks SET state=?,owner=?,delegator=?,detail=?,revision=revision+1,updated_at=? WHERE id=? AND revision=?",
                         (destination, canonical(owner), canonical(delegator) if delegator else None, detail, at, task["id"], revision))
         self.db.execute("INSERT INTO transitions(task_id,state,at,caller) VALUES (?,?,?,?)", (task["id"], destination, at, canonical(caller)))
@@ -483,14 +485,13 @@ class Store:
         if kind not in ("task", "decision"):
             raise ValueError("invalid task kind")
         parent = payload.get("parent")
-        if kind == "task" and parent is None and caller["class"] != "human_unverified" and not importing:
-            raise ValueError("ordinary root creation requires human approval")
         self.parent_for_create(parent, caller, check_owner=not importing)
         values = graph.metadata(payload, required=True)
         task_id = task_id or "task_" + uuid.uuid4().hex
         owner = HUMAN_ROLE if kind == "decision" else caller
-        self.db.execute("INSERT INTO tasks(id,parent,title,kind,owner,state,revision,created_at,updated_at,creator,detail) VALUES (?,?,?,?,?,'open',1,?,?,?,'')",
-                        (task_id, parent, title.strip(), kind, canonical(owner), at, at, canonical(caller)))
+        delegator = HUMAN_ACCEPTOR if kind == "task" and parent is None and caller["class"] == "agent" else None
+        self.db.execute("INSERT INTO tasks(id,parent,title,kind,owner,state,revision,created_at,updated_at,creator,delegator,detail) VALUES (?,?,?,?,?,'open',1,?,?,?,?,'')",
+                        (task_id, parent, title.strip(), kind, canonical(owner), at, at, canonical(caller), canonical(delegator) if delegator else None))
         self.set_metadata(task_id, values)
         if decision_queue.FIELDS & payload.keys() and kind != "decision":
             raise ValueError("decision fields require kind decision")

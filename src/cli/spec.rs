@@ -128,7 +128,7 @@ fn task_command() -> Command {
     for (action, description) in [
         (
             "create",
-            "Create owned work (ordinary roots require a human)",
+            "Create owned work (root approval is a human-directed convention)",
         ),
         ("decision", "File a human-decision task"),
     ] {
@@ -242,7 +242,7 @@ fn task_command() -> Command {
         )
         .subcommand(
             Command::new("plan")
-                .about("Atomically import a graph; human approves fresh roots")
+                .about("Atomically import a graph under human direction/approval")
                 .arg(required("file", "FILE"))
                 .arg(option("parent", "ID").requires("rev"))
                 .arg(option("rev", "N").requires("parent"))
