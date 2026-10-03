@@ -77,7 +77,7 @@ class ReadinessDemo(Demo):
 
         deadline = time.monotonic() + 25
         while time.monotonic() < deadline:
-            if list((self.root / "config").glob("*/bundled/tasks/vqro-extension.toml")):
+            if list((self.root / "config").glob("*/bundled/tasks-*/vqro-extension.toml")):
                 break
             time.sleep(0.05)
         else:
@@ -162,11 +162,14 @@ class ReadinessDemo(Demo):
         registry = json.loads(next((self.root / "config").glob("*/plugins.json")).read_text())
         linked = [entry for entry in registry if entry["plugin_id"] == TASKS_NAMESPACE]
         assert len(linked) == 1 and linked[0]["enabled"] is True, f"tasks not auto-linked: {registry}"
-        assert linked[0]["plugin_root"] == str(bundled / "tasks"), linked[0]["plugin_root"]
+        tasks_dir = Path(linked[0]["plugin_root"])
+        assert tasks_dir.parent == bundled and tasks_dir.name.startswith("tasks-"), tasks_dir
         for name in ("vqro-extension.toml", "provider.py", "view.py", "document.py", "decision_queue.py", "messages.py", "graph.py"):
-            assert (bundled / "tasks" / name).is_file(), name
-        adapter = bundled / "pi" / "vqro-reply-routing.ts"
-        skill = bundled / "pi" / "skills" / "vqro" / "SKILL.md"
+            assert (tasks_dir / name).is_file(), name
+        pi_dirs = sorted(bundled.glob("pi-*"))
+        assert len(pi_dirs) == 1, pi_dirs
+        adapter = pi_dirs[0] / "vqro-reply-routing.ts"
+        skill = pi_dirs[0] / "skills" / "vqro" / "SKILL.md"
         assert adapter.is_file() and skill.is_file(), (adapter, skill)
 
         # R2: two Pi panes are started by Vqro with the adapter and skill auto-loaded.
@@ -229,7 +232,9 @@ class ReadinessDemo(Demo):
         self.change("task-b", "delegate-resume", self.cli("task", "get", delegated_task["id"])["task"], "start")
 
         result = {"result": "passed", "real_pi_agents": 2, "model_calls": 0,
-                  "defaults_auto_linked": True, "pi_adapter_auto_loaded": True, "pi_skill_auto_loaded": True,
+                  "defaults_auto_linked": True,
+                  "pi_adapter_skill_flags_passed": True,
+                  "evidence_limit": "Pi flags recorded from a wrapper argv; no SDK loaded-resource or attached-TUI assertion",
                   "imported_tasks": 3, "blocked_badge": counts, "decision_human_only": True,
                   "durable_message_claimed_by_name": True}
         self.save("RESULT.json", result)
