@@ -65,6 +65,7 @@ mod pane;
 mod pane_contribution;
 mod pane_graphics_files;
 mod persist;
+mod pi_profile;
 mod platform;
 mod plugin_command;
 mod plugin_paths;
@@ -833,6 +834,9 @@ fn main() -> io::Result<()> {
     logging::init_file_logging(product::CLIENT_LOG_FILE);
     if let Err(err) = bundled::ensure_defaults() {
         tracing::warn!(err = %err, "failed to prepare bundled default extensions");
+    }
+    if let Err(err) = pi_profile::ensure_profile() {
+        tracing::warn!(err = %err, "failed to prepare the Vqro Pi profile");
     }
 
     let saved_federation =

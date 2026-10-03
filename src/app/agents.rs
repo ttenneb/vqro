@@ -201,6 +201,16 @@ impl App {
         argv.extend(params.args);
         let command = crate::platform::interactive_shell_command(&argv, &shell_name)
             .ok_or(AgentStartError::InvalidArgument)?;
+        // Fail closed with a visible line: without the profile, Pi would load the
+        // Herdr adapter that can reach the human's real Herdr server.
+        let command = if kind == crate::detect::Agent::Pi && crate::pi_profile::warning_needed() {
+            format!(
+                "printf '%s\\n' \"{}\"; {command}",
+                crate::pi_profile::UNAVAILABLE_WARNING
+            )
+        } else {
+            command
+        };
         let bytes = crate::app::api_helpers::encode_api_submission(runtime, &command);
         let timeout = Duration::from_millis(
             params

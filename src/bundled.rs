@@ -105,20 +105,20 @@ fn generation_dir(root: &Path, prefix: &str, assets: &[(&str, &str)]) -> PathBuf
 
 /// Refuse to install through a symlink anywhere below `root`.
 ///
-/// A pre-existing symlink at the bundled root, a generation directory, a nested
-/// directory or an asset path must never redirect a managed write to an
-/// unrelated file. Same-user, non-adversarial scope; this only preserves
-/// unrelated data.
-fn safe_under(root: &Path, path: &Path) -> io::Result<()> {
+/// A pre-existing symlink at the root, a managed directory, a nested directory or
+/// a managed file must never redirect a managed write to an unrelated file.
+/// Same-user, non-adversarial scope; this only preserves unrelated data. Shared
+/// by the bundled defaults and the Pi profile.
+pub(crate) fn safe_under(root: &Path, path: &Path) -> io::Result<()> {
     let relative = path.strip_prefix(root).map_err(|_| {
         io::Error::other(format!(
-            "bundled path escapes the config root: {}",
+            "managed path escapes the managed root: {}",
             path.display()
         ))
     })?;
     if std::fs::symlink_metadata(root).is_ok_and(|meta| meta.file_type().is_symlink()) {
         return Err(io::Error::other(format!(
-            "refusing to install into a symlinked bundled root: {}",
+            "refusing to install into a symlinked directory: {}",
             root.display()
         )));
     }

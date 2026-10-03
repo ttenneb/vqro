@@ -2,6 +2,8 @@
 
 You need `vqro`, Pi and Python 3 already on PATH, and your usual Pi model setup. No environment exports or per-agent configuration are needed. This is ordinary use; automated demos isolate HOME/config/sockets separately.
 
+Pi that Vqro starts uses a **Vqro-only profile**: your usual auth, models and settings, but without the Herdr-coupled packages (`pi-input-gate`, `pi-tasking-herdr-adapter`, `rpiv-todo`), so a Vqro-started Pi does not load the adapter that contacts Herdr. This is a profile, not a sandbox: a deliberate fallback or `VQRO_NO_BUNDLED_DEFAULTS=1` loads your global Pi config. If the profile cannot be built, a Vqro-started Pi shows one warning line in its pane; a `pi` you type yourself in that pane has no warning and loads your global config. Vqro never writes your `~/.pi/agent` settings or packages; the profile references your `auth.json` and `models-store.json`, so Pi's normal token and catalog refresh can still update those files. Known limits (not handled): package sources written with `./`, `../` or other non-prefix parent-path forms, package paths under an entry the profile does not mirror, and a read-only profile directory whose content still matches its marker.
+
 ## 1. Open Vqro
 
 <!-- launch -->

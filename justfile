@@ -28,6 +28,10 @@ task-core-test:
 readiness-demo:
     python3 extensions/tasks/demo_readiness.py --vqro "${CARGO_TARGET_DIR:-target}/debug/vqro" --pi "$(command -v pi)"
 
+# Check that a Pi Vqro starts gets the Vqro-only profile (model-free).
+pi-profile-demo:
+    python3 extensions/tasks/demo_pi_profile.py --vqro "${CARGO_TARGET_DIR:-target}/debug/vqro" --pi "$(command -v pi)"
+
 # Run one nextest filter, e.g. `just test-one codex_stale_working`
 test-one filter:
     cargo nextest run --locked "{{filter}}" --status-level fail --final-status-level fail --failure-output final --success-output never
