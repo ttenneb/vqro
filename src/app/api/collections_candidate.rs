@@ -37,7 +37,7 @@ pub(crate) fn is_retryable_collections_candidate_error(error: &str) -> bool {
         || error == "Collections candidate authorization is stale or mismatched"
         || error == "candidate captured, observed, and current snapshots differ"
         || error == "candidate actions completed before an audited profile"
-        || error.contains("candidate actions rejected: stale Collections revision")
+        || error.starts_with("candidate actions rejected: stale Collections revision")
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1109,6 +1109,12 @@ mod tests {
         ));
         assert!(!is_retryable_collections_candidate_error(
             "candidate runtime failed: component trapped"
+        ));
+        assert!(!is_retryable_collections_candidate_error(
+            "candidate runtime failed: component trapped: candidate actions rejected: stale Collections revision"
+        ));
+        assert!(!is_retryable_collections_candidate_error(
+            "candidate returned malformed profile: candidate actions rejected: stale Collections revision"
         ));
         assert!(!is_retryable_collections_candidate_error(
             "candidate returned malformed profile: missing field"
