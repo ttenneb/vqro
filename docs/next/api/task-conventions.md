@@ -26,19 +26,20 @@ convention introduces no host API, Pi tool, task delivery or activation mechanis
 - Durable addressed messages have their own record: `vqro message send/list/claim/edit`
   over the same trusted Tasks extension, with the sender taken from the host-observed
   connection rather than a text label. Messages are editable until claimed, survive
-  restarts, and reach Pi through the reply-routing adapter at a turn boundary, never
+  restarts, and reach Pi through the Tasks Pi consumer/neutral adapter at a turn boundary, never
   by pane typing. A claim is not a run, reply or acceptance. One recorded activation
   setting may start an idle recipient's turn; a stopped agent is never relaunched.
 - Human-needed choices go in decisions unless the human addressed the agent
   directly in its pane. Pi's question tool is only an example for that direct case;
   the convention is agent-neutral. Creating a decision does not promise a wake or
   notification. Never exploit cooperative human classification through a shell.
-- Final prose is written for whoever started the turn. The Pi reply-routing adapter
-  sends an agent-started turn's final text back to that agent by default, records it
-  in the session and labels a missing reply on the pane. `vqro agent prompt`
+- Final prose is written for whoever started the turn. The Tasks Pi consumer
+  retains agent-started prompt replies under the [accepted transitional decision](../architecture/tasks-legacy-prompt-reply-transition.md).
+  Its session entry is not a durable message record; it labels a missing reply
+  on the pane. `vqro agent prompt`
   auto-labels from the sending agent's pane (`[agent <name> · reply expected]`,
-  `[agent <name>]`); anything not an agent label is treated as human and a
-  human-started turn is never routed. Remote action still needs the corresponding
+  `[agent <name>]`); unlabelled input is not automatically routed and labels
+  never manufacture host human classification. A human-started turn is never routed. Remote action still needs the corresponding
   task record and an explicit agent notification. Final
   prose and delegate/report receipts are not independent acceptance; accept/done
   receipts may authoritatively record historical committed outcomes. Read `get`

@@ -1,7 +1,7 @@
 //! Core in-tree extensions installed and enabled by default.
 //!
 //! The tasks provider/pane, the decision queue and messaging all live in the
-//! trusted `vqro.tasks` legacy plugin, and the Pi reply-routing adapter plus the
+//! trusted `vqro.tasks` legacy plugin, and the neutral Pi adapter/Tasks consumer plus the
 //! agent-conventions skill ship with the binary. A plain `vqro` launch publishes
 //! those embedded files as one immutable generation under the Vqro config
 //! directory and links the plugin, so the core experience needs no manual
@@ -53,7 +53,8 @@ const TASKS_FILES: &[(&str, &str)] = &[
     ("graph.py", include_str!("../extensions/tasks/graph.py")),
     ("cli.py", include_str!("../extensions/tasks/cli.py")),
 ];
-const PI_ADAPTER: &str = include_str!("../extensions/pi-reply-routing/index.ts");
+const PI_ADAPTER: &str = include_str!("../extensions/vqro-pi/index.ts");
+const TASKS_PI: &str = include_str!("../extensions/tasks/pi.ts");
 const VQRO_SKILL: &str = include_str!("../skills/vqro/SKILL.md");
 
 /// The tasks plugin files, keyed by path inside the generation directory.
@@ -64,9 +65,10 @@ fn tasks_assets() -> Vec<(&'static str, &'static str)> {
 }
 
 /// The Pi adapter and conventions skill, keyed by path inside the generation.
-fn pi_assets() -> [(&'static str, &'static str); 2] {
+fn pi_assets() -> [(&'static str, &'static str); 3] {
     [
-        ("vqro-reply-routing.ts", PI_ADAPTER),
+        ("vqro-pi.ts", PI_ADAPTER),
+        ("tasks-pi.ts", TASKS_PI),
         ("skills/vqro/SKILL.md", VQRO_SKILL),
     ]
 }

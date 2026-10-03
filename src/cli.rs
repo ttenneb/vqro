@@ -1141,9 +1141,17 @@ fn _print_json<T: Serialize>(value: &T) {
 mod tests {
     #[test]
     fn generic_dispatch_preserves_main_owned_entrypoints() {
-        for command in ["client", "update", "remote-api-bridge", "remote-client-bridge"] {
+        for command in [
+            "client",
+            "update",
+            "remote-api-bridge",
+            "remote-client-bridge",
+        ] {
             let args = ["vqro".to_owned(), command.to_owned()];
-            assert!(matches!(super::maybe_run(&args), Ok(super::CommandOutcome::NotCli)));
+            assert!(matches!(
+                super::maybe_run(&args),
+                Ok(super::CommandOutcome::NotCli)
+            ));
         }
     }
 

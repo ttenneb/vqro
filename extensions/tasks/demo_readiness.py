@@ -7,7 +7,7 @@ Reuses the tasks demo lifecycle (private root, real server, real model-free Pi,
 birth-checked cleanup). Tasks itself is never manually linked: plain
 Vqro already linked the bundled `vqro.tasks` (a separate tiny independent CLI
 contribution is linked to prove generic dispatch) and that `agent start` already gave
-each Pi pane the reply-routing adapter and the vqro skill. No installation,
+each Pi pane the neutral adapter, Tasks consumer and the vqro skill. No installation,
 credentials, model calls, or human-session changes.
 """
 import argparse

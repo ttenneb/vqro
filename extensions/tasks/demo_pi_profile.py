@@ -137,7 +137,26 @@ class PiProfileDemo(ReadinessDemo):
         extensions = agent / "extensions"
         extensions.mkdir(exist_ok=True)
         (extensions / EXCLUDED_EXTENSION).write_text("export default function () {}\n")
-        (extensions / KEPT_EXTENSION).write_text("export default function () {}\n")
+        (extensions / KEPT_EXTENSION).write_text('''import fs from "node:fs";
+import path from "node:path";
+export default function (pi) {
+  let adapter, facts = [];
+  pi.events.on("vqro:pi-adapter:v1:ready", value => {
+    adapter = value;
+    value.onFact(fact => { facts.push(fact.kind); });
+  });
+  pi.events.emit("vqro:pi-adapter:v1:discover", {});
+  pi.registerCommand("neutral-probe", {
+    description: "Private model-free neutral adapter probe",
+    handler: async () => {
+      fs.writeFileSync(path.join(process.env.HOME, "neutral-probe.json"), JSON.stringify({
+        version: adapter?.version, facts, snapshot: adapter?.snapshot(),
+        methods: ["snapshot", "current", "onFact", "beforeRun", "exec", "deliver"].every(key => typeof adapter?.[key] === "function")
+      }));
+    }
+  });
+}
+''')
         skills = agent / "skills"
         skills.mkdir(exist_ok=True)
         for name in (*HERDR_SKILLS, KEPT_SKILL):
@@ -253,7 +272,9 @@ class PiProfileDemo(ReadinessDemo):
         extensions_section = sections.get("extensions", "")
         assert "/pi-agent/SYSTEM.md" in context, (context, sanitized)
         assert "vqro" in skills, (skills, sanitized)
-        assert "vqro-reply-routing.ts" in extensions_section, (extensions_section, sanitized)
+        assert "vqro-pi.ts" in extensions_section, (extensions_section, sanitized)
+        assert "tasks-pi.ts" in extensions_section, (extensions_section, sanitized)
+        assert "vqro-reply-routing.ts" not in extensions_section, (extensions_section, sanitized)
         for name in (*EXCLUDED, *HERDR_SKILLS, EXCLUDED_EXTENSION):
             assert name not in sanitized, (name, sanitized)
 
@@ -267,12 +288,20 @@ class PiProfileDemo(ReadinessDemo):
             time.sleep(0.1)
         assert not observed, observed
         self.remember_pane(agent)
+        # Actual SDK callback/discovery evidence, not merely launcher argv or a
+        # resource filename. The custom command makes no model request.
+        self.cli("pane", "run", agent, "/neutral-probe")
+        probe_file = self.root / "home" / "neutral-probe.json"
+        self.wait_file(probe_file)
+        probe = json.loads(probe_file.read_text())
+        assert probe.get("version") == 1 and probe.get("methods") is True, probe
+        assert "session_started" in probe.get("facts", []), probe
 
         result_value = {"result": "passed", "excluded_absent": list(EXCLUDED), "wanted_present": list(WANTED),
                         "excluded_extension_absent": EXCLUDED_EXTENSION,
                         "excluded_skills_absent": list(HERDR_SKILLS), "kept_resources_present": True,
                         "vqro_system_md": True, "pi_list_ok": True, "header_ok": True,
-                        "hand_typed_pane_env": True, "herdr_processes": len(observed)}
+                        "hand_typed_pane_env": True, "actual_sdk_neutral_facts": True, "herdr_processes": len(observed)}
         self.save("RESULT.json", result_value)
         (self.root / "header.txt").write_text(sanitized)
         return result_value
