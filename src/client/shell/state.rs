@@ -107,6 +107,7 @@ pub(crate) struct ClientShellConfig {
     pub(super) preferences_path: Option<std::path::PathBuf>,
     pub(super) preferences: preferences::ClientChromePreferences,
     pub(super) startup_config_diagnostic: Option<String>,
+    pub(super) startup_server_notice: Option<String>,
     pub(super) startup_onboarding: bool,
 }
 
@@ -1185,6 +1186,9 @@ pub(crate) struct ClientShellState {
     pub(super) host_appearance_explicit: bool,
     pub(super) host_background: Option<crate::terminal_theme::RgbColor>,
     pub(super) local_config_diagnostic: Option<String>,
+    /// Presentation text from the client startup probe. A config reload does not
+    /// replace it, because the running server has not changed.
+    pub(super) server_notice: Option<String>,
     pub(super) config_diagnostic: Option<String>,
     pub(super) endpoint_error: Option<String>,
     pub(super) endpoint_error_deadline: Option<std::time::Instant>,
@@ -1232,6 +1236,7 @@ impl ClientShellState {
     pub(crate) fn new(mut config: ClientShellConfig) -> Self {
         let preferences = config.preferences.clone();
         let local_config_diagnostic = config.startup_config_diagnostic.take();
+        let server_notice = config.startup_server_notice.take();
         let overlay = config
             .startup_onboarding
             .then_some(ClientShellOverlay::Onboarding);
@@ -1365,6 +1370,7 @@ impl ClientShellState {
             host_background: None,
             config_diagnostic: local_config_diagnostic.clone(),
             local_config_diagnostic,
+            server_notice,
             endpoint_error: None,
             endpoint_error_deadline: None,
             dismissed_product_announcement: None,

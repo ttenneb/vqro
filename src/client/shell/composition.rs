@@ -834,7 +834,27 @@ impl ClientShellState {
         }
         restore_mode_bar(&mut frame, mode_bar, mode_bar_cells.as_deref());
         self.hits.notification_toast = Rect::default();
-        let has_config_diagnostic = self.config_diagnostic.is_some();
+        let banner_area = if layout.mobile_header.is_empty() {
+            Rect::new(0, 0, cols, rows)
+        } else {
+            layout.pane_surface
+        };
+        // Config diagnostics and the client's own server notice are separate
+        // presentation text: a config reload replaces the first, never the second.
+        // Wrap once per frame; both wrap, so a long restart command occupies the
+        // rows it needs.
+        let banner_lines: Vec<Vec<String>> = [
+            self.config_diagnostic.as_deref(),
+            self.server_notice.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        .map(|message| {
+            crate::ui::diagnostic_banner_lines(message, banner_area.width, banner_area.height)
+        })
+        .collect();
+        let banner_rows: u16 = banner_lines.iter().map(|lines| lines.len() as u16).sum();
+        let has_config_diagnostic = banner_rows > 0;
         let active_lifecycle = self
             .endpoints
             .iter()
@@ -848,19 +868,21 @@ impl ClientShellState {
         {
             let cursor = frame.cursor.clone();
             let mut composed = frame.to_ratatui_buffer()?;
-            if let Some(diagnostic) = self.config_diagnostic.as_deref() {
-                let diagnostic_area = if layout.mobile_header.is_empty() {
-                    Rect::new(0, 0, cols, rows)
-                } else {
-                    layout.pane_surface
-                };
-                crate::ui::render_config_diagnostic_buffer(
+            let mut banner_row = 0u16;
+            for lines in &banner_lines {
+                let area = Rect::new(
+                    banner_area.x,
+                    banner_area.y.saturating_add(banner_row),
+                    banner_area.width,
+                    banner_area.height.saturating_sub(banner_row),
+                );
+                banner_row = banner_row.saturating_add(crate::ui::render_diagnostic_rows(
                     &mut composed,
-                    diagnostic_area,
-                    diagnostic,
+                    area,
+                    lines,
                     &self.config.palette,
                     |rect| occlusion.cover(rect),
-                );
+                ));
             }
             let lifecycle_offset = active_lifecycle.as_ref().map_or(0, |(label, status)| {
                 occlusion.cover(endpoint_notices::render_lifecycle_banner(
@@ -868,7 +890,7 @@ impl ClientShellState {
                     Rect::new(0, 0, cols, rows),
                     label,
                     *status,
-                    u16::from(has_config_diagnostic) + layout.mobile_header.height,
+                    banner_rows + layout.mobile_header.height,
                     &self.config.palette,
                 ));
                 1
@@ -879,7 +901,7 @@ impl ClientShellState {
                         &mut composed,
                         Rect::new(0, 0, cols, rows),
                         notice,
-                        u16::from(has_config_diagnostic) + lifecycle_offset,
+                        banner_rows + lifecycle_offset,
                         &self.config.palette,
                     )
                 } else {
@@ -898,7 +920,7 @@ impl ClientShellState {
                         Rect::new(0, 0, cols, rows),
                         notification,
                         self.config.toast_position,
-                        u16::from(has_config_diagnostic) + lifecycle_offset,
+                        banner_rows + lifecycle_offset,
                         &self.config.palette,
                     )
                 } else {
@@ -917,7 +939,7 @@ impl ClientShellState {
         if let Some(feedback) = self.copy_feedback.as_ref() {
             let cursor = frame.cursor.clone();
             let mut composed = frame.to_ratatui_buffer()?;
-            let base_offset = u16::from(has_config_diagnostic);
+            let base_offset = banner_rows;
             let feedback_area = if layout.mobile_header.is_empty() {
                 layout.pane_surface
             } else {

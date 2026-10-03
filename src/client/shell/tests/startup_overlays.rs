@@ -476,6 +476,72 @@ fn unavailable_extensions_do_not_wedge_onboarding() {
     let _ = std::fs::remove_file(&state.config.local_config_path);
 }
 
+fn frame_text(state: &mut ClientShellState, cols: u16, rows: u16) -> String {
+    let frame = state.compose(cols, rows).expect("composed frame");
+    frame
+        .cells
+        .chunks(frame.width as usize)
+        .map(|row| {
+            row.iter()
+                .map(|cell| cell.symbol.as_str())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The notice names a build the client cannot order, so it must not call the
+/// server older; and a narrow banner must still show the whole restart command.
+#[test]
+fn server_notice_wraps_its_restart_command_at_a_narrow_width() {
+    let notice = "the running vqro server is a different build (server 0.9.0-dev.561da0e3, client 0.9.0)\nrestart it yourself: `vqro server stop`; stopping it exits its pane processes, and this client never restarts it.";
+    let config = ClientShellConfig::from_config(&Config::default())
+        .with_startup_server_notice(Some(notice.to_owned()));
+    let mut state = ClientShellState::new(config);
+    state.set_snapshot(Box::new(snapshot()));
+    state.set_pane_surface(surface());
+    let text = frame_text(&mut state, 106, 20);
+    let rows: Vec<&str> = text.lines().collect();
+    // Intact on one row: a clipped render would lose the tail.
+    let command_row = rows
+        .iter()
+        .find(|row| row.contains("vqro server stop"))
+        .unwrap_or_else(|| panic!("no complete restart command at 106 columns:\n{text}"));
+    assert!(command_row.contains("restart it yourself"), "{command_row}");
+    // The warning and the never-restart clause stay visible when the sentence
+    // wraps; each fragment must survive inside one row of the viewport.
+    assert!(
+        rows.iter()
+            .any(|row| row.contains("stopping it exits its pane processes")),
+        "{text}"
+    );
+    assert!(rows.iter().any(|row| row.contains("restarts it")), "{text}");
+    assert!(text.contains("is a different build"), "{text}");
+    assert!(!text.contains("is older"), "{text}");
+}
+
+/// A config reload replaces the config diagnostic, and must not remove a notice
+/// about a server that has not changed.
+#[test]
+fn server_notice_survives_a_config_reload() {
+    let config = ClientShellConfig::from_config(&Config::default())
+        .with_startup_server_notice(Some("notice about the running server".to_owned()));
+    let mut state = ClientShellState::new(config);
+    state.set_snapshot(Box::new(snapshot()));
+    state.set_pane_surface(surface());
+    assert!(frame_text(&mut state, 106, 20).contains("notice about the running server"));
+
+    state.set_local_config_diagnostic(Some("reloaded config warning".to_owned()));
+
+    assert_eq!(
+        state.server_notice.as_deref(),
+        Some("notice about the running server")
+    );
+    let text = frame_text(&mut state, 106, 20);
+    assert!(text.contains("notice about the running server"), "{text}");
+    assert!(text.contains("reloaded config warning"), "{text}");
+}
+
 #[test]
 fn startup_config_diagnostics_are_client_rendered_and_persist_until_replaced() {
     let config = ClientShellConfig::from_config(&Config::default())
@@ -559,7 +625,8 @@ fn config_diagnostic_offsets_only_the_pane_rows_it_overlaps() {
     endpoint_snapshot.config_diagnostic = Some("first warning\nsecond warning".into());
     state.set_snapshot(Box::new(endpoint_snapshot));
     state.compose(106, 20).expect("two-line frame");
-    assert_eq!(state.hits.notification_toast.y, pane_area.y);
+    // Both banner rows are cleared, not just the first.
+    assert_eq!(state.hits.notification_toast.y, pane_area.y + 1);
 
     state
         .visible_notification
@@ -568,7 +635,9 @@ fn config_diagnostic_offsets_only_the_pane_rows_it_overlaps() {
         .event
         .position = Some(crate::config::ToastHerdrPosition::BottomRight);
     state.compose(106, 20).expect("bottom notification frame");
-    assert_eq!(state.hits.notification_toast.bottom(), 19);
+    // The existing rule lifts the bottom toast by the banner height; with the
+    // two-row banner above it sits one row higher than a bare frame would.
+    assert_eq!(state.hits.notification_toast.bottom(), 18);
 }
 
 #[test]

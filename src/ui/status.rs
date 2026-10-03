@@ -87,10 +87,40 @@ pub(crate) fn render_copy_feedback_buffer(
     feedback_area
 }
 
-pub(crate) fn render_config_diagnostic_buffer(
+/// The banner rows a message occupies at this width. Banners are one row tall by
+/// default, so a long message (a restart command, for example) is wrapped at word
+/// boundaries instead of being clipped away.
+pub(crate) fn diagnostic_banner_lines(message: &str, width: u16, height: u16) -> Vec<String> {
+    let wrap_width = (width as usize).saturating_sub(2).max(1);
+    let mut lines = Vec::new();
+    for line in message.lines().filter(|line| !line.trim().is_empty()) {
+        let mut current = String::new();
+        for word in line.split_whitespace() {
+            if current.is_empty() {
+                current.push_str(word);
+            } else if current.chars().count() + 1 + word.chars().count() <= wrap_width {
+                current.push(' ');
+                current.push_str(word);
+            } else {
+                lines.push(std::mem::take(&mut current));
+                current.push_str(word);
+            }
+        }
+        if !current.is_empty() {
+            lines.push(current);
+        }
+    }
+    lines.truncate(height as usize);
+    lines
+}
+
+/// Draws already-wrapped banner rows. The caller wraps once with
+/// `diagnostic_banner_lines`, so it knows the row count without wrapping twice
+/// per frame.
+pub(crate) fn render_diagnostic_rows(
     buffer: &mut Buffer,
     area: Rect,
-    message: &str,
+    lines: &[String],
     palette: &Palette,
     mut covered: impl FnMut(Rect),
 ) -> u16 {
@@ -100,14 +130,9 @@ pub(crate) fn render_config_diagnostic_buffer(
         .add_modifier(Modifier::BOLD);
     let mut rendered_rows = 0u16;
 
-    for (row, line) in message
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-        .take(area.height as usize)
-        .enumerate()
-    {
+    for (row, line) in lines.iter().take(area.height as usize).enumerate() {
         let text = format!(" {line} ");
-        let width = (text.len() as u16).min(area.width);
+        let width = (text.chars().count() as u16).min(area.width);
         let diagnostic_area = Rect::new(
             area.x + area.width.saturating_sub(width),
             area.y + row as u16,
@@ -127,6 +152,32 @@ pub(crate) fn render_config_diagnostic_buffer(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn a_long_banner_wraps_at_word_boundaries() {
+        let notice = "the running vqro server is a different build (server 0.9.0-dev.561da0e3, \
+                      client 0.9.0)\nrestart it yourself: `vqro server stop`; stopping it exits its \
+                      pane processes, and this client never restarts it.";
+        let lines = diagnostic_banner_lines(notice, 106, 20);
+        assert!(lines.len() > 2, "{lines:?}");
+        for line in &lines {
+            assert!(line.chars().count() <= 104, "{line}");
+        }
+        let command_row = lines
+            .iter()
+            .find(|line| line.contains("vqro server stop"))
+            .unwrap_or_else(|| panic!("command split across rows: {lines:?}"));
+        assert!(command_row.contains("restart it yourself"), "{command_row}");
+        assert!(
+            lines.iter().any(|line| line.contains("exits its pane")),
+            "{lines:?}"
+        );
+    }
+
+    #[test]
+    fn a_banner_never_exceeds_its_height() {
+        let lines = diagnostic_banner_lines("one\ntwo\nthree", 40, 2);
+        assert_eq!(lines, vec!["one".to_owned(), "two".to_owned()]);
+    }
 
     #[test]
     fn copy_feedback_rect_uses_configured_position() {

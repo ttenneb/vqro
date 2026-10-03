@@ -296,6 +296,18 @@ pub(super) fn do_handshake(
             error,
         } => {
             if let Some(error) = error {
+                // A welcome carries the server's own protocol but no build
+                // version, so the protocol decides here. When the server is older,
+                // say which side is stale and name the exact restart command
+                // instead of repeating the server's wording.
+                let client_version = crate::build_info::version();
+                let error = super::errors::server_restart_notice(
+                    &client_version,
+                    &client_version,
+                    PROTOCOL_VERSION,
+                    version,
+                )
+                .unwrap_or(error);
                 return Err(ClientError::HandshakeRejected { version, error });
             }
             info!(version, ?encoding, "handshake succeeded");
