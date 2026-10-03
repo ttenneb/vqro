@@ -44,6 +44,27 @@ WANTED = (
 )
 
 
+def resource_name(entry):
+    entry = entry.lstrip("!+-")
+    parts = [part for part in entry.split("/") if part]
+    return parts[-1] if parts else entry
+
+
+def header_sections(text):
+    """Map each `[Section]` header in Pi's startup header to its whitespace-stripped
+    body, so assertions bind to the real section rather than any occurrence."""
+    sections = {}
+    current = None
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            current = stripped[1:-1].lower()
+            sections[current] = []
+        elif current is not None:
+            sections[current].append(stripped)
+    return {name: "".join(body) for name, body in sections.items()}
+
+
 def package_name(source):
     source = source if isinstance(source, str) else source["source"]
     for prefix in ("npm:", "git:", "http:", "https:"):
@@ -110,7 +131,6 @@ class PiProfileDemo(ReadinessDemo):
         settings["defaultModel"] = "deepseek-chat"
         # A trailing/duplicated-separator directory source must still be excluded.
         settings["packages"].append("/tmp//pi-input-gate//")
-        (agent / "settings.json").write_text(json.dumps(settings, indent=2))
         (agent / "auth.json").write_text('{"deepseek":{"type":"key","key":"demo"}}')
         for name in ("npm", "git"):
             source = human / name
@@ -120,6 +140,13 @@ class PiProfileDemo(ReadinessDemo):
         extensions.mkdir(exist_ok=True)
         (extensions / EXCLUDED_EXTENSION).write_text("export default function () {}\n")
         (extensions / KEPT_EXTENSION).write_text("export default function () {}\n")
+        # An explicit absolute extension path in settings must not bypass the
+        # extension exclusion.
+        settings["extensions"] = [
+            str(extensions / EXCLUDED_EXTENSION),
+            str(extensions / KEPT_EXTENSION),
+        ]
+        (agent / "settings.json").write_text(json.dumps(settings, indent=2))
         skills = agent / "skills"
         skills.mkdir(exist_ok=True)
         for name in (*HERDR_SKILLS, KEPT_SKILL):
@@ -156,6 +183,8 @@ class PiProfileDemo(ReadinessDemo):
         names = [package_name(entry) for entry in settings["packages"]]
         assert not [name for name in names if name in EXCLUDED], names
         assert sorted(names) == sorted(WANTED), names
+        explicit = [resource_name(entry) for entry in settings.get("extensions", [])]
+        assert EXCLUDED_EXTENSION not in explicit, explicit
 
         # Profile layout: excluded resources gone, kept ones and the Vqro system
         # prompt present.
@@ -195,10 +224,15 @@ class PiProfileDemo(ReadinessDemo):
         self.wait_output(agent, r"Skills", 20)
         header = self.cli("pane", "read", agent, "--source", "visible", "--format", "text", "--lines", "80")
         sanitized = header.replace(str(self.root), "")
+        sections = header_sections(sanitized)
+        context = sections.get("context", "")
+        skills = sections.get("skills", "")
+        extensions_section = sections.get("extensions", "")
+        assert "/pi-agent/SYSTEM.md" in context, (context, sanitized)
+        assert "vqro" in skills, (skills, sanitized)
+        assert "vqro-reply-routing.ts" in extensions_section, (extensions_section, sanitized)
         for name in (*EXCLUDED, *HERDR_SKILLS, EXCLUDED_EXTENSION):
             assert name not in sanitized, (name, sanitized)
-        for wanted in ("vqro", "vqro-reply-routing", "SYSTEM.md"):
-            assert wanted in sanitized, (wanted, sanitized)
 
         pane_pid = self.cli("pane", "process-info", "--pane", agent)["result"]["process_info"]["shell_pid"]
         observed = []

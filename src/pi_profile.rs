@@ -169,6 +169,7 @@ pub(crate) fn ensure_profile() -> io::Result<()> {
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
     derive_packages(&mut settings, &human);
     derive_paths(&mut settings, &human);
+    drop_excluded_resources(&mut settings);
     std::fs::create_dir_all(&profile)?;
     let settings_path = profile.join("settings.json");
     crate::bundled::safe_under(&profile, &settings_path)?;
@@ -176,6 +177,12 @@ pub(crate) fn ensure_profile() -> io::Result<()> {
     write_if_changed(&settings_path, &body)?;
     mirror_entries(&human, &profile)?;
     let system = profile.join("SYSTEM.md");
+    // A profile built before SYSTEM.md was replaced holds our own symlink to the
+    // human's file. Unlink the link (never its target) before writing ours, so an
+    // upgrade does not fall back to the global config.
+    if std::fs::symlink_metadata(&system).is_ok_and(|meta| meta.file_type().is_symlink()) {
+        std::fs::remove_file(&system)?;
+    }
     crate::bundled::safe_under(&profile, &system)?;
     write_if_changed(&system, VQRO_SYSTEM_MD)?;
     let marker = profile.join(READY_MARKER);
@@ -238,6 +245,31 @@ fn absolutize_filter(human: &Path, entry: &str) -> Option<String> {
     let rest = entry.strip_prefix(FILTER_OPERATORS).unwrap_or(entry);
     let operator = &entry[..entry.len() - rest.len()];
     Some(format!("{operator}{}", absolutize(human, rest)?))
+}
+
+/// Drop excluded-by-name entries from settings resource lists, so an explicit
+/// absolute path cannot re-enable an excluded extension or skill.
+fn drop_excluded_resources(settings: &mut Value) {
+    let Some(object) = settings.as_object_mut() else {
+        return;
+    };
+    for (key, excluded) in PER_ENTRY_DIRS {
+        if let Some(Value::Array(items)) = object.get_mut(*key) {
+            items.retain(|item| match item {
+                Value::String(value) => !excluded.contains(&resource_name(value)),
+                _ => true,
+            });
+        }
+    }
+}
+
+/// The name a resource path or pattern selects, ignoring a filter operator and any
+/// empty or trailing path components.
+fn resource_name(entry: &str) -> &str {
+    let rest = entry.strip_prefix(FILTER_OPERATORS).unwrap_or(entry);
+    rest.split(['/', '\\'])
+        .rfind(|part| !part.is_empty())
+        .unwrap_or(rest)
 }
 
 /// The absolute form of a relative local path, or `None` when it is not one.
@@ -366,6 +398,14 @@ fn mirror_directory(source: &Path, target: &Path, excluded: &[&str]) -> io::Resu
             continue;
         }
         link_or_skip(&entry.path(), &target.join(name.as_ref()))?;
+    }
+    // An excluded leaf can be left in the profile by an earlier layout; drop our
+    // own symlink, never a real file.
+    for name in excluded {
+        let leaf = target.join(name);
+        if std::fs::symlink_metadata(&leaf).is_ok_and(|meta| meta.file_type().is_symlink()) {
+            std::fs::remove_file(&leaf)?;
+        }
     }
     Ok(())
 }
@@ -518,6 +558,24 @@ mod tests {
             kept[0]["source"],
             "/home/h/.pi/agent/../../Projects/pi-system-prompt"
         );
+    }
+
+    #[test]
+    fn explicit_resource_paths_are_filtered_by_name() {
+        let mut value = serde_json::json!({
+            "extensions": [
+                "/abs/herdr-agent-state.ts",
+                "keep-extension.ts",
+                "!../herdr-agent-state.ts",
+            ],
+            "skills": ["herdr", "/opt/skills/check-session-loaded", "keep-skill"],
+        });
+        drop_excluded_resources(&mut value);
+        assert_eq!(
+            value["extensions"],
+            serde_json::json!(["keep-extension.ts"])
+        );
+        assert_eq!(value["skills"], serde_json::json!(["keep-skill"]));
     }
 
     #[cfg(unix)]
