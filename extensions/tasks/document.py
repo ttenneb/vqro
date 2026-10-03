@@ -21,7 +21,9 @@ def bounded(text):
 def project(store, snapshot):
     refs = snapshot.get("terminals")
     placements = None if refs is None else {row["terminal_id"]: row["placement"] for row in refs}
-    tasks = [store.task(row[0]) for row in store.db.execute("SELECT id FROM tasks ORDER BY id")]
+    # No database yet is a fresh empty installation. A present unreadable or
+    # unsupported database is rejected by the provider, never silently empty.
+    tasks = [] if store is None else [store.task(row[0]) for row in store.db.execute("SELECT id FROM tasks ORDER BY id")]
     items = [{"id": PREFIX + "view:vqro.tasks:tree", "role": "section", "label": "Tasks",
               "detail": "Read-only durable attention · live status in full view"}]
     items.extend({"id": PREFIX + f"measure:{index}", "role": "section", "label": text}

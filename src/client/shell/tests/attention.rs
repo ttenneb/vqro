@@ -60,6 +60,43 @@ fn missing_attention_pane_method_disables_only_click() {
 }
 
 #[test]
+fn fresh_empty_tasks_document_is_healthy_zero_not_unavailable() {
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    state.set_endpoint_status(&ClientEndpointId::Local, ClientEndpointStatus::Online);
+    state.set_endpoint_snapshot_for_generation(&ClientEndpointId::Local, 1, Box::new(snapshot()));
+    state.set_pane_surface(surface());
+    let projection = serde_json::from_value(serde_json::json!({
+        "contract":"host.documents.v1", "boot_id":"boot-1", "revision":1,
+        "documents":[{"provider_priority":1,"document":{
+            "contract":"host.document.v1", "namespace":"vqro.tasks", "generation":7,"revision":2,
+            "surface":"navigation","target":{"kind":"session"},
+            "items":[
+                {"id":"context:attention.view:vqro.tasks:tree", "role":"section","label":"Tasks"},
+                {"id":"context:attention.measure:0", "role":"section","label":"waiting on you"},
+                {"id":"context:attention.measure:1", "role":"section","label":"blocked"},
+                {"id":"context:attention.measure:2", "role":"section","label":"unavailable"}
+            ],
+            "actions":[],"required_capabilities":[]
+        }}]
+    }))
+    .expect("empty Tasks projection");
+    state.set_endpoint_host_documents_for_generation(
+        &ClientEndpointId::Local,
+        1,
+        Box::new(projection),
+    );
+    let frame = state.compose(106, 30).expect("empty Tasks frame");
+    let text = frame
+        .cells
+        .iter()
+        .map(|cell| cell.symbol.as_str())
+        .collect::<String>();
+    assert!(text.contains("No durable attention"), "{text}");
+    assert!(!text.contains("Tasks unavailable"), "{text}");
+    assert!(!state.show_agents);
+}
+
+#[test]
 fn tasks_default_is_unavailable_not_zero_and_agents_toggle_keeps_recovery() {
     let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
     state.set_snapshot(Box::new(snapshot()));

@@ -27,6 +27,13 @@ sources. The hint is not part of persisted/replayed operation outcomes. Equal no
 changed placement retires old observation immediately. Failed/disabled providers
 show unavailable rather than healthy zero, and retirement fences late replies.
 
+An enabled, healthy Tasks provider with no `tasks.sqlite` yet publishes an empty
+observation: a fresh install works before its first core action. The document
+path creates no directory/database and performs no migration or policy write;
+a later sample opens the store once the core action runtime has initialized it.
+Present unreadable, corrupt or unsupported-version stores still fail unavailable,
+not healthy zero. This is package-owned absence policy, not host task knowledge.
+
 Known follow-up limitation: a background decision deadline auto-apply has no action
 response carrying the revision hint. Native badges refresh on the next action,
 read or host-source change; the full Tasks pane's own polling observes it sooner.

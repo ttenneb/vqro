@@ -608,13 +608,25 @@ def emit(value):
 
 def read_only_store(directory):
     """Observation connection: never initialize, migrate or write the Tasks store."""
+    path = Path(directory) / "tasks.sqlite"
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        # Fresh installation: absence is an empty observation, not a write or
+        # migration. Other IO errors and dangling files still fail unavailable.
+        return None
     store = Store.__new__(Store)
-    store.db = sqlite3.connect((Path(directory) / "tasks.sqlite").resolve().as_uri() + "?mode=ro", uri=True, timeout=1, isolation_level=None)
+    store.db = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True, timeout=1, isolation_level=None)
     store.db.row_factory = sqlite3.Row
-    store.decisions = decision_queue.Queue(store, 900, OutcomeUnknown)
-    if store.db.execute("PRAGMA user_version").fetchone()[0] != 4:
+    try:
+        version = store.db.execute("PRAGMA user_version").fetchone()[0]
+    except sqlite3.Error:
+        store.db.close()
+        raise
+    if version != 4:
         store.db.close()
         raise ValueError("Tasks document requires current store version")
+    store.decisions = decision_queue.Queue(store, 900, OutcomeUnknown)
     return store
 
 
@@ -675,13 +687,16 @@ def main():
             try:
                 if document_store is None:
                     document_store = read_only_store(directory)
-                document_store.db.execute("BEGIN")
-                if document_store.db.execute("PRAGMA user_version").fetchone()[0] != 4:
-                    raise ValueError("Tasks document requires current store version")
-                document = project(document_store, request["params"])
-                document_store.db.rollback()
+                if document_store is None:
+                    document = project(None, request["params"])
+                else:
+                    document_store.db.execute("BEGIN")
+                    if document_store.db.execute("PRAGMA user_version").fetchone()[0] != 4:
+                        raise ValueError("Tasks document requires current store version")
+                    document = project(document_store, request["params"])
+                    document_store.db.rollback()
                 emit({"type": "response", "id": request["id"], "result": document})
-            except (ValueError, KeyError, TypeError, sqlite3.Error) as error:
+            except (ValueError, KeyError, TypeError, sqlite3.Error, OSError) as error:
                 if document_store is not None and hasattr(document_store, "db"):
                     document_store.db.rollback()
                 else:

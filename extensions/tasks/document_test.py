@@ -59,8 +59,15 @@ class DocumentTests(unittest.TestCase):
         self.assertEqual(set(),view.durable_attention({**task,"state":"in_progress","owner":H,"owed_action":"report","owed_to":H},{"human":P}))
     def test_read_only_store_never_initializes_or_migrates_and_sees_new_commits(self):
         with tempfile.TemporaryDirectory() as missing:
-            with self.assertRaises(sqlite3.OperationalError):provider.read_only_store(missing)
+            self.assertIsNone(provider.read_only_store(missing))
+            empty=document.project(None,self.snapshot())
+            self.assertFalse(empty["actions"])
+            self.assertTrue(any(row["id"].endswith("view:vqro.tasks:tree") for row in empty["items"]))
+            self.assertFalse(any("badge:" in row["id"] or "row:" in row["id"] for row in empty["items"]))
             self.assertEqual([],list(Path(missing).iterdir()))
+            absent=Path(missing)/"not-created"
+            self.assertIsNone(provider.read_only_store(absent))
+            self.assertFalse(absent.exists())
         observed=provider.read_only_store(self.root.name)
         try:
             with self.assertRaises(sqlite3.OperationalError):observed.db.execute("CREATE TABLE forbidden (id TEXT)")
@@ -71,6 +78,43 @@ class DocumentTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError,"current store version"):provider.read_only_store(self.root.name)
             self.assertEqual(5,self.store.db.execute("PRAGMA user_version").fetchone()[0])
         finally:observed.db.close()
+    def test_missing_store_then_first_commit_is_seen_by_same_document_process(self):
+        with tempfile.TemporaryDirectory() as root:
+            missing=Path(root)/"fresh"
+            proc=subprocess.Popen([sys.executable,"-B",str(Path(provider.__file__).resolve()),"--native-attention","--data-dir",str(missing)],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+            def send(value):
+                proc.stdin.write(json.dumps(value)+"\n");proc.stdin.flush()
+                import select
+                self.assertTrue(select.select([proc.stdout],[],[],5)[0],"document reply timed out")
+                return json.loads(proc.stdout.readline())
+            store=None
+            try:
+                send({"type":"welcome","protocol":2,"granted_capabilities":["action_invoke","host_document"],"methods":["action.invoke.v1","host.document.render"]})
+                request={"type":"request","id":"read","method":"host.document.render","params":self.snapshot()}
+                empty=send(request)
+                self.assertIn("result",empty)
+                self.assertFalse(missing.exists())
+                store=provider.Store(missing)
+                task=store.invoke({"caller":H,"payload":{"action":"decision","title":"first human decision","done_when":"Choice recorded.","options":[{"key":"yes","label":"Yes"},{"key":"no","label":"No"}],"default":"yes","reversible":True,"waiting_cost":"Work waits.","operation_id":"first"}})["task"]
+                populated=send({**request,"id":"after-commit"})
+                self.assertTrue(any(row["label"]==task["title"] for row in populated["result"]["items"]))
+            finally:
+                if store is not None:store.db.close()
+                proc.stdin.close()
+                try:proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    proc.kill();proc.wait(timeout=5)
+                proc.stdout.close();proc.stderr.close()
+
+    def test_present_corrupt_or_dangling_store_is_not_empty(self):
+        with tempfile.TemporaryDirectory() as root:
+            path=Path(root)/"tasks.sqlite"
+            path.write_bytes(b"not a database")
+            with self.assertRaises(sqlite3.DatabaseError):provider.read_only_store(root)
+            path.unlink()
+            path.symlink_to(Path(root)/"missing-target")
+            with self.assertRaises(sqlite3.OperationalError):provider.read_only_store(root)
+
     def test_protocol_document_only_missing_store_no_writes_and_current_version_outside_receipt(self):
         with tempfile.TemporaryDirectory() as missing:
             welcome={"type":"welcome","protocol":2,"granted_capabilities":["action_invoke","host_document"],"methods":["action.invoke.v1","host.document.render"]}
@@ -78,7 +122,10 @@ class DocumentTests(unittest.TestCase):
             proc=subprocess.run([sys.executable,"-B",str(Path(provider.__file__).resolve()),"--native-attention","--data-dir",missing],input=json.dumps(welcome)+"\n"+json.dumps(request)+"\n",capture_output=True,text=True,timeout=5)
             self.assertEqual(0,proc.returncode,proc.stderr)
             lines=[json.loads(line) for line in proc.stdout.splitlines()]
-            self.assertIn("error",lines[1]);self.assertEqual([],list(Path(missing).iterdir()))
+            self.assertNotIn("error",lines[1])
+            self.assertEqual("host.document.v1",lines[1]["result"]["contract"])
+            self.assertFalse(any("badge:" in row["id"] or "row:" in row["id"] for row in lines[1]["result"]["items"]))
+            self.assertEqual([],list(Path(missing).iterdir()))
         welcome={"type":"welcome","protocol":2,"granted_capabilities":["action_invoke","host_document"],"methods":["action.invoke.v1","host.document.render"]}
         create={"action":"create","title":"receipt","done_when":"Recorded.","operation_id":"original"}
         requests=[{"type":"request","id":str(n),"method":"action.invoke.v1","params":{"caller":H,"payload":payload}} for n,payload in enumerate([create,{**create,"operation_id":"later"},create])]

@@ -11,6 +11,13 @@ vqro
 
 Keep it running. Create a workspace with **New** if needed. Run the next block **in a human shell pane inside Vqro**, not in the outside terminal: task writes need its current caller identity. Agent starts open their own panes and keep focus in your shell. Existing names are refused; choose fresh names if you already have task-a/task-b.
 
+The native Tasks panel should already be empty and working, not **Tasks unavailable**, even before the first core action. To see the empty full Tasks pane, run this in your human shell, then select that shell again:
+
+<!-- human-empty -->
+```sh
+vqro task tree
+```
+
 ## 2. Start two agents and import a small plan
 
 <!-- human-setup -->

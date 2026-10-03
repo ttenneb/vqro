@@ -55,7 +55,7 @@ class ReadinessDemo(Demo):
 
     def guide_block(self, step):
         guide = Path(__file__).resolve().parents[2] / "docs/next/first-10-minutes.md"
-        # Four fixed blocks in this one guide, not a general Markdown runner.
+        # Fixed blocks in this one guide, not a general Markdown runner.
         marker = f"<!-- {step} -->\n```sh\n"
         text = guide.read_text()
         assert text.count(marker) == 1, f"missing/duplicate guide block {step}"
@@ -168,6 +168,21 @@ class ReadinessDemo(Demo):
             raise RuntimeError(f"expected one bundled root, found {roots}")
         return roots[0]
 
+    def wait_fresh_empty_attention(self):
+        """Native admission must be healthy before any core call creates a DB."""
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline:
+            documents = self.api("host.document.list", {"namespace": TASKS_NAMESPACE})["result"]["documents"]
+            for entry in documents:
+                items = entry["document"]["items"]
+                if any(item["id"] == "context:attention.view:vqro.tasks:tree" for item in items):
+                    assert not any("badge:" in item["id"] or "row:" in item["id"] for item in items), items
+                    assert not list(self.root.rglob("tasks.sqlite")), "core store already initialized"
+                    self.save("fresh-empty-document.json", entry)
+                    return
+            time.sleep(0.1)
+        raise RuntimeError("fresh native Tasks document unavailable before first core action")
+
     def attention_badges(self):
         """Admitted host documents for the Tasks attention namespace."""
         documents = self.api("host.document.list", {"namespace": TASKS_NAMESPACE})["result"]["documents"]
@@ -212,9 +227,15 @@ class ReadinessDemo(Demo):
         skill = pi_dirs[0] / "skills" / "vqro" / "SKILL.md"
         assert adapter.is_file() and skill.is_file(), (adapter, skill)
 
+        self.wait_fresh_empty_attention()
+
         # R2: two Pi panes are started by Vqro with the adapter and skill auto-loaded.
         human = self.cli("workspace", "create", "--cwd", str(self.root / "work"), "--no-focus")["result"]["root_pane"]["pane_id"]
         self.remember_pane(human)
+        self.guide_human(human, "human-empty")
+        assert self.cli("task", "list")["tasks"] == []
+        human_tab = self.cli("pane", "get", human)["result"]["pane"]["tab_id"]
+        self.cli("tab", "focus", human_tab)  # guide: select the human shell again
         self.guide_human(human, "human-setup")
         a = self.cli("agent", "get", "task-a")["result"]["agent"]["pane_id"]
         b = self.cli("agent", "get", "task-b")["result"]["agent"]["pane_id"]
@@ -290,7 +311,8 @@ class ReadinessDemo(Demo):
                   "defaults_auto_linked": True,
                   "pi_adapter_skill_flags_passed": True,
                   "evidence_limit": "Pi flags recorded from a wrapper argv; no SDK loaded-resource or attached-TUI assertion",
-                  "imported_tasks": 2, "literal_guide_blocks": 5, "named_agent_panes": True,
+                  "imported_tasks": 2, "literal_guide_blocks": 6, "fresh_empty_native_before_core_action": True,
+                  "empty_full_tasks_before_first_task": True, "named_agent_panes": True,
                   "named_plan_owners_and_delegation": True, "name_failures_write_nothing": True,
                   "existing_name_creates_no_pane": True, "blocked_badge": counts, "decision_human_only": True,
                   "durable_message_claimed_by_name": True}
