@@ -162,7 +162,9 @@ export default function (pi: ExtensionAPI) {
     const content = messages.map(renderMessage).join("\n\n");
     // Prefer the live SDK idle state; a queued followUp never wakes a settled agent.
     const idle = typeof latestCtx?.isIdle === "function" ? latestCtx.isIdle() : !turnActive;
-    if (idle) pi.sendUserMessage(content);
+    // Always pass the queue option: an idle sample can race a run starting during
+    // the SDK's input hooks, and an unqueued sendUserMessage then throws.
+    if (idle) pi.sendUserMessage(content, { deliverAs: "followUp" });
     else pi.sendMessage({ customType: "vqro-message", content, display: true }, { deliverAs: "followUp" });
   }
 
