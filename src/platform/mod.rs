@@ -120,6 +120,23 @@ pub(crate) fn classify_child_exit(_status: &portable_pty::ExitStatus) -> ChildEx
     ChildExitReason::Exited
 }
 
+/// Explicit executable-extension CLI invocation. Replacement keeps the native
+/// peer PID/direct-shell-child topology; never substitute ordinary spawn here.
+pub(crate) fn foreground_cli_command(command: std::process::Command) -> std::io::Result<i32> {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        unix_common::foreground_cli_command(command)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = command;
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "extension CLI commands are not supported yet on this platform",
+        ))
+    }
+}
+
 #[cfg(not(target_os = "linux"))]
 pub(crate) fn launch_executable() -> std::io::Result<std::path::PathBuf> {
     std::env::current_exe()

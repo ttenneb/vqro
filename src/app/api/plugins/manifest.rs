@@ -29,6 +29,8 @@ struct RawPluginManifest {
     #[serde(default)]
     services: Vec<RawPluginManifestService>,
     #[serde(default)]
+    cli_commands: Vec<crate::extension_cli::CliCommand>,
+    #[serde(default)]
     actions: Vec<RawPluginManifestAction>,
     #[serde(default)]
     events: Vec<RawPluginManifestEventHook>,
@@ -222,6 +224,8 @@ pub(crate) fn load_plugin_manifest(
             "only extension manifest version 1 is supported".into(),
         ));
     }
+    crate::extension_cli::validate(&manifest_source.cli_commands)
+        .map_err(|message| ("invalid_extension_cli_command", message))?;
     let plugin_id = normalize_plugin_id(&manifest_source.id)
         .ok_or_else(|| ("invalid_plugin_id", "invalid plugin id".to_string()))?;
     let name = non_empty_trimmed(

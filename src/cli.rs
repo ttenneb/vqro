@@ -30,7 +30,6 @@ mod delegation;
 mod extension;
 mod integration;
 mod machine;
-mod message;
 mod notification;
 mod pane;
 mod plugin;
@@ -43,7 +42,6 @@ mod spec;
 mod status;
 mod tab;
 mod target;
-mod task;
 mod workspace;
 mod worktree;
 
@@ -135,8 +133,6 @@ pub fn maybe_run(args: &[String]) -> std::io::Result<CommandOutcome> {
         "collection" => collection::run_collection_command(&args[2..])?,
         "service-binding" => service_binding::run_service_binding_command(&args[2..])?,
         "extension" => extension::run_extension_command(&args[2..])?,
-        "task" => task::run_task_command(&args[2..])?,
-        "message" => message::run_message_command(&args[2..])?,
         "delegation" => delegation::run_delegation_command(&args[2..])?,
         "notification" => notification::run_notification_command(&args[2..])?,
         "agent" => agent::run_agent_command(&args[2..])?,
@@ -145,7 +141,8 @@ pub fn maybe_run(args: &[String]) -> std::io::Result<CommandOutcome> {
         "plugin" => plugin::run_plugin_command(&args[2..])?,
         "integration" => integration::run_integration_command(&args[2..])?,
         "session" => run_session_command(&args[2..])?,
-        _ => return Ok(CommandOutcome::NotCli),
+        _ if command.starts_with('-') => return Ok(CommandOutcome::NotCli),
+        _ => crate::extension_cli::run(command, &args[2..], target::is_remote())?,
     };
 
     Ok(CommandOutcome::Handled(exit_code))

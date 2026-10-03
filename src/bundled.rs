@@ -51,6 +51,7 @@ const TASKS_FILES: &[(&str, &str)] = &[
         include_str!("../extensions/tasks/messages.py"),
     ),
     ("graph.py", include_str!("../extensions/tasks/graph.py")),
+    ("cli.py", include_str!("../extensions/tasks/cli.py")),
 ];
 const PI_ADAPTER: &str = include_str!("../extensions/pi-reply-routing/index.ts");
 const VQRO_SKILL: &str = include_str!("../skills/vqro/SKILL.md");

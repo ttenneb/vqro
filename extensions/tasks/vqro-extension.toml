@@ -5,6 +5,16 @@ version = "0.1.0"
 min_vqro_version = "0.9.0"
 platforms = ["linux"]
 
+[[cli_commands]]
+name = "task"
+description = "Inspect and update Tasks"
+command = ["python3", "./cli.py", "task"]
+
+[[cli_commands]]
+name = "message"
+description = "Send and claim durable Tasks messages"
+command = ["python3", "./cli.py", "message"]
+
 [[services]]
 id = "core"
 provides = ["action_invoke", "host_document"]
