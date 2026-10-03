@@ -159,7 +159,7 @@ Human only (never answer your own decision or impersonate the human):
 vqro task answer "$TASK_ID" a --rev "$REV" --note "A is approved"
 ```
 
-Decisions need 2–4 options, a default, a reversible flag and a waiting cost; a reversible decision may also take `--auto-at` (see the decision policy). The answer selects an option key and is not quote-validated. Do not assume creating a decision notifies/wakes the human. Write your final reply for whoever started your turn: when an agent's message started it, the reply-routing adapter sends that final text back to that agent automatically and records it; a human-started turn stays a normal chat. A message you send with `vqro agent prompt` is auto-labelled from your pane (`[agent <name> · reply expected]`; `--no-reply-expected` drops the reply expectation); anything not labelled as an agent message is treated as human and never routed. To reach anyone else, record a report/decision and explicitly notify them with the task ID. Keep human-needed decisions in Tasks; final prose is neither delivery proof nor a committed task receipt.
+Decisions need 2–4 options, a default, a reversible flag and a waiting cost; a reversible decision may also take `--auto-at` (see the decision policy). The answer selects an option key and is not quote-validated. Do not assume creating a decision notifies/wakes the human. Write your final reply for whoever started your turn: when an agent's message started it, the Tasks Pi consumer sends that final text back automatically under the accepted [legacy prompt-reply transition](../../docs/next/architecture/tasks-legacy-prompt-reply-transition.md); its local routing entry is not a durable message record. A human-started turn stays a normal chat. A message you send with `vqro agent prompt` is auto-labelled from your pane (`[agent <name> · reply expected]`; `--no-reply-expected` drops the reply expectation); unlabelled input is never automatically routed; labels do not manufacture host human classification. To reach anyone else, record a report/decision and explicitly notify them with the task ID. Keep human-needed decisions in Tasks; final prose is neither delivery proof nor a committed task receipt.
 
 ### Uncertain outcomes: lookup, never blind retry
 
@@ -179,7 +179,7 @@ Read current tasks for current state; operation receipts return historical outco
 
 ## Durable addressed messages
 
-Messages are their own durable record in the same trusted Tasks extension, with the sender taken from the host-observed connection (not a self-declared text label). They survive restarts, are editable until picked up, and reach Pi through the reply-routing adapter at a turn boundary, never by typing into a pane.
+Messages are their own durable record in the same trusted Tasks extension, with the sender taken from the host-observed connection (not a self-declared text label). They survive restarts, are editable until picked up, and reach Pi through the Tasks Pi consumer and neutral adapter at a turn boundary, never by typing into a pane.
 
 ```bash
 vqro message send <target> "..." [--reply-to MESSAGE_ID]

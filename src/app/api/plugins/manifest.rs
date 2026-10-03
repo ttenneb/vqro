@@ -29,6 +29,8 @@ struct RawPluginManifest {
     #[serde(default)]
     services: Vec<RawPluginManifestService>,
     #[serde(default)]
+    cli_commands: Vec<crate::extension_cli::CliCommand>,
+    #[serde(default)]
     actions: Vec<RawPluginManifestAction>,
     #[serde(default)]
     events: Vec<RawPluginManifestEventHook>,
@@ -187,6 +189,15 @@ pub(crate) fn load_plugin_manifest(
     path: &str,
     enabled: bool,
 ) -> Result<InstalledPluginInfo, (&'static str, String)> {
+    load_plugin_manifest_with_cli(path, enabled).map(|(plugin, _)| plugin)
+}
+
+/// One manifest observation for metadata and executable CLI declarations. The
+/// additional result is internal; InstalledPluginInfo's frozen fields stay fixed.
+pub(crate) fn load_plugin_manifest_with_cli(
+    path: &str,
+    enabled: bool,
+) -> Result<(InstalledPluginInfo, Vec<crate::extension_cli::CliCommand>), (&'static str, String)> {
     let path = std::path::PathBuf::from(path);
     let manifest_path = if path.is_dir() {
         let native = path.join(crate::extension_spec::EXTENSION_MANIFEST_FILE_V1);
@@ -222,6 +233,8 @@ pub(crate) fn load_plugin_manifest(
             "only extension manifest version 1 is supported".into(),
         ));
     }
+    crate::extension_cli::validate(&manifest_source.cli_commands)
+        .map_err(|message| ("invalid_extension_cli_command", message))?;
     let plugin_id = normalize_plugin_id(&manifest_source.id)
         .ok_or_else(|| ("invalid_plugin_id", "invalid plugin id".to_string()))?;
     let name = non_empty_trimmed(
@@ -322,27 +335,30 @@ pub(crate) fn load_plugin_manifest(
         warnings.push("manifest does not declare platforms; platform support unknown".to_string());
     }
 
-    Ok(InstalledPluginInfo {
-        plugin_id,
-        name,
-        version,
-        min_herdr_version,
-        description,
-        manifest_path: manifest_path.display().to_string(),
-        plugin_root: plugin_root.display().to_string(),
-        enabled,
-        load_order: 0,
-        platforms,
-        build,
-        startup,
-        services,
-        actions,
-        events,
-        panes,
-        link_handlers,
-        source: Default::default(),
-        warnings,
-    })
+    Ok((
+        InstalledPluginInfo {
+            plugin_id,
+            name,
+            version,
+            min_herdr_version,
+            description,
+            manifest_path: manifest_path.display().to_string(),
+            plugin_root: plugin_root.display().to_string(),
+            enabled,
+            load_order: 0,
+            platforms,
+            build,
+            startup,
+            services,
+            actions,
+            events,
+            panes,
+            link_handlers,
+            source: Default::default(),
+            warnings,
+        },
+        manifest_source.cli_commands,
+    ))
 }
 
 fn validate_min_herdr_version(value: Option<&str>) -> Result<String, (&'static str, String)> {

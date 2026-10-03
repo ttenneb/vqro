@@ -7,7 +7,8 @@ import extension, {
   renderMessage,
   MAILBOX_POLL_MS,
   MAX_REPLY_BYTES,
-} from "./index";
+} from "./pi";
+import adapter from "../vqro-pi/index";
 
 const savedEnv = { ...process.env };
 
@@ -35,12 +36,20 @@ interface Harness {
   emit: (name: string, event: any, ctx?: any) => Promise<any[]>;
 }
 
-function harness(exec?: (args: string[]) => any): Harness {
+function harness(exec?: (args: string[]) => any, consumerFirst = false): Harness {
   const handlers = new Map<string, ((event: any, ctx: any) => Promise<any>)[]>();
   const entries: any[] = [];
   const calls: { args: string[] }[] = [];
   const sent: string[] = [];
+  const bus = new Map<string, Set<(value: any) => void>>();
   const pi: any = {
+    events: {
+      emit(name: string, value: any) { for (const listener of [...(bus.get(name) ?? [])]) listener(value); },
+      on(name: string, listener: (value: any) => void) {
+        const set = bus.get(name) ?? new Set(); set.add(listener); bus.set(name, set);
+        return () => set.delete(listener);
+      },
+    },
     on(name: string, handler: (event: any, ctx: any) => Promise<any>) {
       const list = handlers.get(name) ?? [];
       list.push(handler);
@@ -57,14 +66,20 @@ function harness(exec?: (args: string[]) => any): Harness {
     },
     async exec(_bin: string, args: string[]) {
       calls.push({ args });
-      if (exec) return exec(args);
+      if (exec) {
+        const response = await exec(args);
+        if (!(response?.code === 0 && !response.stdout && ((args[0] === "agent" && args[1] === "get") || (args[0] === "task" && args[1] === "whoami")))) return response;
+      }
+      if (args[0] === "task" && args[1] === "whoami") return { code: 0, stdout: JSON.stringify({ caller: { class: "agent" } }), stderr: "" };
       if (args[0] === "agent" && args[1] === "get") {
         return { code: 0, stdout: JSON.stringify({ result: { agent: { name: "beta", execution: "exec-beta" } } }), stderr: "" };
       }
       return { code: 0, stdout: "", stderr: "" };
     },
   };
-  extension(pi);
+  if (consumerFirst) extension(pi);
+  adapter(pi);
+  if (!consumerFirst) extension(pi);
   return {
     entries,
     calls,
@@ -327,9 +342,35 @@ test("an idle SDK state wakes even when the local turn flag is stale", async () 
 
 test("a starting-turn claim after shutdown is recorded, not injected", async () => {
   const claimed = [{ id: "m1", body: "x", sender: "{}" }];
-  const h = harness((args) => (args[0] === "message" && args[1] === "claim" ? { code: 0, stdout: JSON.stringify({ claimed }), stderr: "" } : { code: 0, stdout: "", stderr: "" }));
+  let release: any, started: any;
+  const begun = new Promise<void>(resolve => { started = resolve; });
+  const h = harness((args) => {
+    if (args[0] === "message" && args[1] === "claim") {
+      started(); return new Promise(resolve => { release = () => resolve({ code: 0, stdout: JSON.stringify({ claimed }), stderr: "" }); });
+    }
+    return { code: 0, stdout: "", stderr: "" };
+  });
+  const pending = h.emit("before_agent_start", { prompt: "hi" });
+  await begun;
   await h.emit("session_shutdown", {});
-  const results = await h.emit("before_agent_start", { prompt: "hi" });
+  release();
+  const results = await pending;
   expect(results.some((result) => result?.message)).toBe(false);
   expect(h.entries.some((entry) => entry.data.kind === "messages-undelivered")).toBe(true);
+});
+
+test("consumer loaded before adapter discovers the same interface", async () => {
+  const h = harness(undefined, true);
+  await h.emit("before_agent_start", { prompt: "[agent alpha · reply expected] x" });
+  await h.emit("turn_end", turnText("answer"));
+  await h.emit("agent_settled", {});
+  expect(prompts(h)).toHaveLength(1);
+});
+
+test("unavailable Tasks cannot route legacy replies", async () => {
+  const h = harness(args => args[0] === "task" ? { code: 1, stdout: "", stderr: "unavailable" } : { code: 0, stdout: "", stderr: "" });
+  await h.emit("before_agent_start", { prompt: "[agent alpha · reply expected] x" });
+  await h.emit("turn_end", turnText("answer"));
+  await h.emit("agent_settled", {});
+  expect(prompts(h)).toHaveLength(0);
 });

@@ -80,7 +80,7 @@ pi-launch-profile-test:
 
 # Test the Pi reply-routing adapter without a server or model.
 pi-reply-routing-test:
-    bun test extensions/pi-reply-routing/index.test.ts
+    bun test extensions/vqro-pi/index.test.ts extensions/tasks/pi.test.ts
 
 # Download the Windows SDK once (requires xwin; prompts for Microsoft's SDK license)
 [unix]

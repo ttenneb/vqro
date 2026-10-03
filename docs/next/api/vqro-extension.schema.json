@@ -747,6 +747,40 @@
     },
     "manifest": {
       "$defs": {
+        "CliCommand": {
+          "additionalProperties": false,
+          "description": "Internal manifest data only: never add this to a frozen endpoint codec.",
+          "properties": {
+            "command": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "description": {
+              "default": "",
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "platforms": {
+              "default": null,
+              "items": {
+                "$ref": "#/$defs/PluginPlatform"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "name",
+            "command"
+          ],
+          "type": "object"
+        },
         "ExtensionServiceCapability": {
           "enum": [
             "view_contribution",
@@ -784,6 +818,14 @@
             "split",
             "tab",
             "zoomed"
+          ],
+          "type": "string"
+        },
+        "PluginPlatform": {
+          "enum": [
+            "linux",
+            "macos",
+            "windows"
           ],
           "type": "string"
         },
@@ -1098,6 +1140,12 @@
         "build": {
           "items": {
             "$ref": "#/$defs/RawPluginManifestBuild"
+          },
+          "type": "array"
+        },
+        "cli_commands": {
+          "items": {
+            "$ref": "#/$defs/CliCommand"
           },
           "type": "array"
         },

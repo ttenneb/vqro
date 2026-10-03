@@ -33,6 +33,7 @@ mod detect;
 mod events;
 mod extension_artifact;
 mod extension_candidate;
+mod extension_cli;
 pub mod extension_contract;
 mod extension_git_package;
 mod extension_health;

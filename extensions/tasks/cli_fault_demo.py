@@ -26,6 +26,18 @@ def run_case(binary, name, replies, expected_calls, expected_stderr):
             (root / directory).mkdir(mode=0o700)
         config = root / "config/config.toml"
         config.write_text("[update]\nversion_check = false\nmanifest_check = false\n")
+        # The command is contributed by Tasks, not hardcoded in the binary.
+        # Link only its local CLI declaration into this private fixture registry;
+        # fake replies below remain transport characterization, not admission.
+        package = Path(__file__).resolve().parent
+        for app in ("vqro", "vqro-dev"):
+            directory = root / "config" / app
+            directory.mkdir()
+            (directory / "plugins.json").write_text(json.dumps([{
+                "plugin_id": "vqro.tasks", "name": "Tasks", "version": "0.1.0",
+                "manifest_path": str(package / "vqro-extension.toml"),
+                "plugin_root": str(package), "enabled": True,
+            }]))
         env = {"HOME": str(root / "home"), "XDG_CONFIG_HOME": str(root / "config"),
                "XDG_STATE_HOME": str(root / "state"), "XDG_RUNTIME_DIR": str(root / "run"),
                "VQRO_CONFIG_PATH": str(config), "VQRO_SOCKET_PATH": str(root / "api.sock"),

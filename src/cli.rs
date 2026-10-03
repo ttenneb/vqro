@@ -30,7 +30,6 @@ mod delegation;
 mod extension;
 mod integration;
 mod machine;
-mod message;
 mod notification;
 mod pane;
 mod plugin;
@@ -43,7 +42,6 @@ mod spec;
 mod status;
 mod tab;
 mod target;
-mod task;
 mod workspace;
 mod worktree;
 
@@ -135,8 +133,6 @@ pub fn maybe_run(args: &[String]) -> std::io::Result<CommandOutcome> {
         "collection" => collection::run_collection_command(&args[2..])?,
         "service-binding" => service_binding::run_service_binding_command(&args[2..])?,
         "extension" => extension::run_extension_command(&args[2..])?,
-        "task" => task::run_task_command(&args[2..])?,
-        "message" => message::run_message_command(&args[2..])?,
         "delegation" => delegation::run_delegation_command(&args[2..])?,
         "notification" => notification::run_notification_command(&args[2..])?,
         "agent" => agent::run_agent_command(&args[2..])?,
@@ -145,7 +141,12 @@ pub fn maybe_run(args: &[String]) -> std::io::Result<CommandOutcome> {
         "plugin" => plugin::run_plugin_command(&args[2..])?,
         "integration" => integration::run_integration_command(&args[2..])?,
         "session" => run_session_command(&args[2..])?,
-        _ => return Ok(CommandOutcome::NotCli),
+        // These built-in entrypoints are handled by main after CLI dispatch.
+        "client" | "update" | "remote-api-bridge" | "remote-client-bridge" => {
+            return Ok(CommandOutcome::NotCli);
+        }
+        _ if command.starts_with('-') => return Ok(CommandOutcome::NotCli),
+        _ => crate::extension_cli::run(command, &args[2..], target::is_remote())?,
     };
 
     Ok(CommandOutcome::Handled(exit_code))
@@ -836,18 +837,6 @@ pub(super) fn send_ok_request(method: Method) -> std::io::Result<i32> {
     Ok(0)
 }
 
-pub(super) fn random_operation_id(prefix: &str) -> std::io::Result<String> {
-    let mut bytes = [0_u8; 16];
-    crate::platform::fill_secure_random(&mut bytes)?;
-    Ok(format!(
-        "{prefix}{}",
-        bytes
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect::<String>()
-    ))
-}
-
 pub(super) fn send_request(request: &Request) -> std::io::Result<serde_json::Value> {
     let client = target::api_client()?;
     ensure_server_protocol_compatible(&client, &request.id)?;
@@ -1150,6 +1139,22 @@ fn _print_json<T: Serialize>(value: &T) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn generic_dispatch_preserves_main_owned_entrypoints() {
+        for command in [
+            "client",
+            "update",
+            "remote-api-bridge",
+            "remote-client-bridge",
+        ] {
+            let args = ["vqro".to_owned(), command.to_owned()];
+            assert!(matches!(
+                super::maybe_run(&args),
+                Ok(super::CommandOutcome::NotCli)
+            ));
+        }
+    }
+
     #[test]
     fn parses_channel_set_argument() {
         assert_eq!(

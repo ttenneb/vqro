@@ -4,9 +4,10 @@ single launch, and two model-free Pi panes run import -> delegate -> badge ->
 decision -> message with no manual linking or per-agent config.
 
 Reuses the tasks demo lifecycle (private root, real server, real model-free Pi,
-birth-checked cleanup). It never calls `plugin link`: the point is that plain
-Vqro already linked the bundled `vqro.tasks` and that `agent start` already gave
-each Pi pane the reply-routing adapter and the vqro skill. No installation,
+birth-checked cleanup). Tasks itself is never manually linked: plain
+Vqro already linked the bundled `vqro.tasks` (a separate tiny independent CLI
+contribution is linked to prove generic dispatch) and that `agent start` already gave
+each Pi pane the neutral adapter, Tasks consumer and the vqro skill. No installation,
 credentials, model calls, or human-session changes.
 """
 import argparse
@@ -200,6 +201,48 @@ class ReadinessDemo(Demo):
             time.sleep(0.5)
         raise RuntimeError("no durable blocked attention badge appeared")
 
+    def declared_cli_demo(self):
+        directory = self.root / "example-extension"
+        directory.mkdir()
+        manifest = 'manifest_version=1\nid="demo.example"\nname="Example"\nversion="0.1.0"\nmin_vqro_version="0.9.0"\nplatforms=["linux","macos"]\n[[cli_commands]]\nname="example"\ncommand=["python3","./entry.py"]\n'
+        (directory / "vqro-extension.toml").write_text(manifest)
+        marker = self.root / "example-executions"
+        (directory / "entry.py").write_text(
+            'import json,os,sys\nfrom pathlib import Path\n'
+            + f'with open({str(marker)!r},"a") as f: f.write("invoked\\n")\n'
+            + 'print(json.dumps({"pid":os.getpid(),"cwd":os.getcwd(),"args":sys.argv[1:],"input":sys.stdin.read()}))\n')
+        self.cli("plugin", "link", str(directory))
+        command = subprocess.Popen([str(self.vqro), "example", "two words", "$HOME;echo nope", "./caller-relative"],
+                                   env=self.env, cwd=self.root / "work", stdin=subprocess.PIPE,
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        output, error = command.communicate("stdin fixture", timeout=15)
+        assert command.returncode == 0, error
+        observed = json.loads(output)
+        assert observed == {"pid": command.pid, "cwd": str(self.root / "work"),
+                            "args": ["two words", "$HOME;echo nope", "./caller-relative"], "input": "stdin fixture"}
+        self.cli("plugin", "disable", "demo.example")
+        self.cli("example", expected=2)
+        assert marker.read_text().splitlines() == ["invoked"]
+        self.cli("plugin", "enable", "demo.example")
+        # The cached linked registry is Linux/macOS-compatible. A fresh manifest
+        # edit must constrain execution without waiting for a server reload.
+        (directory / "vqro-extension.toml").write_text(manifest.replace('platforms=["linux","macos"]', 'platforms=["windows"]'))
+        self.cli("example", expected=2)
+        assert marker.read_text().splitlines() == ["invoked"]
+        (directory / "vqro-extension.toml").write_text(manifest)
+        conflict = self.root / "conflicting-extension"
+        conflict.mkdir()
+        (conflict / "vqro-extension.toml").write_text(manifest.replace("demo.example", "demo.conflict"))
+        self.cli("plugin", "link", str(conflict))
+        self.cli("example", expected=2)
+        assert marker.read_text().splitlines() == ["invoked"]
+        self.cli("plugin", "disable", "demo.conflict")
+        (conflict / "vqro-extension.toml").write_text(manifest.replace("demo.example", "demo.invalid").replace("./entry.py", "./../escape.py"))
+        self.cli("plugin", "link", str(conflict), expected=1)
+        return {"independent_alias": True, "foreground_pid_preserved": True,
+                "literal_argv_cwd_stdin": True, "disabled_conflicting_invalid_no_execution": True,
+                "current_manifest_platform_no_execution": True}
+
     def change(self, name, token, task, action, text=None, **flags):
         args = [action, task["id"]]
         if text is not None:
@@ -313,12 +356,14 @@ class ReadinessDemo(Demo):
         self.agent("task-b", "root-other-agent-accept-denied", ["accept", root["id"], "--rev", str(root["revision"])], expected=1)
         accepted = self.human(human, "root-human-accept", ["accept", root["id"], "--rev", str(root["revision"])])["task"]
         assert accepted["state"] == "accepted" and accepted["creator"] == owner_a
-        tree = self.cli("task", "tree")
-        assert "creator" in tree and owner_a["execution"] in tree
+        tree = self.cli("task", "tree", "--json")
+        assert any(task["creator"] == owner_a for task in tree["tasks"])
+        assert owner_a["execution"] in json.dumps(tree)
         direct = self.agent("task-a", "direct-root-create", ["create", "Human-directed follow-up", "--done-when", "The outcome is independently checked."])["task"]
         assert direct["creator"] == owner_a and direct["delegator"] == {"class": "human_unverified"}
 
-        result = {"result": "passed", "real_pi_agents": 2, "model_calls": 0,
+        cli_demo = self.declared_cli_demo()
+        result = {"result": "passed", "declared_cli": cli_demo, "real_pi_agents": 2, "model_calls": 0,
                   "defaults_auto_linked": True,
                   "adapter_skill_evidence": "covered by just pi-profile-demo",
                   "imported_tasks": 2, "literal_guide_blocks": 6, "fresh_empty_native_before_core_action": True,

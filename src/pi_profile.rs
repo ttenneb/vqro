@@ -26,7 +26,7 @@
 //! bundled adapter and vqro skill are linked and present; a preparation that
 //! cannot publish them fails and leaves the profile unselected. In that warned
 //! fallback Pi loads the human's own config and gets neither the vqro skill nor the
-//! reply-routing adapter.
+//! neutral adapter or Tasks consumer.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -141,10 +141,8 @@ pub(crate) fn profile_ready() -> bool {
     // Readiness also attests that the bundled adapter and vqro skill are linked
     // and present, not only that the settings match.
     if !profile.join("skills").join("vqro").exists()
-        || !profile
-            .join("extensions")
-            .join("vqro-reply-routing.ts")
-            .exists()
+        || !profile.join("extensions").join("vqro-pi.ts").exists()
+        || !profile.join("extensions").join("tasks-pi.ts").exists()
     {
         return false;
     }
@@ -230,7 +228,7 @@ pub(crate) fn ensure_profile() -> io::Result<()> {
 }
 
 /// True only for our own previous links: a `pi-<16 hex>` generation directory
-/// directly under the bundled root, holding `vqro-reply-routing.ts` or
+/// directly under the bundled root, holding the neutral/Tasks Pi resources or
 /// `skills/vqro`. The generation name rule matches the tasks generations. Anything
 /// else - another bundled path, a custom or user generation, or a link outside -
 /// is foreign and preserved.
@@ -250,11 +248,13 @@ fn is_owned_pi_asset(root: &Path, path: &Path) -> bool {
         return false;
     }
     let rest: PathBuf = components.collect();
-    rest.as_path() == Path::new("vqro-reply-routing.ts")
-        || rest.as_path() == Path::new("skills").join("vqro")
+    matches!(
+        rest.to_str(),
+        Some("vqro-reply-routing.ts" | "vqro-pi.ts" | "tasks-pi.ts")
+    ) || rest.as_path() == Path::new("skills").join("vqro")
 }
 
-/// Link the bundled reply-routing adapter and vqro skill into the profile, so
+/// Link the neutral adapter, Tasks consumer and vqro skill into the profile, so
 /// every Pi using it - including one the human types in a Vqro pane - loads them.
 /// The links are refreshed when the bundled generation changes. A missing bundled
 /// asset fails the preparation, so readiness is never claimed without them.
@@ -264,14 +264,23 @@ fn link_profile_assets(profile: &Path) -> io::Result<()> {
     let Some(root) = generation.parent() else {
         return Err(io::Error::other("bundled Pi generation has no parent"));
     };
+    // Retire only our old product-bearing adapter link. Preserve foreign files.
+    let legacy = profile.join("extensions").join("vqro-reply-routing.ts");
+    if std::fs::read_link(&legacy).is_ok_and(|target| is_owned_pi_asset(root, &target)) {
+        std::fs::remove_file(&legacy)?;
+    }
     let assets = [
         (
             generation.join("skills").join("vqro"),
             profile.join("skills").join("vqro"),
         ),
         (
-            generation.join("vqro-reply-routing.ts"),
-            profile.join("extensions").join("vqro-reply-routing.ts"),
+            generation.join("vqro-pi.ts"),
+            profile.join("extensions").join("vqro-pi.ts"),
+        ),
+        (
+            generation.join("tasks-pi.ts"),
+            profile.join("extensions").join("tasks-pi.ts"),
         ),
     ];
     for (source, target) in assets {

@@ -455,6 +455,11 @@ pub(crate) fn local_datetime() -> Option<time::PrimitiveDateTime> {
     datetime_from_tm(&local)
 }
 
+pub(crate) fn foreground_cli_command(mut command: std::process::Command) -> std::io::Result<i32> {
+    use std::os::unix::process::CommandExt;
+    Err(command.exec())
+}
+
 pub(crate) fn status_commands_supported() -> bool {
     true
 }
