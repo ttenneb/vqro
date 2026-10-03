@@ -172,43 +172,38 @@ fn write_asset(root: &Path, path: &Path, report: &Path, body: &str) -> io::Resul
 
 /// Publish one complete generation and return its directory.
 ///
-/// A missing generation is written to a staging directory and swapped in with one
-/// rename. An existing generation is only completed: files that are already there
-/// are left untouched, so a user edit inside a published generation stays. A
-/// changed embedded set has a different content address, so it lands in a new
-/// directory and never rewrites a generation a provider may be reading.
+/// A generation directory appears only through one atomic rename of a complete
+/// staging directory, so its existence already means it is complete. An existing
+/// generation is trusted and never read back or rewritten, so a user edit inside
+/// a published generation stays. A changed embedded set has a different content
+/// address, so it lands in a new directory and never rewrites a generation a
+/// provider may be reading.
 fn publish_generation(root: &Path, prefix: &str, assets: &[(&str, &str)]) -> io::Result<PathBuf> {
     let dir = generation_dir(root, prefix, assets);
     safe_under(root, &dir)?;
-    if !dir.exists() {
-        let staging = root.join(format!(".{prefix}.staging.{}", std::process::id()));
-        safe_under(root, &staging)?;
-        if staging.exists() {
-            std::fs::remove_dir_all(&staging)?;
-        }
-        for (name, body) in assets {
-            write_asset(root, &staging.join(name), &dir.join(name), body)?;
-        }
-        match std::fs::rename(&staging, &dir) {
-            Ok(()) => return Ok(dir),
-            // Another launch published the same generation first; use theirs.
-            Err(_) if dir.exists() => {
-                let _ = std::fs::remove_dir_all(&staging);
-            }
-            Err(error) => {
-                let _ = std::fs::remove_dir_all(&staging);
-                return Err(error);
-            }
-        }
+    if dir.is_dir() {
+        return Ok(dir);
+    }
+    let staging = root.join(format!(".{prefix}.staging.{}", std::process::id()));
+    safe_under(root, &staging)?;
+    if staging.exists() {
+        std::fs::remove_dir_all(&staging)?;
     }
     for (name, body) in assets {
-        let path = dir.join(name);
-        safe_under(root, &path)?;
-        if !path.exists() {
-            write_asset(root, &path, &path, body)?;
+        write_asset(root, &staging.join(name), &dir.join(name), body)?;
+    }
+    match std::fs::rename(&staging, &dir) {
+        Ok(()) => Ok(dir),
+        // Another launch published the same generation first; use theirs.
+        Err(_) if dir.is_dir() => {
+            let _ = std::fs::remove_dir_all(&staging);
+            Ok(dir)
+        }
+        Err(error) => {
+            let _ = std::fs::remove_dir_all(&staging);
+            Err(error)
         }
     }
-    Ok(dir)
 }
 
 pub(crate) fn ensure_defaults() -> io::Result<()> {
@@ -315,23 +310,20 @@ mod tests {
     }
 
     #[test]
-    fn publish_keeps_a_user_edit_and_fills_only_missing_files() {
-        let root = temp_root("edit");
+    fn publish_trusts_an_existing_generation() {
+        let root = temp_root("trust");
         let _ = std::fs::remove_dir_all(&root);
         let dir = publish_generation(&root, "gen", &assets()).unwrap();
         std::fs::write(dir.join("one.py"), "edited").unwrap();
         std::fs::remove_file(dir.join("nested/two.py")).unwrap();
         let again = publish_generation(&root, "gen", &assets()).unwrap();
+        // The existing generation is trusted, never read back or rewritten.
         assert_eq!(again, dir);
-        // The edit stays; the deleted file is restored.
         assert_eq!(
             std::fs::read_to_string(dir.join("one.py")).unwrap(),
             "edited"
         );
-        assert_eq!(
-            std::fs::read_to_string(dir.join("nested/two.py")).unwrap(),
-            "second"
-        );
+        assert!(!dir.join("nested/two.py").exists());
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -356,16 +348,18 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn publish_refuses_a_symlinked_asset() {
+    fn publish_refuses_a_symlinked_generation() {
         let root = temp_root("symlink");
         let _ = std::fs::remove_dir_all(&root);
-        let dir = publish_generation(&root, "gen", &assets()).unwrap();
-        let canary = root.join("canary.txt");
-        std::fs::write(&canary, "keep").unwrap();
-        std::fs::remove_file(dir.join("one.py")).unwrap();
-        std::os::unix::fs::symlink(&canary, dir.join("one.py")).unwrap();
+        std::fs::create_dir_all(&root).unwrap();
+        let outside =
+            std::env::temp_dir().join(format!("vqro-bundled-outside-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&outside);
+        std::fs::create_dir_all(&outside).unwrap();
+        std::os::unix::fs::symlink(&outside, generation_dir(&root, "gen", &assets())).unwrap();
         assert!(publish_generation(&root, "gen", &assets()).is_err());
-        assert_eq!(std::fs::read_to_string(&canary).unwrap(), "keep");
+        assert!(std::fs::read_dir(&outside).unwrap().next().is_none());
         let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&outside);
     }
 }
