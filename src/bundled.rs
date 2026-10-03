@@ -297,28 +297,10 @@ fn link_tasks_plugin(root: &Path, tasks_dir: &Path) -> io::Result<()> {
     Ok(())
 }
 
-/// Extra Pi flags that load the bundled adapter and conventions skill.
-///
-/// Read-only: it only names the published generation, so starting a Pi never
-/// hashes user content, writes, or takes a lock on the App thread. A server that
-/// never saw a plain-launch install, or a launch that opted out, simply gets no
-/// flags and Pi still starts.
-pub(crate) fn pi_launch_flags() -> Vec<String> {
-    if opted_out() {
-        return Vec::new();
-    }
-    let dir = generation_dir(&bundled_root(), "pi", &pi_assets());
-    let adapter = dir.join("vqro-reply-routing.ts");
-    let skill = dir.join("skills").join("vqro").join("SKILL.md");
-    if !adapter.is_file() || !skill.is_file() {
-        return Vec::new();
-    }
-    vec![
-        "--extension".into(),
-        adapter.display().to_string(),
-        "--skill".into(),
-        skill.display().to_string(),
-    ]
+/// The published Pi generation directory (adapter + vqro skill), or the path it
+/// will occupy once a plain launch has published it.
+pub(crate) fn pi_generation_dir() -> PathBuf {
+    generation_dir(&bundled_root(), "pi", &pi_assets())
 }
 
 #[cfg(test)]

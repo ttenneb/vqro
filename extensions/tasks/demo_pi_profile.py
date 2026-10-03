@@ -237,13 +237,14 @@ class PiProfileDemo(ReadinessDemo):
         self.wait_file(result)
         assert result.read_text() == str(profile), result.read_text()
 
-        # A Pi started in a Vqro pane: its startup resource list shows none of the
-        # excluded items, the vqro skill and reply-routing adapter, and the Vqro
-        # SYSTEM.md as context; and no herdr process runs under the pane.
+        # A `pi` the human types in a Vqro pane (not agent start): its startup
+        # resource list shows none of the excluded items, the vqro skill and
+        # reply-routing adapter (both from the profile), and the Vqro SYSTEM.md as
+        # context; and no herdr process runs under the pane.
         agent = self.cli("pane", "split", "--pane", human, "--direction", "right", "--no-focus")["result"]["pane"]["pane_id"]
         self.wait_output(agent, r"\$", 5)
-        self.cli("agent", "start", "pi-check", "--kind", "pi", "--pane", agent, "--timeout", "10000", "--", "--no-session")
-        self.wait_output(agent, r"Skills", 20)
+        self.cli("pane", "run", agent, "pi --no-session")
+        self.wait_output(agent, r"Skills", 25)
         header = self.cli("pane", "read", agent, "--source", "visible", "--format", "text", "--lines", "80")
         sanitized = header.replace(str(self.root), "")
         sections = header_sections(sanitized)

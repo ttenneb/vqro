@@ -21,6 +21,12 @@
 //! profile directory whose content still matches its marker. An unreadable human
 //! `settings.json` (any read error, not only a missing file) is treated as the
 //! empty settings, so that case builds a profile without the human's settings.
+//!
+//! Readiness means the profile settings match the human's current settings AND the
+//! bundled adapter and vqro skill are linked and present; a preparation that
+//! cannot publish them fails and leaves the profile unselected. In that warned
+//! fallback Pi loads the human's own config and gets neither the vqro skill nor the
+//! reply-routing adapter.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -132,16 +138,27 @@ pub(crate) fn profile_ready() -> bool {
     let Some(profile_hash) = profile_settings_hash(&profile) else {
         return false;
     };
+    // Readiness also attests that the bundled adapter and vqro skill are linked
+    // and present, not only that the settings match.
+    if !profile.join("skills").join("vqro").exists()
+        || !profile
+            .join("extensions")
+            .join("vqro-reply-routing.ts")
+            .exists()
+    {
+        return false;
+    }
     source == recorded_source && profile_hash == recorded_profile
 }
 
 /// True when a profile is wanted but not ready, so a Vqro-launched Pi must be
-/// warned. A resource-bearing human agent dir counts even without settings.json.
+/// warned. Any human HOME counts, because the profile also carries the bundled
+/// adapter and vqro skill.
 pub(crate) fn warning_needed() -> bool {
     if !cfg!(unix) || opted_out() || profile_ready() {
         return false;
     }
-    human_agent_dir().is_some_and(|human| human.is_dir())
+    human_agent_dir().is_some()
 }
 
 /// Build or refresh the profile.
@@ -166,13 +183,9 @@ pub(crate) fn ensure_profile() -> io::Result<()> {
     let Some(human) = human_agent_dir() else {
         return Ok(());
     };
-    // No human agent dir at all: there is nothing to exclude and Pi's defaults are
-    // already clean, so leave PI_CODING_AGENT_DIR unset.
-    if !human.is_dir() {
-        return Ok(());
-    }
-    // A missing settings.json is the empty settings: the human may still have
-    // extensions, skills or a SYSTEM.md to exclude or replace.
+    // A missing settings.json is the empty settings, and a missing agent dir means
+    // there is nothing to mirror; either way the profile still carries the bundled
+    // adapter, vqro skill and SYSTEM.md, so a Vqro pane gets them.
     let text = std::fs::read_to_string(human.join("settings.json")).unwrap_or_default();
     let mut settings: Value = if text.trim().is_empty() {
         Value::Object(serde_json::Map::new())
@@ -188,7 +201,10 @@ pub(crate) fn ensure_profile() -> io::Result<()> {
     crate::bundled::safe_under(&profile, &settings_path)?;
     let body = serde_json::to_string_pretty(&settings)?;
     write_if_changed(&settings_path, &body)?;
-    mirror_entries(&human, &profile)?;
+    if human.is_dir() {
+        mirror_entries(&human, &profile)?;
+    }
+    link_profile_assets(&profile)?;
     let system = profile.join("SYSTEM.md");
     // A profile built before SYSTEM.md was replaced holds our own symlink to the
     // human's file. Unlink the link (never its target) before writing ours, so an
@@ -210,6 +226,86 @@ pub(crate) fn ensure_profile() -> io::Result<()> {
             digest_hex(body.as_bytes())
         ),
     )?;
+    Ok(())
+}
+
+/// True only for our own previous links: a `pi-<16 hex>` generation directory
+/// directly under the bundled root, holding `vqro-reply-routing.ts` or
+/// `skills/vqro`. The generation name rule matches the tasks generations. Anything
+/// else - another bundled path, a custom or user generation, or a link outside -
+/// is foreign and preserved.
+fn is_owned_pi_asset(root: &Path, path: &Path) -> bool {
+    let Ok(relative) = path.strip_prefix(root) else {
+        return false;
+    };
+    let mut components = relative.components();
+    let Some(first) = components.next() else {
+        return false;
+    };
+    let name = first.as_os_str().to_string_lossy();
+    let Some(generation) = name.strip_prefix("pi-") else {
+        return false;
+    };
+    if generation.len() != 16 || !generation.chars().all(|digit| digit.is_ascii_hexdigit()) {
+        return false;
+    }
+    let rest: PathBuf = components.collect();
+    rest.as_path() == Path::new("vqro-reply-routing.ts")
+        || rest.as_path() == Path::new("skills").join("vqro")
+}
+
+/// Link the bundled reply-routing adapter and vqro skill into the profile, so
+/// every Pi using it - including one the human types in a Vqro pane - loads them.
+/// The links are refreshed when the bundled generation changes. A missing bundled
+/// asset fails the preparation, so readiness is never claimed without them.
+#[cfg(unix)]
+fn link_profile_assets(profile: &Path) -> io::Result<()> {
+    let generation = crate::bundled::pi_generation_dir();
+    let Some(root) = generation.parent() else {
+        return Err(io::Error::other("bundled Pi generation has no parent"));
+    };
+    let assets = [
+        (
+            generation.join("skills").join("vqro"),
+            profile.join("skills").join("vqro"),
+        ),
+        (
+            generation.join("vqro-reply-routing.ts"),
+            profile.join("extensions").join("vqro-reply-routing.ts"),
+        ),
+    ];
+    for (source, target) in assets {
+        if !source.exists() {
+            return Err(io::Error::other(format!(
+                "bundled Pi asset is missing: {}",
+                source.display()
+            )));
+        }
+        let Some(parent) = target.parent() else {
+            return Err(io::Error::other("profile asset has no parent"));
+        };
+        std::fs::create_dir_all(parent)?;
+        crate::bundled::safe_under(profile, parent)?;
+        let owned = match std::fs::read_link(&target) {
+            Ok(existing) if existing == source => continue,
+            // Our own link into an older generation: replace it.
+            Ok(existing) => is_owned_pi_asset(root, &existing),
+            // Absent (ours to create) or a real file or directory (leave it).
+            Err(_) => std::fs::symlink_metadata(&target).is_err(),
+        };
+        if !owned {
+            continue;
+        }
+        let _ = std::fs::remove_file(&target);
+        std::os::unix::fs::symlink(&source, &target)?;
+        tracing::info!(path = %target.display(), "linked a Vqro Pi profile asset");
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn link_profile_assets(_profile: &Path) -> io::Result<()> {
+    // Unreachable: ensure_profile returns before this off unix.
     Ok(())
 }
 
@@ -593,6 +689,41 @@ mod tests {
             kept[0]["source"],
             "/home/h/.pi/agent/../../Projects/pi-system-prompt"
         );
+    }
+
+    #[test]
+    fn owned_pi_asset_matches_only_our_generation_paths() {
+        let root = Path::new("/cfg/bundled");
+        assert!(is_owned_pi_asset(
+            root,
+            Path::new("/cfg/bundled/pi-0123456789abcdef/vqro-reply-routing.ts")
+        ));
+        assert!(is_owned_pi_asset(
+            root,
+            Path::new("/cfg/bundled/pi-0123456789abcdef/skills/vqro")
+        ));
+        // A non-16-hex or non-hex generation name is not ours.
+        assert!(!is_owned_pi_asset(
+            root,
+            Path::new("/cfg/bundled/pi-nothex/vqro-reply-routing.ts")
+        ));
+        assert!(!is_owned_pi_asset(
+            root,
+            Path::new("/cfg/bundled/pi-0123456789abcde/vqro-reply-routing.ts")
+        ));
+        // A foreign or custom bundled path is preserved.
+        assert!(!is_owned_pi_asset(
+            root,
+            Path::new("/cfg/bundled/custom/vqro-reply-routing.ts")
+        ));
+        assert!(!is_owned_pi_asset(
+            root,
+            Path::new("/cfg/bundled/pi-0123456789abcdef/other")
+        ));
+        assert!(!is_owned_pi_asset(
+            root,
+            Path::new("/elsewhere/pi-0123456789abcdef/skills/vqro")
+        ));
     }
 
     #[test]
