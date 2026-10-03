@@ -612,7 +612,7 @@ def read_only_store(directory):
     store.db = sqlite3.connect((Path(directory) / "tasks.sqlite").resolve().as_uri() + "?mode=ro", uri=True, timeout=1, isolation_level=None)
     store.db.row_factory = sqlite3.Row
     store.decisions = decision_queue.Queue(store, 900, OutcomeUnknown)
-    if store.db.execute("PRAGMA user_version").fetchone()[0] != 3:
+    if store.db.execute("PRAGMA user_version").fetchone()[0] != 4:
         store.db.close()
         raise ValueError("Tasks document requires current store version")
     return store
@@ -676,7 +676,7 @@ def main():
                 if document_store is None:
                     document_store = read_only_store(directory)
                 document_store.db.execute("BEGIN")
-                if document_store.db.execute("PRAGMA user_version").fetchone()[0] != 3:
+                if document_store.db.execute("PRAGMA user_version").fetchone()[0] != 4:
                     raise ValueError("Tasks document requires current store version")
                 document = project(document_store, request["params"])
                 document_store.db.rollback()

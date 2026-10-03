@@ -27,6 +27,11 @@ sources. The hint is not part of persisted/replayed operation outcomes. Equal no
 changed placement retires old observation immediately. Failed/disabled providers
 show unavailable rather than healthy zero, and retirement fences late replies.
 
+Known follow-up limitation: a background decision deadline auto-apply has no action
+response carrying the revision hint. Native badges refresh on the next action,
+read or host-source change; the full Tasks pane's own polling observes it sooner.
+There is no additional host timer or protocol mechanism for this case.
+
 A publisher supplies `context:attention.view:<plugin>:<entrypoint>`, optional
 `context:attention.measure:<0|1|2>` labels, count-bearing
 `context:attention.badge:<workspace|tab|session>:<id>:<n>:<n>:<n>` items and flat

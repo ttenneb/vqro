@@ -67,9 +67,9 @@ class DocumentTests(unittest.TestCase):
             self.assertFalse(document.project(observed,self.snapshot())["actions"])
             task=self.invoke({"action":"decision","title":"quiet decision","operation_id":"decision"})["task"]
             self.assertTrue(any(row["label"]==task["title"] for row in document.project(observed,self.snapshot())["items"]))
-            self.store.db.execute("PRAGMA user_version=4")
+            self.store.db.execute("PRAGMA user_version=5")
             with self.assertRaisesRegex(ValueError,"current store version"):provider.read_only_store(self.root.name)
-            self.assertEqual(4,self.store.db.execute("PRAGMA user_version").fetchone()[0])
+            self.assertEqual(5,self.store.db.execute("PRAGMA user_version").fetchone()[0])
         finally:observed.db.close()
     def test_protocol_document_only_missing_store_no_writes_and_current_version_outside_receipt(self):
         with tempfile.TemporaryDirectory() as missing:
