@@ -224,6 +224,28 @@ pub(crate) fn ensure_defaults() -> io::Result<()> {
 /// write. A user-selected link is left exactly as it is, including a disabled
 /// state; one of our own older generations is repointed while preserving its
 /// enabled choice.
+/// True when the registered root is one of our own generation directories (or the
+/// older unversioned location), so it may be repointed.
+///
+/// The `bundled/` subtree is reserved for these generations: an arbitrary user
+/// path elsewhere is never treated as ours, and a path under `bundled/` that is
+/// not one of our addresses is left alone too.
+fn owned_generation(root: &Path, registered: &str) -> bool {
+    let path = Path::new(registered);
+    if path.parent() != Some(root) {
+        return false;
+    }
+    if path == root.join("tasks") {
+        return true;
+    }
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .and_then(|name| name.strip_prefix("tasks-"))
+        .is_some_and(|suffix| {
+            suffix.len() == 16 && suffix.chars().all(|digit| digit.is_ascii_hexdigit())
+        })
+}
+
 fn link_tasks_plugin(root: &Path, tasks_dir: &Path) -> io::Result<()> {
     let current = tasks_dir.display().to_string();
     let manifest = tasks_dir.join("vqro-extension.toml").display().to_string();
@@ -236,8 +258,7 @@ fn link_tasks_plugin(root: &Path, tasks_dir: &Path) -> io::Result<()> {
             .find(|plugin| plugin.plugin_id == TASKS_PLUGIN_ID)
         {
             Some(plugin) => {
-                if plugin.plugin_root != current && Path::new(&plugin.plugin_root).starts_with(root)
-                {
+                if plugin.plugin_root != current && owned_generation(root, &plugin.plugin_root) {
                     plugin.plugin_root = current.clone();
                     plugin.manifest_path = manifest.clone();
                 }
@@ -344,6 +365,26 @@ mod tests {
             "changed"
         );
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn owned_generation_matches_only_our_addresses() {
+        let root = PathBuf::from("/cfg/bundled");
+        assert!(owned_generation(
+            &root,
+            "/cfg/bundled/tasks-9547e32d79df4a85"
+        ));
+        assert!(owned_generation(&root, "/cfg/bundled/tasks"));
+        assert!(!owned_generation(&root, "/cfg/bundled/my-dev-checkout"));
+        assert!(!owned_generation(&root, "/cfg/bundled/tasks-nothex"));
+        assert!(!owned_generation(
+            &root,
+            "/cfg/bundled/tasks-9547e32d79df4a8"
+        ));
+        assert!(!owned_generation(
+            &root,
+            "/elsewhere/tasks-9547e32d79df4a85"
+        ));
     }
 
     #[cfg(unix)]
