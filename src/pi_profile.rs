@@ -15,10 +15,10 @@
 //! not a sandbox: a deliberate fallback or opt-out loads the human's normal Pi
 //! configuration. Set [`crate::bundled::OPT_OUT_ENV`] to disable it.
 //!
-//! Known limits (documented, not handled): a package source written with `./` or
-//! `../` forms that normalize outside the agent dir, a source under an entry the
-//! profile does not mirror, and a read-only profile directory whose content still
-//! matches its marker each keep their previous behaviour or readiness.
+//! Known limits (documented, not handled): a package source written with `./`,
+//! `../` or another non-prefix parent-path form that normalizes outside the agent
+//! dir, a package path under an entry the profile does not mirror, and a read-only
+//! profile directory whose content still matches its marker.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -265,15 +265,17 @@ fn package_source_mut(entry: &mut Value) -> Option<&mut String> {
     }
 }
 
-/// The package's own name, ignoring a spec prefix, scope, `@ref`, `.git` and a
-/// trailing directory separator (a directory source like `local/pkg/`).
+/// The package's own name, ignoring a spec prefix, scope, `@ref`, `.git` and any
+/// empty path components (a directory source like `local//pkg/`).
 fn package_name(source: &str) -> &str {
     let without_spec = SPEC_PREFIXES
         .iter()
         .find_map(|prefix| source.strip_prefix(prefix))
         .unwrap_or(source);
-    let trimmed = without_spec.trim_end_matches(['/', '\\']);
-    let tail = trimmed.rsplit(['/', '\\']).next().unwrap_or(trimmed);
+    let tail = without_spec
+        .split(['/', '\\'])
+        .rfind(|part| !part.is_empty())
+        .unwrap_or(without_spec);
     // Split the pin/ref first: a `.git` suffix precedes an `@ref`.
     let name = match tail.rsplit_once('@') {
         Some((name, reference)) if !name.is_empty() && !reference.is_empty() => name,
@@ -400,8 +402,10 @@ mod tests {
             package_name("git:https://example.com/o/pi-input-gate.git@v1"),
             "pi-input-gate"
         );
-        // A directory source with a trailing separator still names the package.
+        // A directory source with a trailing or duplicated separator still names
+        // the package.
         assert_eq!(package_name("local/pi-input-gate/"), "pi-input-gate");
+        assert_eq!(package_name("local//pi-input-gate//"), "pi-input-gate");
         assert_eq!(package_name("npm:@scope/rpiv-todo/"), "rpiv-todo");
     }
 
