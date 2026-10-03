@@ -85,7 +85,7 @@ export default function(pi:any) {
     });
     writeFileSync(`${root}/receipts/${token}.json`,JSON.stringify({code:0,stdout:'',dropped_reply:true}),{mode:0o600});
    } else {
-    const stdout=execFileSync('vqro',['task',...command.args],{encoding:'utf8',timeout:15000});
+    const stdout=execFileSync('vqro',[command.tool||'task',...command.args],{encoding:'utf8',timeout:15000});
     writeFileSync(`${root}/receipts/${token}.json`,JSON.stringify({code:0,stdout}),{mode:0o600});
    }
    ctx.ui.notify(`Task core ${token} recorded`,'info');
@@ -153,10 +153,10 @@ export default function(pi:any) {
             time.sleep(.05)
         raise RuntimeError(f"private demo result did not arrive: {path}")
 
-    def agent(self, name, token, args=None, expected=0, drop=None):
-        if args and "--op" in args and "--caller" not in args:
+    def agent(self, name, token, args=None, expected=0, drop=None, tool="task"):
+        if tool == "task" and args and "--op" in args and "--caller" not in args:
             args = [*args, "--caller", json.dumps(self.agent_bindings[name])]
-        self.save(f"commands/{token}.json", {"args": args, **({"drop": drop} if drop else {})})
+        self.save(f"commands/{token}.json", {"tool": tool, "args": args, **({"drop": drop} if drop else {})})
         self.cli("agent", "prompt", name, f"/taskcore {token}")
         result_file = self.root / f"receipts/{token}.json"
         self.wait_file(result_file)
@@ -170,11 +170,11 @@ export default function(pi:any) {
             return value
         return result
 
-    def human(self, pane, token, args):
-        if "--op" in args and "--caller" not in args:
+    def human(self, pane, token, args, tool="task"):
+        if tool == "task" and "--op" in args and "--caller" not in args:
             args = [*args, "--caller", json.dumps(self.human_binding)]
         output, error, status = [self.root / f"receipts/{token}.{suffix}" for suffix in ("out", "err", "status")]
-        command = shlex.join(["vqro", "task", *args]) + f" > {shlex.quote(str(output))} 2> {shlex.quote(str(error))}; printf '%s' \"$?\" > {shlex.quote(str(status))}"
+        command = shlex.join(["vqro", tool, *args]) + f" > {shlex.quote(str(output))} 2> {shlex.quote(str(error))}; printf '%s' \"$?\" > {shlex.quote(str(status))}"
         self.cli("pane", "run", pane, command)
         self.wait_file(status)
         result = {"code": int(status.read_text()), "stdout": output.read_text(), "stderr": error.read_text()}
