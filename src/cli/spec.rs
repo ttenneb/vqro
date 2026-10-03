@@ -117,9 +117,10 @@ fn task_command() -> Command {
         )
         .subcommand(
             Command::new("delegate")
-                .about("Explicitly assign an exact caller binding")
+                .about("Assign a named current agent or an exact caller binding")
                 .arg(required("id", "ID"))
-                .arg(option("owner", "JSON").required(true))
+                .arg(option("owner", "JSON").required_unless_present("to"))
+                .arg(option("to", "NAME").conflicts_with("owner"))
                 .arg(option("rev", "N").required(true))
                 .arg(option("op", "ID").requires("caller"))
                 .arg(option("caller", "JSON")),
@@ -824,21 +825,19 @@ fn agent_command() -> Command {
         )
         .subcommand(
             Command::new("start")
-                .about("Start a supported interactive agent in an existing pane")
+                .about("Start an interactive agent in its own pane (default: Pi)")
                 .override_usage(
-                    "vqro agent start <NAME> --kind <KIND> --pane <ID> [OPTIONS] [-- [AGENT_ARG]...]",
+                    "vqro agent start <NAME> [--kind <KIND>] [--pane <ID>] [OPTIONS] [-- [AGENT_ARG]...]",
                 )
                 .arg(required("name", "NAME"))
                 .arg(
                     option("kind", "KIND")
-                        .required(true)
                         .value_parser(agent_kind_values())
-                        .help("Supported agent kind and canonical executable"),
+                        .help("Supported agent kind and canonical executable (default: pi)"),
                 )
                 .arg(
                     option("pane", "ID")
-                        .required(true)
-                        .help("Existing pane at an interactive shell prompt"),
+                        .help("Existing shell pane; omitted creates a new pane without stealing focus"),
                 )
                 .arg(
                     option("timeout", "MS")
@@ -851,7 +850,7 @@ fn agent_command() -> Command {
                         .last(true),
                 )
                 .after_help(
-                    "The pane must be at its interactive shell prompt. Success means the expected agent was detected in the same terminal and is ready for input.\n\nnext: vqro agent prompt <TARGET> <TEXT> --wait",
+                    "An explicit pane must be at its interactive shell prompt. Without --pane, creates a pane next to the caller (or focused pane). Success means the expected agent was detected in the same terminal and is ready for input. Failed startup retains the pane for inspection; do not blindly retry an uncertain launch.\n\nnext: vqro agent prompt <TARGET> <TEXT> --wait",
                 ),
         )
         .subcommand(
@@ -1780,7 +1779,7 @@ mod tests {
     fn next_step_hints_render_without_replacing_existing_after_help() {
         let agent_start = long_help(&["agent", "start"]);
         assert!(
-            agent_start.contains("The pane must be at its interactive shell prompt."),
+            agent_start.contains("An explicit pane must be at its interactive shell prompt."),
             "agent start dropped its existing after_help: {agent_start}"
         );
         assert!(

@@ -38,10 +38,11 @@ vqro pane run <pane-id> <command>...
 vqro pane read <pane-id> --source detection --format text
 ```
 
-For agents, start a bounded helper only when authorized. Exchange its own task binding first; then record assignments/results as described below. `agent prompt` is a notification adapter, not the task or evidence of acceptance.
+For agents, start a bounded helper only when authorized. Use the CLI's current-name lookup for assignments; exchange its own `whoami` binding only when explicit binding JSON is needed. Then record assignments/results as described below. `agent prompt` is a notification adapter, not the task or evidence of acceptance.
 
 ```bash
-vqro agent start <name> --kind <agent> --pane <pane-id>
+vqro agent start <name>
+# Optional: --kind <agent> (default pi), --pane <pane-id> (default own new pane)
 vqro agent prompt <name> "Run vqro task whoami and print its caller binding."
 vqro agent wait <name> --until idle --until done --timeout 300000
 vqro agent read <name> --source detection --format text
@@ -55,7 +56,7 @@ Pi todo stays **private scratch**; do not use its delegation/report features for
 
 ### Propose, approve, then run
 
-The controller proposes a plan one or two levels ahead: parent/child for decomposition/accountability, `depends_on` for prerequisites, an exact owner at each level, work/wait estimates, required `done_when`, and optional brief path. The plan file contains only `{"nodes":[...]}`; each node has a unique local `key`, `title`, `done_when`, optional local `parent`, exact `owner`, prerequisites and budgets. Copy agent owner objects from their own `whoami`, never infer them from names/panes. Existing prerequisites are read-only; parent/ancestor completion cycles reject. Import returns local-key→durable-ID mapping; use those IDs thereafter.
+The controller proposes a plan one or two levels ahead: parent/child for decomposition/accountability, `depends_on` for prerequisites, an exact owner at each level, work/wait estimates, required `done_when`, and optional brief path. The plan file contains only `{"nodes":[...]}`; each node has a unique local `key`, `title`, `done_when`, optional local `parent`, exact `owner`, prerequisites and budgets. The CLI also accepts an agent name as a plan node's `owner` and resolves it through the current exact-binding lookup before import; core/API calls still require binding objects. Unknown, ambiguous or unprovable targets reject before writing. For explicit objects, copy the agent's own `whoami`; never synthesize a binding from names/panes. Existing prerequisites are read-only; parent/ancestor completion cycles reject. Import returns local-key→durable-ID mapping; use those IDs thereafter.
 
 **The human approves and imports ordinary root plans. Agents never create/import ordinary roots.** Agents may add children/import additions only beneath an existing active ordinary task they own, not a foreign descendant, closed task or decision. Re-plan through authorized active-task updates; import adds tasks, not replacements/re-parenting. Every new task/decision needs 1–3 distinct observable `done_when` lines (≤1024 UTF-8 bytes). A brief path is display-only, not evaluated. Never manufacture human classification via shell mediation, `pane run` into a human shell, or caller/actor flags.
 
@@ -95,9 +96,10 @@ Record estimates and explicit actual work/wait while active, including before re
 
 ### Delegate, notify, report, independently accept
 
-After reading the helper's own `whoami` output, record its exact binding in `OWNER`. Assignment is not proof the helper is alive. Then:
+Prefer the CLI's current-name lookup; it submits an exact execution binding, not a name. An explicit `OWNER` from the helper's own `whoami` remains supported. Assignment is not proof the helper stays alive. These are alternatives, not two writes:
 
 ```bash
+vqro task delegate "$TASK_ID" --to <helper> --rev "$REV"
 vqro task delegate "$TASK_ID" --owner "$OWNER" --rev "$REV"
 ```
 
