@@ -5,6 +5,8 @@ import path from "node:path";
 export const MAX_REPLY_BYTES = 8192;
 /** The no-reply attention label is a volatile observation, not durable state. */
 export const METADATA_TTL_MS = 600_000;
+/** Idle mailbox poll while the activation setting is on; one bounded read per tick. */
+export const MAILBOX_POLL_MS = 10_000;
 
 export interface Origin {
   /** Agent name, or pane id when the sender had no registered name. */
@@ -67,6 +69,19 @@ export function promptConfirmsOrigin(output: string, from: string): boolean {
   return false;
 }
 
+/** Render a claimed message with its host-attributed sender class/execution. */
+export function renderMessage(message: any): string {
+  let sender = "an agent";
+  try {
+    const binding = JSON.parse(message?.sender ?? "{}");
+    if (binding.class === "agent") sender = `agent ${String(binding.execution ?? "unknown")}`;
+    else if (binding.class === "human_unverified") sender = "a human";
+  } catch {
+    // keep the generic sender label
+  }
+  return `[vqro message ${message.id} from ${sender}]\n${message.body}`;
+}
+
 export default function (pi: ExtensionAPI) {
   const bin = process.env.VQRO_BIN_PATH;
   const pane = process.env.VQRO_PANE_ID;
@@ -86,6 +101,13 @@ export default function (pi: ExtensionAPI) {
   let runText = "";
   let explicitSend = false;
   let self: string | undefined;
+  let selfExecution: string | undefined;
+  let poll: ReturnType<typeof setInterval> | undefined;
+  let checking = false;
+  let shutDown = false;
+  let turnActive = false;
+  let turnGeneration = 0;
+  let latestCtx: any;
   let metadataSeq = Date.now() * 1000;
 
   pi.registerEntryRenderer?.("vqro-reply-routing", (entry: any, _options: any, theme: any) => {
@@ -112,9 +134,78 @@ export default function (pi: ExtensionAPI) {
       const agent = JSON.parse(result.stdout)?.result?.agent;
       if (!agent) return undefined;
       self = agent.name || pane!;
+      selfExecution = agent.execution;
       return self;
     } catch {
       return undefined;
+    }
+  }
+
+  async function claimMessages(idle: boolean): Promise<any[]> {
+    if (!enabled) return [];
+    const result = await run(idle ? ["message", "claim", "--idle"] : ["message", "claim"], 6000);
+    if (!result || result.code !== 0) return [];
+    try {
+      return JSON.parse(result.stdout)?.claimed ?? [];
+    } catch {
+      return [];
+    }
+  }
+
+  async function deliverClaimed(messages: any[], activate: boolean) {
+    if (!messages.length) return;
+    record({
+      kind: "messages-claimed",
+      ids: messages.map((message) => message.id),
+    });
+    if (!activate) return; // a starting turn injects them via before_agent_start
+    const content = messages.map(renderMessage).join("\n\n");
+    // Prefer the live SDK idle state; a queued followUp never wakes a settled agent.
+    const idle = typeof latestCtx?.isIdle === "function" ? latestCtx.isIdle() : !turnActive;
+    // Always pass the queue option: an idle sample can race a run starting during
+    // the SDK's input hooks, and an unqueued sendUserMessage then throws.
+    if (idle) pi.sendUserMessage(content, { deliverAs: "followUp" });
+    else pi.sendMessage({ customType: "vqro-message", content, display: true }, { deliverAs: "followUp" });
+  }
+
+  function stopPoll() {
+    if (poll) clearInterval(poll);
+    poll = undefined;
+  }
+
+  function startPoll() {
+    if (!enabled || poll || !selfExecution || shutDown) return;
+    poll = setInterval(checkMailbox, MAILBOX_POLL_MS);
+  }
+
+  /** With activation on, a waiting message addressed to this process starts a turn. */
+  async function checkMailbox() {
+    // Single-flight and turn-fenced: an in-flight poll must not deliver after a
+    // turn has started or after the adapter is torn down.
+    if (!enabled || !selfExecution || checking || shutDown) return;
+    const generation = turnGeneration;
+    checking = true;
+    try {
+      // Read-only preflight so an empty or policy-off poll records no operation.
+      const listed = await run(["message", "list"], 4000);
+      if (!listed || listed.code !== 0) return;
+      let value: any;
+      try {
+        value = JSON.parse(listed.stdout);
+      } catch {
+        return;
+      }
+      if (value?.activation !== true || !(value.waiting?.length > 0)) return;
+      if (shutDown || generation !== turnGeneration) return;
+      const claimed = await claimMessages(true);
+      if (!claimed.length) return;
+      if (shutDown) {
+        record({ kind: "messages-undelivered", ids: claimed.map((message) => message.id) });
+        return;
+      }
+      await deliverClaimed(claimed, true);
+    } finally {
+      checking = false;
     }
   }
 
@@ -148,10 +239,43 @@ export default function (pi: ExtensionAPI) {
     pi.appendEntry("vqro-reply-routing", { ...data, at: new Date().toISOString() });
   }
 
-  pi.on("before_agent_start", async (event) => {
+  pi.on("session_start", async (_event, ctx) => {
+    latestCtx = ctx;
+    if (!enabled) return;
+    turnActive = false;
+    await resolveSelf();
+    if (shutDown) return;
+    startPoll();
+  });
+
+  pi.on("session_shutdown", async () => {
+    shutDown = true;
+    stopPoll();
+  });
+
+  pi.on("before_agent_start", async (event, ctx) => {
+    latestCtx = ctx;
+    stopPoll();
+    turnGeneration += 1;
+    turnActive = true;
     runOrigin = parseProvenanceLabel(event.prompt);
     runText = "";
     explicitSend = false;
+    // A turn is starting: pick up waiting durable messages into it.
+    const claimed = await claimMessages(false);
+    if (!claimed.length) return;
+    if (shutDown) {
+      record({ kind: "messages-undelivered", ids: claimed.map((message) => message.id) });
+      return;
+    }
+    await deliverClaimed(claimed, false);
+    return {
+      message: {
+        customType: "vqro-message",
+        content: claimed.map(renderMessage).join("\n\n"),
+        display: true,
+      },
+    };
   });
 
   pi.on("turn_end", async (event) => {
@@ -168,7 +292,11 @@ export default function (pi: ExtensionAPI) {
     }
   });
 
-  pi.on("agent_settled", async () => {
+  pi.on("agent_settled", async (_event, ctx) => {
+    latestCtx = ctx;
+    // Idle again: resume the bounded mailbox poll while activation is on.
+    turnActive = false;
+    startPoll();
     const current = runOrigin;
     const text = runText;
     runOrigin = null;

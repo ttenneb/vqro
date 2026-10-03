@@ -18,8 +18,14 @@ convention introduces no host API, Pi tool, task delivery or activation mechanis
 - Delegation/reporting **record, do not deliver**. Obtain bindings from the helper's
   own whoami. Existing agent prompt/read/wait can exchange that binding and carry
   ID-only assignment/report notifications. Notifications point to the authoritative
-  task; they do not replace work/results, prove delivery/acceptance, or constitute
-  a new durable message lane.
+  task; they do not replace work/results, prove delivery/acceptance, or become a
+  durable message by themselves.
+- Durable addressed messages have their own record: `vqro message send/list/claim/edit`
+  over the same trusted Tasks extension, with the sender taken from the host-observed
+  connection rather than a text label. Messages are editable until claimed, survive
+  restarts, and reach Pi through the reply-routing adapter at a turn boundary, never
+  by pane typing. A claim is not a run, reply or acceptance. One recorded activation
+  setting may start an idle recipient's turn; a stopped agent is never relaunched.
 - Human-needed choices go in decisions unless the human addressed the agent
   directly in its pane. Pi's question tool is only an example for that direct case;
   the convention is agent-neutral. Creating a decision does not promise a wake or

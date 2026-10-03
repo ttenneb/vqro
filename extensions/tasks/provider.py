@@ -12,6 +12,7 @@ import uuid
 
 import graph
 import decision_queue
+import messages
 import select
 
 SERVICE = "vqro.tasks.core"
@@ -67,8 +68,10 @@ class Store:
         Path(directory).mkdir(parents=True, exist_ok=True, mode=0o700)
         self.db = sqlite3.connect(Path(directory) / "tasks.sqlite", timeout=1, isolation_level=None)
         self.db.row_factory = sqlite3.Row
+        self.initialized_at = timestamp()
         self.decisions = decision_queue.Queue(self, decision_delay_seconds, OutcomeUnknown)
-        if self.db.execute("PRAGMA user_version").fetchone()[0] > 3:
+        self.messages = messages.Messages(self)
+        if self.db.execute("PRAGMA user_version").fetchone()[0] > 4:
             self.db.close()
             raise ValueError("unsupported future Tasks database version; no migration attempted")
         self.db.execute("PRAGMA journal_mode=WAL")
@@ -92,9 +95,29 @@ class Store:
         """)
         self.migrate()
 
+    def canonical(self, value):
+        return canonical(value)
+
+    def binding(self, caller):
+        return binding(caller)
+
     def migrate(self):
         # Successful migration is atomic; don't repeat historical backfill on restarts.
-        if self.db.execute("PRAGMA user_version").fetchone()[0] == 3:
+        version = self.db.execute("PRAGMA user_version").fetchone()[0]
+        if version >= 4:
+            return
+        if version == 3:
+            # Additive message schema only; existing records and policy are untouched.
+            self.db.execute("BEGIN IMMEDIATE")
+            try:
+                self.messages.create_schema()
+                self.db.execute("PRAGMA user_version=4")
+                self.commit()
+            except OutcomeUnknown:
+                raise
+            except Exception:
+                self.rollback()
+                raise
             return
         # Only this extension owns this database. Preserve original spike bindings.
         self.db.execute("BEGIN IMMEDIATE")
@@ -117,7 +140,8 @@ class Store:
             self.db.execute("CREATE INDEX IF NOT EXISTS dependency_prerequisite ON dependencies(prerequisite)")
             self.db.execute("UPDATE tasks SET started_at=(SELECT at FROM transitions WHERE task_id=tasks.id AND state='in_progress' ORDER BY seq LIMIT 1) WHERE started_at IS NULL")
             self.decisions.migrate(columns)
-            self.db.execute("PRAGMA user_version=3")
+            self.messages.create_schema()
+            self.db.execute("PRAGMA user_version=4")
             self.commit()
         except OutcomeUnknown:
             raise
@@ -491,6 +515,11 @@ class Store:
             "decision_log": {"action", "after"}, "decision_digest": {"action"},
             "decision_seen": {"action", "operation_id", "through", "expected_caller"},
             "op": {"action", "operation_id", "lookup_caller"},
+            "message_list": {"action"},
+            "message_send": {"action", "operation_id", "recipient", "body", "reply_to", "expected_caller"},
+            "message_edit": {"action", "operation_id", "id", "revision", "body", "expected_caller"},
+            "message_claim": {"action", "operation_id", "idle", "expected_caller"},
+            "message_activation": {"action", "operation_id", "activation", "expected_caller"},
             "create": {"action", "operation_id", "title", "parent", "kind", "expected_caller", "depends_on"} | graph.META_FIELDS | decision_queue.FIELDS,
             "decision": {"action", "operation_id", "title", "parent", "expected_caller", "depends_on"} | graph.META_FIELDS | decision_queue.FIELDS,
             "decision_timer": {"action", "operation_id", "id", "revision", "auto_at", "expected_caller"},
@@ -517,6 +546,8 @@ class Store:
             return {"task": self.task(payload["id"])}
         if action == "op":
             return self.lookup(payload, caller)
+        if action == "message_list":
+            return self.messages.read(payload, caller)
         if len(canonical(payload).encode()) > 64 * 1024:
             raise ValueError("plan/action exceeds 64 KiB request size")
         owner = binding(caller)
@@ -539,6 +570,12 @@ class Store:
             if action == "decision_seen":
                 self.quota({"operations": 1})
                 result = self.decisions.acknowledge(owner, payload.get("through"))
+            elif action.startswith("message_"):
+                counts = {"operations": 1}
+                if action == "message_send":
+                    counts["messages"] = 1
+                self.quota(counts)
+                result = self.messages.mutate(payload, owner, at)
             elif action == "plan":
                 result = self.import_plan(payload, owner, at)
             else:
