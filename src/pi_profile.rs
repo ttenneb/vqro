@@ -61,16 +61,29 @@ fn human_agent_dir() -> Option<PathBuf> {
 /// The content address of the human's settings, or `None` when it is unreadable.
 fn source_stamp(human: &Path) -> Option<String> {
     let bytes = std::fs::read(human.join("settings.json")).ok()?;
-    Some(
-        Sha256::digest(&bytes)
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect(),
-    )
+    Some(digest_hex(&bytes))
+}
+
+fn digest_hex(bytes: &[u8]) -> String {
+    Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+/// The content address of the profile's own settings, or `None` when that path is
+/// not a regular file (for example a symlink to a human file).
+fn profile_settings_hash(profile: &Path) -> Option<String> {
+    let path = profile.join("settings.json");
+    if !std::fs::symlink_metadata(&path).ok()?.file_type().is_file() {
+        return None;
+    }
+    Some(digest_hex(&std::fs::read(&path).ok()?))
 }
 
 /// True when Pi Vqro starts should use the profile: a real (not symlinked)
-/// profile directory whose marker matches the human's current settings.
+/// profile directory whose settings are the exact bytes this profile prepared
+/// from the human's current settings.
 pub(crate) fn profile_ready() -> bool {
     if opted_out() || !cfg!(unix) {
         return false;
@@ -82,10 +95,16 @@ pub(crate) fn profile_ready() -> bool {
     let Ok(marker) = std::fs::read_to_string(profile.join(READY_MARKER)) else {
         return false;
     };
-    let Some(stamp) = human_agent_dir().and_then(|human| source_stamp(&human)) else {
+    let Some((recorded_source, recorded_profile)) = marker.trim().split_once(':') else {
         return false;
     };
-    marker.trim() == stamp
+    let Some(source) = human_agent_dir().and_then(|human| source_stamp(&human)) else {
+        return false;
+    };
+    let Some(profile_hash) = profile_settings_hash(&profile) else {
+        return false;
+    };
+    source == recorded_source && profile_hash == recorded_profile
 }
 
 /// True when a profile is wanted (the human has Pi settings) but is not ready, so
@@ -110,6 +129,12 @@ pub(crate) fn ensure_profile() -> io::Result<()> {
     let profile = profile_dir();
     // Never follow a symlinked profile directory into a human file.
     crate::bundled::safe_under(&profile, &profile)?;
+    // Drop the previous readiness first: a preparation that fails must not keep an
+    // earlier profile selected. (A read-only directory cannot be cleared; its
+    // marker then no longer matches below.)
+    if std::fs::symlink_metadata(&profile).is_ok_and(|meta| meta.file_type().is_dir()) {
+        let _ = std::fs::remove_file(profile.join(READY_MARKER));
+    }
     let Some(human) = human_agent_dir() else {
         return Ok(());
     };
@@ -123,13 +148,21 @@ pub(crate) fn ensure_profile() -> io::Result<()> {
     std::fs::create_dir_all(&profile)?;
     let settings_path = profile.join("settings.json");
     crate::bundled::safe_under(&profile, &settings_path)?;
-    write_if_changed(&settings_path, &serde_json::to_string_pretty(&settings)?)?;
+    let body = serde_json::to_string_pretty(&settings)?;
+    write_if_changed(&settings_path, &body)?;
     mirror_entries(&human, &profile)?;
     let marker = profile.join(READY_MARKER);
     crate::bundled::safe_under(&profile, &marker)?;
-    let stamp = source_stamp(&human)
-        .ok_or_else(|| io::Error::other("human Pi settings disappeared during preparation"))?;
-    write_if_changed(&marker, &format!("{stamp}\n"))?;
+    // Address the exact bytes prepared from this source, not a later reread, so an
+    // edit between the write and the marker leaves the profile unselected.
+    write_if_changed(
+        &marker,
+        &format!(
+            "{}:{}\n",
+            digest_hex(text.as_bytes()),
+            digest_hex(body.as_bytes())
+        ),
+    )?;
     Ok(())
 }
 
@@ -181,15 +214,27 @@ fn absolutize_filter(human: &Path, entry: &str) -> Option<String> {
 }
 
 /// The absolute form of a relative local path, or `None` when it is not one.
+///
+/// A path or pattern that stays inside the agent dir is left relative: the
+/// profile mirrors the human layout with symlinks, so the same relative entry
+/// resolves to the same file (and keeps matching its own glob). Only a path that
+/// escapes the agent dir is rewritten, because it would resolve elsewhere.
 fn absolutize(human: &Path, source: &str) -> Option<String> {
+    if !escapes_agent_dir(source) {
+        return None;
+    }
+    Some(human.join(source).to_string_lossy().into_owned())
+}
+
+fn escapes_agent_dir(source: &str) -> bool {
     if source.is_empty()
         || source.starts_with('~')
         || is_spec(source)
         || Path::new(source).is_absolute()
     {
-        return None;
+        return false;
     }
-    Some(human.join(source).to_string_lossy().into_owned())
+    source == ".." || source.starts_with("../") || source.starts_with("..\\")
 }
 
 fn is_excluded(entry: &Value) -> bool {
@@ -354,7 +399,7 @@ mod tests {
     }
 
     #[test]
-    fn relative_resource_paths_keep_their_filter_operator() {
+    fn relative_resource_paths_keep_their_filter_operator_and_base() {
         let mut value = serde_json::json!({
             "sessionDir": "./sessions",
             "shellPath": "./bin/bash",
@@ -371,12 +416,15 @@ mod tests {
         // sessionDir/shellPath resolve against the CWD, so they are left alone.
         assert_eq!(value["sessionDir"], "./sessions");
         assert_eq!(value["shellPath"], "./bin/bash");
+        // Entries inside the agent dir keep their relative base (the profile
+        // mirrors that layout), so operators and globs still match; only an
+        // escaping path is rewritten.
         assert_eq!(
             value["extensions"],
             serde_json::json!([
-                "/home/h/.pi/agent/extensions/local.ts",
-                "!/home/h/.pi/agent/**/blocked.ts",
-                "-/home/h/.pi/agent/old.ts",
+                "extensions/local.ts",
+                "!**/blocked.ts",
+                "-old.ts",
                 "+/home/h/.pi/agent/../../Projects/ok.ts",
                 "~/local",
                 "npm:x"
