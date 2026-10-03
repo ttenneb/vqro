@@ -114,8 +114,9 @@ def herdr_descendants(pane_pid):
 
 
 class PiProfileDemo(ReadinessDemo):
-    def __init__(self, root, vqro, pi):
+    def __init__(self, root, vqro, pi, no_settings=False):
         super().__init__(root, vqro, pi)
+        self.no_settings = no_settings
         # The readiness harness wraps `pi` to record argv; this demo needs the real
         # Pi so its own arguments and resource loading are exercised.
         link = root / "bin" / "pi"
@@ -133,17 +134,6 @@ class PiProfileDemo(ReadinessDemo):
         """
         agent = self.root / "home" / ".pi" / "agent"
         agent.mkdir(parents=True, exist_ok=True)
-        human = Path.home() / ".pi" / "agent"
-        settings = json.loads((human / "settings.json").read_text())
-        settings["defaultProvider"] = "deepseek"
-        settings["defaultModel"] = "deepseek-chat"
-        # A trailing/duplicated-separator directory source must still be excluded.
-        settings["packages"].append("/tmp//pi-input-gate//")
-        (agent / "auth.json").write_text('{"deepseek":{"type":"key","key":"demo"}}')
-        for name in ("npm", "git"):
-            source = human / name
-            if source.exists() and not (agent / name).exists():
-                (agent / name).symlink_to(source)
         extensions = agent / "extensions"
         extensions.mkdir(exist_ok=True)
         (extensions / EXCLUDED_EXTENSION).write_text("export default function () {}\n")
@@ -154,19 +144,33 @@ class PiProfileDemo(ReadinessDemo):
             directory = skills / name
             directory.mkdir(exist_ok=True)
             (directory / "SKILL.md").write_text("---\ndescription: stub\n---\nStub.\n")
+        (agent / "SYSTEM.md").write_text("HUMAN GLOBAL SYSTEM PROMPT\n")
+        if self.no_settings:
+            # Resources and a SYSTEM.md but no settings.json: the profile must
+            # still be built from empty settings.
+            return
+        human = Path.home() / ".pi" / "agent"
+        settings = json.loads((human / "settings.json").read_text())
+        settings["defaultProvider"] = "deepseek"
+        settings["defaultModel"] = "deepseek-chat"
+        # A trailing/duplicated-separator directory source must still be excluded.
+        settings["packages"].append("/tmp//pi-input-gate//")
         # An explicit absolute extension path in settings must not bypass the
-        # extension exclusion.
+        # extension exclusion, nor an explicit absolute skill file the skill one.
         settings["extensions"] = [
             str(extensions / EXCLUDED_EXTENSION),
             str(extensions / KEPT_EXTENSION),
         ]
-        # An explicit absolute skill file must not bypass the skill exclusion.
         settings["skills"] = [
             str(skills / "herdr" / "SKILL.md"),
             str(skills / KEPT_SKILL / "SKILL.md"),
         ]
         (agent / "settings.json").write_text(json.dumps(settings, indent=2))
-        (agent / "SYSTEM.md").write_text("HUMAN GLOBAL SYSTEM PROMPT\n")
+        (agent / "auth.json").write_text('{"deepseek":{"type":"key","key":"demo"}}')
+        for name in ("npm", "git"):
+            source = human / name
+            if source.exists() and not (agent / name).exists():
+                (agent / name).symlink_to(source)
         # The human's relative local package sources resolve to ~/Projects from the
         # agent dir; mirror that base so they load in the private root.
         home_projects = self.root / "home" / "Projects"
@@ -191,6 +195,8 @@ class PiProfileDemo(ReadinessDemo):
         self.seed_human_agent_dir()
         self.start()
         profile = self.profile_dir()
+        if self.no_settings:
+            return self.check_no_settings(profile)
 
         settings = json.loads((profile / "settings.json").read_text())
         names = [package_name(entry) for entry in settings["packages"]]
@@ -270,6 +276,28 @@ class PiProfileDemo(ReadinessDemo):
         (self.root / "header.txt").write_text(sanitized)
         return result_value
 
+    def check_no_settings(self, profile):
+        """A human agent dir without settings.json still gets a profile."""
+        settings = json.loads((profile / "settings.json").read_text())
+        assert settings.get("packages", []) == [], settings
+        assert not (profile / "extensions" / EXCLUDED_EXTENSION).exists()
+        assert (profile / "extensions" / KEPT_EXTENSION).exists()
+        for name in HERDR_SKILLS:
+            assert not (profile / "skills" / name).exists(), name
+        assert (profile / "skills" / KEPT_SKILL).exists()
+        system = (profile / "SYSTEM.md").read_text()
+        assert "Working with Vqro" in system, system[:80]
+        assert "HUMAN GLOBAL SYSTEM PROMPT" not in system
+        human = self.cli("workspace", "create", "--cwd", str(self.root / "work"), "--no-focus")["result"]["root_pane"]["pane_id"]
+        result = self.root / "pane-agent-dir"
+        self.cli("pane", "run", human, f"printf '%s' \"$PI_CODING_AGENT_DIR\" > {result}")
+        self.wait_file(result)
+        assert result.read_text() == str(profile), result.read_text()
+        value = {"result": "passed", "no_settings": True, "empty_settings": True,
+                 "excluded_resources_absent": True, "vqro_system_md": True, "pane_env": True}
+        self.save("RESULT-nosettings.json", value)
+        return value
+
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
@@ -282,18 +310,28 @@ def main():
     if args.root:
         args.root.mkdir(mode=0o700, parents=True, exist_ok=False)
         root = args.root.resolve()
-    else:
-        base = Path.home() / ".local/share/herdr/scratch"
-        base.mkdir(parents=True, exist_ok=True)
+        if len(str(root / "api.sock").encode()) >= 108:
+            parser.error("private root is too long for a Linux Unix socket")
+        demo = PiProfileDemo(root, args.vqro.resolve(), args.pi.resolve())
+        print(f"Private Pi profile demo: {root}", flush=True)
+        try:
+            print(json.dumps(demo.run()), flush=True)
+        finally:
+            demo.cleanup()
+        return
+    base = Path.home() / ".local/share/herdr/scratch"
+    base.mkdir(parents=True, exist_ok=True)
+    for no_settings in (False, True):
         root = Path(tempfile.mkdtemp(prefix="pi-profile-demo-", dir=base))
-    if len(str(root / "api.sock").encode()) >= 108:
-        parser.error("private root is too long for a Linux Unix socket")
-    demo = PiProfileDemo(root, args.vqro.resolve(), args.pi.resolve())
-    print(f"Private Pi profile demo: {root}", flush=True)
-    try:
-        print(json.dumps(demo.run()), flush=True)
-    finally:
-        demo.cleanup()
+        if len(str(root / "api.sock").encode()) >= 108:
+            parser.error("private root is too long for a Linux Unix socket")
+        label = "no-settings" if no_settings else "default"
+        demo = PiProfileDemo(root, args.vqro.resolve(), args.pi.resolve(), no_settings=no_settings)
+        print(f"Private Pi profile demo ({label}): {root}", flush=True)
+        try:
+            print(json.dumps(demo.run()), flush=True)
+        finally:
+            demo.cleanup()
 
 
 if __name__ == "__main__":
