@@ -139,10 +139,8 @@ pub fn restart_after_update_guidance(stop_command: &str, attach_command: Option<
 }
 
 pub fn active_restart_after_update_guidance() -> String {
-    if !explicit_session_requested() {
-        if std::env::var(crate::api::SOCKET_PATH_ENV_VAR).is_ok() {
-            return restart_after_update_guidance(&stop_command_with_socket_override(), None);
-        }
+    if !explicit_session_requested() && std::env::var(crate::api::SOCKET_PATH_ENV_VAR).is_ok() {
+        return restart_after_update_guidance(&stop_command_with_socket_override(), None);
     }
 
     restart_after_update_guidance(&local_stop_command(), Some(&local_attach_command()))
@@ -162,7 +160,6 @@ pub fn stop_command_with_socket_override() -> String {
             );
         }
     }
-
     local_stop_command()
 }
 
