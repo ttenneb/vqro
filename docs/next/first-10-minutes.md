@@ -34,7 +34,7 @@ cat > first-plan.json <<'JSON'
 JSON
 ```
 
-The block writes `first-plan.json` and `first-plan-result.json`; use a fresh workspace directory, not one containing files with those names. Names resolve to exact current agent executions; the stored plan contains bindings, not names. Import is human-approved, not permission for an agent to start automatically. The files below share this workspace directory.
+This block writes `first-plan.json`; task-a writes `first-plan-result.json` in the next block. Use a fresh workspace directory, not one containing files with those names. Names resolve to exact current agent executions; the stored plan contains bindings, not names. Import is human-approved, not permission for an agent to start automatically. The files below share this workspace directory.
 
 ## 3. Ask task-a to run this block
 
