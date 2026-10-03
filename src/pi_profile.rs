@@ -19,6 +19,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 /// Packages a Vqro-launched Pi must not load: Herdr-coupled or Vqro-competing.
 const EXCLUDED_PACKAGES: &[&str] = &["pi-input-gate", "pi-tasking-herdr-adapter", "rpiv-todo"];
@@ -26,12 +27,14 @@ const EXCLUDED_PACKAGES: &[&str] = &["pi-input-gate", "pi-tasking-herdr-adapter"
 const UNMIRRORED: &[&str] = &["settings.json", ".ready", "sessions", "tmp"];
 /// Package spec prefixes, which carry no local path.
 const SPEC_PREFIXES: &[&str] = &["npm:", "git:", "ssh:", "file:", "http:", "https:"];
-/// Settings keys whose string value is a path resolved against the agent dir.
-const PATH_KEYS: &[&str] = &["sessionDir", "shellPath"];
-/// Settings keys whose string-array values are paths resolved against the agent dir.
+/// Settings keys whose string-array values are paths or patterns resolved
+/// against the agent dir. `sessionDir`/`shellPath` are deliberately excluded:
+/// Pi resolves those against the process CWD.
 const PATH_LIST_KEYS: &[&str] = &["extensions", "skills", "prompts", "themes"];
-/// Written only after a fully successful preparation, so readiness never selects
-/// a partial or stale profile.
+/// Leading resource-filter operators Pi recognizes only at string start.
+const FILTER_OPERATORS: &[char] = &['!', '+', '-'];
+/// Holds the content address of the settings a completed preparation used, so
+/// presence alone never selects a rejected, partial or stale profile.
 const READY_MARKER: &str = ".ready";
 
 /// One warning line shown in a pane when a Vqro-launched Pi cannot be isolated.
@@ -55,10 +58,34 @@ fn human_agent_dir() -> Option<PathBuf> {
     home_dir().map(|home| home.join(".pi").join("agent"))
 }
 
-/// True when Pi Vqro starts should use the profile, i.e. this function completed
-/// a preparation for the current settings.
+/// The content address of the human's settings, or `None` when it is unreadable.
+fn source_stamp(human: &Path) -> Option<String> {
+    let bytes = std::fs::read(human.join("settings.json")).ok()?;
+    Some(
+        Sha256::digest(&bytes)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect(),
+    )
+}
+
+/// True when Pi Vqro starts should use the profile: a real (not symlinked)
+/// profile directory whose marker matches the human's current settings.
 pub(crate) fn profile_ready() -> bool {
-    !opted_out() && profile_dir().join(READY_MARKER).is_file()
+    if opted_out() || !cfg!(unix) {
+        return false;
+    }
+    let profile = profile_dir();
+    if std::fs::symlink_metadata(&profile).is_ok_and(|meta| meta.file_type().is_symlink()) {
+        return false;
+    }
+    let Ok(marker) = std::fs::read_to_string(profile.join(READY_MARKER)) else {
+        return false;
+    };
+    let Some(stamp) = human_agent_dir().and_then(|human| source_stamp(&human)) else {
+        return false;
+    };
+    marker.trim() == stamp
 }
 
 /// True when a profile is wanted (the human has Pi settings) but is not ready, so
@@ -73,8 +100,9 @@ pub(crate) fn warning_needed() -> bool {
 /// Build or refresh the profile.
 ///
 /// A no-op when the human has no Pi settings (then there is nothing to exclude)
-/// or when the defaults are opted out. The ready marker is dropped first and only
-/// rewritten after the whole preparation succeeds.
+/// or when the defaults are opted out. The ready marker records the content
+/// address of the settings used, so a rejected, partial or stale preparation is
+/// never selected even when the marker cannot be rewritten.
 pub(crate) fn ensure_profile() -> io::Result<()> {
     if opted_out() || !cfg!(unix) {
         return Ok(());
@@ -82,9 +110,6 @@ pub(crate) fn ensure_profile() -> io::Result<()> {
     let profile = profile_dir();
     // Never follow a symlinked profile directory into a human file.
     crate::bundled::safe_under(&profile, &profile)?;
-    if std::fs::symlink_metadata(&profile).is_ok() {
-        let _ = std::fs::remove_file(profile.join(READY_MARKER));
-    }
     let Some(human) = human_agent_dir() else {
         return Ok(());
     };
@@ -102,7 +127,9 @@ pub(crate) fn ensure_profile() -> io::Result<()> {
     mirror_entries(&human, &profile)?;
     let marker = profile.join(READY_MARKER);
     crate::bundled::safe_under(&profile, &marker)?;
-    write_if_changed(&marker, "ready\n")?;
+    let stamp = source_stamp(&human)
+        .ok_or_else(|| io::Error::other("human Pi settings disappeared during preparation"))?;
+    write_if_changed(&marker, &format!("{stamp}\n"))?;
     Ok(())
 }
 
@@ -126,29 +153,31 @@ fn derive_packages(settings: &mut Value, human: &Path) {
     }
 }
 
-/// Rewrite relative path settings that Pi resolves against the agent dir.
+/// Rewrite relative path settings Pi resolves against the agent dir, keeping any
+/// leading `!`/`+`/`-` filter operator in place. `sessionDir`/`shellPath` are not
+/// touched: Pi resolves those against the process CWD, not the agent dir.
 fn derive_paths(settings: &mut Value, human: &Path) {
     let Some(object) = settings.as_object_mut() else {
         return;
     };
-    for key in PATH_KEYS {
-        if let Some(Value::String(value)) = object.get_mut(*key) {
-            if let Some(resolved) = absolutize(human, value) {
-                *value = resolved;
-            }
-        }
-    }
     for key in PATH_LIST_KEYS {
         if let Some(Value::Array(items)) = object.get_mut(*key) {
             for item in items.iter_mut() {
                 if let Value::String(value) = item {
-                    if let Some(resolved) = absolutize(human, value) {
+                    if let Some(resolved) = absolutize_filter(human, value) {
                         *value = resolved;
                     }
                 }
             }
         }
     }
+}
+
+/// Absolutize a resource path or pattern, preserving a leading filter operator.
+fn absolutize_filter(human: &Path, entry: &str) -> Option<String> {
+    let rest = entry.strip_prefix(FILTER_OPERATORS).unwrap_or(entry);
+    let operator = &entry[..entry.len() - rest.len()];
+    Some(format!("{operator}{}", absolutize(human, rest)?))
 }
 
 /// The absolute form of a relative local path, or `None` when it is not one.
@@ -186,7 +215,7 @@ fn package_source_mut(entry: &mut Value) -> Option<&mut String> {
     }
 }
 
-/// The package's own name, ignoring a spec prefix, scope, version and `.git`.
+/// The package's own name, ignoring a spec prefix, scope, `@ref` and `.git`.
 fn package_name(source: &str) -> &str {
     let without_spec = SPEC_PREFIXES
         .iter()
@@ -196,11 +225,12 @@ fn package_name(source: &str) -> &str {
         .rsplit(['/', '\\'])
         .next()
         .unwrap_or(without_spec);
-    let tail = tail.strip_suffix(".git").unwrap_or(tail);
-    match tail.rsplit_once('@') {
-        Some((name, version)) if !name.is_empty() && !version.is_empty() => name,
+    // Split the pin/ref first: a `.git` suffix precedes an `@ref`.
+    let name = match tail.rsplit_once('@') {
+        Some((name, reference)) if !name.is_empty() && !reference.is_empty() => name,
         _ => tail,
-    }
+    };
+    name.strip_suffix(".git").unwrap_or(name)
 }
 
 /// Any URL scheme or known spec prefix; such a source is not a local path.
@@ -317,22 +347,37 @@ mod tests {
             package_name("git:https://example.com/o/rpiv-todo.git"),
             "rpiv-todo"
         );
+        assert_eq!(
+            package_name("git:https://example.com/o/pi-input-gate.git@v1"),
+            "pi-input-gate"
+        );
     }
 
     #[test]
-    fn relative_path_settings_are_absolutized_and_specs_kept() {
+    fn relative_resource_paths_keep_their_filter_operator() {
         let mut value = serde_json::json!({
-            "sessionDir": "../../sessions",
-            "shellPath": "/bin/zsh",
-            "extensions": ["../../Projects/extension.ts", "~/local", "npm:x"],
+            "sessionDir": "./sessions",
+            "shellPath": "./bin/bash",
+            "extensions": [
+                "extensions/local.ts",
+                "!**/blocked.ts",
+                "-old.ts",
+                "+../../Projects/ok.ts",
+                "~/local",
+                "npm:x",
+            ],
         });
         derive_paths(&mut value, Path::new("/home/h/.pi/agent"));
-        assert_eq!(value["sessionDir"], "/home/h/.pi/agent/../../sessions");
-        assert_eq!(value["shellPath"], "/bin/zsh");
+        // sessionDir/shellPath resolve against the CWD, so they are left alone.
+        assert_eq!(value["sessionDir"], "./sessions");
+        assert_eq!(value["shellPath"], "./bin/bash");
         assert_eq!(
             value["extensions"],
             serde_json::json!([
-                "/home/h/.pi/agent/../../Projects/extension.ts",
+                "/home/h/.pi/agent/extensions/local.ts",
+                "!/home/h/.pi/agent/**/blocked.ts",
+                "-/home/h/.pi/agent/old.ts",
+                "+/home/h/.pi/agent/../../Projects/ok.ts",
                 "~/local",
                 "npm:x"
             ])
