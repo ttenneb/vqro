@@ -21,6 +21,8 @@ use serde_json::Value;
 const EXCLUDED_PACKAGES: &[&str] = &["pi-input-gate", "pi-tasking-herdr-adapter", "rpiv-todo"];
 /// Entries of the human's agent dir that are never mirrored into the profile.
 const UNMIRRORED: &[&str] = &["settings.json", "sessions", "tmp"];
+/// Package spec prefixes, which carry no local path.
+const SPEC_PREFIXES: &[&str] = &["npm:", "git:", "http:", "https:"];
 
 /// One warning line shown in a pane when a Vqro-launched Pi cannot be isolated.
 pub(crate) const UNAVAILABLE_WARNING: &str =
@@ -36,16 +38,7 @@ pub(crate) fn profile_dir() -> PathBuf {
 }
 
 fn home_dir() -> Option<PathBuf> {
-    #[cfg(windows)]
-    {
-        std::env::var_os("USERPROFILE")
-            .or_else(|| std::env::var_os("HOME"))
-            .map(PathBuf::from)
-    }
-    #[cfg(not(windows))]
-    {
-        std::env::var_os("HOME").map(PathBuf::from)
-    }
+    std::env::var_os("HOME").map(PathBuf::from)
 }
 
 fn human_agent_dir() -> Option<PathBuf> {
@@ -57,28 +50,19 @@ pub(crate) fn profile_ready() -> bool {
     !opted_out() && profile_dir().join("settings.json").is_file()
 }
 
-/// True when the profile is needed (the human's settings list an excluded
-/// package) but could not be built, so a Vqro-launched Pi must be warned.
+/// True when the profile is needed (the human has Pi settings) but could not be
+/// built, so a Vqro-launched Pi must be warned.
 pub(crate) fn warning_needed() -> bool {
-    if profile_ready() {
+    if !cfg!(unix) || opted_out() || profile_ready() {
         return false;
     }
-    let Some(human) = human_agent_dir() else {
-        return false;
-    };
-    let Ok(text) = std::fs::read_to_string(human.join("settings.json")) else {
-        return false;
-    };
-    serde_json::from_str::<Value>(&text)
-        .ok()
-        .and_then(|settings| settings.get("packages").and_then(Value::as_array).cloned())
-        .is_some_and(|packages| packages.iter().any(is_excluded))
+    human_agent_dir().is_some_and(|human| human.join("settings.json").is_file())
 }
 
 /// Build or refresh the profile. A no-op when the human has no Pi settings (then
 /// there is nothing to exclude) or when the defaults are opted out.
 pub(crate) fn ensure_profile() -> io::Result<()> {
-    if opted_out() {
+    if opted_out() || !cfg!(unix) {
         return Ok(());
     }
     let Some(human) = human_agent_dir() else {
@@ -144,7 +128,7 @@ fn package_source_mut(entry: &mut Value) -> Option<&mut String> {
 
 /// The package's own name, ignoring a spec prefix, scope and version suffix.
 fn package_name(source: &str) -> &str {
-    let without_spec = ["npm:", "git:", "http:", "https:"]
+    let without_spec = SPEC_PREFIXES
         .iter()
         .find_map(|prefix| source.strip_prefix(prefix))
         .unwrap_or(source);
@@ -159,10 +143,9 @@ fn package_name(source: &str) -> &str {
 }
 
 fn is_spec(source: &str) -> bool {
-    source.starts_with("npm:")
-        || source.starts_with("git:")
-        || source.starts_with("http:")
-        || source.starts_with("https:")
+    SPEC_PREFIXES
+        .iter()
+        .any(|prefix| source.starts_with(prefix))
 }
 
 fn write_if_changed(path: &Path, body: &str) -> io::Result<()> {
