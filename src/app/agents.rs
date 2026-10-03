@@ -195,6 +195,9 @@ impl App {
             .ok_or_else(|| AgentStartError::TargetBusy(params.pane_id.clone()))?;
 
         let mut argv = vec![crate::detect::interactive_agent_executable(kind).to_string()];
+        if kind == crate::detect::Agent::Pi {
+            argv.extend(crate::bundled::pi_launch_flags());
+        }
         argv.extend(params.args);
         let command = crate::platform::interactive_shell_command(&argv, &shell_name)
             .ok_or(AgentStartError::InvalidArgument)?;

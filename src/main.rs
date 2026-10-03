@@ -21,6 +21,7 @@ mod agent_view_eval;
 mod api;
 mod app;
 mod build_info;
+mod bundled;
 mod checksum;
 mod cli;
 mod client;
@@ -826,6 +827,13 @@ fn main() -> io::Result<()> {
 
     let loaded_config = config::Config::load();
     exit_if_nested_disabled(&loaded_config.config);
+
+    // The bundled install reports each write before the client normally installs
+    // its log subscriber.
+    logging::init_file_logging(product::CLIENT_LOG_FILE);
+    if let Err(err) = bundled::ensure_defaults() {
+        tracing::warn!(err = %err, "failed to prepare bundled default extensions");
+    }
 
     let saved_federation =
         client::endpoint::EndpointCatalog::load().is_ok_and(|catalog| catalog.has_enabled_ssh());

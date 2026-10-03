@@ -22,6 +22,12 @@ maintenance-test:
 task-core-test:
     {{python}} -B -m unittest discover -s extensions/tasks -p '*_test.py'
 
+# Readiness: one-command private launch installs the bundled defaults and two
+# model-free Pi panes run import -> delegate -> badge -> decision -> message.
+# Needs a built vqro and a pi on PATH; writes only under a new private root.
+readiness-demo:
+    python3 extensions/tasks/demo_readiness.py --vqro "${CARGO_TARGET_DIR:-target}/debug/vqro" --pi "$(command -v pi)"
+
 # Run one nextest filter, e.g. `just test-one codex_stale_working`
 test-one filter:
     cargo nextest run --locked "{{filter}}" --status-level fail --final-status-level fail --failure-output final --success-output never
