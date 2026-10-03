@@ -139,7 +139,7 @@ pub(crate) fn run(name: &str, args: &[String], remote: bool) -> std::io::Result<
         }
     }
     let Some((plugin, contribution)) = selected else {
-        eprintln!("unknown or unavailable command: {name}");
+        eprintln!("unknown command: {name} (no available extension contribution)");
         return Ok(2);
     };
     if !supported(&plugin.platforms) || !supported(&contribution.platforms) {
