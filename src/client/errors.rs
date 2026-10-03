@@ -111,11 +111,11 @@ pub(super) fn server_restart_notice(
     let server = crate::product::DISPLAY_NAME;
     let what = if server_protocol < client_protocol {
         format!(
-            "older {server} server protocol (server {server_protocol}, client {client_protocol})"
+            "the running {server} server speaks an older protocol (server {server_protocol}, client {client_protocol})"
         )
     } else if server_version != client_version {
         format!(
-            "different {server} server build (server {server_version}, client {client_version})"
+            "the running {server} server is a different build (server {server_version}, client {client_version})"
         )
     } else {
         return None;
@@ -134,7 +134,10 @@ mod tests {
     fn a_different_build_is_reported_even_when_the_protocol_matches() {
         let notice = server_restart_notice("0.9.0", "0.9.0-dev.561da0e3", 23, 23)
             .expect("different build notice");
-        assert!(notice.contains("different vqro server build"), "{notice}");
+        assert!(
+            notice.contains("the running vqro server is a different build"),
+            "{notice}"
+        );
         assert!(notice.contains("0.9.0-dev.561da0e3"), "{notice}");
         assert!(notice.contains("0.9.0"), "{notice}");
         assert!(notice.contains("server stop"), "{notice}");
@@ -144,7 +147,10 @@ mod tests {
     #[test]
     fn an_older_protocol_is_reported_with_the_command() {
         let notice = server_restart_notice("0.9.0", "0.9.0", 23, 22).expect("older protocol");
-        assert!(notice.contains("older vqro server protocol"), "{notice}");
+        assert!(
+            notice.contains("the running vqro server speaks an older protocol"),
+            "{notice}"
+        );
         assert!(notice.contains("server 22, client 23"), "{notice}");
         assert!(
             notice.contains(&crate::session::stop_command_with_socket_override()),
