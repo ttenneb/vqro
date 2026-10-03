@@ -34,7 +34,7 @@ def package_name(source):
         if source.startswith(prefix):
             source = source[len(prefix):]
             break
-    tail = source.rsplit("/", 1)[-1]
+    tail = source.rstrip("/\\").rsplit("/", 1)[-1]
     return tail.rsplit("@", 1)[0] if "@" in tail else tail
 
 
@@ -90,6 +90,8 @@ class PiProfileDemo(ReadinessDemo):
         settings = json.loads((human / "settings.json").read_text())
         settings["defaultProvider"] = "deepseek"
         settings["defaultModel"] = "deepseek-chat"
+        # A trailing-separator directory source must still be excluded by name.
+        settings["packages"].append("/tmp/pi-input-gate/")
         (agent / "settings.json").write_text(json.dumps(settings, indent=2))
         (agent / "auth.json").write_text('{"deepseek":{"type":"key","key":"demo"}}')
         for name in ("npm", "git"):
