@@ -611,7 +611,8 @@ def read_only_store(directory):
     store = Store.__new__(Store)
     store.db = sqlite3.connect((Path(directory) / "tasks.sqlite").resolve().as_uri() + "?mode=ro", uri=True, timeout=1, isolation_level=None)
     store.db.row_factory = sqlite3.Row
-    if store.db.execute("PRAGMA user_version").fetchone()[0] != 2:
+    store.decisions = decision_queue.Queue(store, 900, OutcomeUnknown)
+    if store.db.execute("PRAGMA user_version").fetchone()[0] != 3:
         store.db.close()
         raise ValueError("Tasks document requires current store version")
     return store
@@ -623,6 +624,8 @@ def main():
     parser.add_argument("--decision-delay-seconds", type=int, default=900)
     parser.add_argument("--native-attention", action="store_true")
     args = parser.parse_args()
+    # Validate policy configuration without opening the store in document-only runtimes.
+    decision_queue.Queue(None, args.decision_delay_seconds, OutcomeUnknown)
     directory = args.data_dir or str(Path(os.environ.get("XDG_STATE_HOME", str(Path.home() / ".local/state"))) / "vqro/extensions/vqro.tasks")
     store, document_store = None, None
     capabilities = ["action_invoke", "host_document"] if args.native_attention else ["action_invoke"]
@@ -673,7 +676,7 @@ def main():
                 if document_store is None:
                     document_store = read_only_store(directory)
                 document_store.db.execute("BEGIN")
-                if document_store.db.execute("PRAGMA user_version").fetchone()[0] != 2:
+                if document_store.db.execute("PRAGMA user_version").fetchone()[0] != 3:
                     raise ValueError("Tasks document requires current store version")
                 document = project(document_store, request["params"])
                 document_store.db.rollback()
@@ -690,7 +693,10 @@ def main():
         try:
             if store is None:
                 store = Store(directory, args.decision_delay_seconds)
-                store.decisions.apply_due(timestamp())
+                try:
+                    store.decisions.apply_due(timestamp())
+                except (ValueError, sqlite3.Error) as error:
+                    print("decision policy delayed: " + str(error), file=sys.stderr)
             result = {"ok": True, "value": store.invoke(request["params"]),
                       "document_revision": store.db.execute("SELECT COALESCE(MAX(seq),0) FROM transitions").fetchone()[0]}
         except OutcomeUnknown as error:

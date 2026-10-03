@@ -24,6 +24,8 @@ class DocumentTests(unittest.TestCase):
     def invoke(self, payload, caller=H):
         if payload["action"] in ("create","decision"):
             payload={"done_when":"An observable result is recorded.",**payload}
+        if payload["action"] == "decision":
+            payload={"options":[{"key":"yes","label":"Yes"},{"key":"no","label":"No"}],"default":"yes","reversible":True,"waiting_cost":"Pending human choice",**payload}
         return self.store.invoke({"caller":caller,"payload":payload})
     def change(self,task,action,**fields):
         return self.invoke({"action":action,"id":task["id"],"revision":task["revision"],"operation_id":f"{action}-{task['revision']}",**fields})["task"]
@@ -65,9 +67,9 @@ class DocumentTests(unittest.TestCase):
             self.assertFalse(document.project(observed,self.snapshot())["actions"])
             task=self.invoke({"action":"decision","title":"quiet decision","operation_id":"decision"})["task"]
             self.assertTrue(any(row["label"]==task["title"] for row in document.project(observed,self.snapshot())["items"]))
-            self.store.db.execute("PRAGMA user_version=3")
+            self.store.db.execute("PRAGMA user_version=4")
             with self.assertRaisesRegex(ValueError,"current store version"):provider.read_only_store(self.root.name)
-            self.assertEqual(3,self.store.db.execute("PRAGMA user_version").fetchone()[0])
+            self.assertEqual(4,self.store.db.execute("PRAGMA user_version").fetchone()[0])
         finally:observed.db.close()
     def test_protocol_document_only_missing_store_no_writes_and_current_version_outside_receipt(self):
         with tempfile.TemporaryDirectory() as missing:

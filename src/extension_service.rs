@@ -3420,7 +3420,8 @@ mod tests {
             received.try_recv().is_err(),
             "equal version must not schedule work"
         );
-        let payload = serde_json::json!({"action":"decision","title":"quiet write","done_when":"Recorded.","operation_id":"same"});
+        let payload = serde_json::json!({"action":"decision","title":"quiet write","done_when":"Recorded.","operation_id":"same",
+            "options":[{"key":"yes","label":"Yes"},{"key":"no","label":"No"}],"default":"yes","reversible":true,"waiting_cost":"Pending human choice"});
         assert_eq!(invoke(payload.clone()), 1);
         assert!(matches!(
             received.try_recv().expect("changed version"),
