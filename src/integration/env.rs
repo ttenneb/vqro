@@ -30,6 +30,14 @@ pub(crate) fn apply_pane_base_env(cmd: &mut CommandBuilder) {
     if let Ok(executable) = crate::platform::launch_executable() {
         cmd.env(crate::product::BIN_PATH_ENV, executable);
     }
+    // A Pi Vqro starts in this pane (agent start, a restored pane, or a
+    // hand-typed `pi`) uses the Vqro-only profile when it is available.
+    if crate::pi_profile::profile_ready() {
+        cmd.env(
+            PI_CODING_AGENT_DIR_ENV_VAR,
+            crate::pi_profile::profile_dir(),
+        );
+    }
 }
 
 pub(crate) fn pi_extension_dir() -> io::Result<PathBuf> {
