@@ -140,20 +140,30 @@ pub fn restart_after_update_guidance(stop_command: &str, attach_command: Option<
 
 pub fn active_restart_after_update_guidance() -> String {
     if !explicit_session_requested() {
-        if let Ok(socket_path) = std::env::var(crate::api::SOCKET_PATH_ENV_VAR) {
-            return restart_after_update_guidance(
-                &format!(
-                    "{}={} {} server stop",
-                    crate::api::SOCKET_PATH_ENV_VAR,
-                    socket_path,
-                    crate::product::NAME
-                ),
-                None,
-            );
+        if std::env::var(crate::api::SOCKET_PATH_ENV_VAR).is_ok() {
+            return restart_after_update_guidance(&stop_command_with_socket_override(), None);
         }
     }
 
     restart_after_update_guidance(&local_stop_command(), Some(&local_attach_command()))
+}
+
+/// The one command that stops the running server, including any socket override
+/// the caller is using. One source for both the long update guidance and the
+/// rendered client's one-line notice.
+pub fn stop_command_with_socket_override() -> String {
+    if !explicit_session_requested() {
+        if let Ok(socket_path) = std::env::var(crate::api::SOCKET_PATH_ENV_VAR) {
+            return format!(
+                "{}={} {} server stop",
+                crate::api::SOCKET_PATH_ENV_VAR,
+                socket_path,
+                crate::product::NAME
+            );
+        }
+    }
+
+    local_stop_command()
 }
 
 pub fn explicit_session_requested() -> bool {

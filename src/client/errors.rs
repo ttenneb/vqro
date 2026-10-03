@@ -114,6 +114,30 @@ pub(super) fn older_server_message(client_protocol: u32, server_protocol: u32) -
     ))
 }
 
+/// The one-line notice the rendered client shows for a running server that is an
+/// older build or protocol than this client. `None` when they are the same build.
+/// The restart stays the human's action: this client never restarts or stops a
+/// server by itself.
+pub(super) fn server_restart_notice(
+    client_version: &str,
+    server_version: &str,
+    client_protocol: u32,
+    server_protocol: u32,
+) -> Option<String> {
+    let reason = if server_protocol < client_protocol {
+        format!("server protocol {server_protocol}, client protocol {client_protocol}")
+    } else if server_version != client_version {
+        format!("server build {server_version}, client build {client_version}")
+    } else {
+        return None;
+    };
+    Some(format!(
+        "older {} server ({reason}); restart it yourself: `{}`  this client never restarts it.",
+        crate::product::DISPLAY_NAME,
+        crate::session::stop_command_with_socket_override(),
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -139,5 +163,26 @@ mod tests {
         assert!(older_server_message(23, 23).is_none());
         assert!(older_server_message(23, 24).is_none());
         assert!(older_server_message(22, 23).is_none());
+    }
+
+    #[test]
+    fn an_older_build_is_reported_even_when_the_protocol_matches() {
+        let notice = server_restart_notice("0.9.0", "0.9.0-dev.561da0e3", 23, 23)
+            .expect("older build notice");
+        assert!(notice.contains("0.9.0-dev.561da0e3"), "{notice}");
+        assert!(notice.contains("0.9.0"), "{notice}");
+        assert!(notice.contains("server stop"), "{notice}");
+        assert!(notice.contains("never restarts it"), "{notice}");
+    }
+
+    #[test]
+    fn an_older_protocol_is_reported_too() {
+        let notice = server_restart_notice("0.9.0", "0.9.0", 23, 22).expect("older protocol");
+        assert!(notice.contains("server protocol 22"), "{notice}");
+    }
+
+    #[test]
+    fn the_same_build_needs_no_notice() {
+        assert!(server_restart_notice("0.9.0", "0.9.0", 23, 23).is_none());
     }
 }

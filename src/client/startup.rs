@@ -9,24 +9,38 @@ pub fn run_client() -> io::Result<()> {
     run_client_with_mode(None, None, "connecting to server")
 }
 
-/// Offers a restart when the already-running server predates this client, which
-/// happens when the binary was upgraded while a server kept running. This only
-/// reports the fact and names the exact command: restarting stays the human's
-/// decision, and this client never restarts or stops a server by itself.
-pub(super) fn offer_server_restart_if_older() {
-    let Some(server_protocol) = running_server_protocol() else {
-        return;
-    };
-    let client_protocol = crate::protocol::PROTOCOL_VERSION;
-    let Some(offer) = super::errors::older_server_message(client_protocol, server_protocol) else {
-        return;
-    };
-    warn!(client_protocol, server_protocol, "running server is older");
-    eprintln!("{offer}");
+/// The one-line notice for the rendered client when the already-running server
+/// is an older build or protocol than this binary, which happens when the binary
+/// was upgraded while a server kept running. `None` when it is the same build or
+/// when no server answers in time. Restarting stays the human's decision: this
+/// client never restarts or stops a server by itself.
+pub(super) fn stale_server_notice() -> Option<String> {
+    let status = running_server_status()?;
+    let client_version = crate::build_info::version();
+    let notice = super::errors::server_restart_notice(
+        &client_version,
+        &status.version,
+        crate::protocol::PROTOCOL_VERSION,
+        status.protocol,
+    )?;
+    info!(
+        client_version = %client_version,
+        server_version = %status.version,
+        client_protocol = crate::protocol::PROTOCOL_VERSION,
+        server_protocol = status.protocol,
+        "running server is an older build"
+    );
+    Some(notice)
 }
 
-/// The running server's protocol, or `None` when no server answers in time.
-fn running_server_protocol() -> Option<u32> {
+/// The running server's own build identity, or `None` when no server answers in
+/// time. Both facts come from the existing ping status; nothing new is exposed.
+struct RunningServerStatus {
+    version: String,
+    protocol: u32,
+}
+
+fn running_server_status() -> Option<RunningServerStatus> {
     use crate::api::client::ApiClient;
     use crate::api::schema::{Method, PingParams, Request};
 
@@ -38,11 +52,11 @@ fn running_server_protocol() -> Option<u32> {
     let response = client
         .request_value_with_timeout(&request, PROTOCOL_PROBE_TIMEOUT)
         .ok()?;
-    response
-        .get("result")
-        .and_then(|result| result.get("protocol"))
-        .and_then(serde_json::Value::as_u64)
-        .and_then(|protocol| u32::try_from(protocol).ok())
+    let result = response.get("result")?;
+    Some(RunningServerStatus {
+        version: result.get("version")?.as_str()?.to_owned(),
+        protocol: u32::try_from(result.get("protocol")?.as_u64()?).ok()?,
+    })
 }
 
 #[cfg(unix)]

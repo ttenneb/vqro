@@ -162,6 +162,17 @@ fn run_client_with_mode(
         } else {
             crate::config::config_diagnostic_summary(&loaded_config.diagnostics)
         };
+    // An upgraded binary can attach to a server that kept running across the
+    // upgrade. Say so in the client's own startup banner, which the TUI clears
+    // to and keeps visible, rather than on stderr, which the TUI erases.
+    let stale_server_notice = (client_rendered_shell && !is_remote_client_process())
+        .then(startup::stale_server_notice)
+        .flatten();
+    let startup_config_diagnostic = match (stale_server_notice, startup_config_diagnostic) {
+        (Some(notice), Some(diagnostic)) => Some(format!("{notice}\n{diagnostic}")),
+        (Some(notice), None) => Some(notice),
+        (None, diagnostic) => diagnostic,
+    };
     let shell_config = client_rendered_shell.then(|| {
         shell::ClientShellConfig::from_config(&loaded_config.config)
             .with_startup_config_diagnostic(startup_config_diagnostic)
@@ -196,13 +207,6 @@ fn run_client_with_mode(
 
     crate::logging::startup("client");
     info!(path = %socket_path.display(), "{log_message}");
-
-    // An upgraded binary can attach to a server that kept running from before
-    // the upgrade. Report that once, with the command to restart it, and never
-    // restart it here.
-    if client_rendered_shell && !is_remote_client_process() {
-        startup::offer_server_restart_if_older();
-    }
 
     let endpoint_catalog = if client_rendered_shell && !is_remote_client_process() {
         endpoint::EndpointCatalog::load().unwrap_or_else(|error| {
