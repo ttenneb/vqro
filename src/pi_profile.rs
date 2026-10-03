@@ -21,6 +21,12 @@
 //! profile directory whose content still matches its marker. An unreadable human
 //! `settings.json` (any read error, not only a missing file) is treated as the
 //! empty settings, so that case builds a profile without the human's settings.
+//!
+//! Readiness means the profile settings match the human's current settings AND the
+//! bundled adapter and vqro skill are linked and present; a preparation that
+//! cannot publish them fails and leaves the profile unselected. In that warned
+//! fallback Pi loads the human's own config and gets neither the vqro skill nor the
+//! reply-routing adapter.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -132,6 +138,16 @@ pub(crate) fn profile_ready() -> bool {
     let Some(profile_hash) = profile_settings_hash(&profile) else {
         return false;
     };
+    // Readiness also attests that the bundled adapter and vqro skill are linked
+    // and present, not only that the settings match.
+    if !profile.join("skills").join("vqro").exists()
+        || !profile
+            .join("extensions")
+            .join("vqro-reply-routing.ts")
+            .exists()
+    {
+        return false;
+    }
     source == recorded_source && profile_hash == recorded_profile
 }
 
@@ -213,10 +229,11 @@ pub(crate) fn ensure_profile() -> io::Result<()> {
     Ok(())
 }
 
-/// True only for our own previous links: a `pi-<generation>` directory directly
-/// under the bundled root, holding `vqro-reply-routing.ts` or `skills/vqro`.
-/// Anything else - another bundled path, a custom or user generation, or a link
-/// outside - is foreign and preserved.
+/// True only for our own previous links: a `pi-<16 hex>` generation directory
+/// directly under the bundled root, holding `vqro-reply-routing.ts` or
+/// `skills/vqro`. The generation name rule matches the tasks generations. Anything
+/// else - another bundled path, a custom or user generation, or a link outside -
+/// is foreign and preserved.
 fn is_owned_pi_asset(root: &Path, path: &Path) -> bool {
     let Ok(relative) = path.strip_prefix(root) else {
         return false;
@@ -225,7 +242,11 @@ fn is_owned_pi_asset(root: &Path, path: &Path) -> bool {
     let Some(first) = components.next() else {
         return false;
     };
-    if !first.as_os_str().to_string_lossy().starts_with("pi-") {
+    let name = first.as_os_str().to_string_lossy();
+    let Some(generation) = name.strip_prefix("pi-") else {
+        return false;
+    };
+    if generation.len() != 16 || !generation.chars().all(|digit| digit.is_ascii_hexdigit()) {
         return false;
     }
     let rest: PathBuf = components.collect();
@@ -675,23 +696,33 @@ mod tests {
         let root = Path::new("/cfg/bundled");
         assert!(is_owned_pi_asset(
             root,
-            Path::new("/cfg/bundled/pi-abc123/vqro-reply-routing.ts")
+            Path::new("/cfg/bundled/pi-0123456789abcdef/vqro-reply-routing.ts")
         ));
         assert!(is_owned_pi_asset(
             root,
-            Path::new("/cfg/bundled/pi-abc123/skills/vqro")
+            Path::new("/cfg/bundled/pi-0123456789abcdef/skills/vqro")
         ));
+        // A non-16-hex or non-hex generation name is not ours.
+        assert!(!is_owned_pi_asset(
+            root,
+            Path::new("/cfg/bundled/pi-nothex/vqro-reply-routing.ts")
+        ));
+        assert!(!is_owned_pi_asset(
+            root,
+            Path::new("/cfg/bundled/pi-0123456789abcde/vqro-reply-routing.ts")
+        ));
+        // A foreign or custom bundled path is preserved.
         assert!(!is_owned_pi_asset(
             root,
             Path::new("/cfg/bundled/custom/vqro-reply-routing.ts")
         ));
         assert!(!is_owned_pi_asset(
             root,
-            Path::new("/cfg/bundled/pi-abc123/other")
+            Path::new("/cfg/bundled/pi-0123456789abcdef/other")
         ));
         assert!(!is_owned_pi_asset(
             root,
-            Path::new("/elsewhere/pi-abc123/skills/vqro")
+            Path::new("/elsewhere/pi-0123456789abcdef/skills/vqro")
         ));
     }
 
