@@ -299,6 +299,16 @@
         },
         "scope_id": {
           "type": "string"
+        },
+        "terminals": {
+          "description": "Complete current placements, including non-agent terminals. Absence is unknown.\nPlacement never proves an execution is current or grants task authority.",
+          "items": {
+            "$ref": "#/schemas/agent_activity/$defs/HostTerminalRef"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
         }
       },
       "required": [
