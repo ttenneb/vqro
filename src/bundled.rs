@@ -21,14 +21,23 @@ const TASKS_PLUGIN_ID: &str = "vqro.tasks";
 const TASKS_MANIFEST: &str = include_str!("../extensions/tasks/vqro-extension.toml");
 const TASKS_README: &str = include_str!("../extensions/tasks/README.md");
 const TASKS_FILES: &[(&str, &str)] = &[
-    ("provider.py", include_str!("../extensions/tasks/provider.py")),
+    (
+        "provider.py",
+        include_str!("../extensions/tasks/provider.py"),
+    ),
     ("view.py", include_str!("../extensions/tasks/view.py")),
-    ("document.py", include_str!("../extensions/tasks/document.py")),
+    (
+        "document.py",
+        include_str!("../extensions/tasks/document.py"),
+    ),
     (
         "decision_queue.py",
         include_str!("../extensions/tasks/decision_queue.py"),
     ),
-    ("messages.py", include_str!("../extensions/tasks/messages.py")),
+    (
+        "messages.py",
+        include_str!("../extensions/tasks/messages.py"),
+    ),
     ("graph.py", include_str!("../extensions/tasks/graph.py")),
 ];
 
@@ -51,21 +60,16 @@ pub(crate) fn paths() -> BundledPaths {
     BundledPaths {
         tasks_dir: root.join("tasks"),
         pi_adapter: root.join("pi").join("vqro-reply-routing.ts"),
-        pi_skill: root
-            .join("pi")
-            .join("skills")
-            .join("vqro")
-            .join("SKILL.md"),
+        pi_skill: root.join("pi").join("skills").join("vqro").join("SKILL.md"),
     }
 }
 
 fn content_digest() -> String {
     let mut hasher = Sha256::new();
-    for (name, body) in TASKS_FILES
-        .iter()
-        .copied()
-        .chain([("vqro-extension.toml", TASKS_MANIFEST), ("README.md", TASKS_README)])
-    {
+    for (name, body) in TASKS_FILES.iter().copied().chain([
+        ("vqro-extension.toml", TASKS_MANIFEST),
+        ("README.md", TASKS_README),
+    ]) {
         hasher.update(name.as_bytes());
         hasher.update([0]);
         hasher.update(body.as_bytes());
@@ -127,9 +131,12 @@ fn write_pi_files(adapter: &std::path::Path, skill: &std::path::Path) -> io::Res
 }
 
 fn link_tasks_plugin(tasks_dir: &std::path::Path) -> io::Result<()> {
-    let linked = crate::persist::plugin_registry::load().into_iter().any(|plugin| {
-        plugin.plugin_id == TASKS_PLUGIN_ID && plugin.plugin_root == tasks_dir.display().to_string()
-    });
+    let linked = crate::persist::plugin_registry::load()
+        .into_iter()
+        .any(|plugin| {
+            plugin.plugin_id == TASKS_PLUGIN_ID
+                && plugin.plugin_root == tasks_dir.display().to_string()
+        });
     if linked {
         return Ok(());
     }
