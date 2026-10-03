@@ -28,8 +28,27 @@ use sha2::{Digest, Sha256};
 
 /// Packages a Vqro-launched Pi must not load: Herdr-coupled or Vqro-competing.
 const EXCLUDED_PACKAGES: &[&str] = &["pi-input-gate", "pi-tasking-herdr-adapter", "rpiv-todo"];
+/// Human agent-dir directories mirrored entry by entry, with the names to drop,
+/// so an excluded entry is absent and a new human entry still appears.
+const EXCLUDED_SKILLS: &[&str] = &[
+    "agent-messaging",
+    "herdr",
+    "herdr-pi-test-root",
+    "herdr-pi-upgrade-rollback",
+    "launch-owner",
+    "check-session-loaded",
+    "scratch-cleanup",
+];
+const EXCLUDED_EXTENSIONS: &[&str] = &["herdr-agent-state.ts"];
+const PER_ENTRY_DIRS: &[(&str, &[&str])] = &[
+    ("skills", EXCLUDED_SKILLS),
+    ("extensions", EXCLUDED_EXTENSIONS),
+];
 /// Entries of the human's agent dir that are never mirrored into the profile.
-const UNMIRRORED: &[&str] = &["settings.json", ".ready", "sessions", "tmp"];
+/// `SYSTEM.md` is replaced by [`VQRO_SYSTEM_MD`] rather than linked.
+const UNMIRRORED: &[&str] = &["settings.json", ".ready", "sessions", "tmp", "SYSTEM.md"];
+/// The Vqro system prompt written into the profile.
+const VQRO_SYSTEM_MD: &str = include_str!("../extensions/pi-profile/SYSTEM.md");
 /// Package spec prefixes, which carry no local path.
 const SPEC_PREFIXES: &[&str] = &["npm:", "git:", "ssh:", "file:", "http:", "https:"];
 /// Settings keys whose string-array values are paths or patterns resolved
@@ -156,6 +175,9 @@ pub(crate) fn ensure_profile() -> io::Result<()> {
     let body = serde_json::to_string_pretty(&settings)?;
     write_if_changed(&settings_path, &body)?;
     mirror_entries(&human, &profile)?;
+    let system = profile.join("SYSTEM.md");
+    crate::bundled::safe_under(&profile, &system)?;
+    write_if_changed(&system, VQRO_SYSTEM_MD)?;
     let marker = profile.join(READY_MARKER);
     crate::bundled::safe_under(&profile, &marker)?;
     // Address the exact bytes prepared from this source, not a later reread, so an
@@ -311,12 +333,50 @@ fn mirror_entries(human: &Path, profile: &Path) -> io::Result<()> {
             continue;
         }
         let target = profile.join(name.as_ref());
-        if std::fs::symlink_metadata(&target).is_ok() {
+        if let Some((_, excluded)) = PER_ENTRY_DIRS
+            .iter()
+            .find(|(directory, _)| *directory == name.as_ref())
+        {
+            mirror_directory(&entry.path(), &target, excluded)?;
+        } else {
+            link_or_skip(&entry.path(), &target)?;
+        }
+    }
+    Ok(())
+}
+
+/// Mirror a human resource directory entry by entry, dropping excluded names.
+///
+/// A whole-directory symlink from an earlier profile is replaced by a real
+/// directory, so an excluded entry is absent while a new one still appears.
+#[cfg(unix)]
+fn mirror_directory(source: &Path, target: &Path, excluded: &[&str]) -> io::Result<()> {
+    if !source.is_dir() {
+        return Ok(());
+    }
+    if std::fs::symlink_metadata(target).is_ok_and(|meta| meta.file_type().is_symlink()) {
+        std::fs::remove_file(target)?;
+    }
+    std::fs::create_dir_all(target)?;
+    for entry in std::fs::read_dir(source)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if excluded.contains(&name.as_ref()) {
             continue;
         }
-        std::os::unix::fs::symlink(entry.path(), &target)?;
-        tracing::info!(path = %target.display(), "linked a Pi profile entry");
+        link_or_skip(&entry.path(), &target.join(name.as_ref()))?;
     }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn link_or_skip(source: &Path, target: &Path) -> io::Result<()> {
+    if std::fs::symlink_metadata(target).is_ok() {
+        return Ok(());
+    }
+    std::os::unix::fs::symlink(source, target)?;
+    tracing::info!(path = %target.display(), "linked a Pi profile entry");
     Ok(())
 }
 
@@ -458,5 +518,32 @@ mod tests {
             kept[0]["source"],
             "/home/h/.pi/agent/../../Projects/pi-system-prompt"
         );
+    }
+
+    #[test]
+    fn the_vqro_system_prompt_is_embedded() {
+        assert!(VQRO_SYSTEM_MD.contains("Vqro pane"));
+        assert!(VQRO_SYSTEM_MD.contains("Working with Vqro"));
+        assert!(!VQRO_SYSTEM_MD.contains("Herdr"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn mirror_directory_drops_excluded_entries_and_keeps_others() {
+        let root = std::env::temp_dir().join(format!("vqro-pi-mirror-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let human = root.join("human");
+        let profile = root.join("profile");
+        std::fs::create_dir_all(human.join("skills")).unwrap();
+        for name in ["herdr", "keep-me"] {
+            std::fs::write(human.join("skills").join(name), "x").unwrap();
+        }
+        mirror_directory(&human.join("skills"), &profile.join("skills"), &["herdr"]).unwrap();
+        assert!(!profile.join("skills/herdr").exists());
+        assert!(std::fs::symlink_metadata(profile.join("skills/keep-me"))
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

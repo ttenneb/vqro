@@ -2,8 +2,10 @@
 """One-command check that a Pi Vqro starts gets the Vqro-only profile.
 
 Reuses the readiness harness (private root, real server, plain `vqro`, PTY,
-birth-checked cleanup). Model-free: it inspects Pi's own package listing and the
-pane environment, and watches for any `herdr` process under the Pi pane.
+birth-checked cleanup). Model-free: it inspects the profile layout, Pi's own
+package listing, the pane environment, and Pi's startup resource list (the
+Skills / Extensions / Context header), and watches for any `herdr` process under
+the Pi pane.
 
 No installation, credentials, model calls or human-session changes.
 """
@@ -18,6 +20,20 @@ from pathlib import Path
 from demo_readiness import ReadinessDemo
 
 EXCLUDED = ("pi-input-gate", "pi-tasking-herdr-adapter", "rpiv-todo")
+# Unambiguous excluded resource names; the bare `herdr` skill is covered by the
+# profile-layout check and the sanitized header check below.
+HERDR_SKILLS = (
+    "agent-messaging",
+    "herdr",
+    "herdr-pi-test-root",
+    "herdr-pi-upgrade-rollback",
+    "launch-owner",
+    "check-session-loaded",
+    "scratch-cleanup",
+)
+EXCLUDED_EXTENSION = "herdr-agent-state.ts"
+KEPT_EXTENSION = "keep-extension.ts"
+KEPT_SKILL = "keep-skill"
 WANTED = (
     "searxng-suite",
     "pi-tree-sitter",
@@ -72,7 +88,7 @@ class PiProfileDemo(ReadinessDemo):
     def __init__(self, root, vqro, pi):
         super().__init__(root, vqro, pi)
         # The readiness harness wraps `pi` to record argv; this demo needs the real
-        # Pi so its own arguments and package loading are exercised.
+        # Pi so its own arguments and resource loading are exercised.
         link = root / "bin" / "pi"
         if link.is_symlink():
             link.unlink()
@@ -83,7 +99,8 @@ class PiProfileDemo(ReadinessDemo):
 
         The settings come from the human's; the default provider and a dummy auth
         entry are only so `pi list` can resolve a model offline without real
-        credentials.
+        credentials. The extensions, skills and SYSTEM.md are stubs that make the
+        excluded and kept sets visible.
         """
         agent = self.root / "home" / ".pi" / "agent"
         agent.mkdir(parents=True, exist_ok=True)
@@ -91,8 +108,7 @@ class PiProfileDemo(ReadinessDemo):
         settings = json.loads((human / "settings.json").read_text())
         settings["defaultProvider"] = "deepseek"
         settings["defaultModel"] = "deepseek-chat"
-        # A trailing/duplicated-separator directory source must still be excluded
-        # by name.
+        # A trailing/duplicated-separator directory source must still be excluded.
         settings["packages"].append("/tmp//pi-input-gate//")
         (agent / "settings.json").write_text(json.dumps(settings, indent=2))
         (agent / "auth.json").write_text('{"deepseek":{"type":"key","key":"demo"}}')
@@ -100,6 +116,22 @@ class PiProfileDemo(ReadinessDemo):
             source = human / name
             if source.exists() and not (agent / name).exists():
                 (agent / name).symlink_to(source)
+        extensions = agent / "extensions"
+        extensions.mkdir(exist_ok=True)
+        (extensions / EXCLUDED_EXTENSION).write_text("export default function () {}\n")
+        (extensions / KEPT_EXTENSION).write_text("export default function () {}\n")
+        skills = agent / "skills"
+        skills.mkdir(exist_ok=True)
+        for name in (*HERDR_SKILLS, KEPT_SKILL):
+            directory = skills / name
+            directory.mkdir(exist_ok=True)
+            (directory / "SKILL.md").write_text("---\ndescription: stub\n---\nStub.\n")
+        (agent / "SYSTEM.md").write_text("HUMAN GLOBAL SYSTEM PROMPT\n")
+        # The human's relative local package sources resolve to ~/Projects from the
+        # agent dir; mirror that base so they load in the private root.
+        home_projects = self.root / "home" / "Projects"
+        if not home_projects.exists():
+            home_projects.symlink_to(Path.home() / "Projects")
 
     def profile_dir(self):
         return self.bundled_dir().parent / "pi-agent"
@@ -112,6 +144,9 @@ class PiProfileDemo(ReadinessDemo):
             time.sleep(0.05)
         raise RuntimeError(f"expected {path}")
 
+    def wait_output(self, pane, regex, seconds=15):
+        self.cli("pane", "wait-output", pane, "--regex", regex, "--timeout", str(int(seconds * 1000)))
+
     def run(self):
         self.seed_human_agent_dir()
         self.start()
@@ -121,6 +156,19 @@ class PiProfileDemo(ReadinessDemo):
         names = [package_name(entry) for entry in settings["packages"]]
         assert not [name for name in names if name in EXCLUDED], names
         assert sorted(names) == sorted(WANTED), names
+
+        # Profile layout: excluded resources gone, kept ones and the Vqro system
+        # prompt present.
+        profile_extensions = profile / "extensions"
+        profile_skills = profile / "skills"
+        assert not (profile_extensions / EXCLUDED_EXTENSION).exists()
+        assert (profile_extensions / KEPT_EXTENSION).exists()
+        for name in HERDR_SKILLS:
+            assert not (profile_skills / name).exists(), name
+        assert (profile_skills / KEPT_SKILL).exists()
+        system = (profile / "SYSTEM.md").read_text()
+        assert "Working with Vqro" in system, system[:80]
+        assert "HUMAN GLOBAL SYSTEM PROMPT" not in system
 
         env = {**self.env, "PI_CODING_AGENT_DIR": str(profile), "PI_OFFLINE": "1",
                "PI_SKIP_VERSION_CHECK": "1", "PI_TELEMETRY": "0"}
@@ -138,11 +186,20 @@ class PiProfileDemo(ReadinessDemo):
         self.wait_file(result)
         assert result.read_text() == str(profile), result.read_text()
 
-        # A Pi started in a Vqro pane loads no herdr-coupled package, so no herdr
-        # process runs under the pane while it starts.
+        # A Pi started in a Vqro pane: its startup resource list shows none of the
+        # excluded items, the vqro skill and reply-routing adapter, and the Vqro
+        # SYSTEM.md as context; and no herdr process runs under the pane.
         agent = self.cli("pane", "split", "--pane", human, "--direction", "right", "--no-focus")["result"]["pane"]["pane_id"]
-        self.cli("pane", "wait-output", agent, "--regex", r"\$", "--timeout", "5000")
+        self.wait_output(agent, r"\$", 5)
         self.cli("agent", "start", "pi-check", "--kind", "pi", "--pane", agent, "--timeout", "10000", "--", "--no-session")
+        self.wait_output(agent, r"Skills", 20)
+        header = self.cli("pane", "read", agent, "--source", "visible", "--format", "text", "--lines", "80")
+        sanitized = header.replace(str(self.root), "")
+        for name in (*EXCLUDED, *HERDR_SKILLS, EXCLUDED_EXTENSION):
+            assert name not in sanitized, (name, sanitized)
+        for wanted in ("vqro", "vqro-reply-routing", "SYSTEM.md"):
+            assert wanted in sanitized, (wanted, sanitized)
+
         pane_pid = self.cli("pane", "process-info", "--pane", agent)["result"]["process_info"]["shell_pid"]
         observed = []
         deadline = time.monotonic() + 6
@@ -155,8 +212,12 @@ class PiProfileDemo(ReadinessDemo):
         self.remember_pane(agent)
 
         result_value = {"result": "passed", "excluded_absent": list(EXCLUDED), "wanted_present": list(WANTED),
-                        "pi_list_ok": True, "hand_typed_pane_env": True, "herdr_processes": len(observed)}
+                        "excluded_extension_absent": EXCLUDED_EXTENSION,
+                        "excluded_skills_absent": list(HERDR_SKILLS), "kept_resources_present": True,
+                        "vqro_system_md": True, "pi_list_ok": True, "header_ok": True,
+                        "hand_typed_pane_env": True, "herdr_processes": len(observed)}
         self.save("RESULT.json", result_value)
+        (self.root / "header.txt").write_text(sanitized)
         return result_value
 
 
