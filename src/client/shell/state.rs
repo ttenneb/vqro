@@ -1656,7 +1656,7 @@ impl ClientShellState {
             // preserving it would leave stale content or a permanently loading request.
             self.inspector = None;
             self.last_pane_viewport_request = None;
-        self.last_pane_panel_viewport = None;
+            self.last_pane_panel_viewport = None;
             self.terminal_view_surfaces.clear();
             self.last_terminal_views_interest = None;
             if matches!(

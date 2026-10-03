@@ -629,7 +629,9 @@ impl ClientShellState {
             claimed: None,
         };
         if let Some(documents) = host_documents {
-            if self.supports_endpoint_capability(crate::protocol::endpoint::PANE_VIEWPORT_CAPABILITY) {
+            if self
+                .supports_endpoint_capability(crate::protocol::endpoint::PANE_VIEWPORT_CAPABILITY)
+            {
                 pane_panel::render(
                     &mut composed,
                     documents,

@@ -10374,6 +10374,17 @@
                 "string",
                 "null"
               ]
+            },
+            "view": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/success_response/$defs/HostViewAction"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "View only: how the user answers this action in a view. Absent means a\nplain button."
             }
           },
           "required": [
@@ -10431,6 +10442,17 @@
                   "type": "null"
                 }
               ]
+            },
+            "view": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/success_response/$defs/HostViewItem"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "View only: this item's view blocks. A legacy document never carries it."
             }
           },
           "required": [
@@ -10745,6 +10767,185 @@
             "terminal_id"
           ],
           "type": "object"
+        },
+        "HostViewAction": {
+          "properties": {
+            "choice": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/success_response/$defs/HostViewChoice"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "A 2-4 option choice the user answers in the view. The chosen key travels\nback as the action's `subject_id`."
+            },
+            "input": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/success_response/$defs/HostViewInput"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "A one-line text field answered in the view. The text travels back as the\naction's `subject_id`."
+            }
+          },
+          "type": "object"
+        },
+        "HostViewChip": {
+          "description": "A bounded state chip: text plus one of the existing tones.",
+          "properties": {
+            "text": {
+              "type": "string"
+            },
+            "tone": {
+              "$ref": "#/schemas/success_response/$defs/HostViewTone",
+              "default": "default"
+            }
+          },
+          "required": [
+            "text"
+          ],
+          "type": "object"
+        },
+        "HostViewChoice": {
+          "properties": {
+            "default_key": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "options": {
+              "items": {
+                "$ref": "#/schemas/success_response/$defs/HostViewChoiceOption"
+              },
+              "type": "array"
+            },
+            "prompt": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "options"
+          ],
+          "type": "object"
+        },
+        "HostViewChoiceOption": {
+          "properties": {
+            "key": {
+              "type": "string"
+            },
+            "label": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "key",
+            "label"
+          ],
+          "type": "object"
+        },
+        "HostViewEdge": {
+          "enum": [
+            "right",
+            "bottom"
+          ],
+          "type": "string"
+        },
+        "HostViewInput": {
+          "properties": {
+            "placeholder": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "prompt": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "type": "object"
+        },
+        "HostViewItem": {
+          "description": "The view blocks of one item. Every field is optional: an item with no view\nblock is a plain group, and an unknown future block degrades to\n\"unsupported\" instead of rejecting the view.",
+          "properties": {
+            "chip": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/success_response/$defs/HostViewChip"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "A short state chip. Its presence makes the item a row."
+            },
+            "count": {
+              "description": "A count shown in a section header or panel title.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "edge": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/success_response/$defs/HostViewEdge"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "A panel root: the edge this view prefers. Vqro may override it to fit."
+            },
+            "pane_id": {
+              "description": "A panel root: the pane whose panel stack this item's subtree fills.\nOnly a root item (no parent) may set it.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "since": {
+              "description": "Unix epoch seconds whose age Vqro draws. Only the extension knows what\nthe instant means.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "view_id": {
+              "description": "A panel root: the stable id of this view inside the pane's panel stack,\nas the user names it to `vqro pane panel`. Only a root may set it.",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "type": "object"
+        },
+        "HostViewTone": {
+          "enum": [
+            "default",
+            "muted",
+            "accent",
+            "success",
+            "warning",
+            "danger"
+          ],
+          "type": "string"
         },
         "InstalledExtensionPackageInfo": {
           "properties": {

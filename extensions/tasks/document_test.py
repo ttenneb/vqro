@@ -31,6 +31,32 @@ class DocumentTests(unittest.TestCase):
         return self.invoke({"action":action,"id":task["id"],"revision":task["revision"],"operation_id":f"{action}-{task['revision']}",**fields})["task"]
     def snapshot(self, refs=None, revision=1):
         return {"generation":7,"revision":revision,"terminals":refs if refs is not None else [{"terminal_id":"human","placement":P}],"activities":[]}
+    def test_pane_panels_slice_by_pane_and_link_the_counterparty(self):
+        panel_a={"pane_id":"w1:p1","workspace_id":"w1","tab_id":"w1:t1"}
+        panel_b={"pane_id":"w1:p2","workspace_id":"w1","tab_id":"w1:t1"}
+        root=self.invoke({"action":"create","title":"Panel root","operation_id":"panel-root"},caller=A)["task"]
+        root=self.change(root,"start")
+        child=self.invoke({"action":"create","title":"Panel child","parent":root["id"],"operation_id":"panel-child"},caller=A)["task"]
+        child=self.invoke({"action":"delegate","id":child["id"],"revision":child["revision"],
+                           "operation_id":"panel-delegate","owner":{"class":"agent","terminal_id":"b","agent":"pi","execution":"boot:1:2"}},caller=A)["task"]
+        refs=[{"terminal_id":"a","placement":panel_a},{"terminal_id":"b","placement":panel_b}]
+        items=document.project(self.store,self.snapshot(refs))["items"]
+        a_root=next(row for row in items if row["id"]=="panel:w1:p1:tasks")
+        self.assertEqual({"pane_id":"w1:p1","view_id":"tasks","edge":"right","count":2},a_root["view"])
+        a_child=next(row for row in items if row["id"]==f"panel:w1:p1:task:{child['id']}")
+        self.assertEqual("owes start",a_child["detail"])
+        self.assertEqual({"terminal_id":"b","placement":panel_b},a_child["terminal"])
+        self.assertEqual(f"panel:w1:p1:task:{root['id']}",a_child["parent_id"])
+        self.assertEqual("open",a_child["view"]["chip"]["text"])
+        self.assertIsInstance(a_child["view"]["since"],int)
+        b_root=next(row for row in items if row["id"]=="panel:w1:p2:tasks")
+        self.assertEqual(1,b_root["view"]["count"])
+        b_child=next(row for row in items if row["id"]==f"panel:w1:p2:task:{child['id']}")
+        self.assertEqual("you owe start",b_child["detail"])
+        self.assertEqual({"terminal_id":"a","placement":panel_a},b_child["terminal"])
+        # Placement is required: no placement, no panel row.
+        self.assertFalse(any("panel:" in row["id"] for row in document.project(self.store,self.snapshot([]))["items"]))
+
     def test_shared_durable_policy_and_placement_move_and_unknown(self):
         task=self.invoke({"action":"create","title":"native","operation_id":"create"})["task"]
         task=self.change(task,"delegate",owner=H)
@@ -123,7 +149,7 @@ class DocumentTests(unittest.TestCase):
             self.assertEqual(0,proc.returncode,proc.stderr)
             lines=[json.loads(line) for line in proc.stdout.splitlines()]
             self.assertNotIn("error",lines[1])
-            self.assertEqual("host.document.v1",lines[1]["result"]["contract"])
+            self.assertEqual("host.view.v1",lines[1]["result"]["contract"])
             self.assertFalse(any("badge:" in row["id"] or "row:" in row["id"] for row in lines[1]["result"]["items"]))
             self.assertEqual([],list(Path(missing).iterdir()))
         welcome={"type":"welcome","protocol":2,"granted_capabilities":["action_invoke","host_document"],"methods":["action.invoke.v1","host.document.render"]}
