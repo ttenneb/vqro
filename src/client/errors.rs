@@ -98,22 +98,6 @@ impl From<protocol::FramingError> for ClientError {
     }
 }
 
-/// The offer shown when the running server is older than this client, or `None`
-/// when it is not older. The restart stays the human's action: this client never
-/// restarts or stops a server by itself.
-pub(super) fn older_server_message(client_protocol: u32, server_protocol: u32) -> Option<String> {
-    if server_protocol >= client_protocol {
-        return None;
-    }
-    Some(format!(
-        "the running {} server is older than this client (server protocol {server_protocol}, client protocol {client_protocol}).\n\
-         Restart it yourself when you choose; this client never restarts or stops a server by itself.\n\
-         {}",
-        crate::product::DISPLAY_NAME,
-        crate::session::active_restart_after_update_guidance(),
-    ))
-}
-
 /// The one-line notice the rendered client shows for a running server that is an
 /// older build or protocol than this client. `None` when they are the same build.
 /// The restart stays the human's action: this client never restarts or stops a
@@ -124,16 +108,20 @@ pub(super) fn server_restart_notice(
     client_protocol: u32,
     server_protocol: u32,
 ) -> Option<String> {
-    let reason = if server_protocol < client_protocol {
-        format!("server protocol {server_protocol}, client protocol {client_protocol}")
+    let server = crate::product::DISPLAY_NAME;
+    let what = if server_protocol < client_protocol {
+        format!(
+            "older {server} server protocol (server {server_protocol}, client {client_protocol})"
+        )
     } else if server_version != client_version {
-        format!("server build {server_version}, client build {client_version}")
+        format!(
+            "different {server} server build (server {server_version}, client {client_version})"
+        )
     } else {
         return None;
     };
     Some(format!(
-        "older {} server ({reason}); restart it yourself: `{}`  this client never restarts it.",
-        crate::product::DISPLAY_NAME,
+        "{what}; restart it yourself: `{}`  this client never restarts it.",
         crate::session::stop_command_with_socket_override(),
     ))
 }
@@ -143,32 +131,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn an_older_server_message_names_the_command_and_refuses_to_restart() {
-        let message = older_server_message(23, 22).expect("older server message");
-        assert!(message.contains("is older than this client"), "{message}");
-        assert!(message.contains("server protocol 22"), "{message}");
-        assert!(message.contains("client protocol 23"), "{message}");
-        assert!(
-            message.contains("never restarts or stops a server by itself"),
-            "{message}"
-        );
-        assert!(
-            message.contains(&crate::session::active_restart_after_update_guidance()),
-            "{message}"
-        );
-    }
-
-    #[test]
-    fn a_matching_or_newer_server_keeps_whatever_the_server_sent() {
-        assert!(older_server_message(23, 23).is_none());
-        assert!(older_server_message(23, 24).is_none());
-        assert!(older_server_message(22, 23).is_none());
-    }
-
-    #[test]
-    fn an_older_build_is_reported_even_when_the_protocol_matches() {
+    fn a_different_build_is_reported_even_when_the_protocol_matches() {
         let notice = server_restart_notice("0.9.0", "0.9.0-dev.561da0e3", 23, 23)
-            .expect("older build notice");
+            .expect("different build notice");
+        assert!(notice.contains("different vqro server build"), "{notice}");
         assert!(notice.contains("0.9.0-dev.561da0e3"), "{notice}");
         assert!(notice.contains("0.9.0"), "{notice}");
         assert!(notice.contains("server stop"), "{notice}");
@@ -176,9 +142,15 @@ mod tests {
     }
 
     #[test]
-    fn an_older_protocol_is_reported_too() {
+    fn an_older_protocol_is_reported_with_the_command() {
         let notice = server_restart_notice("0.9.0", "0.9.0", 23, 22).expect("older protocol");
-        assert!(notice.contains("server protocol 22"), "{notice}");
+        assert!(notice.contains("older vqro server protocol"), "{notice}");
+        assert!(notice.contains("server 22, client 23"), "{notice}");
+        assert!(
+            notice.contains(&crate::session::stop_command_with_socket_override()),
+            "{notice}"
+        );
+        assert!(notice.contains("never restarts it"), "{notice}");
     }
 
     #[test]

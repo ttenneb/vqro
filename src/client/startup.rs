@@ -15,19 +15,19 @@ pub fn run_client() -> io::Result<()> {
 /// when no server answers in time. Restarting stays the human's decision: this
 /// client never restarts or stops a server by itself.
 pub(super) fn stale_server_notice() -> Option<String> {
-    let status = running_server_status()?;
+    let (server_version, server_protocol) = running_server()?;
     let client_version = crate::build_info::version();
     let notice = super::errors::server_restart_notice(
         &client_version,
-        &status.version,
+        &server_version,
         crate::protocol::PROTOCOL_VERSION,
-        status.protocol,
+        server_protocol,
     )?;
     info!(
         client_version = %client_version,
-        server_version = %status.version,
+        server_version = %server_version,
         client_protocol = crate::protocol::PROTOCOL_VERSION,
-        server_protocol = status.protocol,
+        server_protocol,
         "running server is an older build"
     );
     Some(notice)
@@ -35,12 +35,7 @@ pub(super) fn stale_server_notice() -> Option<String> {
 
 /// The running server's own build identity, or `None` when no server answers in
 /// time. Both facts come from the existing ping status; nothing new is exposed.
-struct RunningServerStatus {
-    version: String,
-    protocol: u32,
-}
-
-fn running_server_status() -> Option<RunningServerStatus> {
+fn running_server() -> Option<(String, u32)> {
     use crate::api::client::ApiClient;
     use crate::api::schema::{Method, PingParams, Request};
 
@@ -53,10 +48,10 @@ fn running_server_status() -> Option<RunningServerStatus> {
         .request_value_with_timeout(&request, PROTOCOL_PROBE_TIMEOUT)
         .ok()?;
     let result = response.get("result")?;
-    Some(RunningServerStatus {
-        version: result.get("version")?.as_str()?.to_owned(),
-        protocol: u32::try_from(result.get("protocol")?.as_u64()?).ok()?,
-    })
+    Some((
+        result.get("version")?.as_str()?.to_owned(),
+        u32::try_from(result.get("protocol")?.as_u64()?).ok()?,
+    ))
 }
 
 #[cfg(unix)]
