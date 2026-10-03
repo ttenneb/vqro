@@ -1140,23 +1140,9 @@ fn agent_start_targets_existing_pane_over_socket() {
     assert_eq!(started["result"]["agent"]["name"], "main");
     assert_eq!(started["result"]["agent"]["pane_id"], pane_id);
     assert_eq!(started["result"]["agent"]["terminal_id"], terminal_id);
-    // Vqro launches Pi with the bundled adapter and skill ahead of caller arguments.
-    let bundled_pi = config_home.join("vqro-dev").join("bundled").join("pi");
     assert_eq!(
         started["result"]["argv"],
-        serde_json::json!([
-            "pi",
-            "--extension",
-            bundled_pi.join("vqro-reply-routing.ts").to_str().unwrap(),
-            "--skill",
-            bundled_pi
-                .join("skills")
-                .join("vqro")
-                .join("SKILL.md")
-                .to_str()
-                .unwrap(),
-            "--no-session",
-        ])
+        serde_json::json!(["pi", "--no-session"])
     );
 
     let duplicate = send_request(

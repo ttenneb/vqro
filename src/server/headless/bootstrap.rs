@@ -18,9 +18,6 @@ pub fn run_server() -> io::Result<()> {
     }
 
     let loaded_config = config::Config::load();
-    if let Err(err) = crate::bundled::ensure_defaults() {
-        tracing::warn!(err = %err, "failed to prepare bundled default extensions");
-    }
     let (api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
     let event_hub = api::EventHub::default();
     let should_quit = Arc::new(AtomicBool::new(false));

@@ -10,15 +10,22 @@ each Pi pane the reply-routing adapter and the vqro skill. No installation,
 credentials, model calls, or human-session changes.
 """
 import argparse
+import fcntl
 import json
+import os
+import pty
 import shlex
 import shutil
 import socket
+import struct
+import subprocess
 import tempfile
+import termios
+import threading
 import time
 from pathlib import Path
 
-from demo import Demo
+from demo import Demo, birth
 
 CRITERION = "The observable result is recorded."
 TASKS_NAMESPACE = "vqro.tasks"
@@ -41,6 +48,65 @@ class ReadinessDemo(Demo):
     def launched_pi_args(self):
         records = [record for record in self.launch_log.read_text().split("-----\n") if record.strip()]
         return [[line for line in record.splitlines() if line] for record in records]
+
+    def _drain_pty(self, master):
+        with open(self.root / "client.log", "wb") as log:
+            try:
+                while True:
+                    data = os.read(master, 65536)
+                    if not data:
+                        break
+                    log.write(data)
+            except OSError:
+                pass
+
+    def start(self):
+        """Run the one documented command: plain `vqro`, no subcommand.
+
+        It installs the bundled defaults, spawns the background server daemon and
+        attaches the TUI. A PTY stands in for the human's terminal; the demo then
+        drives the daemon through the CLI, exactly as the human would.
+        """
+        master, slave = pty.openpty()
+        fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack("HHHH", 50, 200, 0, 0))
+        self.client = subprocess.Popen([str(self.vqro)], env=self.env, cwd=str(self.root / "work"),
+                                       stdin=slave, stdout=slave, stderr=slave, start_new_session=True)
+        os.close(slave)
+        self.owned[self.client.pid] = birth(self.client.pid)
+        threading.Thread(target=self._drain_pty, args=(master,), daemon=True).start()
+
+        deadline = time.monotonic() + 25
+        while time.monotonic() < deadline:
+            if list((self.root / "config").glob("*/bundled/tasks/vqro-extension.toml")):
+                break
+            time.sleep(0.05)
+        else:
+            raise RuntimeError("plain `vqro` did not install the bundled defaults")
+
+        while time.monotonic() < deadline:
+            try:
+                with socket.socket(socket.AF_UNIX) as stream:
+                    stream.connect(str(self.root / "api.sock"))
+                    pid, _, _ = struct.unpack("3i", stream.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12))
+                self.server = (pid, birth(pid))
+                self.owned[pid] = self.server[1]
+                break
+            except (FileNotFoundError, ConnectionRefusedError):
+                time.sleep(0.1)
+        else:
+            raise RuntimeError("private API startup timed out")
+        self.save("owned-processes.json", self.owned)
+
+    def stop(self):
+        super().stop()
+        client = getattr(self, "client", None)
+        if client and client.poll() is None:
+            client.terminate()
+            try:
+                client.wait(timeout=8)
+            except subprocess.TimeoutExpired:
+                client.kill()
+                client.wait(timeout=5)
 
     def api(self, method, params=None, timeout=15):
         """One newline-delimited JSON request on the private API socket."""

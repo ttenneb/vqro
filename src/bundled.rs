@@ -165,21 +165,20 @@ fn link_tasks_plugin(tasks_dir: &std::path::Path) -> io::Result<()> {
 
 /// Extra Pi flags that load the bundled adapter and conventions skill.
 ///
-/// Returns an empty vector when the defaults could not be prepared; a launch
-/// must still succeed without them.
+/// Only a plain `vqro` launch installs the bundled files, so this returns an
+/// empty vector until that launch has happened; a Pi agent started against a
+/// server that never saw a default install still starts, just without them.
 pub(crate) fn pi_launch_flags() -> Vec<String> {
-    match ensure_defaults() {
-        Ok(paths) => vec![
-            "--extension".into(),
-            paths.pi_adapter.display().to_string(),
-            "--skill".into(),
-            paths.pi_skill.display().to_string(),
-        ],
-        Err(err) => {
-            tracing::warn!(err = %err, "failed to prepare bundled Pi defaults");
-            Vec::new()
-        }
+    let paths = paths();
+    if !paths.pi_adapter.is_file() || !paths.pi_skill.is_file() {
+        return Vec::new();
     }
+    vec![
+        "--extension".into(),
+        paths.pi_adapter.display().to_string(),
+        "--skill".into(),
+        paths.pi_skill.display().to_string(),
+    ]
 }
 
 #[cfg(test)]
