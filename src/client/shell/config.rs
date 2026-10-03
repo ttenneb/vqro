@@ -158,8 +158,17 @@ impl ClientShellConfig {
             preferences_path: None,
             preferences: preferences::ClientChromePreferences::default(),
             startup_config_diagnostic: None,
+            startup_server_notice: None,
             startup_onboarding: false,
         }
+    }
+
+    /// Client presentation text that is not config diagnostics: the config reload
+    /// path replaces `startup_config_diagnostic`, so a notice about the running
+    /// server must live beside it.
+    pub(crate) fn with_startup_server_notice(mut self, notice: Option<String>) -> Self {
+        self.startup_server_notice = notice;
+        self
     }
 
     pub(crate) fn with_startup_config_diagnostic(mut self, diagnostic: Option<String>) -> Self {

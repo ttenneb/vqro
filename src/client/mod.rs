@@ -168,14 +168,10 @@ fn run_client_with_mode(
     let stale_server_notice = (client_rendered_shell && !is_remote_client_process())
         .then(startup::stale_server_notice)
         .flatten();
-    let startup_config_diagnostic = match (stale_server_notice, startup_config_diagnostic) {
-        (Some(notice), Some(diagnostic)) => Some(format!("{notice}\n{diagnostic}")),
-        (Some(notice), None) => Some(notice),
-        (None, diagnostic) => diagnostic,
-    };
     let shell_config = client_rendered_shell.then(|| {
         shell::ClientShellConfig::from_config(&loaded_config.config)
             .with_startup_config_diagnostic(startup_config_diagnostic)
+            .with_startup_server_notice(stale_server_notice)
             .with_startup_onboarding(loaded_config.config.should_show_onboarding())
             .with_keybinding_source(keybinding_source)
             .with_local_endpoint(&socket_path)

@@ -121,7 +121,7 @@ pub(super) fn server_restart_notice(
         return None;
     };
     Some(format!(
-        "{what}; restart it yourself: `{}`  this client never restarts it.",
+        "{what}\nrestart it yourself: `{}`; stopping it exits its pane processes, and this client never restarts it.",
         crate::session::stop_command_with_socket_override(),
     ))
 }
@@ -142,6 +142,7 @@ mod tests {
         assert!(notice.contains("0.9.0"), "{notice}");
         assert!(notice.contains("server stop"), "{notice}");
         assert!(notice.contains("never restarts it"), "{notice}");
+        assert!(notice.contains("exits its pane processes"), "{notice}");
     }
 
     #[test]
