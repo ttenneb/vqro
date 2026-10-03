@@ -83,9 +83,10 @@ fn human_agent_dir() -> Option<PathBuf> {
 }
 
 /// The content address of the human's settings, or `None` when it is unreadable.
-fn source_stamp(human: &Path) -> Option<String> {
-    let bytes = std::fs::read(human.join("settings.json")).ok()?;
-    Some(digest_hex(&bytes))
+/// The content address of the human's settings; a missing file is the empty
+/// settings, so a resource-only human agent dir still gets a profile.
+fn source_stamp(human: &Path) -> String {
+    digest_hex(&std::fs::read(human.join("settings.json")).unwrap_or_default())
 }
 
 fn digest_hex(bytes: &[u8]) -> String {
@@ -122,22 +123,23 @@ pub(crate) fn profile_ready() -> bool {
     let Some((recorded_source, recorded_profile)) = marker.trim().split_once(':') else {
         return false;
     };
-    let Some(source) = human_agent_dir().and_then(|human| source_stamp(&human)) else {
+    let Some(human) = human_agent_dir() else {
         return false;
     };
+    let source = source_stamp(&human);
     let Some(profile_hash) = profile_settings_hash(&profile) else {
         return false;
     };
     source == recorded_source && profile_hash == recorded_profile
 }
 
-/// True when a profile is wanted (the human has Pi settings) but is not ready, so
-/// a Vqro-launched Pi must be warned.
+/// True when a profile is wanted but not ready, so a Vqro-launched Pi must be
+/// warned. A resource-bearing human agent dir counts even without settings.json.
 pub(crate) fn warning_needed() -> bool {
     if !cfg!(unix) || opted_out() || profile_ready() {
         return false;
     }
-    human_agent_dir().is_some_and(|human| human.join("settings.json").is_file())
+    human_agent_dir().is_some_and(|human| human.is_dir())
 }
 
 /// Build or refresh the profile.
@@ -162,11 +164,20 @@ pub(crate) fn ensure_profile() -> io::Result<()> {
     let Some(human) = human_agent_dir() else {
         return Ok(());
     };
-    let Ok(text) = std::fs::read_to_string(human.join("settings.json")) else {
+    // No human agent dir at all: there is nothing to exclude and Pi's defaults are
+    // already clean, so leave PI_CODING_AGENT_DIR unset.
+    if !human.is_dir() {
         return Ok(());
+    }
+    // A missing settings.json is the empty settings: the human may still have
+    // extensions, skills or a SYSTEM.md to exclude or replace.
+    let text = std::fs::read_to_string(human.join("settings.json")).unwrap_or_default();
+    let mut settings: Value = if text.trim().is_empty() {
+        Value::Object(serde_json::Map::new())
+    } else {
+        serde_json::from_str(&text)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?
     };
-    let mut settings: Value = serde_json::from_str(&text)
-        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
     derive_packages(&mut settings, &human);
     derive_paths(&mut settings, &human);
     drop_excluded_resources(&mut settings);
@@ -580,6 +591,17 @@ mod tests {
             kept[0]["source"],
             "/home/h/.pi/agent/../../Projects/pi-system-prompt"
         );
+    }
+
+    #[test]
+    fn source_stamp_of_a_missing_settings_file_is_the_empty_digest() {
+        let root = std::env::temp_dir().join(format!("vqro-pi-stamp-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        assert_eq!(source_stamp(&root), digest_hex(b""));
+        std::fs::write(root.join("settings.json"), "{}").unwrap();
+        assert_ne!(source_stamp(&root), digest_hex(b""));
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
