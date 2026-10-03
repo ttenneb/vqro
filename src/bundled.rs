@@ -8,17 +8,18 @@
 //! linking.
 //!
 //! Installs are conservative: a generation is written only when it is missing or
-//! its content changed, and files already present are never rewritten, so a user
-//! edit inside a published generation stays. A user-linked replacement, or an
-//! explicitly disabled `vqro.tasks`, is left exactly as it is. Set
-//! [`OPT_OUT_ENV`] to disable the installs and the Pi flags entirely.
+//! its content changed, files already present are never rewritten (so a user edit
+//! inside a published generation stays), a user-linked replacement or an
+//! explicitly disabled `vqro.tasks` is left as it is, and nothing is written
+//! through a symlink. Set [`OPT_OUT_ENV`] to disable the installs and the Pi
+//! flags entirely.
 //!
 //! Nothing here touches another product's state: everything is rooted at this
 //! binary's own config directory, and the Pi adapter/skill are only offered to
 //! Pi processes Vqro itself starts in its panes. `~/.pi/agent` and any Herdr
 //! config are never written.
 
-use std::io;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
@@ -101,8 +102,44 @@ fn generation_dir(root: &Path, prefix: &str, assets: &[(&str, &str)]) -> PathBuf
     root.join(format!("{prefix}-{}", generation_id(assets)))
 }
 
-/// Write one asset through a sibling temp file and log the write.
-fn write_asset(path: &Path, report: &Path, body: &str) -> io::Result<()> {
+/// Refuse to install through a symlink anywhere below `root`.
+///
+/// A pre-existing symlink at the bundled root, a generation directory, a nested
+/// directory or an asset path must never redirect a managed write to an
+/// unrelated file. Same-user, non-adversarial scope; this only preserves
+/// unrelated data.
+fn safe_under(root: &Path, path: &Path) -> io::Result<()> {
+    let relative = path.strip_prefix(root).map_err(|_| {
+        io::Error::other(format!(
+            "bundled path escapes the config root: {}",
+            path.display()
+        ))
+    })?;
+    if std::fs::symlink_metadata(root).is_ok_and(|meta| meta.file_type().is_symlink()) {
+        return Err(io::Error::other(format!(
+            "refusing to install into a symlinked bundled root: {}",
+            root.display()
+        )));
+    }
+    let mut current = root.to_path_buf();
+    for component in relative.components() {
+        current.push(component);
+        if std::fs::symlink_metadata(&current).is_ok_and(|meta| meta.file_type().is_symlink()) {
+            return Err(io::Error::other(format!(
+                "refusing to write through a symlink: {}",
+                current.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Write one asset to `path` through a fresh temp file and log the final path.
+///
+/// `create_new` refuses an existing (or symlinked) temp path, so a pre-existing
+/// link cannot redirect the write.
+fn write_asset(root: &Path, path: &Path, report: &Path, body: &str) -> io::Result<()> {
+    safe_under(root, path)?;
     let parent = path
         .parent()
         .ok_or_else(|| io::Error::other("bundled asset has no parent directory"))?;
@@ -112,12 +149,23 @@ fn write_asset(path: &Path, report: &Path, body: &str) -> io::Result<()> {
         .and_then(|name| name.to_str())
         .ok_or_else(|| io::Error::other("bundled asset has no file name"))?;
     let temporary = parent.join(format!(".{name}.tmp.{}", std::process::id()));
-    if let Err(error) =
-        std::fs::write(&temporary, body).and_then(|()| std::fs::rename(&temporary, path))
-    {
-        let _ = std::fs::remove_file(&temporary);
-        return Err(error);
+    safe_under(root, &temporary)?;
+    if std::fs::symlink_metadata(&temporary).is_ok() {
+        std::fs::remove_file(&temporary)?;
     }
+    let result = (|| {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)?;
+        file.write_all(body.as_bytes())?;
+        drop(file);
+        std::fs::rename(&temporary, path)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    result?;
     tracing::info!(path = %report.display(), bytes = body.len(), "published bundled asset");
     Ok(())
 }
@@ -131,13 +179,15 @@ fn write_asset(path: &Path, report: &Path, body: &str) -> io::Result<()> {
 /// directory and never rewrites a generation a provider may be reading.
 fn publish_generation(root: &Path, prefix: &str, assets: &[(&str, &str)]) -> io::Result<PathBuf> {
     let dir = generation_dir(root, prefix, assets);
+    safe_under(root, &dir)?;
     if !dir.exists() {
         let staging = root.join(format!(".{prefix}.staging.{}", std::process::id()));
+        safe_under(root, &staging)?;
         if staging.exists() {
             std::fs::remove_dir_all(&staging)?;
         }
         for (name, body) in assets {
-            write_asset(&staging.join(name), &dir.join(name), body)?;
+            write_asset(root, &staging.join(name), &dir.join(name), body)?;
         }
         match std::fs::rename(&staging, &dir) {
             Ok(()) => return Ok(dir),
@@ -153,8 +203,9 @@ fn publish_generation(root: &Path, prefix: &str, assets: &[(&str, &str)]) -> io:
     }
     for (name, body) in assets {
         let path = dir.join(name);
+        safe_under(root, &path)?;
         if !path.exists() {
-            write_asset(&path, &path, body)?;
+            write_asset(root, &path, &path, body)?;
         }
     }
     Ok(dir)
@@ -173,35 +224,31 @@ pub(crate) fn ensure_defaults() -> io::Result<()> {
 
 /// Point `vqro.tasks` at this generation.
 ///
-/// A user-selected link is left exactly as it is, including a disabled state; one
-/// of our own older generations is repointed while preserving its enabled choice.
+/// The decision and the mutation happen under one registry lock, so a concurrent
+/// first launch or explicit link cannot duplicate the entry between a check and a
+/// write. A user-selected link is left exactly as it is, including a disabled
+/// state; one of our own older generations is repointed while preserving its
+/// enabled choice.
 fn link_tasks_plugin(root: &Path, tasks_dir: &Path) -> io::Result<()> {
     let current = tasks_dir.display().to_string();
     let manifest = tasks_dir.join("vqro-extension.toml").display().to_string();
-    let existing = crate::persist::plugin_registry::load()
-        .into_iter()
-        .find(|plugin| plugin.plugin_id == TASKS_PLUGIN_ID);
-    match existing {
-        Some(plugin) if plugin.plugin_root == current => Ok(()),
-        Some(plugin) if Path::new(&plugin.plugin_root).starts_with(root) => {
-            crate::persist::plugin_registry::update(|plugins| {
-                if let Some(plugin) = plugins
-                    .iter_mut()
-                    .find(|plugin| plugin.plugin_id == TASKS_PLUGIN_ID)
+    let candidate = crate::app::load_plugin_manifest(&manifest, true)
+        .map_err(|(_, message)| io::Error::other(message))?;
+    crate::plugin_paths::ensure_plugin_user_dirs(TASKS_PLUGIN_ID)?;
+    crate::persist::plugin_registry::update(|plugins| {
+        match plugins
+            .iter_mut()
+            .find(|plugin| plugin.plugin_id == TASKS_PLUGIN_ID)
+        {
+            Some(plugin) => {
+                if plugin.plugin_root != current && Path::new(&plugin.plugin_root).starts_with(root)
                 {
                     plugin.plugin_root = current.clone();
                     plugin.manifest_path = manifest.clone();
                 }
-            })?;
-            tracing::info!(plugin_root = %current, "updated bundled tasks link");
-            Ok(())
-        }
-        Some(_) => Ok(()),
-        None => {
-            crate::plugin_paths::ensure_plugin_user_dirs(TASKS_PLUGIN_ID)?;
-            let mut plugin = crate::app::load_plugin_manifest(&manifest, true)
-                .map_err(|(_, message)| io::Error::other(message))?;
-            crate::persist::plugin_registry::update(|plugins| {
+            }
+            None => {
+                let mut plugin = candidate.clone();
                 plugin.load_order = plugins
                     .iter()
                     .map(|entry| entry.load_order)
@@ -209,11 +256,10 @@ fn link_tasks_plugin(root: &Path, tasks_dir: &Path) -> io::Result<()> {
                     .unwrap_or(0)
                     .saturating_add(1);
                 plugins.push(plugin);
-            })?;
-            tracing::info!(plugin_root = %current, "linked bundled tasks plugin");
-            Ok(())
+            }
         }
-    }
+    })?;
+    Ok(())
 }
 
 /// Extra Pi flags that load the bundled adapter and conventions skill.
@@ -305,6 +351,21 @@ mod tests {
             std::fs::read_to_string(second.join("nested/two.py")).unwrap(),
             "changed"
         );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn publish_refuses_a_symlinked_asset() {
+        let root = temp_root("symlink");
+        let _ = std::fs::remove_dir_all(&root);
+        let dir = publish_generation(&root, "gen", &assets()).unwrap();
+        let canary = root.join("canary.txt");
+        std::fs::write(&canary, "keep").unwrap();
+        std::fs::remove_file(dir.join("one.py")).unwrap();
+        std::os::unix::fs::symlink(&canary, dir.join("one.py")).unwrap();
+        assert!(publish_generation(&root, "gen", &assets()).is_err());
+        assert_eq!(std::fs::read_to_string(&canary).unwrap(), "keep");
         let _ = std::fs::remove_dir_all(&root);
     }
 }
