@@ -134,6 +134,7 @@ export default function (pi: ExtensionAPI) {
         if (context && typeof context.message?.content === "string") accepted.push(context);
       } catch { /* Failed consumer contributes no context. */ }
     }
+    if (accepted.length === 0) return;
     const fresh = await identity();
     if (!current(token) || !token.self?.execution || fresh?.execution !== token.self.execution) {
       discard(accepted);

@@ -68,25 +68,19 @@ pub(crate) fn validate(commands: &[CliCommand]) -> Result<(), String> {
     Ok(())
 }
 
-#[derive(serde::Deserialize)]
-struct Contributions {
-    #[serde(default)]
-    cli_commands: Vec<CliCommand>,
-}
-
-pub(crate) fn declarations(plugin: &InstalledPluginInfo) -> Result<Vec<CliCommand>, String> {
-    let fresh = crate::app::load_plugin_manifest(&plugin.manifest_path, plugin.enabled)
-        .map_err(|(_, message)| message)?;
+pub(crate) fn declarations(
+    plugin: &InstalledPluginInfo,
+) -> Result<(InstalledPluginInfo, Vec<CliCommand>), String> {
+    let (fresh, commands) =
+        crate::app::load_plugin_manifest_with_cli(&plugin.manifest_path, plugin.enabled)
+            .map_err(|(_, message)| message)?;
     if fresh.plugin_id != plugin.plugin_id
         || Path::new(&fresh.plugin_root).canonicalize().ok()
             != Path::new(&plugin.plugin_root).canonicalize().ok()
     {
         return Err("extension CLI manifest no longer matches its registered identity/root".into());
     }
-    let text = std::fs::read_to_string(&fresh.manifest_path).map_err(|error| error.to_string())?;
-    let contributions: Contributions = toml::from_str(&text).map_err(|error| error.to_string())?;
-    validate(&contributions.cli_commands)?;
-    Ok(contributions.cli_commands)
+    Ok((fresh, commands))
 }
 
 pub(crate) fn argv(command: &[String], root: &Path, args: &[String]) -> Vec<String> {
@@ -123,19 +117,19 @@ pub(crate) fn run(name: &str, args: &[String], remote: bool) -> std::io::Result<
     let entries = crate::persist::plugin_registry::try_load()?;
     let mut selected = None;
     for plugin in entries.iter().filter(|plugin| plugin.enabled) {
-        let commands = match declarations(plugin) {
-            Ok(commands) => commands,
+        let (fresh, commands) = match declarations(plugin) {
+            Ok(declarations) => declarations,
             Err(error) => {
                 tracing::warn!(plugin = %plugin.plugin_id, %error, "extension CLI declarations unavailable");
                 continue;
             }
         };
-        for command in commands.into_iter().filter(|command| command.name == name) {
+        if let Some(command) = commands.into_iter().find(|command| command.name == name) {
             if selected.is_some() {
                 eprintln!("extension CLI command {name} is ambiguous; no execution attempted");
                 return Ok(2);
             }
-            selected = Some((plugin, command));
+            selected = Some((fresh, command));
         }
     }
     let Some((plugin, contribution)) = selected else {

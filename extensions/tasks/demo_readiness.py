@@ -224,6 +224,12 @@ class ReadinessDemo(Demo):
         self.cli("example", expected=2)
         assert marker.read_text().splitlines() == ["invoked"]
         self.cli("plugin", "enable", "demo.example")
+        # The cached linked registry is Linux/macOS-compatible. A fresh manifest
+        # edit must constrain execution without waiting for a server reload.
+        (directory / "vqro-extension.toml").write_text(manifest.replace('platforms=["linux","macos"]', 'platforms=["windows"]'))
+        self.cli("example", expected=2)
+        assert marker.read_text().splitlines() == ["invoked"]
+        (directory / "vqro-extension.toml").write_text(manifest)
         conflict = self.root / "conflicting-extension"
         conflict.mkdir()
         (conflict / "vqro-extension.toml").write_text(manifest.replace("demo.example", "demo.conflict"))
@@ -234,7 +240,8 @@ class ReadinessDemo(Demo):
         (conflict / "vqro-extension.toml").write_text(manifest.replace("demo.example", "demo.invalid").replace("./entry.py", "./../escape.py"))
         self.cli("plugin", "link", str(conflict), expected=1)
         return {"independent_alias": True, "foreground_pid_preserved": True,
-                "literal_argv_cwd_stdin": True, "disabled_conflicting_invalid_no_execution": True}
+                "literal_argv_cwd_stdin": True, "disabled_conflicting_invalid_no_execution": True,
+                "current_manifest_platform_no_execution": True}
 
     def change(self, name, token, task, action, text=None, **flags):
         args = [action, task["id"]]
