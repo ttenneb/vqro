@@ -21,11 +21,11 @@ Accepted by the owner on 2026-10-03 (relayed by the pilot coordinator).
 - pane **split** panels and **popovers**; the task and messages panels are the
   first users;
 - **badges** on the pane border, the tab and the sidebar row;
-- building blocks: section, row (state chip, count or age, detail line, link,
-  actions, children), terminal link with live agent state, age from a
-  timestamp, tones, a 2–4 option choice, a one-line text input (the
-  rename-dialog field), and the loading, empty, unavailable and "unsupported"
-  states;
+- **v1 building blocks** (final, 2026-10-03): section; row with a state chip,
+  an age, a terminal link with live agent state, and children that expand and
+  collapse; actions; a 2–4 option choice; a one-line text input through the
+  rename dialog. Vqro also draws the loading, empty, unavailable and
+  "unsupported" states (pipeline behavior, not blocks);
 - fixed panel sizes, scrolling, persisted display state, the
   `vqro pane panel` command, the "show when an agent starts" rule, in-view
   action errors, and the reference extension with render tests.
@@ -82,6 +82,7 @@ Accepted by the owner on 2026-10-03 (relayed by the pilot coordinator).
 | 2026-10-03 | **Text input for decision answers** uses the same one-line field as the rename dialog. |
 | 2026-10-03 | **Filters and notifications are not in v1.** |
 | 2026-10-03 | **Cut-down first version accepted** (relayed by the pilot coordinator): one built-in layout; sidebar and tab bar views after the panels; no overlay in v1; reorder, rename as an action, extension context-menu items and selection deferred; text, key-value and table blocks deferred to the Terminal Inspector migration. See [First version scope](#first-version-scope). |
+| 2026-10-03 | **v1 building blocks fixed without a separate mockup pass** (relayed by the pilot coordinator): the cut-down set in [First version scope](#first-version-scope). The visual review is the building owner's first spike screenshot, which the owner must approve before more is built. |
 
 ## Pipeline
 
@@ -173,5 +174,6 @@ A pane uses the same model:
 
 ## Open questions
 
-- Confirm the v1 building blocks with a mockup pass over the task and messages
-  panels. The sidebar-tab mockup moves to the sidebar step.
+None for v1. The visual review is the first spike screenshot (see Decisions).
+Later steps (sidebar, layouts, overlay, Terminal Inspector migration) reopen
+their own items.
