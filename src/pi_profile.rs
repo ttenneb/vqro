@@ -28,8 +28,27 @@ use sha2::{Digest, Sha256};
 
 /// Packages a Vqro-launched Pi must not load: Herdr-coupled or Vqro-competing.
 const EXCLUDED_PACKAGES: &[&str] = &["pi-input-gate", "pi-tasking-herdr-adapter", "rpiv-todo"];
+/// Human agent-dir directories mirrored entry by entry, with the names to drop,
+/// so an excluded entry is absent and a new human entry still appears.
+const EXCLUDED_SKILLS: &[&str] = &[
+    "agent-messaging",
+    "herdr",
+    "herdr-pi-test-root",
+    "herdr-pi-upgrade-rollback",
+    "launch-owner",
+    "check-session-loaded",
+    "scratch-cleanup",
+];
+const EXCLUDED_EXTENSIONS: &[&str] = &["herdr-agent-state.ts"];
+const PER_ENTRY_DIRS: &[(&str, &[&str])] = &[
+    ("skills", EXCLUDED_SKILLS),
+    ("extensions", EXCLUDED_EXTENSIONS),
+];
 /// Entries of the human's agent dir that are never mirrored into the profile.
-const UNMIRRORED: &[&str] = &["settings.json", ".ready", "sessions", "tmp"];
+/// `SYSTEM.md` is replaced by [`VQRO_SYSTEM_MD`] rather than linked.
+const UNMIRRORED: &[&str] = &["settings.json", ".ready", "sessions", "tmp", "SYSTEM.md"];
+/// The Vqro system prompt written into the profile.
+const VQRO_SYSTEM_MD: &str = include_str!("../extensions/pi-profile/SYSTEM.md");
 /// Package spec prefixes, which carry no local path.
 const SPEC_PREFIXES: &[&str] = &["npm:", "git:", "ssh:", "file:", "http:", "https:"];
 /// Settings keys whose string-array values are paths or patterns resolved
@@ -64,9 +83,10 @@ fn human_agent_dir() -> Option<PathBuf> {
 }
 
 /// The content address of the human's settings, or `None` when it is unreadable.
-fn source_stamp(human: &Path) -> Option<String> {
-    let bytes = std::fs::read(human.join("settings.json")).ok()?;
-    Some(digest_hex(&bytes))
+/// The content address of the human's settings; a missing file is the empty
+/// settings, so a resource-only human agent dir still gets a profile.
+fn source_stamp(human: &Path) -> String {
+    digest_hex(&std::fs::read(human.join("settings.json")).unwrap_or_default())
 }
 
 fn digest_hex(bytes: &[u8]) -> String {
@@ -103,22 +123,23 @@ pub(crate) fn profile_ready() -> bool {
     let Some((recorded_source, recorded_profile)) = marker.trim().split_once(':') else {
         return false;
     };
-    let Some(source) = human_agent_dir().and_then(|human| source_stamp(&human)) else {
+    let Some(human) = human_agent_dir() else {
         return false;
     };
+    let source = source_stamp(&human);
     let Some(profile_hash) = profile_settings_hash(&profile) else {
         return false;
     };
     source == recorded_source && profile_hash == recorded_profile
 }
 
-/// True when a profile is wanted (the human has Pi settings) but is not ready, so
-/// a Vqro-launched Pi must be warned.
+/// True when a profile is wanted but not ready, so a Vqro-launched Pi must be
+/// warned. A resource-bearing human agent dir counts even without settings.json.
 pub(crate) fn warning_needed() -> bool {
     if !cfg!(unix) || opted_out() || profile_ready() {
         return false;
     }
-    human_agent_dir().is_some_and(|human| human.join("settings.json").is_file())
+    human_agent_dir().is_some_and(|human| human.is_dir())
 }
 
 /// Build or refresh the profile.
@@ -143,19 +164,38 @@ pub(crate) fn ensure_profile() -> io::Result<()> {
     let Some(human) = human_agent_dir() else {
         return Ok(());
     };
-    let Ok(text) = std::fs::read_to_string(human.join("settings.json")) else {
+    // No human agent dir at all: there is nothing to exclude and Pi's defaults are
+    // already clean, so leave PI_CODING_AGENT_DIR unset.
+    if !human.is_dir() {
         return Ok(());
+    }
+    // A missing settings.json is the empty settings: the human may still have
+    // extensions, skills or a SYSTEM.md to exclude or replace.
+    let text = std::fs::read_to_string(human.join("settings.json")).unwrap_or_default();
+    let mut settings: Value = if text.trim().is_empty() {
+        Value::Object(serde_json::Map::new())
+    } else {
+        serde_json::from_str(&text)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?
     };
-    let mut settings: Value = serde_json::from_str(&text)
-        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
     derive_packages(&mut settings, &human);
     derive_paths(&mut settings, &human);
+    drop_excluded_resources(&mut settings);
     std::fs::create_dir_all(&profile)?;
     let settings_path = profile.join("settings.json");
     crate::bundled::safe_under(&profile, &settings_path)?;
     let body = serde_json::to_string_pretty(&settings)?;
     write_if_changed(&settings_path, &body)?;
     mirror_entries(&human, &profile)?;
+    let system = profile.join("SYSTEM.md");
+    // A profile built before SYSTEM.md was replaced holds our own symlink to the
+    // human's file. Unlink the link (never its target) before writing ours, so an
+    // upgrade does not fall back to the global config.
+    if std::fs::symlink_metadata(&system).is_ok_and(|meta| meta.file_type().is_symlink()) {
+        std::fs::remove_file(&system)?;
+    }
+    crate::bundled::safe_under(&profile, &system)?;
+    write_if_changed(&system, VQRO_SYSTEM_MD)?;
     let marker = profile.join(READY_MARKER);
     crate::bundled::safe_under(&profile, &marker)?;
     // Address the exact bytes prepared from this source, not a later reread, so an
@@ -216,6 +256,53 @@ fn absolutize_filter(human: &Path, entry: &str) -> Option<String> {
     let rest = entry.strip_prefix(FILTER_OPERATORS).unwrap_or(entry);
     let operator = &entry[..entry.len() - rest.len()];
     Some(format!("{operator}{}", absolutize(human, rest)?))
+}
+
+/// Drop excluded-by-name entries from settings resource lists, so an explicit
+/// absolute path cannot re-enable an excluded extension or skill.
+fn drop_excluded_resources(settings: &mut Value) {
+    let Some(object) = settings.as_object_mut() else {
+        return;
+    };
+    for &(key, excluded) in PER_ENTRY_DIRS {
+        if let Some(Value::Array(items)) = object.get_mut(key) {
+            items.retain(|item| match item {
+                Value::String(value) => {
+                    let name = if key == "skills" {
+                        skill_name(value)
+                    } else {
+                        resource_name(value)
+                    };
+                    !excluded.contains(&name)
+                }
+                _ => true,
+            });
+        }
+    }
+}
+
+/// The name a resource path or pattern selects, ignoring a filter operator and any
+/// empty or trailing path components.
+fn resource_name(entry: &str) -> &str {
+    let rest = entry.strip_prefix(FILTER_OPERATORS).unwrap_or(entry);
+    rest.split(['/', '\\'])
+        .rfind(|part| !part.is_empty())
+        .unwrap_or(rest)
+}
+
+/// The skill a settings entry selects. The standard skill file `SKILL.md` names
+/// its parent directory; anything else names itself.
+fn skill_name(entry: &str) -> &str {
+    let rest = entry.strip_prefix(FILTER_OPERATORS).unwrap_or(entry);
+    let parts: Vec<&str> = rest
+        .split(['/', '\\'])
+        .filter(|part| !part.is_empty())
+        .collect();
+    match parts.last() {
+        Some(&"SKILL.md") if parts.len() >= 2 => parts[parts.len() - 2],
+        Some(&last) => last,
+        None => rest,
+    }
 }
 
 /// The absolute form of a relative local path, or `None` when it is not one.
@@ -311,12 +398,58 @@ fn mirror_entries(human: &Path, profile: &Path) -> io::Result<()> {
             continue;
         }
         let target = profile.join(name.as_ref());
-        if std::fs::symlink_metadata(&target).is_ok() {
+        if let Some((_, excluded)) = PER_ENTRY_DIRS
+            .iter()
+            .find(|(directory, _)| *directory == name.as_ref())
+        {
+            mirror_directory(&entry.path(), &target, excluded)?;
+        } else {
+            link_or_skip(&entry.path(), &target)?;
+        }
+    }
+    Ok(())
+}
+
+/// Mirror a human resource directory entry by entry, dropping excluded names.
+///
+/// A whole-directory symlink from an earlier profile is replaced by a real
+/// directory, so an excluded entry is absent while a new one still appears.
+#[cfg(unix)]
+fn mirror_directory(source: &Path, target: &Path, excluded: &[&str]) -> io::Result<()> {
+    if !source.is_dir() {
+        return Ok(());
+    }
+    if std::fs::symlink_metadata(target).is_ok_and(|meta| meta.file_type().is_symlink()) {
+        std::fs::remove_file(target)?;
+    }
+    std::fs::create_dir_all(target)?;
+    for entry in std::fs::read_dir(source)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if excluded.contains(&name.as_ref()) {
             continue;
         }
-        std::os::unix::fs::symlink(entry.path(), &target)?;
-        tracing::info!(path = %target.display(), "linked a Pi profile entry");
+        link_or_skip(&entry.path(), &target.join(name.as_ref()))?;
     }
+    // An excluded leaf can be left in the profile by an earlier layout; drop our
+    // own symlink, never a real file.
+    for name in excluded {
+        let leaf = target.join(name);
+        if std::fs::symlink_metadata(&leaf).is_ok_and(|meta| meta.file_type().is_symlink()) {
+            std::fs::remove_file(&leaf)?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn link_or_skip(source: &Path, target: &Path) -> io::Result<()> {
+    if std::fs::symlink_metadata(target).is_ok() {
+        return Ok(());
+    }
+    std::os::unix::fs::symlink(source, target)?;
+    tracing::info!(path = %target.display(), "linked a Pi profile entry");
     Ok(())
 }
 
@@ -458,5 +591,62 @@ mod tests {
             kept[0]["source"],
             "/home/h/.pi/agent/../../Projects/pi-system-prompt"
         );
+    }
+
+    #[test]
+    fn source_stamp_of_a_missing_settings_file_is_the_empty_digest() {
+        let root = std::env::temp_dir().join(format!("vqro-pi-stamp-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        assert_eq!(source_stamp(&root), digest_hex(b""));
+        std::fs::write(root.join("settings.json"), "{}").unwrap();
+        assert_ne!(source_stamp(&root), digest_hex(b""));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn explicit_resource_paths_are_filtered_by_name() {
+        let mut value = serde_json::json!({
+            "extensions": [
+                "/abs/herdr-agent-state.ts",
+                "keep-extension.ts",
+                "!../herdr-agent-state.ts",
+            ],
+            "skills": [
+                "/abs/skills/herdr/SKILL.md",
+                "/abs/skills/check-session-loaded/SKILL.md",
+                "herdr",
+                "/abs/skills/keep-skill/SKILL.md",
+            ],
+        });
+        drop_excluded_resources(&mut value);
+        assert_eq!(
+            value["extensions"],
+            serde_json::json!(["keep-extension.ts"])
+        );
+        assert_eq!(
+            value["skills"],
+            serde_json::json!(["/abs/skills/keep-skill/SKILL.md"])
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn mirror_directory_drops_excluded_entries_and_keeps_others() {
+        let root = std::env::temp_dir().join(format!("vqro-pi-mirror-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let human = root.join("human");
+        let profile = root.join("profile");
+        std::fs::create_dir_all(human.join("skills")).unwrap();
+        for name in ["herdr", "keep-me"] {
+            std::fs::write(human.join("skills").join(name), "x").unwrap();
+        }
+        mirror_directory(&human.join("skills"), &profile.join("skills"), &["herdr"]).unwrap();
+        assert!(!profile.join("skills/herdr").exists());
+        assert!(std::fs::symlink_metadata(profile.join("skills/keep-me"))
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
