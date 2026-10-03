@@ -13,14 +13,14 @@ vqro
 
 Keep it running. Create a workspace with **New** if needed. Run the next block **in a human shell pane inside Vqro**, not in the outside terminal: task writes need its current caller identity. Agent starts open their own panes and keep focus in your shell. Existing names are refused; choose fresh names if you already have task-a/task-b.
 
-The native Tasks panel should already be empty and working, not **Tasks unavailable**, even before the first core action. To see the empty full Tasks pane, run this in your human shell, then select that shell again:
+The native Tasks panel should already be empty and working, not **Tasks unavailable**, even before the first core action. To inspect the empty task tree, run this in your human shell:
 
 <!-- human-empty -->
 ```sh
 vqro task tree
 ```
 
-## 2. Start two agents and import a small plan
+## 2. Start two agents and prepare a small plan
 
 <!-- human-setup -->
 ```sh
@@ -32,17 +32,17 @@ cat > first-plan.json <<'JSON'
   {"key":"work","parent":"root","title":"Try delegated work","owner":"task-a","done_when":"The blocker is recorded."}
 ]}
 JSON
-vqro task plan first-plan.json > first-plan-result.json
 ```
 
 The block writes `first-plan.json` and `first-plan-result.json`; use a fresh workspace directory, not one containing files with those names. Names resolve to exact current agent executions; the stored plan contains bindings, not names. Import is human-approved, not permission for an agent to start automatically. The files below share this workspace directory.
 
 ## 3. Ask task-a to run this block
 
-Paste the block into **task-a's Pi** and ask it to execute it (do not run it in your human shell). It starts its root, delegates the child by name, asks a two-option human question, and records a message. Only a human can answer the decision.
+Tell **task-a's Pi**: “I approve this first-plan.json plan; import it and run the block below.” Do not run it in your human shell. Agent root creation/import requires human direction/approval by convention (conversation or a human-answered task decision), not an API gate; otherwise propose a decision first. The agent imports, starts its root, delegates the child, asks a two-option question and records a message. Its exact creator/execution is visible in get/tree; only a host-classified human accepts its reported root or answers the decision.
 
 <!-- agent-a -->
 ```sh
+vqro task plan first-plan.json > first-plan-result.json
 ROOT=$(python3 -c 'import json; print(json.load(open("first-plan-result.json"))["tasks"]["root"])')
 WORK=$(python3 -c 'import json; print(json.load(open("first-plan-result.json"))["tasks"]["work"])')
 vqro task start "$ROOT" --rev 1
@@ -72,6 +72,6 @@ vqro task answer "$DECISION" keep --rev 1
 vqro task tree
 ```
 
-`tree` opens the full Tasks pane; select your shell again before typing more shell commands. The decision closes; task-b's explicit blocker remains until it resumes. Reporting work is not acceptance: task-a accepts its child's result, then reports its root for the human to accept. Use `vqro --skill` for those ownership/evidence conventions.
+`tree` prints current task records, including their creator. The decision closes; task-b's explicit blocker remains until it resumes. Reporting work is not acceptance: task-a accepts its child's result, then reports its root for the human to accept. Use `vqro --skill` for those ownership/evidence conventions.
 
 Run these fresh-state blocks once. Revisions deliberately protect against stale writes; inspect current state before changing it again. If a write or launch says its outcome is unknown, inspect the original operation/terminal first—never blindly repeat it, especially after a name is rebound.

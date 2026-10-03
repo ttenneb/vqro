@@ -7,9 +7,12 @@ convention introduces no host API, Pi tool, task delivery or activation mechanis
 
 - Pi todo is private scratch, not shared delegation/reporting. Shared work and
   evidence are Tasks records. The controller proposes a bounded plan with exact
-  owners, observable criteria and work/wait budgets; the human approves/imports
-  ordinary roots. Agents add work only in their owned active subtree. Root decisions
-  for the human are allowed without fabricating an ordinary root plan.
+  owners, observable criteria and work/wait budgets. An agent creates/imports an
+  ordinary root only after human direction/approval in conversation or a human-
+  answered task decision; otherwise propose a decision first. This is a convention,
+  not an API approval gate. Its exact creator/execution is recorded and only a
+  host-classified human accepts its reported root. Child acceptance and owned
+  active-subtree attachment rules remain unchanged.
 - Ready is an observation, not a reservation. Inspect owner/revision/prerequisites;
   start only owned work. Request explicit delegation for foreign-owned ready work.
   There is no new claim command. Reports quote each criterion with evidence;

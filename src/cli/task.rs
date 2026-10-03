@@ -650,8 +650,12 @@ fn render_tree(tasks: &[Value]) -> Result<String, String> {
             task["title"]
         ));
         text.push_str(&format!(
-            "{indent}  owner {} | owes {} {} since {}\n",
-            task["owner"], task["owed_to"], task["owed_action"], task["owed_since"]
+            "{indent}  owner {} | creator {} | owes {} {} since {}\n",
+            task["owner"],
+            task["creator"],
+            task["owed_to"],
+            task["owed_action"],
+            task["owed_since"]
         ));
         if let Some(ids) = children.get(&Some(id)) {
             stack.extend(ids.iter().rev().map(|id| (id.clone(), depth + 1)));
@@ -771,7 +775,7 @@ mod tests {
     }
 
     fn tree_task(id: &str, parent: Option<&str>, kind: &str, state: &str, owes: Value) -> Value {
-        json!({"id": id, "parent": parent, "kind": kind, "state": state, "revision": 1, "title": "evidence", "owner": {"class":"agent","terminal_id":"term_a"}, "owed_to": owes, "owed_action": "accept", "owed_since": "2026-10-02T00:00:00+00:00"})
+        json!({"id": id, "parent": parent, "kind": kind, "state": state, "revision": 1, "title": "evidence", "owner": {"class":"agent","terminal_id":"term_a"}, "creator":{"class":"agent","terminal_id":"created_term","agent":"pi","execution":"creator_exec"}, "owed_to": owes, "owed_action": "accept", "owed_since": "2026-10-02T00:00:00+00:00"})
     }
 
     #[test]
@@ -793,6 +797,11 @@ mod tests {
         let text = render_tree(&[child.clone(), root.clone()]).unwrap();
         assert!(text.find("root [").unwrap() < text.find("  child [").unwrap());
         assert!(text.contains("human_unverified"));
+        assert!(
+            text.contains("creator")
+                && text.contains("created_term")
+                && text.contains("creator_exec")
+        );
         assert!(text.contains("2026-10-02T00:00:00+00:00"));
         assert!(render_tree(std::slice::from_ref(&child)).is_err());
         assert!(render_tree(&[root.clone(), root]).is_err());
@@ -952,6 +961,7 @@ mod tests {
         let mut actions = std::collections::BTreeSet::new();
         let mut attached_plan = false;
         let mut root_plan = false;
+        let mut root_create = false;
         let mut own_evidence = false;
         let mut original_retry = false;
         for line in skill
@@ -1001,6 +1011,7 @@ mod tests {
                     "missing criteria: {line}"
                 );
             }
+            root_create |= action == "create" && payload.get("parent").is_none();
             if action == "plan" {
                 attached_plan |= payload.get("parent").is_some();
                 root_plan |= payload.get("parent").is_none();
@@ -1019,7 +1030,7 @@ mod tests {
                 "missing shipped example: {action}"
             );
         }
-        assert!(attached_plan && root_plan && own_evidence && original_retry);
+        assert!(attached_plan && root_plan && root_create && own_evidence && original_retry);
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -1028,7 +1039,7 @@ mod tests {
         let skill = include_str!("../../skills/vqro/SKILL.md");
         for rule in [
             "Pi todo stays **private scratch**",
-            "Agents never create/import ordinary roots",
+            "only after the human has directed or approved them",
             "**not a reservation**",
             "Start only your own task",
             "`next_cursor`",
