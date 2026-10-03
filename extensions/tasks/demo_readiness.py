@@ -221,15 +221,12 @@ class ReadinessDemo(Demo):
         assert tasks_dir.parent == bundled and tasks_dir.name.startswith("tasks-"), tasks_dir
         for name in ("vqro-extension.toml", "provider.py", "view.py", "document.py", "decision_queue.py", "messages.py", "graph.py"):
             assert (tasks_dir / name).is_file(), name
-        pi_dirs = sorted(bundled.glob("pi-*"))
-        assert len(pi_dirs) == 1, pi_dirs
-        adapter = pi_dirs[0] / "vqro-reply-routing.ts"
-        skill = pi_dirs[0] / "skills" / "vqro" / "SKILL.md"
-        assert adapter.is_file() and skill.is_file(), (adapter, skill)
 
         self.wait_fresh_empty_attention()
 
-        # R2: two Pi panes are started by Vqro with the adapter and skill auto-loaded.
+        # R2: two Pi panes are started by Vqro. (The adapter and vqro skill are
+        # delivered by the Vqro Pi profile and covered by the pi-profile demo; this
+        # demo's private root has no human agent dir, so no profile is built here.)
         human = self.cli("workspace", "create", "--cwd", str(self.root / "work"), "--no-focus")["result"]["root_pane"]["pane_id"]
         self.remember_pane(human)
         self.guide_human(human, "human-empty")
@@ -242,11 +239,6 @@ class ReadinessDemo(Demo):
         assert human != a != b and human != b
         self.remember_pane(a)
         self.remember_pane(b)
-        launches = self.launched_pi_args()
-        assert len(launches) >= 2, launches
-        for argv in launches:
-            assert str(adapter) in argv, f"adapter not passed to Pi: {argv}"
-            assert str(skill) in argv, f"skill not passed to Pi: {argv}"
 
         owner_a = self.agent("task-a", "a-identity", ["whoami"])["caller"]
         owner_b = self.agent("task-b", "b-identity", ["whoami"])["caller"]
@@ -309,8 +301,7 @@ class ReadinessDemo(Demo):
 
         result = {"result": "passed", "real_pi_agents": 2, "model_calls": 0,
                   "defaults_auto_linked": True,
-                  "pi_adapter_skill_flags_passed": True,
-                  "evidence_limit": "Pi flags recorded from a wrapper argv; no SDK loaded-resource or attached-TUI assertion",
+                  "adapter_skill_evidence": "covered by just pi-profile-demo",
                   "imported_tasks": 2, "literal_guide_blocks": 6, "fresh_empty_native_before_core_action": True,
                   "empty_full_tasks_before_first_task": True, "named_agent_panes": True,
                   "named_plan_owners_and_delegation": True, "name_failures_write_nothing": True,

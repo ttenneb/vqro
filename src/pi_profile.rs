@@ -189,6 +189,7 @@ pub(crate) fn ensure_profile() -> io::Result<()> {
     let body = serde_json::to_string_pretty(&settings)?;
     write_if_changed(&settings_path, &body)?;
     mirror_entries(&human, &profile)?;
+    link_profile_assets(&profile)?;
     let system = profile.join("SYSTEM.md");
     // A profile built before SYSTEM.md was replaced holds our own symlink to the
     // human's file. Unlink the link (never its target) before writing ours, so an
@@ -210,6 +211,57 @@ pub(crate) fn ensure_profile() -> io::Result<()> {
             digest_hex(body.as_bytes())
         ),
     )?;
+    Ok(())
+}
+
+/// Link the bundled reply-routing adapter and vqro skill into the profile, so
+/// every Pi using it - including one the human types in a Vqro pane - loads them.
+/// The links are refreshed when the bundled generation changes.
+#[cfg(unix)]
+fn link_profile_assets(profile: &Path) -> io::Result<()> {
+    let generation = crate::bundled::pi_generation_dir();
+    let Some(root) = generation.parent() else {
+        return Ok(());
+    };
+    let assets = [
+        (
+            generation.join("skills").join("vqro"),
+            profile.join("skills").join("vqro"),
+        ),
+        (
+            generation.join("vqro-reply-routing.ts"),
+            profile.join("extensions").join("vqro-reply-routing.ts"),
+        ),
+    ];
+    for (source, target) in assets {
+        if !source.exists() {
+            continue;
+        }
+        let Some(parent) = target.parent() else {
+            continue;
+        };
+        std::fs::create_dir_all(parent)?;
+        crate::bundled::safe_under(profile, parent)?;
+        let owned = match std::fs::read_link(&target) {
+            Ok(existing) if existing == source => continue,
+            // Our own link into an older generation: replace it.
+            Ok(existing) => existing.starts_with(root),
+            // Absent (ours to create) or a real file or directory (leave it).
+            Err(_) => std::fs::symlink_metadata(&target).is_err(),
+        };
+        if !owned {
+            continue;
+        }
+        let _ = std::fs::remove_file(&target);
+        std::os::unix::fs::symlink(&source, &target)?;
+        tracing::info!(path = %target.display(), "linked a Vqro Pi profile asset");
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn link_profile_assets(_profile: &Path) -> io::Result<()> {
+    // Unreachable: ensure_profile returns before this off unix.
     Ok(())
 }
 
