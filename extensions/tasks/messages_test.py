@@ -50,9 +50,8 @@ class MessagesTest(unittest.TestCase):
         reply = self.invoke({"action": "message_send", "operation_id": "reply1", "recipient": A, "body": "ack", "reply_to": message["id"]}, B)
         self.assertEqual(reply["message"]["reply_to"], message["id"])
         inbox = self.invoke({"action": "message_list"}, A)
-        bodies = [item["body"] for item in inbox["messages"]]
-        self.assertIn("ack", bodies)
-        self.assertIn("final draft", bodies)
+        self.assertEqual([item["body"] for item in inbox["waiting"]], ["ack"])
+        self.assertIn("final draft", [item["body"] for item in inbox["messages"]])
         self.assertEqual(json.loads(reply["message"]["sender"]), B)
 
     def test_edit_rejections_and_message_guards(self):
@@ -79,6 +78,16 @@ class MessagesTest(unittest.TestCase):
         second = self.invoke({"action": "message_claim", "operation_id": "c2"}, B)["claimed"]
         self.assertTrue(second)
         self.assertEqual({item["id"] for item in first} & {item["id"] for item in second}, set())
+
+    def test_a_large_utf8_body_stays_within_encoded_bounds(self):
+        body = "\u0800" * 10_800
+        self.send(body=body, op="wide")
+        listed = self.invoke({"action": "message_list"}, B)
+        self.assertEqual([item["body"] for item in listed["waiting"]], [body])
+        encoded = len(json.dumps(listed, sort_keys=True, separators=(",", ":")).encode())
+        self.assertLess(encoded, 128 * 1024)
+        claimed = self.invoke({"action": "message_claim", "operation_id": "wide-claim"}, B)["claimed"]
+        self.assertEqual([item["body"] for item in claimed], [body])
 
     def test_idle_claim_is_gated_on_the_current_activation_policy(self):
         self.send(body="wake")

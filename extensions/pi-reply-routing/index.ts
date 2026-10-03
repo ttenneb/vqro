@@ -107,6 +107,7 @@ export default function (pi: ExtensionAPI) {
   let shutDown = false;
   let turnActive = false;
   let turnGeneration = 0;
+  let latestCtx: any;
   let metadataSeq = Date.now() * 1000;
 
   pi.registerEntryRenderer?.("vqro-reply-routing", (entry: any, _options: any, theme: any) => {
@@ -159,12 +160,10 @@ export default function (pi: ExtensionAPI) {
     });
     if (!activate) return; // a starting turn injects them via before_agent_start
     const content = messages.map(renderMessage).join("\n\n");
-    // One delivery; queue safely instead of submitting while a turn is running.
-    if (turnActive) {
-      pi.sendMessage({ customType: "vqro-message", content, display: true }, { deliverAs: "followUp" });
-    } else {
-      pi.sendUserMessage(content);
-    }
+    // Prefer the live SDK idle state; a queued followUp never wakes a settled agent.
+    const idle = typeof latestCtx?.isIdle === "function" ? latestCtx.isIdle() : !turnActive;
+    if (idle) pi.sendUserMessage(content);
+    else pi.sendMessage({ customType: "vqro-message", content, display: true }, { deliverAs: "followUp" });
   }
 
   function stopPoll() {
@@ -173,7 +172,7 @@ export default function (pi: ExtensionAPI) {
   }
 
   function startPoll() {
-    if (!enabled || poll || !selfExecution) return;
+    if (!enabled || poll || !selfExecution || shutDown) return;
     poll = setInterval(checkMailbox, MAILBOX_POLL_MS);
   }
 
@@ -238,10 +237,12 @@ export default function (pi: ExtensionAPI) {
     pi.appendEntry("vqro-reply-routing", { ...data, at: new Date().toISOString() });
   }
 
-  pi.on("session_start", async () => {
+  pi.on("session_start", async (_event, ctx) => {
+    latestCtx = ctx;
     if (!enabled) return;
     turnActive = false;
     await resolveSelf();
+    if (shutDown) return;
     startPoll();
   });
 
@@ -250,7 +251,8 @@ export default function (pi: ExtensionAPI) {
     stopPoll();
   });
 
-  pi.on("before_agent_start", async (event) => {
+  pi.on("before_agent_start", async (event, ctx) => {
+    latestCtx = ctx;
     stopPoll();
     turnGeneration += 1;
     turnActive = true;
@@ -260,6 +262,10 @@ export default function (pi: ExtensionAPI) {
     // A turn is starting: pick up waiting durable messages into it.
     const claimed = await claimMessages(false);
     if (!claimed.length) return;
+    if (shutDown) {
+      record({ kind: "messages-undelivered", ids: claimed.map((message) => message.id) });
+      return;
+    }
     await deliverClaimed(claimed, false);
     return {
       message: {
@@ -284,7 +290,8 @@ export default function (pi: ExtensionAPI) {
     }
   });
 
-  pi.on("agent_settled", async () => {
+  pi.on("agent_settled", async (_event, ctx) => {
+    latestCtx = ctx;
     // Idle again: resume the bounded mailbox poll while activation is on.
     turnActive = false;
     startPoll();

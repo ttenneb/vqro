@@ -9,10 +9,13 @@ import uuid
 
 MAX_BODY_BYTES = 32 * 1024
 MAX_PAGE = 32
-# Bounds count encoded record JSON (the real result bytes), not just bodies.
-MAX_LIST_BYTES = 32 * 1024
+# Bounds count encoded record JSON (the real result bytes), not just bodies. A
+# shared serialized budget covers waiting+history; a large UTF-8 body can
+# canonicalize to roughly twice its raw bytes, so the budget stays well under the
+# provider's 128 KiB cap.
+MAX_LIST_BYTES = 96 * 1024
 MAX_CLAIM = 8
-MAX_CLAIM_BYTES = 48 * 1024
+MAX_CLAIM_BYTES = 96 * 1024
 STATES = ("waiting", "claimed")
 
 
@@ -20,7 +23,7 @@ def _bounded(canonical, records, budget):
     kept, total = [], 0
     for record in records:
         size = len(canonical(record).encode())
-        if kept and total + size > budget:
+        if total + size > budget:
             break
         total += size
         kept.append(record)
@@ -88,22 +91,26 @@ class Messages:
     def read(self, payload, caller):
         binding = self.store.binding(caller)
         key = self.store.canonical(binding)
-        waiting = []
+        waiting_rows = []
         clause, params = "sender=?", [key]
         if binding.get("class") == "agent":
             clause, params = "(sender=? OR recipient_execution=?)", [key, binding["execution"]]
-            rows = self.db.execute(
+            waiting_rows = self.db.execute(
                 "SELECT * FROM messages WHERE recipient_execution=? AND state='waiting' ORDER BY created_at ASC, id ASC LIMIT ?",
                 (binding["execution"], MAX_PAGE),
             ).fetchall()
-            # The waiting inbox stays visible independently of sender history and
-            # shares one encoded-byte budget with it.
-            waiting = _bounded(self.store.canonical, [self._record(row) for row in rows], MAX_LIST_BYTES)
-        rows = self.db.execute(
+        history_rows = self.db.execute(
             f"SELECT * FROM messages WHERE {clause} ORDER BY created_at DESC, id DESC LIMIT ?",
             (*params, MAX_PAGE),
         ).fetchall()
-        messages = _bounded(self.store.canonical, [self._record(row) for row in rows], MAX_LIST_BYTES)
+        waiting_ids = {row["id"] for row in waiting_rows}
+        # Waiting pickup first, then history without duplicating it, under one
+        # shared serialized budget the whole result must fit.
+        selected = [self._record(row) for row in waiting_rows]
+        selected += [self._record(row) for row in history_rows if row["id"] not in waiting_ids]
+        kept = _bounded(self.store.canonical, selected, MAX_LIST_BYTES)
+        waiting = [record for record in kept if record["id"] in waiting_ids]
+        messages = [record for record in kept if record["id"] not in waiting_ids]
         return {"activation": self.activation(), "waiting": waiting, "messages": messages}
 
     def mutate(self, payload, caller, at):

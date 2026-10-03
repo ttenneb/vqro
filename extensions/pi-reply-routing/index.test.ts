@@ -305,3 +305,31 @@ test("activation off: the preflight never claims", async () => {
     jest.useRealTimers();
   }
 });
+
+test("an idle SDK state wakes even when the local turn flag is stale", async () => {
+  jest.useFakeTimers();
+  try {
+    const claimed = [{ id: "m1", body: "wake", sender: JSON.stringify({ class: "agent", execution: "e" }) }];
+    const h = harness((args) => {
+      if (args[0] === "agent" && args[1] === "get") return { code: 0, stdout: JSON.stringify({ result: { agent: { name: "beta", execution: "exec-beta" } } }), stderr: "" };
+      if (args[0] === "message" && args[1] === "list") return { code: 0, stdout: JSON.stringify({ activation: true, waiting: [{ id: "m1" }], messages: [] }), stderr: "" };
+      if (args[0] === "message" && args[1] === "claim") return { code: 0, stdout: JSON.stringify({ claimed }), stderr: "" };
+      return { code: 0, stdout: "", stderr: "" };
+    });
+    await h.emit("session_start", {}, { isIdle: () => true });
+    jest.advanceTimersByTime(MAILBOX_POLL_MS + 5);
+    for (let i = 0; i < 20; i += 1) await Promise.resolve();
+    expect(h.sent.join("\n")).toContain("wake");
+  } finally {
+    jest.useRealTimers();
+  }
+});
+
+test("a starting-turn claim after shutdown is recorded, not injected", async () => {
+  const claimed = [{ id: "m1", body: "x", sender: "{}" }];
+  const h = harness((args) => (args[0] === "message" && args[1] === "claim" ? { code: 0, stdout: JSON.stringify({ claimed }), stderr: "" } : { code: 0, stdout: "", stderr: "" }));
+  await h.emit("session_shutdown", {});
+  const results = await h.emit("before_agent_start", { prompt: "hi" });
+  expect(results.some((result) => result?.message)).toBe(false);
+  expect(h.entries.some((entry) => entry.data.kind === "messages-undelivered")).toBe(true);
+});
