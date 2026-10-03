@@ -21,9 +21,10 @@ Accepted by the owner on 2026-10-03 (relayed by the pilot coordinator).
 - pane **split** panels and **popovers**; the task and messages panels are the
   first users;
 - **badges** on the pane border, the tab and the sidebar row;
-- **v1 building blocks** (final, 2026-10-03): section; row with a state chip,
-  an age, a terminal link with live agent state, and children that expand and
-  collapse; actions; a 2–4 option choice; a one-line text input through the
+- **v1 building blocks** (final, 2026-10-03): section with an optional count
+  in its header; row with a state chip (toned with the existing `ViewTone`
+  set), a count, an age, a detail line (for example owed/since), a terminal
+  link with live agent state, and children that expand and collapse; actions; a 2–4 option choice; a one-line text input through the
   rename dialog. Vqro also draws the loading, empty, unavailable and
   "unsupported" states (pipeline behavior, not blocks);
 - fixed panel sizes, scrolling, persisted display state, the
