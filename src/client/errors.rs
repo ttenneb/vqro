@@ -97,3 +97,47 @@ impl From<protocol::FramingError> for ClientError {
         }
     }
 }
+
+/// The offer shown when the running server is older than this client, or `None`
+/// when it is not older. The restart stays the human's action: this client never
+/// restarts or stops a server by itself.
+pub(super) fn older_server_message(client_protocol: u32, server_protocol: u32) -> Option<String> {
+    if server_protocol >= client_protocol {
+        return None;
+    }
+    Some(format!(
+        "the running {} server is older than this client (server protocol {server_protocol}, client protocol {client_protocol}).\n\
+         Restart it yourself when you choose; this client never restarts or stops a server by itself.\n\
+         {}",
+        crate::product::DISPLAY_NAME,
+        crate::session::active_restart_after_update_guidance(),
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_older_server_message_names_the_command_and_refuses_to_restart() {
+        let message = older_server_message(23, 22).expect("older server message");
+        assert!(message.contains("is older than this client"), "{message}");
+        assert!(message.contains("server protocol 22"), "{message}");
+        assert!(message.contains("client protocol 23"), "{message}");
+        assert!(
+            message.contains("never restarts or stops a server by itself"),
+            "{message}"
+        );
+        assert!(
+            message.contains(&crate::session::active_restart_after_update_guidance()),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn a_matching_or_newer_server_keeps_whatever_the_server_sent() {
+        assert!(older_server_message(23, 23).is_none());
+        assert!(older_server_message(23, 24).is_none());
+        assert!(older_server_message(22, 23).is_none());
+    }
+}

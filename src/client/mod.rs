@@ -197,6 +197,13 @@ fn run_client_with_mode(
     crate::logging::startup("client");
     info!(path = %socket_path.display(), "{log_message}");
 
+    // An upgraded binary can attach to a server that kept running from before
+    // the upgrade. Report that once, with the command to restart it, and never
+    // restart it here.
+    if client_rendered_shell && !is_remote_client_process() {
+        startup::offer_server_restart_if_older();
+    }
+
     let endpoint_catalog = if client_rendered_shell && !is_remote_client_process() {
         endpoint::EndpointCatalog::load().unwrap_or_else(|error| {
             warn!(%error, "saved SSH endpoint catalog is unavailable");

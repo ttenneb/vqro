@@ -296,6 +296,11 @@ pub(super) fn do_handshake(
             error,
         } => {
             if let Some(error) = error {
+                // A welcome carries the server's own protocol; when it is older
+                // than this client, say which side is stale and name the exact
+                // restart command instead of repeating the server's wording.
+                let error =
+                    super::errors::older_server_message(PROTOCOL_VERSION, version).unwrap_or(error);
                 return Err(ClientError::HandshakeRejected { version, error });
             }
             info!(version, ?encoding, "handshake succeeded");
