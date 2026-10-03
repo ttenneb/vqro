@@ -96,15 +96,35 @@ pub(crate) fn diagnostic_banner_lines(message: &str, width: u16, height: u16) ->
     for line in message.lines().filter(|line| !line.trim().is_empty()) {
         let mut current = String::new();
         for word in line.split_whitespace() {
-            if current.is_empty() {
-                current.push_str(word);
-            } else if current.chars().count() + 1 + word.chars().count() <= wrap_width {
+            if !current.is_empty()
+                && display_width(&current) + 1 + display_width(word) <= wrap_width
+            {
                 current.push(' ');
                 current.push_str(word);
-            } else {
-                lines.push(std::mem::take(&mut current));
-                current.push_str(word);
+                continue;
             }
+            if !current.is_empty() {
+                lines.push(std::mem::take(&mut current));
+            }
+            if display_width(word) <= wrap_width {
+                current.push_str(word);
+                continue;
+            }
+            // A token wider than the row (a long socket override, for example):
+            // split it cell-aware so no cell of the command is dropped.
+            let mut chunk = String::new();
+            let mut chunk_width = 0usize;
+            for character in word.chars() {
+                let character_width =
+                    unicode_width::UnicodeWidthChar::width(character).unwrap_or(0);
+                if chunk_width + character_width > wrap_width {
+                    lines.push(std::mem::take(&mut chunk));
+                    chunk_width = 0;
+                }
+                chunk.push(character);
+                chunk_width += character_width;
+            }
+            current = chunk;
         }
         if !current.is_empty() {
             lines.push(current);
@@ -112,6 +132,10 @@ pub(crate) fn diagnostic_banner_lines(message: &str, width: u16, height: u16) ->
     }
     lines.truncate(height as usize);
     lines
+}
+
+fn display_width(text: &str) -> usize {
+    unicode_width::UnicodeWidthStr::width(text)
 }
 
 /// Draws already-wrapped banner rows. The caller wraps once with
@@ -132,7 +156,7 @@ pub(crate) fn render_diagnostic_rows(
 
     for (row, line) in lines.iter().take(area.height as usize).enumerate() {
         let text = format!(" {line} ");
-        let width = (text.chars().count() as u16).min(area.width);
+        let width = (display_width(&text) as u16).min(area.width);
         let diagnostic_area = Rect::new(
             area.x + area.width.saturating_sub(width),
             area.y + row as u16,
@@ -171,6 +195,28 @@ mod tests {
             lines.iter().any(|line| line.contains("exits its pane")),
             "{lines:?}"
         );
+    }
+
+    #[test]
+    fn an_over_long_token_keeps_every_cell_across_rows() {
+        let command = "VQRO_SOCKET_PATH=/home/someone/.local/share/herdr/scratch/deep/nested/root/sock vqro server stop";
+        let message = format!("a different server build\nrestart it yourself: `{command}`; stopping it exits its pane processes.");
+        let lines = diagnostic_banner_lines(&message, 60, 20);
+        // Rows are the whole banner here, so dropping the row breaks (and every
+        // space) must leave the command intact.
+        let rebuilt: String = lines
+            .concat()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join("");
+        let expected: String = command.split_whitespace().collect::<Vec<_>>().join("");
+        assert!(rebuilt.contains(&expected), "{lines:?}");
+        for line in &lines {
+            assert!(
+                unicode_width::UnicodeWidthStr::width(line.as_str()) <= 58,
+                "{line}"
+            );
+        }
     }
 
     #[test]

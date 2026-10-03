@@ -843,16 +843,22 @@ impl ClientShellState {
         // presentation text: a config reload replaces the first, never the second.
         // Wrap once per frame; both wrap, so a long restart command occupies the
         // rows it needs.
-        let banner_lines: Vec<Vec<String>> = [
+        let mut banner_lines: Vec<Vec<String>> = Vec::new();
+        let mut banner_remaining = banner_area.height;
+        for message in [
             self.config_diagnostic.as_deref(),
             self.server_notice.as_deref(),
         ]
         .into_iter()
         .flatten()
-        .map(|message| {
-            crate::ui::diagnostic_banner_lines(message, banner_area.width, banner_area.height)
-        })
-        .collect();
+        {
+            let lines =
+                crate::ui::diagnostic_banner_lines(message, banner_area.width, banner_remaining);
+            banner_remaining = banner_remaining.saturating_sub(lines.len() as u16);
+            banner_lines.push(lines);
+        }
+        // Derived from what actually renders and clamped to the height, so the
+        // offsets below can never exceed the frame.
         let banner_rows: u16 = banner_lines.iter().map(|lines| lines.len() as u16).sum();
         let has_config_diagnostic = banner_rows > 0;
         let active_lifecycle = self
