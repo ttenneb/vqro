@@ -40,10 +40,44 @@ class ReadinessDemo(Demo):
         wrapper = root / "bin" / "pi-wrapper"
         wrapper.write_text(
             "#!/bin/sh\n{ printf '%s\\n' \"$@\"; echo '-----'; } >> "
-            + shlex.quote(str(self.launch_log)) + "\nexec " + shlex.quote(str(pi)) + ' "$@"\n')
+            + shlex.quote(str(self.launch_log)) + "\nexec " + shlex.quote(str(pi))
+            + ' --no-session --no-extensions --no-skills --no-prompt-templates --no-themes -e '
+            + shlex.quote(str(root / "demo-agent.ts")) + ' "$@"\n')
         wrapper.chmod(0o755)
         (root / "bin" / "pi").unlink()
         (root / "bin" / "pi").symlink_to(wrapper)
+        # The private fixture executes the guide's shell blocks under each real
+        # Pi execution. No model, credentials or normal-user config is involved.
+        fixture = root / "demo-agent.ts"
+        fixture.write_text(fixture.read_text().replace(
+            "const stdout=execFileSync('vqro',[command.tool||'task',...command.args],{encoding:'utf8',timeout:15000});",
+            "const stdout=command.script ? execFileSync('/bin/bash',['-ec',command.script],{encoding:'utf8',timeout:60000}) : execFileSync('vqro',[command.tool||'task',...command.args],{encoding:'utf8',timeout:15000});"))
+
+    def guide_block(self, step):
+        guide = Path(__file__).resolve().parents[2] / "docs/next/first-10-minutes.md"
+        # Fixed blocks in this one guide, not a general Markdown runner.
+        marker = f"<!-- {step} -->\n```sh\n"
+        text = guide.read_text()
+        assert text.count(marker) == 1, f"missing/duplicate guide block {step}"
+        return text.split(marker, 1)[1].split("\n```", 1)[0]
+
+    def guide_human(self, pane, step):
+        output, error, status = [self.root / f"receipts/{step}.{suffix}" for suffix in ("out", "err", "status")]
+        # Brace grouping, not a new bash process: literal paste executes under
+        # the host-owned interactive human shell, as the guide specifies.
+        command = "{\n" + self.guide_block(step) + "\n}"
+        command += f" > {shlex.quote(str(output))} 2> {shlex.quote(str(error))}; printf '%s' \"$?\" > {shlex.quote(str(status))}"
+        self.cli("pane", "run", pane, command)
+        self.wait_file(status)
+        assert status.read_text() == "0", f"guide {step}: {error.read_text()} {output.read_text()}"
+
+    def guide_agent(self, name, step):
+        self.save(f"commands/{step}.json", {"script": self.guide_block(step)})
+        self.cli("agent", "prompt", name, f"/taskcore {step}")
+        path = self.root / f"receipts/{step}.json"
+        self.wait_file(path)
+        result = json.loads(path.read_text())
+        assert result["code"] == 0, f"guide {step}: {result}"
 
     def launched_pi_args(self):
         records = [record for record in self.launch_log.read_text().split("-----\n") if record.strip()]
@@ -67,6 +101,7 @@ class ReadinessDemo(Demo):
         attaches the TUI. A PTY stands in for the human's terminal; the demo then
         drives the daemon through the CLI, exactly as the human would.
         """
+        assert self.guide_block("launch") == "vqro"
         master, slave = pty.openpty()
         fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack("HHHH", 50, 200, 0, 0))
         self.client = subprocess.Popen([str(self.vqro)], env=self.env, cwd=str(self.root / "work"),
@@ -98,6 +133,11 @@ class ReadinessDemo(Demo):
         self.save("owned-processes.json", self.owned)
 
     def stop(self):
+        # A guide block may fail after starting one agent but before the next
+        # assertion. Capture every private pane's births before stopping it.
+        if self.server and birth(self.server[0]) == self.server[1]:
+            for pane in self.cli("pane", "list")["result"]["panes"]:
+                self.remember_pane(pane["pane_id"])
         super().stop()
         client = getattr(self, "client", None)
         if client and client.poll() is None:
@@ -127,6 +167,21 @@ class ReadinessDemo(Demo):
         if len(roots) != 1:
             raise RuntimeError(f"expected one bundled root, found {roots}")
         return roots[0]
+
+    def wait_fresh_empty_attention(self):
+        """Native admission must be healthy before any core call creates a DB."""
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline:
+            documents = self.api("host.document.list", {"namespace": TASKS_NAMESPACE})["result"]["documents"]
+            for entry in documents:
+                items = entry["document"]["items"]
+                if any(item["id"] == "context:attention.view:vqro.tasks:tree" for item in items):
+                    assert not any("badge:" in item["id"] or "row:" in item["id"] for item in items), items
+                    assert not list(self.root.rglob("tasks.sqlite")), "core store already initialized"
+                    self.save("fresh-empty-document.json", entry)
+                    return
+            time.sleep(0.1)
+        raise RuntimeError("fresh native Tasks document unavailable before first core action")
 
     def attention_badges(self):
         """Admitted host documents for the Tasks attention namespace."""
@@ -172,13 +227,21 @@ class ReadinessDemo(Demo):
         skill = pi_dirs[0] / "skills" / "vqro" / "SKILL.md"
         assert adapter.is_file() and skill.is_file(), (adapter, skill)
 
+        self.wait_fresh_empty_attention()
+
         # R2: two Pi panes are started by Vqro with the adapter and skill auto-loaded.
         human = self.cli("workspace", "create", "--cwd", str(self.root / "work"), "--no-focus")["result"]["root_pane"]["pane_id"]
-        a = self.cli("pane", "split", "--pane", human, "--direction", "right", "--no-focus")["result"]["pane"]["pane_id"]
-        b = self.cli("pane", "split", "--pane", human, "--direction", "down", "--no-focus")["result"]["pane"]["pane_id"]
         self.remember_pane(human)
-        self.launch("task-a", a)
-        self.launch("task-b", b)
+        self.guide_human(human, "human-empty")
+        assert self.cli("task", "list")["tasks"] == []
+        human_tab = self.cli("pane", "get", human)["result"]["pane"]["tab_id"]
+        self.cli("tab", "focus", human_tab)  # guide: select the human shell again
+        self.guide_human(human, "human-setup")
+        a = self.cli("agent", "get", "task-a")["result"]["agent"]["pane_id"]
+        b = self.cli("agent", "get", "task-b")["result"]["agent"]["pane_id"]
+        assert human != a != b and human != b
+        self.remember_pane(a)
+        self.remember_pane(b)
         launches = self.launched_pi_args()
         assert len(launches) >= 2, launches
         for argv in launches:
@@ -190,52 +253,68 @@ class ReadinessDemo(Demo):
         assert owner_a["class"] == owner_b["class"] == "agent" and owner_a != owner_b
         self.human(human, "human-identity", ["whoami"])
 
-        # R3: import -> delegate. A human-approved plan assigns the two agents.
-        plan = {"nodes": [
-            {"key": "root", "title": "Readiness root", "owner": owner_a, "done_when": "All child outcomes are verified."},
-            {"key": "import", "parent": "root", "title": "Import the plan", "owner": owner_a, "done_when": CRITERION},
-            {"key": "delegate", "parent": "root", "title": "Delegate the work", "owner": owner_b, "done_when": CRITERION},
-        ]}
-        self.save("plan.json", plan)
-        imported = self.human(human, "human-plan", ["plan", str(self.root / "plan.json"), "--op", "readiness-plan"])
+        # R3/R4: the literal named-owner import, delegation and blocker examples.
+        imported = json.loads((self.root / "work/first-plan-result.json").read_text())
         root = self.cli("task", "get", imported["tasks"]["root"])["task"]
-        imported_task = self.cli("task", "get", imported["tasks"]["import"])["task"]
-        delegated_task = self.cli("task", "get", imported["tasks"]["delegate"])["task"]
-        self.change("task-a", "import-start", imported_task, "start")
-
-        # R4: blocking a delegated task publishes a durable attention badge.
-        self.change("task-b", "delegate-block", delegated_task, "block", "Waiting on the import receipt")
+        delegated_task = self.cli("task", "get", imported["tasks"]["work"])["task"]
+        assert root["owner"] == delegated_task["owner"] == owner_a
+        self.guide_agent("task-a", "agent-a")
+        self.guide_agent("task-b", "agent-b")
+        delegated_task = self.cli("task", "get", delegated_task["id"])["task"]
+        assert delegated_task["owner"] == owner_b and delegated_task["state"] == "blocked"
         badge, counts = self.wait_blocked_badge()
         self.save("badge.json", {"badge": badge, "counts": counts})
 
         # R5: a decision stays human-only and is answered by the human.
-        options = json.dumps([{"key": "keep", "label": "Keep"}, {"key": "change", "label": "Change"}])
-        decision = self.agent("task-a", "a-decision", ["decision", "Keep the bounded plan?", "--parent", root["id"],
-                                                     "--done-when", CRITERION, "--options", options, "--default", "keep",
-                                                     "--reversible", "true", "--waiting-cost", "Work waits."])["task"]
+        decision = json.loads((self.root / "work/first-decision.json").read_text())["task"]
         answer_denied = self.agent("task-a", "answer-denied", ["answer", decision["id"], "keep", "--rev", str(decision["revision"])], expected=1)
         assert answer_denied["code"] == 1
-        answered = self.human(human, "human-answer", ["answer", decision["id"], "keep", "--rev", str(decision["revision"])])["task"]
+        self.guide_human(human, "human-answer")
+        answered = self.cli("task", "get", decision["id"])["task"]
         assert answered["state"] in ("accepted", "done") or answered.get("owed_action") != "answer", answered["state"]
 
         # R6: a durable message crosses the two real Pi panes and is claimed by name.
         state = self.agent("task-a", "msg-state", ["list"], tool="message")
         assert state["activation"] is False, f"activation must stay off: {state}"
-        sent = self.agent("task-a", "msg-send", ["send", "task-b", "Readiness message from task-a", "--op", "msg-send"], tool="message")
-        message_id = sent["message"]["id"]
-        claimed = self.agent("task-b", "msg-claim", ["claim", "--op", "msg-claim"], tool="message")
-        assert message_id in [item["id"] for item in claimed["claimed"]], claimed
+        claimed = self.agent("task-b", "msg-claimed", ["list"], tool="message")
+        records = claimed["messages"]
+        notice = f"task {delegated_task['id']} assigned; inspect vqro task get {delegated_task['id']}"
+        message_id = next(item["id"] for item in records if item["body"] == notice)
+        assert next(item for item in records if item["id"] == message_id)["state"] == "claimed", records
         reply = self.agent("task-b", "msg-reply", ["send", "task-a", "ack from task-b", "--reply-to", message_id, "--op", "msg-reply"], tool="message")
         back = self.agent("task-a", "msg-back", ["claim", "--op", "msg-back"], tool="message")
         assert reply["message"]["id"] in [item["id"] for item in back["claimed"]], back
 
         self.change("task-b", "delegate-resume", self.cli("task", "get", delegated_task["id"])["task"], "start")
 
+        # Existing names must not create orphan panes. Failed name resolution
+        # must not change an owner or partially import a plan.
+        before_panes = len(self.cli("pane", "list")["result"]["panes"])
+        duplicate = subprocess.run([str(self.vqro), "agent", "start", "task-a"],
+                                   env=self.env, cwd=self.root / "work", capture_output=True, text=True, timeout=25)
+        assert duplicate.returncode == 1 and json.loads(duplicate.stderr)["error"]["code"] == "agent_name_taken", duplicate
+        assert len(self.cli("pane", "list")["result"]["panes"]) == before_panes
+        before = self.cli("task", "get", delegated_task["id"])["task"]
+        rejected = self.agent("task-a", "unknown-owner", ["delegate", before["id"], "--to", "no-such-agent", "--rev", str(before["revision"])], expected=1)
+        assert "cannot resolve owner no-such-agent" in rejected["stderr"], rejected
+        after = self.cli("task", "get", before["id"])["task"]
+        assert all(after[key] == before[key] for key in ("owner", "revision", "state"))
+        self.save("work/bad-plan.json", {"nodes": [
+            {"key": "good", "title": "Good", "owner": "task-a", "done_when": CRITERION},
+            {"key": "bad", "title": "Bad", "owner": "no-such-agent", "done_when": CRITERION},
+        ]})
+        count = len(self.cli("task", "list")["tasks"])
+        self.cli("task", "plan", "bad-plan.json", expected=1)
+        assert len(self.cli("task", "list")["tasks"]) == count
+
         result = {"result": "passed", "real_pi_agents": 2, "model_calls": 0,
                   "defaults_auto_linked": True,
                   "pi_adapter_skill_flags_passed": True,
                   "evidence_limit": "Pi flags recorded from a wrapper argv; no SDK loaded-resource or attached-TUI assertion",
-                  "imported_tasks": 3, "blocked_badge": counts, "decision_human_only": True,
+                  "imported_tasks": 2, "literal_guide_blocks": 6, "fresh_empty_native_before_core_action": True,
+                  "empty_full_tasks_before_first_task": True, "named_agent_panes": True,
+                  "named_plan_owners_and_delegation": True, "name_failures_write_nothing": True,
+                  "existing_name_creates_no_pane": True, "blocked_badge": counts, "decision_human_only": True,
                   "durable_message_claimed_by_name": True}
         self.save("RESULT.json", result)
         return result

@@ -22,6 +22,12 @@ pub(super) fn run_task_command(args: &[String]) -> std::io::Result<i32> {
     }
     let op = payload["operation_id"].as_str().unwrap_or("").to_string();
     let client = super::target::api_client()?;
+    if let Err(message) = resolve_owner_names(&mut payload, |name| {
+        super::message::recipient_binding(&client, name)
+    }) {
+        eprintln!("{message}; no write attempted");
+        return Ok(1);
+    }
     let original_caller = if mutation {
         // A read-only preflight captures the original scope for lost-reply lookup.
         // It grants no authority: the extension compares this precondition with
@@ -401,7 +407,16 @@ fn parse_payload(args: &[String]) -> Result<(Value, bool), String> {
                 }
                 payload["revision"] = revision.into();
             }
+            ("delegate", "--to") => {
+                if payload.get("owner").is_some() {
+                    return Err("use only one of --to NAME or --owner JSON".into());
+                }
+                payload["owner"] = value.clone().into();
+            }
             ("delegate", "--owner") => {
+                if payload.get("owner").is_some() {
+                    return Err("use only one of --to NAME or --owner JSON".into());
+                }
                 payload["owner"] = serde_json::from_str(value).map_err(|_| {
                     "--owner must be the assignee's binding JSON from task whoami".to_string()
                 })?
@@ -464,9 +479,36 @@ fn parse_payload(args: &[String]) -> Result<(Value, bool), String> {
         return Err("plan --rev selects an existing --parent".into());
     }
     if action == "delegate" && payload.get("owner").is_none() {
-        return Err("--owner is required; use the assignee's task whoami binding".into());
+        return Err("--to NAME or --owner JSON is required".into());
     }
     Ok((payload, mutation))
+}
+
+// Names are CLI conveniences only. The provider still receives exact bindings,
+// and enforces the same caller, ownership, revision and acceptance rules.
+fn resolve_owner_names(
+    payload: &mut Value,
+    mut resolve: impl FnMut(&str) -> Result<Value, String>,
+) -> Result<(), String> {
+    let mut resolve_owner = |owner: &mut Value| -> Result<(), String> {
+        if let Some(name) = owner.as_str() {
+            *owner =
+                resolve(name).map_err(|error| format!("cannot resolve owner {name}: {error}"))?;
+        }
+        Ok(())
+    };
+    if payload["action"] == "delegate" {
+        resolve_owner(&mut payload["owner"])?;
+    } else if payload["action"] == "plan" {
+        if let Some(nodes) = payload["nodes"].as_array_mut() {
+            for node in nodes {
+                if let Some(owner) = node.get_mut("owner") {
+                    resolve_owner(owner)?;
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 fn read_plan(path: &str) -> Result<Value, String> {
@@ -625,11 +667,60 @@ fn render_tree(tasks: &[Value]) -> Result<String, String> {
 }
 
 fn usage() -> String {
-    "usage: vqro task <create/decision TITLE --done-when TEXT [--parent ID]|plan FILE [--parent ID --rev N]|depends ID --on JSON --rev N|update ID --rev N [metadata options]|delegate ID --owner JSON --rev N|start/accept/done ID --rev N [done --evidence TEXT]|block/report/answer ID TEXT --rev N (answer uses an option KEY for structured decisions, with optional --note TEXT)|revert ID --rev N|decision-timer ID --rev N --auto-at UTC|decisions|decisions-seen --through SEQ|decision-log [--after SEQ]|list/ready [--after ID]|tree [--json]|whoami|get ID|op ID [--caller JSON]>; new decision also requires --options JSON --default KEY --reversible BOOL --waiting-cost TEXT [--auto-at UTC]; explicit --op ID requires --caller JSON from the original attempt".into()
+    "usage: vqro task <create/decision TITLE --done-when TEXT [--parent ID]|plan FILE [--parent ID --rev N]|depends ID --on JSON --rev N|update ID --rev N [metadata options]|delegate ID --to NAME (or --owner JSON) --rev N|start/accept/done ID --rev N [done --evidence TEXT]|block/report/answer ID TEXT --rev N (answer uses an option KEY for structured decisions, with optional --note TEXT)|revert ID --rev N|decision-timer ID --rev N --auto-at UTC|decisions|decisions-seen --through SEQ|decision-log [--after SEQ]|list/ready [--after ID]|tree [--json]|whoami|get ID|op ID [--caller JSON]>; new decision also requires --options JSON --default KEY --reversible BOOL --waiting-cost TEXT [--auto-at UTC]; explicit --op ID requires --caller JSON from the original attempt".into()
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn named_owners_resolve_only_to_exact_bindings_before_writing() {
+        let binding = serde_json::json!({"class":"agent", "terminal_id":"term_a", "agent":"pi", "execution":"exec-a"});
+        let mut plan = serde_json::json!({"action":"plan", "nodes":[{"key":"root"}, {"key":"a", "owner":"task-a"}, {"key":"b", "owner":binding}]});
+        let mut lookups = Vec::new();
+        super::resolve_owner_names(&mut plan, |name| {
+            lookups.push(name.to_string());
+            Ok(binding.clone())
+        })
+        .unwrap();
+        assert_eq!(lookups, ["task-a"]);
+        assert_eq!(plan["nodes"][1]["owner"], binding);
+        assert_eq!(plan["nodes"][2]["owner"], binding);
+        assert!(plan["nodes"][0].get("owner").is_none());
+        let mut delegate = serde_json::json!({"action":"delegate", "owner":"missing"});
+        assert!(
+            super::resolve_owner_names(&mut delegate, |_| Err("agent not found".into()))
+                .unwrap_err()
+                .contains("cannot resolve owner missing")
+        );
+    }
+
+    #[test]
+    fn delegate_to_name_requires_revision_and_conflicts_with_binding() {
+        let args = |items: &[&str]| {
+            items
+                .iter()
+                .map(|item| item.to_string())
+                .collect::<Vec<_>>()
+        };
+        let (payload, mutation) = super::parse_payload(&args(&[
+            "delegate", "task_1", "--to", "task-b", "--rev", "1",
+        ]))
+        .unwrap();
+        assert!(mutation);
+        assert_eq!(payload["owner"], "task-b");
+        assert!(super::parse_payload(&args(&["delegate", "task_1", "--to", "task-b"])).is_err());
+        for flags in [
+            vec!["--to", "task-b", "--owner", "{}"],
+            vec!["--owner", "{}", "--to", "task-b"],
+        ] {
+            let mut command = vec!["delegate", "task_1", "--rev", "1"];
+            command.extend(flags);
+            assert!(super::parse_payload(&args(&command))
+                .unwrap_err()
+                .contains("only one"));
+        }
+    }
+
     use super::*;
     #[test]
     fn task_writes_require_explicit_revision_and_delegation_binding() {

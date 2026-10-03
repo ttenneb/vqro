@@ -3,7 +3,8 @@ use std::time::{Duration, Instant};
 use crate::api::schema::{
     AgentPromptParams, AgentPromptWaitOptions, AgentReadParams, AgentRenameParams,
     AgentSendKeysParams, AgentStartParams, AgentTarget, AgentWaitParams, EmptyParams, ErrorBody,
-    ErrorResponse, Method, PaneProcessInfoParams, PaneTarget, ReadFormat, ReadSource, Request,
+    ErrorResponse, Method, PaneProcessInfoParams, PaneSplitParams, PaneTarget, ReadFormat,
+    ReadSource, Request, SplitDirection,
 };
 
 const AGENT_START_POLL_INTERVAL: Duration = Duration::from_millis(100);
@@ -286,7 +287,7 @@ fn matched_rule_region_preview<'a>(
 
 fn agent_start(args: &[String]) -> std::io::Result<i32> {
     let Some(name) = args.first() else {
-        eprintln!("usage: vqro agent start <name> --kind KIND --pane ID [--timeout MS] [-- <agent-args...>]");
+        eprintln!("usage: vqro agent start <name> [--kind KIND] [--pane ID] [--timeout MS] [-- <agent-args...>]");
         return Ok(2);
     };
     let separator = args
@@ -332,14 +333,7 @@ fn agent_start(args: &[String]) -> std::io::Result<i32> {
             }
         }
     }
-    let Some(kind) = kind else {
-        eprintln!("missing required --kind");
-        return Ok(2);
-    };
-    let Some(pane_id) = pane_id else {
-        eprintln!("missing required --pane");
-        return Ok(2);
-    };
+    let kind = kind.unwrap_or_else(|| "pi".into());
     let Some(expected_kind) = crate::detect::parse_agent_label(&kind) else {
         eprintln!("unsupported interactive agent kind: {kind}");
         return Ok(2);
@@ -353,6 +347,49 @@ fn agent_start(args: &[String]) -> std::io::Result<i32> {
     let timeout = Duration::from_millis(timeout_ms.unwrap_or(30_000));
     let retryable_timeout = timeout > crate::app::AGENT_START_SETTLE_DELAY
         && timeout <= crate::app::MAX_AGENT_START_TIMEOUT;
+    let pane_id = match pane_id {
+        Some(pane) => pane,
+        None => {
+            // Refuse existing/ambiguous names before creating a pane. Do not retry
+            // creation or close the new terminal after an uncertain startup.
+            let existing = super::send_request(&agent_get_request(name, "cli:agent:start:check"))?;
+            if existing.get("error").is_none() {
+                return super::print_response(&cli_agent_error(
+                    "cli:agent:start",
+                    "agent_name_taken",
+                    format!("agent name {name} is already used"),
+                ));
+            }
+            if existing["error"]["code"] != "agent_not_found" {
+                return super::print_response(&existing);
+            }
+            let response = super::send_request(&Request {
+                id: "cli:agent:start:split".into(),
+                method: Method::PaneSplit(PaneSplitParams {
+                    workspace_id: None,
+                    target_pane_id: super::target::caller_pane_id(),
+                    direction: SplitDirection::Right,
+                    ratio: None,
+                    cwd: None,
+                    focus: false,
+                    right_click: Default::default(),
+                    env: Default::default(),
+                }),
+            })?;
+            if response.get("error").is_some() {
+                return super::print_response(&response);
+            }
+            let Some(pane) = response["result"]["pane"]["pane_id"].as_str() else {
+                return super::print_response(&cli_agent_error(
+                    "cli:agent:start",
+                    "agent_pane_unavailable",
+                    "pane creation response missing pane_id",
+                ));
+            };
+            eprintln!("created agent pane {pane}; retained for recovery if startup fails");
+            pane.to_string()
+        }
+    };
     let pinned_terminal_id = pane_terminal_id(&pane_id)?;
     let mut retry_deadline = None;
     let mut previous_busy_response = None;

@@ -47,7 +47,7 @@ fn flag_value(args: &[String], index: usize, name: &str) -> Result<String, i32> 
 }
 
 /// Resolve an exact agent-process recipient binding for a durable message.
-fn recipient_binding(client: &ApiClient, target: &str) -> Result<Value, String> {
+pub(super) fn recipient_binding(client: &ApiClient, target: &str) -> Result<Value, String> {
     let response = client
         .request_value_with_timeout(
             &Request {
