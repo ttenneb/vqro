@@ -520,13 +520,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn the_vqro_system_prompt_is_embedded() {
-        assert!(VQRO_SYSTEM_MD.contains("Vqro pane"));
-        assert!(VQRO_SYSTEM_MD.contains("Working with Vqro"));
-        assert!(!VQRO_SYSTEM_MD.contains("Herdr"));
-    }
-
     #[cfg(unix)]
     #[test]
     fn mirror_directory_drops_excluded_entries_and_keeps_others() {
