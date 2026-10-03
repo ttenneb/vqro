@@ -7,9 +7,16 @@
 //! directory and links the plugin, so the core experience needs no manual
 //! linking.
 //!
+//! Installs are conservative: a generation is written only when it is missing or
+//! its content changed, and files already present are never rewritten, so a user
+//! edit inside a published generation stays. A user-linked replacement, or an
+//! explicitly disabled `vqro.tasks`, is left exactly as it is. Set
+//! [`OPT_OUT_ENV`] to disable the installs and the Pi flags entirely.
+//!
 //! Nothing here touches another product's state: everything is rooted at this
 //! binary's own config directory, and the Pi adapter/skill are only offered to
-//! Pi processes Vqro itself starts in its panes.
+//! Pi processes Vqro itself starts in its panes. `~/.pi/agent` and any Herdr
+//! config are never written.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -17,6 +24,10 @@ use std::path::{Path, PathBuf};
 use sha2::{Digest, Sha256};
 
 const TASKS_PLUGIN_ID: &str = "vqro.tasks";
+
+/// Environment variable that disables the bundled defaults when non-empty and
+/// not `0`.
+pub(crate) const OPT_OUT_ENV: &str = "VQRO_NO_BUNDLED_DEFAULTS";
 
 const TASKS_MANIFEST: &str = include_str!("../extensions/tasks/vqro-extension.toml");
 const TASKS_FILES: &[(&str, &str)] = &[
@@ -61,11 +72,15 @@ fn bundled_root() -> PathBuf {
     crate::config::config_dir().join("bundled")
 }
 
+fn opted_out() -> bool {
+    std::env::var(OPT_OUT_ENV).is_ok_and(|value| !value.is_empty() && value != "0")
+}
+
 /// Content address for one managed generation.
 ///
-/// This is a directory name, not a skip stamp: a linked provider always points at
-/// a complete, immutable set of files rather than a tree another launch may be
-/// rewriting.
+/// A linked provider always points at a complete, immutable set of files, so a
+/// changed embedded set publishes a new directory instead of rewriting a live
+/// one.
 fn generation_id(assets: &[(&str, &str)]) -> String {
     let mut hasher = Sha256::new();
     for (name, body) in assets {
@@ -86,54 +101,73 @@ fn generation_dir(root: &Path, prefix: &str, assets: &[(&str, &str)]) -> PathBuf
     root.join(format!("{prefix}-{}", generation_id(assets)))
 }
 
-fn generation_matches(dir: &Path, assets: &[(&str, &str)]) -> bool {
-    assets.iter().all(|(name, body)| {
-        std::fs::read(dir.join(name)).is_ok_and(|current| current == body.as_bytes())
-    })
+/// Write one asset through a sibling temp file and log the write.
+fn write_asset(path: &Path, report: &Path, body: &str) -> io::Result<()> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| io::Error::other("bundled asset has no parent directory"))?;
+    std::fs::create_dir_all(parent)?;
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| io::Error::other("bundled asset has no file name"))?;
+    let temporary = parent.join(format!(".{name}.tmp.{}", std::process::id()));
+    if let Err(error) =
+        std::fs::write(&temporary, body).and_then(|()| std::fs::rename(&temporary, path))
+    {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(error);
+    }
+    tracing::info!(path = %report.display(), bytes = body.len(), "published bundled asset");
+    Ok(())
 }
 
-/// Publish a complete generation at its content address and return its directory.
+/// Publish one complete generation and return its directory.
 ///
-/// Files are written to a staging directory first and swapped in with one rename,
-/// so no launch ever mutates the generation a linked provider is reading.
-fn publish(root: &Path, prefix: &str, assets: &[(&str, &str)]) -> io::Result<PathBuf> {
+/// A missing generation is written to a staging directory and swapped in with one
+/// rename. An existing generation is only completed: files that are already there
+/// are left untouched, so a user edit inside a published generation stays. A
+/// changed embedded set has a different content address, so it lands in a new
+/// directory and never rewrites a generation a provider may be reading.
+fn publish_generation(root: &Path, prefix: &str, assets: &[(&str, &str)]) -> io::Result<PathBuf> {
     let dir = generation_dir(root, prefix, assets);
-    if generation_matches(&dir, assets) {
-        return Ok(dir);
+    if !dir.exists() {
+        let staging = root.join(format!(".{prefix}.staging.{}", std::process::id()));
+        if staging.exists() {
+            std::fs::remove_dir_all(&staging)?;
+        }
+        for (name, body) in assets {
+            write_asset(&staging.join(name), &dir.join(name), body)?;
+        }
+        match std::fs::rename(&staging, &dir) {
+            Ok(()) => return Ok(dir),
+            // Another launch published the same generation first; use theirs.
+            Err(_) if dir.exists() => {
+                let _ = std::fs::remove_dir_all(&staging);
+            }
+            Err(error) => {
+                let _ = std::fs::remove_dir_all(&staging);
+                return Err(error);
+            }
+        }
     }
-    let staging = root.join(format!(".{prefix}.staging.{}", std::process::id()));
-    if staging.exists() {
-        std::fs::remove_dir_all(&staging)?;
-    }
-    std::fs::create_dir_all(&staging)?;
     for (name, body) in assets {
-        let path = staging.join(name);
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        std::fs::write(&path, body)?;
-    }
-    match std::fs::rename(&staging, &dir) {
-        Ok(()) => Ok(dir),
-        // Another launch published the same generation first; use theirs.
-        Err(_) if generation_matches(&dir, assets) => {
-            let _ = std::fs::remove_dir_all(&staging);
-            Ok(dir)
-        }
-        // The address exists but is incomplete or tampered with: repair it.
-        Err(_) => {
-            std::fs::remove_dir_all(&dir)?;
-            std::fs::rename(&staging, &dir)?;
-            Ok(dir)
+        let path = dir.join(name);
+        if !path.exists() {
+            write_asset(&path, &path, body)?;
         }
     }
+    Ok(dir)
 }
 
 pub(crate) fn ensure_defaults() -> io::Result<()> {
+    if opted_out() {
+        return Ok(());
+    }
     let root = bundled_root();
     std::fs::create_dir_all(&root)?;
-    let tasks_dir = publish(&root, "tasks", &tasks_assets())?;
-    publish(&root, "pi", &pi_assets())?;
+    let tasks_dir = publish_generation(&root, "tasks", &tasks_assets())?;
+    publish_generation(&root, "pi", &pi_assets())?;
     link_tasks_plugin(&root, &tasks_dir)
 }
 
@@ -159,6 +193,7 @@ fn link_tasks_plugin(root: &Path, tasks_dir: &Path) -> io::Result<()> {
                     plugin.manifest_path = manifest.clone();
                 }
             })?;
+            tracing::info!(plugin_root = %current, "updated bundled tasks link");
             Ok(())
         }
         Some(_) => Ok(()),
@@ -175,6 +210,7 @@ fn link_tasks_plugin(root: &Path, tasks_dir: &Path) -> io::Result<()> {
                     .saturating_add(1);
                 plugins.push(plugin);
             })?;
+            tracing::info!(plugin_root = %current, "linked bundled tasks plugin");
             Ok(())
         }
     }
@@ -183,9 +219,13 @@ fn link_tasks_plugin(root: &Path, tasks_dir: &Path) -> io::Result<()> {
 /// Extra Pi flags that load the bundled adapter and conventions skill.
 ///
 /// Read-only: it only names the published generation, so starting a Pi never
-/// hashes, writes or takes a lock on the App thread. A server that never saw a
-/// plain-launch install simply gets no flags and Pi still starts.
+/// hashes user content, writes, or takes a lock on the App thread. A server that
+/// never saw a plain-launch install, or a launch that opted out, simply gets no
+/// flags and Pi still starts.
 pub(crate) fn pi_launch_flags() -> Vec<String> {
+    if opted_out() {
+        return Vec::new();
+    }
     let dir = generation_dir(&bundled_root(), "pi", &pi_assets());
     let adapter = dir.join("vqro-reply-routing.ts");
     let skill = dir.join("skills").join("vqro").join("SKILL.md");
@@ -198,4 +238,73 @@ pub(crate) fn pi_launch_flags() -> Vec<String> {
         "--skill".into(),
         skill.display().to_string(),
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn assets() -> [(&'static str, &'static str); 2] {
+        [("one.py", "first"), ("nested/two.py", "second")]
+    }
+
+    fn temp_root(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("vqro-bundled-{name}-{}", std::process::id()))
+    }
+
+    #[test]
+    fn publish_writes_a_complete_generation() {
+        let root = temp_root("complete");
+        let _ = std::fs::remove_dir_all(&root);
+        let dir = publish_generation(&root, "gen", &assets()).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dir.join("one.py")).unwrap(),
+            "first"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("nested/two.py")).unwrap(),
+            "second"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn publish_keeps_a_user_edit_and_fills_only_missing_files() {
+        let root = temp_root("edit");
+        let _ = std::fs::remove_dir_all(&root);
+        let dir = publish_generation(&root, "gen", &assets()).unwrap();
+        std::fs::write(dir.join("one.py"), "edited").unwrap();
+        std::fs::remove_file(dir.join("nested/two.py")).unwrap();
+        let again = publish_generation(&root, "gen", &assets()).unwrap();
+        assert_eq!(again, dir);
+        // The edit stays; the deleted file is restored.
+        assert_eq!(
+            std::fs::read_to_string(dir.join("one.py")).unwrap(),
+            "edited"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("nested/two.py")).unwrap(),
+            "second"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn changed_content_publishes_a_new_generation() {
+        let root = temp_root("changed");
+        let _ = std::fs::remove_dir_all(&root);
+        let first = publish_generation(&root, "gen", &assets()).unwrap();
+        let changed = [("one.py", "first"), ("nested/two.py", "changed")];
+        let second = publish_generation(&root, "gen", &changed).unwrap();
+        assert_ne!(first, second);
+        assert_eq!(
+            std::fs::read_to_string(first.join("nested/two.py")).unwrap(),
+            "second"
+        );
+        assert_eq!(
+            std::fs::read_to_string(second.join("nested/two.py")).unwrap(),
+            "changed"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }
