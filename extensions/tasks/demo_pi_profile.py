@@ -50,6 +50,14 @@ def resource_name(entry):
     return parts[-1] if parts else entry
 
 
+def skill_name(entry):
+    entry = entry.lstrip("!+-")
+    parts = [part for part in entry.split("/") if part]
+    if len(parts) >= 2 and parts[-1] == "SKILL.md":
+        return parts[-2]
+    return parts[-1] if parts else entry
+
+
 def header_sections(text):
     """Map each `[Section]` header in Pi's startup header to its whitespace-stripped
     body, so assertions bind to the real section rather than any occurrence."""
@@ -140,19 +148,24 @@ class PiProfileDemo(ReadinessDemo):
         extensions.mkdir(exist_ok=True)
         (extensions / EXCLUDED_EXTENSION).write_text("export default function () {}\n")
         (extensions / KEPT_EXTENSION).write_text("export default function () {}\n")
-        # An explicit absolute extension path in settings must not bypass the
-        # extension exclusion.
-        settings["extensions"] = [
-            str(extensions / EXCLUDED_EXTENSION),
-            str(extensions / KEPT_EXTENSION),
-        ]
-        (agent / "settings.json").write_text(json.dumps(settings, indent=2))
         skills = agent / "skills"
         skills.mkdir(exist_ok=True)
         for name in (*HERDR_SKILLS, KEPT_SKILL):
             directory = skills / name
             directory.mkdir(exist_ok=True)
             (directory / "SKILL.md").write_text("---\ndescription: stub\n---\nStub.\n")
+        # An explicit absolute extension path in settings must not bypass the
+        # extension exclusion.
+        settings["extensions"] = [
+            str(extensions / EXCLUDED_EXTENSION),
+            str(extensions / KEPT_EXTENSION),
+        ]
+        # An explicit absolute skill file must not bypass the skill exclusion.
+        settings["skills"] = [
+            str(skills / "herdr" / "SKILL.md"),
+            str(skills / KEPT_SKILL / "SKILL.md"),
+        ]
+        (agent / "settings.json").write_text(json.dumps(settings, indent=2))
         (agent / "SYSTEM.md").write_text("HUMAN GLOBAL SYSTEM PROMPT\n")
         # The human's relative local package sources resolve to ~/Projects from the
         # agent dir; mirror that base so they load in the private root.
@@ -185,6 +198,9 @@ class PiProfileDemo(ReadinessDemo):
         assert sorted(names) == sorted(WANTED), names
         explicit = [resource_name(entry) for entry in settings.get("extensions", [])]
         assert EXCLUDED_EXTENSION not in explicit, explicit
+        explicit_skills = [skill_name(entry) for entry in settings.get("skills", [])]
+        assert not [name for name in explicit_skills if name in HERDR_SKILLS], explicit_skills
+        assert KEPT_SKILL in explicit_skills, explicit_skills
 
         # Profile layout: excluded resources gone, kept ones and the Vqro system
         # prompt present.

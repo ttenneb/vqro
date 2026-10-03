@@ -253,10 +253,17 @@ fn drop_excluded_resources(settings: &mut Value) {
     let Some(object) = settings.as_object_mut() else {
         return;
     };
-    for (key, excluded) in PER_ENTRY_DIRS {
-        if let Some(Value::Array(items)) = object.get_mut(*key) {
+    for &(key, excluded) in PER_ENTRY_DIRS {
+        if let Some(Value::Array(items)) = object.get_mut(key) {
             items.retain(|item| match item {
-                Value::String(value) => !excluded.contains(&resource_name(value)),
+                Value::String(value) => {
+                    let name = if key == "skills" {
+                        skill_name(value)
+                    } else {
+                        resource_name(value)
+                    };
+                    !excluded.contains(&name)
+                }
                 _ => true,
             });
         }
@@ -270,6 +277,21 @@ fn resource_name(entry: &str) -> &str {
     rest.split(['/', '\\'])
         .rfind(|part| !part.is_empty())
         .unwrap_or(rest)
+}
+
+/// The skill a settings entry selects. The standard skill file `SKILL.md` names
+/// its parent directory; anything else names itself.
+fn skill_name(entry: &str) -> &str {
+    let rest = entry.strip_prefix(FILTER_OPERATORS).unwrap_or(entry);
+    let parts: Vec<&str> = rest
+        .split(['/', '\\'])
+        .filter(|part| !part.is_empty())
+        .collect();
+    match parts.last() {
+        Some(&"SKILL.md") if parts.len() >= 2 => parts[parts.len() - 2],
+        Some(&last) => last,
+        None => rest,
+    }
 }
 
 /// The absolute form of a relative local path, or `None` when it is not one.
@@ -568,14 +590,22 @@ mod tests {
                 "keep-extension.ts",
                 "!../herdr-agent-state.ts",
             ],
-            "skills": ["herdr", "/opt/skills/check-session-loaded", "keep-skill"],
+            "skills": [
+                "/abs/skills/herdr/SKILL.md",
+                "/abs/skills/check-session-loaded/SKILL.md",
+                "herdr",
+                "/abs/skills/keep-skill/SKILL.md",
+            ],
         });
         drop_excluded_resources(&mut value);
         assert_eq!(
             value["extensions"],
             serde_json::json!(["keep-extension.ts"])
         );
-        assert_eq!(value["skills"], serde_json::json!(["keep-skill"]));
+        assert_eq!(
+            value["skills"],
+            serde_json::json!(["/abs/skills/keep-skill/SKILL.md"])
+        );
     }
 
     #[cfg(unix)]
