@@ -37,9 +37,7 @@ pub(crate) fn is_retryable_collections_candidate_error(error: &str) -> bool {
         || error == "Collections candidate authorization is stale or mismatched"
         || error == "candidate captured, observed, and current snapshots differ"
         || error == "candidate actions completed before an audited profile"
-        || error.contains("candidate actions rejected: stale Collections revision")
-        || (error.starts_with("candidate host-read trace rejected:")
-            && error.contains("observed []"))
+        || error.starts_with("candidate actions rejected: stale Collections revision")
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -460,6 +458,9 @@ impl CollectionsCandidateCoordinator {
             &pending.expected_terminals.workspace_id,
             &pending.expected_terminals.tab_id,
         )?;
+        // A terminal runtime failure may never reach host reads. Preserve it rather
+        // than disguising it as an empty observation trace and retrying the same input.
+        let value = result.map_err(|error| format!("candidate runtime failed: {error}"))?;
         let CompositeSnapshotObservation { state, terminals } = pending
             .observer
             .exact_state_then_terminals()
@@ -471,7 +472,6 @@ impl CollectionsCandidateCoordinator {
         {
             return Err("candidate captured, observed, and current snapshots differ".into());
         }
-        let value = result.map_err(|error| format!("candidate runtime failed: {error}"))?;
         match pending.kind {
             CandidateAuditKind::Profile => {
                 let profile: CollectionsDocumentProfileV1 = serde_json::from_value(value)
@@ -1101,7 +1101,7 @@ mod tests {
         assert!(is_retryable_collections_candidate_error(
             "Collections candidate authorization is stale or mismatched"
         ));
-        assert!(is_retryable_collections_candidate_error(
+        assert!(!is_retryable_collections_candidate_error(
             "candidate host-read trace rejected: Invalid(\"expected exact state.snapshot then terminals.snapshot trace, observed []\")"
         ));
         assert!(is_retryable_collections_candidate_error(
@@ -1111,8 +1111,76 @@ mod tests {
             "candidate runtime failed: component trapped"
         ));
         assert!(!is_retryable_collections_candidate_error(
+            "candidate runtime failed: component trapped: candidate actions rejected: stale Collections revision"
+        ));
+        assert!(!is_retryable_collections_candidate_error(
+            "candidate returned malformed profile: candidate actions rejected: stale Collections revision"
+        ));
+        assert!(!is_retryable_collections_candidate_error(
             "candidate returned malformed profile: missing field"
         ));
+    }
+
+    #[test]
+    fn failed_candidate_without_host_reads_does_not_reschedule_unchanged_input() {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &crate::config::Config::default(),
+            crate::app::AppPolicy::TEST,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        let workspace = crate::workspace::Workspace::test_new("candidate-failure");
+        let workspace_id = workspace.id.clone();
+        let tab_id = workspace.tabs[0].id.clone();
+        app.state.workspaces = vec![workspace];
+        app.state.ensure_test_terminals();
+        let pin = production_pin().unwrap();
+        let binding = HostProviderBinding::for_test(
+            pin.package_id.clone(),
+            pin.service_id.clone(),
+            pin.package_id.clone(),
+            pin.package_sha256.clone(),
+            "1.0.0".into(),
+            pin.capabilities.iter().cloned().collect(),
+        );
+        let record = serde_json::from_value(serde_json::json!({
+            "package_id": pin.package_id,
+            "source": {"kind":"git", "url":pin.source_url, "source_commit":pin.source_commit,
+                "package_path":pin.package_path, "package_id":pin.package_id,
+                "version":"1.0.0", "package_sha256":pin.package_sha256,
+                "manifest_sha256":pin.manifest_sha256},
+            "namespaces":[pin.package_id], "revision":1, "status":"enabled",
+            "active":{"package_sha256":pin.package_sha256,"version":"1.0.0","runtime_generation":1}
+        }))
+        .unwrap();
+        app.marketplace_state.packages.revision = 1;
+        app.marketplace_state
+            .packages
+            .packages
+            .insert(pin.package_id.clone(), record);
+        app.extension_package_services.insert(
+            pin.package_id.clone(),
+            crate::extension_candidate::PackageCandidateSlot::ready_for_test(binding, 1),
+        );
+        assert!(app
+            .schedule_collections_candidate(workspace_id, tab_id, 1)
+            .unwrap());
+        let attempt_id = app.collections_candidate_audits.next_attempt_id;
+        assert_eq!(app.collections_candidate_audits.pending_len(), 1);
+        // A failed/retired worker can complete without observing either snapshot.
+        // The input/fences are still current: this must not mint another request.
+        let error = app
+            .finalize_collections_candidate(attempt_id, Err("service runtime unavailable".into()))
+            .unwrap_err();
+        assert_eq!(
+            error,
+            "candidate runtime failed: service runtime unavailable"
+        );
+        assert!(!is_retryable_collections_candidate_error(&error));
+        assert_eq!(app.collections_candidate_audits.next_attempt_id, attempt_id);
+        assert_eq!(app.collections_candidate_audits.pending_len(), 0);
     }
 
     #[test]
