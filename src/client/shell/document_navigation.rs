@@ -453,6 +453,7 @@ mod tests {
                 disabled,
                 ..Default::default()
             },
+            view: None,
         }
     }
 
@@ -469,6 +470,7 @@ mod tests {
                 expanded: true,
                 ..Default::default()
             },
+            view: None,
         }
     }
 

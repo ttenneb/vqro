@@ -444,6 +444,7 @@ mod tests {
                     terminal: None,
                     action_ids: Vec::new(),
                     flags: HostDocumentItemFlags::default(),
+                    view: None,
                 },
                 HostDocumentItem {
                     id: "repository:repo_main".into(),
@@ -457,6 +458,7 @@ mod tests {
                         expanded: true,
                         ..Default::default()
                     },
+                    view: None,
                 },
                 HostDocumentItem {
                     id: "workspace:workspace_main".into(),
@@ -467,6 +469,7 @@ mod tests {
                     terminal: None,
                     action_ids: Vec::new(),
                     flags: HostDocumentItemFlags::default(),
+                    view: None,
                 },
             ],
             actions: Vec::new(),

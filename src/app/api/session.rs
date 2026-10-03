@@ -187,6 +187,7 @@ mod tests {
                                 expanded: true,
                                 ..Default::default()
                             },
+                            view: None,
                         },
                         crate::extension_contract::HostDocumentItem {
                             id: format!("workspace:{workspace_id}"),
@@ -197,6 +198,7 @@ mod tests {
                             terminal: None,
                             action_ids: Vec::new(),
                             flags: crate::extension_contract::HostDocumentItemFlags::default(),
+                            view: None,
                         },
                     ],
                     actions: Vec::new(),
@@ -343,6 +345,7 @@ mod tests {
                         terminal: None,
                         action_ids: Vec::new(),
                         flags: crate::extension_contract::HostDocumentItemFlags::default(),
+                        view: None,
                     }],
                     actions: Vec::new(),
                     required_capabilities: Vec::new(),

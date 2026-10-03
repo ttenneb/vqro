@@ -32,6 +32,7 @@ pub(crate) fn project(
                 expanded: true,
                 ..Default::default()
             },
+            view: None,
         });
         for member in &group.members {
             let item_id = format!("terminal:{}", member.terminal.terminal_id);
@@ -57,6 +58,7 @@ pub(crate) fn project(
                     disabled: false,
                     ..Default::default()
                 },
+                view: None,
             });
             actions.push(HostDocumentAction {
                 id: action_id,
@@ -68,6 +70,7 @@ pub(crate) fn project(
                 },
                 subject_id: Some(item_id),
                 confirmation: HostConfirmation::None,
+                view: None,
             });
         }
     }
@@ -90,6 +93,7 @@ pub(crate) fn project(
             terminal: Some(member.terminal.clone()),
             action_ids: vec![action_id.clone()],
             flags: HostDocumentItemFlags::default(),
+            view: None,
         });
         actions.push(HostDocumentAction {
             id: action_id,
@@ -101,6 +105,7 @@ pub(crate) fn project(
             },
             subject_id: Some(item_id),
             confirmation: HostConfirmation::None,
+            view: None,
         });
     }
     let document = HostDocumentV1 {

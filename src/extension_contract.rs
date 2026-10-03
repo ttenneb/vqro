@@ -8,6 +8,16 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 pub const HOST_DOCUMENT_CONTRACT_V1: &str = "host.document.v1";
+/// One new, separately named, versioned view format. It travels the live host
+/// document path with the same envelope, scope and action contract as
+/// `host.document.v1` and adds the view blocks Vqro draws in panels. An older
+/// client ignores the added item/action fields, so this stays append-only.
+pub const HOST_VIEW_CONTRACT_V1: &str = "host.view.v1";
+pub const MAX_VIEW_DEPTH: usize = 8;
+pub const MAX_VIEW_CHIP_CHARS: usize = 32;
+pub const MAX_VIEW_CHOICES: usize = 4;
+pub const MIN_VIEW_CHOICES: usize = 2;
+pub const MAX_VIEW_INPUT_CHARS: usize = 240;
 pub const MAX_DOCUMENT_PROVIDERS: usize = 16;
 pub const MAX_DOCUMENT_ITEMS: usize = 512;
 const MAX_SPACES_ITEMS: usize = MAX_DOCUMENT_ITEMS;
@@ -237,6 +247,85 @@ pub struct HostDocumentItem {
     pub action_ids: Vec<String>,
     #[serde(default)]
     pub flags: HostDocumentItemFlags,
+    /// View only: this item's view blocks. A legacy document never carries it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub view: Option<HostViewItem>,
+}
+
+/// The view blocks of one item. Every field is optional: an item with no view
+/// block is a plain group, and an unknown future block degrades to
+/// "unsupported" instead of rejecting the view.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct HostViewItem {
+    /// A panel root: the pane whose panel stack this item's subtree fills.
+    /// Only a root item (no parent) may set it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pane_id: Option<String>,
+    /// A panel root: the stable id of this view inside the pane's panel stack,
+    /// as the user names it to `vqro pane panel`. Only a root may set it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub view_id: Option<String>,
+    /// A panel root: the edge this view prefers. Vqro may override it to fit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edge: Option<HostViewEdge>,
+    /// A short state chip. Its presence makes the item a row.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chip: Option<HostViewChip>,
+    /// A count shown in a section header or panel title.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub count: Option<u32>,
+    /// Unix epoch seconds whose age Vqro draws. Only the extension knows what
+    /// the instant means.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub since: Option<u64>,
+}
+
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    schemars::JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum HostViewEdge {
+    #[default]
+    Right,
+    Bottom,
+}
+
+/// A bounded state chip: text plus one of the existing tones.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct HostViewChip {
+    pub text: String,
+    #[serde(default)]
+    pub tone: HostViewTone,
+}
+
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    schemars::JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum HostViewTone {
+    #[default]
+    Default,
+    Muted,
+    Accent,
+    Success,
+    Warning,
+    Danger,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -300,6 +389,45 @@ pub struct HostDocumentAction {
     pub subject_id: Option<String>,
     #[serde(default)]
     pub confirmation: HostConfirmation,
+    /// View only: how the user answers this action in a view. Absent means a
+    /// plain button.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub view: Option<HostViewAction>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct HostViewAction {
+    /// A 2-4 option choice the user answers in the view. The chosen key travels
+    /// back as the action's `subject_id`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub choice: Option<HostViewChoice>,
+    /// A one-line text field answered in the view. The text travels back as the
+    /// action's `subject_id`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input: Option<HostViewInput>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct HostViewChoice {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt: Option<String>,
+    pub options: Vec<HostViewChoiceOption>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_key: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct HostViewChoiceOption {
+    pub key: String,
+    pub label: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct HostViewInput {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placeholder: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -723,7 +851,8 @@ impl HostDocumentV1 {
     }
 
     pub fn validate(&self) -> Result<(), HostDocumentError> {
-        if self.contract != HOST_DOCUMENT_CONTRACT_V1 {
+        let is_view = self.contract == HOST_VIEW_CONTRACT_V1;
+        if !is_view && self.contract != HOST_DOCUMENT_CONTRACT_V1 {
             return invalid("unsupported host document contract");
         }
         validate_namespace(&self.namespace)?;
@@ -750,6 +879,10 @@ impl HostDocumentV1 {
             if let Some(terminal) = &item.terminal {
                 validate_terminal_ref(terminal)?;
             }
+            validate_view_item_fields(item, is_view)?;
+        }
+        if is_view {
+            validate_item_depth(&self.items)?;
         }
         for item in &self.items {
             if let Some(parent) = item.parent_id.as_deref() {
@@ -772,6 +905,7 @@ impl HostDocumentV1 {
         for action in &self.actions {
             validate_local_id(&action.id)?;
             validate_text(&action.label)?;
+            validate_view_action_fields(action, is_view)?;
             match &action.operation {
                 HostDocumentOperation::Extension { name } => validate_local_id(name)?,
                 HostDocumentOperation::Host { effect } => {
@@ -926,6 +1060,121 @@ fn validate_text(value: &str) -> Result<(), HostDocumentError> {
         || value.chars().any(|character| character.is_control())
     {
         return invalid("invalid document text");
+    }
+    Ok(())
+}
+
+/// View blocks exist only on `host.view.v1`. A legacy document that carries
+/// them is rejected instead of being drawn with fields its consumers cannot
+/// see, so a provider cannot publish view semantics under the old name.
+fn validate_view_item_fields(
+    item: &HostDocumentItem,
+    is_view: bool,
+) -> Result<(), HostDocumentError> {
+    let has_view_fields = item.view.is_some();
+    if !is_view {
+        return if has_view_fields {
+            invalid("view item fields require the view contract")
+        } else {
+            Ok(())
+        };
+    }
+    let Some(view) = &item.view else {
+        return Ok(());
+    };
+    if view.pane_id.is_some() || view.view_id.is_some() {
+        if item.parent_id.is_some() {
+            return invalid("only a panel root may name its pane or view");
+        }
+    }
+    if view.view_id.is_some() != view.pane_id.is_some() {
+        return invalid("a panel root names both its pane and its view");
+    }
+    if let Some(pane_id) = &view.pane_id {
+        validate_local_id(pane_id)?;
+    }
+    if let Some(view_id) = &view.view_id {
+        validate_local_id(view_id)?;
+    }
+    if view.edge.is_some() && view.pane_id.is_none() {
+        return invalid("only a panel root may name an edge");
+    }
+    if let Some(chip) = &view.chip {
+        if chip.text.trim().is_empty() || chip.text.chars().count() > MAX_VIEW_CHIP_CHARS {
+            return invalid("invalid view chip text");
+        }
+        validate_text(&chip.text)?;
+    }
+    Ok(())
+}
+
+fn validate_view_action_fields(
+    action: &HostDocumentAction,
+    is_view: bool,
+) -> Result<(), HostDocumentError> {
+    if !is_view {
+        return if action.view.is_some() {
+            invalid("view action fields require the view contract")
+        } else {
+            Ok(())
+        };
+    }
+    let Some(view) = &action.view else {
+        return Ok(());
+    };
+    if view.choice.is_some() && view.input.is_some() {
+        return invalid("a view action cannot both choose and type");
+    }
+    if let Some(choice) = &view.choice {
+        if choice.options.len() < MIN_VIEW_CHOICES || choice.options.len() > MAX_VIEW_CHOICES {
+            return invalid("a view choice needs two to four options");
+        }
+        let mut keys = HashSet::with_capacity(choice.options.len());
+        for option in &choice.options {
+            validate_local_id(&option.key)?;
+            validate_text(&option.label)?;
+            if !keys.insert(option.key.as_str()) {
+                return invalid("view choice option keys must be unique");
+            }
+        }
+        if let Some(default) = &choice.default_key {
+            if !keys.contains(default.as_str()) {
+                return invalid("view choice default must be one of its options");
+            }
+        }
+        if let Some(prompt) = &choice.prompt {
+            validate_text(prompt)?;
+        }
+    }
+    if let Some(input) = &view.input {
+        if let Some(prompt) = &input.prompt {
+            validate_text(prompt)?;
+        }
+        if let Some(placeholder) = &input.placeholder {
+            if placeholder.chars().count() > MAX_VIEW_INPUT_CHARS {
+                return invalid("view input placeholder is too long");
+            }
+            validate_text(placeholder)?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_item_depth(items: &[HostDocumentItem]) -> Result<(), HostDocumentError> {
+    let parents = items
+        .iter()
+        .map(|item| (item.id.as_str(), item.parent_id.as_deref()))
+        .collect::<HashMap<_, _>>();
+    for item in items {
+        let mut current = Some(item.id.as_str());
+        let mut depth = 0;
+        while let Some(id) = current {
+            depth += 1;
+            if depth > MAX_VIEW_DEPTH {
+                return invalid("view hierarchy is too deep");
+            }
+            current = parents.get(id).copied().flatten();
+        }
     }
     Ok(())
 }
@@ -1215,6 +1464,7 @@ mod tests {
                         expanded: true,
                         ..Default::default()
                     },
+                    view: None,
                 },
                 HostDocumentItem {
                     id: "member:1".into(),
@@ -1232,6 +1482,7 @@ mod tests {
                     }),
                     action_ids: vec!["select:1".into()],
                     flags: HostDocumentItemFlags::default(),
+                    view: None,
                 },
             ],
             actions: vec![HostDocumentAction {
@@ -1242,6 +1493,7 @@ mod tests {
                 },
                 subject_id: Some("member:1".into()),
                 confirmation: HostConfirmation::None,
+                view: None,
             }],
             required_capabilities: Vec::new(),
         }

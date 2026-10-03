@@ -59,15 +59,19 @@ pub(super) fn navigation(projection: &HostDocumentsProjectionV1) -> Option<Atten
         .iter()
         .filter(|entry| {
             let doc = &entry.document;
+            // Attention items are selected by convention, not by document
+            // shape: one view may also carry panel blocks the attention
+            // renderer must ignore. Every attention item must still be an
+            // enabled section.
             doc.surface == HostSurface::Navigation
                 && doc.target == HostTarget::Session
                 && doc.actions.is_empty()
                 && doc.required_capabilities.is_empty()
-                && doc.items.iter().all(|item| {
-                    item.role == HostItemRole::Section
-                        && item.id.starts_with("context:attention.")
-                        && !item.flags.disabled
-                })
+                && doc
+                    .items
+                    .iter()
+                    .filter(|item| item.id.starts_with("context:attention."))
+                    .all(|item| item.role == HostItemRole::Section && !item.flags.disabled)
                 && doc
                     .items
                     .iter()

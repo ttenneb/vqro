@@ -615,6 +615,7 @@ fn spaces_document_controls_workspace_order_labels_and_hierarchy() {
         terminal: None,
         action_ids: Vec::new(),
         flags: HostDocumentItemFlags::default(),
+        view: None,
     };
     let document = HostDocumentV1 {
         contract: HOST_DOCUMENT_CONTRACT_V1.into(),
@@ -736,6 +737,7 @@ fn highest_priority_spaces_document_wins_deterministically() {
             terminal: None,
             action_ids: Vec::new(),
             flags: HostDocumentItemFlags::default(),
+            view: None,
         }],
         actions: Vec::new(),
         required_capabilities: Vec::new(),

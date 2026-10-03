@@ -153,6 +153,7 @@ pub(super) struct ShellHitMap {
     pub(super) attention_toggle: Rect,
     pub(super) panes: Vec<PaneHit>,
     pub(super) collections: Vec<CollectionChromeHit>,
+    pub(super) pane_panels: Vec<super::pane_panel::PanePanelHit>,
     pub(super) collection_members: Vec<CollectionMemberHit>,
     pub(super) popup: Option<PaneHit>,
     pub(super) pane_splits: Vec<PaneSplitHit>,
@@ -1182,6 +1183,10 @@ pub(crate) struct ClientShellState {
     pub(super) pending_endpoint_controls: Vec<(ClientEndpointId, ClientMessage)>,
     pub(super) last_pane_viewport_request:
         Option<crate::protocol::endpoint::ClientPaneViewportRequest>,
+    /// The pane viewport a pane panel claims, separate from the transient
+    /// inspector claim so opening the inspector never fights a panel.
+    pub(super) last_pane_panel_viewport:
+        Option<crate::protocol::endpoint::ClientPaneViewportRequest>,
     pub(super) host_appearance: Option<crate::terminal_theme::HostAppearance>,
     pub(super) host_appearance_explicit: bool,
     pub(super) host_background: Option<crate::terminal_theme::RgbColor>,
@@ -1365,6 +1370,7 @@ impl ClientShellState {
             pending_input_source_changes: Vec::new(),
             pending_endpoint_controls: Vec::new(),
             last_pane_viewport_request: None,
+            last_pane_panel_viewport: None,
             host_appearance: None,
             host_appearance_explicit: false,
             host_background: None,
@@ -1620,6 +1626,7 @@ impl ClientShellState {
         self.host_mouse_pixels = None;
         self.pending_endpoint_controls.clear();
         self.last_pane_viewport_request = None;
+        self.last_pane_panel_viewport = None;
         self.dismissed_product_announcement = None;
     }
 
@@ -1649,6 +1656,7 @@ impl ClientShellState {
             // preserving it would leave stale content or a permanently loading request.
             self.inspector = None;
             self.last_pane_viewport_request = None;
+        self.last_pane_panel_viewport = None;
             self.terminal_view_surfaces.clear();
             self.last_terminal_views_interest = None;
             if matches!(

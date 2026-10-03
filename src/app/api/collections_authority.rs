@@ -1072,6 +1072,7 @@ mod tests {
                         }),
                         action_ids: Vec::new(),
                         flags: HostDocumentItemFlags::default(),
+                        view: None,
                     }],
                     actions: Vec::new(),
                     required_capabilities: Vec::new(),

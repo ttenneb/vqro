@@ -887,6 +887,7 @@ mod tests {
                 terminal: None,
                 action_ids: Vec::new(),
                 flags: crate::extension_contract::HostDocumentItemFlags::default(),
+                view: None,
             }
         };
         let document = crate::extension_contract::HostDocumentV1 {

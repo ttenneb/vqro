@@ -618,6 +618,73 @@ impl ClientShellState {
                 self.hits.panes.push(preview_hit);
             }
         }
+        // Pane split panels: the focused pane's published views. Drawn before the
+        // transient inspector so an explicitly opened inspector keeps the pane.
+        let inspector_pane = self
+            .inspector
+            .as_ref()
+            .map(|inspector| inspector.pane_id.as_str());
+        let mut panel_render = pane_panel::PanePanelRender {
+            hits: Vec::new(),
+            claimed: None,
+        };
+        if let Some(documents) = host_documents {
+            if self.supports_endpoint_capability(crate::protocol::endpoint::PANE_VIEWPORT_CAPABILITY) {
+                pane_panel::render(
+                    &mut composed,
+                    documents,
+                    snapshot,
+                    &self.hits.panes,
+                    snapshot.focused_pane_id.as_deref(),
+                    inspector_pane,
+                    &self.config.palette,
+                    &mut panel_render,
+                );
+            }
+        }
+        self.hits.pane_panels = panel_render.hits;
+        // A panel takes its edge from the pane's terminal, and the claimed
+        // viewport is what the server resizes that pane's PTY to. Closing the
+        // panel releases the claim so the pane returns to layout geometry.
+        let panel_request = match &panel_render.claimed {
+            Some((pane_id, terminal)) => Some(contributions::viewport_request(
+                &snapshot.boot_id,
+                snapshot.revision,
+                pane_id,
+                Some(*terminal),
+            )),
+            None => self.last_pane_panel_viewport.as_ref().map(|previous| {
+                crate::protocol::endpoint::ClientPaneViewportRequest {
+                    size: None,
+                    ..previous.clone()
+                }
+            }),
+        };
+        if let Some(request) = panel_request {
+            if self.last_pane_panel_viewport.as_ref() != Some(&request) {
+                if let Some((pane_id, terminal)) = panel_render.claimed.as_ref() {
+                    if let Some(hit) = self
+                        .hits
+                        .panes
+                        .iter_mut()
+                        .find(|hit| &hit.pane_id == pane_id)
+                    {
+                        hit.inner_rect = *terminal;
+                        hit.scrollbar_rect = None;
+                    }
+                }
+                if let Ok(data) = serde_json::to_string(&request) {
+                    self.last_pane_panel_viewport = Some(request);
+                    self.pending_endpoint_controls.push((
+                        self.active_endpoint_id.clone(),
+                        ClientMessage::EndpointControl {
+                            kind: crate::protocol::endpoint::PANE_VIEWPORT_KIND.into(),
+                            data,
+                        },
+                    ));
+                }
+            }
+        }
         frame.replace_from_ratatui_buffer_preserving_effects(&composed, cursor.clone());
         frame.cursor = cursor;
         self.hits.inspector_body = Rect::default();

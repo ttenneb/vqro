@@ -967,6 +967,7 @@ fn current_workspace_or_blocked_keeps_foreign_attention_only() {
             }),
             action_ids: Vec::new(),
             flags: Default::default(),
+            view: None,
         };
     state.set_endpoint_host_documents_for_generation(
         &endpoint_id,
@@ -996,6 +997,7 @@ fn current_workspace_or_blocked_keeps_foreign_attention_only() {
                                 expanded: true,
                                 ..Default::default()
                             },
+                            view: None,
                         },
                         terminal_item("remote-1", "pane_1", "remote idle"),
                         terminal_item("remote-2", "pane_2", "remote blocked"),

@@ -2715,6 +2715,23 @@ impl ClientShellState {
                     self.open_attention(launch, outcome);
                     return;
                 }
+                // A panel row that names a terminal link focuses that terminal's
+                // pane. Vqro owns the click; the extension only named the link.
+                if let Some(target) = self
+                    .hits
+                    .pane_panels
+                    .iter()
+                    .find(|hit| super::contains(hit.rect, point))
+                    .and_then(|hit| hit.target_pane.clone())
+                {
+                    self.push_endpoint_method(
+                        crate::api::schema::Method::PaneFocus(crate::api::schema::PaneTarget {
+                            pane_id: target,
+                        }),
+                        outcome,
+                    );
+                    return;
+                }
                 // Some terminals reserve Shift for selection and report a
                 // Ctrl+Shift click to mouse-aware applications as Ctrl-only.
                 let space_link = mouse
