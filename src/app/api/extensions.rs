@@ -2169,9 +2169,13 @@ impl App {
     ) {
         let collections =
             result.package_id == crate::collections_extension_contract::COLLECTIONS_PACKAGE_ID;
+        let spaces = result.package_id == crate::spaces_extension_contract::SPACES_PACKAGE_ID;
         self.finish_extension_package_candidate_result(result);
         if collections {
             self.drain_deferred_collections_scope();
+        }
+        if spaces {
+            self.drain_deferred_spaces_candidate();
         }
     }
 
