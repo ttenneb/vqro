@@ -104,8 +104,8 @@ export default function (pi: ExtensionAPI) {
 
   function sendInputBoxRequest(socketPath: string, request: string): void {
     if (cancelInputBoxRequest) return;
-    const endpoint = process.platform === "win32" ? `\\\\.\\pipe\\${socketPath}` : socketPath;
-    const socket = net.createConnection(endpoint);
+    // Unix only: the Vqro Pi profile this adapter ships in needs symlink support.
+    const socket = net.createConnection(socketPath);
     let settled = false;
     const finish = () => {
       if (settled) return;
