@@ -44,6 +44,55 @@ pub(super) enum PanePanelAction {
     FocusPane(String),
     /// The edge between the panel and the terminal: drag it to resize.
     ResizePanel,
+    /// The pane's own badge: open every view this pane publishes.
+    OpenViews,
+}
+
+/// A pane's own badge: it has views to open and none showing them.
+pub(super) struct PaneBadge {
+    pub(super) rect: Rect,
+    pub(super) pane_id: String,
+    pub(super) label: String,
+}
+
+/// Plan one badge per pane that has published views but nothing open. Pure:
+/// the caller draws the labels and registers the hits.
+pub(super) fn pane_badges(
+    documents: &HostDocumentsProjectionV1,
+    panes: &[PaneHit],
+    open: &HashMap<String, BTreeSet<String>>,
+) -> Vec<PaneBadge> {
+    let mut badges = Vec::new();
+    for pane in panes {
+        if pane.rect.width < 12
+            || pane.rect.height < 4
+            || open
+                .get(&pane.pane_id)
+                .is_some_and(|views| !views.is_empty())
+        {
+            continue;
+        }
+        let available = published_views(documents, &pane.pane_id);
+        if available.is_empty() {
+            continue;
+        }
+        let label = format!(" ⚑ {} ", available.len());
+        let width = display_width(&label);
+        if width + 2 >= pane.rect.width {
+            continue;
+        }
+        badges.push(PaneBadge {
+            rect: Rect::new(
+                pane.rect.right().saturating_sub(width + 1),
+                pane.rect.y,
+                width,
+                1,
+            ),
+            pane_id: pane.pane_id.clone(),
+            label,
+        });
+    }
+    badges
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

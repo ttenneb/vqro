@@ -21,8 +21,15 @@ in-flight work, or a human turn that wins the race, is therefore not auto-replie
 and a delivered reply is never re-answered automatically. `vqro agent prompt` is human-only, so agents address
 each other with messages rather than pane input.
 
+Presentation: this extension publishes **views** - a Tasks panel and a
+Messages panel per pane - which Vqro draws in the pane's top slot
+(`extensions/tasks/document.py`). The full-tab Tasks terminal view is retired:
+the tab pane entry is gone from the manifest, and a badge click opens the pane
+panels instead of launching another terminal app. `view.py` stays as the
+extension's formatting library and as the shape reference for the retired tab.
+
 - [Tasks policy, CLI, receipts and limits](../../docs/next/api/tasks-core-v0.md)
-- [Read-only pane, filters and exact-owner navigation](../../docs/next/api/tasks-view-v0.md)
+- [The retired full-tab view, kept as the shape reference](../../docs/next/api/tasks-view-v0.md)
 - [Public generic invocation and authority boundary](../../docs/next/api/extension-action-invoke-v1.md)
 
 ```sh

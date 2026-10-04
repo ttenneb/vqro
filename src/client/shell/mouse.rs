@@ -2800,6 +2800,36 @@ impl ClientShellState {
                                 outcome,
                             );
                         }
+                        super::pane_panel::PanePanelAction::OpenViews => {
+                            // The pane's own badge opens every view it
+                            // publishes, in this client.
+                            let Some(documents) = self
+                                .endpoints
+                                .iter()
+                                .find(|endpoint| endpoint.endpoint_id == self.active_endpoint_id)
+                                .and_then(ClientShellEndpoint::current_host_documents)
+                                .cloned()
+                            else {
+                                return;
+                            };
+                            let views =
+                                super::pane_panel::published_views(&documents, &hit.pane_id);
+                            if views.is_empty() {
+                                return;
+                            }
+                            let open = self.pane_panel_open.entry(hit.pane_id.clone()).or_default();
+                            for view_id in views {
+                                open.insert(view_id);
+                            }
+                            self.pane_panel_display
+                                .entry(hit.pane_id.clone())
+                                .or_default()
+                                .refit();
+                            self.persist_pane_panels();
+                            outcome.repaint = true;
+                            outcome.resize = true;
+                            return;
+                        }
                         super::pane_panel::PanePanelAction::ResizePanel => {
                             // Start a drag from the panel's own edge. The drawn
                             // height is the frozen content fit, or the user's.

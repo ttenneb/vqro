@@ -663,6 +663,28 @@ impl ClientShellState {
                 display.height = Some(drawn_height);
             }
         }
+        // A pane with views to open and nothing open shows its own badge, so a
+        // user can open the panel without knowing a command.
+        if let Some(documents) = host_documents {
+            for badge in pane_panel::pane_badges(documents, &self.hits.panes, &self.pane_panel_open)
+            {
+                render::put_text(
+                    &mut composed,
+                    badge.rect.x,
+                    badge.rect.y,
+                    badge.rect.width,
+                    &badge.label,
+                    Style::default()
+                        .fg(self.config.palette.peach)
+                        .bg(self.config.palette.panel_bg),
+                );
+                self.hits.pane_panels.push(pane_panel::PanePanelHit {
+                    rect: badge.rect,
+                    pane_id: badge.pane_id,
+                    action: pane_panel::PanePanelAction::OpenViews,
+                });
+            }
+        }
         let panel_dragging = matches!(
             self.chrome_drag,
             Some(ClientChromeDrag::PanePanelEdge { .. })

@@ -118,6 +118,25 @@ class PanelViewDemo(ReadinessDemo):
         assert result["code"] == 0, (token, result)
         return result
 
+    def wait_pane_a_badge(self, seconds=15):
+        """The badge on pane A's border: the right-hand pane's own affordance."""
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline:
+            screen = self.screen()
+            found = None
+            for row, line in enumerate(screen.rows):
+                cells = "".join(cell[0] for cell in line)
+                column = cells.find("⚑")
+                while column >= 0:
+                    if column > 120 and (found is None or column > found[0]):
+                        found = (column, row)
+                    column = cells.find("⚑", column + 1)
+            if found is not None:
+                return found
+            time.sleep(0.2)
+        (self.root / "timeout-screen.txt").write_text(self.screen().text())
+        raise RuntimeError("pane A never showed its badge")
+
     def right_panel_open(self):
         """Whether the right-hand pane's own panel header is on screen."""
         screen = self.screen()
@@ -307,11 +326,11 @@ class PanelViewDemo(ReadinessDemo):
         while time.monotonic() < deadline and self.right_panel_open():
             time.sleep(0.2)
         assert not self.right_panel_open(), "hide did not close pane A's panel"
-        self.cli("pane", "panel", "toggle", a, "tasks")
-        deadline = time.monotonic() + 10
-        while time.monotonic() < deadline and not self.right_panel_open():
-            time.sleep(0.2)
-        self.wait_screen("waiting on panel-b: unblock")
+        # A pane with views to open and nothing open shows its own badge; the
+        # badge click opens them, which is how a user finds the panel.
+        badge = self.wait_pane_a_badge()
+        self.click(*badge)
+        self.wait_screen("waiting on panel-b: unblock", seconds=15)
 
         # The open views are the client's own, and persist for the next attach.
         preferences = next((self.root / "state").rglob("local-*.json"))
@@ -383,8 +402,8 @@ class PanelViewDemo(ReadinessDemo):
                   "height_rule": {"frozen_after_open": True,
                                   "content_lines": len([line for line in Path(expanded_text).read_text().splitlines() if "├─" in line or "└─" in line])},
                   "command": {"opened": opened["result"]["panel"]["pane_id"] == a,
-                              "hide_closed_the_right_panel": True,
-                              "toggle_reopened_it": True},
+                              "hide_closed_the_right_panel": True},
+                  "badge_click_reopened_it": True,
                   "show_on_agent_start": {"b_panel_from_rule": True},
                   "messages_panel": {
                       "shows_the_message_rows": "review the panel when you can" in Path(messages_text).read_text(),

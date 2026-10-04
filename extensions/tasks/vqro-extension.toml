@@ -21,10 +21,3 @@ provides = ["action_invoke", "host_document"]
 capabilities = ["action_invoke", "host_document"]
 document_source = "agent_activity"
 command = ["python3", "provider.py", "--native-attention"]
-
-[[panes]]
-id = "tree"
-title = "Tasks"
-description = "Read-only task tree and exact-owner navigation"
-placement = "tab"
-command = ["python3", "view.py"]
