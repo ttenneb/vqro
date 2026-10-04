@@ -36,9 +36,9 @@ fn apply_row(row: &crate::protocol::PaneSurfacePatchRow, frame: &mut FrameData) 
 /// in the pane's coordinates belongs that many rows lower on screen.
 type PanelShifts = std::collections::HashMap<String, u16>;
 
-/// The panes a panel moved down, with the band and height of each: only these
-/// can contain a patch row that has to move, so a row for any other pane costs
-/// one comparison against a short list and no clone.
+/// The panes a panel moved down, with the band and the surface rect of each: only
+/// these can contain a patch row that has to move, so a row for any other pane
+/// costs one comparison against a short list.
 struct PanelBands {
     panes: Vec<(crate::protocol::SurfaceRect, u16)>,
 }
@@ -58,8 +58,14 @@ impl PanelBands {
         Self { panes }
     }
 
-    /// `(band, pane height)` for the pane this raw surface row belongs to.
-    fn of(&self, row: &crate::protocol::PaneSurfacePatchRow) -> Option<(u16, u16)> {
+    /// For a raw surface row of a pane a panel moved: its band and the composed
+    /// row its pane ends at. Both are in composed coordinates, which is the space
+    /// the fast path writes in.
+    fn of_composed(
+        &self,
+        row: &crate::protocol::PaneSurfacePatchRow,
+        area: Rect,
+    ) -> Option<(u16, u16)> {
         self.panes
             .iter()
             .find(|(rect, _)| {
@@ -68,7 +74,12 @@ impl PanelBands {
                     && row.y >= rect.y
                     && row.y < rect.y.saturating_add(rect.height)
             })
-            .map(|(rect, band)| (*band, rect.height))
+            .map(|(rect, band)| {
+                (
+                    *band,
+                    area.y.saturating_add(rect.y).saturating_add(rect.height),
+                )
+            })
     }
 }
 
@@ -237,12 +248,12 @@ impl ClientShellState {
             let (cols, rows) = self.last_composed_size.unwrap_or_default();
             self.layout(cols, rows).pane_surface
         });
-        // The focused pane's band, for the cursor: the host wrote the cursor in the
-        // pane's own coordinates and the panel moved the grid down.
-        let cursor_band = patch
-            .panes
-            .iter()
-            .find(|pane| pane.focused)
+        // The cursor's band, from the pane the surface says is focused: a patch can
+        // carry only the panes it changed, so the focused pane is often absent.
+        let cursor_band = self
+            .pane_surface
+            .as_ref()
+            .and_then(|surface| surface.panes.iter().find(|pane| pane.focused))
             .and_then(|pane| shifts.get(&pane.pane_id).copied())
             .unwrap_or(0);
         let composed_patch = fast_path_area.map(|area| ClientComposedSurfacePatch {
@@ -250,21 +261,21 @@ impl ClientShellState {
                 .rows
                 .iter()
                 .map(|row| {
-                    let (band, height) = bands.of(row).unwrap_or((0, 0));
+                    let moved = bands.of_composed(row, area);
+                    let band = moved.map(|(band, _)| band).unwrap_or(0);
                     (
                         crate::protocol::PaneSurfacePatchRow {
                             x: area.x.saturating_add(row.x),
                             y: area.y.saturating_add(row.y).saturating_add(band),
                             cells: row.cells.clone(),
                         },
-                        band,
-                        height,
+                        moved.map(|(_, bottom)| bottom),
                     )
                 })
-                .filter(|(row, band, height)| {
-                    // A composed row outside the pane has nowhere to go: the grid
-                    // is exactly as tall as the rect below the panel.
-                    (*band == 0 || *height == 0 || row.y < area.y.saturating_add(*height))
+                .filter(|(row, bottom)| {
+                    // A row a panel moved has nowhere to go past its own pane's
+                    // composed bottom: the grid is exactly the rect below the panel.
+                    bottom.is_none_or(|bottom| row.y < bottom)
                         && !panel_rows.iter().any(|panel| {
                             row.y >= panel.y
                                 && row.y < panel.bottom()
@@ -272,7 +283,7 @@ impl ClientShellState {
                                 && row.x.saturating_add(row.cells.len() as u16) > panel.x
                         })
                 })
-                .map(|(row, _, _)| row)
+                .map(|(row, _)| row)
                 .collect(),
             cursor: patch
                 .cursor

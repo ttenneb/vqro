@@ -1079,3 +1079,114 @@ fn the_cursor_travels_with_the_grid_below_the_panel() {
         "the cursor belongs at the top of the rect below the panel"
     );
 }
+
+#[test]
+fn a_fast_path_patch_keeps_the_changed_row_and_the_focused_cursor() {
+    // Two panes with panels, two clients' worth of state: the whole patch is
+    // applied through the fast path when it applies at all. QA's probe: the
+    // changed row of the lower pane must survive, and the cursor's band must come
+    // from the surface's focused pane, which a patch of another pane omits.
+    let mut state = panel_state(None, true);
+    text_of(&mut state);
+    let first = state
+        .hits
+        .panes
+        .iter()
+        .find(|pane| pane.pane_id == "pane_1")
+        .expect("pane_1")
+        .clone();
+    // A second pane with its own panel and band.
+    let mut second = first.clone();
+    second.pane_id = "pane_2".into();
+    second.rect = Rect::new(20, 1, 90, 20);
+    second.projected_inner_rect = Rect::new(21, 2, 88, 18);
+    state.hits.panes.push(second.clone());
+    state
+        .pane_panel_open
+        .entry("pane_2".into())
+        .or_default()
+        .insert("tasks".into());
+    state.pane_panel_band_rows.insert("pane_2".into(), 2);
+    let mut surface = state.pane_surface.as_ref().expect("surface").clone();
+    let mut surface_pane = surface.panes[0].clone();
+    surface_pane.pane_id = "pane_2".into();
+    // Below the other pane's band, so the row cannot be dropped by the panel
+    // filter for a different reason than the one under test.
+    surface_pane.inner_rect = crate::protocol::SurfaceRect {
+        x: 1,
+        y: 20,
+        width: 10,
+        height: 16,
+    };
+    surface_pane.focused = false;
+    surface.panes.push(surface_pane.clone());
+    surface.frame.cursor = Some(crate::protocol::CursorState {
+        x: 2,
+        y: 3,
+        visible: true,
+        shape: 0,
+    });
+    state.set_pane_surface(surface);
+    text_of(&mut state);
+
+    // A patch of the *lower* pane, carrying neither pane A nor its own focus.
+    let mut cell = state
+        .pane_surface
+        .as_ref()
+        .expect("surface")
+        .frame
+        .cells
+        .first()
+        .cloned()
+        .expect("a cell");
+    cell.symbol = "Q".into();
+    let patch = crate::protocol::PaneSurfacePatch {
+        boot_id: "boot-1".into(),
+        projection_revision: 1,
+        base_surface_revision: state
+            .pane_surface
+            .as_ref()
+            .expect("surface")
+            .surface_revision,
+        surface_revision: state
+            .pane_surface
+            .as_ref()
+            .expect("surface")
+            .surface_revision
+            .saturating_add(1),
+        rows: vec![crate::protocol::PaneSurfacePatchRow {
+            x: surface_pane.inner_rect.x,
+            y: surface_pane.inner_rect.y,
+            cells: vec![cell],
+        }],
+        panes: vec![surface_pane.clone()],
+        cursor: Some(crate::protocol::CursorState {
+            x: 2,
+            y: 3,
+            visible: true,
+            shape: 0,
+        }),
+    };
+    // The fast path's own payload is what the caller writes into the composed
+    // frame, so that is what has to be right: QA's probe found the changed row of a
+    // lower pane dropped and the cursor's band lost when its pane is not carried.
+    let ClientPaneSurfacePatchOutcome::Applied(Some(composed)) =
+        state.apply_pane_surface_patch(patch)
+    else {
+        panic!("the fast path applies this patch");
+    };
+    let area = state.layout(106, 30).pane_surface;
+    // The band of the pane the surface says is focused - the one the cursor
+    // belongs to - even though this patch does not carry that pane at all.
+    let band = *state
+        .pane_panel_band_rows
+        .get("pane_1")
+        .expect("pane_1 has a band");
+    assert!(band > 0, "the focused pane has a panel band");
+    let cursor = composed.cursor.expect("cursor");
+    assert_eq!(
+        cursor.y,
+        area.y + 3 + band,
+        "the cursor's band comes from the surface's focused pane, not the patch"
+    );
+}
