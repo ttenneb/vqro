@@ -177,7 +177,92 @@ fn collections_candidate_passes_authoritative_host_gate() {
 
     app.extension_package_services.remove("vqro.collections");
     app.revoke_host_invocation_authority_for_package("vqro.collections");
+    assert_superseded_read_and_scope_pressure(&installed_for_plans);
     cleanup(root);
+}
+
+fn assert_superseded_read_and_scope_pressure(
+    installed: &crate::extension_package::InstalledPackageV1,
+) {
+    let (mut app, _, _) = staged_candidate_app(exact_git_provenance());
+    for _ in 1..8 {
+        app.state.workspaces[0].test_add_tab(None);
+    }
+    app.state.ensure_test_terminals();
+    // This is a non-publishing read characterization, not a cutover/migration.
+    app.collections_mutations_blocked = true;
+    let state_before = app.extension_state.clone();
+    let workspace_id = app.state.workspaces[0].id.clone();
+    let tab_id = app.state.workspaces[0].tabs[0].id.clone();
+    app.extension_package_services.insert(
+        "vqro.collections".into(),
+        crate::extension_candidate::PackageCandidateSlot::spawn(
+            installed.clone(),
+            ARTIFACT_GENERATION,
+            app.event_tx.clone(),
+        )
+        .unwrap(),
+    );
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut held_read = false;
+    let mut discarded_old = false;
+    while app.collections_candidate_audits.cached_len() != 8
+        || app.collections_candidate_audits.action_cached_len() != 8
+    {
+        assert!(
+            Instant::now() < deadline,
+            "supersession/queue pressure did not drain"
+        );
+        match app.event_rx.try_recv() {
+            Ok(crate::events::AppEvent::ExtensionHostStateCall(request)) if !held_read => {
+                // The real component is waiting for its first host read. Supersede its
+                // audit while it is active, with four other requests already queued.
+                held_read = true;
+                let _ =
+                    app.schedule_collections_candidate(workspace_id.clone(), tab_id.clone(), 999);
+                app.handle_internal_event(crate::events::AppEvent::ExtensionHostStateCall(request));
+            }
+            Ok(crate::events::AppEvent::ExtensionPackageCandidateFinished(result)) => {
+                if held_read && !discarded_old {
+                    assert!(
+                        result.result.is_ok(),
+                        "superseding a read killed its component: {:?}",
+                        result.result
+                    );
+                    app.handle_extension_package_candidate_finished(*result);
+                    assert_eq!(
+                        app.collections_candidate_audits.cached_len(),
+                        0,
+                        "obsolete component result was published"
+                    );
+                    discarded_old = true;
+                } else {
+                    app.handle_extension_package_candidate_finished(*result);
+                }
+            }
+            Ok(event) => {
+                app.handle_internal_event(event);
+            }
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            Err(error) => panic!("candidate event channel failed: {error}"),
+        }
+    }
+    assert!(held_read && discarded_old);
+    let current = app
+        .collections_candidate_audits
+        .profiles()
+        .find(|profile| profile.document.scope.scope_id == tab_id.to_string())
+        .unwrap();
+    assert_eq!(current.document.revision, 999);
+    assert_eq!(app.collections_candidate_audits.pending_len(), 0);
+    assert_eq!(
+        app.extension_state, state_before,
+        "read characterization wrote policy"
+    );
+    app.extension_package_services.remove("vqro.collections");
+    app.revoke_host_invocation_authority_for_package("vqro.collections");
 }
 
 fn assert_shadow_action_plans(

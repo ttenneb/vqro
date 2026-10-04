@@ -32,6 +32,7 @@ pub(crate) struct SpacesCandidateCoordinator {
     pending: Option<PendingSpacesCandidate>,
     last_published: Option<crate::extension_contract::HostSpacesV1>,
     next_attempt_id: u64,
+    deferred_for_capacity: bool,
 }
 
 impl SpacesCandidateCoordinator {
@@ -47,6 +48,7 @@ impl SpacesCandidateCoordinator {
         snapshot: crate::extension_contract::HostSpacesV1,
     ) -> Result<Option<SpacesCandidateWork>, String> {
         let (artifact_generation, runtime_generation) = exact_spaces_binding(app)?;
+        self.deferred_for_capacity = false;
         if self
             .last_published
             .as_ref()
@@ -69,7 +71,10 @@ impl SpacesCandidateCoordinator {
         {
             return Ok(None);
         }
-        self.cancel_pending();
+        // Pure render supersession retires the ticket, not its component runtime.
+        // finish() rejects the obsolete attempt; disable/error/deadline cancellation
+        // remains unchanged. The service still has at most four queued + one active.
+        self.pending = None;
         self.next_attempt_id = self.next_attempt_id.saturating_add(1).max(1);
         let attempt_id = self.next_attempt_id;
         let deadline = Instant::now() + INVOCATION_TIMEOUT;
@@ -151,11 +156,19 @@ impl SpacesCandidateCoordinator {
 
     fn disable(&mut self) {
         self.cancel_pending();
+        self.deferred_for_capacity = false;
         self.last_published = None;
     }
 }
 
 impl App {
+    #[cfg(test)]
+    pub(crate) fn assert_spaces_component_supersession_for_test(
+        installed: &crate::extension_package::InstalledPackageV1,
+    ) {
+        tests::assert_real_component_supersession(installed);
+    }
+
     pub(crate) fn spaces_package_provider_generation(&self) -> Option<u64> {
         exact_spaces_binding(self)
             .ok()
@@ -191,11 +204,29 @@ impl App {
             work.deadline,
             work.canceled,
         );
-        if invoked.is_err() {
+        if let Err(error) = &invoked {
+            // Cancel only the unsent ticket, never a superseded admitted render.
             self.spaces_candidate_audits.cancel_pending();
-            self.host_spaces_last_desired = None;
+            self.spaces_candidate_audits.deferred_for_capacity =
+                error == "package candidate queue is full";
+            if !self.spaces_candidate_audits.deferred_for_capacity {
+                self.host_spaces_last_desired = None;
+            }
         }
         invoked
+    }
+
+    pub(crate) fn drain_deferred_spaces_candidate(&mut self) {
+        if !std::mem::take(&mut self.spaces_candidate_audits.deferred_for_capacity) {
+            return;
+        }
+        // Re-admit the one latest host-derived snapshot with fresh binding checks;
+        // do not mint a revision or retain an old invocation payload/authority.
+        if let Some(snapshot) = self.host_spaces_last_desired.clone() {
+            if let Err(error) = self.schedule_spaces_candidate(snapshot) {
+                tracing::debug!(%error, "deferred Spaces render was not scheduled");
+            }
+        }
     }
 
     pub(crate) fn finalize_spaces_candidate(
@@ -545,13 +576,179 @@ mod tests {
         assert_ne!(begin(&mut app, rebound), first_attempt);
     }
 
+    pub(super) fn assert_real_component_supersession(
+        installed: &crate::extension_package::InstalledPackageV1,
+    ) {
+        let pin = crate::spaces_extension_contract::embedded_spaces_production_pin().unwrap();
+        let factory = crate::extension_runtime::RuntimeFactory::installed(
+            installed,
+            &pin.service_id,
+            &pin.namespace,
+        )
+        .unwrap();
+        let mut app = app_with_exact_package();
+        let first = snapshot("first", 1);
+        let old_attempt = begin(&mut app, first.clone());
+        let old_canceled = app
+            .spaces_candidate_audits
+            .pending
+            .as_ref()
+            .unwrap()
+            .canceled
+            .clone();
+        let mut runtime =
+            crate::extension_runtime::ExtensionRuntimeDispatcher::start(&factory, 1, &old_canceled)
+                .unwrap();
+        let old_result = runtime
+            .invoke(
+                &pin.method,
+                serde_json::to_value(&first).unwrap(),
+                1,
+                Instant::now() + INVOCATION_TIMEOUT,
+                &old_canceled,
+            )
+            .unwrap();
+        // Hold the real component's result outside the App until supersession.
+        // Spaces has no host calls; acceptance is its host snapshot/attempt fence.
+        let second = snapshot("second", 2);
+        let current_attempt = begin(&mut app, second.clone());
+        assert!(!old_canceled.load(Ordering::Acquire));
+        completion(&mut app, old_attempt, Ok(old_result));
+        let key = (
+            pin.namespace.clone(),
+            crate::spaces_extension_contract::SPACES_SCOPE_ID.into(),
+        );
+        assert!(app
+            .host_document_caches
+            .get(&key)
+            .and_then(|cache| cache.current())
+            .is_none());
+        let current_canceled = app
+            .spaces_candidate_audits
+            .pending
+            .as_ref()
+            .unwrap()
+            .canceled
+            .clone();
+        let result = runtime
+            .invoke(
+                &pin.method,
+                serde_json::to_value(&second).unwrap(),
+                1,
+                Instant::now() + INVOCATION_TIMEOUT,
+                &current_canceled,
+            )
+            .unwrap();
+        completion(&mut app, current_attempt, Ok(result));
+        assert_eq!(
+            app.host_document_caches
+                .get(&key)
+                .and_then(|cache| cache.current())
+                .map(|document| document.revision),
+            Some(2)
+        );
+        runtime.stop(crate::extension_runtime::RuntimeStopReason::Requested);
+        assert_real_component_pressure(installed);
+    }
+
+    fn assert_real_component_pressure(installed: &crate::extension_package::InstalledPackageV1) {
+        let pin = crate::spaces_extension_contract::embedded_spaces_production_pin().unwrap();
+        let mut app = app_with_exact_package();
+        // Hold completions, not execution authority. This deterministically fills
+        // the existing four-entry service queue without adding a runtime hook.
+        let (event_tx, event_rx) = tokio::sync::mpsc::channel(1);
+        app.event_tx = event_tx;
+        app.event_rx = event_rx;
+        app.extension_package_services.insert(
+            pin.package_id.clone(),
+            crate::extension_candidate::PackageCandidateSlot::spawn(
+                installed.clone(),
+                1,
+                app.event_tx.clone(),
+            )
+            .unwrap(),
+        );
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            assert!(
+                Instant::now() < deadline,
+                "Spaces pressure bootstrap timed out"
+            );
+            match app.event_rx.try_recv() {
+                Ok(crate::events::AppEvent::ExtensionPackageCandidateReady(result)) => {
+                    let slot = app
+                        .extension_package_services
+                        .get_mut(&pin.package_id)
+                        .unwrap();
+                    assert!(slot.accepts(&result));
+                    slot.install_ready(result.result.unwrap());
+                    break;
+                }
+                Ok(event) => {
+                    app.handle_internal_event(event);
+                }
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                Err(error) => panic!("Spaces pressure bootstrap channel: {error}"),
+            }
+        }
+        let mut saw_full = false;
+        for revision in 1..=20 {
+            let desired = snapshot(&format!("pressure-{revision}"), revision);
+            app.host_spaces_last_desired = Some(desired.clone());
+            if let Err(error) = app.schedule_spaces_candidate(desired) {
+                assert_eq!(error, "package candidate queue is full");
+                saw_full = true;
+            }
+        }
+        assert!(saw_full, "pressure did not reach the existing queue bound");
+        let key = (
+            pin.namespace.clone(),
+            crate::spaces_extension_contract::SPACES_SCOPE_ID.into(),
+        );
+        while app
+            .host_document_caches
+            .get(&key)
+            .and_then(|cache| cache.current())
+            .map(|document| document.revision)
+            != Some(20)
+        {
+            assert!(
+                Instant::now() < deadline,
+                "Spaces lost the capacity-rejected latest render"
+            );
+            match app.event_rx.try_recv() {
+                Ok(event) => {
+                    app.handle_internal_event(event);
+                }
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                Err(error) => panic!("Spaces pressure channel: {error}"),
+            }
+        }
+        app.extension_package_services.remove(&pin.package_id);
+    }
+
     #[test]
     fn superseded_completion_cannot_replace_the_current_spaces_attempt() {
         let mut app = app_with_exact_package();
         let first = snapshot("first", 1);
         let first_attempt = begin(&mut app, first.clone());
+        let old_canceled = app
+            .spaces_candidate_audits
+            .pending
+            .as_ref()
+            .unwrap()
+            .canceled
+            .clone();
         let second = snapshot("second", 2);
         let second_attempt = begin(&mut app, second.clone());
+        assert!(
+            !old_canceled.load(Ordering::Acquire),
+            "read supersession aborted the component"
+        );
         completion(
             &mut app,
             first_attempt,
