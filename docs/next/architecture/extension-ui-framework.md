@@ -25,7 +25,9 @@ expected.
   first users;
 - **badges** on the pane border, the tab and the sidebar row;
 - **v1 building blocks** (final, 2026-10-03; panel look revised by the owner
-  on 2026-10-03): section with an optional summary in its header; row with a
+  on 2026-10-03; per-item `count` and `tone` overrides deferred on 2026-10-04
+  because no panel sends them and an optional field is additive later): section
+  with an optional summary in its header; row with a
   state glyph from the fixed Pi set (toned with the existing `ViewTone` set),
   a count, an age, a detail line (for example owed/since), a terminal link with
   live agent state, and children that expand and collapse; **one line per row**,

@@ -360,6 +360,124 @@ fn a_view_that_stops_being_published_says_unavailable() {
 }
 
 #[test]
+fn dragging_the_edge_resizes_the_panel_and_never_toggles_it() {
+    let mut state = panel_state(None, true);
+    let _ = text_of(&mut state);
+    let edge = state
+        .hits
+        .pane_panels
+        .iter()
+        .find(|hit| {
+            matches!(
+                hit.action,
+                super::super::pane_panel::PanePanelAction::ResizePanel
+            )
+        })
+        .cloned()
+        .expect("edge hit");
+    assert!(state.pane_panel_display["pane_1"].user_height.is_none());
+    fn mouse(kind: MouseEventKind, column: u16, row: u16) -> RawInputEvent {
+        RawInputEvent::Mouse(crossterm::event::MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: KeyModifiers::empty(),
+        })
+    }
+    // Press on the edge, drag down two rows, release.
+    state.handle_raw_events(vec![mouse(
+        MouseEventKind::Down(MouseButton::Left),
+        edge.rect.x,
+        edge.rect.y,
+    )]);
+    state.handle_raw_events(vec![mouse(
+        MouseEventKind::Drag(MouseButton::Left),
+        edge.rect.x,
+        edge.rect.y + 2,
+    )]);
+    let grown = state.pane_panel_display["pane_1"]
+        .user_height
+        .expect("the drag set the user's height");
+    assert!(grown > 4, "the drag grew the panel: {grown}");
+    state.handle_raw_events(vec![mouse(
+        MouseEventKind::Up(MouseButton::Left),
+        edge.rect.x,
+        edge.rect.y + 2,
+    )]);
+    // Releasing a drag is not a click: the section stays open.
+    assert!(
+        state.pane_panel_display["pane_1"]
+            .collapsed_views
+            .is_empty(),
+        "the drag must not collapse the section"
+    );
+    // A release invalidates the cached pane surface (the server re-sends it),
+    // so the test hands one back before reading what is drawn.
+    state.set_pane_surface(panel_surface());
+    let text = text_of(&mut state);
+    assert!(text.contains("Panel panels layout"), "{text}");
+    let pane = state
+        .hits
+        .panes
+        .iter()
+        .find(|pane| pane.pane_id == "pane_1")
+        .expect("pane");
+    assert!(
+        pane.inner_rect.y > edge.rect.y - 3,
+        "the terminal follows the taller panel: {}",
+        pane.inner_rect.y
+    );
+}
+
+#[test]
+fn the_wheel_scrolls_the_panel_without_touching_the_terminal() {
+    // A slice taller than the panel's cap, so it has somewhere to scroll.
+    let mut projection = view_projection(None);
+    let items = projection["documents"][0]["document"]["items"]
+        .as_array_mut()
+        .expect("items");
+    let template = items[2].clone();
+    for index in 0..20 {
+        let mut row = template.clone();
+        row["id"] = serde_json::Value::String(format!("panel:pane_1:extra:{index}"));
+        row["label"] = serde_json::Value::String(format!("Extra row {index}"));
+        items.push(row);
+    }
+    let mut state = state_with_projection(projection, true);
+    let _ = text_of(&mut state);
+    let header = state
+        .hits
+        .pane_panels
+        .iter()
+        .find(|hit| {
+            matches!(
+                hit.action,
+                super::super::pane_panel::PanePanelAction::ToggleView(_)
+            )
+        })
+        .cloned()
+        .expect("header hit");
+    assert_eq!(state.pane_panel_display["pane_1"].scroll, 0);
+    state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
+        kind: MouseEventKind::ScrollDown,
+        column: header.rect.x + 10,
+        row: header.rect.y,
+        modifiers: KeyModifiers::empty(),
+    })]);
+    let scrolled = state.pane_panel_display["pane_1"].scroll;
+    assert!(scrolled > 0, "the wheel scrolled the panel: {scrolled}");
+    state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
+        kind: MouseEventKind::ScrollUp,
+        column: header.rect.x + 10,
+        row: header.rect.y,
+        modifiers: KeyModifiers::empty(),
+    })]);
+    assert_eq!(state.pane_panel_display["pane_1"].scroll, 0);
+    // The terminal was never resized by scrolling.
+    assert!(state.pane_panel_display["pane_1"].height.is_some());
+}
+
+#[test]
 fn persisted_panels_follow_the_terminal_when_the_pane_moves() {
     let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
     state.config.preferences.panels = vec![super::super::preferences::ClientPanelPreference {

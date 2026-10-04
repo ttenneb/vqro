@@ -54,16 +54,17 @@ contract:
   "pane_id": "w2:p2",        // panel root only: the pane this view fills
   "view_id": "tasks",        // panel root only: the user names this to `vqro pane panel`
   "state": "blocked",        // open | in_progress | blocked | reported | done
-  "tone": "danger",          // optional override: default | muted | accent | success | warning | danger
   "action": "unblock",       // one word Vqro composes the waiting sentence around
   "waiting": "them",         // you | them: whose move the row waits for
-  "count": 2,                // optional count in a section header
   "since": 1791072060        // Unix epoch seconds; Vqro draws the age
 }
 ```
 
 - A **panel root** (no parent) names both `pane_id` and `view_id` and becomes a
   section in that pane's panel. `state` on a root is the panel's aggregate.
+- A section's summary is `detail`, and a row's tone comes from its `state`.
+  Per-item `count` and `tone` overrides are **deferred**: no panel sends them,
+  and an optional field can be added later without a codec break.
 - Any other item carrying a `view` block must have a `parent_id`, or the view is
   rejected: a block that belongs to nothing would silently never draw.
 - Vqro draws the fixed Pi-style glyphs: `○` open, `◐` in progress, `⊘` blocked,

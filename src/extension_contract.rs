@@ -273,9 +273,6 @@ pub struct HostViewItem {
     /// only which state the row or panel is in.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub state: Option<HostViewState>,
-    /// Override the tone the state would use. Only the existing tone set.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tone: Option<HostViewTone>,
     /// What the row is waiting for, in one short word ("unblock", "report").
     /// Vqro composes the sentence around it, so the row never spells out
     /// bookkeeping of its own.
@@ -285,9 +282,6 @@ pub struct HostViewItem {
     /// link, which is the only party it can speak about live.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub waiting: Option<HostViewWaiting>,
-    /// A count shown in a section header or panel title.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub count: Option<u32>,
     /// Unix epoch seconds whose age Vqro draws. Only the extension knows what
     /// the instant means.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1382,10 +1376,8 @@ mod tests {
                 pane_id: parent.is_none().then(|| "w1:p2".to_owned()),
                 view_id: parent.is_none().then(|| "tasks".to_owned()),
                 state: parent.is_some().then_some(HostViewState::Blocked),
-                tone: None,
                 action: parent.is_some().then(|| "unblock".to_owned()),
                 waiting: parent.is_some().then_some(HostViewWaiting::Them),
-                count: parent.is_none().then_some(2),
                 since: parent.is_some().then_some(1_700_000_000),
             }),
         }

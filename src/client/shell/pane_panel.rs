@@ -145,15 +145,11 @@ pub(super) struct PanePanelRender {
 
 /// A published view that fills one pane's panel slot.
 struct PanelView<'a> {
-    /// The extension's own id for this view, which the user names to
-    /// `vqro pane panel`. It selects the view in `published_views` before the
-    /// section is built, so the renderer itself does not read it again.
-    #[allow(dead_code)]
+    /// The extension's own id for this view. It is the section's identity: the
+    /// user names it to `vqro pane panel`, and collapse state is kept by it.
     view_id: String,
     /// The root block's kind, when the extension named one.
     kind: Option<String>,
-    /// Stable identity of this section inside the pane's panel area.
-    key: String,
     title: &'a str,
     /// The extension's own summary of the slice, drawn after the title.
     summary: &'a str,
@@ -205,7 +201,7 @@ fn fit_height(views: &[PanelView<'_>], collapsed_views: &BTreeSet<String>) -> u1
     let mut height = 0_u16;
     for view in views {
         height = height.saturating_add(1);
-        if collapsed_views.contains(&view.key) {
+        if collapsed_views.contains(&view.view_id) {
             continue;
         }
         height = height.saturating_add(if view.rows.is_empty() {
@@ -412,7 +408,6 @@ fn panel_views<'a>(
             views.push(PanelView {
                 view_id: _view_id.to_owned(),
                 kind: view.kind.clone(),
-                key: format!("{}.{}", document.namespace, item.id),
                 title: item.label.as_str(),
                 summary: item.detail.as_deref().unwrap_or_default(),
                 state: view.state,
@@ -505,7 +500,7 @@ fn render_pane(
     let headers = views.len() as u16;
     let all_collapsed = views
         .iter()
-        .all(|view| display.collapsed_views.contains(&view.key));
+        .all(|view| display.collapsed_views.contains(&view.view_id));
     let fit = fit_height(&views, &display.collapsed_views);
     let panel_height = if all_collapsed {
         headers
@@ -580,13 +575,13 @@ fn render_pane(
         .min((rows.len() as u16).saturating_sub(row_space));
     let mut y = geometry.panel.y;
     for view in &views {
-        let collapsed = display.collapsed_views.contains(&view.key);
+        let collapsed = display.collapsed_views.contains(&view.view_id);
         let header_rect = Rect::new(geometry.panel.x, y, body_width, 1);
         draw_header(buffer, header_rect, view, collapsed, palette);
         out.hits.push(PanePanelHit {
             rect: header_rect,
             pane_id: pane.pane_id.clone(),
-            action: PanePanelAction::ToggleView(view.key.clone()),
+            action: PanePanelAction::ToggleView(view.view_id.clone()),
         });
         y = y.saturating_add(1);
     }
@@ -695,11 +690,9 @@ fn render_placeholder(
     out: &mut PanePanelRender,
 ) {
     let area = pane.projected_inner_rect.intersection(buffer.area);
-    let collapsed = display.collapsed_views.iter().any(|key| {
-        missing
-            .iter()
-            .any(|view_id| key.ends_with(view_id.as_str()))
-    });
+    let collapsed = missing
+        .iter()
+        .any(|view_id| display.collapsed_views.contains(view_id));
     let fit = if collapsed { 1 } else { 2 };
     let panel_height = if collapsed {
         1
@@ -789,7 +782,7 @@ fn panel_rows<'a>(
 ) -> Vec<PanelRow<'a>> {
     let mut rows = Vec::new();
     for view in views {
-        if collapsed_views.contains(&view.key) {
+        if collapsed_views.contains(&view.view_id) {
             continue;
         }
         if view.rows.is_empty() {
@@ -933,9 +926,7 @@ fn draw_row(
         return;
     }
     let state = row_view.and_then(|view| view.state).unwrap_or_default();
-    let tone = row_view
-        .and_then(|view| view.tone)
-        .unwrap_or_else(|| state_tone(state));
+    let tone = state_tone(state);
     let prefix = row_prefix(&row.lanes, row.is_last);
     let expandable = row.children > 0;
     let expanded = expandable && !collapsed_rows.contains(row.item.id.as_str());
@@ -1351,9 +1342,8 @@ mod tests {
             view: None,
         };
         let view = |key: &str, count: usize| PanelView {
-            view_id: "tasks".into(),
+            view_id: key.to_string(),
             kind: None,
-            key: key.to_string(),
             title: "Tasks",
             summary: "",
             state: None,

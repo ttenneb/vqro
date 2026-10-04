@@ -10816,15 +10816,6 @@
                 "null"
               ]
             },
-            "count": {
-              "description": "A count shown in a section header or panel title.",
-              "format": "uint32",
-              "minimum": 0,
-              "type": [
-                "integer",
-                "null"
-              ]
-            },
             "kind": {
               "description": "What this block is, as a free string so the set can grow: `section` and\n`row` are known, and anything else is drawn as \"unsupported\" in place\nrather than dropped. Never a closed enum: an unknown variant would make\nan older client reject the whole view.",
               "type": [
@@ -10858,17 +10849,6 @@
                 }
               ],
               "description": "A row state, or a panel root's aggregate state for its header glyph.\nVqro draws the fixed Pi-style glyph and its tone; the extension owns\nonly which state the row or panel is in."
-            },
-            "tone": {
-              "anyOf": [
-                {
-                  "$ref": "#/schemas/success_response/$defs/HostViewTone"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "description": "Override the tone the state would use. Only the existing tone set."
             },
             "view_id": {
               "description": "A panel root: the stable id of this view inside the pane's panel stack,\nas the user names it to `vqro pane panel`. Only a root may set it.",
@@ -10920,17 +10900,6 @@
               "type": "string"
             }
           ]
-        },
-        "HostViewTone": {
-          "enum": [
-            "default",
-            "muted",
-            "accent",
-            "success",
-            "warning",
-            "danger"
-          ],
-          "type": "string"
         },
         "HostViewWaiting": {
           "description": "Whose move a row waits for.",
