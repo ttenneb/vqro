@@ -19,8 +19,9 @@ convention introduces no host API, Pi tool, task delivery or activation mechanis
   independent authorized parent owner/delegator checks it and accepts. Never agent
   self-accept; own-step direct completion is the documented bounded exception.
 - Delegation/reporting **record, do not deliver**. Obtain bindings from the helper's
-  own whoami. Existing agent prompt/read/wait can exchange that binding and carry
-  ID-only assignment/report notifications. Notifications point to the authoritative
+  own whoami. `vqro agent prompt` is human-only: an agent-classified caller is refused,
+  and agents exchange bindings and carry ID-only assignment/report notifications with
+  durable `vqro message send`. Notifications point to the authoritative
   task; they do not replace work/results, prove delivery/acceptance, or become a
   durable message by themselves.
 - Durable addressed messages have their own record: `vqro message send/list/claim/edit`
@@ -34,13 +35,13 @@ convention introduces no host API, Pi tool, task delivery or activation mechanis
   directly in its pane. Pi's question tool is only an example for that direct case;
   the convention is agent-neutral. Creating a decision does not promise a wake or
   notification. Never exploit cooperative human classification through a shell.
-- Final prose is written for whoever started the turn. The Tasks Pi consumer
-  retains agent-started prompt replies under the [accepted transitional decision](../architecture/tasks-legacy-prompt-reply-transition.md).
-  Its session entry is not a durable message record; it labels a missing reply
-  on the pane. `vqro agent prompt`
-  auto-labels from the sending agent's pane (`[agent <name> · reply expected]`,
-  `[agent <name>]`); unlabelled input is not automatically routed and labels
-  never manufacture host human classification. A human-started turn is never routed. Remote action still needs the corresponding
+- Final prose is written for whoever started the turn. A turn started by another
+  agent's durable message records that final text as a durable reply message to the
+  exact sender binding, with `reply_to` when one message started the run; a delivered
+  reply is never re-answered automatically, so a thread continues with an explicit
+  `message send --reply-to`. Nothing is typed into a pane. `vqro agent prompt` is
+  human-only and its old auto-labelled reply routing is removed. A human-started turn
+  is never routed. Remote action still needs the corresponding
   task record and an explicit agent notification. Final
   prose and delegate/report receipts are not independent acceptance; accept/done
   receipts may authoritatively record historical committed outcomes. Read `get`

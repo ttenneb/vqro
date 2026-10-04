@@ -40,13 +40,16 @@ labels. It keeps no message/approval/work record of truth.
 `extensions/tasks/pi.ts` consumes this interface. Tasks owns durable message
 claim/activation polling, message rendering, explicit-send evidence, reply caps,
 recipient policy and no-reply observations. Disabled/unavailable Tasks cannot
-route through the legacy path or activate a durable message. A late successful
+activate a durable message or record a reply. A late successful
 claim is recorded undelivered rather than injected into a different run; an
 uncertain claim retains CLI recovery information and is not blindly replayed.
 
-Legacy prompt replies remain under the explicitly approved
-[accepted transitional decision](../architecture/tasks-legacy-prompt-reply-transition.md),
-not as durable message records. Other facts/status/receipts do not start turns.
+A turn that a delivered durable message started records its final text as a
+durable Tasks reply message to the exact sender binding (`reply_to` when one
+message started the run). Nothing is typed into a pane, a delivered reply is
+never re-answered automatically, and the former prompt-label reply path is
+removed ([superseded decision](../architecture/tasks-legacy-prompt-reply-transition.md)).
+Other facts/status/receipts do not start turns.
 The consumer has no broader automatic-reply policy for every claimed message.
 
 The profile carries the neutral adapter and separately loaded Tasks consumer;

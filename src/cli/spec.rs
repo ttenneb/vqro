@@ -528,13 +528,10 @@ fn agent_command() -> Command {
         )
         .subcommand(
             Command::new("prompt")
-                .about("Submit a prompt to an agent")
+                .about("Submit a prompt to an agent (human-only)")
                 .override_usage("vqro agent prompt <TARGET> <TEXT> [OPTIONS]")
                 .arg(required("target", "TARGET"))
                 .arg(required("text", "TEXT"))
-                .arg(flag("no-reply-expected").help(
-                    "Auto-label with the sender but without 'reply expected', for a reply or notice",
-                ))
                 .arg(
                     flag("wait")
                         .help("Wait for the first matching state observed after submission"),
@@ -552,7 +549,7 @@ fn agent_command() -> Command {
                         .help("Fail after this many milliseconds"),
                 )
                 .after_help(
-                    "If the agent is already blocked, submission is rejected with agent_blocked before any input is sent. When an accepted submission starts from another non-working state, --wait requires an observed working or blocked state within 5000ms; otherwise it returns agent_prompt_stalled. A caller timeout that expires first returns timeout. It then matches idle, done, or blocked by default, or any exact --until state. It does not track turns: if the agent is already working, that active turn's completion may match. When run from inside a pane that hosts a detected agent, the text is prefixed automatically with a readable provenance label naming the sender and whether a reply is expected; --no-reply-expected drops the 'reply expected' part. The label is self-declared, not authenticated caller identity.",
+                    "If the agent is already blocked, submission is rejected with agent_blocked before any input is sent. When an accepted submission starts from another non-working state, --wait requires an observed working or blocked state within 5000ms; otherwise it returns agent_prompt_stalled. A caller timeout that expires first returns timeout. It then matches idle, done, or blocked by default, or any exact --until state. It does not track turns: if the agent is already working, that active turn's completion may match. Submission is human-only: a caller the host classifies as an agent is refused with human_only, because agents address each other with durable `vqro message send` records instead of pane input.",
                 ),
         )
         .subcommand(

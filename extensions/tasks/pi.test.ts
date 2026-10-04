@@ -2,9 +2,9 @@ import { afterEach, beforeEach, expect, jest, test } from "bun:test";
 import extension, {
   assistantText,
   boundedReplyBytes,
-  parseProvenanceLabel,
-  promptConfirmsOrigin,
+  messageConfirmsOrigin,
   renderMessage,
+  replyTarget,
   MAILBOX_POLL_MS,
   MAX_REPLY_BYTES,
 } from "./pi";
@@ -93,7 +93,26 @@ function harness(exec?: (args: string[]) => any, consumerFirst = false): Harness
 }
 
 const turnText = (text: string) => ({ message: { role: "assistant", content: [{ type: "text", text }] } });
-const prompts = (h: Harness) => h.calls.filter((call) => call.args[0] === "agent" && call.args[1] === "prompt");
+const sends = (h: Harness) => h.calls.filter((call) => call.args[0] === "message" && call.args[1] === "send");
+const bindingOf = (execution: string) =>
+  JSON.stringify({ class: "agent", terminal_id: `term-${execution}`, agent: "pi", execution });
+const messageFixture = (id: string, body: string, execution = "exec-alpha", replyTo: string | null = null) => ({
+  id,
+  body,
+  reply_to: replyTo,
+  sender: bindingOf(execution),
+});
+const flush = async () => { for (let i = 0; i < 20; i += 1) await Promise.resolve(); };
+
+/** A private harness where the consumer polls, claims the given messages and delivers them. */
+function mailboxHarness(claimed: any[], activation = true, consumerFirst = false): Harness {
+  return harness((args) => {
+    if (args[0] === "agent" && args[1] === "get") return { code: 0, stdout: JSON.stringify({ result: { agent: { name: "beta", execution: "exec-beta" } } }), stderr: "" };
+    if (args[0] === "message" && args[1] === "list") return { code: 0, stdout: JSON.stringify({ activation, waiting: claimed.map((message) => ({ id: message.id })), messages: [] }), stderr: "" };
+    if (args[0] === "message" && args[1] === "claim") return { code: 0, stdout: JSON.stringify({ claimed }), stderr: "" };
+    return { code: 0, stdout: "", stderr: "" };
+  }, consumerFirst);
+}
 
 beforeEach(() => {
   setVqroEnv();
@@ -102,42 +121,196 @@ afterEach(() => {
   process.env = { ...savedEnv };
 });
 
-test("provenance labels distinguish agent requests, replies, and human input", () => {
-  expect(parseProvenanceLabel("[agent alpha · reply expected] summarise X")).toEqual({
-    from: "alpha",
-    replyExpected: true,
-  });
-  expect(parseProvenanceLabel("[agent w2P:pFM] done")).toEqual({
-    from: "w2P:pFM",
-    replyExpected: false,
-  });
-  expect(parseProvenanceLabel("[host notice] restarted")).toBeNull();
-  expect(parseProvenanceLabel("just a human typing")).toBeNull();
-  expect(parseProvenanceLabel("[agentalpha] nope")).toBeNull();
+test("a delivered batch is answered by the sender's exact binding with reply_to", async () => {
+  jest.useFakeTimers();
+  try {
+    const h = mailboxHarness([messageFixture("m1", "please review")]);
+    await h.emit("session_start", {});
+    jest.advanceTimersByTime(MAILBOX_POLL_MS + 5);
+    await flush();
+    expect(h.sent.join("\n")).toContain("please review");
+    await h.emit("before_agent_start", { prompt: "please review" });
+    await h.emit("turn_end", turnText("here is the review"));
+    await h.emit("agent_settled", {});
+    const recorded = sends(h);
+    expect(recorded).toHaveLength(1);
+    expect(recorded[0].args).toEqual(["message", "send", bindingOf("exec-alpha"), "here is the review", "--reply-to", "m1"]);
+    expect(h.entries).toContainEqual(expect.objectContaining({ data: expect.objectContaining({ kind: "replied", recipient: "exec-alpha" }) }));
+  } finally {
+    jest.useRealTimers();
+  }
 });
 
-test("A2 trusts only the CLI's own successful prompt response for the origin", () => {
-  const success = JSON.stringify({ result: { type: "agent_prompted", agent: { name: "alpha", pane_id: "w1:p2" } } });
-  expect(promptConfirmsOrigin(success, "alpha")).toBe(true);
-  expect(promptConfirmsOrigin(success, "w1:p2")).toBe(true);
-  expect(promptConfirmsOrigin(success, "gamma")).toBe(false);
-  const error = JSON.stringify({ error: { code: "agent_not_ready", message: "alpha" } });
-  expect(promptConfirmsOrigin(error, "alpha")).toBe(false);
-  expect(promptConfirmsOrigin('echo "vqro agent prompt alpha"', "alpha")).toBe(false);
-  expect(promptConfirmsOrigin("", "alpha")).toBe(false);
-  // A mention of alpha in one response must not combine with a send to gamma.
-  const combined =
-    JSON.stringify({ id: "cli:agent:get", result: { agent: { name: "alpha" } } }) +
-    "\n" +
-    JSON.stringify({ result: { type: "agent_prompted", agent: { name: "gamma" } } });
-  expect(promptConfirmsOrigin(combined, "alpha")).toBe(false);
+test("a batch from one sender keeps no reply_to when it is more than one message", async () => {
+  jest.useFakeTimers();
+  try {
+    const h = mailboxHarness([messageFixture("m1", "first"), messageFixture("m2", "second")]);
+    await h.emit("session_start", {});
+    jest.advanceTimersByTime(MAILBOX_POLL_MS + 5);
+    await flush();
+    await h.emit("before_agent_start", { prompt: "first\n\nsecond" });
+    await h.emit("turn_end", turnText("both answered"));
+    await h.emit("agent_settled", {});
+    expect(sends(h)[0]?.args).toEqual(["message", "send", bindingOf("exec-alpha"), "both answered"]);
+  } finally {
+    jest.useRealTimers();
+  }
+});
+
+test("a delivered reply never starts another automatic reply", async () => {
+  jest.useFakeTimers();
+  try {
+    const h = mailboxHarness([messageFixture("m1", "answer", "exec-alpha", "m0")]);
+    await h.emit("session_start", {});
+    jest.advanceTimersByTime(MAILBOX_POLL_MS + 5);
+    await flush();
+    expect(h.sent.join("\n")).toContain("answer");
+    await h.emit("before_agent_start", { prompt: "answer" });
+    await h.emit("turn_end", turnText("thanks, got it"));
+    await h.emit("agent_settled", {});
+    expect(sends(h)).toHaveLength(0);
+    expect(h.entries).not.toContainEqual(expect.objectContaining({ data: expect.objectContaining({ kind: "replied" }) }));
+  } finally {
+    jest.useRealTimers();
+  }
+});
+
+test("a batch from more than one sender is delivered without an automatic reply", async () => {
+  jest.useFakeTimers();
+  try {
+    const h = mailboxHarness([messageFixture("m1", "one"), messageFixture("m2", "two", "exec-gamma")]);
+    await h.emit("session_start", {});
+    jest.advanceTimersByTime(MAILBOX_POLL_MS + 5);
+    await flush();
+    await h.emit("before_agent_start", { prompt: "one\n\ntwo" });
+    await h.emit("turn_end", turnText("answered both"));
+    await h.emit("agent_settled", {});
+    expect(sends(h)).toHaveLength(0);
+  } finally {
+    jest.useRealTimers();
+  }
+});
+
+test("an empty final turn records no reply and a volatile label", async () => {
+  jest.useFakeTimers();
+  try {
+    const h = mailboxHarness([messageFixture("m1", "please review")]);
+    await h.emit("session_start", {});
+    jest.advanceTimersByTime(MAILBOX_POLL_MS + 5);
+    await flush();
+    await h.emit("before_agent_start", { prompt: "please review" });
+    await h.emit("agent_settled", {});
+    expect(sends(h)).toHaveLength(0);
+    expect(h.entries).toContainEqual(expect.objectContaining({ data: expect.objectContaining({ kind: "no-reply", recipient: "exec-alpha" }) }));
+    const metadata = h.calls.find((call) => call.args[0] === "pane" && call.args[1] === "report-metadata");
+    expect(metadata?.args).toContain("idle=no reply to pi exec-alpha");
+  } finally {
+    jest.useRealTimers();
+  }
+});
+
+test("an explicit message to the origin suppresses the automatic reply", async () => {
+  jest.useFakeTimers();
+  try {
+    const h = mailboxHarness([messageFixture("m1", "please review")]);
+    await h.emit("session_start", {});
+    jest.advanceTimersByTime(MAILBOX_POLL_MS + 5);
+    await flush();
+    const confirmed = JSON.stringify({ message: { id: "m9", recipient_execution: "exec-alpha" }, operation_id: "op" });
+    await h.emit("before_agent_start", { prompt: "please review" });
+    await h.emit("tool_result", { toolName: "bash", toolCallId: "t1", content: [{ type: "text", text: confirmed }], isError: false });
+    await h.emit("turn_end", turnText("sent it myself"));
+    await h.emit("agent_settled", {});
+    expect(sends(h)).toHaveLength(0);
+    expect(h.entries).toContainEqual(expect.objectContaining({ data: expect.objectContaining({ kind: "explicit", recipient: "exec-alpha" }) }));
+  } finally {
+    jest.useRealTimers();
+  }
+});
+
+test("a failed or unrelated message send does not suppress the reply", async () => {
+  jest.useFakeTimers();
+  try {
+    const other = JSON.stringify({ message: { id: "m9", recipient_execution: "exec-gamma" }, operation_id: "op" });
+    const errors = JSON.stringify({ error: { code: "invalid_request", message: "exec-alpha" } });
+    const h = mailboxHarness([messageFixture("m1", "please review")]);
+    await h.emit("session_start", {});
+    jest.advanceTimersByTime(MAILBOX_POLL_MS + 5);
+    await flush();
+    await h.emit("before_agent_start", { prompt: "please review" });
+    await h.emit("tool_result", { toolName: "bash", toolCallId: "t1", content: [{ type: "text", text: other }], isError: false });
+    await h.emit("tool_result", { toolName: "bash", toolCallId: "t2", content: [{ type: "text", text: errors }], isError: false });
+    await h.emit("turn_end", turnText("answer"));
+    await h.emit("agent_settled", {});
+    expect(sends(h)).toHaveLength(1);
+  } finally {
+    jest.useRealTimers();
+  }
+});
+
+test("unknown or self identity fails closed", async () => {
+  const unknown = harness(() => ({ code: 1, stdout: "", stderr: "no agent" }));
+  await unknown.emit("before_agent_start", { prompt: "x" });
+  await unknown.emit("turn_end", turnText("answer"));
+  await unknown.emit("agent_settled", {});
+  expect(sends(unknown)).toHaveLength(0);
+
+  jest.useFakeTimers();
+  try {
+    // The sender is this pane's own execution: never answer yourself.
+    const h = mailboxHarness([messageFixture("m1", "note", "exec-beta")]);
+    await h.emit("session_start", {});
+    jest.advanceTimersByTime(MAILBOX_POLL_MS + 5);
+    await flush();
+    await h.emit("before_agent_start", { prompt: "note" });
+    await h.emit("turn_end", turnText("answer"));
+    await h.emit("agent_settled", {});
+    expect(sends(h)).toHaveLength(0);
+  } finally {
+    jest.useRealTimers();
+  }
+});
+
+test("routing stays off without the managed Vqro environment", async () => {
+  clearVqroEnv();
+  const h = mailboxHarness([messageFixture("m1", "please review")]);
+  await h.emit("session_start", {});
+  await h.emit("before_agent_start", { prompt: "x" });
+  await h.emit("turn_end", turnText("answer"));
+  await h.emit("agent_settled", {});
+  expect(h.calls).toHaveLength(0);
+  expect(h.entries).toHaveLength(0);
+});
+
+test("unavailable Tasks cannot record a reply", async () => {
+  jest.useFakeTimers();
+  try {
+    const h = harness((args) => {
+      if (args[0] === "task" && args[1] === "whoami") return { code: 1, stdout: "", stderr: "unavailable" };
+      if (args[0] === "agent" && args[1] === "get") return { code: 0, stdout: JSON.stringify({ result: { agent: { name: "beta", execution: "exec-beta" } } }), stderr: "" };
+      const claimed = [messageFixture("m1", "please review")];
+      if (args[0] === "message" && args[1] === "list") return { code: 0, stdout: JSON.stringify({ activation: true, waiting: [{ id: "m1" }], messages: [] }), stderr: "" };
+      if (args[0] === "message" && args[1] === "claim") return { code: 0, stdout: JSON.stringify({ claimed }), stderr: "" };
+      return { code: 0, stdout: "", stderr: "" };
+    });
+    await h.emit("session_start", {});
+    jest.advanceTimersByTime(MAILBOX_POLL_MS + 5);
+    await flush();
+    await h.emit("before_agent_start", { prompt: "please review" });
+    await h.emit("turn_end", turnText("answer"));
+    await h.emit("agent_settled", {});
+    expect(sends(h)).toHaveLength(0);
+    expect(h.entries.some((entry) => entry.data.kind === "replied")).toBe(false);
+  } finally {
+    jest.useRealTimers();
+  }
 });
 
 test("reply bytes are capped without splitting a character", () => {
   expect(boundedReplyBytes("short")).toBe("short");
   const long = "a".repeat(MAX_REPLY_BYTES + 10);
   expect(boundedReplyBytes(long).endsWith("bytes]")).toBe(true);
-  expect(boundedReplyBytes("🙂".repeat(MAX_REPLY_BYTES)).includes("\uFFFD")).toBe(false);
+  expect(boundedReplyBytes("\u{1F642}".repeat(MAX_REPLY_BYTES)).includes("\uFFFD")).toBe(false);
 });
 
 test("assistantText reads only text blocks", () => {
@@ -146,125 +319,28 @@ test("assistantText reads only text blocks", () => {
   expect(assistantText({ content: [] })).toBe("");
 });
 
-test("an agent-started run routes its final text back with --no-reply-expected", async () => {
-  const h = harness();
-  await h.emit("before_agent_start", { prompt: "[agent alpha · reply expected] summarise X" });
-  await h.emit("turn_end", turnText("here is the summary"));
-  await h.emit("agent_settled", {});
-  expect(prompts(h)[0]?.args).toEqual(["agent", "prompt", "alpha", "here is the summary", "--no-reply-expected"]);
-  expect(h.entries).toEqual([expect.objectContaining({ data: expect.objectContaining({ kind: "replied", from: "alpha" }) })]);
+test("replyTarget requires one agent sender and a non-reply message", () => {
+  expect(replyTarget([messageFixture("m1", "x")])).toEqual({
+    binding: bindingOf("exec-alpha"),
+    execution: "exec-alpha",
+    display: "pi exec-alpha",
+    id: "m1",
+  });
+  expect(replyTarget([messageFixture("m1", "x"), messageFixture("m2", "y")])?.id).toBeUndefined();
+  expect(replyTarget([messageFixture("m1", "x"), messageFixture("m2", "y", "exec-gamma")])).toBeUndefined();
+  expect(replyTarget([messageFixture("m1", "x", "exec-alpha", "m0")])).toBeUndefined();
+  expect(replyTarget([{ id: "m1", body: "x", sender: JSON.stringify({ class: "human_unverified", uid: 1 }) }])).toBeUndefined();
+  expect(replyTarget([{ id: "m1", body: "x" }])).toBeUndefined();
+  expect(replyTarget([])).toBeUndefined();
 });
 
-test("a no-reply-expected label never expects another reply", async () => {
-  const h = harness();
-  await h.emit("before_agent_start", { prompt: "[agent alpha] thanks" });
-  await h.emit("turn_end", turnText("ok"));
-  await h.emit("agent_settled", {});
-  expect(prompts(h)).toHaveLength(0);
-});
-
-test("an empty run records no reply and a volatile label", async () => {
-  const h = harness();
-  await h.emit("before_agent_start", { prompt: "[agent alpha · reply expected] summarise X" });
-  await h.emit("agent_settled", {});
-  expect(h.entries[0]?.data).toMatchObject({ kind: "no-reply", from: "alpha" });
-  const metadata = h.calls.find((call) => call.args[0] === "pane" && call.args[1] === "report-metadata");
-  expect(metadata?.args).toContain("idle=no reply to alpha");
-});
-
-test("no run text is not reused across runs", async () => {
-  const h = harness();
-  await h.emit("before_agent_start", { prompt: "[agent alpha · reply expected] one" });
-  await h.emit("turn_end", turnText("first answer"));
-  await h.emit("agent_settled", {});
-  await h.emit("before_agent_start", { prompt: "[agent alpha · reply expected] two" });
-  await h.emit("agent_settled", {});
-  expect(h.entries.map((entry) => entry.data.kind)).toEqual(["replied", "no-reply"]);
-});
-
-test("an empty final turn does not reuse an intermediate turn's text", async () => {
-  const h = harness();
-  await h.emit("before_agent_start", { prompt: "[agent alpha · reply expected] x" });
-  await h.emit("turn_end", turnText("intermediate"));
-  await h.emit("turn_end", { message: { role: "assistant", content: [{ type: "toolCall" }] } });
-  await h.emit("agent_settled", {});
-  expect(prompts(h)).toHaveLength(0);
-  expect(h.entries[0]?.data).toMatchObject({ kind: "no-reply", from: "alpha" });
-});
-
-test("a queued human follow-up cannot claim the run", async () => {
-  const h = harness();
-  await h.emit("before_agent_start", { prompt: "[agent alpha · reply expected] summarise X" });
-  await h.emit("input", { source: "interactive", text: "actually never mind" });
-  await h.emit("turn_end", turnText("summary"));
-  await h.emit("agent_settled", {});
-  expect(prompts(h)[0]?.args[2]).toBe("alpha");
-});
-
-test("human and unlabelled input are never routed", async () => {
-  const h = harness();
-  for (const prompt of ["just asking", "[host notice] restarted"]) {
-    await h.emit("before_agent_start", { prompt });
-    await h.emit("turn_end", turnText("answer"));
-    await h.emit("agent_settled", {});
-  }
-  expect(prompts(h)).toHaveLength(0);
-  expect(h.entries).toHaveLength(0);
-});
-
-test("a successful explicit message to the origin suppresses the automatic reply", async () => {
-  const h = harness();
-  await h.emit("before_agent_start", { prompt: "[agent alpha · reply expected] summarise X" });
-  const confirmed = JSON.stringify({ result: { type: "agent_prompted", agent: { name: "alpha" } } });
-  await h.emit("tool_result", { toolName: "bash", toolCallId: "t1", content: [{ type: "text", text: confirmed }], isError: false });
-  await h.emit("turn_end", turnText("also this"));
-  await h.emit("agent_settled", {});
-  expect(prompts(h)).toHaveLength(0);
-  expect(h.entries[0]?.data).toMatchObject({ kind: "explicit", from: "alpha" });
-});
-
-test("A2 does not suppress on a failed send or a mention", async () => {
-  for (const output of [
-    JSON.stringify({ error: { code: "agent_not_ready", message: "alpha" } }),
-    JSON.stringify({ result: { type: "agent_prompted", agent: { name: "gamma" } } }),
-    'echo "vqro agent prompt alpha"',
-  ]) {
-    const h = harness();
-    await h.emit("before_agent_start", { prompt: "[agent alpha · reply expected] x" });
-    await h.emit("tool_result", { toolName: "bash", toolCallId: "t1", content: [{ type: "text", text: output }], isError: false });
-    await h.emit("turn_end", turnText("answer"));
-    await h.emit("agent_settled", {});
-    expect(prompts(h)).toHaveLength(1);
-  }
-});
-
-test("unknown or self identity fails closed", async () => {
-  const unknown = harness(() => ({ code: 1, stdout: "", stderr: "no agent" }));
-  await unknown.emit("before_agent_start", { prompt: "[agent alpha · reply expected] x" });
-  await unknown.emit("turn_end", turnText("answer"));
-  await unknown.emit("agent_settled", {});
-  expect(prompts(unknown)).toHaveLength(0);
-  expect(unknown.entries[0]?.data).toMatchObject({ kind: "self-unknown", from: "alpha" });
-
-  const self = harness((args) =>
-    args[0] === "agent" && args[1] === "get"
-      ? { code: 0, stdout: JSON.stringify({ result: { agent: { name: "alpha" } } }), stderr: "" }
-      : { code: 0, stdout: "", stderr: "" },
-  );
-  await self.emit("before_agent_start", { prompt: "[agent alpha · reply expected] note" });
-  await self.emit("turn_end", turnText("answer"));
-  await self.emit("agent_settled", {});
-  expect(prompts(self)).toHaveLength(0);
-});
-
-test("routing stays off without the managed Vqro environment", async () => {
-  clearVqroEnv();
-  const h = harness();
-  await h.emit("before_agent_start", { prompt: "[agent alpha · reply expected] summarise X" });
-  await h.emit("turn_end", turnText("answer"));
-  await h.emit("agent_settled", {});
-  expect(h.calls).toHaveLength(0);
-  expect(h.entries).toHaveLength(0);
+test("messageConfirmsOrigin trusts only a successful send to that execution", () => {
+  const success = JSON.stringify({ message: { id: "m2", recipient_execution: "exec-alpha" }, operation_id: "op" });
+  expect(messageConfirmsOrigin(success, "exec-alpha")).toBe(true);
+  expect(messageConfirmsOrigin(success, "exec-beta")).toBe(false);
+  expect(messageConfirmsOrigin(JSON.stringify({ error: { code: "invalid_request", message: "exec-alpha" } }), "exec-alpha")).toBe(false);
+  expect(messageConfirmsOrigin('echo "vqro message send exec-alpha hi"', "exec-alpha")).toBe(false);
+  expect(messageConfirmsOrigin("", "exec-alpha")).toBe(false);
 });
 
 test("renderMessage names the host-attributed sender and carries the body", () => {
@@ -273,8 +349,8 @@ test("renderMessage names the host-attributed sender and carries the body", () =
   expect(renderMessage({ id: "m2", body: "x" })).toContain("from an agent");
 });
 
-test("a waiting message is claimed into a starting turn", async () => {
-  const claimed = [{ id: "m1", body: "please review", sender_address: "alpha" }];
+test("a waiting message is claimed into a starting turn without an automatic reply", async () => {
+  const claimed = [messageFixture("m1", "please review")];
   const h = harness((args) =>
     args[0] === "message" && args[1] === "claim" ? { code: 0, stdout: JSON.stringify({ claimed }), stderr: "" } : { code: 0, stdout: "", stderr: "" },
   );
@@ -282,23 +358,20 @@ test("a waiting message is claimed into a starting turn", async () => {
   const injected = results.find((result) => result?.message)?.message;
   expect(injected?.content).toContain("please review");
   expect(h.entries.some((entry) => entry.data.kind === "messages-claimed")).toBe(true);
-  expect(prompts(h)).toHaveLength(0);
+  await h.emit("turn_end", turnText("answer"));
+  await h.emit("agent_settled", {});
+  expect(sends(h)).toHaveLength(0);
 });
 
-test("activation on: the idle mailbox poll claims and starts a turn", async () => {
+test("activation on: the idle mailbox poll claims and delivers", async () => {
   jest.useFakeTimers();
   try {
-    const claimed = [{ id: "m1", body: "wake up", sender_address: "alpha" }];
-    const h = harness((args) => {
-      if (args[0] === "agent" && args[1] === "get") return { code: 0, stdout: JSON.stringify({ result: { agent: { name: "beta", execution: "exec-beta" } } }), stderr: "" };
-      if (args[0] === "message" && args[1] === "list") return { code: 0, stdout: JSON.stringify({ activation: true, waiting: [{ id: "m1", state: "waiting", recipient_execution: "exec-beta" }], messages: [] }), stderr: "" };
-      if (args[0] === "message" && args[1] === "claim") return { code: 0, stdout: JSON.stringify({ claimed }), stderr: "" };
-      return { code: 0, stdout: "", stderr: "" };
-    });
+    const h = mailboxHarness([messageFixture("m1", "wake up")]);
     await h.emit("session_start", {});
     jest.advanceTimersByTime(MAILBOX_POLL_MS + 5);
-    for (let i = 0; i < 20; i += 1) await Promise.resolve();
-    expect(h.sent.join("\n")).toContain("wake up");  } finally {
+    await flush();
+    expect(h.sent.join("\n")).toContain("wake up");
+  } finally {
     jest.useRealTimers();
   }
 });
@@ -306,14 +379,10 @@ test("activation on: the idle mailbox poll claims and starts a turn", async () =
 test("activation off: the preflight never claims", async () => {
   jest.useFakeTimers();
   try {
-    const h = harness((args) => {
-      if (args[0] === "agent" && args[1] === "get") return { code: 0, stdout: JSON.stringify({ result: { agent: { name: "beta", execution: "exec-beta" } } }), stderr: "" };
-      if (args[0] === "message" && args[1] === "list") return { code: 0, stdout: JSON.stringify({ activation: false, waiting: [{ id: "m1", state: "waiting", recipient_execution: "exec-beta" }], messages: [] }), stderr: "" };
-      return { code: 0, stdout: "", stderr: "" };
-    });
+    const h = mailboxHarness([messageFixture("m1", "wake up")], false);
     await h.emit("session_start", {});
     jest.advanceTimersByTime(MAILBOX_POLL_MS + 5);
-    for (let i = 0; i < 20; i += 1) await Promise.resolve();
+    await flush();
     expect(h.calls.filter((call) => call.args[1] === "claim")).toHaveLength(0);
     expect(h.sent).toHaveLength(0);
   } finally {
@@ -324,16 +393,10 @@ test("activation off: the preflight never claims", async () => {
 test("an idle SDK state wakes even when the local turn flag is stale", async () => {
   jest.useFakeTimers();
   try {
-    const claimed = [{ id: "m1", body: "wake", sender: JSON.stringify({ class: "agent", execution: "e" }) }];
-    const h = harness((args) => {
-      if (args[0] === "agent" && args[1] === "get") return { code: 0, stdout: JSON.stringify({ result: { agent: { name: "beta", execution: "exec-beta" } } }), stderr: "" };
-      if (args[0] === "message" && args[1] === "list") return { code: 0, stdout: JSON.stringify({ activation: true, waiting: [{ id: "m1" }], messages: [] }), stderr: "" };
-      if (args[0] === "message" && args[1] === "claim") return { code: 0, stdout: JSON.stringify({ claimed }), stderr: "" };
-      return { code: 0, stdout: "", stderr: "" };
-    });
+    const h = mailboxHarness([messageFixture("m1", "wake")]);
     await h.emit("session_start", {}, { isIdle: () => true });
     jest.advanceTimersByTime(MAILBOX_POLL_MS + 5);
-    for (let i = 0; i < 20; i += 1) await Promise.resolve();
+    await flush();
     expect(h.sent.join("\n")).toContain("wake");
   } finally {
     jest.useRealTimers();
@@ -341,7 +404,7 @@ test("an idle SDK state wakes even when the local turn flag is stale", async () 
 });
 
 test("a starting-turn claim after shutdown is recorded, not injected", async () => {
-  const claimed = [{ id: "m1", body: "x", sender: "{}" }];
+  const claimed = [messageFixture("m1", "x")];
   let release: any, started: any;
   const begun = new Promise<void>(resolve => { started = resolve; });
   const h = harness((args) => {
@@ -360,17 +423,17 @@ test("a starting-turn claim after shutdown is recorded, not injected", async () 
 });
 
 test("consumer loaded before adapter discovers the same interface", async () => {
-  const h = harness(undefined, true);
-  await h.emit("before_agent_start", { prompt: "[agent alpha · reply expected] x" });
-  await h.emit("turn_end", turnText("answer"));
-  await h.emit("agent_settled", {});
-  expect(prompts(h)).toHaveLength(1);
-});
-
-test("unavailable Tasks cannot route legacy replies", async () => {
-  const h = harness(args => args[0] === "task" ? { code: 1, stdout: "", stderr: "unavailable" } : { code: 0, stdout: "", stderr: "" });
-  await h.emit("before_agent_start", { prompt: "[agent alpha · reply expected] x" });
-  await h.emit("turn_end", turnText("answer"));
-  await h.emit("agent_settled", {});
-  expect(prompts(h)).toHaveLength(0);
+  jest.useFakeTimers();
+  try {
+    const h = mailboxHarness([messageFixture("m1", "please review")], true, true);
+    await h.emit("session_start", {});
+    jest.advanceTimersByTime(MAILBOX_POLL_MS + 5);
+    await flush();
+    await h.emit("before_agent_start", { prompt: "please review" });
+    await h.emit("turn_end", turnText("answer"));
+    await h.emit("agent_settled", {});
+    expect(sends(h)).toHaveLength(1);
+  } finally {
+    jest.useRealTimers();
+  }
 });

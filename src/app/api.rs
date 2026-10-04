@@ -2,6 +2,7 @@ use std::time::{Duration, Instant};
 
 mod agent_view;
 mod agents;
+pub(crate) use agents::agent_prompt_refusal;
 mod collections;
 pub(crate) mod collections_authority;
 pub(crate) mod collections_create;
