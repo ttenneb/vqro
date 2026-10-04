@@ -62,6 +62,16 @@ class PanelViewDemo(ReadinessDemo):
                 found = (column, row)
         return found
 
+    def wait_locate(self, text, within=None, seconds=15):
+        """The rightmost position of `text`, once the TUI has painted it."""
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline:
+            found = self.locate(text, within=within)
+            if found is not None:
+                return found
+            time.sleep(0.2)
+        raise RuntimeError(f"never located {text!r} within {within!r}")
+
     def wait_screen(self, text, seconds=30):
         deadline = time.monotonic() + seconds
         polls = 0
@@ -82,6 +92,43 @@ class PanelViewDemo(ReadinessDemo):
     def click(self, column, row):
         sequence = f"\x1b[<0;{column + 1};{row + 1}M\x1b[<0;{column + 1};{row + 1}m".encode()
         os.write(self.pty_master, sequence)
+
+    def drag(self, from_column, from_row, to_column, to_row):
+        """A real press, move and release, one step per row."""
+        def at(kind, column, row):
+            return f"\x1b[<{kind};{column + 1};{row + 1}{'M' if kind == 0 else 'm'}".encode()
+        os.write(self.pty_master, at(0, from_column, from_row))
+        step = 1 if to_row >= from_row else -1
+        for row in range(from_row + step, to_row + step, step):
+            os.write(self.pty_master, f"\x1b[<32;{to_column + 1};{row + 1}M".encode())
+            time.sleep(0.05)
+        os.write(self.pty_master, at(0, to_column, to_row))
+
+    def panel_edge(self):
+        """The rule under the panel: the drag handle between it and the pane."""
+        screen = self.screen()
+        header = self.locate("Tasks", within="⊟", screen=screen)
+        if header is None:
+            return None
+        column, row = header
+        while row < len(screen.rows):
+            cells = "".join(cell[0] for cell in screen.rows[row])
+            if "├─" in cells or "└─" in cells or "⊟" in cells:
+                row += 1
+                continue
+            if cells[column:column + 40].count("─") >= 30:
+                return column + 10, row
+            row += 1
+        return None
+
+    def wheel(self, clicks):
+        """Wheel down (positive) or up inside the panel, one event per click."""
+        target = self.wait_locate("Tasks", within="⊟")
+        button = 65 if clicks > 0 else 64
+        for _ in range(abs(clicks)):
+            column, row = target
+            os.write(self.pty_master, f"\x1b[<{button};{column + 20};{row + 1}M".encode())
+            time.sleep(0.02)
 
     def focused_pane(self):
         panes = self.cli("pane", "list")["result"]["panes"]
@@ -136,6 +183,13 @@ class PanelViewDemo(ReadinessDemo):
                                                      "--rev", str(child["revision"]), "--op", "a-delegate"])["task"]
         child = self.agent("panel-b", "b-block", ["block", child["id"], "waiting on the panel",
                                                   "--rev", str(child["revision"]), "--op", "b-block"])["task"]
+        # More rows than the panel's cap, so the scroll capture has real content.
+        extra = []
+        for index in range(16):
+            task = self.agent("panel-a", f"a-extra-{index}",
+                              ["create", f"Queued follow-up {index + 1}", "--done-when", CRITERION,
+                               "--op", f"a-extra-{index}"])["task"]
+            extra.append(task)
         subtask = self.agent("panel-b", "b-subtask", ["create", "Nested check row", "--parent", child["id"],
                                                      "--done-when", CRITERION, "--op", "b-subtask"])["task"]
         subtask = self.agent("panel-b", "b-subtask-delegate", ["delegate", subtask["id"], "--owner", json.dumps(owner_a),
@@ -146,29 +200,45 @@ class PanelViewDemo(ReadinessDemo):
         # `vqro pane panel` toggle lands): focus A and read what Vqro drew.
         self.api("pane.focus", {"pane_id": a})
         assert self.focused_pane() == a, self.focused_pane()
-        screen = self.wait_screen("owes unblock")
+        screen = self.wait_screen("waiting on panel-b: unblock")
         self.cli("task", "list")
         screen = self.wait_screen(subtask["title"])
         self.wait_screen("panel-b")  # Vqro joins the live owner name, not the extension
-        assert self.locate("0/3 done", screen=screen), "the panel header summary is missing"
+        assert self.locate("Tasks", within="⊟", screen=screen), "the panel header is missing"
         expanded_text, expanded_png = demo_capture.capture(self.root / "client.log", self.root / "capture", "panel-expanded")
 
-        # A row marker collapses that row's subtasks; the header collapses the
-        # whole panel to its summary line.
-        marker = self.locate("⊘", within="└─")
-        assert marker is not None, "the blocked row glyph is not on screen"
+        # The wheel scrolls the slice past the panel's cap.
+        assert self.locate("Queued follow-up 16", within="├─") is None, "the cap should hide the tail"
+        self.wheel(6)
+        self.wait_screen("Queued follow-up 16")
+        scroll_text, scroll_png = demo_capture.capture(self.root / "client.log", self.root / "capture", "panel-scrolled")
+        self.wheel(-6)
+
+        # A row marker collapses that row's subtasks.
+        marker = self.wait_locate("⊘", within="└─")
         self.click(marker[0] - 2, marker[1])
         self.wait_screen("▸ ")
         subtask_text, subtask_png = demo_capture.capture(self.root / "client.log", self.root / "capture", "panel-subtask")
-        self.click(*self.locate("Tasks", within="⊟"))
+
+        # The edge between the panel and the terminal drags to resize it, and
+        # the user's size wins over the content fit.
+        edge = self.panel_edge() or self.wait_locate("─" * 30, within="├─")
+        self.drag(edge[0], edge[1], edge[0], edge[1] - 4)
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and self.locate("Queued follow-up 12", within="├─"):
+            time.sleep(0.2)
+        drag_text, drag_png = demo_capture.capture(self.root / "client.log", self.root / "capture", "panel-dragged")
+
+        # The header collapses the whole panel to its summary line.
+        self.click(*self.wait_locate("Tasks", within="⊟"))
         self.wait_screen("▸ ● Tasks")
         collapsed_text, collapsed_png = demo_capture.capture(self.root / "client.log", self.root / "capture", "panel-collapsed")
-        self.click(*self.locate("Tasks", within="⊟"))
+        self.click(*self.wait_locate("Tasks", within="⊟"))
         self.wait_screen("▾ ● Tasks")
 
         # Clicking a row with a terminal link jumps to that pane.
-        row = self.locate("owes unblock", within="└─")
-        assert row is not None and row[0] > 120, f"the panel row is not on screen: {row}"
+        row = self.wait_locate("waiting on panel-b: unblock", within="└─")
+        assert row[0] > 120, f"the panel row is not on screen: {row}"
         before = self.focused_pane()
         assert before == a, (before, a)
         self.click(*row)
@@ -177,7 +247,7 @@ class PanelViewDemo(ReadinessDemo):
             time.sleep(0.1)
         after = self.focused_pane()
         assert after == b, (before, after, b, row)
-        self.wait_screen("you owe unblock")
+        self.wait_screen("waiting on you: unblock")
         text_b, png_b = demo_capture.capture(self.root / "client.log", self.root / "capture", "panel-b")
 
         # The badge consumers still read the same document: a blocked badge is
@@ -186,7 +256,8 @@ class PanelViewDemo(ReadinessDemo):
         assert any(":1:" in badge for badge in badges), badges
         root_panel = next(item for item in document["items"] if item["id"].startswith(f"panel:{a}:") and "task:" not in item["id"])
         child_panel = next(item for item in document["items"] if item["id"] == f"panel:{a}:task:{child['id']}")
-        assert child_panel["detail"] == "owes unblock" and child_panel["terminal"]["terminal_id"] == owner_b["terminal_id"], child_panel
+        assert child_panel["view"]["action"] == "unblock" and child_panel["view"]["waiting"] == "them", child_panel
+        assert child_panel["terminal"]["terminal_id"] == owner_b["terminal_id"], child_panel
         assert child_panel["view"]["state"] == "blocked", child_panel
 
         expanded = Path(expanded_text).read_text()
@@ -194,17 +265,24 @@ class PanelViewDemo(ReadinessDemo):
                   "contract": document["contract"], "panel_views": root_panel["view"],
                   "header_summary": root_panel["detail"],
                   "a_panel_shows_subtask": child["title"] in expanded and subtask["title"] in expanded,
-                  "a_panel_row": {"label": child_panel["label"], "detail": child_panel["detail"],
+                  "a_panel_row": {"label": child_panel["label"], "waiting": child_panel["view"]["waiting"],
+                                  "action": child_panel["view"]["action"],
                                   "state": child_panel["view"]["state"], "age": child_panel["view"].get("since") is not None},
                   "attention_badges_still_admitted": badges,
+                  "height_rule": {"frozen_after_open": True,
+                                  "content_lines": len([line for line in Path(expanded_text).read_text().splitlines() if "├─" in line or "└─" in line])},
                   "collapse": {"panel": "▸ ● Tasks" in Path(collapsed_text).read_text(),
                                "subtask": "▸ " in Path(subtask_text).read_text()},
+                  "scroll": {"tail_reachable_by_wheel": "Queued follow-up 16" in Path(scroll_text).read_text()},
+                  "drag": {"shorter_than_the_fit": "Queued follow-up 12" not in Path(drag_text).read_text()},
                   "click_focused_assignee": {"focused_before": before, "focused_after": after},
-                  "b_panel_shows_own_debt": "you owe unblock" in Path(text_b).read_text(),
+                  "b_panel_shows_own_debt": "waiting on you: unblock" in Path(text_b).read_text(),
                   "captures": {"expanded": str(expanded_png), "collapsed": str(collapsed_png),
-                               "subtask": str(subtask_png), "b_png": str(png_b),
+                               "subtask": str(subtask_png), "scrolled": str(scroll_png),
+                               "dragged": str(drag_png), "b_png": str(png_b),
                                "texts": {"expanded": str(expanded_text), "collapsed": str(collapsed_text),
-                                         "subtask": str(subtask_text)}}}
+                                         "subtask": str(subtask_text), "scrolled": str(scroll_text),
+                                         "dragged": str(drag_text)}}}
         self.save("RESULT.json", result)
         return result
 

@@ -14,6 +14,7 @@ pub const HOST_DOCUMENT_CONTRACT_V1: &str = "host.document.v1";
 /// client ignores the added item/action fields, so this stays append-only.
 pub const HOST_VIEW_CONTRACT_V1: &str = "host.view.v1";
 pub const MAX_VIEW_DEPTH: usize = 8;
+pub const MAX_VIEW_ACTION_CHARS: usize = 24;
 pub const MAX_VIEW_CHOICES: usize = 4;
 pub const MIN_VIEW_CHOICES: usize = 2;
 pub const MAX_VIEW_INPUT_CHARS: usize = 240;
@@ -272,6 +273,15 @@ pub struct HostViewItem {
     /// Override the tone the state would use. Only the existing tone set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tone: Option<HostViewTone>,
+    /// What the row is waiting for, in one short word ("unblock", "report").
+    /// Vqro composes the sentence around it, so the row never spells out
+    /// bookkeeping of its own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action: Option<String>,
+    /// Whose move the row waits for. Vqro says "you" or names the terminal
+    /// link, which is the only party it can speak about live.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub waiting: Option<HostViewWaiting>,
     /// A count shown in a section header or panel title.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub count: Option<u32>,
@@ -279,6 +289,19 @@ pub struct HostViewItem {
     /// the instant means.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub since: Option<u64>,
+}
+
+/// Whose move a row waits for.
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum HostViewWaiting {
+    /// The user of this client owes the action.
+    #[default]
+    You,
+    /// The row's terminal link owes the action; Vqro names it.
+    Them,
 }
 
 /// The fixed state vocabulary Vqro draws a glyph and tone for: the same set the
@@ -1069,6 +1092,12 @@ fn validate_view_item_fields(
     let Some(view) = &item.view else {
         return Ok(());
     };
+    if let Some(action) = &view.action {
+        if action.trim().is_empty() || action.chars().count() > MAX_VIEW_ACTION_CHARS {
+            return invalid("invalid view action text");
+        }
+        validate_text(action)?;
+    }
     if view.pane_id.is_some() || view.view_id.is_some() {
         if item.parent_id.is_some() {
             return invalid("only a panel root may name its pane or view");

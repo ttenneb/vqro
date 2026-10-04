@@ -627,6 +627,7 @@ impl ClientShellState {
         let mut panel_render = pane_panel::PanePanelRender {
             hits: Vec::new(),
             claimed: None,
+            drawn_height: None,
         };
         if let Some(documents) = host_documents {
             if self
@@ -652,6 +653,25 @@ impl ClientShellState {
             }
         }
         self.hits.pane_panels = panel_render.hits;
+        // Opening the panel is when it sizes to its content. From then on the
+        // height is fixed: a live update scrolls instead of resizing the PTY,
+        // and the user's own dragged height always wins.
+        if let (Some(pane_id), Some(drawn_height)) = (
+            snapshot.focused_pane_id.as_deref(),
+            panel_render.drawn_height,
+        ) {
+            let display = self
+                .pane_panel_display
+                .entry(pane_id.to_string())
+                .or_default();
+            if display.height.is_none() {
+                display.height = Some(drawn_height);
+            }
+        }
+        let panel_dragging = matches!(
+            self.chrome_drag,
+            Some(ClientChromeDrag::PanePanelEdge { .. })
+        );
         // A panel takes its edge from the pane's terminal, and the claimed
         // viewport is what the server resizes that pane's PTY to. Closing the
         // panel releases the claim so the pane returns to layout geometry.
@@ -669,7 +689,7 @@ impl ClientShellState {
                 }
             }),
         };
-        if let Some(request) = panel_request {
+        if let Some(request) = panel_request.filter(|_| !panel_dragging) {
             if self.last_pane_panel_viewport.as_ref() != Some(&request) {
                 if let Some((pane_id, terminal)) = panel_render.claimed.as_ref() {
                     if let Some(hit) = self

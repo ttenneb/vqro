@@ -171,6 +171,16 @@ impl ClientShellState {
             }
         }
 
+        // Vqro's own panel chrome owns its cells. A terminal patch is computed
+        // against the server's view of the pane, which does not know the panel
+        // reserved an edge of it, so a row that lands inside a panel is dropped
+        // and the next compose blends the panel over the patched surface again.
+        let panel_rows = self
+            .hits
+            .pane_panels
+            .iter()
+            .map(|hit| hit.rect)
+            .collect::<Vec<_>>();
         let fast_path_blocker = fast_path_blocker(self, &patch);
         if let Some(reason) = fast_path_blocker {
             crate::render_prof::event(reason);
@@ -187,6 +197,14 @@ impl ClientShellState {
                     x: area.x.saturating_add(row.x),
                     y: area.y.saturating_add(row.y),
                     cells: row.cells.clone(),
+                })
+                .filter(|row| {
+                    !panel_rows.iter().any(|panel| {
+                        row.y >= panel.y
+                            && row.y < panel.bottom()
+                            && row.x < panel.right()
+                            && row.x.saturating_add(row.cells.len() as u16) > panel.x
+                    })
                 })
                 .collect(),
             cursor: patch

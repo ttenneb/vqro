@@ -10856,6 +10856,13 @@
         "HostViewItem": {
           "description": "The view blocks of one item. Every field is optional: an item with no view\nblock is a plain group, and an unknown future block degrades to\n\"unsupported\" instead of rejecting the view.",
           "properties": {
+            "action": {
+              "description": "What the row is waiting for, in one short word (\"unblock\", \"report\").\nVqro composes the sentence around it, so the row never spells out\nbookkeeping of its own.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "count": {
               "description": "A count shown in a section header or panel title.",
               "format": "uint32",
@@ -10909,6 +10916,17 @@
                 "string",
                 "null"
               ]
+            },
+            "waiting": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/success_response/$defs/HostViewWaiting"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Whose move the row waits for. Vqro says \"you\" or names the terminal\nlink, which is the only party it can speak about live."
             }
           },
           "type": "object"
@@ -10953,6 +10971,21 @@
             "danger"
           ],
           "type": "string"
+        },
+        "HostViewWaiting": {
+          "description": "Whose move a row waits for.",
+          "oneOf": [
+            {
+              "const": "you",
+              "description": "The user of this client owes the action.",
+              "type": "string"
+            },
+            {
+              "const": "them",
+              "description": "The row's terminal link owes the action; Vqro names it.",
+              "type": "string"
+            }
+          ]
         },
         "InstalledExtensionPackageInfo": {
           "properties": {

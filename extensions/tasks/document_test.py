@@ -46,7 +46,7 @@ class DocumentTests(unittest.TestCase):
         # The header counts the whole slice; rows carry the open work only.
         self.assertEqual("0/2 done · 1 active · 1 ready",a_root["detail"])
         a_child=next(row for row in items if row["id"]==f"panel:w1:p1:task:{child['id']}")
-        self.assertEqual("owes start",a_child["detail"])
+        self.assertEqual({"them","start"}, {a_child["view"]["waiting"], a_child["view"]["action"]})
         self.assertEqual({"terminal_id":"b","placement":panel_b},a_child["terminal"])
         self.assertEqual(f"panel:w1:p1:task:{root['id']}",a_child["parent_id"])
         self.assertEqual("open",a_child["view"]["state"])
@@ -54,7 +54,7 @@ class DocumentTests(unittest.TestCase):
         b_root=next(row for row in items if row["id"]=="panel:w1:p2:tasks")
         self.assertEqual("0/1 done · 1 ready",b_root["detail"])
         b_child=next(row for row in items if row["id"]==f"panel:w1:p2:task:{child['id']}")
-        self.assertEqual("you owe start",b_child["detail"])
+        self.assertEqual({"you","start"}, {b_child["view"]["waiting"], b_child["view"]["action"]})
         self.assertEqual({"terminal_id":"a","placement":panel_a},b_child["terminal"])
         # Placement is required: no placement, no panel row.
         self.assertFalse(any("panel:" in row["id"] for row in document.project(self.store,self.snapshot([]))["items"]))

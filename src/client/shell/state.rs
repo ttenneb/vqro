@@ -328,6 +328,13 @@ pub(super) enum ClientChromeDrag {
         last_sent_ratio: Option<f32>,
         last_sent_at: Option<std::time::Instant>,
     },
+    /// Dragging a pane panel's edge. The pane's PTY resizes once, on release.
+    PanePanelEdge {
+        pane_id: String,
+        start_row: u16,
+        start_height: u16,
+        max_height: u16,
+    },
     PaneScrollbar {
         hit: PaneHit,
         grab_row_offset: u16,

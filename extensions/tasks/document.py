@@ -12,13 +12,14 @@ PREFIX = "context:attention."
 VIEW_CONTRACT = "host.view.v1"
 PANEL_VIEW = "tasks"
 PANEL_ROW_LIMIT = 24
+# The one word Vqro composes "waiting on ..." around.
 OWED_TEXT = {
     "start": "start",
     "work/report": "report",
     "unblock": "unblock",
     "accept": "accept",
     "answer": "answer",
-    "acceptor_missing": "no acceptor",
+    "acceptor_missing": "accept",
 }
 CHIP_TONE = {"open": "muted", "in_progress": "accent", "blocked": "danger", "reported": "success"}
 CHIP_TEXT = {"open": "open", "in_progress": "in progress", "blocked": "blocked", "reported": "reported"}
@@ -86,18 +87,21 @@ def pane_slices(tasks, placements):
         creditor_placement = (placements or {}).get(creditor.get("terminal_id"))
         owed = OWED_TEXT.get(task.get("owed_action") or "", "work")
         entries = []
+        # In the owner's pane the viewer owes the action; in the pane it is owed
+        # to, the owner does. Vqro says which, and names the other side.
         if owner_placement:
-            entries.append((owner_placement["pane_id"], f"you owe {owed}", creditor, creditor_placement))
+            entries.append((owner_placement["pane_id"], "you", owed, creditor, creditor_placement))
         if creditor_placement and creditor_placement["pane_id"] != (owner_placement or {}).get("pane_id"):
-            entries.append((creditor_placement["pane_id"], f"owes {owed}", owner, owner_placement))
-        for pane_id, detail, counterparty, counterparty_placement in entries:
+            entries.append((creditor_placement["pane_id"], "them", owed, owner, owner_placement))
+        for pane_id, waiting, action, counterparty, counterparty_placement in entries:
             bucket = slices.setdefault(pane_id, {"counts": Counter(), "rows": []})
             bucket["counts"][count_word(task)] += 1
             if not final(task):
                 bucket["rows"].append({
                     "task": task,
                     "state": state_name(task),
-                    "detail": detail,
+                    "waiting": waiting,
+                    "action": action,
                     "counterparty": counterparty,
                     "counterparty_placement": counterparty_placement,
                     "since": epoch(task.get("owed_since") or task.get("updated_at")),
@@ -134,8 +138,8 @@ def panel_items(tasks, placements, room):
                 break
             task = row["task"]
             item = {"id": f"panel:{pane_id}:task:{task['id']}", "role": "section",
-                    "label": bounded(task["title"]), "detail": bounded(row["detail"]),
-                    "view": {"state": row["state"]}}
+                    "label": bounded(task["title"]),
+                    "view": {"state": row["state"], "waiting": row["waiting"], "action": row["action"]}}
             if row["since"] is not None:
                 item["view"]["since"] = row["since"]
             parent = task.get("parent")
