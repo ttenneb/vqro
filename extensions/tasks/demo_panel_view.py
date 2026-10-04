@@ -221,13 +221,10 @@ class PanelViewDemo(ReadinessDemo):
         # answered; the demo drives clicks, so it starts answered. Only this
         # disposable root's config changes.
         config = self.root / "config/config.toml"
-        # `onboarding = false` answers the first-run dialog, and the second line
-        # is the user-enabled rule that opens a pane's views when an agent
-        # starts there. Both are this disposable root's config only.
-        config.write_text(
-            "onboarding = false\n[ui]\nshow_panels_on_agent_start = true\n"
-            + config.read_text()
-        )
+        # `onboarding = false` answers the first-run dialog. The
+        # show-on-agent-start rule is deliberately NOT set here: the demo proves
+        # the shipped default opens a pane's views when an agent starts.
+        config.write_text("onboarding = false\n" + config.read_text())
         self.start()
         human = self.cli("workspace", "create", "--cwd", str(self.root / "work"), "--no-focus")["result"]["root_pane"]["pane_id"]
         self.remember_pane(human)
