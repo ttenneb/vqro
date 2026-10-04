@@ -1123,12 +1123,10 @@ fn pane_patch_row(
 /// builds a band for each. Nothing is injected.
 fn two_panelled_panes_state() -> ClientShellState {
     let mut state = panel_state(None, false);
-    let mut surface = state.pane_surface.as_ref().expect("surface").clone();
-    let mut second = surface.panes[0].clone();
-    second.pane_id = "pane_2".into();
-    second.focused = false;
-    surface.panes.push(second);
-    state.set_pane_surface(surface);
+    // The existing distinct-pane fixture: pane_1 at x=0 and pane_2 at x=51, each
+    // 50/49 wide with its own inner rect, so the origins differ and their bands can
+    // be told apart. Cloning one pane's rect would stack them exactly.
+    state.set_pane_surface(two_pane_surface());
     let items = ["pane_1", "pane_2"]
         .iter()
         .flat_map(|pane_id| {
@@ -1193,6 +1191,16 @@ fn a_panelled_patch_never_paints_into_the_panel_band() {
         .find(|pane| pane.pane_id == "pane_2")
         .cloned()
         .expect("pane_2");
+    assert_eq!(
+        state.pane_panel_areas.len(),
+        2,
+        "each pane drew its own panel and band"
+    );
+    let surfaces = state.pane_surface.as_ref().expect("surface").panes.clone();
+    assert_ne!(
+        surfaces[0].inner_rect, surfaces[1].inner_rect,
+        "the fixture's panes must not overlap"
+    );
     let patch = pane_patch_row(&state, &pane, pane.inner_rect.y.saturating_add(2), "B");
     let outcome = state.apply_pane_surface_patch(patch);
     let ClientPaneSurfacePatchOutcome::Applied(Some(composed)) = outcome else {
@@ -1200,10 +1208,15 @@ fn a_panelled_patch_never_paints_into_the_panel_band() {
     };
     assert!(!composed.rows.is_empty(), "the row is emitted");
     for change in &composed.rows {
+        let width = u16::try_from(change.cells.len()).unwrap_or(1);
         for band in &state.pane_panel_areas {
+            let inside_y = change.y >= band.y && change.y < band.y.saturating_add(band.height);
+            let inside_x =
+                change.x < band.x.saturating_add(band.width) && change.x + width > band.x;
             assert!(
-                !(change.y >= band.y && change.y < band.y.saturating_add(band.height)),
-                "row {} is inside a panel band {:?}",
+                !(inside_y && inside_x),
+                "cells at ({}, {}) x{width} intersect the band {:?}",
+                change.x,
                 change.y,
                 band
             );
@@ -1269,6 +1282,52 @@ fn the_fast_path_and_a_full_compose_agree_for_two_panelled_panes() {
         }
     }
     assert!(emitted >= 8, "every emitted row was compared: {emitted}");
+
+    // The returned cursor, not only the rows: a patch that carries the focused
+    // pane's cursor must return the same cursor a full compose shows. With distinct
+    // panes there is no shared cursor to move twice.
+    let focused = state
+        .pane_surface
+        .as_ref()
+        .expect("surface")
+        .panes
+        .iter()
+        .find(|pane| pane.focused)
+        .expect("a focused pane")
+        .inner_rect;
+    let background = state
+        .pane_surface
+        .as_ref()
+        .expect("surface")
+        .panes
+        .iter()
+        .find(|pane| !pane.focused)
+        .cloned()
+        .expect("a background pane");
+    let mut patch = pane_patch_row(
+        &state,
+        &background,
+        background.inner_rect.y.saturating_add(2),
+        "z",
+    );
+    patch.cursor = Some(crate::protocol::CursorState {
+        x: focused.x.saturating_add(2),
+        y: focused.y.saturating_add(3),
+        visible: true,
+        shape: 0,
+    });
+    let ClientPaneSurfacePatchOutcome::Applied(Some(composed)) =
+        state.apply_pane_surface_patch(patch)
+    else {
+        panic!("the fast path applies this patch");
+    };
+    let frame = state.compose(106, 30).expect("frame");
+    let fast = composed.cursor.map(|cursor| (cursor.y, cursor.visible));
+    let full = frame.cursor.map(|cursor| (cursor.y, cursor.visible));
+    assert_eq!(
+        fast, full,
+        "the returned cursor (row, visible) must equal the full compose's"
+    );
 }
 
 #[test]
@@ -1293,8 +1352,8 @@ fn a_row_past_the_grid_takes_the_compose_path() {
     let patch = pane_patch_row(&state, &pane, past, "C");
     let outcome = state.apply_pane_surface_patch(patch);
     assert!(
-        !matches!(outcome, ClientPaneSurfacePatchOutcome::Rejected),
-        "the patch is accepted"
+        matches!(outcome, ClientPaneSurfacePatchOutcome::Applied(None)),
+        "a row with no destination after the translation composes instead of translating"
     );
 }
 
