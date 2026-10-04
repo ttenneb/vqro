@@ -75,28 +75,31 @@ export default function (pi: ExtensionAPI) {
   // The host refuses to type into an editor that already holds the human's
   // unsent text, so it needs to know whether this one does. Only the fact is
   // reported (never the content), once a second, as the same neutral
-  // pane.report_metadata request the other integrations send. A request goes
-  // out when the fact changes, when the human presses a key (re-checked right
-  // after it, so a line typed and deleted between two polls still reports), and
-  // otherwise on a slow refresh, so one idle pane costs one small request every
-  // 10s. The refresh only bounds one refusal case: keys that leave an empty box
-  // empty. Each request is bounded by a timeout and at most one is in flight, so
-  // an endpoint that never answers cannot accumulate sockets, and shutdown
-  // cancels the outstanding one. The socket write is deliberate: a CLI spawn per
-  // pane per tick is not bounded enough to run in every Vqro pane.
+  // pane.report_metadata request the other integrations send. The poll is a
+  // cheap in-process read of the editor text; a request goes out when the text
+  // changed since the last poll (carrying only the empty/has_text fact, never
+  // the content), right after a keystroke, and otherwise on a slow refresh. An
+  // idle pane therefore costs one small request per 30s, and a pane being typed
+  // in at most one per second. The refresh only bounds the case a text change
+  // cannot see: keys that leave the text alone, which the host treats as no
+  // draft at all while an editor report is in hand. Each request is bounded by a
+  // timeout and at most one is in flight, so an endpoint that never answers
+  // cannot accumulate sockets, and shutdown cancels the outstanding one. The
+  // socket write is deliberate: a CLI spawn per pane per tick is not bounded
+  // enough to run in every Vqro pane.
   const INPUT_BOX_POLL_MS = 1000;
-  const INPUT_BOX_REFRESH_MS = 10_000;
+  const INPUT_BOX_REFRESH_MS = 30_000;
   const INPUT_BOX_REQUEST_TIMEOUT_MS = 1500;
   let editorPoll: ReturnType<typeof setInterval> | undefined;
   let stopEditorInput: (() => void) | undefined;
   let cancelInputBoxRequest: (() => void) | undefined;
   let inputBoxSeq = Date.now() * 1000;
-  let lastInputBox: { hasText: boolean; at: number } | undefined;
+  let lastReportedInputBox: { text: string; at: number } | undefined;
 
-  function readInputBoxHasText(): boolean | undefined {
+  function readInputBoxText(): string | undefined {
     try {
       const text = latestCtx?.ui?.getEditorText?.();
-      return typeof text === "string" ? text.trim().length > 0 : undefined;
+      return typeof text === "string" ? text : undefined;
     } catch {
       return undefined;
     }
@@ -128,17 +131,17 @@ export default function (pi: ExtensionAPI) {
 
   function reportInputBox(force = false): void {
     const socketPath = process.env.VQRO_SOCKET_PATH;
-    const hasText = readInputBoxHasText();
-    if (!socketPath || hasText === undefined || state.state === "closed") return;
+    const text = readInputBoxText();
+    if (!socketPath || text === undefined || state.state === "closed") return;
     const now = Date.now();
-    const changed = lastInputBox === undefined || lastInputBox.hasText !== hasText;
-    if (!force && !changed && now - (lastInputBox?.at ?? 0) < INPUT_BOX_REFRESH_MS) return;
-    lastInputBox = { hasText, at: now };
+    const changed = lastReportedInputBox === undefined || lastReportedInputBox.text !== text;
+    if (!force && !changed && now - (lastReportedInputBox?.at ?? 0) < INPUT_BOX_REFRESH_MS) return;
+    lastReportedInputBox = { text, at: now };
     inputBoxSeq += 1;
     sendInputBoxRequest(socketPath, JSON.stringify({
       id: `vqro:pi:input-box:${inputBoxSeq}`,
       method: "pane.report_metadata",
-      params: { pane_id: pane, source: "vqro:pi", seq: inputBoxSeq, tokens: { input_box: hasText ? "has_text" : "empty" } },
+      params: { pane_id: pane, source: "vqro:pi", seq: inputBoxSeq, tokens: { input_box: text.trim().length > 0 ? "has_text" : "empty" } },
     }));
   }
 
@@ -162,7 +165,7 @@ export default function (pi: ExtensionAPI) {
     stopEditorInput?.();
     stopEditorInput = undefined;
     cancelInputBoxRequest?.();
-    lastInputBox = undefined;
+    lastReportedInputBox = undefined;
   }
   const adapter: AdapterV1 = {
     version: 1, snapshot, current, exec,

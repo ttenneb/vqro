@@ -1257,11 +1257,10 @@ impl HeadlessServer {
     fn note_human_pane_input(
         &mut self,
         terminal_id: crate::terminal::TerminalId,
-        effect: super::pane_input::UnsentTextEffect,
+        effect: crate::terminal::ForwardedInputEffect,
     ) {
-        let may_hold = matches!(effect, super::pane_input::UnsentTextEffect::MayHold);
         if let Some(terminal) = self.app.state.terminals.get_mut(&terminal_id) {
-            terminal.note_forwarded_human_input(may_hold, std::time::Instant::now());
+            terminal.note_forwarded_human_input(effect, std::time::Instant::now());
         }
     }
 
@@ -1351,7 +1350,7 @@ impl HeadlessServer {
                 if let Some(terminal_id) = self.terminal_id_by_string(&terminal_id) {
                     self.note_human_pane_input(
                         terminal_id,
-                        super::pane_input::UnsentTextEffect::MayHold,
+                        crate::terminal::ForwardedInputEffect::Text,
                     );
                 }
                 if let Some(runtime) = self.runtime_for_terminal_id_string(&terminal_id) {

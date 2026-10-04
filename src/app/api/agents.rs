@@ -796,7 +796,10 @@ mod tests {
         let terminal = app.state.terminals.get_mut(&terminal_id).unwrap();
         terminal.set_agent_name("reviewer".into());
         terminal.set_detected_state(Some(Agent::Pi), AgentState::Idle);
-        terminal.note_forwarded_human_input(true, std::time::Instant::now());
+        terminal.note_forwarded_human_input(
+            crate::terminal::ForwardedInputEffect::Text,
+            std::time::Instant::now(),
+        );
         let (runtime, mut rx) = crate::terminal::TerminalRuntime::test_with_channel(80, 24);
         app.state.insert_test_runtime(pane_id, runtime);
 
@@ -876,7 +879,7 @@ mod tests {
             .terminals
             .get_mut(&terminal_id)
             .unwrap()
-            .note_forwarded_human_input(true, forwarded_at);
+            .note_forwarded_human_input(crate::terminal::ForwardedInputEffect::Text, forwarded_at);
 
         let response = run_deferred_agent_prompt(
             &mut app,
@@ -920,7 +923,7 @@ mod tests {
             .terminals
             .get_mut(&terminal_id)
             .unwrap()
-            .note_forwarded_human_input(true, forwarded_at);
+            .note_forwarded_human_input(crate::terminal::ForwardedInputEffect::Text, forwarded_at);
         assert!(app.state.terminals[&terminal_id].editor_may_hold_unsent_text());
 
         // The refresh says the same thing, later.
@@ -935,6 +938,77 @@ mod tests {
             !terminal.editor_may_hold_unsent_text(),
             "the refresh must still count as a newer observation than the human's keys"
         );
+    }
+
+    /// The remaining case behind the refresh: with the editor's own report in
+    /// hand, a key that cannot write text (cursor movement, Esc) is not evidence
+    /// of a draft, so it must not refuse the prompt while the box is empty. A
+    /// key that can write text after that report still does refuse.
+    #[tokio::test]
+    async fn a_cursor_key_in_an_empty_box_does_not_refuse_the_prompt() {
+        let mut app = app_with_agent();
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.state.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        let terminal = app.state.terminals.get_mut(&terminal_id).unwrap();
+        terminal.set_agent_name("reviewer".into());
+        terminal.set_detected_state(Some(Agent::Pi), AgentState::Idle);
+        let (runtime, mut rx) = crate::terminal::TerminalRuntime::test_with_channel(80, 24);
+        app.state.insert_test_runtime(pane_id, runtime);
+        let public_pane_id = app.public_pane_id(0, pane_id).unwrap();
+        report_input_box(&mut app, &public_pane_id, "empty");
+
+        let later = std::time::Instant::now() + Duration::from_millis(1);
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .note_forwarded_human_input(crate::terminal::ForwardedInputEffect::NoText, later);
+        assert!(
+            !app.state.terminals[&terminal_id].editor_may_hold_unsent_text(),
+            "moving the cursor in a reported-empty box is not a draft"
+        );
+        let response = run_deferred_agent_prompt(
+            &mut app,
+            "req-cursor",
+            AgentPromptParams {
+                target: "reviewer".into(),
+                text: "unrelated prompt".into(),
+                wait: None,
+            },
+        );
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        assert!(matches!(
+            success.result,
+            ResponseResult::AgentPrompted { .. }
+        ));
+        assert_eq!(
+            rx.try_recv().unwrap(),
+            Bytes::from_static(b"unrelated prompt")
+        );
+
+        // A key that can write text after the report still refuses, because the
+        // host has no report newer than it.
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .note_forwarded_human_input(
+                crate::terminal::ForwardedInputEffect::Text,
+                std::time::Instant::now() + Duration::from_millis(1),
+            );
+        let refused = run_deferred_agent_prompt(
+            &mut app,
+            "req-typed",
+            AgentPromptParams {
+                target: "reviewer".into(),
+                text: "unrelated prompt".into(),
+                wait: None,
+            },
+        );
+        let error: crate::api::schema::ErrorResponse = serde_json::from_str(&refused).unwrap();
+        assert_eq!(error.error.code, "editor_has_text");
     }
 
     #[tokio::test]

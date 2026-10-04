@@ -2,28 +2,25 @@ use bytes::Bytes;
 use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers, MouseEventKind};
 
 use crate::protocol::{AttachScrollDirection, AttachScrollSource, ClientPaneInputEvent};
+use crate::terminal::ForwardedInputEffect;
 
-/// What forwarded human input proves about unsent text in the target editor.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum UnsentTextEffect {
-    /// The editor may hold text the human has not sent.
-    MayHold,
-    /// The human submitted the line, so the editor no longer holds it.
-    Cleared,
-}
-
-/// What forwarded human pane input proves about the target editor's unsent
-/// text: `None` proves nothing. The last proving event decides, so a typed line
+/// What forwarded human pane input could have done to the target editor:
+/// `None` proves nothing. The last proving event decides, so a typed line
 /// followed by Enter reads as submitted.
 ///
-/// Any non-release key, text commit or paste may put text in the editor
-/// (autocomplete, history recall, a submitted line edited again), so only the
-/// submit key proves the editor empty: a plain, unmodified Enter, which takes
-/// the editor's content as the submitted input. Modified Enter inserts a
-/// newline, and the keys that look like clears prove nothing: Ctrl-C copies the
-/// selection, Ctrl-U deletes to the line start only (Pi's
-/// `tui.editor.deleteToLineStart`), releases and mouse events prove nothing.
-pub(super) fn human_input_unsent_text(events: &[ClientPaneInputEvent]) -> Option<UnsentTextEffect> {
+/// Input that can put text in the editor is [`ForwardedInputEffect::Text`], and
+/// the only submit key is a plain unmodified Enter, which takes the editor's
+/// content as the submitted input. Cursor movement, Esc, function keys and
+/// releases cannot write text, so they are [`ForwardedInputEffect::NoText`]:
+/// with an editor report in hand they must not look like a draft, or moving the
+/// cursor in an empty box would refuse for as long as the report predates the
+/// key. Everything that might insert text stays `Text`: ctrl/alt chords recall
+/// history or yank, Tab completes, modified Enter inserts a newline, and the
+/// keys that look like clears prove nothing either (Ctrl-C copies the selection,
+/// Ctrl-U deletes to the line start only in Pi).
+pub(super) fn human_input_unsent_text(
+    events: &[ClientPaneInputEvent],
+) -> Option<ForwardedInputEffect> {
     let mut effect = None;
     for event in events {
         let event_effect = match event {
@@ -36,13 +33,29 @@ pub(super) fn human_input_unsent_text(events: &[ClientPaneInputEvent]) -> Option
                 if *kind == crate::protocol::ClientKeyKind::Release {
                     None
                 } else if *code == crate::protocol::ClientKeyCode::Enter && *modifiers == 0 {
-                    Some(UnsentTextEffect::Cleared)
+                    Some(ForwardedInputEffect::Submitted)
+                } else if matches!(
+                    code,
+                    crate::protocol::ClientKeyCode::Left
+                        | crate::protocol::ClientKeyCode::Right
+                        | crate::protocol::ClientKeyCode::Up
+                        | crate::protocol::ClientKeyCode::Down
+                        | crate::protocol::ClientKeyCode::Home
+                        | crate::protocol::ClientKeyCode::End
+                        | crate::protocol::ClientKeyCode::PageUp
+                        | crate::protocol::ClientKeyCode::PageDown
+                        | crate::protocol::ClientKeyCode::Insert
+                        | crate::protocol::ClientKeyCode::Esc
+                        | crate::protocol::ClientKeyCode::F(_)
+                        | crate::protocol::ClientKeyCode::Null
+                ) {
+                    Some(ForwardedInputEffect::NoText)
                 } else {
-                    Some(UnsentTextEffect::MayHold)
+                    Some(ForwardedInputEffect::Text)
                 }
             }
             ClientPaneInputEvent::TextCommit(text) | ClientPaneInputEvent::Paste(text) => {
-                (!text.is_empty()).then_some(UnsentTextEffect::MayHold)
+                (!text.is_empty()).then_some(ForwardedInputEffect::Text)
             }
             ClientPaneInputEvent::Mouse { .. } => None,
         };
@@ -53,17 +66,17 @@ pub(super) fn human_input_unsent_text(events: &[ClientPaneInputEvent]) -> Option
     effect
 }
 
-/// What raw input forwarded by a directly attached client proves about the
-/// target editor's unsent text: `None` proves nothing. Attach forwards the
-/// outer terminal's bytes verbatim, so the last byte decides, as for a key
-/// batch: a trailing Return is the human submitting the line and anything else
-/// may have added text. Ctrl-C and Ctrl-U are not clears here either: they are
-/// only codes once the outer terminal has encoded them, and in Pi they copy or
-/// delete to the line start.
-pub(super) fn attach_input_unsent_text(data: &[u8]) -> Option<UnsentTextEffect> {
+/// What raw input forwarded by a directly attached client could have done to the
+/// target editor: `None` proves nothing. Attach forwards the outer terminal's
+/// bytes verbatim, so the last byte decides: a trailing Return is the human
+/// submitting the line. Any other bytes count as text even when they are only a
+/// cursor key's escape sequence, because those bytes cannot be told from a
+/// bracket that inserts text; that errs toward refusing, and the editor's own
+/// report settles it.
+pub(super) fn attach_input_unsent_text(data: &[u8]) -> Option<ForwardedInputEffect> {
     match *data.last()? {
-        b'\r' => Some(UnsentTextEffect::Cleared),
-        _ => Some(UnsentTextEffect::MayHold),
+        b'\r' => Some(ForwardedInputEffect::Submitted),
+        _ => Some(ForwardedInputEffect::Text),
     }
 }
 
@@ -431,36 +444,29 @@ mod tests {
     /// partial delete such as Pi's `tui.editor.deleteToLineStart` on Ctrl-U).
     #[test]
     fn forwarded_human_input_marks_unsent_text_except_the_submit_key() {
-        use UnsentTextEffect::{Cleared, MayHold};
+        use ForwardedInputEffect::{NoText, Submitted, Text};
 
         let cases = [
-            (key(KeyCode::Enter, KeyModifiers::NONE), Some(Cleared)),
-            (key(KeyCode::Char('h'), KeyModifiers::NONE), Some(MayHold)),
-            (key(KeyCode::Up, KeyModifiers::NONE), Some(MayHold)),
-            (key(KeyCode::Tab, KeyModifiers::NONE), Some(MayHold)),
-            (key(KeyCode::Backspace, KeyModifiers::NONE), Some(MayHold)),
+            (key(KeyCode::Enter, KeyModifiers::NONE), Some(Submitted)),
+            (key(KeyCode::Char('h'), KeyModifiers::NONE), Some(Text)),
+            // Cursor movement and function keys cannot write text.
+            (key(KeyCode::Up, KeyModifiers::NONE), Some(NoText)),
+            (key(KeyCode::Left, KeyModifiers::NONE), Some(NoText)),
+            (key(KeyCode::Home, KeyModifiers::NONE), Some(NoText)),
+            (key(KeyCode::PageDown, KeyModifiers::NONE), Some(NoText)),
+            (key(KeyCode::F(5), KeyModifiers::NONE), Some(NoText)),
+            (key(KeyCode::Tab, KeyModifiers::NONE), Some(Text)),
+            (key(KeyCode::Backspace, KeyModifiers::NONE), Some(Text)),
             // Delete-to-line-start and copy-selection are not clears: text can
             // survive them (Pi: `tui.editor.deleteToLineStart`, `tui.input.copy`).
-            (
-                key(KeyCode::Char('u'), KeyModifiers::CONTROL),
-                Some(MayHold),
-            ),
-            (
-                key(KeyCode::Char('c'), KeyModifiers::CONTROL),
-                Some(MayHold),
-            ),
-            (
-                key(KeyCode::Char('r'), KeyModifiers::CONTROL),
-                Some(MayHold),
-            ),
-            (key(KeyCode::Esc, KeyModifiers::NONE), Some(MayHold)),
-            (key(KeyCode::Enter, KeyModifiers::SHIFT), Some(MayHold)),
-            (key(KeyCode::Char('c'), KeyModifiers::ALT), Some(MayHold)),
-            (
-                ClientPaneInputEvent::TextCommit("typed".into()),
-                Some(MayHold),
-            ),
-            (ClientPaneInputEvent::Paste("pasted".into()), Some(MayHold)),
+            (key(KeyCode::Char('u'), KeyModifiers::CONTROL), Some(Text)),
+            (key(KeyCode::Char('c'), KeyModifiers::CONTROL), Some(Text)),
+            (key(KeyCode::Char('r'), KeyModifiers::CONTROL), Some(Text)),
+            (key(KeyCode::Esc, KeyModifiers::NONE), Some(NoText)),
+            (key(KeyCode::Enter, KeyModifiers::SHIFT), Some(Text)),
+            (key(KeyCode::Char('c'), KeyModifiers::ALT), Some(Text)),
+            (ClientPaneInputEvent::TextCommit("typed".into()), Some(Text)),
+            (ClientPaneInputEvent::Paste("pasted".into()), Some(Text)),
             (released(KeyCode::Char('h')), None),
             (ClientPaneInputEvent::TextCommit(String::new()), None),
             (ClientPaneInputEvent::Paste(String::new()), None),
@@ -494,28 +500,28 @@ mod tests {
                 released(KeyCode::Char('h')),
                 key(KeyCode::Enter, KeyModifiers::NONE),
             ]),
-            Some(Cleared)
+            Some(Submitted)
         );
         assert_eq!(
             human_input_unsent_text(&[
                 key(KeyCode::Char('u'), KeyModifiers::CONTROL),
                 key(KeyCode::Char('h'), KeyModifiers::NONE),
             ]),
-            Some(MayHold)
+            Some(Text)
         );
 
         // Attached clients forward the outer terminal's bytes, so the last
         // byte decides the same way.
         let attached = [
             (b"".as_slice(), None),
-            (b"\r".as_slice(), Some(Cleared)),
+            (b"\r".as_slice(), Some(Submitted)),
             // Not clears on the raw path either: the outer terminal's own bytes
             // for Ctrl-C and Ctrl-U prove nothing about the editor.
-            (b"\x03".as_slice(), Some(MayHold)),
-            (b"\x15".as_slice(), Some(MayHold)),
-            (b"x".as_slice(), Some(MayHold)),
-            (b"half typed\r".as_slice(), Some(Cleared)),
-            (b"\x1b[A".as_slice(), Some(MayHold)),
+            (b"\x03".as_slice(), Some(Text)),
+            (b"\x15".as_slice(), Some(Text)),
+            (b"x".as_slice(), Some(Text)),
+            (b"half typed\r".as_slice(), Some(Submitted)),
+            (b"\x1b[A".as_slice(), Some(Text)),
         ];
         for (data, expected) in attached {
             assert_eq!(attach_input_unsent_text(data), expected, "{data:?}");
