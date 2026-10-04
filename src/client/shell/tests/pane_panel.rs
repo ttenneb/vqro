@@ -792,3 +792,39 @@ fn a_second_root_keeps_its_known_siblings() {
     assert!(text.contains("Known view"), "the known root: {text}");
     assert!(text.contains("A known row"), "{text}");
 }
+
+#[test]
+fn an_open_panel_claims_the_rect_below_it() {
+    // The claim is what makes the panel a split rather than a crop: the client
+    // tells the server the smaller terminal rect, so the pane's PTY is sized to
+    // the rows below the panel and the agent reflows.
+    let mut state = panel_state(None, true);
+    text_of(&mut state);
+    let claim = state
+        .pending_endpoint_controls
+        .iter()
+        .map(|(_, message)| format!("{message:?}"))
+        .find(|message| message.contains("pane.panels.v1"))
+        .expect("the claim is queued");
+    let data = claim
+        .split("data: \"")
+        .nth(1)
+        .and_then(|rest| rest.split("\" }").next())
+        .expect("claim json");
+    let data = data.replace("\\\"", "\"");
+    let claim: crate::protocol::endpoint::ClientPanePanels =
+        serde_json::from_str(&data).expect("claim decodes");
+    let size = claim.claims.first().expect("one claim").size;
+    let pane = state
+        .hits
+        .panes
+        .iter()
+        .find(|pane| pane.pane_id == "pane_1")
+        .expect("pane_1");
+    assert!(
+        size.rows < pane.projected_inner_rect.height,
+        "the claimed rows must be the pane's minus the panel: {size:?} vs {:?}",
+        pane.projected_inner_rect
+    );
+    assert_eq!(size.cols, pane.projected_inner_rect.width);
+}
