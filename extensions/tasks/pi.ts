@@ -161,11 +161,12 @@ export default function (pi: ExtensionAPI) {
         stopPoll(); explicit = false;
         const current = pending; pending = undefined;
         const prompt = fact.prompt ?? "";
-        // Positive ownership: only a run whose own prompt is the delivered content
-        // is answering it. Anything else — a human turn that won the race, a
-        // busy-queued follow-up, a merged or transformed prompt — gets no automatic
-        // reply rather than risking an unrelated turn's text.
-        const owns = current !== undefined && (prompt === current.content || (fact.prompt_truncated === true && prompt.length > 0 && current.content.startsWith(prompt)));
+        // Positive ownership only: the run's own prompt must be exactly the
+        // delivered content. A different or truncated prompt is not proven to be
+        // this delivery's run — a human turn that won the race, a busy-queued
+        // follow-up, or a prompt another input hook transformed — so nothing is
+        // sent rather than risking an unrelated turn's text.
+        const owns = current !== undefined && prompt === current.content;
         replyTo = owns ? current!.target : undefined;
         return;
       }

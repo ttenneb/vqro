@@ -12,7 +12,8 @@ on. Delivery to Pi is the reply-routing adapter claiming at a turn boundary,
 never pane typing. When a delivered message owns an agent turn, that turn's
 final text is recorded as a durable reply message to the exact sender binding,
 always with `reply_to` (a same-sender batch links its newest message). Ownership
-is the run's own prompt being the delivered text, so a handoff queued behind
+is the run's own prompt being exactly the delivered text (a different or
+truncated prompt is declined), so a handoff queued behind
 in-flight work, or a human turn that wins the race, is not auto-replied, and a
 delivered reply is never re-answered automatically. `vqro agent prompt` is human-only, so agents address
 each other with messages rather than pane input.

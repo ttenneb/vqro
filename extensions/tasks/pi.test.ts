@@ -218,6 +218,27 @@ test("the run whose prompt is the delivered content answers it", async () => {
   }
 });
 
+test("a transformed or prefix prompt is not the delivered run", async () => {
+  jest.useFakeTimers();
+  try {
+    for (const variant of ["transformed", "prefix"]) {
+      const messages = [messageFixture("m1", "colleague request")];
+      const h = mailboxHarness(messages);
+      await h.emit("session_start", {});
+      jest.advanceTimersByTime(MAILBOX_POLL_MS + 5);
+      await flush();
+      // Another input hook may transform human text; a truncated fact is a prefix.
+      const prompt = variant === "transformed" ? "human question with hook context" : deliveredContent(messages).slice(0, 12);
+      await h.emit("before_agent_start", { prompt });
+      await h.emit("turn_end", turnText("private human answer"));
+      await h.emit("agent_settled", {});
+      expect(sends(h)).toHaveLength(0);
+    }
+  } finally {
+    jest.useRealTimers();
+  }
+});
+
 test("a handoff queued behind a busy SDK does not route the active turn's final", async () => {
   jest.useFakeTimers();
   try {
