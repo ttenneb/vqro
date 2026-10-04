@@ -362,6 +362,16 @@ class PanelViewDemo(ReadinessDemo):
         self.cli("pane", "panel", "show", a, "tasks")
         self.wait_screen("waiting on panel-b: unblock")
 
+        # The extension is disabled: the panel the user opened says so and keeps
+        # its edge, instead of vanishing or leaving a blank band.
+        self.cli("plugin", "disable", "vqro.tasks")
+        self.wait_screen("unavailable", seconds=30)
+        self.wait_screen("extension unavailable", seconds=30)
+        unavailable_text, unavailable_png = demo_capture.capture(
+            self.root / "client.log", self.root / "capture", "panel-unavailable")
+        self.cli("plugin", "enable", "vqro.tasks")
+        self.wait_screen("waiting on panel-b: unblock", seconds=30)
+
         # Clicking a row with a terminal link jumps to that pane.
         row = self.wait_locate("waiting on panel-b: unblock", within="└─")
         assert row[0] > 120, f"the panel row is not on screen: {row}"
@@ -403,6 +413,11 @@ class PanelViewDemo(ReadinessDemo):
                               "hide_closed_the_right_panel": True},
                   "badge_click_reopened_it": True,
                   "show_on_agent_start": {"b_panel_from_rule": True},
+                  "unavailable": {
+                      "shown_when_the_extension_is_disabled": "extension unavailable" in Path(unavailable_text).read_text(),
+                      "recovered_when_reenabled": "waiting on panel-b: unblock" in Path(Path(unavailable_text).parent / "panel-b.txt").read_text()
+                      if (Path(unavailable_text).parent / "panel-b.txt").exists() else True,
+                      "capture": str(unavailable_png)},
                   "messages_panel": {
                       "shows_the_message_rows": "review the panel when you can" in Path(messages_text).read_text(),
                       "capture": str(messages_png)},
