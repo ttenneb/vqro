@@ -90,11 +90,15 @@ export default function (pi: ExtensionAPI) {
   const INPUT_BOX_POLL_MS = 1000;
   const INPUT_BOX_REFRESH_MS = 30_000;
   const INPUT_BOX_REQUEST_TIMEOUT_MS = 1500;
+  const INPUT_BOX_SETTLE_MS = 400;
   let editorPoll: ReturnType<typeof setInterval> | undefined;
   let stopEditorInput: (() => void) | undefined;
   let cancelInputBoxRequest: (() => void) | undefined;
+  let settleTimer: ReturnType<typeof setTimeout> | undefined;
   let inputBoxSeq = Date.now() * 1000;
-  let lastReportedInputBox: { text: string; at: number } | undefined;
+  let lastSentInputBox: { text: string; at: number } | undefined;
+  let pendingInputBox: { text: string } | undefined;
+  let dirty = false;
 
   function readInputBoxText(): string | undefined {
     try {
@@ -115,6 +119,8 @@ export default function (pi: ExtensionAPI) {
       settled = true;
       cancelInputBoxRequest = undefined;
       socket.destroy();
+      // An observation that arrived while this was in flight is still owed.
+      sendPendingInputBox();
     };
     cancelInputBoxRequest = finish;
     const timeout = setTimeout(finish, INPUT_BOX_REQUEST_TIMEOUT_MS);
@@ -129,44 +135,79 @@ export default function (pi: ExtensionAPI) {
     socket.unref?.();
   }
 
-  function reportInputBox(force = false): void {
+  /** Sends the retained observation, and only then caches it as sent. */
+  function sendPendingInputBox(): void {
+    if (cancelInputBoxRequest || !pendingInputBox) return;
     const socketPath = process.env.VQRO_SOCKET_PATH;
-    const text = readInputBoxText();
-    if (!socketPath || text === undefined || state.state === "closed") return;
-    const now = Date.now();
-    const changed = lastReportedInputBox === undefined || lastReportedInputBox.text !== text;
-    if (!force && !changed && now - (lastReportedInputBox?.at ?? 0) < INPUT_BOX_REFRESH_MS) return;
-    lastReportedInputBox = { text, at: now };
+    if (!socketPath || state.state === "closed") return;
+    const pending = pendingInputBox;
+    pendingInputBox = undefined;
+    dirty = false;
+    lastSentInputBox = { text: pending.text, at: Date.now() };
     inputBoxSeq += 1;
     sendInputBoxRequest(socketPath, JSON.stringify({
       id: `vqro:pi:input-box:${inputBoxSeq}`,
       method: "pane.report_metadata",
-      params: { pane_id: pane, source: "vqro:pi", seq: inputBoxSeq, tokens: { input_box: text.trim().length > 0 ? "has_text" : "empty" } },
+      params: { pane_id: pane, source: "vqro:pi", seq: inputBoxSeq, tokens: { input_box: pending.text.trim().length > 0 ? "has_text" : "empty" } },
     }));
+  }
+
+  /** Records that the editor may differ from the last report, and sends the
+   *  current fact once the input settles. A key settles, so a line typed and
+   *  deleted inside one poll still reports; a poll-observed text change (an
+   *  extension setting a draft) does not need the delay. */
+  function markInputBoxDirty(settle: boolean): void {
+    dirty = true;
+    if (!settle) return;
+    if (settleTimer) clearTimeout(settleTimer);
+    settleTimer = setTimeout(() => {
+      settleTimer = undefined;
+      flushInputBox();
+    }, INPUT_BOX_SETTLE_MS);
+    settleTimer.unref?.();
+  }
+
+  function flushInputBox(force = false): void {
+    const text = readInputBoxText();
+    if (text === undefined || state.state === "closed") return;
+    const now = Date.now();
+    const due = lastSentInputBox === undefined || now - lastSentInputBox.at >= INPUT_BOX_REFRESH_MS;
+    if (!force && !dirty && !due) return;
+    pendingInputBox = { text };
+    sendPendingInputBox();
   }
 
   function watchInputBox(ctx: any): void {
     stopInputBox();
     latestCtx = ctx;
-    reportInputBox(true);
-    // Interactive-mode key stream, so a keystroke is re-read immediately rather
-    // than at the next poll. Absent outside the TUI: the poll still covers it.
+    flushInputBox(true);
+    // Interactive-mode key stream, so a key settles into a report right after it
+    // rather than at the next poll. Absent outside the TUI: the poll still does.
     stopEditorInput = ctx?.ui?.onTerminalInput?.(() => {
-      setTimeout(() => reportInputBox(), 0);
+      markInputBoxDirty(true);
       return undefined;
     });
-    editorPoll = setInterval(() => reportInputBox(), INPUT_BOX_POLL_MS);
+    editorPoll = setInterval(() => {
+      const text = readInputBoxText();
+      if (text !== undefined && text !== lastSentInputBox?.text) markInputBoxDirty(false);
+      flushInputBox();
+    }, INPUT_BOX_POLL_MS);
     editorPoll.unref?.();
   }
 
   function stopInputBox(): void {
     if (editorPoll) clearInterval(editorPoll);
     editorPoll = undefined;
+    if (settleTimer) clearTimeout(settleTimer);
+    settleTimer = undefined;
     stopEditorInput?.();
     stopEditorInput = undefined;
     cancelInputBoxRequest?.();
-    lastReportedInputBox = undefined;
+    pendingInputBox = undefined;
+    lastSentInputBox = undefined;
+    dirty = false;
   }
+
   const adapter: AdapterV1 = {
     version: 1, snapshot, current, exec,
     onFact: listener => subscribe(facts, listener),
