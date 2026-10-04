@@ -55,6 +55,12 @@ pub struct WorktreeRemoveResult {
 /// An event from a background task to the main loop.
 #[derive(Debug)]
 pub enum AppEvent {
+    /// A user asked for a pane's panel view to open, close or toggle.
+    PanePanelRequested {
+        pane_id: String,
+        view_id: Option<String>,
+        action: crate::protocol::endpoint::ServerPanePanelAction,
+    },
     /// A pane's child process exited.
     PaneDied {
         pane_id: PaneId,

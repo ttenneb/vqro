@@ -252,6 +252,7 @@ pub enum Method {
     PaneLinkResolve(PaneLinkActivateParams),
     #[serde(rename = "pane.rename")]
     PaneRename(PaneRenameParams),
+    PanePanel(PanePanelParams),
     #[serde(rename = "pane.send_text")]
     PaneSendText(PaneSendTextParams),
     #[serde(rename = "pane.send_keys")]

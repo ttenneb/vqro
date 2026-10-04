@@ -272,7 +272,10 @@ pub(super) fn resize_tab_panes_except(
             let pane_inner =
                 collection_content_rect(tab, focused_id, pane_inner_rect(area, borders));
             let inner_rect = terminal_inner_rect(rt, pane_inner, app.pane_scrollbars);
+            // A pane a client claimed for an open panel is sized by that claim:
+            // the layout must not resize its PTY back, on this or any other path.
             if !excluded_panes.contains(&focused_id)
+                && !app.pane_panel_claims.contains_key(&focused_id)
                 && !app.direct_attach_resize_locks.contains(terminal_id)
             {
                 rt.resize(
@@ -300,6 +303,7 @@ pub(super) fn resize_tab_panes_except(
         {
             let inner_rect = terminal_inner_rect(rt, pane_inner, app.pane_scrollbars);
             if !excluded_panes.contains(&info.id)
+                && !app.pane_panel_claims.contains_key(&info.id)
                 && !app.direct_attach_resize_locks.contains(terminal_id)
             {
                 rt.resize(
@@ -314,6 +318,7 @@ pub(super) fn resize_tab_panes_except(
 }
 
 /// Compute pane layout info and optionally resize pane runtimes to match.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn compute_pane_infos_for_tab(
     app: &AppState,
     terminal_runtimes: &TerminalRuntimeRegistry,
@@ -346,7 +351,11 @@ pub(super) fn compute_pane_infos_for_tab(
         if let Some(rt) = app.runtime_for_pane_in_workspace(terminal_runtimes, ws_idx, focused_id) {
             (inner_rect, scrollbar_rect) =
                 stable_scrollbar_gutter(rt, pane_inner, app.pane_scrollbars);
+            // A pane a client claimed (an open panel) is sized by that claim, not
+            // by the layout: re-applying the layout size here would resize the PTY
+            // back and forth between the claim and every render.
             if resize_panes
+                && !app.pane_panel_claims.contains_key(&focused_id)
                 && tab.terminal_id(focused_id).is_some_and(|terminal_id| {
                     !app.direct_attach_resize_locks.contains(terminal_id)
                 })
@@ -386,6 +395,7 @@ pub(super) fn compute_pane_infos_for_tab(
             (inner_rect, scrollbar_rect) =
                 stable_scrollbar_gutter(rt, pane_inner, app.pane_scrollbars);
             if resize_panes
+                && !app.pane_panel_claims.contains_key(&info.id)
                 && tab.terminal_id(info.id).is_some_and(|terminal_id| {
                     !app.direct_attach_resize_locks.contains(terminal_id)
                 })

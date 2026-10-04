@@ -503,6 +503,17 @@ class Store:
             self.set_dependencies(task_id, payload["depends_on"])
         return task_id
 
+    def document_revision(self):
+        """State-derived version of everything the published document draws.
+
+        Task transitions alone miss messages, so a message that changes what a
+        panel shows must move this too: the host re-fetches a document only when
+        its version changes, and an idempotent retry must not move it.
+        """
+        transitions = self.db.execute("SELECT COALESCE(MAX(seq),0) FROM transitions").fetchone()[0]
+        messages = self.db.execute("SELECT COALESCE(MAX(revision),0) FROM messages").fetchone()[0]
+        return transitions + messages
+
     def invoke(self, params):
         if set(params) != {"caller", "payload"}:
             raise ValueError("invalid host action envelope")
@@ -714,7 +725,7 @@ def main():
                 except (ValueError, sqlite3.Error) as error:
                     print("decision policy delayed: " + str(error), file=sys.stderr)
             result = {"ok": True, "value": store.invoke(request["params"]),
-                      "document_revision": store.db.execute("SELECT COALESCE(MAX(seq),0) FROM transitions").fetchone()[0]}
+                      "document_revision": store.document_revision()}
         except OutcomeUnknown as error:
             emit({"type": "response", "id": request["id"], "error": str(error)})
             return

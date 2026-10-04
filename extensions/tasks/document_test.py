@@ -31,6 +31,54 @@ class DocumentTests(unittest.TestCase):
         return self.invoke({"action":action,"id":task["id"],"revision":task["revision"],"operation_id":f"{action}-{task['revision']}",**fields})["task"]
     def snapshot(self, refs=None, revision=1):
         return {"generation":7,"revision":revision,"terminals":refs if refs is not None else [{"terminal_id":"human","placement":P}],"activities":[]}
+    def test_pane_panels_slice_by_pane_and_link_the_counterparty(self):
+        panel_a={"pane_id":"w1:p1","workspace_id":"w1","tab_id":"w1:t1"}
+        panel_b={"pane_id":"w1:p2","workspace_id":"w1","tab_id":"w1:t1"}
+        root=self.invoke({"action":"create","title":"Panel root","operation_id":"panel-root"},caller=A)["task"]
+        root=self.change(root,"start")
+        child=self.invoke({"action":"create","title":"Panel child","parent":root["id"],"operation_id":"panel-child"},caller=A)["task"]
+        child=self.invoke({"action":"delegate","id":child["id"],"revision":child["revision"],
+                           "operation_id":"panel-delegate","owner":{"class":"agent","terminal_id":"b","agent":"pi","execution":"boot:1:2"}},caller=A)["task"]
+        refs=[{"terminal_id":"a","placement":panel_a},{"terminal_id":"b","placement":panel_b}]
+        items=document.project(self.store,self.snapshot(refs))["items"]
+        a_root=next(row for row in items if row["id"]=="panel:w1:p1:tasks")
+        self.assertEqual({"pane_id":"w1:p1","view_id":"tasks","state":"in_progress"},a_root["view"])
+        # The header counts the whole slice; rows carry the open work only.
+        self.assertEqual("0/2 done · 1 active · 1 ready",a_root["detail"])
+        a_child=next(row for row in items if row["id"]==f"panel:w1:p1:task:{child['id']}")
+        self.assertEqual({"them","start"}, {a_child["view"]["waiting"], a_child["view"]["action"]})
+        self.assertEqual({"terminal_id":"b","placement":panel_b},a_child["terminal"])
+        self.assertEqual(f"panel:w1:p1:task:{root['id']}",a_child["parent_id"])
+        self.assertEqual("open",a_child["view"]["state"])
+        self.assertIsInstance(a_child["view"]["since"],int)
+        b_root=next(row for row in items if row["id"]=="panel:w1:p2:tasks")
+        self.assertEqual("0/1 done · 1 ready",b_root["detail"])
+        b_child=next(row for row in items if row["id"]==f"panel:w1:p2:task:{child['id']}")
+        self.assertEqual({"you","start"}, {b_child["view"]["waiting"], b_child["view"]["action"]})
+        self.assertEqual({"terminal_id":"a","placement":panel_a},b_child["terminal"])
+        # Placement is required: no placement, no panel row.
+        self.assertFalse(any("panel:" in row["id"] for row in document.project(self.store,self.snapshot([]))["items"]))
+
+    def test_messages_view_shows_waiting_claimed_and_missing_replies(self):
+        panel_a={"pane_id":"w1:p1","workspace_id":"w1","tab_id":"w1:t1"}
+        panel_b={"pane_id":"w1:p2","workspace_id":"w1","tab_id":"w1:t1"}
+        agent_b={"class":"agent","terminal_id":"b","agent":"pi","execution":"boot:1:2"}
+        self.invoke({"action":"create","title":"Message anchor","operation_id":"anchor"},caller=A)
+        # The extension's own message path: A sends, B claims.
+        sent=self.store.messages.mutate({"action":"message_send","body":"please review the panel","recipient":agent_b}, A, "2026-10-04T00:00:00.000+00:00")
+        message_id=sent["message"]["id"]
+        self.store.messages.mutate({"action":"message_claim","id":message_id}, agent_b, "2026-10-04T00:01:00.000+00:00")
+        refs=[{"terminal_id":"a","placement":panel_a},{"terminal_id":"b","placement":panel_b}]
+        items=document.project(self.store,self.snapshot(refs))["items"]
+        a_root=next(row for row in items if row["id"]=="panel:w1:p1:messages")
+        self.assertEqual("Messages",a_root["label"])
+        self.assertEqual("1 no reply",a_root["detail"])
+        self.assertTrue(any(row["detail"].startswith("no reply to") for row in items if row["id"].startswith("panel:w1:p1:message:")))
+        b_rows=[row for row in items if row["id"].startswith("panel:w1:p2:message:")]
+        self.assertEqual(1,len(b_rows))
+        self.assertEqual("claimed",b_rows[0]["detail"])
+        self.assertTrue(b_rows[0]["label"].startswith("pi @") or "please review" in b_rows[0]["label"], b_rows[0])
+
     def test_shared_durable_policy_and_placement_move_and_unknown(self):
         task=self.invoke({"action":"create","title":"native","operation_id":"create"})["task"]
         task=self.change(task,"delegate",owner=H)
@@ -123,7 +171,7 @@ class DocumentTests(unittest.TestCase):
             self.assertEqual(0,proc.returncode,proc.stderr)
             lines=[json.loads(line) for line in proc.stdout.splitlines()]
             self.assertNotIn("error",lines[1])
-            self.assertEqual("host.document.v1",lines[1]["result"]["contract"])
+            self.assertEqual("host.view.v1",lines[1]["result"]["contract"])
             self.assertFalse(any("badge:" in row["id"] or "row:" in row["id"] for row in lines[1]["result"]["items"]))
             self.assertEqual([],list(Path(missing).iterdir()))
         welcome={"type":"welcome","protocol":2,"granted_capabilities":["action_invoke","host_document"],"methods":["action.invoke.v1","host.document.render"]}

@@ -566,6 +566,7 @@ pub(crate) fn api_method_name(method: &Method) -> &'static str {
         Method::PaneEdges(_) => "pane.edges",
         Method::PaneFocusDirection(_) => "pane.focus_direction",
         Method::PaneResize(_) => "pane.resize",
+        Method::PanePanel(_) => "pane.panel",
         Method::PaneScroll(_) => "pane.scroll",
         Method::PaneEditScrollback(_) => "pane.edit_scrollback",
         Method::PaneSelectionRead(_) => "pane.selection.read",
@@ -1194,6 +1195,7 @@ mod tests {
             tokens: HashMap::new(),
             agent_session: None,
             scroll: None,
+            terminal_size: None,
             revision: 0,
         }
     }

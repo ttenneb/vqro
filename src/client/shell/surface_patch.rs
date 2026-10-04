@@ -30,6 +30,66 @@ fn apply_row(row: &crate::protocol::PaneSurfacePatchRow, frame: &mut FrameData) 
     true
 }
 
+/// Rows a panel moved a pane's grid down by, by pane id: the band it reserved at
+/// the pane's top. The raw surface cache is the host's own view of the pane and
+/// has no band, so this applies to the *composed* rows only: a row the host wrote
+/// in the pane's coordinates belongs that many rows lower on screen.
+type PanelShifts = std::collections::HashMap<String, u16>;
+
+/// The panes a panel moved down, with the band and the surface rect of each: only
+/// these can contain a patch row that has to move, so a row for any other pane
+/// costs one comparison against a short list.
+struct PanelBands {
+    panes: Vec<(crate::protocol::SurfaceRect, u16)>,
+}
+
+impl PanelBands {
+    fn new(panes: &[crate::protocol::PaneSurfacePane], shifts: &PanelShifts) -> Self {
+        let panes = panes
+            .iter()
+            .filter_map(|pane| {
+                let band = shifts
+                    .get(&pane.pane_id)
+                    .copied()
+                    .filter(|band| *band > 0)?;
+                Some((pane.inner_rect, band))
+            })
+            .collect();
+        Self { panes }
+    }
+
+    /// The raw pane rect and band a patch row belongs to, when a panel moved it.
+    fn of(
+        &self,
+        row: &crate::protocol::PaneSurfacePatchRow,
+    ) -> Option<(crate::protocol::SurfaceRect, u16)> {
+        self.panes
+            .iter()
+            .find(|(rect, _)| {
+                row.x >= rect.x
+                    && row.x < rect.x.saturating_add(rect.width)
+                    && row.y >= rect.y
+                    && row.y < rect.y.saturating_add(rect.height)
+            })
+            .copied()
+    }
+
+    /// The band that translates a row into the rect below its panel.
+    fn band_for(&self, row: &crate::protocol::PaneSurfacePatchRow) -> Option<u16> {
+        self.of(row).map(|(_, band)| band)
+    }
+
+    /// Whether any row of this patch has no destination once translated: it comes
+    /// from the pane's last rows, where the grid ends. Such a patch composes.
+    fn any_row_past_grid(&self, rows: &[crate::protocol::PaneSurfacePatchRow]) -> bool {
+        rows.iter().any(|row| {
+            self.of(row).is_some_and(|(rect, band)| {
+                row.y.saturating_add(band) >= rect.y.saturating_add(rect.height)
+            })
+        })
+    }
+}
+
 fn apply_patch_to_surface(
     surface: &mut crate::protocol::PaneSurfaceFrame,
     patch: &crate::protocol::PaneSurfacePatch,
@@ -57,6 +117,7 @@ fn apply_patch_to_surface(
 fn fast_path_blocker(
     state: &ClientShellState,
     patch: &crate::protocol::PaneSurfacePatch,
+    bands: &PanelBands,
 ) -> Option<&'static str> {
     if state.mode != ClientShellMode::Terminal {
         Some("client_surface_patch.fallback.mode")
@@ -92,6 +153,12 @@ fn fast_path_blocker(
             .any(|hit| hit.pane_id == pane.pane_id)
     }) {
         Some("client_surface_patch.fallback.pane_hits")
+    } else if bands.any_row_past_grid(&patch.rows) {
+        // A row a panel moved has a destination below the band, so the fast path
+        // translates it and never paints into the panel. A row from the pane's last
+        // rows has no destination at all and takes the compose path, as does any
+        // change to the band or pane geometry.
+        Some("client_surface_patch.fallback.pane_panel_row_past_grid")
     } else {
         None
     }
@@ -171,7 +238,23 @@ impl ClientShellState {
             }
         }
 
-        let fast_path_blocker = fast_path_blocker(self, &patch);
+        // Vqro's own panel chrome owns its cells. A terminal patch is computed
+        // against the server's view of the pane, which does not know the panel
+        // reserved an edge of it, so a row that lands inside a panel is dropped
+        // and the next compose blends the panel over the patched surface again.
+        // Every band Vqro's own panels reserved, clickable or not: a patch row
+        // that lands in one of them is dropped, so chrome is never repainted
+        // over by a retained surface patch.
+        let panel_rows = self
+            .hits
+            .pane_panels
+            .iter()
+            .map(|hit| hit.rect)
+            .chain(self.pane_panel_areas.iter().copied())
+            .collect::<Vec<_>>();
+        let shifts = self.pane_panel_band_rows.clone();
+        let bands = PanelBands::new(&patch.panes, &shifts);
+        let fast_path_blocker = fast_path_blocker(self, &patch, &bands);
         if let Some(reason) = fast_path_blocker {
             crate::render_prof::event(reason);
         }
@@ -179,25 +262,60 @@ impl ClientShellState {
             let (cols, rows) = self.last_composed_size.unwrap_or_default();
             self.layout(cols, rows).pane_surface
         });
-        let composed_patch = fast_path_area.map(|area| ClientComposedSurfacePatch {
-            rows: patch
-                .rows
-                .iter()
-                .map(|row| crate::protocol::PaneSurfacePatchRow {
-                    x: area.x.saturating_add(row.x),
-                    y: area.y.saturating_add(row.y),
-                    cells: row.cells.clone(),
-                })
-                .collect(),
-            cursor: patch
-                .cursor
-                .clone()
-                .map(|cursor| crate::protocol::CursorState {
-                    x: area.x.saturating_add(cursor.x),
-                    y: area.y.saturating_add(cursor.y),
-                    visible: cursor.visible,
-                    shape: cursor.shape,
+        // The cursor's band and the composed row its pane ends at, from the pane the
+        // surface says is focused: a patch can carry only the panes it changed, so
+        // the focused pane is often absent from it. A cursor past that row is not
+        // visible, which is what a full compose decides too.
+        let focused = self
+            .pane_surface
+            .as_ref()
+            .and_then(|surface| surface.panes.iter().find(|pane| pane.focused));
+        let cursor_band = focused
+            .and_then(|pane| shifts.get(&pane.pane_id).copied())
+            .unwrap_or(0);
+        let composed_patch = fast_path_area.map(|area| {
+            // The composed row the focused pane ends at: a cursor at or past it is
+            // not visible, which is what a full compose decides too.
+            let cursor_bottom = focused.map(|pane| {
+                area.y
+                    .saturating_add(pane.inner_rect.y)
+                    .saturating_add(pane.inner_rect.height)
+            });
+            ClientComposedSurfacePatch {
+                rows: patch
+                    .rows
+                    .iter()
+                    .map(|row| crate::protocol::PaneSurfacePatchRow {
+                        x: area.x.saturating_add(row.x),
+                        y: area
+                            .y
+                            .saturating_add(row.y)
+                            .saturating_add(bands.band_for(row).unwrap_or(0)),
+                        cells: row.cells.clone(),
+                    })
+                    // Only the panel's own cells are filtered: a row with no
+                    // destination never reaches here, because the predicate above
+                    // sends such a patch to the compose path.
+                    .filter(|row| {
+                        !panel_rows.iter().any(|panel| {
+                            row.y >= panel.y
+                                && row.y < panel.bottom()
+                                && row.x < panel.right()
+                                && row.x.saturating_add(row.cells.len() as u16) > panel.x
+                        })
+                    })
+                    .collect(),
+                cursor: patch.cursor.clone().map(|cursor| {
+                    let y = area.y.saturating_add(cursor.y).saturating_add(cursor_band);
+                    let visible = cursor.visible && cursor_bottom.is_none_or(|bottom| y < bottom);
+                    crate::protocol::CursorState {
+                        x: area.x.saturating_add(cursor.x),
+                        y,
+                        visible,
+                        shape: cursor.shape,
+                    }
                 }),
+            }
         });
         if let Some(area) = fast_path_area {
             let applied = self

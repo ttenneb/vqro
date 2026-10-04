@@ -198,6 +198,7 @@ fn pane_scroll_result(
                 max_offset_from_bottom,
                 viewport_rows,
             }),
+            terminal_size: None,
             revision: 0,
         },
     }
@@ -259,6 +260,8 @@ mod keybindings_settings;
 mod link_hover;
 mod mobile;
 mod mouse_selection;
+mod pane_panel;
+mod pane_panel_profile;
 mod popup_focus_projection;
 mod recovery;
 mod startup_overlays;

@@ -32,6 +32,7 @@ mod mouse;
 mod notification_policy;
 mod notifications;
 mod overlay_input;
+mod pane_panel;
 mod preferences;
 mod recovery_browser;
 mod render;

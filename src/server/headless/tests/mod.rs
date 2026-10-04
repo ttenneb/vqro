@@ -628,6 +628,8 @@ async fn client_shell_attach_seeds_workspace() {
             pane_view_enabled: false,
             terminal_views_enabled: false,
             writer,
+            pane_panels_enabled: false,
+            host_views_enabled: false,
         })
     );
 
@@ -663,6 +665,8 @@ async fn client_shell_endpoint_request_uses_the_selected_connection() {
             pane_view_enabled: false,
             terminal_views_enabled: false,
             writer,
+            pane_panels_enabled: false,
+            host_views_enabled: false,
         })
     );
     let _initial_snapshot = control_rx.recv().expect("initial shell snapshot");
@@ -757,6 +761,8 @@ async fn native_endpoint_lane_dispatches_methods_outside_the_frozen_bridge() {
             pane_view_enabled: false,
             terminal_views_enabled: false,
             writer,
+            pane_panels_enabled: false,
+            host_views_enabled: false,
         })
     );
     let _initial_snapshot = control_rx.recv().expect("initial shell snapshot");
@@ -852,6 +858,8 @@ async fn client_shell_pairs_agent_view_set_replacement_and_clear_with_snapshots(
             pane_view_enabled: false,
             terminal_views_enabled: false,
             writer,
+            pane_panels_enabled: false,
+            host_views_enabled: false,
         })
     );
     let initial = client_shell_snapshot(read_server_message(
@@ -946,6 +954,8 @@ async fn host_documents_control_is_sent_only_when_negotiated() {
                 pane_view_enabled: false,
                 terminal_views_enabled: false,
                 writer,
+                pane_panels_enabled: false,
+                host_views_enabled: false,
             })
         );
         let _snapshot = client_shell_snapshot(read_server_message(
@@ -1012,6 +1022,8 @@ async fn client_shell_receives_metadata_then_shell_free_pane_surface() {
             pane_view_enabled: false,
             terminal_views_enabled: false,
             writer,
+            pane_panels_enabled: false,
+            host_views_enabled: false,
         })
     );
     let snapshot = client_shell_snapshot(read_server_message(
@@ -1194,6 +1206,8 @@ fn connect_test_shell(
             pane_view_enabled: false,
             terminal_views_enabled: false,
             writer,
+            pane_panels_enabled: false,
+            host_views_enabled: false,
         })
     );
     (control, render)
@@ -1660,6 +1674,8 @@ async fn client_shell_config_diagnostics_follow_keybinding_ownership() {
             pane_view_enabled: false,
             terminal_views_enabled: false,
             writer: local_writer,
+            pane_panels_enabled: false,
+            host_views_enabled: false,
         })
     );
     let local_snapshot = client_shell_snapshot(read_server_message(
@@ -1689,6 +1705,8 @@ async fn client_shell_config_diagnostics_follow_keybinding_ownership() {
             pane_view_enabled: false,
             terminal_views_enabled: false,
             writer: endpoint_writer,
+            pane_panels_enabled: false,
+            host_views_enabled: false,
         })
     );
     let endpoint_snapshot = client_shell_snapshot(read_server_message(
@@ -2161,6 +2179,206 @@ async fn repeated_layout_action_reapplies_controller_geometry() {
 
     let after = server.app.state.workspaces[0].test_runtimes[&first_pane].current_size();
     assert_ne!(after, before);
+    shutdown_test_runtimes(&mut server);
+}
+
+#[tokio::test]
+async fn a_disconnected_client_stops_owning_its_panel_claim() {
+    // A client that goes away must stop shrinking the pane's terminal: the claim
+    // map is host session state and every layout pass consults it.
+    let mut server = test_headless_server();
+    let mut workspace = crate::workspace::Workspace::test_new("pane-panel-claims");
+    let pane = workspace.tabs[0].root_pane;
+    workspace.insert_test_runtime(
+        pane,
+        crate::terminal::TerminalRuntime::test_with_screen_bytes(80, 24, b"ready"),
+    );
+    server.app.state.workspaces = vec![workspace];
+    server.app.state.active = Some(0);
+    server.app.state.selected = 0;
+    server.app.state.mode = crate::app::Mode::Terminal;
+
+    let (control, _) = connect_test_shell(&mut server, 165, 100, 30);
+    let _ = control.recv().expect("snapshot");
+    server
+        .clients
+        .get_mut(&165)
+        .unwrap()
+        .shell_pane_panels_enabled = true;
+    let boot_id = server.client_shell_boot_id.clone();
+    let public_pane = server.app.public_pane_id(0, pane).unwrap();
+    let revision = server.clients[&165].shell_projection_revision;
+    assert!(
+        server.handle_server_event(ServerEvent::ClientShellPanePanels {
+            client_id: 165,
+            panels: crate::protocol::endpoint::ClientPanePanels {
+                boot_id,
+                projection_revision: revision,
+                claims: vec![crate::protocol::endpoint::ClientPanePanelClaim {
+                    pane_id: public_pane,
+                    size: crate::protocol::ClientSurfaceSize { cols: 60, rows: 12 },
+                }],
+            },
+        })
+    );
+    assert!(
+        server.app.state.pane_panel_claims.contains_key(&pane),
+        "the claim is host session state"
+    );
+
+    assert!(server.handle_server_event(ServerEvent::ClientDisconnected { client_id: 165 }));
+    assert!(
+        !server.app.state.pane_panel_claims.contains_key(&pane),
+        "a disconnected client's claim must not keep shrinking the pane"
+    );
+    shutdown_test_runtimes(&mut server);
+}
+
+#[tokio::test]
+async fn two_clients_claiming_one_pane_get_the_smallest_viewport_regardless_of_order() {
+    let mut server = test_headless_server();
+    let mut workspace = crate::workspace::Workspace::test_new("pane-panels");
+    let pane = workspace.tabs[0].root_pane;
+    workspace.insert_test_runtime(
+        pane,
+        crate::terminal::TerminalRuntime::test_with_screen_bytes(80, 24, b"ready"),
+    );
+    server.app.state.workspaces = vec![workspace];
+    server.app.state.active = Some(0);
+    server.app.state.selected = 0;
+    server.app.state.mode = crate::app::Mode::Terminal;
+
+    let (first_control, _) = connect_test_shell(&mut server, 165, 100, 30);
+    let _ = first_control.recv().expect("snapshot");
+    let (second_control, _) = connect_test_shell(&mut server, 166, 80, 20);
+    let _ = second_control.recv().expect("other snapshot");
+    for client_id in [165, 166] {
+        server
+            .clients
+            .get_mut(&client_id)
+            .unwrap()
+            .shell_pane_panels_enabled = true;
+    }
+    // Both clients are connected before the boot id is read: connecting bumps
+    // it, and a claim from before a boot is stale by design.
+    let boot_id = server.client_shell_boot_id.clone();
+    let public_pane = server.app.public_pane_id(0, pane).unwrap();
+    let revision = server.clients[&165].shell_projection_revision;
+    let other_revision = server.clients[&166].shell_projection_revision;
+    let claim = |cols, rows| crate::protocol::endpoint::ClientPanePanels {
+        boot_id: boot_id.clone(),
+        projection_revision: revision,
+        claims: vec![crate::protocol::endpoint::ClientPanePanelClaim {
+            pane_id: public_pane.clone(),
+            size: crate::protocol::ClientSurfaceSize { cols, rows },
+        }],
+    };
+
+    // The layout size, to check the pane returns to it once nothing is claimed.
+    let layout_size = server.app.state.workspaces[0].test_runtimes[&pane].current_size();
+
+    // The larger claim arrives first and the smaller one second.
+    assert!(
+        server.handle_server_event(ServerEvent::ClientShellPanePanels {
+            client_id: 165,
+            panels: claim(60, 20),
+        })
+    );
+    assert_eq!(
+        server.app.state.workspaces[0].test_runtimes[&pane].current_size(),
+        (20, 60)
+    );
+    let mut second = claim(40, 12);
+    second.projection_revision = other_revision;
+    assert!(
+        server.handle_server_event(ServerEvent::ClientShellPanePanels {
+            client_id: 166,
+            panels: second,
+        })
+    );
+    // Smallest wins: the largest panel of any attached client fits.
+    assert_eq!(
+        server.app.state.workspaces[0].test_runtimes[&pane].current_size(),
+        (12, 40)
+    );
+
+    assert!(
+        server.clients[&165].shell_pane_panels.is_some(),
+        "first client keeps its claim"
+    );
+    assert!(
+        server.clients[&165].is_active_shell_client(),
+        "first client stays active"
+    );
+    assert_eq!(
+        server.clients[&165]
+            .shell_pane_panels
+            .as_ref()
+            .map(|panels| panels.boot_id.clone()),
+        Some(server.client_shell_boot_id.clone()),
+        "first client's claim is not stale"
+    );
+    // The order is irrelevant: a larger claim from another client afterwards
+    // leaves the smallest in force.
+    let mut third = claim(70, 25);
+    third.projection_revision = other_revision;
+    assert!(
+        server.handle_server_event(ServerEvent::ClientShellPanePanels {
+            client_id: 166,
+            panels: third,
+        })
+    );
+    assert_eq!(
+        server.app.state.workspaces[0].test_runtimes[&pane].current_size(),
+        (20, 60)
+    );
+
+    // A stale boot id is rejected and changes nothing.
+    assert!(
+        !server.handle_server_event(ServerEvent::ClientShellPanePanels {
+            client_id: 166,
+            panels: crate::protocol::endpoint::ClientPanePanels {
+                boot_id: "other-boot".into(),
+                projection_revision: other_revision,
+                claims: vec![crate::protocol::endpoint::ClientPanePanelClaim {
+                    pane_id: public_pane.clone(),
+                    size: crate::protocol::ClientSurfaceSize { cols: 10, rows: 4 },
+                }],
+            },
+        })
+    );
+
+    // One client stops: the smallest claim of the clients that remain is in
+    // force, so the pane follows the second client alone.
+    assert!(
+        server.handle_server_event(ServerEvent::ClientShellPanePanels {
+            client_id: 165,
+            panels: crate::protocol::endpoint::ClientPanePanels {
+                boot_id: boot_id.clone(),
+                projection_revision: revision,
+                claims: Vec::new(),
+            },
+        })
+    );
+    assert_eq!(
+        server.app.state.workspaces[0].test_runtimes[&pane].current_size(),
+        (25, 70)
+    );
+    assert!(
+        server.handle_server_event(ServerEvent::ClientShellPanePanels {
+            client_id: 166,
+            panels: crate::protocol::endpoint::ClientPanePanels {
+                boot_id,
+                projection_revision: other_revision,
+                claims: Vec::new(),
+            },
+        })
+    );
+    // No claims left at all: the pane returns to its layout geometry.
+    assert_eq!(
+        server.app.state.workspaces[0].test_runtimes[&pane].current_size(),
+        layout_size
+    );
     shutdown_test_runtimes(&mut server);
 }
 
@@ -3696,6 +3914,8 @@ async fn public_api_focus_replaces_every_client_shell_projection() {
             pane_view_enabled: false,
             terminal_views_enabled: false,
             writer,
+            pane_panels_enabled: false,
+            host_views_enabled: false,
         })
     );
     let initial_revision = client_shell_snapshot(read_server_message(
@@ -4054,6 +4274,8 @@ async fn client_shell_streams_and_targets_popup_terminal_content() {
             pane_view_enabled: false,
             terminal_views_enabled: false,
             writer,
+            pane_panels_enabled: false,
+            host_views_enabled: false,
         })
     );
     let _snapshot = client_shell_snapshot(read_server_message(

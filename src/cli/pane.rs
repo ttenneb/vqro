@@ -1,12 +1,12 @@
 use crate::api::schema::{
     Method, OutputMatch, PaneCurrentParams, PaneDirection, PaneEdgesParams,
     PaneFocusDirectionParams, PaneInputSetParams, PaneLayoutParams, PaneListParams,
-    PaneMoveDestination, PaneMoveParams, PaneNeighborParams, PaneProcessInfoParams, PaneReadParams,
-    PaneReleaseAgentParams, PaneRenameParams, PaneReportAgentParams, PaneReportAgentSessionParams,
-    PaneReportMetadataParams, PaneResizeParams, PaneRightClickTarget, PaneSendInputParams,
-    PaneSendKeysParams, PaneSendTextParams, PaneSplitParams, PaneSwapParams, PaneTarget,
-    PaneWaitForOutputParams, PaneZoomMode, PaneZoomParams, ReadFormat, ReadSource, Request,
-    SplitDirection,
+    PaneMoveDestination, PaneMoveParams, PaneNeighborParams, PanePanelAction, PanePanelParams,
+    PaneProcessInfoParams, PaneReadParams, PaneReleaseAgentParams, PaneRenameParams,
+    PaneReportAgentParams, PaneReportAgentSessionParams, PaneReportMetadataParams,
+    PaneResizeParams, PaneRightClickTarget, PaneSendInputParams, PaneSendKeysParams,
+    PaneSendTextParams, PaneSplitParams, PaneSwapParams, PaneTarget, PaneWaitForOutputParams,
+    PaneZoomMode, PaneZoomParams, ReadFormat, ReadSource, Request, SplitDirection,
 };
 
 pub(super) fn run_pane_command(args: &[String]) -> std::io::Result<i32> {
@@ -24,6 +24,7 @@ pub(super) fn run_pane_command(args: &[String]) -> std::io::Result<i32> {
         "neighbor" => pane_neighbor(&args[1..]),
         "edges" => pane_edges(&args[1..]),
         "focus" => pane_focus(&args[1..]),
+        "panel" => pane_panel(&args[1..]),
         "resize" => pane_resize(&args[1..]),
         "zoom" => pane_zoom(&args[1..]),
         "read" => pane_read(&args[1..]),
@@ -196,6 +197,67 @@ fn pane_neighbor(args: &[String]) -> std::io::Result<i32> {
         id: "cli:pane:neighbor".into(),
         method: Method::PaneNeighbor(params),
     })?)
+}
+
+fn pane_panel(args: &[String]) -> std::io::Result<i32> {
+    let params = match parse_pane_panel_args(args) {
+        Ok(params) => params,
+        Err(message) => {
+            eprintln!("{message}");
+            return Ok(2);
+        }
+    };
+    super::runtime::pane_panel(params)
+}
+
+fn parse_pane_panel_args(args: &[String]) -> Result<PanePanelParams, String> {
+    let mut action = None;
+    let mut pane_id = None;
+    let mut view = None;
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "show" | "hide" | "toggle" if action.is_none() => {
+                action = Some(match args[index].as_str() {
+                    "show" => PanePanelAction::Show,
+                    "hide" => PanePanelAction::Hide,
+                    _ => PanePanelAction::Toggle,
+                });
+                index += 1;
+            }
+            "--pane" => {
+                let Some(value) = args.get(index + 1) else {
+                    return Err("missing value for --pane".into());
+                };
+                pane_id = Some(super::normalize_pane_id(value));
+                index += 2;
+            }
+            "--view" => {
+                let Some(value) = args.get(index + 1) else {
+                    return Err("missing value for --view".into());
+                };
+                view = Some(value.clone());
+                index += 2;
+            }
+            value if !value.starts_with('-') && action.is_some() && pane_id.is_none() => {
+                pane_id = Some(super::normalize_pane_id(value));
+                index += 1;
+            }
+            value if !value.starts_with('-') && action.is_some() && view.is_none() => {
+                view = Some(value.to_owned());
+                index += 1;
+            }
+            _ => return Err("usage: vqro pane panel show|hide|toggle <pane> [<view>]".to_string()),
+        }
+    }
+    let Some(action) = action else {
+        return Err("usage: vqro pane panel show|hide|toggle <pane> [<view>]".to_string());
+    };
+    Ok(PanePanelParams {
+        pane_id,
+        view,
+        action,
+    })
 }
 
 fn pane_focus(args: &[String]) -> std::io::Result<i32> {
@@ -1667,6 +1729,7 @@ fn print_pane_help() {
     eprintln!("  vqro pane neighbor --direction left|right|up|down [--pane ID|--current]");
     eprintln!("  vqro pane edges [--pane ID|--current]");
     eprintln!("  vqro pane focus --direction left|right|up|down [--pane ID|--current]");
+    eprintln!("  vqro pane panel show|hide|toggle <pane_id> [<view>]");
     eprintln!(
         "  vqro pane resize --direction left|right|up|down [--amount FLOAT] [--pane ID|--current]"
     );

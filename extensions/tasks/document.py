@@ -1,12 +1,31 @@
-"""Actionless native attention presentation, from Tasks' own durable store.
+"""Native attention and pane panels, from Tasks' own durable store.
 
 Terminal placement is a host observation, not execution/acceptance authority.
-Live-owner categories deliberately remain in the full terminal view.
+Live owner status is joined by Vqro when it draws, so this module publishes the
+durable meaning only: which task, who owes what, and since when.
 """
+import datetime
+import json
+import sqlite3
 from collections import Counter
-from view import clean, durable_attention as attention, label
+from provider import canonical
+from view import clean, debtors, durable_attention as attention, label, recipient
 
 PREFIX = "context:attention."
+VIEW_CONTRACT = "host.view.v1"
+PANEL_VIEW = "tasks"
+PANEL_ROW_LIMIT = 24
+# The one word Vqro composes "waiting on ..." around.
+OWED_TEXT = {
+    "start": "start",
+    "work/report": "report",
+    "unblock": "unblock",
+    "accept": "accept",
+    "answer": "answer",
+    "acceptor_missing": "accept",
+}
+CHIP_TONE = {"open": "muted", "in_progress": "accent", "blocked": "danger", "reported": "success"}
+CHIP_TEXT = {"open": "open", "in_progress": "in progress", "blocked": "blocked", "reported": "reported"}
 
 
 def badge_text(counts):
@@ -16,6 +35,263 @@ def badge_text(counts):
 
 def bounded(text):
     return clean(text).encode("utf-8")[:240].decode("utf-8", errors="ignore")
+
+
+def epoch(value):
+    """Unix epoch seconds of a store instant, or None when unreadable."""
+    if not value:
+        return None
+    try:
+        return int(datetime.datetime.fromisoformat(value).timestamp())
+    except ValueError:
+        return None
+
+
+def final(task):
+    return task["state"] in ("accepted", "done")
+
+
+def state_name(task):
+    """The fixed state Vqro draws a Pi-style glyph for."""
+    return {"open": "open", "in_progress": "in_progress", "blocked": "blocked", "reported": "reported",
+            "accepted": "done", "done": "done"}.get(task["state"], "open")
+
+
+def count_word(task):
+    if final(task):
+        return "done"
+    if task["state"] == "blocked":
+        return "blocked"
+    if task["state"] == "in_progress":
+        return "active"
+    return "ready" if task.get("ready") else "waiting"
+
+
+def summary(counts):
+    """The panel header's own summary of the slice, in the todo widget's shape."""
+    parts = [f"{counts['done']}/{sum(counts.values())} done"]
+    parts.extend(f"{counts[word]} {word}" for word in ("active", "blocked", "ready", "waiting") if counts[word])
+    return " · ".join(parts)
+
+
+def pane_slices(tasks, placements):
+    """Per-pane slices: counts over the whole slice, rows for open work.
+
+    A task appears in its owner's pane as that agent's debt, and in the pane of
+    the agent it is owed to as something they are waiting for. No placement, no
+    row: the host's placement is an observation, never a guess.
+    """
+    by_id = {task["id"]: task for task in tasks}
+    slices = {}
+    for task in tasks:
+        owner = task.get("owner") or {}
+        creditor = recipient(task, by_id) or {}
+        owner_placement = (placements or {}).get(owner.get("terminal_id"))
+        creditor_placement = (placements or {}).get(creditor.get("terminal_id"))
+        owed = OWED_TEXT.get(task.get("owed_action") or "", "work")
+        entries = []
+        # In the owner's pane the viewer owes the action; in the pane it is owed
+        # to, the owner does. Vqro says which, and names the other side.
+        if owner_placement:
+            entries.append((owner_placement["pane_id"], "you", owed, creditor, creditor_placement))
+        if creditor_placement and creditor_placement["pane_id"] != (owner_placement or {}).get("pane_id"):
+            entries.append((creditor_placement["pane_id"], "them", owed, owner, owner_placement))
+        for pane_id, waiting, action, counterparty, counterparty_placement in entries:
+            bucket = slices.setdefault(pane_id, {"counts": Counter(), "rows": []})
+            bucket["counts"][count_word(task)] += 1
+            if not final(task):
+                bucket["rows"].append({
+                    "task": task,
+                    "state": state_name(task),
+                    "waiting": waiting,
+                    "action": action,
+                    "counterparty": counterparty,
+                    "counterparty_placement": counterparty_placement,
+                    "since": epoch(task.get("owed_since") or task.get("updated_at")),
+                })
+    for bucket in slices.values():
+        bucket["rows"].sort(key=lambda row: (row["task"]["state"] != "blocked",
+                                             row["task"].get("owed_since") or row["task"].get("updated_at") or ""))
+    return slices
+
+
+def panel_terminal(binding, placement):
+    if binding is None or placement is None or not binding.get("terminal_id"):
+        return None
+    if binding.get("role") == "acceptors" or binding.get("class") in ("human_unverified",):
+        return None
+    return {"terminal_id": binding["terminal_id"], "placement": placement}
+
+
+MESSAGE_VIEW = "messages"
+MESSAGE_LIMIT = 8
+MESSAGE_PREVIEW = 60
+
+
+def message_record(row):
+    """One messages row as the store keeps it."""
+    return {key: row[key] for key in row.keys()}
+
+
+def known_bindings(tasks, messages=()):
+    """canonical key -> binding, from the records the extension already owns.
+
+    A message stores its sender and recipient as canonical binding keys, so a
+    name and a terminal link need this join: the task records carry their own
+    bindings, and each message's keys are bindings too.
+    """
+    known = {}
+    for task in tasks:
+        for key in ("owner", "creator", "delegator"):
+            binding = task.get(key)
+            if isinstance(binding, dict):
+                known[canonical(binding)] = binding
+    for record in messages:
+        for key in ("sender", "recipient"):
+            try:
+                binding = json.loads(record.get(key) or "null")
+            except (TypeError, ValueError):
+                continue
+            if isinstance(binding, dict):
+                known.setdefault(record[key], binding)
+    return known
+
+
+def executions_by_terminal(known):
+    by_terminal = {}
+    for binding in known.values():
+        terminal, execution = binding.get("terminal_id"), binding.get("execution")
+        if binding.get("class") == "agent" and terminal and execution:
+            by_terminal.setdefault(terminal, execution)
+    return by_terminal
+
+
+def message_subject(record):
+    body = " ".join(bounded(record.get("body") or "").split())
+    return body[:MESSAGE_PREVIEW] if body else "(no body)"
+
+
+def message_rows(records, execution, known):
+    """One pane's messages: waiting pickups, claimed messages, missing replies.
+
+    Show and jump only: sending and claiming stay in the CLI.
+    """
+    def counterpart(key):
+        binding = known.get(key)
+        if binding is None:
+            return None, None
+        return binding, label(binding, None)
+
+    rows = []
+    for record in records:
+        sender_binding, sender_label = counterpart(record.get("sender"))
+        recipient_binding, recipient_label = counterpart(record.get("recipient"))
+        if record["state"] == "waiting" and record["recipient_execution"] == execution:
+            rows.append({"label": f"{sender_label}: {message_subject(record)}",
+                         "state": "open", "waiting": "you", "action": "claim",
+                         "since": epoch(record.get("created_at")),
+                         "counterparty": sender_binding, "kind": "waiting"})
+        elif record["state"] in ("claimed", "answered") and record["recipient_execution"] == execution:
+            rows.append({"label": f"{sender_label}: {message_subject(record)}",
+                         "state": "done", "detail": record["state"],
+                         "since": epoch(record.get("updated_at") or record.get("created_at")),
+                         "counterparty": sender_binding, "kind": "claimed"})
+    replied = {record.get("reply_to") for record in records if record.get("reply_to")}
+    mine = {
+        canonical(binding)
+        for binding in known.values()
+        if binding.get("execution") == execution
+    }
+    for record in records:
+        if record.get("sender") not in mine or record["id"] in replied:
+            continue
+        _, recipient_label = counterpart(record.get("recipient"))
+        rows.append({"label": message_subject(record),
+                     "state": "reported", "detail": f"no reply to {recipient_label}",
+                     "since": epoch(record.get("created_at")),
+                     "counterparty": None, "kind": "no-reply"})
+    return rows[: MESSAGE_LIMIT * 2]
+
+
+def message_panel_items(tasks, placements, messages, known, room):
+    """One messages view per pane whose agent has messages or owes a reply."""
+    items = []
+    by_terminal = executions_by_terminal(known)
+    # Every placed terminal is a candidate pane; only an agent's has messages.
+    panes = {}
+    for terminal_id, placement in sorted((placements or {}).items()):
+        if terminal_id in by_terminal:
+            panes.setdefault(placement["pane_id"], terminal_id)
+    for pane_id, terminal_id in sorted(panes.items()):
+        execution = by_terminal.get(terminal_id)
+        if not execution:
+            continue
+        rows = message_rows(messages, execution, known)
+        if not rows or len(items) + 3 > room:
+            continue
+        waiting = sum(1 for row in rows if row["kind"] == "waiting")
+        missing = sum(1 for row in rows if row["kind"] == "no-reply")
+        summary = " · ".join(
+            part for part in (
+                f"{waiting} waiting" if waiting else "",
+                f"{missing} no reply" if missing else "",
+            ) if part
+        ) or "settled"
+        root_id = f"panel:{pane_id}:{MESSAGE_VIEW}"
+        items.append({"id": root_id, "role": "section", "label": "Messages",
+                      "detail": summary,
+                      "view": {"pane_id": pane_id, "view_id": MESSAGE_VIEW,
+                               "state": "in_progress" if waiting else "open"}})
+        for index, row in enumerate(rows):
+            if len(items) + 1 >= room:
+                break
+            item = {"id": f"panel:{pane_id}:message:{index}", "role": "section",
+                    "parent_id": root_id, "label": row["label"],
+                    "view": {"state": row["state"]}}
+            if row.get("action"):
+                item["view"]["waiting"] = row["waiting"]
+                item["view"]["action"] = row["action"]
+            elif row.get("detail"):
+                item["detail"] = row["detail"]
+            if row.get("since") is not None:
+                item["view"]["since"] = row["since"]
+            terminal = panel_terminal(row.get("counterparty"), (placements or {}).get(
+                (row.get("counterparty") or {}).get("terminal_id")))
+            if terminal is not None:
+                item["terminal"] = terminal
+            items.append(item)
+    return items
+
+
+def panel_items(tasks, placements, room):
+    """One panel view per pane with rows, bounded by the remaining item room."""
+    items = []
+    for pane_id, bucket in sorted(pane_slices(tasks, placements).items()):
+        if len(items) + 2 > room:
+            break
+        root_id = f"panel:{pane_id}:{PANEL_VIEW}"
+        rows = bucket["rows"][:PANEL_ROW_LIMIT]
+        in_slice = {row["task"]["id"] for row in rows}
+        items.append({"id": root_id, "role": "section", "label": "Tasks",
+                      "detail": summary(bucket["counts"]), "view": {
+                          "pane_id": pane_id, "view_id": PANEL_VIEW,
+                          "state": "in_progress" if bucket["counts"]["active"] else "open"}})
+        for row in rows:
+            if len(items) + 1 >= room:
+                break
+            task = row["task"]
+            item = {"id": f"panel:{pane_id}:task:{task['id']}", "role": "section",
+                    "label": bounded(task["title"]),
+                    "view": {"state": row["state"], "waiting": row["waiting"], "action": row["action"]}}
+            if row["since"] is not None:
+                item["view"]["since"] = row["since"]
+            parent = task.get("parent")
+            item["parent_id"] = f"panel:{pane_id}:task:{parent}" if parent in in_slice else root_id
+            terminal = panel_terminal(row["counterparty"], row["counterparty_placement"])
+            if terminal is not None:
+                item["terminal"] = terminal
+            items.append(item)
+    return items
 
 
 def project(store, snapshot):
@@ -46,12 +322,23 @@ def project(store, snapshot):
     for (kind, key), value in sorted(counts.items()):
         items.append({"id": PREFIX + f"badge:{kind}:{key}:{value['human']}:{value['blocked']}:{value['unavailable']}",
                       "role": "section", "label": bounded(badge_text(value)), "flags": {"attention": True}})
-    room = max(0, 256 - len(items) - 1)
-    items.extend(rows[:room])
-    if len(rows) > room:
-        items.append({"id": PREFIX + "overflow:tasks", "role": "section", "label": f"{len(rows) - room} more · open full Tasks view"})
+    room = max(0, 256 - len(items))
+    attention_rows = rows[: room // 2]
+    items.extend(attention_rows)
+    items.extend(panel_items(tasks, placements, max(0, 256 - len(items))))
+    if store is not None:
+        try:
+            messages = [message_record(row) for row in store.db.execute(
+                "SELECT * FROM messages ORDER BY created_at DESC, id DESC LIMIT 200")]
+        except sqlite3.OperationalError:
+            messages = []
+        known = known_bindings(tasks, messages)
+        items.extend(message_panel_items(
+            tasks, placements, messages, known, max(0, 256 - len(items))))
+    if len(rows) > len(attention_rows):
+        items.append({"id": PREFIX + "overflow:tasks", "role": "section", "label": f"{len(rows)} more · open full Tasks view"})
     if len(items) > 256:
         raise ValueError("attention scopes exceed document item bound")
-    return {"contract": "host.document.v1", "namespace": "vqro.tasks", "generation": snapshot["generation"],
+    return {"contract": VIEW_CONTRACT, "namespace": "vqro.tasks", "generation": snapshot["generation"],
             "revision": snapshot["revision"], "surface": "navigation", "target": {"kind": "session"},
             "items": items, "actions": [], "required_capabilities": []}

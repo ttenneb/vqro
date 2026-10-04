@@ -32,6 +32,11 @@ pub const AGENT_VIEW_PROJECTION_KIND: &str = "endpoint.agent-view.v1";
 pub const SESSION_STRUCTURE_CAPABILITY: &str = "session_structure_v1";
 pub const SESSION_STRUCTURE_KIND: &str = "session.structure.v1";
 pub const HOST_DOCUMENTS_KIND: &str = "host.documents.v1";
+/// A client that can parse `host.view.v1` documents advertises this kind, and
+/// the server sends it view entries. A client that cannot is sent legacy
+/// entries only: the projection is a published codec, so it must never carry a
+/// contract the client would reject.
+pub const HOST_VIEWS_KIND: &str = "host.view.v1";
 pub const PANE_VIEWPORT_CAPABILITY: &str = "pane_viewport_v1";
 pub const PANE_VIEW_CAPABILITY: &str = "pane_view_v1";
 pub const PANE_VIEWPORT_KIND: &str = "pane.viewport.v1";
@@ -41,6 +46,14 @@ pub const PANE_VIEW_RESULT_KIND: &str = "pane.view.result.v1";
 pub const PANE_VIEW_ACTION_KIND: &str = "pane.view.action.v1";
 pub const PANE_VIEW_ACTION_RESULT_KIND: &str = "pane.view.action-result.v1";
 pub const PANE_VIEW_CONFIRM_KIND: &str = "pane.view.confirm.v1";
+/// Pane panels: a client may reserve an edge of several panes and claim the
+/// smaller terminal viewport for each, and the server may ask it to open, close
+/// or toggle one of the views it has.
+pub const PANE_PANELS_CAPABILITY: &str = "pane_panels_v1";
+pub const PANE_PANELS_KIND: &str = "pane.panels.v1";
+pub const PANE_PANELS_REQUEST_KIND: &str = "pane.panels.request.v1";
+pub const MAX_PANE_PANEL_CLAIMS: usize = 16;
+
 pub const TERMINAL_VIEWS_CAPABILITY: &str = "terminal_views_v1";
 pub const TERMINAL_VIEWS_INTEREST_KIND: &str = "terminal.views.interest.v1";
 pub const TERMINAL_VIEWS_SURFACE_KIND: &str = "terminal.views.surface.v1";
@@ -240,6 +253,43 @@ pub struct ClientShellDelegation {
     pub purpose: Option<String>,
     pub depth: usize,
     pub external_parent_id: Option<String>,
+}
+
+/// One pane whose terminal this client shows smaller because it draws a panel
+/// in the freed edge.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClientPanePanelClaim {
+    pub pane_id: String,
+    pub size: crate::protocol::ClientSurfaceSize,
+}
+
+/// The complete set of panels a client has open, one claim per pane. Later
+/// versions replace earlier ones; an empty list releases every claim.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClientPanePanels {
+    pub boot_id: String,
+    pub projection_revision: u64,
+    #[serde(default)]
+    pub claims: Vec<ClientPanePanelClaim>,
+}
+
+/// A user's request, forwarded to attached clients that understand it. Older
+/// clients ignore the kind and keep their own view state.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ServerPanePanelRequest {
+    pub pane_id: String,
+    /// The view to act on; absent means every view the pane publishes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub view_id: Option<String>,
+    pub action: ServerPanePanelAction,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ServerPanePanelAction {
+    Show,
+    Hide,
+    Toggle,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

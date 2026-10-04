@@ -80,6 +80,8 @@ async fn metadata_only_shell_is_isolated_until_surface_activation() {
             pane_view_enabled: false,
             terminal_views_enabled: false,
             writer,
+            pane_panels_enabled: false,
+            host_views_enabled: false,
         })
     );
     assert!(matches!(
@@ -301,6 +303,8 @@ async fn background_surface_activation_preserves_focused_viewer_geometry() {
             pane_view_enabled: false,
             terminal_views_enabled: false,
             writer,
+            pane_panels_enabled: false,
+            host_views_enabled: false,
         })
     );
     let _ = background_control
@@ -417,6 +421,8 @@ async fn presentation_sync_epoch_replays_modes_and_title() {
             pane_view_enabled: false,
             terminal_views_enabled: false,
             writer,
+            pane_panels_enabled: false,
+            host_views_enabled: false,
         })
     );
     let _ = control_rx.recv().expect("initial snapshot");
@@ -536,6 +542,8 @@ async fn two_headless_servers_drive_atomic_endpoint_handoff() {
             pane_view_enabled: false,
             terminal_views_enabled: false,
             writer: source_writer,
+            pane_panels_enabled: false,
+            host_views_enabled: false,
         })
     );
     let source_snapshot = client_shell_snapshot(read_server_message(
@@ -566,6 +574,8 @@ async fn two_headless_servers_drive_atomic_endpoint_handoff() {
             pane_view_enabled: false,
             terminal_views_enabled: false,
             writer: target_writer,
+            pane_panels_enabled: false,
+            host_views_enabled: false,
         })
     );
     let remote_snapshot = client_shell_snapshot(read_server_message(

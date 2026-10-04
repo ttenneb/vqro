@@ -8,6 +8,13 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 pub const HOST_DOCUMENT_CONTRACT_V1: &str = "host.document.v1";
+/// One new, separately named, versioned view format. It travels the live host
+/// document path with the same envelope, scope and action contract as
+/// `host.document.v1` and adds the view blocks Vqro draws in panels. An older
+/// client ignores the added item/action fields, so this stays append-only.
+pub const HOST_VIEW_CONTRACT_V1: &str = "host.view.v1";
+pub const MAX_VIEW_DEPTH: usize = 8;
+pub const MAX_VIEW_ACTION_CHARS: usize = 24;
 pub const MAX_DOCUMENT_PROVIDERS: usize = 16;
 pub const MAX_DOCUMENT_ITEMS: usize = 512;
 const MAX_SPACES_ITEMS: usize = MAX_DOCUMENT_ITEMS;
@@ -237,6 +244,95 @@ pub struct HostDocumentItem {
     pub action_ids: Vec<String>,
     #[serde(default)]
     pub flags: HostDocumentItemFlags,
+    /// View only: this item's view blocks. A legacy document never carries it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub view: Option<HostViewItem>,
+}
+
+/// The view blocks of one item. Every field is optional: an item with no view
+/// block is a plain group, and an unknown future block degrades to
+/// "unsupported" instead of rejecting the view.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct HostViewItem {
+    /// What this block is, as a free string so the set can grow: `section` and
+    /// `row` are known, and anything else is drawn as "unsupported" in place
+    /// rather than dropped. Never a closed enum: an unknown variant would make
+    /// an older client reject the whole view.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    /// A panel root: the pane whose panel this item's subtree fills. Only a
+    /// root item (no parent) may set it. Vqro draws the pane's bottom edge slot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pane_id: Option<String>,
+    /// A panel root: the stable id of this view inside the pane's panel stack,
+    /// as the user names it to `vqro pane panel`. Only a root may set it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub view_id: Option<String>,
+    /// A row state, or a panel root's aggregate state for its header glyph.
+    /// Vqro draws the fixed Pi-style glyph and its tone; the extension owns
+    /// only which state the row or panel is in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<HostViewState>,
+    /// What the row is waiting for, in one short word ("unblock", "report").
+    /// Vqro composes the sentence around it, so the row never spells out
+    /// bookkeeping of its own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action: Option<String>,
+    /// Whose move the row waits for. Vqro says "you" or names the terminal
+    /// link, which is the only party it can speak about live.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub waiting: Option<HostViewWaiting>,
+    /// Unix epoch seconds whose age Vqro draws. Only the extension knows what
+    /// the instant means.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub since: Option<u64>,
+}
+
+/// Whose move a row waits for.
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum HostViewWaiting {
+    /// The user of this client owes the action.
+    #[default]
+    You,
+    /// The row's terminal link owes the action; Vqro names it.
+    Them,
+}
+
+/// The fixed state vocabulary Vqro draws a glyph and tone for: the same set the
+/// Pi todo widget uses, so panels read like the rest of the UI.
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum HostViewState {
+    /// Not started or unblocked: `○`.
+    #[default]
+    Open,
+    /// Being worked on: `◐`.
+    InProgress,
+    /// Cannot proceed: `⊘`.
+    Blocked,
+    /// Waiting for someone to accept it: `◎`.
+    Reported,
+    /// Finished: `●`.
+    Done,
+}
+
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum HostViewTone {
+    #[default]
+    Default,
+    Muted,
+    Accent,
+    Success,
+    Warning,
+    Danger,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -300,6 +396,10 @@ pub struct HostDocumentAction {
     pub subject_id: Option<String>,
     #[serde(default)]
     pub confirmation: HostConfirmation,
+    // v1 is read-only: how a user answers an action inside a panel is deferred
+    // until the interaction model is designed, so no shape for it is frozen
+    // here. An unknown field is ignored by any client, so the shape can be added
+    // later without breaking this one.
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -723,7 +823,8 @@ impl HostDocumentV1 {
     }
 
     pub fn validate(&self) -> Result<(), HostDocumentError> {
-        if self.contract != HOST_DOCUMENT_CONTRACT_V1 {
+        let is_view = self.contract == HOST_VIEW_CONTRACT_V1;
+        if !is_view && self.contract != HOST_DOCUMENT_CONTRACT_V1 {
             return invalid("unsupported host document contract");
         }
         validate_namespace(&self.namespace)?;
@@ -750,6 +851,10 @@ impl HostDocumentV1 {
             if let Some(terminal) = &item.terminal {
                 validate_terminal_ref(terminal)?;
             }
+            validate_view_item_fields(item, is_view)?;
+        }
+        if is_view {
+            validate_item_depth(&self.items)?;
         }
         for item in &self.items {
             if let Some(parent) = item.parent_id.as_deref() {
@@ -926,6 +1031,70 @@ fn validate_text(value: &str) -> Result<(), HostDocumentError> {
         || value.chars().any(|character| character.is_control())
     {
         return invalid("invalid document text");
+    }
+    Ok(())
+}
+
+/// View blocks exist only on `host.view.v1`. A legacy document that carries
+/// them is rejected instead of being drawn with fields its consumers cannot
+/// see, so a provider cannot publish view semantics under the old name.
+fn validate_view_item_fields(
+    item: &HostDocumentItem,
+    is_view: bool,
+) -> Result<(), HostDocumentError> {
+    let has_view_fields = item.view.is_some();
+    if !is_view {
+        return if has_view_fields {
+            invalid("view item fields require the view contract")
+        } else {
+            Ok(())
+        };
+    }
+    let Some(view) = &item.view else {
+        return Ok(());
+    };
+    if let Some(action) = &view.action {
+        if action.trim().is_empty() || action.chars().count() > MAX_VIEW_ACTION_CHARS {
+            return invalid("invalid view action text");
+        }
+        validate_text(action)?;
+    }
+    if (view.pane_id.is_some() || view.view_id.is_some()) && item.parent_id.is_some() {
+        return invalid("only a panel root may name its pane or view");
+    }
+    if view.view_id.is_some() != view.pane_id.is_some() {
+        return invalid("a panel root names both its pane and its view");
+    }
+    if view.pane_id.is_none() && item.parent_id.is_none() {
+        return invalid("a view block needs a panel root or a parent section");
+    }
+    if let Some(kind) = &view.kind {
+        validate_local_id(kind)?;
+    }
+    if let Some(pane_id) = &view.pane_id {
+        validate_local_id(pane_id)?;
+    }
+    if let Some(view_id) = &view.view_id {
+        validate_local_id(view_id)?;
+    }
+    Ok(())
+}
+
+fn validate_item_depth(items: &[HostDocumentItem]) -> Result<(), HostDocumentError> {
+    let parents = items
+        .iter()
+        .map(|item| (item.id.as_str(), item.parent_id.as_deref()))
+        .collect::<HashMap<_, _>>();
+    for item in items {
+        let mut current = Some(item.id.as_str());
+        let mut depth = 0;
+        while let Some(id) = current {
+            depth += 1;
+            if depth > MAX_VIEW_DEPTH {
+                return invalid("view hierarchy is too deep");
+            }
+            current = parents.get(id).copied().flatten();
+        }
     }
     Ok(())
 }
@@ -1192,6 +1361,84 @@ mod tests {
             .contains("too many workspaces"));
     }
 
+    fn view_item(id: &str, parent: Option<&str>) -> HostDocumentItem {
+        HostDocumentItem {
+            id: id.into(),
+            parent_id: parent.map(str::to_owned),
+            role: HostItemRole::Section,
+            label: "row".into(),
+            detail: None,
+            terminal: None,
+            action_ids: Vec::new(),
+            flags: HostDocumentItemFlags::default(),
+            view: Some(HostViewItem {
+                kind: parent.is_some().then(|| "row".to_owned()),
+                pane_id: parent.is_none().then(|| "w1:p2".to_owned()),
+                view_id: parent.is_none().then(|| "tasks".to_owned()),
+                state: parent.is_some().then_some(HostViewState::Blocked),
+                action: parent.is_some().then(|| "unblock".to_owned()),
+                waiting: parent.is_some().then_some(HostViewWaiting::Them),
+                since: parent.is_some().then_some(1_700_000_000),
+            }),
+        }
+    }
+
+    fn view_document() -> HostDocumentV1 {
+        HostDocumentV1 {
+            contract: HOST_VIEW_CONTRACT_V1.into(),
+            namespace: "example.view".into(),
+            generation: 7,
+            revision: 2,
+            surface: HostSurface::Navigation,
+            target: HostTarget::Session,
+            items: vec![
+                view_item("panel:1", None),
+                view_item("panel:1:row", Some("panel:1")),
+            ],
+            actions: Vec::new(),
+            required_capabilities: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn view_contract_accepts_every_v1_block() {
+        let document = view_document();
+        document.validate().unwrap();
+        // A legacy document may not smuggle view blocks in.
+        let mut legacy = document.clone();
+        legacy.contract = HOST_DOCUMENT_CONTRACT_V1.into();
+        assert!(legacy.validate().unwrap_err().0.contains("view contract"));
+    }
+
+    #[test]
+    fn view_contract_needs_a_panel_root_or_a_parent_for_a_view_block() {
+        let mut document = view_document();
+        document.items[1].parent_id = None;
+        document.items[1].view.as_mut().unwrap().pane_id = None;
+        document.items[1].view.as_mut().unwrap().view_id = None;
+        assert!(document
+            .validate()
+            .unwrap_err()
+            .0
+            .contains("panel root or a parent"));
+        // A panel root names both its pane and its view.
+        let mut document = view_document();
+        document.items[0].view.as_mut().unwrap().view_id = None;
+        assert!(document.validate().unwrap_err().0.contains("both its pane"));
+    }
+
+    #[test]
+    fn view_action_text_is_bounded() {
+        let mut document = view_document();
+        document.items[1].view.as_mut().unwrap().action =
+            Some("x".repeat(MAX_VIEW_ACTION_CHARS + 1));
+        assert!(document
+            .validate()
+            .unwrap_err()
+            .0
+            .contains("invalid view action text"));
+    }
+
     fn document() -> HostDocumentV1 {
         HostDocumentV1 {
             contract: HOST_DOCUMENT_CONTRACT_V1.into(),
@@ -1215,6 +1462,7 @@ mod tests {
                         expanded: true,
                         ..Default::default()
                     },
+                    view: None,
                 },
                 HostDocumentItem {
                     id: "member:1".into(),
@@ -1232,6 +1480,7 @@ mod tests {
                     }),
                     action_ids: vec!["select:1".into()],
                     flags: HostDocumentItemFlags::default(),
+                    view: None,
                 },
             ],
             actions: vec![HostDocumentAction {

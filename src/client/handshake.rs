@@ -11,8 +11,9 @@ use tracing::info;
 use crate::ipc::LocalStream;
 use crate::protocol::endpoint::{
     EndpointClientHello, EndpointServerWelcome, BLOB_CODEC_V1, ENDPOINT_HELLO_KIND,
-    ENDPOINT_PROTOCOL_GENERATION, ENDPOINT_WELCOME_KIND, HOST_DOCUMENTS_KIND, INPUT_CODEC_V1,
-    PANE_VIEWPORT_KIND, PANE_VIEW_ACTION_KIND, PANE_VIEW_ACTION_RESULT_KIND, PANE_VIEW_CANCEL_KIND,
+    ENDPOINT_PROTOCOL_GENERATION, ENDPOINT_WELCOME_KIND, HOST_DOCUMENTS_KIND, HOST_VIEWS_KIND,
+    INPUT_CODEC_V1, PANE_PANELS_KIND, PANE_PANELS_REQUEST_KIND, PANE_VIEWPORT_KIND,
+    PANE_VIEW_ACTION_KIND, PANE_VIEW_ACTION_RESULT_KIND, PANE_VIEW_CANCEL_KIND,
     PANE_VIEW_CONFIRM_KIND, PANE_VIEW_REQUEST_KIND, PANE_VIEW_RESULT_KIND, SESSION_STRUCTURE_KIND,
     SNAPSHOT_CODEC_V1, SURFACE_CODEC_V1, TERMINAL_VIEWS_INTEREST_KIND, TERMINAL_VIEWS_SURFACE_KIND,
 };
@@ -191,6 +192,7 @@ pub(super) fn do_handshake(
             control_kinds: vec![
                 SESSION_STRUCTURE_KIND.into(),
                 HOST_DOCUMENTS_KIND.into(),
+                HOST_VIEWS_KIND.into(),
                 PANE_VIEWPORT_KIND.into(),
                 PANE_VIEW_REQUEST_KIND.into(),
                 PANE_VIEW_CANCEL_KIND.into(),
@@ -199,6 +201,8 @@ pub(super) fn do_handshake(
                 PANE_VIEW_ACTION_RESULT_KIND.into(),
                 PANE_VIEW_CONFIRM_KIND.into(),
                 TERMINAL_VIEWS_INTEREST_KIND.into(),
+                PANE_PANELS_KIND.into(),
+                PANE_PANELS_REQUEST_KIND.into(),
                 TERMINAL_VIEWS_SURFACE_KIND.into(),
                 crate::native_api::NATIVE_API_REQUEST_KIND_V1.into(),
                 crate::native_api::NATIVE_API_RESPONSE_KIND_V1.into(),

@@ -109,6 +109,9 @@ pub(crate) struct ClientShellConfig {
     pub(super) startup_config_diagnostic: Option<String>,
     pub(super) startup_server_notice: Option<String>,
     pub(super) startup_onboarding: bool,
+    /// Open a pane's views when an agent starts there. On by default; the user
+    /// opts out. Only a user action or this user-facing rule opens a view.
+    pub(super) show_panels_on_agent_start: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -153,6 +156,7 @@ pub(super) struct ShellHitMap {
     pub(super) attention_toggle: Rect,
     pub(super) panes: Vec<PaneHit>,
     pub(super) collections: Vec<CollectionChromeHit>,
+    pub(super) pane_panels: Vec<super::pane_panel::PanePanelHit>,
     pub(super) collection_members: Vec<CollectionMemberHit>,
     pub(super) popup: Option<PaneHit>,
     pub(super) pane_splits: Vec<PaneSplitHit>,
@@ -326,6 +330,13 @@ pub(super) enum ClientChromeDrag {
         grab_offset: i32,
         last_sent_ratio: Option<f32>,
         last_sent_at: Option<std::time::Instant>,
+    },
+    /// Dragging a pane panel's edge. The pane's PTY resizes once, on release.
+    PanePanelEdge {
+        pane_id: String,
+        start_row: u16,
+        start_height: u16,
+        max_height: u16,
     },
     PaneScrollbar {
         hit: PaneHit,
@@ -1110,6 +1121,32 @@ pub(crate) struct ClientShellState {
     pub(super) collection_list_views: HashSet<String>,
     pub(super) collection_expanded_members: HashMap<String, HashSet<String>>,
     pub(super) collection_preview_heights: HashMap<String, u16>,
+    /// Panel collapse state per pane: per client, never shared.
+    pub(super) pane_panel_display: HashMap<String, super::pane_panel::PanePanelDisplay>,
+    /// Which views the user (or the show-on-agent-start rule) has open, per
+    /// pane, by the extension's own view id. Per client, never shared.
+    ///
+    /// Panels are addressed by pane (that is what the server's request names)
+    /// but *kept* by terminal id, so a pane that moves between tabs keeps its
+    /// panels: `pane_terminal_ids` is the join, filled from the snapshot.
+    pub(super) pane_panel_open: HashMap<String, std::collections::BTreeSet<String>>,
+    /// Pane identity to terminal identity, joined from the published views:
+    /// a pane has exactly one terminal, so any placement in it is authoritative.
+    pub(super) pane_terminal_ids: HashMap<String, String>,
+    /// The same panels, kept by terminal identity. This is the durable key: a
+    /// pane that moves between tabs changes its pane id but not its terminal,
+    /// so the panes above are derived from this on every snapshot.
+    pub(super) panels_by_terminal: HashMap<String, std::collections::BTreeSet<String>>,
+    pub(super) display_by_terminal: HashMap<String, super::pane_panel::PanePanelDisplay>,
+    /// The last pane panel claim sent, so it is sent only when it changes.
+    pub(super) last_pane_panels: Option<crate::protocol::endpoint::ClientPanePanels>,
+    /// Panes that already had an agent when the rule last ran.
+    pub(super) panes_with_agents: std::collections::BTreeSet<String>,
+    /// The panel bands Vqro drew, clickable or not, for the patch filter.
+    pub(super) pane_panel_areas: Vec<Rect>,
+    /// Rows a panel moved each pane's grid down by, by pane id: a retained patch
+    /// row for that pane belongs that many rows lower.
+    pub(super) pane_panel_band_rows: HashMap<String, u16>,
     pub(super) collection_entered_pane: Option<String>,
     pub(super) collection_maximized_pane: Option<(String, String)>,
     /// Stable local presentation preferences; never carries connection/action authority.
@@ -1181,6 +1218,10 @@ pub(crate) struct ClientShellState {
     pub(super) pending_input_source_changes: Vec<bool>,
     pub(super) pending_endpoint_controls: Vec<(ClientEndpointId, ClientMessage)>,
     pub(super) last_pane_viewport_request:
+        Option<crate::protocol::endpoint::ClientPaneViewportRequest>,
+    /// The pane viewport a pane panel claims, separate from the transient
+    /// inspector claim so opening the inspector never fights a panel.
+    pub(super) last_pane_panel_viewport:
         Option<crate::protocol::endpoint::ClientPaneViewportRequest>,
     pub(super) host_appearance: Option<crate::terminal_theme::HostAppearance>,
     pub(super) host_appearance_explicit: bool,
@@ -1298,6 +1339,15 @@ impl ClientShellState {
             collection_list_views: HashSet::new(),
             collection_expanded_members: HashMap::new(),
             collection_preview_heights: HashMap::new(),
+            pane_panel_display: HashMap::new(),
+            pane_panel_open: HashMap::new(),
+            pane_terminal_ids: HashMap::new(),
+            panels_by_terminal: HashMap::new(),
+            display_by_terminal: HashMap::new(),
+            last_pane_panels: None,
+            panes_with_agents: Default::default(),
+            pane_panel_areas: Vec::new(),
+            pane_panel_band_rows: HashMap::new(),
             collection_entered_pane: None,
             collection_maximized_pane: None,
             recovery_presentations: HashMap::new(),
@@ -1365,6 +1415,7 @@ impl ClientShellState {
             pending_input_source_changes: Vec::new(),
             pending_endpoint_controls: Vec::new(),
             last_pane_viewport_request: None,
+            last_pane_panel_viewport: None,
             host_appearance: None,
             host_appearance_explicit: false,
             host_background: None,
@@ -1560,6 +1611,14 @@ impl ClientShellState {
         self.collection_list_views.clear();
         self.collection_expanded_members.clear();
         self.collection_preview_heights.clear();
+        self.pane_panel_display.clear();
+        self.pane_panel_open.clear();
+        self.pane_terminal_ids.clear();
+        self.panels_by_terminal.clear();
+        self.display_by_terminal.clear();
+        self.last_pane_panels = None;
+        self.panes_with_agents.clear();
+        self.pane_panel_areas.clear();
         self.collection_entered_pane = None;
         self.collection_maximized_pane = None;
         self.terminal_view_surfaces.clear();
@@ -1620,6 +1679,7 @@ impl ClientShellState {
         self.host_mouse_pixels = None;
         self.pending_endpoint_controls.clear();
         self.last_pane_viewport_request = None;
+        self.last_pane_panel_viewport = None;
         self.dismissed_product_announcement = None;
     }
 
@@ -1649,6 +1709,7 @@ impl ClientShellState {
             // preserving it would leave stale content or a permanently loading request.
             self.inspector = None;
             self.last_pane_viewport_request = None;
+            self.last_pane_panel_viewport = None;
             self.terminal_view_surfaces.clear();
             self.last_terminal_views_interest = None;
             if matches!(
@@ -1926,6 +1987,10 @@ impl ClientShellState {
             }
         }
         self.snapshot = Some(snapshot);
+        // Pane identities are known now: restore the user's own panels, then
+        // apply the show-on-agent-start rule if the user enabled it.
+        self.restore_pane_panels();
+        let _ = self.apply_show_panels_on_agent_start();
         let focused_repository = self.focused_repository_id();
         if let Some(ClientShellOverlay::Extensions(extensions)) = self.overlay.as_mut() {
             extensions.repository_context = focused_repository;

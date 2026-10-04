@@ -321,9 +321,16 @@ impl App {
         let pane = ws.pane_state(pane_id)?;
         let terminal = self.state.terminals.get(&pane.attached_terminal_id)?;
         let tab_idx = ws.find_tab_index_for_pane(pane_id)?;
-        let scroll = self
-            .state
-            .runtime_for_pane_in_workspace(&self.terminal_runtimes, ws_idx, pane_id)
+        let runtime =
+            self.state
+                .runtime_for_pane_in_workspace(&self.terminal_runtimes, ws_idx, pane_id);
+        // The live terminal size: a pane whose terminal a client claimed for an
+        // open panel is smaller than its layout rect by that panel's band.
+        let terminal_size = runtime.map(|runtime| {
+            let (rows, cols) = runtime.current_size();
+            crate::api::schema::PaneTerminalSize { rows, cols }
+        });
+        let scroll = runtime
             .and_then(|runtime| runtime.scroll_metrics())
             .map(|metrics| crate::api::schema::PaneScrollInfo {
                 offset_from_bottom: metrics.offset_from_bottom as u64,
@@ -359,6 +366,7 @@ impl App {
             tokens: terminal.metadata_tokens.values(),
             agent_session: terminal_agent_session_info(terminal),
             scroll,
+            terminal_size,
             revision: terminal.revision,
         })
     }

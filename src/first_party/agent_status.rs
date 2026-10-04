@@ -51,6 +51,7 @@ pub(crate) fn project(snapshot: &HostAgentActivityV1) -> Result<HostDocumentV1, 
                 attention: state == HostAgentActivityState::Blocked,
                 ..Default::default()
             },
+            view: None,
         });
         for activity in activities {
             items.push(activity_item(activity, state_id));
@@ -91,6 +92,7 @@ fn activity_item(activity: &HostAgentActivityRecord, state_id: &str) -> HostDocu
             attention: activity.activity == HostAgentActivityState::Blocked,
             ..Default::default()
         },
+        view: None,
     }
 }
 

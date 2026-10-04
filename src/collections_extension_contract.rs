@@ -515,6 +515,7 @@ impl CollectionsDocumentProfileV1 {
                     disabled: false,
                     attention: false,
                 },
+                view: None,
             });
         }
         let document = HostDocumentV1 {

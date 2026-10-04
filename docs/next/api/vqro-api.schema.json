@@ -1096,6 +1096,17 @@
             "terminal_id": {
               "type": "string"
             },
+            "terminal_size": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/event/$defs/PaneTerminalSize"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The pane's live terminal size: the rows and columns its PTY and terminal\ncore have now. A pane whose terminal a client claimed for a panel is\nsmaller than its layout rect by the panel's band, so this is the size to\ncompare against the pane's own rows."
+            },
             "terminal_title": {
               "type": [
                 "string",
@@ -1280,6 +1291,27 @@
             "offset_from_bottom",
             "max_offset_from_bottom",
             "viewport_rows"
+          ],
+          "type": "object"
+        },
+        "PaneTerminalSize": {
+          "properties": {
+            "cols": {
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "rows": {
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "rows",
+            "cols"
           ],
           "type": "object"
         },
@@ -3952,6 +3984,39 @@
           },
           "required": [
             "direction"
+          ],
+          "type": "object"
+        },
+        "PanePanelAction": {
+          "enum": [
+            "show",
+            "hide",
+            "toggle"
+          ],
+          "type": "string"
+        },
+        "PanePanelParams": {
+          "description": "One user request to open, close or toggle a pane panel view. Vqro forwards\nit to the attached clients that advertise the pane-panels control; a client\nkeeps its own view state and ignores requests it cannot place.",
+          "properties": {
+            "action": {
+              "$ref": "#/schemas/request/$defs/PanePanelAction"
+            },
+            "pane_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "view": {
+              "description": "The extension's view id (\"tasks\"); absent means every view the pane\npublishes.",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "action"
           ],
           "type": "object"
         },
@@ -7349,6 +7414,22 @@
         {
           "properties": {
             "method": {
+              "const": "PanePanel",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/PanePanelParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
               "const": "pane.send_text",
               "type": "string"
             },
@@ -10431,6 +10512,17 @@
                   "type": "null"
                 }
               ]
+            },
+            "view": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/success_response/$defs/HostViewItem"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "View only: this item's view blocks. A legacy document never carries it."
             }
           },
           "required": [
@@ -10745,6 +10837,116 @@
             "terminal_id"
           ],
           "type": "object"
+        },
+        "HostViewItem": {
+          "description": "The view blocks of one item. Every field is optional: an item with no view\nblock is a plain group, and an unknown future block degrades to\n\"unsupported\" instead of rejecting the view.",
+          "properties": {
+            "action": {
+              "description": "What the row is waiting for, in one short word (\"unblock\", \"report\").\nVqro composes the sentence around it, so the row never spells out\nbookkeeping of its own.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "kind": {
+              "description": "What this block is, as a free string so the set can grow: `section` and\n`row` are known, and anything else is drawn as \"unsupported\" in place\nrather than dropped. Never a closed enum: an unknown variant would make\nan older client reject the whole view.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "pane_id": {
+              "description": "A panel root: the pane whose panel this item's subtree fills. Only a\nroot item (no parent) may set it. Vqro draws the pane's bottom edge slot.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "since": {
+              "description": "Unix epoch seconds whose age Vqro draws. Only the extension knows what\nthe instant means.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "state": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/success_response/$defs/HostViewState"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "A row state, or a panel root's aggregate state for its header glyph.\nVqro draws the fixed Pi-style glyph and its tone; the extension owns\nonly which state the row or panel is in."
+            },
+            "view_id": {
+              "description": "A panel root: the stable id of this view inside the pane's panel stack,\nas the user names it to `vqro pane panel`. Only a root may set it.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "waiting": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/success_response/$defs/HostViewWaiting"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Whose move the row waits for. Vqro says \"you\" or names the terminal\nlink, which is the only party it can speak about live."
+            }
+          },
+          "type": "object"
+        },
+        "HostViewState": {
+          "description": "The fixed state vocabulary Vqro draws a glyph and tone for: the same set the\nPi todo widget uses, so panels read like the rest of the UI.",
+          "oneOf": [
+            {
+              "const": "open",
+              "description": "Not started or unblocked: `○`.",
+              "type": "string"
+            },
+            {
+              "const": "in_progress",
+              "description": "Being worked on: `◐`.",
+              "type": "string"
+            },
+            {
+              "const": "blocked",
+              "description": "Cannot proceed: `⊘`.",
+              "type": "string"
+            },
+            {
+              "const": "reported",
+              "description": "Waiting for someone to accept it: `◎`.",
+              "type": "string"
+            },
+            {
+              "const": "done",
+              "description": "Finished: `●`.",
+              "type": "string"
+            }
+          ]
+        },
+        "HostViewWaiting": {
+          "description": "Whose move a row waits for.",
+          "oneOf": [
+            {
+              "const": "you",
+              "description": "The user of this client owes the action.",
+              "type": "string"
+            },
+            {
+              "const": "them",
+              "description": "The row's terminal link owes the action; Vqro names it.",
+              "type": "string"
+            }
+          ]
         },
         "InstalledExtensionPackageInfo": {
           "properties": {
@@ -11289,6 +11491,17 @@
             "terminal_id": {
               "type": "string"
             },
+            "terminal_size": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/success_response/$defs/PaneTerminalSize"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The pane's live terminal size: the rows and columns its PTY and terminal\ncore have now. A pane whose terminal a client claimed for a panel is\nsmaller than its layout rect by the panel's band, so this is the size to\ncompare against the pane's own rows."
+            },
             "terminal_title": {
               "type": [
                 "string",
@@ -11596,6 +11809,35 @@
             "pane_id",
             "direction",
             "layout"
+          ],
+          "type": "object"
+        },
+        "PanePanelAction": {
+          "enum": [
+            "show",
+            "hide",
+            "toggle"
+          ],
+          "type": "string"
+        },
+        "PanePanelResult": {
+          "properties": {
+            "action": {
+              "$ref": "#/schemas/success_response/$defs/PanePanelAction"
+            },
+            "pane_id": {
+              "type": "string"
+            },
+            "view": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "pane_id",
+            "action"
           ],
           "type": "object"
         },
@@ -12006,6 +12248,27 @@
           "required": [
             "pid",
             "name"
+          ],
+          "type": "object"
+        },
+        "PaneTerminalSize": {
+          "properties": {
+            "cols": {
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "rows": {
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "rows",
+            "cols"
           ],
           "type": "object"
         },
@@ -13408,6 +13671,22 @@
               "required": [
                 "type",
                 "zoom"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "panel": {
+                  "$ref": "#/schemas/success_response/$defs/PanePanelResult"
+                },
+                "type": {
+                  "const": "pane_panel",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "panel"
               ],
               "type": "object"
             },

@@ -248,6 +248,39 @@ pub struct PaneResizeParams {
     pub amount: Option<f32>,
 }
 
+/// One user request to open, close or toggle a pane panel view. Vqro forwards
+/// it to the attached clients that advertise the pane-panels control; a client
+/// keeps its own view state and ignores requests it cannot place.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct PanePanelParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pane_id: Option<String>,
+    /// The extension's view id ("tasks"); absent means every view the pane
+    /// publishes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub view: Option<String>,
+    pub action: PanePanelAction,
+}
+
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema, Default,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum PanePanelAction {
+    Show,
+    Hide,
+    #[default]
+    Toggle,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct PanePanelResult {
+    pub pane_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub view: Option<String>,
+    pub action: PanePanelAction,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct PaneScrollParams {
     pub pane_id: String,
@@ -562,7 +595,19 @@ pub struct PaneInfo {
     pub agent_session: Option<AgentSessionInfo>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scroll: Option<PaneScrollInfo>,
+    /// The pane's live terminal size: the rows and columns its PTY and terminal
+    /// core have now. A pane whose terminal a client claimed for a panel is
+    /// smaller than its layout rect by the panel's band, so this is the size to
+    /// compare against the pane's own rows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_size: Option<PaneTerminalSize>,
     pub revision: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct PaneTerminalSize {
+    pub rows: u16,
+    pub cols: u16,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]

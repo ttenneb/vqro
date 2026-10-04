@@ -1,20 +1,28 @@
 use super::*;
 
 #[test]
-fn missing_attention_pane_method_disables_only_click() {
+fn a_badge_click_opens_the_scopes_panels_and_never_needs_a_host_method() {
     let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
     state.set_endpoint_status(&ClientEndpointId::Local, ClientEndpointStatus::Online);
     state.set_endpoint_snapshot_for_generation(&ClientEndpointId::Local, 1, Box::new(snapshot()));
-    state.set_endpoint_methods(Some(vec!["pane.focus".into()]));
+    // Deliberately no host methods: opening a panel is the client's own state.
+    state.set_endpoint_methods(Some(Vec::new()));
     let projection = serde_json::from_value(serde_json::json!({
         "contract":"host.documents.v1", "boot_id":"boot-1", "revision":1,
         "documents":[{"provider_priority":1,"document":{
-            "contract":"host.document.v1", "namespace":"independent.attention", "generation":7,"revision":2,
+            "contract":"host.view.v1", "namespace":"independent.attention", "generation":7,"revision":2,
             "surface":"navigation","target":{"kind":"session"},
-            "items":[{"id":"context:attention.view:independent:read", "role":"section","label":"Work"}],
+            "items":[
+                {"id":"context:attention.view:independent:read", "role":"section","label":"Work"},
+                {"id":"panel:pane_1:tasks", "role":"section","label":"Tasks","detail":"0/1 done",
+                 "view":{"pane_id":"pane_1","view_id":"tasks"}},
+                {"id":"panel:pane_1:task:1", "parent_id":"panel:pane_1:tasks","role":"section",
+                 "label":"A row","view":{"state":"open"}}
+            ],
             "actions":[],"required_capabilities":[]
         }}]
-    })).expect("projection");
+    }))
+    .expect("projection");
     state.set_endpoint_host_documents_for_generation(
         &ClientEndpointId::Local,
         1,
@@ -30,33 +38,65 @@ fn missing_attention_pane_method_disables_only_click() {
     };
     let mut outcome = ClientShellInput::default();
     state.open_attention(hit.clone(), &mut outcome);
+    // No host method, no action: the click opened the panel in this client.
     assert!(outcome.actions.is_empty());
-    assert_eq!(state.endpoints[0].status, ClientEndpointStatus::Online);
-    assert!(state.snapshot.is_some());
     assert_eq!(
         state
-            .visible_endpoint_notice
-            .as_ref()
-            .expect("feature-local notice")
-            .key
-            .code,
-        "plugin.pane.open"
+            .pane_panel_open
+            .get("pane_1")
+            .map(|views| views.contains("tasks")),
+        Some(true)
     );
-    state.set_endpoint_methods(Some(vec!["pane.focus".into(), "plugin.pane.open".into()]));
-    state.open_attention(hit.clone(), &mut outcome);
-    assert!(outcome.actions.iter().any(|action| matches!(action, ClientShellAction::Endpoint {request,..} if matches!(&request.method, crate::api::schema::Method::PluginPaneOpen(params) if params.env.get("VQRO_ATTENTION_SCOPE").is_some_and(|value| value.contains("tab_1"))))));
-    state.endpoints[0]
-        .attention
-        .as_mut()
-        .expect("cached nav")
-        .document_key
-        .1 += 1;
+    assert_eq!(state.endpoints[0].status, ClientEndpointStatus::Online);
+    assert!(state.snapshot.is_some());
+    // A stale document key is rejected before anything opens.
+    let mut fresh = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    fresh.set_endpoint_status(&ClientEndpointId::Local, ClientEndpointStatus::Online);
+    fresh.set_endpoint_snapshot_for_generation(&ClientEndpointId::Local, 1, Box::new(snapshot()));
     let mut stale = ClientShellInput::default();
-    state.open_attention(hit, &mut stale);
-    assert!(
-        stale.actions.is_empty(),
-        "replacement before redraw must reject old badge"
+    fresh.open_attention(hit, &mut stale);
+    assert!(stale.actions.is_empty());
+    assert!(fresh.pane_panel_open.is_empty());
+}
+
+#[test]
+fn a_badge_with_no_views_notices_instead_of_launching_a_tab() {
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    state.set_endpoint_status(&ClientEndpointId::Local, ClientEndpointStatus::Online);
+    state.set_endpoint_snapshot_for_generation(&ClientEndpointId::Local, 1, Box::new(snapshot()));
+    state.set_endpoint_methods(Some(vec!["plugin.pane.open".into()]));
+    let projection = serde_json::from_value(serde_json::json!({
+        "contract":"host.documents.v1", "boot_id":"boot-1", "revision":1,
+        "documents":[{"provider_priority":1,"document":{
+            "contract":"host.document.v1", "namespace":"independent.attention", "generation":7,"revision":2,
+            "surface":"navigation","target":{"kind":"session"},
+            "items":[{"id":"context:attention.view:independent:read", "role":"section","label":"Work"}],
+            "actions":[],"required_capabilities":[]
+        }}]
+    }))
+    .expect("projection");
+    state.set_endpoint_host_documents_for_generation(
+        &ClientEndpointId::Local,
+        1,
+        Box::new(projection),
     );
+    let hit = AttentionHit {
+        rect: Rect::new(0, 0, 5, 1),
+        plugin: "independent".into(),
+        entrypoint: "read".into(),
+        kind: "tab".into(),
+        ids: vec!["tab_1".into()],
+        document_key: ("independent.attention".into(), 7, 2),
+    };
+    let mut outcome = ClientShellInput::default();
+    state.open_attention(hit, &mut outcome);
+    // The extension's own tab view is retired: nothing is launched, the click
+    // reports that this scope has no panel to open.
+    assert!(outcome.actions.is_empty());
+    assert_eq!(state.endpoints[0].status, ClientEndpointStatus::Online);
+    // The client says why nothing opened, and stays connected.
+    assert!(state.endpoint_error.is_some());
+    assert!(state.pane_panel_open.is_empty());
 }
 
 #[test]

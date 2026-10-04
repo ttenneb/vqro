@@ -380,6 +380,51 @@ pub(super) fn put_text(buffer: &mut Buffer, x: u16, y: u16, width: u16, text: &s
     buffer.set_stringn(x, y, text, width as usize, style);
 }
 
+/// A one-column scroll indicator for a Vqro-drawn panel: a dim track with a
+/// brighter thumb. Vqro owns scrolling; extensions never see it.
+pub(super) fn render_panel_scroll(
+    buffer: &mut Buffer,
+    track: Rect,
+    lines: usize,
+    first: usize,
+    visible: usize,
+    palette: &crate::app::state::Palette,
+) {
+    let track = track.intersection(buffer.area);
+    if track.is_empty() || visible == 0 || lines <= visible {
+        return;
+    }
+    let thumb_rows = (track.height as usize * visible)
+        .checked_div(lines)
+        .unwrap_or(1)
+        .max(1) as u16;
+    let max_top = track.height.saturating_sub(thumb_rows);
+    let scrollable = lines.saturating_sub(visible);
+    let top = (max_top as usize * first)
+        .checked_div(scrollable)
+        .unwrap_or(0) as u16;
+    for y in track.y..track.bottom() {
+        let offset = y.saturating_sub(track.y);
+        let in_thumb = offset >= top && offset < top.saturating_add(thumb_rows);
+        let (symbol, color) = if in_thumb {
+            ("▐", palette.overlay1)
+        } else {
+            ("▕", palette.surface_dim)
+        };
+        put_text(
+            buffer,
+            track.x,
+            y,
+            1,
+            symbol,
+            Style::default()
+                .fg(color)
+                .bg(ratatui::style::Color::Reset)
+                .remove_modifier(Modifier::DIM),
+        );
+    }
+}
+
 pub(super) fn display_width(text: &str) -> u16 {
     UnicodeWidthStr::width(text).min(u16::MAX as usize) as u16
 }

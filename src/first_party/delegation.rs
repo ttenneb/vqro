@@ -92,6 +92,7 @@ fn append_children(
                 disabled: relationship.lifecycle == HostRelationshipLifecycle::Retained,
                 ..Default::default()
             },
+            view: None,
         });
         append_children(Some(relationship.relationship_id.as_str()), children, items);
     }

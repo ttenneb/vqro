@@ -26,7 +26,7 @@ pub(super) fn navigation(
             || !document
                 .items
                 .iter()
-                .all(|item| item.id.starts_with("context:"))
+                .any(|item| item.id.starts_with("context:"))
         {
             continue;
         }
@@ -190,6 +190,7 @@ mod tests {
             }),
             action_ids: Vec::new(),
             flags: HostDocumentItemFlags::default(),
+            view: None,
         };
         let projection = HostDocumentsProjectionV1 {
             boot_id: snapshot.boot_id.clone(),

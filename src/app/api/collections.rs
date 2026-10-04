@@ -1114,24 +1114,34 @@ impl App {
                 });
         if current {
             let publication = result.result.and_then(|document| {
-                let observation = document.actions.is_empty()
+                // A view carries its own blocks: rows, hierarchy, chips and
+                // panel roots. Its shape is the view validator's job, so the
+                // observation-only shape check below applies to navigation
+                // documents only. Both must still name host-owned terminals.
+                let is_view = document.contract == crate::extension_contract::HOST_VIEW_CONTRACT_V1;
+                let terminals_are_host_owned = document.items.iter().all(|item| {
+                    item.terminal.as_ref().is_none_or(|terminal| {
+                        result
+                            .snapshot
+                            .terminals
+                            .as_ref()
+                            .is_some_and(|terminals| terminals.contains(terminal))
+                    })
+                });
+                let observation = !is_view
+                    && document.actions.is_empty()
                     && document.required_capabilities.is_empty()
                     && !document.items.is_empty()
                     && document.items.iter().all(|item| {
                         item.role == crate::extension_contract::HostItemRole::Section
                             && item.parent_id.is_none()
                             && item.action_ids.is_empty()
-                            && item.terminal.as_ref().is_none_or(|terminal| {
-                                result
-                                    .snapshot
-                                    .terminals
-                                    .as_ref()
-                                    .is_some_and(|terminals| terminals.contains(terminal))
-                            })
                     });
                 if document.revision != result.snapshot.revision
                     || document.target != crate::extension_contract::HostTarget::Session
-                    || !(observation
+                    || !terminals_are_host_owned
+                    || !(is_view
+                        || observation
                         || document.items.iter().all(|item| match item.role {
                             crate::extension_contract::HostItemRole::Group => {
                                 item.id.starts_with("activity:")
@@ -3295,6 +3305,7 @@ mod tests {
                     terminal: None,
                     action_ids: Vec::new(),
                     flags: Default::default(),
+                    view: None,
                 }],
                 actions: Vec::new(),
                 required_capabilities: Vec::new(),
@@ -3609,6 +3620,7 @@ mod tests {
                         terminal: None,
                         action_ids: Vec::new(),
                         flags: Default::default(),
+                        view: None,
                     })
                     .collect(),
                 actions: Vec::new(),
