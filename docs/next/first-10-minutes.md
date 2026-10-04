@@ -61,7 +61,7 @@ vqro task block "$WORK" 'Waiting for the human choice.' --rev 3
 vqro message claim
 ```
 
-The Tasks badge now shows durable human/blocked attention. A claim confirms transport, not understanding or accepted work. With default activation off, messages do not start agent turns; an explicitly opted-in Pi adapter can wake/follow up.
+The Tasks badge now shows durable human/blocked attention. A claim confirms transport, not understanding or accepted work. A fresh Tasks store has activation on by default, so a waiting message may start an idle recipient's turn through the opted-in Pi adapter at its next poll; only a human can turn it off with `vqro message activation off`, and an existing store keeps its recorded setting.
 
 ## 5. Answer in your human shell
 

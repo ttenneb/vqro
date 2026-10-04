@@ -89,10 +89,20 @@ class MessagesTest(unittest.TestCase):
         claimed = self.invoke({"action": "message_claim", "operation_id": "wide-claim"}, B)["claimed"]
         self.assertEqual([item["body"] for item in claimed], [body])
 
+    def test_a_fresh_store_defaults_activation_on_and_keeps_the_stored_value(self):
+        self.assertTrue(self.invoke({"action": "message_list"}, A)["activation"])
+        self.invoke({"action": "message_activation", "operation_id": "human-off", "activation": False}, HUMAN)
+        self.store.db.close()
+        reopened = provider.Store(self.root)
+        # A restart never re-derives the default or flips the recorded setting.
+        self.assertFalse(reopened.invoke({"caller": HUMAN, "payload": {"action": "message_list"}})["activation"])
+        reopened.db.close()
+
     def test_idle_claim_is_gated_on_the_current_activation_policy(self):
         self.send(body="wake")
         listed = self.invoke({"action": "message_list"}, B)
         self.assertEqual([item["body"] for item in listed["waiting"]], ["wake"])
+        self.invoke({"action": "message_activation", "operation_id": "off", "activation": False}, HUMAN)
         idle_off = self.invoke({"action": "message_claim", "operation_id": "idle-off", "idle": True}, B)
         self.assertEqual(idle_off["claimed"], [])
         self.assertFalse(idle_off["activation"])
@@ -101,13 +111,13 @@ class MessagesTest(unittest.TestCase):
         self.assertEqual([item["body"] for item in idle_on["claimed"]], ["wake"])
 
     def test_activation_is_one_recorded_human_setting(self):
-        self.assertFalse(self.invoke({"action": "message_list"}, A)["activation"])
-        with self.assertRaises(ValueError):
-            self.invoke({"action": "message_activation", "operation_id": "agent-set", "activation": True}, A)
-        self.assertTrue(self.invoke({"action": "message_activation", "operation_id": "human-on", "activation": True}, HUMAN)["activation"])
         self.assertTrue(self.invoke({"action": "message_list"}, A)["activation"])
+        with self.assertRaises(ValueError):
+            self.invoke({"action": "message_activation", "operation_id": "agent-set", "activation": False}, A)
+        self.assertFalse(self.invoke({"action": "message_activation", "operation_id": "human-off", "activation": False}, HUMAN)["activation"])
+        self.assertFalse(self.invoke({"action": "message_list"}, A)["activation"])
         row = self.store.db.execute("SELECT activation, updated_by FROM message_policy WHERE id=1").fetchone()
-        self.assertEqual((row["activation"], json.loads(row["updated_by"])), (1, HUMAN))
+        self.assertEqual((row["activation"], json.loads(row["updated_by"])), (0, HUMAN))
 
     def test_operation_dedupe_and_provider_restart_durability(self):
         sent = self.send(body="durable")

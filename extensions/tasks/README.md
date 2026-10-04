@@ -7,8 +7,9 @@ Not sandboxed, not secure human authentication, not Pi todo integration.
 Durable addressed messages are a second record family in the same store
 (`messages.py`, schema v4): `vqro message send/list/claim/edit` with the sender
 taken from the host-supplied caller, exact-execution recipients, edit before
-claim, and one human-controlled activation setting. Delivery to Pi is the
-reply-routing adapter claiming at a turn boundary, never pane typing.
+claim, and one human-controlled activation setting that a fresh store defaults
+on. Delivery to Pi is the reply-routing adapter claiming at a turn boundary,
+never pane typing.
 
 - [Tasks policy, CLI, receipts and limits](../../docs/next/api/tasks-core-v0.md)
 - [Read-only pane, filters and exact-owner navigation](../../docs/next/api/tasks-view-v0.md)

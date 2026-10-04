@@ -312,7 +312,7 @@ class ReadinessDemo(Demo):
 
         # R6: a durable message crosses the two real Pi panes and is claimed by name.
         state = self.agent("task-a", "msg-state", ["list"], tool="message")
-        assert state["activation"] is False, f"activation must stay off: {state}"
+        assert state["activation"] is True, f"a fresh Tasks store must default activation on: {state}"
         claimed = self.agent("task-b", "msg-claimed", ["list"], tool="message")
         records = claimed["messages"]
         notice = f"task {delegated_task['id']} assigned; inspect vqro task get {delegated_task['id']}"
@@ -321,6 +321,19 @@ class ReadinessDemo(Demo):
         reply = self.agent("task-b", "msg-reply", ["send", "task-a", "ack from task-b", "--reply-to", message_id, "--op", "msg-reply"], tool="message")
         back = self.agent("task-a", "msg-back", ["claim", "--op", "msg-back"], tool="message")
         assert reply["message"]["id"] in [item["id"] for item in back["claimed"]], back
+
+        # Activation is human-only. Explicitly turning it off must suppress the
+        # idle wake/claim path while a message waits; an agent cannot change it.
+        waiting = self.agent("task-a", "msg-waiting", ["send", "task-b", "activation probe", "--op", "msg-waiting"], tool="message")["message"]
+        agent_denied = self.agent("task-a", "msg-agent-set-denied", ["activation", "off", "--op", "msg-agent-set-denied"], tool="message", expected=1)
+        assert agent_denied["code"] == 1, agent_denied
+        turned_off = self.human(human, "msg-activation-off", ["activation", "off", "--op", "msg-activation-off"], tool="message")
+        assert turned_off["activation"] is False, turned_off
+        idle_off = self.agent("task-b", "msg-idle-off", ["claim", "--idle", "--op", "msg-idle-off"], tool="message")
+        assert idle_off["claimed"] == [] and idle_off["activation"] is False, f"activation off must not wake or claim: {idle_off}"
+        self.human(human, "msg-activation-on", ["activation", "on", "--op", "msg-activation-on"], tool="message")
+        idle_on = self.agent("task-b", "msg-idle-on", ["claim", "--idle", "--op", "msg-idle-on"], tool="message")
+        assert waiting["id"] in [item["id"] for item in idle_on["claimed"]], idle_on
 
         resumed = self.change("task-b", "delegate-resume", self.cli("task", "get", delegated_task["id"])["task"], "start")
 
@@ -370,7 +383,9 @@ class ReadinessDemo(Demo):
                   "empty_full_tasks_before_first_task": True, "named_agent_panes": True,
                   "named_plan_owners_and_delegation": True, "name_failures_write_nothing": True,
                   "existing_name_creates_no_pane": True, "blocked_badge": counts, "decision_human_only": True,
-                  "durable_message_claimed_by_name": True, "agent_root_create_and_import": True,
+                  "durable_message_claimed_by_name": True, "fresh_store_activation_on": True,
+                  "activation_off_blocks_idle_claim": True, "agent_cannot_set_activation": True,
+                  "agent_root_create_and_import": True,
                   "child_accepted_by_agent_delegator": True, "root_agent_accept_and_done_denied": True,
                   "root_human_accepted": True, "creator_execution_in_get_and_tree": True}
         self.save("RESULT.json", result)
