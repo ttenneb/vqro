@@ -47,15 +47,11 @@ activate a durable message or record a reply. A late successful
 claim is recorded undelivered rather than injected into a different run; an
 uncertain claim retains CLI recovery information and is not blindly replayed.
 
-A turn that a delivered durable message started records its final text as a
-durable Tasks reply message to the exact sender binding (`reply_to`, including a
-same-sender batch, whose answer links its newest message). Nothing is typed into
-a pane, a delivered reply is never re-answered automatically, and the former
-prompt-label reply path is
-removed ([superseded decision](../architecture/tasks-legacy-prompt-reply-transition.md)).
-A handoff the SDK took while busy belongs to a run someone else started, so it is
-recorded as delivered context without an automatic reply. Other
-facts/status/receipts do not start turns.
+Reply recording — exact sender bindings, `reply_to` on every automatic answer,
+no automatic answer to an answer, and no automatic reply for a handoff the SDK
+took while busy — is Tasks consumer policy, documented with Tasks in
+[Tasks conventions](task-conventions.md) and
+[`extensions/tasks/README.md`](../../extensions/tasks/README.md).
 The consumer has no broader automatic-reply policy for every claimed message.
 
 The profile carries the neutral adapter and separately loaded Tasks consumer;
