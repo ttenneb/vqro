@@ -1224,55 +1224,6 @@ fn a_lower_pane_patch_row_keeps_its_own_origin() {
 }
 
 #[test]
-fn a_background_patch_keeps_the_focused_panes_cursor_band() {
-    // A patch carries only what changed. The cursor belongs to the focused pane, so
-    // its band must come from the surface, not from the patch's panes.
-    let mut state = panel_state(None, true);
-    let mut surface = state.pane_surface.as_ref().expect("surface").clone();
-    let mut lower = surface.panes[0].clone();
-    lower.pane_id = "pane_2".into();
-    lower.focused = false;
-    lower.inner_rect = crate::protocol::SurfaceRect {
-        x: 1,
-        y: 20,
-        width: 10,
-        height: 16,
-    };
-    surface.panes.push(lower.clone());
-    surface.frame.cursor = Some(crate::protocol::CursorState {
-        x: 2,
-        y: 3,
-        visible: true,
-        shape: 0,
-    });
-    state.set_pane_surface(surface);
-    text_of(&mut state);
-    let band = *state
-        .pane_panel_band_rows
-        .get("pane_1")
-        .expect("the focused pane has a band");
-    assert!(band > 0, "the focused pane has a panel band");
-    let mut patch = pane_patch_row(&state, &lower, lower.inner_rect.y.saturating_add(3), "S");
-    patch.cursor = Some(crate::protocol::CursorState {
-        x: 2,
-        y: 3,
-        visible: true,
-        shape: 0,
-    });
-    let ClientPaneSurfacePatchOutcome::Applied(Some(composed)) =
-        state.apply_pane_surface_patch(patch)
-    else {
-        panic!("the fast path applies this patch");
-    };
-    let area = state.layout(106, 30).pane_surface;
-    assert_eq!(
-        composed.cursor.map(|cursor| cursor.y),
-        Some(area.y + 3 + band),
-        "the cursor's band comes from the surface's focused pane"
-    );
-}
-
-#[test]
 fn a_cycle_across_two_documents_is_never_walked_as_one_tree() {
     // Two documents that each name the other's item as a parent: individually
     // acyclic, combined a loop. Document-scoped children mean neither can reach

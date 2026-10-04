@@ -248,52 +248,65 @@ impl ClientShellState {
             let (cols, rows) = self.last_composed_size.unwrap_or_default();
             self.layout(cols, rows).pane_surface
         });
-        // The cursor's band, from the pane the surface says is focused: a patch can
-        // carry only the panes it changed, so the focused pane is often absent.
-        let cursor_band = self
+        // The cursor's band and the composed row its pane ends at, from the pane the
+        // surface says is focused: a patch can carry only the panes it changed, so
+        // the focused pane is often absent from it. A cursor past that row is not
+        // visible, which is what a full compose decides too.
+        let focused = self
             .pane_surface
             .as_ref()
-            .and_then(|surface| surface.panes.iter().find(|pane| pane.focused))
+            .and_then(|surface| surface.panes.iter().find(|pane| pane.focused));
+        let cursor_band = focused
             .and_then(|pane| shifts.get(&pane.pane_id).copied())
             .unwrap_or(0);
-        let composed_patch = fast_path_area.map(|area| ClientComposedSurfacePatch {
-            rows: patch
-                .rows
-                .iter()
-                .map(|row| {
-                    let moved = bands.of_composed(row, area);
-                    let band = moved.map(|(band, _)| band).unwrap_or(0);
-                    (
-                        crate::protocol::PaneSurfacePatchRow {
-                            x: area.x.saturating_add(row.x),
-                            y: area.y.saturating_add(row.y).saturating_add(band),
-                            cells: row.cells.clone(),
-                        },
-                        moved.map(|(_, bottom)| bottom),
-                    )
-                })
-                .filter(|(row, bottom)| {
-                    // A row a panel moved has nowhere to go past its own pane's
-                    // composed bottom: the grid is exactly the rect below the panel.
-                    bottom.is_none_or(|bottom| row.y < bottom)
-                        && !panel_rows.iter().any(|panel| {
-                            row.y >= panel.y
-                                && row.y < panel.bottom()
-                                && row.x < panel.right()
-                                && row.x.saturating_add(row.cells.len() as u16) > panel.x
-                        })
-                })
-                .map(|(row, _)| row)
-                .collect(),
-            cursor: patch
-                .cursor
-                .clone()
-                .map(|cursor| crate::protocol::CursorState {
-                    x: area.x.saturating_add(cursor.x),
-                    y: area.y.saturating_add(cursor.y).saturating_add(cursor_band),
-                    visible: cursor.visible,
-                    shape: cursor.shape,
+        let composed_patch = fast_path_area.map(|area| {
+            // The composed row the focused pane ends at: a cursor at or past it is
+            // not visible, which is what a full compose decides too.
+            let cursor_bottom = focused.map(|pane| {
+                area.y
+                    .saturating_add(pane.inner_rect.y)
+                    .saturating_add(pane.inner_rect.height)
+            });
+            ClientComposedSurfacePatch {
+                rows: patch
+                    .rows
+                    .iter()
+                    .map(|row| {
+                        let moved = bands.of_composed(row, area);
+                        let band = moved.map(|(band, _)| band).unwrap_or(0);
+                        (
+                            crate::protocol::PaneSurfacePatchRow {
+                                x: area.x.saturating_add(row.x),
+                                y: area.y.saturating_add(row.y).saturating_add(band),
+                                cells: row.cells.clone(),
+                            },
+                            moved.map(|(_, bottom)| bottom),
+                        )
+                    })
+                    .filter(|(row, bottom)| {
+                        // A row a panel moved has nowhere to go past its own pane's
+                        // composed bottom: the grid is exactly the rect below the panel.
+                        bottom.is_none_or(|bottom| row.y < bottom)
+                            && !panel_rows.iter().any(|panel| {
+                                row.y >= panel.y
+                                    && row.y < panel.bottom()
+                                    && row.x < panel.right()
+                                    && row.x.saturating_add(row.cells.len() as u16) > panel.x
+                            })
+                    })
+                    .map(|(row, _)| row)
+                    .collect(),
+                cursor: patch.cursor.clone().map(|cursor| {
+                    let y = area.y.saturating_add(cursor.y).saturating_add(cursor_band);
+                    let visible = cursor.visible && cursor_bottom.is_none_or(|bottom| y < bottom);
+                    crate::protocol::CursorState {
+                        x: area.x.saturating_add(cursor.x),
+                        y,
+                        visible,
+                        shape: cursor.shape,
+                    }
                 }),
+            }
         });
         if let Some(area) = fast_path_area {
             let applied = self
