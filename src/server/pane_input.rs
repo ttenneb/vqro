@@ -3,16 +3,25 @@ use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers, MouseEventKind};
 
 use crate::protocol::{AttachScrollDirection, AttachScrollSource, ClientPaneInputEvent};
 
-/// What forwarded human pane input proves about unsent text in the target
-/// editor. `Some(true)`: the editor may now hold unsent human text.
-/// `Some(false)`: the human submitted or cleared it. `None`: proves nothing.
+/// What forwarded human input proves about unsent text in the target editor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum UnsentTextEffect {
+    /// The editor may hold text the human has not sent.
+    MayHold,
+    /// The human submitted or cleared the line, so the editor is empty.
+    Cleared,
+}
+
+/// What forwarded human pane input proves about the target editor's unsent
+/// text: `None` proves nothing. The last proving event decides, so a typed line
+/// followed by Enter reads as submitted.
 ///
 /// Any non-release key, text commit or paste may put text in the editor
 /// (autocomplete, history recall, a submitted line edited again), so only the
 /// known submit and clear keys prove the editor empty: an unmodified Enter,
 /// Ctrl-C and Ctrl-U. Releases and mouse events prove nothing, a modified
 /// Enter inserts a newline, and Esc proves nothing about the editor.
-pub(super) fn human_input_unsent_text(events: &[ClientPaneInputEvent]) -> Option<bool> {
+pub(super) fn human_input_unsent_text(events: &[ClientPaneInputEvent]) -> Option<UnsentTextEffect> {
     let mut effect = None;
     for event in events {
         let event_effect = match event {
@@ -28,13 +37,13 @@ pub(super) fn human_input_unsent_text(events: &[ClientPaneInputEvent]) -> Option
                     || (KeyModifiers::from_bits_truncate(*modifiers) == KeyModifiers::CONTROL
                         && matches!(code, crate::protocol::ClientKeyCode::Char('c' | 'u')))
                 {
-                    Some(false)
+                    Some(UnsentTextEffect::Cleared)
                 } else {
-                    Some(true)
+                    Some(UnsentTextEffect::MayHold)
                 }
             }
             ClientPaneInputEvent::TextCommit(text) | ClientPaneInputEvent::Paste(text) => {
-                (!text.is_empty()).then_some(true)
+                (!text.is_empty()).then_some(UnsentTextEffect::MayHold)
             }
             ClientPaneInputEvent::Mouse { .. } => None,
         };
@@ -45,15 +54,15 @@ pub(super) fn human_input_unsent_text(events: &[ClientPaneInputEvent]) -> Option
     effect
 }
 
-/// What raw input forwarded by a directly attached client proves about unsent
-/// text in the target editor. Attach forwards the outer terminal's bytes
-/// verbatim, so a lone Return, Ctrl-C or Ctrl-U is the human submitting or
+/// What raw input forwarded by a directly attached client proves about the
+/// target editor's unsent text: `None` proves nothing. Attach forwards the
+/// outer terminal's bytes verbatim, so the last byte decides, as for a key
+/// batch: a trailing Return, Ctrl-C or Ctrl-U is the human submitting or
 /// clearing the line and anything else may have added text.
-pub(super) fn attach_input_unsent_text(data: &[u8]) -> Option<bool> {
-    match data {
-        [] => None,
-        [b'\r'] | [b'\x03'] | [b'\x15'] => Some(false),
-        _ => Some(true),
+pub(super) fn attach_input_unsent_text(data: &[u8]) -> Option<UnsentTextEffect> {
+    match *data.last()? {
+        b'\r' | b'\x03' | b'\x15' => Some(UnsentTextEffect::Cleared),
+        _ => Some(UnsentTextEffect::MayHold),
     }
 }
 
@@ -416,102 +425,96 @@ mod tests {
         .expect("pane input key")
     }
 
-    /// Only the keys that submit or clear a line prove the editor empty; every
-    /// other key may have put text there (autocomplete, history, a line edited
-    /// again after submitting it).
+    /// Only input that submits or clears a line proves the editor empty; every
+    /// other key or byte may have put text there (autocomplete, history, a line
+    /// edited again after submitting it).
     #[test]
-    fn forwarded_keys_mark_unsent_text_except_submit_and_clear_keys() {
-        assert_eq!(
-            human_input_unsent_text(&[key(KeyCode::Enter, KeyModifiers::NONE)]),
-            Some(false)
-        );
-        assert_eq!(
-            human_input_unsent_text(&[key(KeyCode::Char('c'), KeyModifiers::CONTROL)]),
-            Some(false)
-        );
-        assert_eq!(
-            human_input_unsent_text(&[key(KeyCode::Char('u'), KeyModifiers::CONTROL)]),
-            Some(false)
-        );
+    fn forwarded_human_input_marks_unsent_text_except_submit_and_clear() {
+        use UnsentTextEffect::{Cleared, MayHold};
 
-        for event in [
-            key(KeyCode::Char('h'), KeyModifiers::NONE),
-            key(KeyCode::Up, KeyModifiers::NONE),
-            key(KeyCode::Tab, KeyModifiers::NONE),
-            key(KeyCode::Backspace, KeyModifiers::NONE),
-            key(KeyCode::Char('r'), KeyModifiers::CONTROL),
-            key(KeyCode::Esc, KeyModifiers::NONE),
-            key(KeyCode::Enter, KeyModifiers::SHIFT),
-            key(KeyCode::Char('c'), KeyModifiers::ALT),
-            ClientPaneInputEvent::TextCommit("typed".into()),
-            ClientPaneInputEvent::Paste("pasted".into()),
-        ] {
+        let cases = [
+            (key(KeyCode::Enter, KeyModifiers::NONE), Some(Cleared)),
+            (
+                key(KeyCode::Char('c'), KeyModifiers::CONTROL),
+                Some(Cleared),
+            ),
+            (
+                key(KeyCode::Char('u'), KeyModifiers::CONTROL),
+                Some(Cleared),
+            ),
+            (key(KeyCode::Char('h'), KeyModifiers::NONE), Some(MayHold)),
+            (key(KeyCode::Up, KeyModifiers::NONE), Some(MayHold)),
+            (key(KeyCode::Tab, KeyModifiers::NONE), Some(MayHold)),
+            (key(KeyCode::Backspace, KeyModifiers::NONE), Some(MayHold)),
+            (
+                key(KeyCode::Char('r'), KeyModifiers::CONTROL),
+                Some(MayHold),
+            ),
+            (key(KeyCode::Esc, KeyModifiers::NONE), Some(MayHold)),
+            (key(KeyCode::Enter, KeyModifiers::SHIFT), Some(MayHold)),
+            (key(KeyCode::Char('c'), KeyModifiers::ALT), Some(MayHold)),
+            (
+                ClientPaneInputEvent::TextCommit("typed".into()),
+                Some(MayHold),
+            ),
+            (ClientPaneInputEvent::Paste("pasted".into()), Some(MayHold)),
+            (released(KeyCode::Char('h')), None),
+            (ClientPaneInputEvent::TextCommit(String::new()), None),
+            (ClientPaneInputEvent::Paste(String::new()), None),
+            (
+                ClientPaneInputEvent::Mouse {
+                    kind: crate::protocol::ClientMouseKind::Down(
+                        crate::protocol::ClientMouseButton::Left,
+                    ),
+                    position: crate::protocol::ClientMousePosition::Cell { column: 1, row: 1 },
+                    geometry: None,
+                    modifiers: 0,
+                    lines: 1,
+                },
+                None,
+            ),
+        ];
+        for (event, expected) in cases {
             assert_eq!(
                 human_input_unsent_text(std::slice::from_ref(&event)),
-                Some(true),
+                expected,
                 "{event:?}"
             );
         }
-    }
-
-    #[test]
-    fn input_that_proves_nothing_leaves_unsent_text_alone() {
         assert_eq!(human_input_unsent_text(&[]), None);
-        assert_eq!(
-            human_input_unsent_text(&[released(KeyCode::Char('h'))]),
-            None
-        );
-        assert_eq!(
-            human_input_unsent_text(&[ClientPaneInputEvent::TextCommit(String::new())]),
-            None
-        );
-        assert_eq!(
-            human_input_unsent_text(&[ClientPaneInputEvent::Paste(String::new())]),
-            None
-        );
-        assert_eq!(
-            human_input_unsent_text(&[ClientPaneInputEvent::Mouse {
-                kind: crate::protocol::ClientMouseKind::Down(
-                    crate::protocol::ClientMouseButton::Left
-                ),
-                position: crate::protocol::ClientMousePosition::Cell { column: 1, row: 1 },
-                geometry: None,
-                modifiers: 0,
-                lines: 1,
-            }]),
-            None
-        );
-    }
 
-    /// A batch is decided by its last proving event, so "typed then submitted"
-    /// reads as submitted rather than as left unsent.
-    #[test]
-    fn the_last_proving_event_decides_a_batch() {
+        // A batch is decided by its last proving event, so a line the human
+        // typed and then submitted is not left unsent.
         assert_eq!(
             human_input_unsent_text(&[
                 key(KeyCode::Char('h'), KeyModifiers::NONE),
                 released(KeyCode::Char('h')),
                 key(KeyCode::Enter, KeyModifiers::NONE),
             ]),
-            Some(false)
+            Some(Cleared)
         );
         assert_eq!(
             human_input_unsent_text(&[
                 key(KeyCode::Char('u'), KeyModifiers::CONTROL),
                 key(KeyCode::Char('h'), KeyModifiers::NONE),
             ]),
-            Some(true)
+            Some(MayHold)
         );
-    }
 
-    #[test]
-    fn attached_input_marks_unsent_text_unless_it_is_a_lone_submit_or_clear() {
-        assert_eq!(attach_input_unsent_text(b""), None);
-        assert_eq!(attach_input_unsent_text(b"\r"), Some(false));
-        assert_eq!(attach_input_unsent_text(b"\x03"), Some(false));
-        assert_eq!(attach_input_unsent_text(b"\x15"), Some(false));
-        assert_eq!(attach_input_unsent_text(b"x"), Some(true));
-        assert_eq!(attach_input_unsent_text(b"half typed\r"), Some(true));
+        // Attached clients forward the outer terminal's bytes, so the last
+        // byte decides the same way.
+        let attached = [
+            (b"".as_slice(), None),
+            (b"\r".as_slice(), Some(Cleared)),
+            (b"\x03".as_slice(), Some(Cleared)),
+            (b"\x15".as_slice(), Some(Cleared)),
+            (b"x".as_slice(), Some(MayHold)),
+            (b"half typed\r".as_slice(), Some(Cleared)),
+            (b"\x1b[A".as_slice(), Some(MayHold)),
+        ];
+        for (data, expected) in attached {
+            assert_eq!(attach_input_unsent_text(data), expected, "{data:?}");
+        }
     }
 
     #[tokio::test]

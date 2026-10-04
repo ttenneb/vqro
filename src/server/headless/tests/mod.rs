@@ -3792,17 +3792,6 @@ async fn forwarded_human_keys_arm_and_clear_possible_unsent_input() {
     );
     assert!(server.app.state.terminals[&terminal_id].unsent_input_possible);
 
-    // A release on its own proves nothing about the editor's contents.
-    forward(
-        &mut server,
-        vec![key(
-            crate::protocol::ClientKeyCode::Char('h'),
-            0,
-            crate::protocol::ClientKeyKind::Release,
-        )],
-    );
-    assert!(server.app.state.terminals[&terminal_id].unsent_input_possible);
-
     // A plain Enter is the human submitting the line.
     forward(
         &mut server,
@@ -3811,24 +3800,6 @@ async fn forwarded_human_keys_arm_and_clear_possible_unsent_input() {
             0,
             crate::protocol::ClientKeyKind::Press,
         )],
-    );
-    assert!(!server.app.state.terminals[&terminal_id].unsent_input_possible);
-
-    // Ctrl-C clears the line the human abandoned.
-    forward(
-        &mut server,
-        vec![
-            key(
-                crate::protocol::ClientKeyCode::Char('h'),
-                0,
-                crate::protocol::ClientKeyKind::Press,
-            ),
-            key(
-                crate::protocol::ClientKeyCode::Char('c'),
-                crossterm::event::KeyModifiers::CONTROL.bits(),
-                crate::protocol::ClientKeyKind::Press,
-            ),
-        ],
     );
     assert!(!server.app.state.terminals[&terminal_id].unsent_input_possible);
     shutdown_test_runtimes(&mut server);

@@ -1254,9 +1254,14 @@ impl HeadlessServer {
 
     /// Records what forwarded human pane input proves about unsent text in the
     /// target terminal's editor, for the `agent prompt` guard.
-    fn note_human_pane_input(&mut self, terminal_id: crate::terminal::TerminalId, effect: bool) {
+    fn note_human_pane_input(
+        &mut self,
+        terminal_id: crate::terminal::TerminalId,
+        effect: super::pane_input::UnsentTextEffect,
+    ) {
+        let may_hold = matches!(effect, super::pane_input::UnsentTextEffect::MayHold);
         if let Some(terminal) = self.app.state.terminals.get_mut(&terminal_id) {
-            terminal.unsent_input_possible = effect;
+            terminal.unsent_input_possible = may_hold;
         }
     }
 
@@ -1344,7 +1349,10 @@ impl HeadlessServer {
                 // Pasting an image path inserts text into the same editor the
                 // human types in, so it can join unsent text the same way.
                 if let Some(terminal_id) = self.terminal_id_by_string(&terminal_id) {
-                    self.note_human_pane_input(terminal_id, true);
+                    self.note_human_pane_input(
+                        terminal_id,
+                        super::pane_input::UnsentTextEffect::MayHold,
+                    );
                 }
                 if let Some(runtime) = self.runtime_for_terminal_id_string(&terminal_id) {
                     let payload = paste_payload_for_runtime(runtime, &path);

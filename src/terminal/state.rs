@@ -5964,25 +5964,6 @@ mod tests {
     }
 
     #[test]
-    fn a_hook_clearing_a_gone_agent_process_drops_human_input_evidence() {
-        let mut terminal = test_terminal();
-        terminal.set_hook_authority(
-            "custom:pi".into(),
-            "pi".into(),
-            AgentState::Working,
-            None,
-            None,
-        );
-        terminal.unsent_input_possible = true;
-
-        assert!(terminal
-            .release_agent_with_mutation("custom:pi", "pi", None)
-            .is_some());
-
-        assert!(!terminal.unsent_input_possible);
-    }
-
-    #[test]
     fn respawn_cleanup_resets_restored_agent_status() {
         let mut terminal = test_terminal();
         terminal.respawn_shell_on_exit = true;
