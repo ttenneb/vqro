@@ -1,4 +1,4 @@
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 
@@ -850,17 +850,6 @@ pub(super) fn send_request_unchecked(request: &Request) -> std::io::Result<serde
     client
         .request_value(request)
         .map_err(|err| map_server_not_running_or_io(err, &request.id, &client))
-}
-
-/// Optional, silent, time-bounded probe (e.g. sender provenance): on any error or
-/// timeout it returns `None` and prints nothing, so it cannot duplicate the real
-/// request's error or block it.
-pub(super) fn send_request_optional(
-    request: &Request,
-    timeout: Duration,
-) -> Option<serde_json::Value> {
-    let client = target::api_client().ok()?;
-    client.request_value_with_timeout(request, timeout).ok()
 }
 
 fn ensure_server_protocol_compatible(client: &ApiClient, request_id: &str) -> std::io::Result<()> {

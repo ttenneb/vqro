@@ -288,6 +288,13 @@ fn handle_connection_with_stop(
             finish_wait_response(&mut stream, response, &request_id, method, changes_ui)
         }
         Method::AgentPrompt(params) => {
+            // `agent prompt` is human-only: attach this local connection's peer so
+            // the app can refuse an agent-classified caller. Peer evidence is used
+            // only when the peer incarnation still matches this connection, so a
+            // changed incarnation degrades to Unknown rather than misbinding.
+            let peer = crate::platform::invocation_peer(&stream).filter(|peer| {
+                peer.ancestry.first().map(|entry| (entry.pid, entry.birth)) == initial_peer_birth
+            });
             let response = prompt_agent(
                 request_id.clone(),
                 params,
@@ -295,6 +302,7 @@ fn handle_connection_with_stop(
                 api_tx,
                 event_hub,
                 running,
+                peer,
             )?;
             finish_wait_response(&mut stream, response, &request_id, method, changes_ui)
         }
@@ -463,7 +471,15 @@ fn handle_request(
         );
     }
 
-    dispatch_to_app(request, api_tx, None, response_write_complete, None, None)
+    dispatch_to_app(
+        request,
+        api_tx,
+        None,
+        response_write_complete,
+        None,
+        None,
+        crate::api::ApiOrigin::LocalSocket,
+    )
 }
 
 pub(crate) fn api_method_name(method: &Method) -> &'static str {
@@ -941,7 +957,15 @@ pub(super) fn dispatch_to_app_with_timeout(
     api_tx: &ApiRequestSender,
     timeout: Option<Duration>,
 ) -> String {
-    dispatch_to_app(request, api_tx, timeout, None, None, None)
+    dispatch_to_app(
+        request,
+        api_tx,
+        timeout,
+        None,
+        None,
+        None,
+        crate::api::ApiOrigin::LocalSocket,
+    )
 }
 
 pub(super) fn dispatch_to_app_with_caller_timeout(
@@ -956,6 +980,7 @@ pub(super) fn dispatch_to_app_with_caller_timeout(
         None,
         None,
         Some(("timeout", "timed out waiting for agent status")),
+        crate::api::ApiOrigin::LocalSocket,
     )
 }
 
@@ -965,7 +990,15 @@ pub(super) fn dispatch_stream_open(
     timeout: Duration,
     active: Arc<AtomicBool>,
 ) -> String {
-    dispatch_to_app(request, api_tx, Some(timeout), None, Some(active), None)
+    dispatch_to_app(
+        request,
+        api_tx,
+        Some(timeout),
+        None,
+        Some(active),
+        None,
+        crate::api::ApiOrigin::LocalSocket,
+    )
 }
 
 pub(super) fn dispatch_stream_frame(
@@ -980,22 +1013,24 @@ pub(super) fn dispatch_stream_frame(
         None,
         Some(active),
         None,
+        crate::api::ApiOrigin::LocalSocket,
     )
 }
 
-fn dispatch_to_app(
+pub(super) fn dispatch_to_app(
     request: Request,
     api_tx: &ApiRequestSender,
     timeout: Option<Duration>,
     response_write_complete: Option<std::sync::mpsc::Receiver<()>>,
     stream_active: Option<Arc<AtomicBool>>,
     timeout_response: Option<(&str, &str)>,
+    origin: crate::api::ApiOrigin,
 ) -> String {
     let request_id = request.id.clone();
     let request_active = stream_active.clone();
     let (respond_to, response_rx) = std::sync::mpsc::channel();
     if let Err(err) = api_tx.send(ApiRequestMessage {
-        origin: crate::api::ApiOrigin::LocalSocket,
+        origin,
         request,
         respond_to,
         response_write_complete,

@@ -26,7 +26,7 @@ version1 interface provides:
 - `exec(argv, timeout)`: bounded CLI transport through the supplied Vqro binary;
   the adapter does not choose commands, recipients or product policy.
 - `deliver(content, token)`: explicit queued SDK input with fresh execution and
-  shutdown/run checks, at most128KiB. Both SDK idle and busy paths use followUp
+  shutdown/run checks, at most 128KiB. Both SDK idle and busy paths use followUp
   queuing. A transport result is not agent acceptance; do not replay uncertain
   effects or infer understanding from a receipt.
 
@@ -40,13 +40,15 @@ labels. It keeps no message/approval/work record of truth.
 `extensions/tasks/pi.ts` consumes this interface. Tasks owns durable message
 claim/activation polling, message rendering, explicit-send evidence, reply caps,
 recipient policy and no-reply observations. Disabled/unavailable Tasks cannot
-route through the legacy path or activate a durable message. A late successful
+activate a durable message or record a reply. A late successful
 claim is recorded undelivered rather than injected into a different run; an
 uncertain claim retains CLI recovery information and is not blindly replayed.
 
-Legacy prompt replies remain under the explicitly approved
-[accepted transitional decision](../architecture/tasks-legacy-prompt-reply-transition.md),
-not as durable message records. Other facts/status/receipts do not start turns.
+Reply recording — exact sender bindings, `reply_to` on every automatic answer,
+no automatic answer to an answer, and no automatic reply unless the run's own
+untruncated input is observed to carry the delivered message id — is Tasks consumer policy, documented with Tasks in
+[Tasks conventions](task-conventions.md) and
+[`extensions/tasks/README.md`](../../extensions/tasks/README.md).
 The consumer has no broader automatic-reply policy for every claimed message.
 
 The profile carries the neutral adapter and separately loaded Tasks consumer;

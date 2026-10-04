@@ -9,7 +9,17 @@ Durable addressed messages are a second record family in the same store
 taken from the host-supplied caller, exact-execution recipients, edit before
 claim, and one human-controlled activation setting that a fresh store defaults
 on. Delivery to Pi is the reply-routing adapter claiming at a turn boundary,
-never pane typing.
+never pane typing. When a delivered message owns an agent turn, that turn's
+final text is recorded as a durable reply message to the exact sender binding,
+always with `reply_to` (a same-sender batch links its newest message). Ownership
+is positive: the run's own observed input carries the delivery's unique message
+id and that observation is untruncated, so a different,
+transformed-without-it or truncated prompt is not proven, is
+not auto-replied, and keeps its "no reply" label so the recipient answers
+explicitly. A handoff queued behind
+in-flight work, or a human turn that wins the race, is therefore not auto-replied,
+and a delivered reply is never re-answered automatically. `vqro agent prompt` is human-only, so agents address
+each other with messages rather than pane input.
 
 - [Tasks policy, CLI, receipts and limits](../../docs/next/api/tasks-core-v0.md)
 - [Read-only pane, filters and exact-owner navigation](../../docs/next/api/tasks-view-v0.md)

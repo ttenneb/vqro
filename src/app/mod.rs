@@ -9,6 +9,7 @@ pub(crate) mod agent_view;
 mod agents;
 pub(crate) use agents::{AGENT_START_SETTLE_DELAY, MAX_AGENT_START_TIMEOUT};
 mod api;
+pub(crate) use api::agent_prompt_refusal;
 pub(crate) use api::collections_authority::CollectionsCheckpointResult;
 pub(crate) use api::collections_create::CollectionsCreateCheckpointResult;
 pub(crate) use api::extension_state::ExtensionStatePersistResult;

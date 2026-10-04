@@ -5,8 +5,8 @@ contains no Tasks, message activation, recipient selection or reply policy.
 Consumers register through the SDK-scoped version1 interface described in
 [`docs/next/api/pi-adapter-v1.md`](../../docs/next/api/pi-adapter-v1.md).
 
-The bundled Tasks consumer is `../tasks/pi.ts`; its legacy prompt-reply workflow
-has a tracked accepted transitional decision. Adapter observations are not
+The bundled Tasks consumer is `../tasks/pi.ts`; it records a delivered-message
+turn's final text as a durable reply message. Adapter observations are not
 durable messages, authenticated identity, accepted work or evidence of model
 understanding. Ordinary host identity/admission checks remain authoritative.
 

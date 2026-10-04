@@ -38,12 +38,12 @@ vqro pane run <pane-id> <command>...
 vqro pane read <pane-id> --source detection --format text
 ```
 
-For agents, start a bounded helper only when authorized. Use the CLI's current-name lookup for assignments; exchange its own `whoami` binding only when explicit binding JSON is needed. Then record assignments/results as described below. `agent prompt` is a notification adapter, not the task or evidence of acceptance.
+For agents, start a bounded helper only when authorized. Use the CLI's current-name lookup for assignments; exchange its own `whoami` binding only when explicit binding JSON is needed. Then record assignments/results as described below. `vqro agent prompt` is human-only: an agent caller is refused with `human_only` and must record a durable message instead. A prompt or message is not the task or evidence of acceptance.
 
 ```bash
 vqro agent start <name>
 # Optional: --kind <agent> (default pi), --pane <pane-id> (default own new pane)
-vqro agent prompt <name> "Run vqro task whoami and print its caller binding."
+vqro message send <name> "Run vqro task whoami and reply with its caller binding."
 vqro agent wait <name> --until idle --until done --timeout 300000
 vqro agent read <name> --source detection --format text
 ```
@@ -107,7 +107,7 @@ vqro task delegate "$TASK_ID" --owner "$OWNER" --rev "$REV"
 Send only the durable task ID/pointer as the work notification; the task contains the obligation:
 
 ```bash
-vqro agent prompt <helper> "task $TASK_ID assigned; inspect vqro task get $TASK_ID"
+vqro message send <helper> "task $TASK_ID assigned; inspect vqro task get $TASK_ID"
 ```
 
 The helper inspects, starts its owned task, works, updates actuals, and reports **every criterion exactly once** as `> criterion` with nonempty non-quote evidence below each. Example report body (use the task's actual criteria, not invented ones):
@@ -126,7 +126,7 @@ vqro task report "$TASK_ID" "$EVIDENCE" --rev "$REV"
 Then notify the delegator/lead with the task ID only; they read current task state/evidence, not a chat substitute:
 
 ```bash
-vqro agent prompt <lead> "task $TASK_ID reported; inspect vqro task get $TASK_ID"
+vqro message send <lead> "task $TASK_ID reported; inspect vqro task get $TASK_ID"
 ```
 
 **Delegate/report record, do not deliver.** Notifications, waits and final prose are not independent acceptance. A delegate/report receipt records that write, not independent acceptance; an accept/done receipt can authoritatively record its historical committed outcome. Use `get` for current state. The current parent owner or stored delegator may accept a report after checking each criterion, but **agents never self-accept**, even with a role match. Read the computed `acceptors`; there is no creator fallback or unrelated-human-admin accept right. Actual human binding acceptors match UID across panes; an agent-created root's logical human-class acceptor instead matches any fresh host-classified human. Human-created roots keep existing handoff rules. Original operation scopes remain exact.
@@ -159,7 +159,7 @@ Human only (never answer your own decision or impersonate the human):
 vqro task answer "$TASK_ID" a --rev "$REV" --note "A is approved"
 ```
 
-Decisions need 2–4 options, a default, a reversible flag and a waiting cost; a reversible decision may also take `--auto-at` (see the decision policy). The answer selects an option key and is not quote-validated. Do not assume creating a decision notifies/wakes the human. Write your final reply for whoever started your turn: when an agent's message started it, the Tasks Pi consumer sends that final text back automatically under the accepted [legacy prompt-reply transition](../../docs/next/architecture/tasks-legacy-prompt-reply-transition.md); its local routing entry is not a durable message record. A human-started turn stays a normal chat. A message you send with `vqro agent prompt` is auto-labelled from your pane (`[agent <name> · reply expected]`; `--no-reply-expected` drops the reply expectation); unlabelled input is never automatically routed; labels do not manufacture host human classification. To reach anyone else, record a report/decision and explicitly notify them with the task ID. Keep human-needed decisions in Tasks; final prose is neither delivery proof nor a committed task receipt.
+Decisions need 2–4 options, a default, a reversible flag and a waiting cost; a reversible decision may also take `--auto-at` (see the decision policy). The answer selects an option key and is not quote-validated. Do not assume creating a decision notifies/wakes the human. Write your final reply for whoever started your turn: when a delivered durable message owns it — the run's own observed input carries the delivery's unique message id, untruncated — the Tasks Pi consumer records that final text as a durable reply message to the exact sender, always with `--reply-to` (a same-sender batch links its newest message). An unproven run (a different, transformed-without-the-id or truncated prompt) is not auto-replied and keeps its "no reply" label, so the recipient answers explicitly with `vqro message send`. A human-started turn stays a normal chat. A delivered reply is never re-answered automatically, so continue a thread with an explicit `vqro message send --reply-to`. `vqro agent prompt` is human-only and no longer auto-labels; agents reach each other with durable messages. To reach anyone else, record a report/decision and explicitly notify them with the task ID. Keep human-needed decisions in Tasks; final prose is neither delivery proof nor a committed task receipt.
 
 ### Uncertain outcomes: lookup, never blind retry
 
@@ -189,7 +189,7 @@ vqro message edit MESSAGE_ID "..." --rev N
 vqro message activation on|off   # human only; fresh stores default on; one recorded setting
 ```
 
-The target must be a detected agent process (a name or pane that currently hosts one). `claim` binds the exact recipient execution, so a restarted agent (a new process execution) cannot claim an old address and the sender resends; a moved pane with the same execution still can. `edit` works only for the original sender while the message is waiting. A fresh Tasks store has activation on by default; an existing store keeps its recorded value and only a human can change it. With activation on, a waiting message may start an idle recipient's turn at the adapter's next poll; a stopped agent is never relaunched, and `claim` is not a run, reply or acceptance. A reply is a `send` with `--reply-to`.
+The target must be a detected agent process (a name or pane that currently hosts one), or an exact agent binding JSON as recorded in a message's `sender`. `claim` binds the exact recipient execution, so a restarted agent (a new process execution) cannot claim an old address and the sender resends; a moved pane with the same execution still can. An agent cannot `agent prompt`: that path is human-only, so address another agent with `message send`. `edit` works only for the original sender while the message is waiting. A fresh Tasks store has activation on by default; an existing store keeps its recorded value and only a human can change it. With activation on, a waiting message may start an idle recipient's turn at the adapter's next poll; a stopped agent is never relaunched, and `claim` is not a run, reply or acceptance. A settled turn that a durable message started records its final text as a reply `send` to that exact sender with `--reply-to`; a delivered reply is not re-answered automatically.
 
 ## Spaces and collections
 

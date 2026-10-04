@@ -11,7 +11,7 @@ import sys
 
 SERVICE = "vqro.tasks.core"
 TASK_USAGE = "usage: vqro task <create/decision TITLE --done-when TEXT [--parent ID]|plan FILE [--parent ID --rev N]|depends ID --on JSON --rev N|update ID --rev N [metadata options]|delegate ID --to NAME (or --owner JSON) --rev N|start/accept/done ID --rev N [done --evidence TEXT]|block/report/answer ID TEXT --rev N|revert ID --rev N|decision-timer ID --rev N --auto-at UTC|decisions|decisions-seen --through SEQ|decision-log [--after SEQ]|list/ready [--after ID]|tree|whoami|get ID|op ID [--caller JSON]>; decision requires --options JSON --default KEY --reversible BOOL --waiting-cost TEXT [--auto-at UTC]; explicit task --op requires --caller JSON from the original attempt; --json forces JSON"
-MESSAGE_USAGE = "usage: vqro message <send TARGET TEXT [--reply-to ID]|list|claim [--idle]|edit ID TEXT --rev N|activation on|off> [--op ID] [--caller JSON] [--json]"
+MESSAGE_USAGE = "usage: vqro message <send TARGET TEXT [--reply-to ID]|list|claim [--idle]|edit ID TEXT --rev N|activation on|off> [--op ID] [--caller JSON] [--json]; TARGET is a detected agent name, pane id, or an exact agent binding JSON {\"class\":\"agent\",\"terminal_id\":...,\"agent\":...,\"execution\":...}"
 MUTATIONS = {"create", "decision", "delegate", "start", "block", "report", "accept", "done", "answer", "decision_seen", "decision_timer", "decision_revert", "plan", "depends", "update"}
 
 
@@ -68,6 +68,14 @@ def decode_reply(response):
 
 
 def resolve_recipient(target):
+    # An exact agent binding is passed through as given: the durable record is the
+    # authority, only that exact execution can claim the message later, and the
+    # provider revalidates the binding's exact shape before any write.
+    if target.startswith("{"):
+        try:
+            return json.loads(target)
+        except ValueError as error:
+            raise ValueError(f"recipient binding is not valid JSON: {error}") from error
     response = api("agent.get", {"target": target}, "cli:message:resolve", 5)
     if "error" in response:
         raise ValueError(response["error"].get("message", "agent not found"))

@@ -12,6 +12,27 @@ use super::responses::{encode_error, encode_error_body, encode_success};
 
 const AGENT_PROMPT_SUBMIT_DELAY: Duration = Duration::from_millis(300);
 
+/// `agent prompt` is human-only: an agent-classified caller is refused with a
+/// durable-message pointer. A human or unclassifiable (remote/unknown) caller is
+/// unaffected. The classification is the host's own action-invocation
+/// observation, never a self-declared field on the wire.
+pub(crate) fn agent_prompt_refusal(
+    id: &str,
+    caller: &crate::action_invocation::InvocationCaller,
+) -> Option<String> {
+    matches!(
+        caller,
+        crate::action_invocation::InvocationCaller::Agent { .. }
+    )
+    .then(|| {
+        encode_error(
+            id.to_string(),
+            "human_only",
+            "agent prompt is human-only; an agent must record a durable message with `vqro message send`",
+        )
+    })
+}
+
 // Codex's Windows input reader does not surface bracketed paste. It detects the prompt as a
 // "paste burst" and, while that burst is buffered, rewrites a following Enter into a newline
 // instead of submitting. The burst only flushes after an idle timeout, so any size-based delay is
@@ -437,6 +458,37 @@ mod tests {
         start_deferred_agent_prompt(app, id, params)
             .recv_timeout(Duration::from_secs(1))
             .expect("agent prompt responds after submission")
+    }
+
+    #[test]
+    fn agent_prompt_refuses_only_agent_callers() {
+        use crate::action_invocation::InvocationCaller;
+
+        let agent = InvocationCaller::Agent {
+            terminal_id: "term".into(),
+            agent: "pi".into(),
+            execution: "boot:1:2".into(),
+            session: None,
+        };
+        let refusal = agent_prompt_refusal("req", &agent).expect("an agent caller is refused");
+        let error: crate::api::schema::ErrorResponse = serde_json::from_str(&refusal).unwrap();
+        assert_eq!(error.id, "req");
+        assert_eq!(error.error.code, "human_only");
+        assert!(
+            agent_prompt_refusal("req", &InvocationCaller::Unknown).is_none(),
+            "an unclassifiable caller keeps working"
+        );
+        assert!(
+            agent_prompt_refusal(
+                "req",
+                &InvocationCaller::HumanUnverified {
+                    terminal_id: "term".into(),
+                    uid: 1000,
+                }
+            )
+            .is_none(),
+            "a human caller keeps working"
+        );
     }
 
     #[cfg(windows)]

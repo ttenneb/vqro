@@ -1,6 +1,6 @@
 # Tasks legacy prompt-reply transition
 
-Status: **accepted, transitional**
+Status: **superseded and removed** (2026-10-04). The transitional legacy prompt-reply path this decision preserved no longer exists: a turn started by another agent's durable message now records its final text as a durable Tasks reply message (`message send` with `reply_to`), and `vqro agent prompt` is human-only. See [task conventions](../api/task-conventions.md). The decision, limits and removal condition below are kept as history.
 Decision: owner approval2026-10-03, conveyed by the coordinator with the core-neutrality design approval.
 
 ## Decision and exact scope

@@ -5,37 +5,90 @@ import type { AdapterV1 } from "../vqro-pi/index";
 export const MAX_REPLY_BYTES = 8192;
 export const METADATA_TTL_MS = 600_000;
 export const MAILBOX_POLL_MS = 10_000;
-export interface Origin { from: string; replyExpected: boolean }
-export function parseProvenanceLabel(text: string): Origin | null {
-  const match = /^\[agent ([^\]\s]+)(?: · (reply expected))?\]\s?/.exec(text);
-  return match ? { from: match[1], replyExpected: match[2] === "reply expected" } : null;
+
+/** The exact agent this reply answers, and the delivered message when there is one. */
+export interface ReplyTarget {
+  binding: string;
+  execution: string;
+  display: string;
+  id?: string;
 }
+
 export function boundedReplyBytes(text: string, maxBytes = MAX_REPLY_BYTES): string {
   const bytes = Buffer.from(text, "utf8");
   if (bytes.length <= maxBytes) return text;
   return `${bytes.subarray(0, maxBytes).toString("utf8").replace(/\uFFFD+$/, "")}\n[truncated by vqro reply routing at ${maxBytes} bytes]`;
 }
+
 export function assistantText(message: any): string {
   if (typeof message?.content === "string") return message.content;
   return Array.isArray(message?.content) ? message.content.filter((b: any) => b?.type === "text").map((b: any) => b.text).join("\n") : "";
 }
-export function promptConfirmsOrigin(output: string, from: string): boolean {
+
+function agentBinding(message: any): Omit<ReplyTarget, "id"> | undefined {
+  try {
+    const value = JSON.parse(message?.sender ?? "{}");
+    if (value?.class !== "agent") return undefined;
+    if (![value.terminal_id, value.agent, value.execution].every((field: any) => typeof field === "string" && field)) return undefined;
+    return { binding: JSON.stringify(value), execution: value.execution, display: `${value.agent} ${value.execution}` };
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * The reply target for one delivered batch: a single agent sender, and no message
+ * that is itself a reply. That last condition is what bounds the exchange — a
+ * reply delivered to the other side must not start another automatic reply,
+ * which is also why every automatic answer carries `reply_to` (a same-sender
+ * batch links its newest message).
+ */
+export function replyTarget(messages: any[]): ReplyTarget | undefined {
+  const senders = messages.map(agentBinding);
+  const first = senders[0];
+  if (!first || senders.some(sender => !sender || sender.binding !== first.binding)) return undefined;
+  if (messages.some(message => message?.reply_to != null)) return undefined;
+  return { ...first, id: messages[messages.length - 1]?.id };
+}
+
+/**
+ * A successful explicit message send to this execution suppresses the automatic
+ * reply. Only a newly committed send counts: `message edit` reports the same
+ * message shape, so an edited old message at revision 1 would otherwise pass.
+ */
+export function messageConfirmsOrigin(output: string, execution: string): boolean {
   for (const line of output.split("\n")) {
     try {
-      const value = JSON.parse(line.trim()), agent = value?.result?.agent;
-      if (value?.result?.type === "agent_prompted" && (agent?.name === from || agent?.pane_id === from)) return true;
-    } catch { /* Non-response text is not evidence of a successful send. */ }
+      const message = JSON.parse(line.trim())?.message;
+      if (message?.recipient_execution === execution && message?.state === "waiting" && message?.revision === 1) return true;
+    } catch {
+      /* Non-response text is not evidence of a successful send. */
+    }
   }
   return false;
 }
+
 export function renderMessage(message: any): string {
   let sender = "an agent";
   try {
     const binding = JSON.parse(message?.sender ?? "{}");
     if (binding.class === "agent") sender = `agent ${String(binding.execution ?? "unknown")}`;
     else if (binding.class === "human_unverified") sender = "a human";
-  } catch { /* Retain unknown provenance. */ }
+  } catch {
+    /* Retain unknown provenance. */
+  }
   return `[vqro message ${message.id} from ${sender}]\n${message.body}`;
+}
+
+/**
+ * The unique delivery id the SDK copies into the run's own input. A claimed
+ * message id is random per message, so a run whose observed input carries it is
+ * proven to be running that delivery — positive ownership rather than the absence
+ * of a remembered competitor, and robust to an input hook prepending or appending
+ * context around it.
+ */
+export function deliveryMarker(message: any): string | undefined {
+  return typeof message?.id === "string" && message.id ? `[vqro message ${message.id} from ` : undefined;
 }
 
 export default function (pi: ExtensionAPI) {
@@ -45,7 +98,10 @@ export default function (pi: ExtensionAPI) {
     if (candidate?.version !== 1 || candidate === active || !["snapshot", "current", "onFact", "beforeRun", "exec", "deliver"].every(key => typeof candidate[key] === "function")) return;
     detach(); active = candidate;
     const adapter = candidate as AdapterV1;
-    let origin: Origin | null = null, explicit = false, shutDown = false, checking = false;
+    let replyTo: ReplyTarget | undefined = undefined, explicit = false, shutDown = false, checking = false;
+    // A delivered batch awaiting the run that runs it, identified by the unique
+    // delivery id the SDK copies into that run's own input.
+    let pending: { marker: string; target: ReplyTarget } | undefined = undefined;
     let poll: ReturnType<typeof setInterval> | undefined;
     let metadataSeq = Date.now() * 1000;
     const record = (data: Record<string, unknown>) => pi.appendEntry("vqro-reply-routing", { ...data, at: new Date().toISOString() });
@@ -79,56 +135,77 @@ export default function (pi: ExtensionAPI) {
         const messages = await claim(true);
         if (!messages.length) return;
         record({ kind: "messages-claimed", ids: messages.map(message => message.id) });
-        if (shutDown || !adapter.current(token) || !await adapter.deliver(messages.map(renderMessage).join("\n\n"), token)) undelivered(messages);
+        const content = messages.map(renderMessage).join("\n\n");
+        const target = replyTarget(messages);
+        const delivered = await adapter.deliver(content, token);
+        if (shutDown || !adapter.current(token) || !delivered) {
+          undelivered(messages);
+          return;
+        }
+        // Armed here, owned only by a run whose own input carries this delivery id.
+        const marker = deliveryMarker(messages[0]);
+        pending = delivered && target && marker ? { marker, target } : undefined;
       } finally { checking = false; }
     }
     const startPoll = () => {
       if (!poll && !shutDown && adapter.snapshot().self?.execution) poll = setInterval(checkMailbox, MAILBOX_POLL_MS);
     };
-    async function noReply(from: string) {
-      await run(["pane", "report-metadata", process.env.VQRO_PANE_ID!, "--source", "vqro.reply-routing", "--state-label", `idle=no reply to ${from}`, "--seq", String(++metadataSeq), "--ttl-ms", String(METADATA_TTL_MS)], 2000);
+    async function noReply(target: ReplyTarget) {
+      await run(["pane", "report-metadata", process.env.VQRO_PANE_ID!, "--source", "vqro.reply-routing", "--state-label", `idle=no reply to ${target.display}`, "--seq", String(++metadataSeq), "--ttl-ms", String(METADATA_TTL_MS)], 2000);
     }
     const unBefore = adapter.beforeRun(async token => {
       const messages = await claim(false);
       if (!messages.length) return;
       record({ kind: "messages-claimed", ids: messages.map(message => message.id) });
       if (shutDown || !adapter.current(token)) { undelivered(messages); return; }
+      // Claimed into a turn something else started: recorded as delivered context,
+      // but this turn does not owe the sender an automatic reply.
       return { message: { customType: "vqro-message", content: messages.map(renderMessage).join("\n\n"), display: true }, discard: () => undelivered(messages) };
     });
     const unFacts = adapter.onFact(async fact => {
-      if (fact.kind === "session_closed") { shutDown = true; stopPoll(); return; }
+      if (fact.kind === "session_closed") { shutDown = true; replyTo = undefined; pending = undefined; stopPoll(); return; }
       if (shutDown) return;
-      if (fact.kind === "session_started") { stopPoll(); origin = null; explicit = false; startPoll(); return; }
+      if (fact.kind === "session_started") { stopPoll(); replyTo = undefined; pending = undefined; explicit = false; startPoll(); return; }
       if (fact.kind === "run_started") {
-        stopPoll(); origin = parseProvenanceLabel(fact.prompt); explicit = false; return;
+        stopPoll(); explicit = false;
+        const current = pending; pending = undefined;
+        const prompt = fact.prompt ?? "";
+        // Positive ownership: this run's own input carries the delivery id, so the
+        // SDK is running this delivery. A truncated observation is not complete
+        // proof, and anything else — a human turn that won the race, a busy-queued
+        // follow-up, transformed input — is not proven either: none of those is
+        // sent an automatic reply, and the pane is told so.
+        const owns = current !== undefined && fact.prompt_truncated !== true && prompt.includes(current.marker);
+        replyTo = owns && current ? current.target : undefined;
+        if (current && !owns) {
+          record({ kind: "no-reply", recipient: current.target.execution, reason: "delivery-not-run" });
+          await noReply(current.target);
+        }
+        return;
       }
-      if (fact.kind === "tool_observed" && fact.toolName === "bash" && origin && !explicit) {
-        explicit = promptConfirmsOrigin(fact.text ?? "", origin.from); return;
+      if (fact.kind === "tool_observed" && fact.toolName === "bash" && replyTo && !explicit) {
+        explicit = messageConfirmsOrigin(fact.text ?? "", replyTo.execution); return;
       }
       if (fact.kind !== "run_settled") return;
       startPoll();
-      const current = origin; origin = null;
-      if (!current?.replyExpected) return;
-      const from = current.from, self = fact.self?.name || fact.self?.pane_id;
-      if (!self) { record({ kind: "self-unknown", from }); return; }
-      if (self === from) return;
-      // Disabled/unavailable Tasks cannot apply reply/no-reply workflow.
+      const current = replyTo; replyTo = undefined;
+      if (!current) return;
+      if (fact.self?.execution === current.execution) { record({ kind: "self", recipient: current.execution }); return; }
+      // Disabled/unavailable Tasks cannot record the reply.
       if (!await available() || shutDown || !adapter.current(fact)) return;
-      if (explicit) { record({ kind: "explicit", from }); return; }
-      if (!fact.final) { record({ kind: "no-reply", from }); await noReply(from); return; }
-      // Approved compatibility exception, not a durable message or acceptance:
-      // docs/next/architecture/tasks-legacy-prompt-reply-transition.md.
+      if (explicit) { record({ kind: "explicit", recipient: current.execution }); return; }
+      if (!fact.final) { record({ kind: "no-reply", recipient: current.execution }); await noReply(current); return; }
       const body = boundedReplyBytes(fact.final);
-      const result = await run(["agent", "prompt", from, body, "--no-reply-expected"], 10_000);
+      const result = await run(["message", "send", current.binding, body, ...(current.id ? ["--reply-to", current.id] : [])], 10_000);
       if (result?.code === 0) {
-        record({ kind: "replied", from, bytes: Buffer.byteLength(body, "utf8") });
+        record({ kind: "replied", recipient: current.execution, bytes: Buffer.byteLength(body, "utf8") });
         await run(["pane", "report-metadata", process.env.VQRO_PANE_ID!, "--source", "vqro.reply-routing", "--clear-state-labels"], 2000);
       } else {
-        record({ kind: "no-reply", from, reason: result ? `agent prompt exited ${result.code}` : "agent prompt unavailable" });
-        await noReply(from);
+        record({ kind: "no-reply", recipient: current.execution, reason: result ? `message send exited ${result.code}` : "message send unavailable" });
+        await noReply(current);
       }
     });
-    detach = () => { shutDown = true; stopPoll(); unBefore(); unFacts(); };
+    detach = () => { shutDown = true; replyTo = undefined; pending = undefined; stopPoll(); unBefore(); unFacts(); };
   };
   const unReady = pi.events.on("vqro:pi-adapter:v1:ready", connect);
   pi.events.emit("vqro:pi-adapter:v1:discover", {});

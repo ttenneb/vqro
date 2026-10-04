@@ -3721,6 +3721,15 @@ impl HeadlessServer {
         }
         let alt_screen_read_spec = self.alt_screen_read_spec(&msg.request);
         if matches!(&msg.request.method, api::schema::Method::AgentPrompt(_)) {
+            // `agent prompt` is human-only. An agent-classified local caller must use
+            // a real durable message; humans and unclassifiable callers are unaffected.
+            if let api::ApiOrigin::LocalSocketPeer(peer) = &msg.origin {
+                let caller = self.app.invocation_caller(peer);
+                if let Some(response) = crate::app::agent_prompt_refusal(&msg.request.id, &caller) {
+                    let _ = msg.respond_to.send(response);
+                    return changed;
+                }
+            }
             let deferred_changed = self
                 .app
                 .handle_deferred_agent_api_request(msg.request, msg.respond_to);
