@@ -37,14 +37,20 @@ test("adapter alone reports neutral facts and only explicit input delivers", asy
   expect(h.facts[4].final).toBe("final");
   expect(h.calls.every(args => args[0] === "agent" && args[1] === "get")).toBe(true);
   expect(h.sent).toHaveLength(0);
-  expect(await h.api().deliver("explicit", h.api().snapshot())).toBe(true);
+  expect(await h.api().deliver("explicit", h.api().snapshot())).toBe("idle");
   expect(h.sent[0].options).toEqual({ deliverAs: "followUp" });
   await h.emit("session_shutdown");
-  expect(await h.api().deliver("after shutdown", h.api().snapshot())).toBe(false);
+  expect(await h.api().deliver("after shutdown", h.api().snapshot())).toBe("unavailable");
 });
 
-test("consumer mutation cannot alter the producer's identity or facts", async () => {
+test("a busy SDK handoff is reported queued, not as the next run", async () => {
   const h = harness();
+  await h.emit("session_start", {}, { isIdle: () => false });
+  expect(await h.api().deliver("behind in-flight work", h.api().snapshot())).toBe("busy");
+  expect(h.sent[0].options).toEqual({ deliverAs: "followUp" });
+});
+
+test("consumer mutation cannot alter the producer's identity or facts", async () => {  const h = harness();
   h.api().onFact(fact => { if (fact.self) fact.self.execution = "forged"; });
   await h.emit("session_start");
   const borrowed = h.api().snapshot(); borrowed.self!.execution = "forged";
@@ -77,7 +83,7 @@ test("new session/runtime cannot accept a retained token", async () => {
   expect(first.api().current(token)).toBe(false);
   const replacement = harness(); await replacement.emit("session_start");
   expect(replacement.api().current(token)).toBe(false);
-  expect(await replacement.api().deliver("stale input", token)).toBe(false);
+  expect(await replacement.api().deliver("stale input", token)).toBe("unavailable");
   expect(replacement.sent).toHaveLength(0);
 });
 

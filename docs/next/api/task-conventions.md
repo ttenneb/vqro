@@ -37,7 +37,8 @@ convention introduces no host API, Pi tool, task delivery or activation mechanis
   notification. Never exploit cooperative human classification through a shell.
 - Final prose is written for whoever started the turn. A turn started by another
   agent's durable message records that final text as a durable reply message to the
-  exact sender binding, with `reply_to` when one message started the run; a delivered
+  exact sender binding and always carries `reply_to` (a same-sender batch links
+  its newest message), so a delivered answer is never automatically re-answered; a delivered
   reply is never re-answered automatically, so a thread continues with an explicit
   `message send --reply-to`. Nothing is typed into a pane. `vqro agent prompt` is
   human-only and its old auto-labelled reply routing is removed. A human-started turn

@@ -39,22 +39,28 @@ function agentBinding(message: any): Omit<ReplyTarget, "id"> | undefined {
 /**
  * The reply target for one delivered batch: a single agent sender, and no message
  * that is itself a reply. That last condition is what bounds the exchange — a
- * reply delivered to the other side must not start another automatic reply.
+ * reply delivered to the other side must not start another automatic reply,
+ * which is also why every automatic answer carries `reply_to` (a same-sender
+ * batch links its newest message).
  */
 export function replyTarget(messages: any[]): ReplyTarget | undefined {
   const senders = messages.map(agentBinding);
   const first = senders[0];
   if (!first || senders.some(sender => !sender || sender.binding !== first.binding)) return undefined;
   if (messages.some(message => message?.reply_to != null)) return undefined;
-  return messages.length === 1 ? { ...first, id: messages[0].id } : { ...first };
+  return { ...first, id: messages[messages.length - 1]?.id };
 }
 
-/** A successful explicit message send to this execution suppresses the automatic reply. */
+/**
+ * A successful explicit message send to this execution suppresses the automatic
+ * reply. Only a newly committed send counts: `message edit` reports the same
+ * message shape, so an edited old message at revision 1 would otherwise pass.
+ */
 export function messageConfirmsOrigin(output: string, execution: string): boolean {
   for (const line of output.split("\n")) {
     try {
-      const value = JSON.parse(line.trim());
-      if (value?.message?.recipient_execution === execution) return true;
+      const message = JSON.parse(line.trim())?.message;
+      if (message?.recipient_execution === execution && message?.state === "waiting" && message?.revision === 1) return true;
     } catch {
       /* Non-response text is not evidence of a successful send. */
     }
@@ -115,14 +121,16 @@ export default function (pi: ExtensionAPI) {
         const messages = await claim(true);
         if (!messages.length) return;
         record({ kind: "messages-claimed", ids: messages.map(message => message.id) });
-        // This delivery starts (or continues) the turn that answers the message, so
-        // its sender is owed the final text. A failed delivery owes nothing.
         const target = replyTarget(messages);
-        if (shutDown || !adapter.current(token) || !await adapter.deliver(messages.map(renderMessage).join("\n\n"), token)) {
+        const handoff = await adapter.deliver(messages.map(renderMessage).join("\n\n"), token);
+        if (shutDown || !adapter.current(token) || handoff === "unavailable") {
           undelivered(messages);
           return;
         }
-        replyTo = target;
+        // Only a handoff the SDK took while idle is answered automatically: a busy
+        // handoff was queued behind a run someone else started, so its final text
+        // is not this delivery's answer.
+        replyTo = handoff === "idle" ? target : undefined;
       } finally { checking = false; }
     }
     const startPoll = () => {

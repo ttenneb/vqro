@@ -26,9 +26,12 @@ version1 interface provides:
 - `exec(argv, timeout)`: bounded CLI transport through the supplied Vqro binary;
   the adapter does not choose commands, recipients or product policy.
 - `deliver(content, token)`: explicit queued SDK input with fresh execution and
-  shutdown/run checks, at most128KiB. Both SDK idle and busy paths use followUp
-  queuing. A transport result is not agent acceptance; do not replay uncertain
-  effects or infer understanding from a receipt.
+  shutdown/run checks, at most 128KiB. Both SDK idle and busy paths use followUp
+  queuing; the returned `idle`/`busy`/`unavailable` observation says whether the
+  SDK reported itself idle at handoff (so the queued message is the run that
+  follows) or busy (so it was queued behind work already in flight). A transport
+  result is not agent acceptance; do not replay uncertain effects or infer
+  understanding from a receipt.
 
 Shutdown invalidates retained interfaces/in-flight work and unregisters discovery
 and consumers. Facts never request input themselves. The adapter does not poll
@@ -45,11 +48,14 @@ claim is recorded undelivered rather than injected into a different run; an
 uncertain claim retains CLI recovery information and is not blindly replayed.
 
 A turn that a delivered durable message started records its final text as a
-durable Tasks reply message to the exact sender binding (`reply_to` when one
-message started the run). Nothing is typed into a pane, a delivered reply is
-never re-answered automatically, and the former prompt-label reply path is
+durable Tasks reply message to the exact sender binding (`reply_to`, including a
+same-sender batch, whose answer links its newest message). Nothing is typed into
+a pane, a delivered reply is never re-answered automatically, and the former
+prompt-label reply path is
 removed ([superseded decision](../architecture/tasks-legacy-prompt-reply-transition.md)).
-Other facts/status/receipts do not start turns.
+A handoff the SDK took while busy belongs to a run someone else started, so it is
+recorded as delivered context without an automatic reply. Other
+facts/status/receipts do not start turns.
 The consumer has no broader automatic-reply policy for every claimed message.
 
 The profile carries the neutral adapter and separately loaded Tasks consumer;

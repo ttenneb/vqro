@@ -14,6 +14,13 @@ export interface Run {
 }
 export interface Fact extends Run { kind: string; toolName?: string; text?: string; text_truncated?: boolean }
 export interface ContextInput { message: { customType: string; content: string; display: boolean }; discard?: () => void }
+/**
+ * At handoff: whether the SDK reported itself idle (`idle`, so the queued user
+ * message is the run that follows) or busy (`busy`, so it was queued behind work
+ * already in flight), or that no input was handed over at all (`unavailable`).
+ * A neutral observation only; the consumer owns what it implies.
+ */
+export type DeliveryHandoff = "idle" | "busy" | "unavailable";
 export interface AdapterV1 {
   version: 1;
   snapshot(): Run;
@@ -21,7 +28,7 @@ export interface AdapterV1 {
   onFact(listener: (fact: Fact) => void | Promise<void>): () => void;
   beforeRun(listener: (run: Run) => Promise<ContextInput | void>): () => void;
   exec(args: string[], timeout: number): Promise<any>;
-  deliver(content: string, token: Run): Promise<boolean>;
+  deliver(content: string, token: Run): Promise<DeliveryHandoff>;
 }
 export function assistantText(message: any): string {
   if (typeof message?.content === "string") return message.content;
@@ -75,17 +82,19 @@ export default function (pi: ExtensionAPI) {
     onFact: listener => subscribe(facts, listener),
     beforeRun: listener => subscribe(before, listener),
     async deliver(content, token) {
-      if (Buffer.byteLength(content, "utf8") > 128 * 1024 || !current(token) || !token.self?.execution) return false;
+      if (Buffer.byteLength(content, "utf8") > 128 * 1024 || !current(token) || !token.self?.execution) return "unavailable";
       const fresh = await identity();
-      if (!current(token) || fresh?.execution !== token.self.execution) return false;
+      if (!current(token) || fresh?.execution !== token.self.execution) return "unavailable";
       // Always queue: an observed idle state can race a turn beginning inside
       // SDK input hooks. Facts themselves never invoke either delivery method.
+      // The reported observation lets the consumer tell "the run that follows is
+      // this input" from "this input was queued behind someone else's work".
       try {
         const idle = typeof latestCtx?.isIdle === "function" ? latestCtx.isIdle() : state.state === "idle";
         if (idle) pi.sendUserMessage(content, { deliverAs: "followUp" });
         else pi.sendMessage({ customType: "vqro-input", content, display: true }, { deliverAs: "followUp" });
-        return true;
-      } catch { return false; }
+        return idle ? "idle" : "busy";
+      } catch { return "unavailable"; }
     },
   };
   // Synchronous SDK-scoped discovery, independent of extension load order.

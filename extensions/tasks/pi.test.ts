@@ -141,7 +141,7 @@ test("a delivered batch is answered by the sender's exact binding with reply_to"
   }
 });
 
-test("a batch from one sender keeps no reply_to when it is more than one message", async () => {
+test("a same-sender batch answer links the newest message", async () => {
   jest.useFakeTimers();
   try {
     const h = mailboxHarness([messageFixture("m1", "first"), messageFixture("m2", "second")]);
@@ -151,7 +151,28 @@ test("a batch from one sender keeps no reply_to when it is more than one message
     await h.emit("before_agent_start", { prompt: "first\n\nsecond" });
     await h.emit("turn_end", turnText("both answered"));
     await h.emit("agent_settled", {});
-    expect(sends(h)[0]?.args).toEqual(["message", "send", bindingOf("exec-alpha"), "both answered"]);
+    expect(sends(h)[0]?.args).toEqual(["message", "send", bindingOf("exec-alpha"), "both answered", "--reply-to", "m2"]);
+    // The answer is a reply, so it cannot arm another automatic answer.
+    const answer = messageFixture("auto1", "both answered", "exec-beta", "m2");
+    expect(replyTarget([answer])).toBeUndefined();
+  } finally {
+    jest.useRealTimers();
+  }
+});
+
+test("a handoff queued behind a busy SDK does not route the active turn's final", async () => {
+  jest.useFakeTimers();
+  try {
+    const h = mailboxHarness([messageFixture("m1", "future request")]);
+    await h.emit("session_start", {}, { isIdle: () => false });
+    jest.advanceTimersByTime(MAILBOX_POLL_MS + 5);
+    await flush();
+    expect(h.sent.join("\n")).toContain("future request");
+    // A human-started run settles first; its text is not the colleague's answer.
+    await h.emit("before_agent_start", { prompt: "human question, not the request" }, { isIdle: () => false });
+    await h.emit("turn_end", turnText("private answer for the human turn"));
+    await h.emit("agent_settled", {});
+    expect(sends(h)).toHaveLength(0);
   } finally {
     jest.useRealTimers();
   }
@@ -216,7 +237,7 @@ test("an explicit message to the origin suppresses the automatic reply", async (
     await h.emit("session_start", {});
     jest.advanceTimersByTime(MAILBOX_POLL_MS + 5);
     await flush();
-    const confirmed = JSON.stringify({ message: { id: "m9", recipient_execution: "exec-alpha" }, operation_id: "op" });
+    const confirmed = JSON.stringify({ message: { id: "m9", recipient_execution: "exec-alpha", state: "waiting", revision: 1 }, operation_id: "op" });
     await h.emit("before_agent_start", { prompt: "please review" });
     await h.emit("tool_result", { toolName: "bash", toolCallId: "t1", content: [{ type: "text", text: confirmed }], isError: false });
     await h.emit("turn_end", turnText("sent it myself"));
@@ -231,7 +252,7 @@ test("an explicit message to the origin suppresses the automatic reply", async (
 test("a failed or unrelated message send does not suppress the reply", async () => {
   jest.useFakeTimers();
   try {
-    const other = JSON.stringify({ message: { id: "m9", recipient_execution: "exec-gamma" }, operation_id: "op" });
+    const other = JSON.stringify({ message: { id: "m9", recipient_execution: "exec-gamma", state: "waiting", revision: 1 }, operation_id: "op" });
     const errors = JSON.stringify({ error: { code: "invalid_request", message: "exec-alpha" } });
     const h = mailboxHarness([messageFixture("m1", "please review")]);
     await h.emit("session_start", {});
@@ -326,7 +347,7 @@ test("replyTarget requires one agent sender and a non-reply message", () => {
     display: "pi exec-alpha",
     id: "m1",
   });
-  expect(replyTarget([messageFixture("m1", "x"), messageFixture("m2", "y")])?.id).toBeUndefined();
+  expect(replyTarget([messageFixture("m1", "x"), messageFixture("m2", "y")])?.id).toBe("m2");
   expect(replyTarget([messageFixture("m1", "x"), messageFixture("m2", "y", "exec-gamma")])).toBeUndefined();
   expect(replyTarget([messageFixture("m1", "x", "exec-alpha", "m0")])).toBeUndefined();
   expect(replyTarget([{ id: "m1", body: "x", sender: JSON.stringify({ class: "human_unverified", uid: 1 }) }])).toBeUndefined();
@@ -334,10 +355,13 @@ test("replyTarget requires one agent sender and a non-reply message", () => {
   expect(replyTarget([])).toBeUndefined();
 });
 
-test("messageConfirmsOrigin trusts only a successful send to that execution", () => {
-  const success = JSON.stringify({ message: { id: "m2", recipient_execution: "exec-alpha" }, operation_id: "op" });
+test("messageConfirmsOrigin trusts only a newly committed send to that execution", () => {
+  const success = JSON.stringify({ message: { id: "m2", recipient_execution: "exec-alpha", state: "waiting", revision: 1 }, operation_id: "op" });
   expect(messageConfirmsOrigin(success, "exec-alpha")).toBe(true);
   expect(messageConfirmsOrigin(success, "exec-beta")).toBe(false);
+  // `message edit` reports the same message shape, at a later revision.
+  const edit = JSON.stringify({ message: { id: "m1", recipient_execution: "exec-alpha", state: "waiting", revision: 2 }, operation_id: "edit-op" });
+  expect(messageConfirmsOrigin(edit, "exec-alpha")).toBe(false);
   expect(messageConfirmsOrigin(JSON.stringify({ error: { code: "invalid_request", message: "exec-alpha" } }), "exec-alpha")).toBe(false);
   expect(messageConfirmsOrigin('echo "vqro message send exec-alpha hi"', "exec-alpha")).toBe(false);
   expect(messageConfirmsOrigin("", "exec-alpha")).toBe(false);

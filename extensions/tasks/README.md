@@ -10,9 +10,11 @@ taken from the host-supplied caller, exact-execution recipients, edit before
 claim, and one human-controlled activation setting that a fresh store defaults
 on. Delivery to Pi is the reply-routing adapter claiming at a turn boundary,
 never pane typing. When a delivered message starts an agent turn, that turn's
-final text is recorded as a durable reply message to the exact sender binding
-(with `reply_to` when one message started it); a delivered reply is never
-re-answered automatically. `vqro agent prompt` is human-only, so agents address
+final text is recorded as a durable reply message to the exact sender binding,
+always with `reply_to` (a same-sender batch links its newest message); a
+delivered reply is never
+re-answered automatically, and a handoff queued behind in-flight work is not
+auto-replied. `vqro agent prompt` is human-only, so agents address
 each other with messages rather than pane input.
 
 - [Tasks policy, CLI, receipts and limits](../../docs/next/api/tasks-core-v0.md)
