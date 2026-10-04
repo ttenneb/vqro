@@ -997,19 +997,20 @@ impl ClientShellState {
         let Some(path) = self.config.preferences_path.clone() else {
             return;
         };
+        self.sync_panel_identity();
         let mut preferences = self.config.preferences.clone();
         preferences.panels = self
-            .pane_panel_open
+            .panels_by_terminal
             .iter()
             .filter(|(_, views)| !views.is_empty())
-            .map(|(pane_id, views)| {
+            .map(|(terminal_id, views)| {
                 let display = self
-                    .pane_panel_display
-                    .get(pane_id)
+                    .display_by_terminal
+                    .get(terminal_id)
                     .cloned()
                     .unwrap_or_default();
                 preferences::ClientPanelPreference {
-                    pane_id: pane_id.clone(),
+                    terminal_id: terminal_id.clone(),
                     views: views.iter().cloned().collect(),
                     height: display.user_height,
                     collapsed_views: display.collapsed_views.iter().cloned().collect(),
@@ -1019,7 +1020,7 @@ impl ClientShellState {
             .collect();
         preferences
             .panels
-            .sort_by(|left, right| left.pane_id.cmp(&right.pane_id));
+            .sort_by(|left, right| left.terminal_id.cmp(&right.terminal_id));
         self.config.preferences = preferences.clone();
         let mut outcome = ClientShellInput::default();
         if let Err(error) = preferences::store(&path, preferences) {
@@ -1028,31 +1029,85 @@ impl ClientShellState {
         }
     }
 
-    /// Restore the persisted panels once the pane identities are known.
-    pub(super) fn restore_pane_panels(&mut self) {
-        if !self.pane_panel_open.is_empty() {
-            return;
-        }
-        let Some(snapshot) = self.snapshot.as_deref() else {
-            return;
-        };
-        let live = snapshot
-            .panes
+    /// The pane-to-terminal join, from the published views: a pane has exactly
+    /// one terminal, so a terminal placed in that pane is that pane's terminal.
+    fn pane_terminal_join(&self) -> HashMap<String, String> {
+        let Some(documents) = self
+            .endpoints
             .iter()
-            .map(|pane| pane.pane_id.clone())
-            .collect::<std::collections::BTreeSet<_>>();
-        let panels = self.config.preferences.panels.clone();
-        for panel in panels {
-            if !live.contains(&panel.pane_id) {
-                continue;
+            .find(|endpoint| endpoint.endpoint_id == self.active_endpoint_id)
+            .and_then(ClientShellEndpoint::current_host_documents)
+        else {
+            return HashMap::new();
+        };
+        let mut join = HashMap::new();
+        for entry in &documents.documents {
+            for item in &entry.document.items {
+                if let Some(terminal) = item.terminal.as_ref() {
+                    if let Some(placement) = terminal.placement.as_ref() {
+                        join.insert(placement.pane_id.clone(), terminal.terminal_id.clone());
+                    }
+                }
             }
-            self.pane_panel_open
-                .insert(panel.pane_id.clone(), panel.views.iter().cloned().collect());
-            let display = self.pane_panel_display.entry(panel.pane_id).or_default();
-            display.user_height = panel.height;
-            display.collapsed_views = panel.collapsed_views.iter().cloned().collect();
-            display.collapsed_rows = panel.collapsed_rows.iter().cloned().collect();
         }
+        join
+    }
+
+    /// Keep the durable, terminal-keyed panels and the pane-keyed ones the
+    /// renderer uses in step. Called when the pane identities may have changed:
+    /// a pane moving between tabs keeps its panels, height and collapsed rows.
+    pub(crate) fn sync_panel_identity(&mut self) {
+        self.pane_terminal_ids = self.pane_terminal_join();
+        for (pane_id, views) in std::mem::take(&mut self.pane_panel_open) {
+            if let Some(terminal) = self.pane_terminal_ids.get(&pane_id) {
+                self.panels_by_terminal.insert(terminal.clone(), views);
+            }
+        }
+        for (pane_id, display) in std::mem::take(&mut self.pane_panel_display) {
+            if let Some(terminal) = self.pane_terminal_ids.get(&pane_id) {
+                self.display_by_terminal.insert(terminal.clone(), display);
+            }
+        }
+        let live = self
+            .pane_terminal_ids
+            .iter()
+            .map(|(pane_id, terminal_id)| (pane_id.clone(), terminal_id.clone()))
+            .collect::<Vec<_>>();
+        for (pane_id, terminal_id) in live {
+            if let Some(views) = self.panels_by_terminal.get(&terminal_id) {
+                if !views.is_empty() {
+                    self.pane_panel_open.insert(pane_id.clone(), views.clone());
+                }
+            }
+            if let Some(display) = self.display_by_terminal.get(&terminal_id) {
+                self.pane_panel_display.insert(pane_id, display.clone());
+            }
+        }
+    }
+
+    /// Restore the persisted panels. The stored key is the terminal id, so a
+    /// pane that moved keeps its panels wherever it is now.
+    pub(super) fn restore_pane_panels(&mut self) {
+        if self.snapshot.is_none() {
+            return;
+        }
+        for panel in self.config.preferences.panels.clone() {
+            let terminal_id = panel.terminal_id.clone();
+            self.panels_by_terminal
+                .entry(terminal_id.clone())
+                .or_default()
+                .extend(panel.views);
+            let display = PanePanelDisplay {
+                user_height: panel.height,
+                collapsed_views: panel.collapsed_views.into_iter().collect(),
+                collapsed_rows: panel.collapsed_rows.into_iter().collect(),
+                ..Default::default()
+            };
+            self.display_by_terminal
+                .entry(terminal_id)
+                .or_insert(display);
+        }
+        self.sync_panel_identity();
     }
 }
 

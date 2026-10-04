@@ -18,7 +18,8 @@ pub(super) struct ClientRemoteCollapsedGroups {
 /// keyed by the pane identity the server reports.
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub(super) struct ClientPanelPreference {
-    pub(super) pane_id: String,
+    /// The pane's terminal identity, which survives a pane moving between tabs.
+    pub(super) terminal_id: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(super) views: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

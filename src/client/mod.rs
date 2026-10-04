@@ -1931,8 +1931,11 @@ async fn run_client_loop(
                                         generation,
                                         projection,
                                     );
-                                    // Views can arrive after the pane gained its
-                                    // agent, so the user's rule retries here.
+                                    // Views can arrive after the pane gained
+                                    // its agent, so the user's rule retries
+                                    // here; they also carry the placements the
+                                    // panels are keyed by.
+                                    shell.sync_panel_identity();
                                     shell.apply_show_panels_on_agent_start()
                                 });
                                 if repaint {

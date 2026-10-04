@@ -271,3 +271,80 @@ fn an_empty_slice_says_so_instead_of_drawing_nothing() {
     let text = text_of(&mut state);
     assert!(text.contains("nothing to show"), "{text}");
 }
+
+#[test]
+fn persisted_panels_follow_the_terminal_when_the_pane_moves() {
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    state.config.preferences.panels = vec![super::super::preferences::ClientPanelPreference {
+        terminal_id: "term_moved".into(),
+        views: vec!["tasks".into()],
+        height: Some(6),
+        collapsed_views: Vec::new(),
+        collapsed_rows: Vec::new(),
+    }];
+    let mut moved = snapshot();
+    moved.panes[0].pane_id = "pane_9".into();
+    state.set_endpoint_status(&ClientEndpointId::Local, ClientEndpointStatus::Online);
+    state.set_endpoint_capabilities_for(
+        &ClientEndpointId::Local,
+        vec![crate::protocol::endpoint::PANE_PANELS_CAPABILITY.into()],
+    );
+    state.set_endpoint_snapshot_for_generation(&ClientEndpointId::Local, 1, Box::new(moved));
+    state.set_pane_surface(panel_surface());
+    // The same terminal, now placed in the pane's new identity.
+    let projection: crate::protocol::endpoint::HostDocumentsProjectionV1 =
+        serde_json::from_value(serde_json::json!({
+            "contract":"host.documents.v1", "boot_id":"boot-1", "revision":1,
+            "documents":[{"provider_priority":1,"document":{
+                "contract":"host.view.v1", "namespace":"example.view", "generation":7,"revision":2,
+                "surface":"navigation","target":{"kind":"session"},
+                "items":[{"id":"panel:pane_9:tasks","role":"section","label":"Tasks",
+                          "view":{"pane_id":"pane_9","view_id":"tasks"},
+                          "terminal":{"terminal_id":"term_moved",
+                            "placement":{"pane_id":"pane_9","workspace_id":"ws_1","tab_id":"tab_1"}}}],
+                "actions":[],"required_capabilities":[]
+            }}]
+        }))
+        .expect("projection");
+    state.set_endpoint_host_documents_for_generation(
+        &ClientEndpointId::Local,
+        1,
+        Box::new(projection),
+    );
+    state.sync_panel_identity();
+    assert!(
+        state
+            .pane_panel_open
+            .get("pane_9")
+            .is_some_and(|views| views.contains("tasks")),
+        "the panel followed its terminal to the pane's new identity"
+    );
+    assert_eq!(
+        state
+            .pane_panel_display
+            .get("pane_9")
+            .and_then(|display| display.user_height),
+        Some(6)
+    );
+    // A terminal that is not in this snapshot claims nothing.
+    assert!(!state.pane_panel_open.contains_key("pane_1"));
+}
+
+#[test]
+fn views_open_by_default_when_an_agent_starts_and_the_user_can_opt_out() {
+    let config = ClientShellConfig::from_config(&Config::default());
+    assert!(config.show_panels_on_agent_start, "on by default");
+    let mut on = panel_state(Some(AgentStatus::Working), false);
+    assert!(on.config.show_panels_on_agent_start);
+    assert!(on.apply_show_panels_on_agent_start());
+    assert!(
+        on.pane_panel_open
+            .get("pane_1")
+            .is_some_and(|views| views.contains("tasks")),
+        "an agent start opens the pane's first view"
+    );
+    let mut off = panel_state(Some(AgentStatus::Working), false);
+    off.config.show_panels_on_agent_start = false;
+    assert!(!off.apply_show_panels_on_agent_start());
+    assert!(off.pane_panel_open.is_empty(), "opting out opens nothing");
+}

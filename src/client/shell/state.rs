@@ -109,8 +109,8 @@ pub(crate) struct ClientShellConfig {
     pub(super) startup_config_diagnostic: Option<String>,
     pub(super) startup_server_notice: Option<String>,
     pub(super) startup_onboarding: bool,
-    /// Open a pane's views when an agent starts there. Off unless the user
-    /// turns it on: only the user opens views.
+    /// Open a pane's views when an agent starts there. On by default; the user
+    /// opts out. Only a user action or this user-facing rule opens a view.
     pub(super) show_panels_on_agent_start: bool,
 }
 
@@ -1125,7 +1125,19 @@ pub(crate) struct ClientShellState {
     pub(super) pane_panel_display: HashMap<String, super::pane_panel::PanePanelDisplay>,
     /// Which views the user (or the show-on-agent-start rule) has open, per
     /// pane, by the extension's own view id. Per client, never shared.
+    ///
+    /// Panels are addressed by pane (that is what the server's request names)
+    /// but *kept* by terminal id, so a pane that moves between tabs keeps its
+    /// panels: `pane_terminal_ids` is the join, filled from the snapshot.
     pub(super) pane_panel_open: HashMap<String, std::collections::BTreeSet<String>>,
+    /// Pane identity to terminal identity, joined from the published views:
+    /// a pane has exactly one terminal, so any placement in it is authoritative.
+    pub(super) pane_terminal_ids: HashMap<String, String>,
+    /// The same panels, kept by terminal identity. This is the durable key: a
+    /// pane that moves between tabs changes its pane id but not its terminal,
+    /// so the panes above are derived from this on every snapshot.
+    pub(super) panels_by_terminal: HashMap<String, std::collections::BTreeSet<String>>,
+    pub(super) display_by_terminal: HashMap<String, super::pane_panel::PanePanelDisplay>,
     /// The last pane panel claim sent, so it is sent only when it changes.
     pub(super) last_pane_panels: Option<crate::protocol::endpoint::ClientPanePanels>,
     /// Panes that already had an agent when the rule last ran.
@@ -1324,6 +1336,9 @@ impl ClientShellState {
             collection_preview_heights: HashMap::new(),
             pane_panel_display: HashMap::new(),
             pane_panel_open: HashMap::new(),
+            pane_terminal_ids: HashMap::new(),
+            panels_by_terminal: HashMap::new(),
+            display_by_terminal: HashMap::new(),
             last_pane_panels: None,
             panes_with_agents: Default::default(),
             collection_entered_pane: None,
@@ -1591,6 +1606,9 @@ impl ClientShellState {
         self.collection_preview_heights.clear();
         self.pane_panel_display.clear();
         self.pane_panel_open.clear();
+        self.pane_terminal_ids.clear();
+        self.panels_by_terminal.clear();
+        self.display_by_terminal.clear();
         self.last_pane_panels = None;
         self.panes_with_agents.clear();
         self.collection_entered_pane = None;

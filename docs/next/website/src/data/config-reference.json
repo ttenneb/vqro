@@ -902,8 +902,8 @@
         {
           "key": "ui.show_panels_on_agent_start",
           "type": "boolean",
-          "default": "false",
-          "description": "Open a pane's published views when an agent starts there. Off by default: only the user opens views."
+          "default": "true",
+          "description": "Open a pane's published views when an agent starts there. Views stay hidden until the user toggles them or an agent starts; set false to opt out."
         },
         {
           "key": "ui.copy_on_select",
