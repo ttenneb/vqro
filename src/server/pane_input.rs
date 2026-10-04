@@ -24,10 +24,9 @@ pub(super) fn human_input_unsent_text(events: &[ClientPaneInputEvent]) -> Option
             } => {
                 if *kind == crate::protocol::ClientKeyKind::Release {
                     None
-                } else if *code == crate::protocol::ClientKeyCode::Enter && *modifiers == 0 {
-                    Some(false)
-                } else if KeyModifiers::from_bits_truncate(*modifiers) == KeyModifiers::CONTROL
-                    && matches!(code, crate::protocol::ClientKeyCode::Char('c' | 'u'))
+                } else if (*code == crate::protocol::ClientKeyCode::Enter && *modifiers == 0)
+                    || (KeyModifiers::from_bits_truncate(*modifiers) == KeyModifiers::CONTROL
+                        && matches!(code, crate::protocol::ClientKeyCode::Char('c' | 'u')))
                 {
                     Some(false)
                 } else {
@@ -448,7 +447,7 @@ mod tests {
             ClientPaneInputEvent::Paste("pasted".into()),
         ] {
             assert_eq!(
-                human_input_unsent_text(&[event.clone()]),
+                human_input_unsent_text(std::slice::from_ref(&event)),
                 Some(true),
                 "{event:?}"
             );
