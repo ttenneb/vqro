@@ -579,12 +579,34 @@ impl HeadlessServer {
                 request.boot_id == self.client_shell_boot_id
                     && request.projection_revision == client.shell_projection_revision
             });
-        // Panels a client has open: these panes' terminals are the claimed
-        // size, so the ordinary layout pass must not resize them back.
-        let pane_panels = client.shell_pane_panels.clone().filter(|request| {
-            request.boot_id == self.client_shell_boot_id
-                && request.projection_revision == client.shell_projection_revision
-        });
+        // Panels every attached client has open, as the smallest terminal any of
+        // them claimed for that pane. One PTY serves all clients, so the smallest
+        // claim wins: the largest panel always fits, no client's terminal is
+        // drawn under another client's panel, and the size never depends on which
+        // client's request arrived last.
+        let mut claimed: std::collections::HashMap<String, crate::protocol::ClientSurfaceSize> =
+            std::collections::HashMap::new();
+        for other in self.clients.values() {
+            // Every attached client that made a claim counts, foreground or
+            // not: a background client is still drawing its own panel over the
+            // same PTY.
+            let Some(request) = other.shell_pane_panels.as_ref() else {
+                continue;
+            };
+            if request.boot_id != self.client_shell_boot_id {
+                continue;
+            }
+            for claim in &request.claims {
+                claimed
+                    .entry(claim.pane_id.clone())
+                    .and_modify(|size| {
+                        size.cols = size.cols.min(claim.size.cols);
+                        size.rows = size.rows.min(claim.size.rows);
+                    })
+                    .or_insert(claim.size);
+            }
+        }
+        let pane_panels = (!claimed.is_empty()).then_some(claimed);
         let viewport_pane_id = pane_viewport
             .as_ref()
             .filter(|request| request.size.is_some())
@@ -609,7 +631,7 @@ impl HeadlessServer {
                 pane_panels
                     .as_ref()
                     .into_iter()
-                    .flat_map(|panels| panels.claims.iter().map(|claim| &claim.pane_id)),
+                    .flat_map(|panels| panels.keys()),
             )
             .filter_map(|pane_id| self.app.parse_pane_id(pane_id))
             .filter_map(|(workspace_index, pane_id)| {
@@ -695,8 +717,8 @@ impl HeadlessServer {
             }
         }
         if let Some(panels) = pane_panels {
-            for claim in panels.claims {
-                let Some((workspace_index, pane_id)) = self.app.parse_pane_id(&claim.pane_id)
+            for (pane_public_id, size) in panels {
+                let Some((workspace_index, pane_id)) = self.app.parse_pane_id(&pane_public_id)
                 else {
                     continue;
                 };
@@ -727,8 +749,8 @@ impl HeadlessServer {
                     pane_id,
                 ) {
                     runtime.resize(
-                        claim.size.rows,
-                        claim.size.cols,
+                        size.rows,
+                        size.cols,
                         cell_size.width_px,
                         cell_size.height_px,
                     );

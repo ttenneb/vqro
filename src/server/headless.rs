@@ -2998,7 +2998,22 @@ impl HeadlessServer {
                 if let Some(client) = self.clients.get_mut(&client_id) {
                     client.shell_pane_panels = Some(panels);
                 }
-                self.resize_shell_tab_if_controller(client_id, true)
+                // The claims are shared by every attached client, so the tab's
+                // geometry controller applies them: a client that is not the
+                // controller still changes what the controller draws and what
+                // the pane's PTY is.
+                let controller = self
+                    .tab_id_for_target(target)
+                    .and_then(|tab_id| self.tab_geometry_controllers.get(&tab_id).copied());
+                match controller {
+                    Some(controller) => {
+                        let _ = self.resize_shell_tab_if_controller(controller, true);
+                    }
+                    None => {
+                        let _ = self.resize_shell_tab_if_controller(client_id, true);
+                    }
+                }
+                true
             }
             ServerEvent::ClientShellPaneViewport {
                 client_id,

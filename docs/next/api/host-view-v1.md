@@ -109,6 +109,24 @@ effect), with an optional `view` block for the way the user answers it:
   its children, clicking a row's terminal link focuses that pane's terminal,
   and the wheel scrolls the slice.
 
+## Several clients at one pane
+
+One PTY serves every attached client, so panel sizes are arbitrated, never
+raced:
+
+- The pane's terminal is the **smallest** size any attached client claimed for
+  it. The client with the largest panel always fits, no client's terminal is
+  drawn under another client's panel, and the result never depends on which
+  request arrived last.
+- A claim from another boot than the current shell boot is stale and ignored.
+- When no attached client claims a pane, it returns to its layout geometry.
+- The tab's geometry controller applies the claims, so a client that does not
+  control the tab's geometry still changes what the controller draws and what
+  the pane's PTY is.
+- A server that does not advertise `pane_panels_v1` draws no panels at all: a
+  panel that could not claim its terminal's edge would be drawn over the
+  terminal instead of shrinking it. The connection stays usable.
+
 ## User-facing entry points
 
 - `vqro pane panel show|hide|toggle <pane> [<view>]` asks the attached clients

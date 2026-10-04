@@ -630,9 +630,11 @@ impl ClientShellState {
             drawn_height: None,
             drawn_pane: None,
         };
+        // A server that does not advertise the panel control gets no panels:
+        // a panel that could not claim its terminal's edge would be drawn over
+        // the terminal instead of shrinking it. The connection stays usable.
         if let Some(documents) = host_documents {
-            if self
-                .supports_endpoint_capability(crate::protocol::endpoint::PANE_VIEWPORT_CAPABILITY)
+            if self.supports_endpoint_capability(crate::protocol::endpoint::PANE_PANELS_CAPABILITY)
             {
                 pane_panel::render(
                     &mut composed,
