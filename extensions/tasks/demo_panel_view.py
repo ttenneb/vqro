@@ -14,6 +14,7 @@ import argparse
 import json
 import os
 import shutil
+import subprocess
 import tempfile
 import time
 from pathlib import Path
@@ -169,6 +170,25 @@ class PanelViewDemo(ReadinessDemo):
             time.sleep(0.5)
         raise RuntimeError("no pane panel view was published")
 
+    def pty_size(self, pane):
+        """The pane's own PTY size, read from its TTY: the ground truth for
+        whether the panel is a split (the PTY shrinks) or an overlay."""
+        info = self.cli("pane", "process-info", "--pane", pane)["result"]
+        info = info.get("process_info") or info.get("pane") or info
+        tty = info.get("tty")
+        if not tty:
+            # The pane's foreground process holds the PTY as its terminal.
+            pid = (info.get("foreground_processes") or [{}])[0].get("pid")
+            assert pid, info
+            tty = os.readlink(f"/proc/{pid}/fd/0")
+        assert tty.startswith("/dev/pts/"), tty
+        out = subprocess.run(["stty", "-F", tty, "size"], capture_output=True, text=True,
+                             check=True).stdout.split()
+        return int(out[0]), int(out[1])
+
+    def human_columns(self, first=28, last=112):
+        return first, last
+
     def run(self):
         # The private root's first-run dialog owns the mouse until it is
         # answered, so it starts answered. The show-on-agent-start rule is
@@ -287,6 +307,30 @@ class PanelViewDemo(ReadinessDemo):
         self.wait_screen("waiting on you: unblock")
         text_b = demo_capture.capture(self.root / "client.log", self.root / "capture", "panel-b")
 
+        # 8. The panel is a split, not a crop: the host resizes the pane's PTY to
+        #    the rows below the panel, and every grid row is drawn there, so the
+        #    agent's newest rows end at the pane's bottom edge with no blank band.
+        #    The pane's TTY is asked directly, which is the ground truth.
+        self.api("pane.focus", {"pane_id": a})
+        self.cli("pane", "panel", "hide", a, "tasks")
+        time.sleep(2)
+        rows_closed, cols_closed = self.pty_size(a)
+        self.cli("pane", "panel", "show", a, "tasks")
+        self.wait_screen("waiting on panel-b: unblock")
+        time.sleep(2)
+        rows_open, cols_open = self.pty_size(a)
+        # Recorded, not asserted: this is the measurement the split depends on,
+        # and a green demo that hid a broken split would be worse than a number.
+        band = rows_closed - rows_open
+        header = self.locate("Tasks", within="▾ ●")[1]
+        screen_rows = ["".join(cells) for cells in self.screen().rows]
+        divider = next(
+            (row for row in range(header + 1, min(header + 24, len(screen_rows)))
+             if screen_rows[row][118:190].strip().startswith("────────")),
+            header + 1,
+        )
+        filled_text = demo_capture.capture(self.root / "client.log", self.root / "capture",
+                                           "panel-split-filled")
         # The served document is the contract the panels are drawn from.
         badges = [item["id"] for item in document["items"] if item["id"].startswith("context:attention.badge:")]
         assert any(":1:" in badge for badge in badges), badges
@@ -315,9 +359,15 @@ class PanelViewDemo(ReadinessDemo):
                   "messages_panel": {"shows_the_message_rows": "review the panel when you can" in Path(messages_text).read_text()},
                   "click_focused_assignee": {"focused_before": before, "focused_after": after},
                   "b_panel_shows_own_debt": "waiting on you: unblock" in Path(text_b).read_text(),
+                  "split": {"pty_rows_without_panel": rows_closed, "pty_rows_with_panel": rows_open,
+                            "pty_cols_unchanged": cols_open == cols_closed,
+                            "rows_freed": band,
+                            "drawn_band_rows": divider - header + 2,
+                            "pty_shrank_with_the_panel": rows_open < rows_closed,
+                            "blank_row_under_the_panel": self.pane_row_blank(divider + 1)},
                   "captures": {"expanded": str(expanded_text), "messages": str(messages_text),
                                "collapsed": str(collapsed_text), "unavailable": str(unavailable_text),
-                               "b": str(text_b)}}
+                               "b": str(text_b), "split_filled": str(filled_text)}}
         self.save("RESULT.json", result)
         return result
 
