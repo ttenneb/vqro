@@ -46,7 +46,7 @@ uncertain claim retains CLI recovery information and is not blindly replayed.
 
 Reply recording — exact sender bindings, `reply_to` on every automatic answer,
 no automatic answer to an answer, and no automatic reply unless the run's own
-prompt is the delivered text — is Tasks consumer policy, documented with Tasks in
+delivered message id is observed in its input — is Tasks consumer policy, documented with Tasks in
 [Tasks conventions](task-conventions.md) and
 [`extensions/tasks/README.md`](../../extensions/tasks/README.md).
 The consumer has no broader automatic-reply policy for every claimed message.

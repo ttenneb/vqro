@@ -239,6 +239,43 @@ test("a transformed or prefix prompt is not the delivered run", async () => {
   }
 });
 
+test("a run whose input carries the delivery id answers it even after a transform", async () => {
+  jest.useFakeTimers();
+  try {
+    const messages = [messageFixture("m1", "colleague request")];
+    const h = mailboxHarness(messages);
+    await h.emit("session_start", {});
+    jest.advanceTimersByTime(MAILBOX_POLL_MS + 5);
+    await flush();
+    // An input hook that only adds context keeps the delivery id.
+    await h.emit("before_agent_start", { prompt: `context added by an input hook\n${deliveredContent(messages)}` });
+    await h.emit("turn_end", turnText("answer to the colleague"));
+    await h.emit("agent_settled", {});
+    expect(sends(h)).toHaveLength(1);
+  } finally {
+    jest.useRealTimers();
+  }
+});
+
+test("an unproven delivery is declined and labelled for an explicit reply", async () => {
+  jest.useFakeTimers();
+  try {
+    const h = mailboxHarness([messageFixture("m1", "colleague request")]);
+    await h.emit("session_start", {});
+    jest.advanceTimersByTime(MAILBOX_POLL_MS + 5);
+    await flush();
+    await h.emit("before_agent_start", { prompt: "human question" });
+    await h.emit("turn_end", turnText("private human answer"));
+    await h.emit("agent_settled", {});
+    expect(sends(h)).toHaveLength(0);
+    expect(h.entries).toContainEqual(expect.objectContaining({ data: expect.objectContaining({ kind: "no-reply", reason: "delivery-not-run" }) }));
+    const metadata = h.calls.find((call) => call.args[0] === "pane" && call.args[1] === "report-metadata");
+    expect(metadata?.args).toContain("idle=no reply to pi exec-alpha");
+  } finally {
+    jest.useRealTimers();
+  }
+});
+
 test("a handoff queued behind a busy SDK does not route the active turn's final", async () => {
   jest.useFakeTimers();
   try {

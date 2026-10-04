@@ -80,6 +80,17 @@ export function renderMessage(message: any): string {
   return `[vqro message ${message.id} from ${sender}]\n${message.body}`;
 }
 
+/**
+ * The unique delivery id the SDK copies into the run's own input. A claimed
+ * message id is random per message, so a run whose observed input carries it is
+ * proven to be running that delivery — positive ownership rather than the absence
+ * of a remembered competitor, and robust to an input hook prepending or appending
+ * context around it.
+ */
+export function deliveryMarker(message: any): string | undefined {
+  return typeof message?.id === "string" && message.id ? `[vqro message ${message.id} from ` : undefined;
+}
+
 export default function (pi: ExtensionAPI) {
   let active: AdapterV1 | undefined;
   let detach = () => {};
@@ -88,10 +99,9 @@ export default function (pi: ExtensionAPI) {
     detach(); active = candidate;
     const adapter = candidate as AdapterV1;
     let replyTo: ReplyTarget | undefined = undefined, explicit = false, shutDown = false, checking = false;
-    // A delivered batch awaiting the run that consumes it. Ownership is decided at
-    // `run_started` from the run's own prompt, not from anything observed at
-    // handoff: a pending human input can still win the run.
-    let pending: { content: string; target: ReplyTarget | undefined } | undefined = undefined;
+    // A delivered batch awaiting the run that runs it, identified by the unique
+    // delivery id the SDK copies into that run's own input.
+    let pending: { marker: string; target: ReplyTarget } | undefined = undefined;
     let poll: ReturnType<typeof setInterval> | undefined;
     let metadataSeq = Date.now() * 1000;
     const record = (data: Record<string, unknown>) => pi.appendEntry("vqro-reply-routing", { ...data, at: new Date().toISOString() });
@@ -132,10 +142,9 @@ export default function (pi: ExtensionAPI) {
           undelivered(messages);
           return;
         }
-        // Armed here, owned only by the run whose own prompt is this content: a
-        // busy-queued follow-up, or a human turn that wins the race, settles with
-        // a different prompt and is never answered automatically.
-        pending = delivered && target ? { content, target } : undefined;
+        // Armed here, owned only by a run whose own input carries this delivery id.
+        const marker = deliveryMarker(messages[0]);
+        pending = delivered && target && marker ? { marker, target } : undefined;
       } finally { checking = false; }
     }
     const startPoll = () => {
@@ -161,13 +170,16 @@ export default function (pi: ExtensionAPI) {
         stopPoll(); explicit = false;
         const current = pending; pending = undefined;
         const prompt = fact.prompt ?? "";
-        // Positive ownership only: the run's own prompt must be exactly the
-        // delivered content. A different or truncated prompt is not proven to be
-        // this delivery's run — a human turn that won the race, a busy-queued
-        // follow-up, or a prompt another input hook transformed — so nothing is
-        // sent rather than risking an unrelated turn's text.
-        const owns = current !== undefined && prompt === current.content;
-        replyTo = owns ? current!.target : undefined;
+        // Positive ownership: this run's own input carries the delivery id, so the
+        // SDK is running this delivery. Anything else — a human turn that won the
+        // race, a busy-queued follow-up, transformed input — is not proven, so no
+        // automatic reply is sent and the pane is told so.
+        const owns = current !== undefined && prompt.includes(current.marker);
+        replyTo = owns && current ? current.target : undefined;
+        if (current && !owns) {
+          record({ kind: "no-reply", recipient: current.target.execution, reason: "delivery-not-run" });
+          await noReply(current.target);
+        }
         return;
       }
       if (fact.kind === "tool_observed" && fact.toolName === "bash" && replyTo && !explicit) {
