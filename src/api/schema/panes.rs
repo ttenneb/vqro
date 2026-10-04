@@ -595,7 +595,19 @@ pub struct PaneInfo {
     pub agent_session: Option<AgentSessionInfo>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scroll: Option<PaneScrollInfo>,
+    /// The pane's live terminal size: the rows and columns its PTY and terminal
+    /// core have now. A pane whose terminal a client claimed for a panel is
+    /// smaller than its layout rect by the panel's band, so this is the size to
+    /// compare against the pane's own rows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_size: Option<PaneTerminalSize>,
     pub revision: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct PaneTerminalSize {
+    pub rows: u16,
+    pub cols: u16,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]

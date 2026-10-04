@@ -637,6 +637,7 @@ mod tests {
             tokens: HashMap::new(),
             agent_session: None,
             scroll,
+            terminal_size: None,
             revision: 0,
         }
     }

@@ -198,6 +198,7 @@ fn pane_scroll_result(
                 max_offset_from_bottom,
                 viewport_rows,
             }),
+            terminal_size: None,
             revision: 0,
         },
     }

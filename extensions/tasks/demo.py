@@ -73,6 +73,21 @@ import {readFileSync,writeFileSync} from 'node:fs';
 import net from 'node:net';
 const root=ROOT;
 export default function(pi:any) {
+ // A demo that wants an agent whose output overflows the pane writes
+ // overflow-lines.json first: the agent then prints numbered lines at startup
+ // and one more every few seconds, which is what makes a panel's split visible.
+ pi.registerCommand('overflow', {description:'Print numbered lines so the pane overflows', handler: async(_args:string,ctx:any)=>{
+  let spec:any;
+  try { spec = JSON.parse(readFileSync(`${root}/overflow-lines.json`,'utf8')); } catch { spec = {lines:200,every_ms:2000,visible:60}; }
+  const lines = Number(spec.lines ?? 0);
+  const visible = Number(spec.visible ?? 60);
+  const numbers = Array.from({length: lines}, (_unused, index) => index + 1);
+  const draw = () => ctx.ui.setWidget('overflow', numbers.slice(-visible).map(n => `line ${n}`));
+  draw();
+  let next = lines;
+  setInterval(() => { next += 1; numbers.push(next); draw(); }, Number(spec.every_ms ?? 2000));
+  ctx.ui.notify('overflow printing', 'info');
+ }});
  pi.registerCommand('taskcore', {description:'Approved private task-core demo action', handler: async(token:string,ctx:any)=>{
   if(!/^[a-z0-9-]+$/.test(token)) throw new Error('invalid demo token');
   const command=JSON.parse(readFileSync(`${root}/commands/${token}.json`,'utf8'));

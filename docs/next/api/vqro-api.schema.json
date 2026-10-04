@@ -1096,6 +1096,17 @@
             "terminal_id": {
               "type": "string"
             },
+            "terminal_size": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/event/$defs/PaneTerminalSize"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The pane's live terminal size: the rows and columns its PTY and terminal\ncore have now. A pane whose terminal a client claimed for a panel is\nsmaller than its layout rect by the panel's band, so this is the size to\ncompare against the pane's own rows."
+            },
             "terminal_title": {
               "type": [
                 "string",
@@ -1280,6 +1291,27 @@
             "offset_from_bottom",
             "max_offset_from_bottom",
             "viewport_rows"
+          ],
+          "type": "object"
+        },
+        "PaneTerminalSize": {
+          "properties": {
+            "cols": {
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "rows": {
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "rows",
+            "cols"
           ],
           "type": "object"
         },
@@ -11459,6 +11491,17 @@
             "terminal_id": {
               "type": "string"
             },
+            "terminal_size": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/success_response/$defs/PaneTerminalSize"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The pane's live terminal size: the rows and columns its PTY and terminal\ncore have now. A pane whose terminal a client claimed for a panel is\nsmaller than its layout rect by the panel's band, so this is the size to\ncompare against the pane's own rows."
+            },
             "terminal_title": {
               "type": [
                 "string",
@@ -12205,6 +12248,27 @@
           "required": [
             "pid",
             "name"
+          ],
+          "type": "object"
+        },
+        "PaneTerminalSize": {
+          "properties": {
+            "cols": {
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "rows": {
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "rows",
+            "cols"
           ],
           "type": "object"
         },

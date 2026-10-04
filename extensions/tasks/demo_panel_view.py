@@ -13,6 +13,7 @@ Writes a full screen capture (text and PNG) of both panes next to RESULT.json.
 import argparse
 import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -170,6 +171,24 @@ class PanelViewDemo(ReadinessDemo):
             time.sleep(0.5)
         raise RuntimeError("no pane panel view was published")
 
+    def pane_terminal_rows(self, pane):
+        """The pane's live terminal rows, from the optional native-API field."""
+        info = self.cli("pane", "get", pane)["result"]["pane"]
+        size = info.get("terminal_size")
+        assert size, info
+        return int(size["rows"])
+
+    def numbered_rows(self, first, last):
+        """(row, number) for each visible numbered line in the pane's columns."""
+        rows = ["".join(cells) for cells in self.screen().rows]
+        found = []
+        for row, line in enumerate(rows):
+            text = line[first:last]
+            match = re.search(r"line (\d+)", text)
+            if match:
+                found.append((row, int(match.group(1))))
+        return found
+
     def keep_log(self, name):
         """The client log as of this moment: replay.py turns it into the PNG the
         human looks at, and demo_capture replays the whole log at capture time."""
@@ -200,6 +219,9 @@ class PanelViewDemo(ReadinessDemo):
     def human_columns(self, first=28, last=112):
         return first, last
 
+    def pane_columns(self, first=118, last=190):
+        return first, last
+
     def run(self):
         # The private root's first-run dialog owns the mouse until it is
         # answered, so it starts answered. The show-on-agent-start rule is
@@ -214,6 +236,10 @@ class PanelViewDemo(ReadinessDemo):
         b = self.cli("pane", "split", "--pane", human, "--direction", "down", "--no-focus")["result"]["pane"]["pane_id"]
         self.remember_pane(a)
         self.remember_pane(b)
+        # A's agent prints more numbered lines than the pane can hold, so the
+        # split is visible: with a panel open the newest line must sit on the last
+        # row above the agent's editor.
+        (self.root / "overflow-lines.json").write_text(json.dumps({"lines": 200, "every_ms": 2000}))
         self.launch("panel-a", a)
         self.launch("panel-b", b)
         owner_a = self.agent("panel-a", "panel-a-identity", ["whoami"])["caller"]
@@ -377,6 +403,54 @@ class PanelViewDemo(ReadinessDemo):
         )
         self.cli("pane", "panel", "hide", human, "tasks")
 
+        # 9. The overflow proof, which separates "the agent leaves blank space"
+        #    from "the grid was painted at the pane's top": pane A's agent prints
+        #    200 numbered lines and one more every two seconds. With a panel open
+        #    the newest line must sit on the last row above the agent's editor, the
+        #    first visible line directly under the panel, and the API's terminal
+        #    size must be the pane's own rows minus the band. Same with it
+        #    collapsed.
+        # The agent prints its overflow on request, so the demo decides when.
+        self.cli("agent", "prompt", "panel-a", "/overflow")
+        time.sleep(6)
+        self.api("pane.focus", {"pane_id": a})
+        self.cli("pane", "panel", "hide", a, "tasks")
+        time.sleep(2)
+        o_plain = self.pane_terminal_rows(a)
+        o_first, o_last = self.pane_columns()
+        debug_text = demo_capture.capture(self.root / "client.log", self.root / "capture",
+                                          "panel-overflow-debug")
+        self.keep_log("panel-overflow-debug")
+        # Pi renders nothing for `ctx.ui.setWidget` in this launch configuration
+        # (its notify does show), so the agent's own line output is not evidence
+        # yet; the terminal size is, and it is measured on this Pi pane.
+        o_plain_lines = self.numbered_rows(o_first, o_last)
+        self.cli("pane", "panel", "show", a, "tasks")
+        self.wait_screen("waiting on panel-b: unblock")
+        time.sleep(4)
+        o_open = self.pane_terminal_rows(a)
+        screen = ["".join(cells) for cells in self.screen().rows]
+        o_header = next((row for row, line in enumerate(screen)
+                       if "⊟" in line[o_first:o_last] and "Tasks" in line[o_first:o_last]), None)
+        o_divider = next((row for row in range(o_header, o_header + 24)
+                        if screen[row][o_first:o_last].strip().startswith("────────")), None)
+        o_band = o_divider - o_header + 1
+        o_open_lines = self.numbered_rows(o_first, o_last)
+        open_text = demo_capture.capture(self.root / "client.log", self.root / "capture",
+                                         "panel-overflow-open")
+        self.keep_log("panel-overflow-open")
+        # Collapse it: the terminal gets the band back and the same checks hold.
+        self.click(*self.wait_locate("Tasks", within="⊟"))
+        self.wait_screen("▸ ● Tasks")
+        time.sleep(3)
+        o_collapsed = self.pane_terminal_rows(a)
+        o_collapsed_lines = self.numbered_rows(o_first, o_last)
+        collapsed_text = demo_capture.capture(self.root / "client.log", self.root / "capture",
+                                             "panel-overflow-collapsed")
+        self.keep_log("panel-overflow-collapsed")
+        self.click(*self.wait_locate("Tasks", within="⊟"))
+        self.wait_screen("▾ ● Tasks")
+
         # The served document is the contract the panels are drawn from.
         badges = [item["id"] for item in document["items"] if item["id"].startswith("context:attention.badge:")]
         assert any(":1:" in badge for badge in badges), badges
@@ -416,9 +490,28 @@ class PanelViewDemo(ReadinessDemo):
                             "pty_cols_unchanged": cols_open == cols_closed,
                             "newest_line_at_the_bottom_edge": newest_at_bottom,
                             "blank_rows_between_the_panel_and_the_bottom": gaps},
+                  "overflow": {
+                      "pane_rows_without_panel": o_plain,
+                      "pane_rows_with_panel": o_open,
+                      "pane_rows_collapsed": o_collapsed,
+                      "band_rows": o_band,
+                      "rows_with_panel_equals_pane_minus_band": o_open == o_plain - o_band,
+                      "collapsed_rows_equals_pane_minus_its_two_row_band": o_collapsed == o_plain - 2,
+                      "first_visible_line_directly_under_the_panel":
+                          bool(o_open_lines) and o_open_lines[0][0] == o_divider + 1,
+                      "newest_line_on_the_last_row_above_the_editor":
+                          bool(o_open_lines)
+                          and not self.pane_row_blank(o_open_lines[-1][0] + 1, o_first, o_last),
+                      "agent_line_output_rendered_by_pi": len(o_plain_lines),
+                      "open_lines": [number for _, number in o_open_lines],
+                      "collapsed_lines": [number for _, number in o_collapsed_lines],
+                      "note": "the numbered-line widget does not render in this Pi launch config", 
+                  },
                   "captures": {"expanded": str(expanded_text), "messages": str(messages_text),
                                "collapsed": str(collapsed_text), "unavailable": str(unavailable_text),
-                               "b": str(text_b), "split_filled": str(filled_text)}}
+                               "b": str(text_b), "split_filled": str(filled_text),
+                               "overflow_open": str(open_text),
+                               "overflow_collapsed": str(collapsed_text)}}
         self.save("RESULT.json", result)
         return result
 
