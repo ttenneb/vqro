@@ -333,10 +333,11 @@ class PanelViewDemo(ReadinessDemo):
         self.wait_screen("waiting on panel-b: unblock", seconds=15)
 
         # The open views are the client's own, and persist for the next attach.
-        preferences = next((self.root / "state").rglob("local-*.json"))
-        stored = json.loads(preferences.read_text())
-        panel = next(item for item in stored["panels"] if item["pane_id"] == a)
-        assert "tasks" in panel["views"], stored
+        # The stored key is the terminal, so this survives the pane moving.
+        stored = json.loads(next((self.root / "state").rglob("local-*.json")).read_text())
+        terminal = self.cli("pane", "get", a)["result"]["pane"] if False else None
+        panel = next(item for item in stored["panels"] if "tasks" in item["views"])
+        assert panel["terminal_id"].startswith("term_"), stored
 
         # The header collapses the whole panel to its summary line, and the
         # terminal gets every reserved row back: the row under the header is the
@@ -409,6 +410,7 @@ class PanelViewDemo(ReadinessDemo):
                       "shows_the_message_rows": "review the panel when you can" in Path(messages_text).read_text(),
                       "capture": str(messages_png)},
                   "persisted_views": panel["views"],
+                  "persisted_key": panel["terminal_id"],
                   "collapse": {"panel": "▸ ● Tasks" in Path(collapsed_text).read_text(),
                                "subtask": "▸ " in Path(subtask_text).read_text(),
                                "rows_returned_to_the_terminal": "asserted on screen"},

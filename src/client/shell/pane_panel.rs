@@ -1053,36 +1053,58 @@ impl ClientShellState {
         join
     }
 
-    /// Keep the durable, terminal-keyed panels and the pane-keyed ones the
-    /// renderer uses in step. Called when the pane identities may have changed:
-    /// a pane moving between tabs keeps its panels, height and collapsed rows.
-    pub(crate) fn sync_panel_identity(&mut self) {
+    /// Update the pane-to-terminal join and derive the pane-keyed state the
+    /// renderer uses from the terminal-keyed state that is authoritative.
+    fn rekey_panels(&mut self) {
         self.pane_terminal_ids = self.pane_terminal_join();
+        let mut open = HashMap::new();
+        let mut display = HashMap::new();
+        for (pane_id, terminal_id) in &self.pane_terminal_ids {
+            if let Some(views) = self.panels_by_terminal.get(terminal_id) {
+                if !views.is_empty() {
+                    open.insert(pane_id.clone(), views.clone());
+                }
+            }
+            if let Some(stored) = self.display_by_terminal.get(terminal_id) {
+                display.insert(pane_id.clone(), stored.clone());
+            }
+        }
+        self.pane_panel_open = open;
+        self.pane_panel_display = display;
+    }
+
+    /// Keep the durable, terminal-keyed panels and the pane-keyed ones the
+    /// renderer uses in step. Called whenever the pane-keyed state changes and
+    /// when the pane identities may have: the fold uses the join that was in
+    /// force, so a pane that moved keeps its entry under its terminal.
+    pub(crate) fn sync_panel_identity(&mut self) {
+        let mut panels = HashMap::new();
+        let mut displays = HashMap::new();
         for (pane_id, views) in std::mem::take(&mut self.pane_panel_open) {
-            if let Some(terminal) = self.pane_terminal_ids.get(&pane_id) {
-                self.panels_by_terminal.insert(terminal.clone(), views);
+            if let Some(terminal_id) = self.pane_terminal_ids.get(&pane_id) {
+                panels.insert(terminal_id.clone(), views);
             }
         }
         for (pane_id, display) in std::mem::take(&mut self.pane_panel_display) {
-            if let Some(terminal) = self.pane_terminal_ids.get(&pane_id) {
-                self.display_by_terminal.insert(terminal.clone(), display);
+            if let Some(terminal_id) = self.pane_terminal_ids.get(&pane_id) {
+                displays.insert(terminal_id.clone(), display);
             }
         }
+        // A terminal whose pane is live but has no panel is closed on purpose:
+        // forgetting it is what makes closing stick. A terminal whose pane is
+        // not live (a restore before the join is known) keeps its entry.
         let live = self
             .pane_terminal_ids
-            .iter()
-            .map(|(pane_id, terminal_id)| (pane_id.clone(), terminal_id.clone()))
-            .collect::<Vec<_>>();
-        for (pane_id, terminal_id) in live {
-            if let Some(views) = self.panels_by_terminal.get(&terminal_id) {
-                if !views.is_empty() {
-                    self.pane_panel_open.insert(pane_id.clone(), views.clone());
-                }
-            }
-            if let Some(display) = self.display_by_terminal.get(&terminal_id) {
-                self.pane_panel_display.insert(pane_id, display.clone());
-            }
-        }
+            .values()
+            .cloned()
+            .collect::<std::collections::HashSet<_>>();
+        self.panels_by_terminal
+            .retain(|terminal_id, _| !live.contains(terminal_id));
+        self.display_by_terminal
+            .retain(|terminal_id, _| !live.contains(terminal_id));
+        self.panels_by_terminal.extend(panels);
+        self.display_by_terminal.extend(displays);
+        self.rekey_panels();
     }
 
     /// Restore the persisted panels. The stored key is the terminal id, so a
