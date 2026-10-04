@@ -3739,6 +3739,102 @@ async fn public_api_focus_replaces_every_client_shell_projection() {
 }
 
 #[tokio::test]
+async fn forwarded_human_keys_arm_and_clear_possible_unsent_input() {
+    let mut server = test_headless_server();
+    let _input_rx = install_focused_test_runtime(&mut server, b"");
+    server.app.state.ensure_test_terminals();
+    let pane_id = server.app.state.workspaces[0].tabs[0].root_pane;
+    let public_pane_id = server.app.public_pane_id(0, pane_id).unwrap();
+    let terminal_id = server.app.state.terminal_id_for_pane(0, pane_id).unwrap();
+    server.clients.insert(
+        11,
+        ClientConnection::new_with_mode(
+            ClientConnectionMode::ClientShell,
+            (80, 24),
+            crate::kitty_graphics::HostCellSize::default(),
+            1,
+            RenderEncoding::SemanticFrame,
+            None,
+        ),
+    );
+    let key = |code: crate::protocol::ClientKeyCode,
+               modifiers: u8,
+               kind: crate::protocol::ClientKeyKind| {
+        crate::protocol::ClientPaneInputEvent::Key {
+            code,
+            modifiers,
+            kind,
+            repeat_count: 1,
+            shifted_codepoint: None,
+            generated_text: None,
+            tracks_release: true,
+            physical_key_id: None,
+            windows_record: None,
+        }
+    };
+    let forward = |server: &mut HeadlessServer,
+                   events: Vec<crate::protocol::ClientPaneInputEvent>| {
+        let _ = server.handle_server_event(ServerEvent::ClientShellPaneInput {
+            client_id: 11,
+            pane_id: public_pane_id.clone(),
+            events,
+        });
+    };
+
+    // A character the human typed may be sitting unsent in the editor.
+    forward(
+        &mut server,
+        vec![key(
+            crate::protocol::ClientKeyCode::Char('h'),
+            0,
+            crate::protocol::ClientKeyKind::Press,
+        )],
+    );
+    assert!(server.app.state.terminals[&terminal_id].unsent_input_possible);
+
+    // A release on its own proves nothing about the editor's contents.
+    forward(
+        &mut server,
+        vec![key(
+            crate::protocol::ClientKeyCode::Char('h'),
+            0,
+            crate::protocol::ClientKeyKind::Release,
+        )],
+    );
+    assert!(server.app.state.terminals[&terminal_id].unsent_input_possible);
+
+    // A plain Enter is the human submitting the line.
+    forward(
+        &mut server,
+        vec![key(
+            crate::protocol::ClientKeyCode::Enter,
+            0,
+            crate::protocol::ClientKeyKind::Press,
+        )],
+    );
+    assert!(!server.app.state.terminals[&terminal_id].unsent_input_possible);
+
+    // Ctrl-C clears the line the human abandoned.
+    forward(
+        &mut server,
+        vec![
+            key(
+                crate::protocol::ClientKeyCode::Char('h'),
+                0,
+                crate::protocol::ClientKeyKind::Press,
+            ),
+            key(
+                crate::protocol::ClientKeyCode::Char('c'),
+                crossterm::event::KeyModifiers::CONTROL.bits(),
+                crate::protocol::ClientKeyKind::Press,
+            ),
+        ],
+    );
+    assert!(!server.app.state.terminals[&terminal_id].unsent_input_possible);
+    shutdown_test_runtimes(&mut server);
+}
+
+#[tokio::test]
 async fn client_shell_input_targets_runtime_without_server_shell_classification() {
     let mut server = test_headless_server();
     let mut input_rx = install_focused_test_runtime(&mut server, b"\x1b[?1000h\x1b[?1006h");

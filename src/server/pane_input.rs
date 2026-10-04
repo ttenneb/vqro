@@ -3,6 +3,61 @@ use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers, MouseEventKind};
 
 use crate::protocol::{AttachScrollDirection, AttachScrollSource, ClientPaneInputEvent};
 
+/// What forwarded human pane input proves about unsent text in the target
+/// editor. `Some(true)`: the editor may now hold unsent human text.
+/// `Some(false)`: the human submitted or cleared it. `None`: proves nothing.
+///
+/// Any non-release key, text commit or paste may put text in the editor
+/// (autocomplete, history recall, a submitted line edited again), so only the
+/// known submit and clear keys prove the editor empty: an unmodified Enter,
+/// Ctrl-C and Ctrl-U. Releases and mouse events prove nothing, a modified
+/// Enter inserts a newline, and Esc proves nothing about the editor.
+pub(super) fn human_input_unsent_text(events: &[ClientPaneInputEvent]) -> Option<bool> {
+    let mut effect = None;
+    for event in events {
+        let event_effect = match event {
+            ClientPaneInputEvent::Key {
+                code,
+                modifiers,
+                kind,
+                ..
+            } => {
+                if *kind == crate::protocol::ClientKeyKind::Release {
+                    None
+                } else if *code == crate::protocol::ClientKeyCode::Enter && *modifiers == 0 {
+                    Some(false)
+                } else if KeyModifiers::from_bits_truncate(*modifiers) == KeyModifiers::CONTROL
+                    && matches!(code, crate::protocol::ClientKeyCode::Char('c' | 'u'))
+                {
+                    Some(false)
+                } else {
+                    Some(true)
+                }
+            }
+            ClientPaneInputEvent::TextCommit(text) | ClientPaneInputEvent::Paste(text) => {
+                (!text.is_empty()).then_some(true)
+            }
+            ClientPaneInputEvent::Mouse { .. } => None,
+        };
+        if event_effect.is_some() {
+            effect = event_effect;
+        }
+    }
+    effect
+}
+
+/// What raw input forwarded by a directly attached client proves about unsent
+/// text in the target editor. Attach forwards the outer terminal's bytes
+/// verbatim, so a lone Return, Ctrl-C or Ctrl-U is the human submitting or
+/// clearing the line and anything else may have added text.
+pub(super) fn attach_input_unsent_text(data: &[u8]) -> Option<bool> {
+    match data {
+        [] => None,
+        [b'\r'] | [b'\x03'] | [b'\x15'] => Some(false),
+        _ => Some(true),
+    }
+}
+
 pub(super) fn downgrade_ineligible_pixel_mouse(
     events: &mut [ClientPaneInputEvent],
     pixel_mouse: bool,
@@ -348,6 +403,117 @@ fn apply_client_terminal_input_events(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn key(code: KeyCode, modifiers: KeyModifiers) -> ClientPaneInputEvent {
+        ClientPaneInputEvent::from_terminal_key(crate::input::TerminalKey::new(code, modifiers))
+            .expect("pane input key")
+    }
+
+    fn released(code: KeyCode) -> ClientPaneInputEvent {
+        ClientPaneInputEvent::from_terminal_key(
+            crate::input::TerminalKey::new(code, KeyModifiers::NONE)
+                .with_kind(KeyEventKind::Release),
+        )
+        .expect("pane input key")
+    }
+
+    /// Only the keys that submit or clear a line prove the editor empty; every
+    /// other key may have put text there (autocomplete, history, a line edited
+    /// again after submitting it).
+    #[test]
+    fn forwarded_keys_mark_unsent_text_except_submit_and_clear_keys() {
+        assert_eq!(
+            human_input_unsent_text(&[key(KeyCode::Enter, KeyModifiers::NONE)]),
+            Some(false)
+        );
+        assert_eq!(
+            human_input_unsent_text(&[key(KeyCode::Char('c'), KeyModifiers::CONTROL)]),
+            Some(false)
+        );
+        assert_eq!(
+            human_input_unsent_text(&[key(KeyCode::Char('u'), KeyModifiers::CONTROL)]),
+            Some(false)
+        );
+
+        for event in [
+            key(KeyCode::Char('h'), KeyModifiers::NONE),
+            key(KeyCode::Up, KeyModifiers::NONE),
+            key(KeyCode::Tab, KeyModifiers::NONE),
+            key(KeyCode::Backspace, KeyModifiers::NONE),
+            key(KeyCode::Char('r'), KeyModifiers::CONTROL),
+            key(KeyCode::Esc, KeyModifiers::NONE),
+            key(KeyCode::Enter, KeyModifiers::SHIFT),
+            key(KeyCode::Char('c'), KeyModifiers::ALT),
+            ClientPaneInputEvent::TextCommit("typed".into()),
+            ClientPaneInputEvent::Paste("pasted".into()),
+        ] {
+            assert_eq!(
+                human_input_unsent_text(&[event.clone()]),
+                Some(true),
+                "{event:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn input_that_proves_nothing_leaves_unsent_text_alone() {
+        assert_eq!(human_input_unsent_text(&[]), None);
+        assert_eq!(
+            human_input_unsent_text(&[released(KeyCode::Char('h'))]),
+            None
+        );
+        assert_eq!(
+            human_input_unsent_text(&[ClientPaneInputEvent::TextCommit(String::new())]),
+            None
+        );
+        assert_eq!(
+            human_input_unsent_text(&[ClientPaneInputEvent::Paste(String::new())]),
+            None
+        );
+        assert_eq!(
+            human_input_unsent_text(&[ClientPaneInputEvent::Mouse {
+                kind: crate::protocol::ClientMouseKind::Down(
+                    crate::protocol::ClientMouseButton::Left
+                ),
+                position: crate::protocol::ClientMousePosition::Cell { column: 1, row: 1 },
+                geometry: None,
+                modifiers: 0,
+                lines: 1,
+            }]),
+            None
+        );
+    }
+
+    /// A batch is decided by its last proving event, so "typed then submitted"
+    /// reads as submitted rather than as left unsent.
+    #[test]
+    fn the_last_proving_event_decides_a_batch() {
+        assert_eq!(
+            human_input_unsent_text(&[
+                key(KeyCode::Char('h'), KeyModifiers::NONE),
+                released(KeyCode::Char('h')),
+                key(KeyCode::Enter, KeyModifiers::NONE),
+            ]),
+            Some(false)
+        );
+        assert_eq!(
+            human_input_unsent_text(&[
+                key(KeyCode::Char('u'), KeyModifiers::CONTROL),
+                key(KeyCode::Char('h'), KeyModifiers::NONE),
+            ]),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn attached_input_marks_unsent_text_unless_it_is_a_lone_submit_or_clear() {
+        assert_eq!(attach_input_unsent_text(b""), None);
+        assert_eq!(attach_input_unsent_text(b"\r"), Some(false));
+        assert_eq!(attach_input_unsent_text(b"\x03"), Some(false));
+        assert_eq!(attach_input_unsent_text(b"\x15"), Some(false));
+        assert_eq!(attach_input_unsent_text(b"x"), Some(true));
+        assert_eq!(attach_input_unsent_text(b"half typed\r"), Some(true));
+    }
 
     #[tokio::test]
     async fn terminal_attach_stale_geometry_falls_back_to_the_canonical_cell() {

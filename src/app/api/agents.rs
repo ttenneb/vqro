@@ -193,6 +193,19 @@ impl App {
                 ),
             ));
         }
+        if terminal.unsent_input_possible {
+            // Typing here would join the human's unsent text and let the trailing Enter
+            // submit the mix. The host forwarded those keys; it cannot tell whether the
+            // editor still holds them, so it refuses instead of guessing.
+            return Err(encode_error(
+                id,
+                "editor_has_text",
+                format!(
+                    "agent {} has unsent text in its input box; not typing over it",
+                    params.target
+                ),
+            ));
+        }
         #[cfg(windows)]
         let submit_deadline = params
             .wait
@@ -634,7 +647,7 @@ mod tests {
             .unwrap()
             .test_process_pty_bytes(b"\x1b[?2004l");
         let raw_started = std::time::Instant::now();
-        let raw = run_deferred_agent_prompt(
+        let unbracketed = run_deferred_agent_prompt(
             &mut app,
             "req-raw",
             AgentPromptParams {
@@ -643,8 +656,11 @@ mod tests {
                 wait: None,
             },
         );
-        let raw: SuccessResponse = serde_json::from_str(&raw).unwrap();
-        assert!(matches!(raw.result, ResponseResult::AgentPrompted { .. }));
+        let unbracketed: SuccessResponse = serde_json::from_str(&unbracketed).unwrap();
+        assert!(matches!(
+            unbracketed.result,
+            ResponseResult::AgentPrompted { .. }
+        ));
         assert_eq!(rx.try_recv().unwrap(), Bytes::from_static(b"A != B"));
         assert_eq!(rx.try_recv().unwrap(), Bytes::from_static(b"\r"));
         assert!(raw_started.elapsed() >= AGENT_PROMPT_SUBMIT_DELAY);
@@ -661,6 +677,81 @@ mod tests {
         let error: crate::api::schema::ErrorResponse = serde_json::from_str(&rejected).unwrap();
         assert_eq!(error.error.code, "agent_not_found");
         assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn agent_prompt_refuses_to_type_over_the_humans_unsent_text() {
+        let mut app = app_with_agent();
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.state.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        let terminal = app.state.terminals.get_mut(&terminal_id).unwrap();
+        terminal.set_agent_name("reviewer".into());
+        terminal.set_detected_state(Some(Agent::Pi), AgentState::Idle);
+        let (runtime, mut rx) = crate::terminal::TerminalRuntime::test_with_channel(80, 24);
+        app.state.insert_test_runtime(pane_id, runtime);
+
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .unsent_input_possible = true;
+        let response = run_deferred_agent_prompt(
+            &mut app,
+            "req-unsent",
+            AgentPromptParams {
+                target: "reviewer".into(),
+                text: "unrelated prompt".into(),
+                wait: None,
+            },
+        );
+        let error: crate::api::schema::ErrorResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(error.error.code, "editor_has_text");
+        assert!(
+            error.error.message.contains("unsent text"),
+            "error should say what it found: {}",
+            error.error.message
+        );
+        assert!(
+            tokio::time::timeout(
+                AGENT_PROMPT_SUBMIT_DELAY + Duration::from_millis(100),
+                rx.recv()
+            )
+            .await
+            .is_err(),
+            "prompt wrote or scheduled terminal input over unsent text"
+        );
+
+        // The human submitted: the same prompt now goes through untouched.
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .unsent_input_possible = false;
+        let response = run_deferred_agent_prompt(
+            &mut app,
+            "req-clear",
+            AgentPromptParams {
+                target: "reviewer".into(),
+                text: "unrelated prompt".into(),
+                wait: None,
+            },
+        );
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        assert!(matches!(
+            success.result,
+            ResponseResult::AgentPrompted { .. }
+        ));
+        assert_eq!(
+            rx.try_recv().unwrap(),
+            Bytes::from_static(b"unrelated prompt")
+        );
+        assert_eq!(rx.try_recv().unwrap(), Bytes::from_static(b"\r"));
+        assert!(
+            !app.state.terminals[&terminal_id].unsent_input_possible,
+            "typing a prompt is not the human typing; it must not arm the guard"
+        );
     }
 
     #[tokio::test]

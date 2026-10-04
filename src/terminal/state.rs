@@ -145,6 +145,11 @@ pub struct TerminalState {
     pub revision: u64,
     pub launch_argv: Option<Vec<String>>,
     pub respawn_shell_on_exit: bool,
+    /// The host forwarded human input to this terminal and has not seen the
+    /// human submit or clear it, so the editor may hold unsent human text.
+    /// Set from the forwarded-input effect in `crate::server::pane_input`, not
+    /// from screen parsing; cleared for a different or exited agent process.
+    pub unsent_input_possible: bool,
     recent_agent_process_exit: Option<RecentAgentProcessExit>,
     agent_process_acquisition_pending: bool,
     pub pending_agent_resume_plan: Option<crate::agent_resume::AgentResumePlan>,
@@ -180,6 +185,7 @@ impl TerminalState {
             revision: 0,
             launch_argv: None,
             respawn_shell_on_exit: false,
+            unsent_input_possible: false,
             recent_agent_process_exit: None,
             agent_process_acquisition_pending: false,
             pending_agent_resume_plan: None,
@@ -348,6 +354,9 @@ impl TerminalState {
             {
                 self.detected_agent = agent;
             }
+            if previous_detected_agent != self.detected_agent || process_exited {
+                self.unsent_input_possible = false;
+            }
             return TerminalStateMutation {
                 effective_state_change: self.recompute_effective_state(
                     previous_agent_label,
@@ -381,6 +390,9 @@ impl TerminalState {
             };
         }
         self.detected_agent = agent;
+        if previous_detected_agent != agent || process_exited {
+            self.unsent_input_possible = false;
+        }
         if let Some(agent) = agent {
             let agent_label = crate::detect::agent_label(agent);
             self.reconcile_agent_name_owner(agent_label, None);
@@ -1789,6 +1801,7 @@ impl TerminalState {
             self.fallback_state = AgentState::Unknown;
             self.fallback_visible_blocker = false;
             self.fallback_observed_at = None;
+            self.unsent_input_possible = false;
             self.clear_agent_name();
         }
         self.hook_authority = None;
@@ -2098,6 +2111,7 @@ impl TerminalState {
         self.fallback_observed_at = None;
         self.hook_authority = None;
         self.persisted_agent_session = None;
+        self.unsent_input_possible = false;
         self.agent_metadata.clear();
         self.metadata_report_agents.clear();
         self.suppressed_full_lifecycle_hook_reports.clear();
@@ -5912,6 +5926,60 @@ mod tests {
                 .map(|session| session.session_ref.value.as_str()),
             Some("claude-session")
         );
+    }
+
+    #[test]
+    fn human_input_evidence_does_not_survive_the_agent_process() {
+        let now = Instant::now();
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::Pi), AgentState::Idle);
+
+        // The same live agent keeps the evidence: its editor is still the one
+        // the human typed into.
+        terminal.unsent_input_possible = true;
+        terminal.set_detected_state(Some(Agent::Pi), AgentState::Working);
+        assert!(terminal.unsent_input_possible);
+
+        // The process exited.
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(Agent::Pi),
+            AgentState::Unknown,
+            false,
+            false,
+            false,
+            true,
+            now,
+        );
+        assert!(!terminal.unsent_input_possible);
+
+        // A different agent took the pane.
+        terminal.unsent_input_possible = true;
+        terminal.set_detected_agent_process_at(Agent::Codex, now);
+        assert!(!terminal.unsent_input_possible);
+
+        // The pane's agent was respawned.
+        terminal.unsent_input_possible = true;
+        terminal.clear_agent_runtime_identity_after_respawn();
+        assert!(!terminal.unsent_input_possible);
+    }
+
+    #[test]
+    fn a_hook_clearing_a_gone_agent_process_drops_human_input_evidence() {
+        let mut terminal = test_terminal();
+        terminal.set_hook_authority(
+            "custom:pi".into(),
+            "pi".into(),
+            AgentState::Working,
+            None,
+            None,
+        );
+        terminal.unsent_input_possible = true;
+
+        assert!(terminal
+            .release_agent_with_mutation("custom:pi", "pi", None)
+            .is_some());
+
+        assert!(!terminal.unsent_input_possible);
     }
 
     #[test]
