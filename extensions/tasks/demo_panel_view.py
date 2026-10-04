@@ -184,7 +184,7 @@ class PanelViewDemo(ReadinessDemo):
         found = []
         for row, line in enumerate(rows):
             text = line[first:last]
-            match = re.search(r"line (\d+)", text)
+            match = re.search(r"PI_OVERFLOW_(\d+)", text)
             if match:
                 found.append((row, int(match.group(1))))
         return found
@@ -219,7 +219,9 @@ class PanelViewDemo(ReadinessDemo):
     def human_columns(self, first=28, last=112):
         return first, last
 
-    def pane_columns(self, first=118, last=190):
+    def pane_columns(self, first=113, last=199):
+        # Pane A's content columns: the window starts at the pane's own first
+        # content column so a marker's full name is inside it.
         return first, last
 
     def run(self):
@@ -433,7 +435,8 @@ class PanelViewDemo(ReadinessDemo):
         o_header = next((row for row, line in enumerate(screen)
                        if "⊟" in line[o_first:o_last] and "Tasks" in line[o_first:o_last]), None)
         o_divider = next((row for row in range(o_header, o_header + 24)
-                        if screen[row][o_first:o_last].strip().startswith("────────")), None)
+                          if screen[row][o_first:o_last].count("─") >= 20), None)
+        assert o_divider is not None, "the panel's edge row"
         o_band = o_divider - o_header + 1
         o_open_lines = self.numbered_rows(o_first, o_last)
         open_text = demo_capture.capture(self.root / "client.log", self.root / "capture",
@@ -499,13 +502,16 @@ class PanelViewDemo(ReadinessDemo):
                       "collapsed_rows_equals_pane_minus_its_two_row_band": o_collapsed == o_plain - 2,
                       "first_visible_line_directly_under_the_panel":
                           bool(o_open_lines) and o_open_lines[0][0] == o_divider + 1,
-                      "newest_line_on_the_last_row_above_the_editor":
+                      "newest_marker_on_the_last_row_above_the_editor":
                           bool(o_open_lines)
+                          and o_open_lines[-1][1] == max(n for _, n in o_open_lines)
                           and not self.pane_row_blank(o_open_lines[-1][0] + 1, o_first, o_last),
-                      "agent_line_output_rendered_by_pi": len(o_plain_lines),
-                      "open_lines": [number for _, number in o_open_lines],
-                      "collapsed_lines": [number for _, number in o_collapsed_lines],
-                      "note": "the numbered-line widget does not render in this Pi launch config", 
+                      "agent_markers_rendered_by_pi": len(o_plain_lines),
+                      "open_marker_range": [min([n for _, n in o_open_lines] or [0]),
+                                            max([n for _, n in o_open_lines] or [0])],
+                      "collapsed_marker_range": [min([n for _, n in o_collapsed_lines] or [0]),
+                                                 max([n for _, n in o_collapsed_lines] or [0])],
+                      "note": "markers are a custom Pi message through registerMessageRenderer, sent idle with triggerTurn false", 
                   },
                   "captures": {"expanded": str(expanded_text), "messages": str(messages_text),
                                "collapsed": str(collapsed_text), "unavailable": str(unavailable_text),
