@@ -28,7 +28,8 @@ convention introduces no host API, Pi tool, task delivery or activation mechanis
   connection rather than a text label. Messages are editable until claimed, survive
   restarts, and reach Pi through the Tasks Pi consumer/neutral adapter at a turn boundary, never
   by pane typing. A claim is not a run, reply or acceptance. One recorded activation
-  setting may start an idle recipient's turn; a stopped agent is never relaunched.
+  setting may start an idle recipient's turn; a fresh Tasks store defaults it on and only
+  a human can change it. A stopped agent is never relaunched.
 - Human-needed choices go in decisions unless the human addressed the agent
   directly in its pane. Pi's question tool is only an example for that direct case;
   the convention is agent-neutral. Creating a decision does not promise a wake or

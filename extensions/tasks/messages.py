@@ -71,8 +71,11 @@ class Messages:
                 id INTEGER PRIMARY KEY CHECK (id = 1), activation INTEGER NOT NULL,
                 updated_at TEXT NOT NULL, updated_by TEXT NOT NULL)""")
         if self.db.execute("SELECT 1 FROM message_policy WHERE id=1").fetchone() is None:
+            # A fresh Tasks store starts with delivery activation on. The row is
+            # inserted once, so an existing store keeps whatever recorded value
+            # it already has; only a human may change it afterwards.
             self.db.execute(
-                "INSERT INTO message_policy(id,activation,updated_at,updated_by) VALUES (1,0,?,?)",
+                "INSERT INTO message_policy(id,activation,updated_at,updated_by) VALUES (1,1,?,?)",
                 (self.store.initialized_at, "{}"),
             )
 
