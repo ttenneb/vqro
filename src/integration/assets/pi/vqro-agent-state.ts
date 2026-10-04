@@ -189,7 +189,6 @@ export default function (pi) {
   let rootSession = false;
   let editorUi: any;
   let editorPoll: ReturnType<typeof setInterval> | undefined;
-  let inputBoxHasText: boolean | undefined;
 
   // The host refuses to type into an editor that already holds the human's
   // unsent text, so it needs to know whether this one does. Only the fact is
@@ -205,7 +204,14 @@ export default function (pi) {
     }
   }
 
-  function reportInputBox(hasText: boolean): void {
+  function reportInputBox(): void {
+    if (!rootSession) {
+      return;
+    }
+    const hasText = readInputBoxHasText();
+    if (hasText === undefined) {
+      return;
+    }
     void sendRequest({
       id: `${source}:input-box:${Date.now()}:${Math.random().toString(36).slice(2)}`,
       method: "pane.report_metadata",
@@ -218,38 +224,18 @@ export default function (pi) {
     });
   }
 
-  function checkInputBox(force = false): void {
-    if (!rootSession) {
-      return;
-    }
-    const next = readInputBoxHasText();
-    if (next === undefined || (!force && next === inputBoxHasText)) {
-      return;
-    }
-    inputBoxHasText = next;
-    reportInputBox(next);
-  }
-
   function watchEditor(ctx: any): void {
     if (editorPoll) {
       clearInterval(editorPoll);
     }
     editorUi = ctx?.ui;
-    // Every tick re-reports, not only a flip: the host discards a report older
+    // Every tick reports, not only a flip: the host discards a report older
     // than the human's latest key, and a flip-only report would leave it on its
     // fallback heuristic after any keystroke until the next flip, which may
-    // never come. One small request per second per pane is the whole cost.
-    editorPoll = setInterval(() => {
-      if (!rootSession) {
-        return;
-      }
-      const next = readInputBoxHasText();
-      if (next === undefined) {
-        return;
-      }
-      inputBoxHasText = next;
-      reportInputBox(next);
-    }, 1000);
+    // never come (a line typed and deleted between two polls never flips). One
+    // small request per second per pane is the whole cost, and the host treats a
+    // re-report of the same value as no change.
+    editorPoll = setInterval(reportInputBox, 1000);
     editorPoll.unref?.();
   }
 
@@ -304,9 +290,9 @@ export default function (pi) {
     agentActive = ctx?.isIdle?.() === false;
     publishState(true);
     watchEditor(ctx);
-    // Report the empty/typed baseline even when it has not flipped yet, so the
-    // host knows this editor reports at all.
-    checkInputBox(true);
+    // Report the baseline now rather than up to a tick later, so the host knows
+    // this editor reports at all.
+    reportInputBox();
   });
 
   pi.on("agent_start", (_event, ctx) => {
@@ -317,7 +303,7 @@ export default function (pi) {
     void reportSession();
     agentActive = true;
     publishState();
-    checkInputBox();
+    reportInputBox();
   });
 
   pi.on("agent_settled", (_event, ctx) => {
@@ -327,7 +313,7 @@ export default function (pi) {
 
     agentActive = false;
     publishState();
-    checkInputBox();
+    reportInputBox();
   });
 
   pi.on("session_shutdown", () => {
@@ -335,7 +321,6 @@ export default function (pi) {
     // reporting whether the editor has text. The host drops the fact with the
     // agent process either way.
     rootSession = false;
-    inputBoxHasText = undefined;
     editorUi = undefined;
     if (editorPoll) {
       clearInterval(editorPoll);
