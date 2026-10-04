@@ -146,7 +146,9 @@ pub(super) struct PanePanelRender {
 /// A published view that fills one pane's panel slot.
 struct PanelView<'a> {
     /// The extension's own id for this view, which the user names to
-    /// `vqro pane panel`.
+    /// `vqro pane panel`. It selects the view in `published_views` before the
+    /// section is built, so the renderer itself does not read it again.
+    #[allow(dead_code)]
     view_id: String,
     /// Stable identity of this section inside the pane's panel area.
     key: String,

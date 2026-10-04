@@ -394,14 +394,15 @@ pub(super) fn render_panel_scroll(
     if track.is_empty() || visible == 0 || lines <= visible {
         return;
     }
-    let thumb_rows = ((track.height as usize * visible) / lines).max(1) as u16;
+    let thumb_rows = (track.height as usize * visible)
+        .checked_div(lines)
+        .unwrap_or(1)
+        .max(1) as u16;
     let max_top = track.height.saturating_sub(thumb_rows);
     let scrollable = lines.saturating_sub(visible);
-    let top = if scrollable == 0 {
-        0
-    } else {
-        ((max_top as usize * first) / scrollable) as u16
-    };
+    let top = (max_top as usize * first)
+        .checked_div(scrollable)
+        .unwrap_or(0) as u16;
     for y in track.y..track.bottom() {
         let offset = y.saturating_sub(track.y);
         let in_thumb = offset >= top && offset < top.saturating_add(thumb_rows);

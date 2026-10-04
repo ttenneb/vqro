@@ -1098,10 +1098,8 @@ fn validate_view_item_fields(
         }
         validate_text(action)?;
     }
-    if view.pane_id.is_some() || view.view_id.is_some() {
-        if item.parent_id.is_some() {
-            return invalid("only a panel root may name its pane or view");
-        }
+    if (view.pane_id.is_some() || view.view_id.is_some()) && item.parent_id.is_some() {
+        return invalid("only a panel root may name its pane or view");
     }
     if view.view_id.is_some() != view.pane_id.is_some() {
         return invalid("a panel root names both its pane and its view");
@@ -1555,7 +1553,7 @@ mod tests {
         });
         document.validate().unwrap();
         // A default must be one of the options, and a choice cannot also type.
-        let choice = document
+        document
             .actions
             .last_mut()
             .unwrap()
@@ -1564,20 +1562,8 @@ mod tests {
             .unwrap()
             .choice
             .as_mut()
-            .unwrap();
-        {
-            let choice = document
-                .actions
-                .last_mut()
-                .unwrap()
-                .view
-                .as_mut()
-                .unwrap()
-                .choice
-                .as_mut()
-                .unwrap();
-            choice.default_key = Some("later".into());
-        }
+            .unwrap()
+            .default_key = Some("later".into());
         assert!(document
             .validate()
             .unwrap_err()

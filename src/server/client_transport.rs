@@ -2402,7 +2402,7 @@ mod tests {
                 pane_viewport_enabled,
                 pane_view_enabled,
                 terminal_views_enabled,
-                pane_panels_enabled,
+                pane_panels_enabled: _,
                 writer,
             } => {
                 assert_eq!(client_id, 43);
