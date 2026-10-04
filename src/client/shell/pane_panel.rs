@@ -150,6 +150,8 @@ struct PanelView<'a> {
     /// section is built, so the renderer itself does not read it again.
     #[allow(dead_code)]
     view_id: String,
+    /// The root block's kind, when the extension named one.
+    kind: Option<String>,
     /// Stable identity of this section inside the pane's panel area.
     key: String,
     title: &'a str,
@@ -213,6 +215,12 @@ fn fit_height(views: &[PanelView<'_>], collapsed_views: &BTreeSet<String>) -> u1
         });
     }
     height.max(1)
+}
+
+/// What Vqro can draw. Anything else is drawn as "unsupported" in place, which
+/// is the compatibility guarantee: a new block never breaks an older surface.
+fn block_kind_supported(kind: Option<&str>) -> bool {
+    matches!(kind, None | Some("row") | Some("section"))
 }
 
 /// The fixed Pi-style glyph for a row state.
@@ -403,6 +411,7 @@ fn panel_views<'a>(
             }
             views.push(PanelView {
                 view_id: _view_id.to_owned(),
+                kind: view.kind.clone(),
                 key: format!("{}.{}", document.namespace, item.id),
                 title: item.label.as_str(),
                 summary: item.detail.as_deref().unwrap_or_default(),
@@ -469,7 +478,21 @@ fn render_pane(
         open_views,
         &display.collapsed_rows,
     );
+    // The user has views open here and none of them is published any more: the
+    // extension failed or was disabled. Vqro owns that state and says so in the
+    // same place, instead of silently dropping a panel the user opened.
     if views.is_empty() {
+        let missing = open_views.iter().cloned().collect::<Vec<_>>();
+        render_placeholder(
+            buffer,
+            pane,
+            display,
+            &missing,
+            "unavailable",
+            "└─ extension unavailable",
+            palette,
+            out,
+        );
         return;
     }
     // The pane's full inner rect, including a scrollback lane: the panel owns
@@ -493,6 +516,26 @@ fn render_pane(
             .unwrap_or(fit)
             .max(headers)
     };
+    if let Some(kind) = views
+        .first()
+        .and_then(|view| view.kind.as_deref())
+        .filter(|kind| !block_kind_supported(Some(kind)))
+    {
+        render_placeholder(
+            buffer,
+            pane,
+            display,
+            &views
+                .iter()
+                .map(|view| view.title.to_owned())
+                .collect::<Vec<_>>(),
+            &format!("unsupported {kind}"),
+            &format!("└─ unsupported block {kind}"),
+            palette,
+            out,
+        );
+        return;
+    }
     let Some(geometry) = geometry(area, panel_height) else {
         return;
     };
@@ -638,6 +681,101 @@ fn render_pane(
     out.drawn_pane = Some(pane.pane_id.clone());
 }
 
+/// The panel a user opened whose view is no longer published: the extension
+/// failed or was disabled. Vqro draws the header and one dead row, and keeps
+/// the pane's edge reserved so the space stays stable when it recovers.
+fn render_placeholder(
+    buffer: &mut Buffer,
+    pane: &PaneHit,
+    display: &PanePanelDisplay,
+    missing: &[String],
+    right: &str,
+    row: &str,
+    palette: &Palette,
+    out: &mut PanePanelRender,
+) {
+    let area = pane.projected_inner_rect.intersection(buffer.area);
+    let collapsed = display.collapsed_views.iter().any(|key| {
+        missing
+            .iter()
+            .any(|view_id| key.ends_with(view_id.as_str()))
+    });
+    let fit = if collapsed { 1 } else { 2 };
+    let panel_height = if collapsed {
+        1
+    } else {
+        display.user_height.or(display.height).unwrap_or(fit).max(1)
+    };
+    let Some(geometry) = geometry(area, panel_height) else {
+        return;
+    };
+    let dim = Style::default().fg(palette.overlay0);
+    let style = Style::default().bg(ratatui::style::Color::Reset);
+    super::render::render_pane_contribution_divider(buffer, geometry.divider, palette);
+    for y in geometry.panel.y..geometry.panel.bottom() {
+        for x in geometry.panel.x..geometry.panel.right() {
+            put_text(buffer, x, y, 1, " ", style);
+        }
+    }
+    let width = geometry.panel.width.saturating_sub(1);
+    let title = missing.first().map(String::as_str).unwrap_or("view");
+    let header = Rect::new(geometry.panel.x, geometry.panel.y, width, 1);
+    let marker = if collapsed { "▸" } else { "▾" };
+    put_text(buffer, header.x, header.y, 1, marker, dim);
+    put_text(
+        buffer,
+        header.x.saturating_add(2),
+        header.y,
+        1,
+        state_glyph(HostViewState::Blocked),
+        Style::default().fg(palette.red),
+    );
+    put_text(
+        buffer,
+        header.x.saturating_add(4),
+        header.y,
+        width.saturating_sub(4),
+        title,
+        Style::default()
+            .fg(palette.text)
+            .add_modifier(Modifier::BOLD),
+    );
+    let right = format!("{HEADER_MARK} · {right}");
+    let right_width = display_width(&right);
+    if right_width.saturating_add(8) < width {
+        put_text(
+            buffer,
+            header.x.saturating_add(width.saturating_sub(right_width)),
+            header.y,
+            right_width,
+            &right,
+            dim,
+        );
+    }
+    out.hits.push(PanePanelHit {
+        rect: header,
+        pane_id: pane.pane_id.clone(),
+        action: PanePanelAction::ToggleView(title.to_owned()),
+    });
+    if !collapsed && geometry.panel.height > 1 {
+        put_text(
+            buffer,
+            geometry.panel.x,
+            geometry.panel.y.saturating_add(1),
+            width,
+            &truncate(row, width),
+            dim,
+        );
+    }
+    if let Some(claimed) = out.claims.iter_mut().find(|claim| claim.0 == pane.pane_id) {
+        claimed.1 = geometry.terminal;
+    } else {
+        out.claims.push((pane.pane_id.clone(), geometry.terminal));
+    }
+    out.drawn_height = Some(geometry.panel.height);
+    out.drawn_pane = Some(pane.pane_id.clone());
+}
+
 /// One drawable line of the scrolling region.
 enum PanelRow<'a> {
     Row(&'a FlatRow<'a>),
@@ -750,6 +888,50 @@ fn draw_row(
     palette: &Palette,
 ) {
     let row_view = row.item.view.as_ref();
+    if row_view
+        .and_then(|view| view.kind.as_deref())
+        .is_some_and(|kind| !block_kind_supported(Some(kind)))
+    {
+        // In place: the row keeps its tree position and label, and says what
+        // Vqro cannot draw instead of dropping it.
+        let prefix = row_prefix(&row.lanes, row.is_last);
+        let indent_x = 1_u16;
+        put_text(
+            buffer,
+            rect.x,
+            rect.y,
+            width,
+            &prefix,
+            Style::default().fg(palette.overlay0),
+        );
+        put_text(
+            buffer,
+            rect.x.saturating_add(display_width(&prefix)),
+            rect.y,
+            1,
+            "?",
+            Style::default().fg(palette.overlay0),
+        );
+        put_text(
+            buffer,
+            rect.x
+                .saturating_add(display_width(&prefix))
+                .saturating_add(2),
+            rect.y,
+            width
+                .saturating_sub(display_width(&prefix))
+                .saturating_sub(2),
+            &truncate(
+                &row.item.label,
+                width
+                    .saturating_sub(display_width(&prefix))
+                    .saturating_sub(2),
+            ),
+            Style::default().fg(palette.text),
+        );
+        let _ = indent_x;
+        return;
+    }
     let state = row_view.and_then(|view| view.state).unwrap_or_default();
     let tone = row_view
         .and_then(|view| view.tone)
@@ -1170,6 +1352,7 @@ mod tests {
         };
         let view = |key: &str, count: usize| PanelView {
             view_id: "tasks".into(),
+            kind: None,
             key: key.to_string(),
             title: "Tasks",
             summary: "",

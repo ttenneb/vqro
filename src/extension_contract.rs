@@ -257,6 +257,12 @@ pub struct HostDocumentItem {
 /// "unsupported" instead of rejecting the view.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct HostViewItem {
+    /// What this block is, as a free string so the set can grow: `section` and
+    /// `row` are known, and anything else is drawn as "unsupported" in place
+    /// rather than dropped. Never a closed enum: an unknown variant would make
+    /// an older client reject the whole view.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
     /// A panel root: the pane whose panel this item's subtree fills. Only a
     /// root item (no parent) may set it. Vqro draws the pane's bottom edge slot.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1107,6 +1113,9 @@ fn validate_view_item_fields(
     if view.pane_id.is_none() && item.parent_id.is_none() {
         return invalid("a view block needs a panel root or a parent section");
     }
+    if let Some(kind) = &view.kind {
+        validate_local_id(kind)?;
+    }
     if let Some(pane_id) = &view.pane_id {
         validate_local_id(pane_id)?;
     }
@@ -1460,6 +1469,7 @@ mod tests {
             action_ids: Vec::new(),
             flags: HostDocumentItemFlags::default(),
             view: Some(HostViewItem {
+                kind: parent.is_some().then(|| "row".to_owned()),
                 pane_id: parent.is_none().then(|| "w1:p2".to_owned()),
                 view_id: parent.is_none().then(|| "tasks".to_owned()),
                 state: parent.is_some().then_some(HostViewState::Blocked),
@@ -1596,6 +1606,22 @@ mod tests {
             .unwrap_err()
             .0
             .contains("cannot both choose and type"));
+    }
+
+    #[test]
+    fn an_unknown_view_kind_is_accepted_because_it_is_a_string() {
+        // The block set grows append-only: an unknown kind must validate (so the
+        // view arrives and Vqro can draw "unsupported" in place), unlike an
+        // unknown enum variant, which would reject the whole view.
+        let mut document = view_document();
+        document.items[1].view.as_mut().unwrap().kind = Some("table".into());
+        document.validate().unwrap();
+        document.items[1].view.as_mut().unwrap().kind = Some("not a kind".into());
+        assert!(document
+            .validate()
+            .unwrap_err()
+            .0
+            .contains("invalid local id"));
     }
 
     #[test]

@@ -50,6 +50,7 @@ contract:
 
 ```json
 "view": {
+  "kind": "row",             // section | row; any other value draws as "unsupported"
   "pane_id": "w2:p2",        // panel root only: the pane this view fills
   "view_id": "tasks",        // panel root only: the user names this to `vqro pane panel`
   "state": "blocked",        // open | in_progress | blocked | reported | done
@@ -91,6 +92,20 @@ effect), with an optional `view` block for the way the user answers it:
 - Every action reference must name an action in the same document, and an
   action's `subject_id` must name the item it belongs to; Vqro drops a click
   whose item no longer exists.
+
+## Compatibility: unknown blocks
+
+`kind` is a free string, never a closed enum: an unknown variant would make an
+older client reject the whole view, while an unknown string lets it draw
+`unsupported <kind>` **in place** — the row keeps its tree position and label,
+and a section that Vqro cannot draw still reserves its edge and says so. The
+block set can therefore grow without breaking an older surface.
+
+`unavailable` is Vqro-owned too: when a pane has a view open and the provider
+stops publishing it (the extension failed or was disabled), Vqro keeps the
+panel's edge reserved and draws the header with `unavailable` and one
+`extension unavailable` row, instead of silently dropping a panel the user
+opened. When the provider returns, the view is drawn again.
 
 ## What Vqro owns
 

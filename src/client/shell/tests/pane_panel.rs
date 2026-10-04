@@ -81,6 +81,24 @@ fn panel_surface() -> PaneSurfaceFrame {
     }
 }
 
+/// The same pane, with one row whose block kind Vqro does not know.
+fn unsupported_projection() -> serde_json::Value {
+    serde_json::json!({
+        "contract":"host.documents.v1", "boot_id":"boot-1", "revision":1,
+        "documents":[{"provider_priority":1,"document":{
+            "contract":"host.view.v1", "namespace":"example.view", "generation":7,"revision":2,
+            "surface":"navigation","target":{"kind":"session"},
+            "items":[
+                {"id":"panel:pane_1:tasks","role":"section","label":"Tasks","detail":"0/1 done",
+                 "view":{"pane_id":"pane_1","view_id":"tasks","state":"in_progress"}},
+                {"id":"panel:pane_1:chart","parent_id":"panel:pane_1:tasks","role":"section",
+                 "label":"A future block","view":{"kind":"sparkline","state":"open"}}
+            ],
+            "actions":[],"required_capabilities":[]
+        }}]
+    })
+}
+
 fn panel_state(agent_state: Option<AgentStatus>, open: bool) -> ClientShellState {
     let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
     state.set_endpoint_status(&ClientEndpointId::Local, ClientEndpointStatus::Online);
@@ -270,6 +288,75 @@ fn an_empty_slice_says_so_instead_of_drawing_nothing() {
     );
     let text = text_of(&mut state);
     assert!(text.contains("nothing to show"), "{text}");
+}
+
+fn state_with_projection(projection: serde_json::Value, open: bool) -> ClientShellState {
+    let mut state = panel_state(None, false);
+    let projection: crate::protocol::endpoint::HostDocumentsProjectionV1 =
+        serde_json::from_value(projection).expect("projection");
+    state.set_endpoint_host_documents_for_generation(
+        &ClientEndpointId::Local,
+        1,
+        Box::new(projection),
+    );
+    if open {
+        state
+            .pane_panel_open
+            .entry("pane_1".into())
+            .or_default()
+            .insert("tasks".into());
+    }
+    state
+}
+
+#[test]
+fn an_unknown_block_renders_as_unsupported_in_place() {
+    let mut state = state_with_projection(unsupported_projection(), true);
+    let text = text_of(&mut state);
+    // The section still draws, and the unknown row keeps its place and label.
+    assert!(text.contains("Tasks"), "{text}");
+    assert!(text.contains("A future block"), "{text}");
+    // The row says what Vqro cannot draw instead of vanishing.
+    assert!(text.contains('?'), "unsupported marker: {text}");
+    // The known row still renders beside it.
+    assert!(text.contains("└─"), "{text}");
+}
+
+#[test]
+fn an_unknown_section_kind_renders_unsupported_and_keeps_its_edge() {
+    let mut projection = unsupported_projection();
+    projection["documents"][0]["document"]["items"][0]["view"]["kind"] =
+        serde_json::Value::String("timeline".into());
+    let mut state = state_with_projection(projection, true);
+    let text = text_of(&mut state);
+    assert!(text.contains("unsupported timeline"), "{text}");
+    assert!(text.contains("unsupported block timeline"), "{text}");
+    let claimed = state
+        .hits
+        .panes
+        .iter()
+        .find(|pane| pane.pane_id == "pane_1")
+        .map(|pane| pane.inner_rect.y)
+        .unwrap_or(0);
+    assert!(claimed > 3, "the edge stays reserved: {claimed}");
+}
+
+#[test]
+fn a_view_that_stops_being_published_says_unavailable() {
+    let mut state = panel_state(None, true);
+    let healthy = text_of(&mut state);
+    assert!(healthy.contains("Panel panels layout"), "{healthy}");
+    // The provider is gone: the same document, with nothing for this pane.
+    let empty: crate::protocol::endpoint::HostDocumentsProjectionV1 =
+        serde_json::from_value(serde_json::json!({
+            "contract":"host.documents.v1", "boot_id":"boot-1", "revision":1, "documents":[]
+        }))
+        .expect("projection");
+    state.set_endpoint_host_documents_for_generation(&ClientEndpointId::Local, 1, Box::new(empty));
+    let text = text_of(&mut state);
+    assert!(text.contains("unavailable"), "{text}");
+    assert!(text.contains("extension unavailable"), "{text}");
+    assert!(!text.contains("Panel panels layout"), "{text}");
 }
 
 #[test]

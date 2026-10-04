@@ -766,6 +766,13 @@
                 "null"
               ]
             },
+            "kind": {
+              "description": "What this block is, as a free string so the set can grow: `section` and\n`row` are known, and anything else is drawn as \"unsupported\" in place\nrather than dropped. Never a closed enum: an unknown variant would make\nan older client reject the whole view.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "pane_id": {
               "description": "A panel root: the pane whose panel this item's subtree fills. Only a\nroot item (no parent) may set it. Vqro draws the pane's bottom edge slot.",
               "type": [
