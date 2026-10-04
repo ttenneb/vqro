@@ -100,7 +100,6 @@ export default function (pi: ExtensionAPI) {
   let paceTimer: ReturnType<typeof setTimeout> | undefined;
   let inputBoxSeq = Date.now() * 1000;
   let lastSentInputBox: { text: string; at: number } | undefined;
-  let pendingInputBox: { text: string } | undefined;
   let dirty = false;
 
   function readInputBoxText(): string | undefined {
@@ -122,8 +121,8 @@ export default function (pi: ExtensionAPI) {
       settled = true;
       cancelInputBoxRequest = undefined;
       socket.destroy();
-      // An observation that arrived while this was in flight is still owed.
-      sendPendingInputBox();
+      // Anything seen while this was in flight is still owed, re-read now.
+      reportInputBox();
     };
     cancelInputBoxRequest = finish;
     const timeout = setTimeout(finish, INPUT_BOX_REQUEST_TIMEOUT_MS);
@@ -138,63 +137,58 @@ export default function (pi: ExtensionAPI) {
     socket.unref?.();
   }
 
-  /** Sends the retained observation, and only then caches it as sent. Sends are
-   *  paced: typing keeps the latest observation instead of one request per key. */
-  function sendPendingInputBox(): void {
-    if (cancelInputBoxRequest || !pendingInputBox) return;
+  /** Reports the current editor fact when the tracker is dirty, when the slow
+   *  refresh is due, or on request. The editor is the truth: no reading is
+   *  stored between observations, so a send can never carry a stale one. Sends
+   *  are paced and at most one is in flight; a blocked send retries when the
+   *  in-flight one settles. */
+  function reportInputBox(force = false): void {
+    if (cancelInputBoxRequest) return;
     const socketPath = process.env.VQRO_SOCKET_PATH;
-    if (!socketPath || state.state === "closed") return;
-    const since = Date.now() - (lastSentInputBox?.at ?? 0);
+    const text = readInputBoxText();
+    if (!socketPath || text === undefined || state.state === "closed") return;
+    const now = Date.now();
+    const due = lastSentInputBox === undefined || now - lastSentInputBox.at >= INPUT_BOX_REFRESH_MS;
+    if (!force && !dirty && !due) return;
+    const since = now - (lastSentInputBox?.at ?? 0);
     if (lastSentInputBox && since < INPUT_BOX_MIN_INTERVAL_MS) {
       if (paceTimer) clearTimeout(paceTimer);
       paceTimer = setTimeout(() => {
         paceTimer = undefined;
-        sendPendingInputBox();
+        reportInputBox();
       }, INPUT_BOX_MIN_INTERVAL_MS - since);
       paceTimer.unref?.();
       return;
     }
-    const pending = pendingInputBox;
-    pendingInputBox = undefined;
     dirty = false;
-    lastSentInputBox = { text: pending.text, at: Date.now() };
+    lastSentInputBox = { text, at: now };
     inputBoxSeq += 1;
     sendInputBoxRequest(socketPath, JSON.stringify({
       id: `vqro:pi:input-box:${inputBoxSeq}`,
       method: "pane.report_metadata",
-      params: { pane_id: pane, source: "vqro:pi", seq: inputBoxSeq, tokens: { input_box: pending.text.trim().length > 0 ? "has_text" : "empty" } },
+      params: { pane_id: pane, source: "vqro:pi", seq: inputBoxSeq, tokens: { input_box: text.trim().length > 0 ? "has_text" : "empty" } },
     }));
   }
 
-  /** Records that the editor may differ from the last report, and sends the
+  /** Records that the editor may differ from the last report, and reports the
    *  current fact once the input settles. A key settles, so a line typed and
    *  deleted inside one poll still reports; a poll-observed text change (an
-   *  extension setting a draft) does not need the delay. */
+   *  extension setting a draft) needs no delay. */
   function markInputBoxDirty(settle: boolean): void {
     dirty = true;
     if (!settle) return;
     if (settleTimer) clearTimeout(settleTimer);
     settleTimer = setTimeout(() => {
       settleTimer = undefined;
-      flushInputBox();
+      reportInputBox();
     }, INPUT_BOX_SETTLE_MS);
     settleTimer.unref?.();
-  }
-
-  function flushInputBox(force = false): void {
-    const text = readInputBoxText();
-    if (text === undefined || state.state === "closed") return;
-    const now = Date.now();
-    const due = lastSentInputBox === undefined || now - lastSentInputBox.at >= INPUT_BOX_REFRESH_MS;
-    if (!force && !dirty && !due) return;
-    pendingInputBox = { text };
-    sendPendingInputBox();
   }
 
   function watchInputBox(ctx: any): void {
     stopInputBox();
     latestCtx = ctx;
-    flushInputBox(true);
+    reportInputBox(true);
     // Interactive-mode key stream, so a key settles into a report right after it
     // rather than at the next poll. Absent outside the TUI: the poll still does.
     stopEditorInput = ctx?.ui?.onTerminalInput?.(() => {
@@ -204,7 +198,7 @@ export default function (pi: ExtensionAPI) {
     editorPoll = setInterval(() => {
       const text = readInputBoxText();
       if (text !== undefined && text !== lastSentInputBox?.text) markInputBoxDirty(false);
-      flushInputBox();
+      reportInputBox();
     }, INPUT_BOX_POLL_MS);
     editorPoll.unref?.();
   }
@@ -219,7 +213,6 @@ export default function (pi: ExtensionAPI) {
     stopEditorInput?.();
     stopEditorInput = undefined;
     cancelInputBoxRequest?.();
-    pendingInputBox = undefined;
     lastSentInputBox = undefined;
     dirty = false;
   }
