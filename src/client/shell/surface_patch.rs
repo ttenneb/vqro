@@ -148,12 +148,30 @@ fn fast_path_blocker(
             .any(|hit| hit.pane_id == pane.pane_id)
     }) {
         Some("client_surface_patch.fallback.pane_hits")
-    } else if !state.pane_panel_band_rows.is_empty() {
-        // A panel moves the grid inside its pane, so the host's row coordinates
-        // and the composed ones differ. The fast path would have to carry that
-        // mapping for every row and for the cursor; the full compose already does
-        // it correctly, so a patch for a panelled pane takes that path instead.
-        Some("client_surface_patch.fallback.pane_panel")
+    } else if patch.rows.iter().any(|row| {
+        // A row a panel moved has a destination below the band, so the fast path
+        // translates it by the band and never paints into the panel. The exception
+        // is a row past the grid, which has no destination at all: that one takes
+        // the compose path, as does any change to the band or pane geometry.
+        patch.panes.iter().any(|pane| {
+            let Some(band) = state
+                .pane_panel_band_rows
+                .get(&pane.pane_id)
+                .copied()
+                .filter(|band| *band > 0)
+            else {
+                return false;
+            };
+            let right = pane.inner_rect.x.saturating_add(pane.inner_rect.width);
+            let bottom = pane.inner_rect.y.saturating_add(pane.inner_rect.height);
+            row.x >= pane.inner_rect.x
+                && row.x < right
+                && row.y >= pane.inner_rect.y
+                && row.y < bottom
+                && row.y.saturating_add(band) >= bottom
+        })
+    }) {
+        Some("client_surface_patch.fallback.pane_panel_row_past_grid")
     } else {
         None
     }

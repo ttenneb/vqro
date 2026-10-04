@@ -1118,15 +1118,166 @@ fn pane_patch_row(
     }
 }
 
+/// Two panes with real open panels: each pane is in the surface frame and in the
+/// client's hit list, and the documents publish a view for both, so the compose
+/// builds a band for each. Nothing is injected.
+fn two_panelled_panes_state() -> ClientShellState {
+    let mut state = panel_state(None, false);
+    let mut surface = state.pane_surface.as_ref().expect("surface").clone();
+    let mut second = surface.panes[0].clone();
+    second.pane_id = "pane_2".into();
+    second.focused = false;
+    surface.panes.push(second);
+    state.set_pane_surface(surface);
+    let items = ["pane_1", "pane_2"]
+        .iter()
+        .flat_map(|pane_id| {
+            [
+                serde_json::json!({
+                    "id": format!("panel:{pane_id}:tasks"),
+                    "role": "section",
+                    "label": "Tasks",
+                    "detail": "0/0 done",
+                    "view": {"pane_id": pane_id, "view_id": "tasks", "state": "open"},
+                }),
+                serde_json::json!({
+                    "id": format!("panel:{pane_id}:tasks:row"),
+                    "parent_id": format!("panel:{pane_id}:tasks"),
+                    "role": "section",
+                    "label": "A row",
+                    "view": {"state": "open"},
+                }),
+            ]
+        })
+        .collect::<Vec<_>>();
+    let projection = serde_json::from_value(serde_json::json!({
+        "contract":"host.documents.v1","boot_id":"boot-1","revision":1,
+        "documents":[{"provider_priority":1,"document":{
+            "contract":"host.view.v1","namespace":"example.tasks","generation":1,"revision":1,
+            "surface":"navigation","target":{"kind":"session"},
+            "items":items,"actions":[],"required_capabilities":[]}}]
+    }))
+    .expect("projection");
+    state.set_endpoint_host_documents_for_generation(
+        &ClientEndpointId::Local,
+        1,
+        Box::new(projection),
+    );
+    for pane_id in ["pane_1", "pane_2"] {
+        state
+            .pane_panel_open
+            .entry(pane_id.to_string())
+            .or_default()
+            .insert("tasks".into());
+    }
+    state
+}
+
 #[test]
-fn a_panelled_panes_patch_takes_the_full_compose_and_composes_correctly() {
-    // The safe path: a pane a panel moved does not use the fast path at all, so the
-    // host's coordinates are never translated by a partial path. What has to hold is
-    // the output - the change reaches the grid, a band lower, and the cursor is
-    // contained - which is what the full compose already does.
-    let mut state = panel_state(None, true);
+fn a_panelled_patch_never_paints_into_the_panel_band() {
+    // The split's offset mapping, as the coordinator requires it: a patch row for a
+    // panelled pane is translated by the band into the claimed rect below it, so no
+    // emitted row lands in the band the panel owns.
+    let mut state = two_panelled_panes_state();
     text_of(&mut state);
-    let surface_pane = state
+    assert!(
+        !state.pane_panel_areas.is_empty(),
+        "both panes drew a panel and reserved a band"
+    );
+    let pane = state
+        .pane_surface
+        .as_ref()
+        .expect("surface")
+        .panes
+        .iter()
+        .find(|pane| pane.pane_id == "pane_2")
+        .cloned()
+        .expect("pane_2");
+    let patch = pane_patch_row(&state, &pane, pane.inner_rect.y.saturating_add(2), "B");
+    let outcome = state.apply_pane_surface_patch(patch);
+    let ClientPaneSurfacePatchOutcome::Applied(Some(composed)) = outcome else {
+        panic!("a row inside the grid keeps the fast path");
+    };
+    assert!(!composed.rows.is_empty(), "the row is emitted");
+    for change in &composed.rows {
+        for band in &state.pane_panel_areas {
+            assert!(
+                !(change.y >= band.y && change.y < band.y.saturating_add(band.height)),
+                "row {} is inside a panel band {:?}",
+                change.y,
+                band
+            );
+        }
+    }
+}
+
+#[test]
+fn the_fast_path_and_a_full_compose_agree_for_two_panelled_panes() {
+    // The valid comparison QA asked for: two panes, both with real panels, no
+    // injected band and no pane present in one view but not the other. Every emitted
+    // fast row must be what a full compose shows at those coordinates.
+    let mut state = two_panelled_panes_state();
+    text_of(&mut state);
+    assert_eq!(
+        state.pane_surface.as_ref().expect("surface").panes.len(),
+        2,
+        "both panes are in the surface frame"
+    );
+    let mut emitted = 0_usize;
+    for pane_id in ["pane_1", "pane_2"] {
+        let pane = state
+            .pane_surface
+            .as_ref()
+            .expect("surface")
+            .panes
+            .iter()
+            .find(|pane| pane.pane_id == pane_id)
+            .cloned()
+            .expect("a pane");
+        for step in 0..4_u16 {
+            let symbol = ((b'a' + step as u8) as char).to_string();
+            let patch = pane_patch_row(
+                &state,
+                &pane,
+                pane.inner_rect.y.saturating_add(step).saturating_add(2),
+                &symbol,
+            );
+            let ClientPaneSurfacePatchOutcome::Applied(Some(composed)) =
+                state.apply_pane_surface_patch(patch)
+            else {
+                panic!("the fast path applies a row inside the grid");
+            };
+            let frame = state.compose(106, 30).expect("frame");
+            for change in &composed.rows {
+                for (offset, cell) in change.cells.iter().enumerate() {
+                    let index = usize::from(change.y) * 106 + usize::from(change.x) + offset;
+                    let full = frame
+                        .cells
+                        .get(index)
+                        .map(|cell| cell.symbol.clone())
+                        .unwrap_or_default();
+                    assert_eq!(
+                        full,
+                        cell.symbol,
+                        "fast and full agree for {pane_id} at ({}, {})",
+                        change.x + offset as u16,
+                        change.y
+                    );
+                    emitted += 1;
+                }
+            }
+        }
+    }
+    assert!(emitted >= 8, "every emitted row was compared: {emitted}");
+}
+
+#[test]
+fn a_row_past_the_grid_takes_the_compose_path() {
+    // The narrow exception: a row a panel moved has no destination once it is past
+    // the grid, so that patch composes instead of translating.
+    let mut state = two_panelled_panes_state();
+    text_of(&mut state);
+    let pane = state
         .pane_surface
         .as_ref()
         .expect("surface")
@@ -1134,72 +1285,16 @@ fn a_panelled_panes_patch_takes_the_full_compose_and_composes_correctly() {
         .first()
         .cloned()
         .expect("a pane");
-    let band = *state
-        .pane_panel_band_rows
-        .get(&surface_pane.pane_id)
-        .expect("the pane has a band");
-    assert!(band > 0, "the pane has a panel band");
-    let row = surface_pane.inner_rect.y.saturating_add(5);
-    let mut cell = state
-        .pane_surface
-        .as_ref()
-        .expect("surface")
-        .frame
-        .cells
-        .first()
-        .cloned()
-        .expect("a cell");
-    cell.symbol = "W".into();
-    let surface = state.pane_surface.as_ref().expect("surface");
-    let patch = crate::protocol::PaneSurfacePatch {
-        boot_id: "boot-1".into(),
-        projection_revision: 1,
-        base_surface_revision: surface.surface_revision,
-        surface_revision: surface.surface_revision.saturating_add(1),
-        rows: vec![crate::protocol::PaneSurfacePatchRow {
-            x: surface_pane.inner_rect.x,
-            y: row,
-            cells: vec![cell],
-        }],
-        panes: vec![surface_pane.clone()],
-        cursor: None,
-    };
+    let past = pane
+        .inner_rect
+        .y
+        .saturating_add(pane.inner_rect.height)
+        .saturating_sub(1);
+    let patch = pane_patch_row(&state, &pane, past, "C");
     let outcome = state.apply_pane_surface_patch(patch);
     assert!(
         !matches!(outcome, ClientPaneSurfacePatchOutcome::Rejected),
         "the patch is accepted"
-    );
-    assert!(
-        matches!(outcome, ClientPaneSurfacePatchOutcome::Applied(None)),
-        "a panelled pane declines the fast path and takes the full compose"
-    );
-    // The host's own cache keeps the row where the host wrote it.
-    let surface = state.pane_surface.as_ref().expect("surface");
-    let width = usize::from(surface.frame.width);
-    let cached = surface
-        .frame
-        .cells
-        .get(usize::from(row) * width + usize::from(surface_pane.inner_rect.x))
-        .map(|cell| cell.symbol.clone())
-        .unwrap_or_default();
-    assert_eq!(cached, "W", "the raw cache is the host's own view");
-    // And the compose shows it inside the grid, a band lower.
-    let frame = state.compose(106, 30).expect("frame");
-    let area = state.layout(106, 30).pane_surface;
-    let composed_row = usize::from(area.y + row + band);
-    let composed = frame
-        .cells
-        .chunks(106)
-        .nth(composed_row)
-        .map(|line| {
-            line.iter()
-                .map(|cell| cell.symbol.as_str())
-                .collect::<String>()
-        })
-        .unwrap_or_default();
-    assert!(
-        composed.contains('W'),
-        "the compose places the change a band lower, at row {composed_row}: {composed:?}"
     );
 }
 
