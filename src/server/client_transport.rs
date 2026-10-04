@@ -427,6 +427,7 @@ pub(crate) enum ServerEvent {
         surface_active: bool,
         structure_enabled: bool,
         host_documents_enabled: bool,
+        host_views_enabled: bool,
         pane_viewport_enabled: bool,
         pane_panels_enabled: bool,
         pane_view_enabled: bool,
@@ -724,6 +725,7 @@ struct ClientShellHandshakeOptions {
     surface_active: bool,
     structure_enabled: bool,
     host_documents_enabled: bool,
+    host_views_enabled: bool,
     pane_viewport_enabled: bool,
     pane_panels_enabled: bool,
     pane_view_enabled: bool,
@@ -743,6 +745,7 @@ fn client_shell_handshake_options(
         surface_active: hello.surface_active,
         structure_enabled: has(crate::protocol::endpoint::SESSION_STRUCTURE_KIND),
         host_documents_enabled: has(crate::protocol::endpoint::HOST_DOCUMENTS_KIND),
+        host_views_enabled: has(crate::protocol::endpoint::HOST_VIEWS_KIND),
         pane_viewport_enabled: has(crate::protocol::endpoint::PANE_VIEWPORT_KIND),
         pane_panels_enabled: [
             crate::protocol::endpoint::PANE_PANELS_KIND,
@@ -1051,6 +1054,7 @@ pub(crate) fn handle_client_handshake(
             surface_active: options.surface_active,
             structure_enabled: options.structure_enabled,
             host_documents_enabled: options.host_documents_enabled,
+            host_views_enabled: options.host_views_enabled,
             pane_viewport_enabled: options.pane_viewport_enabled,
             pane_view_enabled: options.pane_view_enabled,
             terminal_views_enabled: options.terminal_views_enabled,
@@ -2404,6 +2408,7 @@ mod tests {
                 terminal_views_enabled,
                 pane_panels_enabled: _,
                 writer,
+                host_views_enabled: false,
             } => {
                 assert_eq!(client_id, 43);
                 assert_eq!((surface_cols, surface_rows), (80, 29));

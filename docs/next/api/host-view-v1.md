@@ -86,7 +86,7 @@ to a later slice, together with the interaction model it belongs to, so no shape
 for it is frozen here. Adding one later is safe: an unknown field is ignored by
 every client.
 
-## Several clients at one pane## Several clients at one pane
+## Several clients at one pane
 
 One PTY serves every attached client, so panel sizes are arbitrated, never
 raced:
@@ -103,6 +103,30 @@ raced:
 - A server that does not advertise `pane_panels_v1` draws no panels at all: a
   panel that could not claim its terminal's edge would be drawn over the
   terminal instead of shrinking it. The connection stays usable.
+
+## Delivery and negotiation
+
+Views travel in the `host.documents.v1` projection, which is a published codec.
+A client advertises the kinds it can parse in its handshake; a client that lists
+`host.view.v1` receives view entries, and one that does not is sent legacy
+entries only. That is not a nicety: the projection is validated as a whole, so an
+older client that received a view entry would reject the projection, not ignore
+it. A server must filter the projection per client, and a separate optional
+control would be an equally safe carrier.
+
+## Compatibility: unknown blocks
+
+`kind` is a free string, never a closed enum: an unknown variant would make an
+older client reject the whole view, while an unknown string lets it draw
+`unsupported <kind>` **in place** — the row keeps its tree position and label,
+and a section that Vqro cannot draw still reserves its edge and says so. The
+block set can therefore grow without breaking an older surface.
+
+`unavailable` is Vqro-owned too: when a pane has a view open and the provider
+stops publishing it (the extension failed or was disabled), Vqro keeps the
+panel's edge reserved and draws the header with `unavailable` and one
+`extension unavailable` row, instead of silently dropping a panel the user
+opened. When the provider returns, the view is drawn again.
 
 ## User-facing entry points
 

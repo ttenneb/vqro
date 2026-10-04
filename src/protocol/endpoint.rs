@@ -32,6 +32,11 @@ pub const AGENT_VIEW_PROJECTION_KIND: &str = "endpoint.agent-view.v1";
 pub const SESSION_STRUCTURE_CAPABILITY: &str = "session_structure_v1";
 pub const SESSION_STRUCTURE_KIND: &str = "session.structure.v1";
 pub const HOST_DOCUMENTS_KIND: &str = "host.documents.v1";
+/// A client that can parse `host.view.v1` documents advertises this kind, and
+/// the server sends it view entries. A client that cannot is sent legacy
+/// entries only: the projection is a published codec, so it must never carry a
+/// contract the client would reject.
+pub const HOST_VIEWS_KIND: &str = "host.view.v1";
 pub const PANE_VIEWPORT_CAPABILITY: &str = "pane_viewport_v1";
 pub const PANE_VIEW_CAPABILITY: &str = "pane_view_v1";
 pub const PANE_VIEWPORT_KIND: &str = "pane.viewport.v1";

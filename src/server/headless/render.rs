@@ -868,8 +868,16 @@ impl HeadlessServer {
                 let Some(client) = self.clients.get_mut(&client_id) else {
                     continue;
                 };
+                // The projection is a published codec: a client that cannot
+                // parse view documents is never sent one, because its own
+                // validation would reject the whole projection. A client that
+                // advertises `host.view.v1` gets them alongside the legacy
+                // entries.
                 let host_documents = if client.shell_host_documents_enabled {
-                    shared_host_documents.clone().unwrap_or_default()
+                    filter_host_documents_for_client(
+                        shared_host_documents.clone().unwrap_or_default(),
+                        client.shell_host_views_enabled,
+                    )
                 } else {
                     Vec::new()
                 };
@@ -1284,5 +1292,65 @@ impl HeadlessServer {
         self.app.full_redraw_pending = false;
         crate::render_prof::duration_since("full_render.total", full_started);
         debug!(cols, rows, foreground_client_id = ?self.foreground_client_id, "rendered virtual frame(s)");
+    }
+}
+
+/// What one client may receive: a client that does not advertise
+/// `host.view.v1` never gets a view entry, because its own validation of the
+/// projection would reject the whole payload. Legacy entries pass through
+/// unchanged.
+pub(super) fn filter_host_documents_for_client(
+    entries: Vec<crate::protocol::endpoint::HostDocumentProjectionEntryV1>,
+    host_views_enabled: bool,
+) -> Vec<crate::protocol::endpoint::HostDocumentProjectionEntryV1> {
+    if host_views_enabled {
+        return entries;
+    }
+    entries
+        .into_iter()
+        .filter(|entry| entry.document.contract != crate::extension_contract::HOST_VIEW_CONTRACT_V1)
+        .collect()
+}
+
+#[cfg(test)]
+mod host_document_filter_tests {
+    use super::filter_host_documents_for_client;
+    use crate::extension_contract::{
+        HostDocumentV1, HostSurface, HostTarget, HOST_DOCUMENT_CONTRACT_V1, HOST_VIEW_CONTRACT_V1,
+    };
+    use crate::protocol::endpoint::HostDocumentProjectionEntryV1;
+
+    fn entry(contract: &str, namespace: &str) -> HostDocumentProjectionEntryV1 {
+        HostDocumentProjectionEntryV1 {
+            provider_priority: 1,
+            document: HostDocumentV1 {
+                contract: contract.into(),
+                namespace: namespace.into(),
+                generation: 1,
+                revision: 1,
+                surface: HostSurface::Navigation,
+                target: HostTarget::Session,
+                items: Vec::new(),
+                actions: Vec::new(),
+                required_capabilities: Vec::new(),
+            },
+            confirmation_tokens: Default::default(),
+        }
+    }
+
+    #[test]
+    fn a_client_without_the_view_kind_never_receives_a_view_entry() {
+        let entries = vec![
+            entry(HOST_DOCUMENT_CONTRACT_V1, "legacy.one"),
+            entry(HOST_VIEW_CONTRACT_V1, "vqro.tasks"),
+            entry(HOST_DOCUMENT_CONTRACT_V1, "legacy.two"),
+        ];
+        let filtered = filter_host_documents_for_client(entries.clone(), false);
+        assert_eq!(filtered.len(), 2);
+        assert!(filtered
+            .iter()
+            .all(|entry| entry.document.contract == HOST_DOCUMENT_CONTRACT_V1));
+        // A client that advertises the kind receives everything.
+        assert_eq!(filter_host_documents_for_client(entries, true).len(), 3);
     }
 }

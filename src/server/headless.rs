@@ -2060,6 +2060,7 @@ impl HeadlessServer {
                 surface_active,
                 structure_enabled,
                 host_documents_enabled,
+                host_views_enabled,
                 pane_viewport_enabled,
                 pane_view_enabled,
                 terminal_views_enabled,
@@ -2110,6 +2111,7 @@ impl HeadlessServer {
                 connection.shell_mouse_capture = mouse_capture;
                 connection.shell_structure_enabled = structure_enabled;
                 connection.shell_host_documents_enabled = host_documents_enabled;
+                connection.shell_host_views_enabled = host_views_enabled;
                 connection.shell_pane_viewport_enabled = pane_viewport_enabled;
                 connection.shell_pane_view_enabled = pane_view_enabled;
                 connection.shell_terminal_views_enabled = terminal_views_enabled;

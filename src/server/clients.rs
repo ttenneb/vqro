@@ -191,6 +191,8 @@ pub(crate) struct ClientConnection {
     /// Whether the client negotiated the optional typed structure control.
     pub(crate) shell_structure_enabled: bool,
     pub(crate) shell_host_documents_enabled: bool,
+    /// The client advertises that it can parse view documents.
+    pub(crate) shell_host_views_enabled: bool,
     /// Whether this client may reserve terminal geometry for pane contributions.
     pub(crate) shell_pane_viewport_enabled: bool,
     pub(crate) shell_pane_view_enabled: bool,
@@ -287,6 +289,7 @@ impl ClientConnection {
             shell_mouse_capture: false,
             shell_structure_enabled: false,
             shell_host_documents_enabled: false,
+            shell_host_views_enabled: false,
             shell_pane_viewport_enabled: false,
             shell_pane_view_enabled: false,
             shell_pane_panels_enabled: false,
