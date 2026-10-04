@@ -132,7 +132,10 @@ fn panel_state(cols: u16, rows: u16, count: usize, open: bool) -> ClientShellSta
 #[test]
 #[ignore = "wall-clock evidence, run by `just bench-render-scale`"]
 fn render_scale_profile_pane_panels() {
-    let (cols, rows) = (106, 40);
+    // Owner-2's render-scale fixture geometry (240x50, a 5x3 grid of pane-sized
+    // panes beside the sidebar), so the panels here are the same size class as the
+    // ones their per-frame pipeline measures.
+    let (cols, rows) = (240, 50);
     let mut baseline = 0_u128;
     for count in [1, 15] {
         for open in [false, true] {
@@ -168,7 +171,8 @@ fn render_scale_profile_pane_panels() {
 #[test]
 #[ignore = "wall-clock evidence, run by `just bench-render-scale`"]
 fn render_scale_profile_panel_patch_feed() {
-    let (cols, rows) = (106, 40);
+    // Same geometry reason as above: pane-sized panes, not slivers.
+    let (cols, rows) = (240, 50);
     for count in [1, 15] {
         for open in [false, true] {
             let mut state = panel_state(cols, rows, count, open);
