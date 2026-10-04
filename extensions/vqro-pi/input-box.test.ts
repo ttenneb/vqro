@@ -105,6 +105,36 @@ test("a stalled endpoint must not accumulate sockets on every tick", async () =>
   expect(alive().length).toBeLessThanOrEqual(2);
 });
 
+test("paced pending evidence must not outlive newer typing", async () => {
+  await start();
+  jest.advanceTimersByTime(1000); await flush();
+  hang = true;
+  // An empty batch's report stays in flight, and a second one is owed but paced.
+  terminalInput("q\x7f"); text = ""; jest.advanceTimersByTime(400); await flush();
+  jest.advanceTimersByTime(100); terminalInput("q\x7f"); jest.advanceTimersByTime(400); await flush();
+  // The human types a new draft while that empty evidence is still owed.
+  jest.advanceTimersByTime(200); text = "new human draft"; terminalInput("new human draft");
+  // The in-flight request settles and the paced drain runs.
+  jest.advanceTimersByTime(100); sockets.at(-1).emit("data", Buffer.from("{}\n")); hang = false; await flush();
+  const before = reports().length;
+  jest.advanceTimersByTime(200); await flush();
+  // Nothing may publish an empty box while the editor holds the newer draft.
+  expect(reports().slice(before).some(r => r.params.tokens.input_box === "empty")).toBe(false);
+  expect(reports().at(-1).params.tokens.input_box).toBe("has_text");
+});
+
+test("shutdown with evidence owed after the pacing window must not spawn another socket", async () => {
+  hang = true;
+  await start();
+  text = "draft"; terminalInput("draft");
+  // Past the pacing window, so a report is owed and only the in-flight one blocks it.
+  jest.advanceTimersByTime(1100); await flush();
+  await handlers.get("session_shutdown")();
+  await flush();
+  expect(alive()).toHaveLength(0);
+  expect(reports()).toHaveLength(1);
+});
+
 test("shutdown stops reporting and closes the outstanding report socket", async () => {
   hang = true;
   await start();
