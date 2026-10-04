@@ -148,6 +148,12 @@ fn fast_path_blocker(
             .any(|hit| hit.pane_id == pane.pane_id)
     }) {
         Some("client_surface_patch.fallback.pane_hits")
+    } else if !state.pane_panel_band_rows.is_empty() {
+        // A panel moves the grid inside its pane, so the host's row coordinates
+        // and the composed ones differ. The fast path would have to carry that
+        // mapping for every row and for the cursor; the full compose already does
+        // it correctly, so a patch for a panelled pane takes that path instead.
+        Some("client_surface_patch.fallback.pane_panel")
     } else {
         None
     }

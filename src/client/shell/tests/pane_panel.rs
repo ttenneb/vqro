@@ -1114,9 +1114,95 @@ fn pane_patch_row(
 }
 
 #[test]
-fn a_lower_pane_patch_row_keeps_its_own_origin() {
-    // Two panes with panels; a patch that names only the lower one must keep its
-    // rows, bounded by that pane's own bottom and not by an absolute height.
+fn a_panelled_panes_patch_takes_the_full_compose_and_composes_correctly() {
+    // The safe path: a pane a panel moved does not use the fast path at all, so the
+    // host's coordinates are never translated by a partial path. What has to hold is
+    // the output - the change reaches the grid, a band lower, and the cursor is
+    // contained - which is what the full compose already does.
+    let mut state = panel_state(None, true);
+    text_of(&mut state);
+    let surface_pane = state
+        .pane_surface
+        .as_ref()
+        .expect("surface")
+        .panes
+        .first()
+        .cloned()
+        .expect("a pane");
+    let band = *state
+        .pane_panel_band_rows
+        .get(&surface_pane.pane_id)
+        .expect("the pane has a band");
+    assert!(band > 0, "the pane has a panel band");
+    let row = surface_pane.inner_rect.y.saturating_add(5);
+    let mut cell = state
+        .pane_surface
+        .as_ref()
+        .expect("surface")
+        .frame
+        .cells
+        .first()
+        .cloned()
+        .expect("a cell");
+    cell.symbol = "W".into();
+    let surface = state.pane_surface.as_ref().expect("surface");
+    let patch = crate::protocol::PaneSurfacePatch {
+        boot_id: "boot-1".into(),
+        projection_revision: 1,
+        base_surface_revision: surface.surface_revision,
+        surface_revision: surface.surface_revision.saturating_add(1),
+        rows: vec![crate::protocol::PaneSurfacePatchRow {
+            x: surface_pane.inner_rect.x,
+            y: row,
+            cells: vec![cell],
+        }],
+        panes: vec![surface_pane.clone()],
+        cursor: None,
+    };
+    let outcome = state.apply_pane_surface_patch(patch);
+    assert!(
+        !matches!(outcome, ClientPaneSurfacePatchOutcome::Rejected),
+        "the patch is accepted"
+    );
+    assert!(
+        matches!(outcome, ClientPaneSurfacePatchOutcome::Applied(None)),
+        "a panelled pane declines the fast path and takes the full compose"
+    );
+    // The host's own cache keeps the row where the host wrote it.
+    let surface = state.pane_surface.as_ref().expect("surface");
+    let width = usize::from(surface.frame.width);
+    let cached = surface
+        .frame
+        .cells
+        .get(usize::from(row) * width + usize::from(surface_pane.inner_rect.x))
+        .map(|cell| cell.symbol.clone())
+        .unwrap_or_default();
+    assert_eq!(cached, "W", "the raw cache is the host's own view");
+    // And the compose shows it inside the grid, a band lower.
+    let frame = state.compose(106, 30).expect("frame");
+    let area = state.layout(106, 30).pane_surface;
+    let composed_row = usize::from(area.y + row + band);
+    let composed = frame
+        .cells
+        .chunks(106)
+        .nth(composed_row)
+        .map(|line| {
+            line.iter()
+                .map(|cell| cell.symbol.as_str())
+                .collect::<String>()
+        })
+        .unwrap_or_default();
+    assert!(
+        composed.contains('W'),
+        "the compose places the change a band lower, at row {composed_row}: {composed:?}"
+    );
+}
+
+#[test]
+fn a_background_patch_keeps_the_composes_cursor_in_the_pane() {
+    // A patch carries only the panes that changed, so the focused pane can be
+    // absent. The cursor belongs to that pane: the compose must still contain it -
+    // a band lower - and hide it when it would land past the pane.
     let mut state = panel_state(None, true);
     let mut surface = state.pane_surface.as_ref().expect("surface").clone();
     let mut lower = surface.panes[0].clone();
@@ -1129,29 +1215,38 @@ fn a_lower_pane_patch_row_keeps_its_own_origin() {
         height: 16,
     };
     surface.panes.push(lower.clone());
+    surface.frame.cursor = Some(crate::protocol::CursorState {
+        x: 2,
+        y: 3,
+        visible: true,
+        shape: 0,
+    });
     state.set_pane_surface(surface);
     text_of(&mut state);
-    state.pane_panel_band_rows.insert("pane_2".into(), 2);
-    let patch = pane_patch_row(&state, &lower, lower.inner_rect.y.saturating_add(3), "R");
-    let ClientPaneSurfacePatchOutcome::Applied(Some(composed)) =
-        state.apply_pane_surface_patch(patch)
-    else {
-        panic!("the fast path applies this patch");
-    };
-    let area = state.layout(106, 30).pane_surface;
-    let expected = area
-        .y
-        .saturating_add(lower.inner_rect.y)
-        .saturating_add(3)
-        .saturating_add(2);
+    let band = *state
+        .pane_panel_band_rows
+        .get("pane_1")
+        .expect("the focused pane has a band");
+    assert!(band > 0, "the focused pane has a panel band");
+    let mut patch = pane_patch_row(&state, &lower, lower.inner_rect.y.saturating_add(3), "S");
+    patch.cursor = Some(crate::protocol::CursorState {
+        x: 2,
+        y: 3,
+        visible: true,
+        shape: 0,
+    });
+    let outcome = state.apply_pane_surface_patch(patch);
     assert!(
-        composed.rows.iter().any(|change| change.y == expected),
-        "the lower pane's row keeps its origin plus its band: want {expected}, got {:?}",
-        composed
-            .rows
-            .iter()
-            .map(|change| change.y)
-            .collect::<Vec<_>>()
+        !matches!(outcome, ClientPaneSurfacePatchOutcome::Rejected),
+        "the patch is accepted"
+    );
+    let frame = state.compose(106, 30).expect("frame");
+    let area = state.layout(106, 30).pane_surface;
+    let cursor = frame.cursor.expect("a composed cursor");
+    assert_eq!(
+        cursor.y,
+        area.y + 3 + band,
+        "the composed cursor travels with the grid, a band lower"
     );
 }
 
