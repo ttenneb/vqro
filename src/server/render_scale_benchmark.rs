@@ -7,16 +7,25 @@ use crate::app::{App, AppPolicy};
 use crate::client::{ClientShellConfig, ClientShellState};
 use crate::config::Config;
 use crate::kitty_graphics::HostCellSize;
+use crate::layout::PaneId;
 use crate::protocol::PaneSurfaceFrame;
 use crate::terminal::TerminalRuntime;
 use crate::workspace::Workspace;
 
-const COLS: u16 = 120;
-const ROWS: u16 = 40;
+// A client geometry that leaves room for fifteen real panes beside the default
+// sidebar: the pane surface is about 210x49, so a 5x3 grid gives every pane
+// 42x16. Without that, "15 panes" were fifteen hits on one tiny rect and nothing
+// pane-sized (borders, scrollbars, panels) could draw.
+const COLS: u16 = 240;
+const ROWS: u16 = 50;
+/// Every populated pane in a fixture is at least this size.
+const MIN_PANE_COLS: u16 = 40;
+const MIN_PANE_ROWS: u16 = 12;
 const SAMPLE_COUNT: usize = 40;
 const WARMUP_COUNT: usize = 5;
 const CARDINALITIES: [usize; 3] = [1, 15, 50];
 const CLIENT_CARDINALITIES: [usize; 2] = [1, 4];
+const SCROLLBACK_BYTES: usize = 1024 * 1024;
 
 #[derive(Clone, Copy)]
 struct StageStats {
@@ -83,7 +92,7 @@ impl RenderPipeline {
                 workspace_index,
                 tab_index: self.app.state.workspaces[workspace_index].active_tab_index(),
             });
-        let rendered = super::client_shell::render_pane_surface(
+        let rendered = crate::server::client_shell::render_pane_surface(
             &mut self.app,
             target,
             Rect::new(0, 0, surface_size.cols, surface_size.rows),
@@ -126,43 +135,150 @@ fn history() -> String {
     (0..2_000).map(|line| format!("line-{line}\r\n")).collect()
 }
 
-fn runtime(history: &str) -> TerminalRuntime {
-    TerminalRuntime::test_with_scrollback_bytes(COLS, ROWS, 1024 * 1024, history.as_bytes())
+/// The client's pane area at the fixed benchmark geometry: what a pane fixture
+/// must tile inside, and what the client renders into.
+fn pane_surface_rect() -> Rect {
+    let client = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    let size = client.surface_size(COLS, ROWS);
+    Rect::new(0, 0, size.cols.max(1), size.rows.max(1))
+}
+
+/// How many panes tile `area` at the fixture minimum, and in what grid. Panes
+/// beyond the capacity of one tab go to extra tabs of the same workspace.
+fn grid_for(area: Rect, panes: usize) -> (usize, usize) {
+    let max_cols = (area.width / MIN_PANE_COLS).max(1) as usize;
+    let max_rows = (area.height / MIN_PANE_ROWS).max(1) as usize;
+    let cols = max_cols.min(panes.max(1));
+    let rows = panes.max(1).div_ceil(cols).min(max_rows);
+    (cols, rows.max(1))
+}
+
+/// A runtime sized like the pane that owns it, holding real scrollback content
+/// plus recent output, so the pane renders a populated screen.
+fn populated_runtime(rect: Rect, history: &str) -> TerminalRuntime {
+    let cols = rect.width.max(1);
+    let rows = rect.height.max(1);
+    let runtime = TerminalRuntime::test_with_scrollback_bytes(
+        cols,
+        rows,
+        SCROLLBACK_BYTES,
+        history.as_bytes(),
+    );
+    runtime.test_process_pty_bytes(b"$ bench output arriving in this pane\r\n");
+    runtime
+}
+
+/// Tiles the active tab into a `cols` x `rows` grid and returns its pane ids.
+/// Each split takes an equal share of what is left, so the panes come out even
+/// rather than halving down to slivers.
+fn tile_active_tab(workspace: &mut Workspace, cols: usize, rows: usize) -> Vec<PaneId> {
+    let tab_idx = workspace.active_tab_index();
+    let mut row_roots = vec![workspace.tabs[tab_idx].root_pane];
+    for index in 1..rows {
+        let last = *row_roots.last().expect("a row to split");
+        workspace.tabs[tab_idx].layout.focus_pane(last);
+        let ratio = 1.0 / (rows - index + 1) as f32;
+        row_roots.push(workspace.test_split_with_ratio(Direction::Vertical, ratio));
+    }
+
+    let mut pane_ids = Vec::with_capacity(cols * rows);
+    for root in row_roots {
+        pane_ids.push(root);
+        let mut last = root;
+        for index in 1..cols {
+            workspace.tabs[tab_idx].layout.focus_pane(last);
+            let ratio = 1.0 / (cols - index + 1) as f32;
+            last = workspace.test_split_with_ratio(Direction::Horizontal, ratio);
+            pane_ids.push(last);
+        }
+    }
+    pane_ids
+}
+
+/// A populated tab: every pane sized for its own rect, with content and output.
+fn populate_tab(
+    workspace: &mut Workspace,
+    pane_count: usize,
+    surface: Rect,
+    history: &str,
+) -> Vec<PaneId> {
+    if pane_count == 0 {
+        return Vec::new();
+    }
+    let (cols, rows) = grid_for(surface, pane_count);
+    let pane_ids = tile_active_tab(workspace, cols, rows.min(pane_count.div_ceil(cols)));
+    let tab_idx = workspace.active_tab_index();
+    let rects = workspace.tabs[tab_idx]
+        .layout
+        .panes(surface)
+        .into_iter()
+        .map(|info| (info.id, info.rect))
+        .collect::<std::collections::HashMap<_, _>>();
+    for pane_id in pane_ids
+        .iter()
+        .filter(|id| rects.contains_key(id))
+        .take(pane_count)
+    {
+        let rect = rects[pane_id];
+        workspace.insert_test_runtime(*pane_id, populated_runtime(rect, history));
+    }
+    pane_ids
+}
+
+/// Populates `pane_count` panes across the surfaces the client can actually
+/// show at `COLS` x `ROWS`: the active tab is a real grid, and panes past its
+/// capacity live in further tabs of the same workspace, still populated and
+/// still parsed, but not on screen at the same time.
+fn populated_panes(pane_count: usize) -> Workspace {
+    let history = history();
+    let surface = pane_surface_rect();
+    let (cols, rows) = grid_for(surface, pane_count);
+    let capacity = (cols * rows).max(1);
+    let mut remaining = pane_count.max(1);
+    let mut workspace = Workspace::test_new("bench");
+    let first = remaining.min(capacity);
+    populate_tab(&mut workspace, first, surface, &history);
+    remaining -= first;
+    while remaining > 0 {
+        let tab_idx = workspace.test_add_tab(None);
+        // The tiler works in the active tab, so make the new one active.
+        workspace.switch_tab(tab_idx);
+        let next = remaining.min(capacity);
+        populate_tab(&mut workspace, next, surface, &history);
+        remaining -= next;
+    }
+    let first_root = workspace.tabs[0].root_pane;
+    workspace.switch_tab(0);
+    workspace.tabs[0].layout.focus_pane(first_root);
+    workspace
 }
 
 fn workspaces(workspace_count: usize) -> Vec<Workspace> {
     let history = history();
+    let surface = pane_surface_rect();
     (0..workspace_count)
         .map(|index| {
             let mut workspace = Workspace::test_new(&format!("bench-{}", index + 1));
             let root_pane = workspace.tabs[0].root_pane;
-            workspace.insert_test_runtime(root_pane, runtime(&history));
+            workspace.insert_test_runtime(root_pane, populated_runtime(surface, &history));
             workspace
         })
         .collect()
 }
 
 fn active_panes(pane_count: usize) -> Vec<Workspace> {
-    let history = history();
-    let mut workspace = Workspace::test_new("bench");
-    let root_pane = workspace.tabs[0].root_pane;
-    workspace.insert_test_runtime(root_pane, runtime(&history));
-    let mut pane_ids = vec![root_pane];
+    vec![populated_panes(pane_count)]
+}
 
-    for index in 1..pane_count {
-        let target = pane_ids[(index - 1) / 2];
-        workspace.tabs[0].focus_pane(target);
-        let direction = if index % 2 == 0 {
-            Direction::Vertical
-        } else {
-            Direction::Horizontal
-        };
-        let pane_id = workspace.test_split(direction);
-        workspace.insert_test_runtime(pane_id, runtime(&history));
-        pane_ids.push(pane_id);
+/// Output keeps arriving between samples, so each sample renders a screen that
+/// just changed rather than one frozen frame. The feed itself is outside the
+/// measured region.
+fn feed_output(app: &mut App) {
+    for workspace in &app.state.workspaces {
+        for runtime in workspace.test_runtimes.values() {
+            runtime.test_process_pty_bytes(b"> bench sample output\r\n");
+        }
     }
-
-    vec![workspace]
 }
 
 fn summarize(mut samples: Vec<Duration>) -> StageStats {
@@ -180,6 +296,7 @@ fn profile(build: fn(usize) -> Vec<Workspace>, count: usize) -> PipelineStats {
 
 fn profile_pipeline(mut pipeline: RenderPipeline) -> PipelineStats {
     for _ in 0..WARMUP_COUNT {
+        feed_output(&mut pipeline.app);
         black_box(pipeline.render_once());
     }
 
@@ -187,6 +304,7 @@ fn profile_pipeline(mut pipeline: RenderPipeline) -> PipelineStats {
     let mut client = Vec::with_capacity(SAMPLE_COUNT);
     let mut total = Vec::with_capacity(SAMPLE_COUNT);
     for _ in 0..SAMPLE_COUNT {
+        feed_output(&mut pipeline.app);
         let (server_elapsed, client_elapsed) = pipeline.render_once();
         server.push(server_elapsed);
         client.push(client_elapsed);
@@ -365,4 +483,41 @@ async fn render_scale_profile() {
     print_token_rule_profiles();
     print_recovery_browser_profile();
     print_terminal_views_profile();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The fixture must show real panes, not N hits on one tiny rect: every pane
+    /// a tab shows is at least the fixture minimum, and every pane in every tab
+    /// is populated.
+    #[tokio::test(flavor = "current_thread")]
+    async fn every_populated_pane_is_real() {
+        let surface = pane_surface_rect();
+        for count in [1usize, 15, 50] {
+            let workspace = populated_panes(count);
+            let mut total = 0;
+            for (tab_idx, tab) in workspace.tabs.iter().enumerate() {
+                let visible = tab.layout.panes(surface);
+                total += visible.len();
+                for info in visible {
+                    assert!(
+                        info.rect.width >= MIN_PANE_COLS && info.rect.height >= MIN_PANE_ROWS,
+                        "{count} panes, tab {tab_idx}: {:?} is below the fixture minimum",
+                        info.rect
+                    );
+                }
+            }
+            assert_eq!(total, count, "every pane is populated");
+        }
+        let surface = pane_surface_rect();
+        let missing = populated_panes(15)
+            .tabs
+            .iter()
+            .flat_map(|tab| tab.layout.panes(surface))
+            .filter(|info| !info.rect.is_empty())
+            .count();
+        assert_eq!(missing, 15);
+    }
 }
