@@ -828,3 +828,191 @@ fn an_open_panel_claims_the_rect_below_it() {
     );
     assert_eq!(size.cols, pane.projected_inner_rect.width);
 }
+
+#[test]
+fn documents_with_one_namespace_keep_their_rows_apart() {
+    // Two providers publish under the same namespace with different pane targets
+    // and their own item ids. A shared namespace must not merge their rows.
+    let projection = serde_json::json!({
+        "contract":"host.documents.v1", "boot_id":"boot-1", "revision":1,
+        "documents":[
+            {"provider_priority":1,"document":{
+                "contract":"host.view.v1","namespace":"example.same","generation":1,"revision":1,
+                "surface":"navigation","target":{"kind":"pane","pane_id":"pane_1"},
+                "items":[
+                    {"id":"root","role":"section","label":"Tasks","view":{"pane_id":"pane_1","view_id":"tasks","state":"open"}},
+                    {"id":"child","parent_id":"root","role":"section","label":"Only from A","view":{"state":"open"}}
+                ],"actions":[],"required_capabilities":[]}},
+            {"provider_priority":1,"document":{
+                "contract":"host.view.v1","namespace":"example.same","generation":2,"revision":1,
+                "surface":"navigation","target":{"kind":"pane","pane_id":"pane_2"},
+                "items":[
+                    {"id":"root","role":"section","label":"Tasks","view":{"pane_id":"pane_2","view_id":"tasks","state":"open"}},
+                    {"id":"child","parent_id":"root","role":"section","label":"Only from B","view":{"state":"open"}}
+                ],"actions":[],"required_capabilities":[]}}
+        ]
+    });
+    let mut state = panel_state(None, false);
+    let projection: crate::protocol::endpoint::HostDocumentsProjectionV1 =
+        serde_json::from_value(projection).expect("projection");
+    state.set_endpoint_host_documents_for_generation(
+        &ClientEndpointId::Local,
+        1,
+        Box::new(projection),
+    );
+    state
+        .pane_panel_open
+        .entry("pane_1".into())
+        .or_default()
+        .insert("tasks".into());
+    let text = text_of(&mut state);
+    assert!(
+        text.contains("Only from A"),
+        "pane_1 keeps its own rows: {text}"
+    );
+    assert!(
+        !text.contains("Only from B"),
+        "pane_2's rows must not leak into pane_1: {text}"
+    );
+}
+
+#[test]
+fn a_child_chain_that_loops_still_terminates() {
+    // Two items that name each other as parent: the walk must bound its work even
+    // though the host would not serve this, so a malformed document cannot hang
+    // the render.
+    let projection = serde_json::json!({
+        "contract":"host.documents.v1", "boot_id":"boot-1", "revision":1,
+        "documents":[{"provider_priority":1,"document":{
+            "contract":"host.view.v1","namespace":"example.loop","generation":1,"revision":1,
+            "surface":"navigation","target":{"kind":"session"},
+            "items":[
+                {"id":"root","role":"section","label":"Tasks","view":{"pane_id":"pane_1","view_id":"tasks","state":"open"}},
+                {"id":"a","parent_id":"b","role":"section","label":"A","view":{"state":"open"}},
+                {"id":"b","parent_id":"a","role":"section","label":"B","view":{"state":"open"}},
+                {"id":"reach","parent_id":"a","role":"section","label":"Reachable","view":{"state":"open"}}
+            ],"actions":[],"required_capabilities":[]}}]
+    });
+    let mut state = panel_state(None, false);
+    let projection: crate::protocol::endpoint::HostDocumentsProjectionV1 =
+        serde_json::from_value(projection).expect("projection");
+    state.set_endpoint_host_documents_for_generation(
+        &ClientEndpointId::Local,
+        1,
+        Box::new(projection),
+    );
+    state
+        .pane_panel_open
+        .entry("pane_1".into())
+        .or_default()
+        .insert("tasks".into());
+    let text = text_of(&mut state);
+    assert!(text.contains("Tasks"), "{text}");
+}
+
+#[test]
+fn a_collapsed_panel_still_says_a_missing_view_is_unavailable() {
+    // The user has one published view collapsed and another open view that the
+    // extension stopped publishing. Collapsing must not hide the missing one.
+    let mut state = panel_state(None, true);
+    state
+        .pane_panel_open
+        .entry("pane_1".into())
+        .or_default()
+        .insert("messages".into());
+    state
+        .pane_panel_display
+        .entry("pane_1".into())
+        .or_default()
+        .collapsed_views
+        .insert("tasks".into());
+    let text = text_of(&mut state);
+    assert!(text.contains("▸ "), "the known view is collapsed: {text}");
+    assert!(
+        text.contains("messages"),
+        "the missing open view still says so: {text}"
+    );
+}
+
+#[test]
+fn a_retained_patch_row_lands_below_the_panel_with_the_grid() {
+    // The panel moved this pane's grid down by its band, so a patch row the host
+    // computed in the pane's own coordinates belongs a band lower too: otherwise
+    // a live update would paint a row where the grid no longer is.
+    let mut state = panel_state(None, true);
+    text_of(&mut state);
+    let pane = state
+        .hits
+        .panes
+        .iter()
+        .find(|pane| pane.pane_id == "pane_1")
+        .expect("pane_1");
+    let inner = pane.projected_inner_rect;
+    let band = state
+        .pane_panel_areas
+        .first()
+        .copied()
+        .expect("reserved band")
+        .height;
+    assert!(band > 0, "the panel reserved a band");
+    let mut surface_pane = state
+        .pane_surface
+        .as_ref()
+        .expect("surface")
+        .panes
+        .iter()
+        .find(|pane| pane.pane_id == "pane_1")
+        .expect("surface pane")
+        .clone();
+    surface_pane.content_revision = 2;
+    let mut cell = state
+        .pane_surface
+        .as_ref()
+        .expect("surface")
+        .frame
+        .cells
+        .first()
+        .cloned()
+        .expect("a cell");
+    cell.symbol = "Z".into();
+    let patch = crate::protocol::PaneSurfacePatch {
+        boot_id: "boot-1".into(),
+        projection_revision: 1,
+        base_surface_revision: 1,
+        surface_revision: 2,
+        rows: vec![crate::protocol::PaneSurfacePatchRow {
+            x: inner.x,
+            y: inner.y,
+            cells: vec![cell],
+        }],
+        panes: vec![surface_pane],
+        cursor: None,
+    };
+    assert!(
+        !matches!(
+            state.apply_pane_surface_patch(patch),
+            ClientPaneSurfacePatchOutcome::Rejected
+        ),
+        "the patch must be applied, not rejected"
+    );
+    let surface = state.pane_surface.as_ref().expect("surface");
+    let width = usize::from(surface.frame.width);
+    let symbol_at = |y: u16| {
+        surface
+            .frame
+            .cells
+            .get(usize::from(y) * width + usize::from(inner.x))
+            .map(|cell| cell.symbol.clone())
+            .unwrap_or_default()
+    };
+    assert_ne!(
+        symbol_at(inner.y),
+        "Z",
+        "the panel's band is not where the grid row goes"
+    );
+    assert_eq!(
+        symbol_at(inner.y.saturating_add(band)),
+        "Z",
+        "the patched row is written a band lower"
+    );
+}

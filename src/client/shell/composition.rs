@@ -666,7 +666,15 @@ impl ClientShellState {
         // One index of the published documents for this frame, shared by the
         // panel render and the pane badges: building it twice is a second full
         // pass over every item per frame.
-        let index = host_documents.map(pane_panel::PanelIndex::new);
+        // Rows are only read for panes the user has something open in: a frame
+        // where nothing is open needs the item list for badges and nothing more.
+        let any_open = self.hits.panes.iter().any(|pane| {
+            self.pane_panel_open
+                .get(&pane.pane_id)
+                .is_some_and(|views| !views.is_empty())
+        });
+        let index =
+            host_documents.map(|documents| pane_panel::PanelIndex::with_rows(documents, any_open));
         // A server that does not advertise the panel control gets no panels:
         // a panel that could not claim its terminal's edge would be drawn over
         // the terminal instead of shrinking it. The connection stays usable.
@@ -688,6 +696,13 @@ impl ClientShellState {
         }
         self.hits.pane_panels = panel_render.hits;
         self.pane_panel_areas = panel_render.reserved.clone();
+        self.pane_panel_band_rows.clear();
+        for (pane_id, band, _) in &panel_render.projected {
+            if band.height > 0 {
+                self.pane_panel_band_rows
+                    .insert(pane_id.clone(), band.height);
+            }
+        }
         for (pane_id, band, destination) in &panel_render.projected {
             let Some((_, source, cells)) = grid_cells
                 .iter()

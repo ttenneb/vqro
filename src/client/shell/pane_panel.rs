@@ -317,29 +317,35 @@ fn row_prefix(lanes: &[bool], is_last: bool) -> String {
 /// Descend the root's children in document order, honouring collapsed rows.
 fn flatten<'a>(
     index: &PanelIndex<'a>,
-    namespace: &'a str,
+    document: usize,
     root: &str,
     collapsed: &BTreeSet<String>,
 ) -> Vec<FlatRow<'a>> {
     let children = &index.children;
     let mut rows = Vec::new();
+    // A bound on the work, not just on the output: documents are independent, but
+    // one document's ids could still loop, and this walk must always terminate.
+    let bound = index.items.len().max(1);
     // (item, ancestor lanes, is last child), pushed in reverse so the next pop
     // is the first child in document order.
     let mut stack: Vec<(&HostDocumentItem, Vec<bool>, bool)> = Vec::new();
-    for (index, item) in children
-        .get(&(namespace, root))
+    for (position, item) in children
+        .get(&(document, root))
         .map(Vec::as_slice)
         .unwrap_or_default()
         .iter()
         .enumerate()
         .rev()
     {
-        let total = children.get(&(namespace, root)).map(Vec::len).unwrap_or(0);
-        stack.push((item, Vec::new(), index == total - 1));
+        let total = children.get(&(document, root)).map(Vec::len).unwrap_or(0);
+        stack.push((item, Vec::new(), position == total - 1));
     }
     while let Some((item, lanes, is_last)) = stack.pop() {
+        if rows.len() >= bound {
+            break;
+        }
         let descendants = children
-            .get(&(namespace, item.id.as_str()))
+            .get(&(document, item.id.as_str()))
             .cloned()
             .unwrap_or_default();
         rows.push(FlatRow {
@@ -364,29 +370,46 @@ fn flatten<'a>(
 /// One pass over the published documents, reused by every pane in a frame.
 /// Building this per pane made the panel path scale with panes times items.
 pub(super) struct PanelIndex<'a> {
-    /// `(priority, namespace, item)` in render order.
-    items: Vec<(i32, &'a str, &'a HostDocumentItem)>,
-    children: HashMap<(&'a str, &'a str), Vec<&'a HostDocumentItem>>,
+    /// `(priority, document index, item)` in render order. The document index is
+    /// this frame's identity for the document, so two documents that share a
+    /// namespace never share rows.
+    items: Vec<(i32, usize, &'a HostDocumentItem)>,
+    /// Per document, its items by parent id. Scoped by document index: a chain of
+    /// ids across two documents can never be walked as one tree.
+    children: HashMap<(usize, &'a str), Vec<&'a HostDocumentItem>>,
 }
 
 impl<'a> PanelIndex<'a> {
-    pub(super) fn new(documents: &'a HostDocumentsProjectionV1) -> Self {
-        let mut entries = documents.documents.iter().collect::<Vec<_>>();
+    /// `with_rows` builds the per-document children index only when a caller will
+    /// read rows: a frame where nothing is open needs the item list for badges and
+    /// nothing more.
+    pub(super) fn with_rows(documents: &'a HostDocumentsProjectionV1, rows: bool) -> Self {
+        let mut entries = documents
+            .documents
+            .iter()
+            .enumerate()
+            .collect::<Vec<(usize, _)>>();
         entries.sort_by(|left, right| {
             right
+                .1
                 .provider_priority
-                .cmp(&left.provider_priority)
-                .then_with(|| left.document.namespace.cmp(&right.document.namespace))
+                .cmp(&left.1.provider_priority)
+                .then_with(|| left.1.document.namespace.cmp(&right.1.document.namespace))
+                .then_with(|| left.0.cmp(&right.0))
         });
         let mut items = Vec::new();
-        let mut children: HashMap<(&str, &str), Vec<&HostDocumentItem>> = HashMap::new();
-        for entry in entries {
-            let namespace = entry.document.namespace.as_str();
+        let mut children: HashMap<(usize, &str), Vec<&HostDocumentItem>> = HashMap::new();
+        for (document_index, entry) in entries {
             for item in &entry.document.items {
-                if let Some(parent) = item.parent_id.as_deref() {
-                    children.entry((namespace, parent)).or_default().push(item);
+                if rows {
+                    if let Some(parent) = item.parent_id.as_deref() {
+                        children
+                            .entry((document_index, parent))
+                            .or_default()
+                            .push(item);
+                    }
                 }
-                items.push((entry.provider_priority, namespace, item));
+                items.push((entry.provider_priority, document_index, item));
             }
         }
         Self { items, children }
@@ -442,7 +465,7 @@ fn panel_views<'a>(
     collapsed: &BTreeSet<String>,
 ) -> Vec<PanelView<'a>> {
     let mut views = Vec::new();
-    for (_, namespace, item) in &index.items {
+    for (_, document, item) in &index.items {
         let Some(view) = item.view.as_ref() else {
             continue;
         };
@@ -459,7 +482,7 @@ fn panel_views<'a>(
             title: item.label.as_str(),
             summary: item.detail.as_deref().unwrap_or_default(),
             state: view.state,
-            rows: flatten(index, namespace, item.id.as_str(), collapsed),
+            rows: flatten(index, *document, item.id.as_str(), collapsed),
         });
     }
     views
@@ -539,14 +562,18 @@ fn render_pane(
     // of resizing the terminal, and the user's own size always wins.
     // One header line per section is the floor: a collapsed panel is its
     // headers, and the terminal gets every other row back.
-    let headers = views.len() as u16;
-    let all_collapsed = views
-        .iter()
-        .all(|view| display.collapsed_views.contains(&view.view_id));
+    // A view the user opened that is no longer published keeps its own row, so it
+    // counts as reserved space too: otherwise a collapsed panel is nothing but
+    // headers and the missing view is never drawn at all.
     let missing = open_views
         .iter()
         .filter(|view_id| !views.iter().any(|view| &view.view_id == *view_id))
         .count() as u16;
+    let pinned = views.len() as u16;
+    let headers = pinned + missing;
+    let all_collapsed = views
+        .iter()
+        .all(|view| display.collapsed_views.contains(&view.view_id));
     let fit = fit_height(&views, &display.collapsed_views)
         + views
             .iter()
@@ -591,7 +618,7 @@ fn render_pane(
     let visible = geometry.panel.height;
     // Section headers stay pinned; only the rows scroll, so a section never
     // loses its name or its collapse marker.
-    let row_space = visible.saturating_sub(headers);
+    let row_space = visible.saturating_sub(pinned);
     let rows = panel_rows(&views, open_views, &display.collapsed_views);
     let overflow = rows.len() as u16 > row_space;
     // The scroll indicator owns the last column, with one quiet column of
@@ -710,7 +737,7 @@ fn render_pane(
     if overflow {
         let track = Rect::new(
             geometry.panel.x.saturating_add(width.saturating_sub(1)),
-            geometry.panel.y.saturating_add(headers),
+            geometry.panel.y.saturating_add(pinned),
             1,
             row_space,
         );

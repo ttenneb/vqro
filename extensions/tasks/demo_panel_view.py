@@ -186,6 +186,12 @@ class PanelViewDemo(ReadinessDemo):
                              check=True).stdout.split()
         return int(out[0]), int(out[1])
 
+    def document_has_view(self, pane_id, view_id):
+        document = self.panel_document()
+        return any(item.get("view", {}).get("pane_id") == pane_id
+                   and item.get("view", {}).get("view_id") == view_id
+                   for item in document["items"])
+
     def human_columns(self, first=28, last=112):
         return first, last
 
@@ -307,34 +313,61 @@ class PanelViewDemo(ReadinessDemo):
         self.wait_screen("waiting on you: unblock")
         text_b = demo_capture.capture(self.root / "client.log", self.root / "capture", "panel-b")
 
-        # 8. The panel is a split, not a crop: the host resizes the pane's PTY to
-        #    the rows below the panel, and every grid row is drawn there, so the
-        #    agent's newest rows end at the pane's bottom edge with no blank band.
-        #    The pane's TTY is asked directly, which is the ground truth.
-        self.api("pane.focus", {"pane_id": a})
-        self.cli("pane", "panel", "hide", a, "tasks")
+        # 8. The panel is a split, not an overlay: the host resizes the pane's PTY
+        #    to the rows below the panel and the grid moves there, so the agent's
+        #    newest lines end at the pane's bottom edge with no blank band. The
+        #    human's own shell pane is the subject: it can be asked its size and
+        #    made to print more than fits, model-free.
+        self.human(human, "panel-split-task", ["create", "Split check row",
+                                               "--done-when", CRITERION,
+                                               "--op", "panel-split-task"])
+        deadline = time.monotonic() + 25
+        while time.monotonic() < deadline and not self.document_has_view(human, "tasks"):
+            time.sleep(0.3)
+        view_published = self.document_has_view(human, "tasks")
+        self.api("pane.focus", {"pane_id": human})
+        rows_closed, cols_closed = self.pty_size(human)
+        self.cli("pane", "panel", "show", human, "tasks")
+        deadline = time.monotonic() + 25
+        panel_drawn = False
+        while time.monotonic() < deadline and not panel_drawn:
+            screen = "".join("".join(cells) for cells in self.screen().rows)
+            panel_drawn = "Split check row" in screen or "extension unavailable" in screen
+            time.sleep(0.3)
         time.sleep(2)
-        rows_closed, cols_closed = self.pty_size(a)
-        self.cli("pane", "panel", "show", a, "tasks")
-        self.wait_screen("waiting on panel-b: unblock")
-        time.sleep(2)
-        rows_open, cols_open = self.pty_size(a)
-        # Recorded, not asserted: this is the measurement the split depends on,
-        # and a green demo that hid a broken split would be worse than a number.
-        band = rows_closed - rows_open
-        header = self.locate("Tasks", within="▾ ●")[1]
+        rows_open, cols_open = self.pty_size(human)
+        # The band the panel drew, from its header row to the divider below it.
+        first, last = self.human_columns()
         screen_rows = ["".join(cells) for cells in self.screen().rows]
-        divider = next(
-            (row for row in range(header + 1, min(header + 24, len(screen_rows)))
-             if screen_rows[row][118:190].strip().startswith("────────")),
-            header + 1,
-        )
+        # The panel's own header: it carries the collapse mark and its summary,
+        # unlike the rows inside it.
+        header = next((row for row, line in enumerate(screen_rows)
+                       if "⊟" in line[first:last] and "Tasks" in line[first:last]), None)
+        band = 0
+        if header is not None:
+            divider = next((row for row in range(header, min(header + 24, len(screen_rows)))
+                            if screen_rows[row][first:last].strip().startswith("────────")), None)
+            if divider is not None:
+                # The header row through the divider row inclusive.
+                band = divider - header + 1
+        # More output than the pane can hold, then the newest line must be at the
+        # bottom edge and no row between the panel and that edge may be blank.
+        self.cli("pane", "run", human, "seq 1 200")
+        self.wait_screen("200", seconds=20)
+        time.sleep(1)
         filled_text = demo_capture.capture(self.root / "client.log", self.root / "capture",
                                            "panel-split-filled")
-        # Keep the server's own log: the PTY resize is a host fact, not a client one.
-        server_log = next(iter((self.root / "config").rglob("*server.log")), None)
-        if server_log is not None:
-            shutil.copy(server_log, self.root / "capture" / "server-split.log")
+        # The grid's own rows: the PTY's row count, starting directly below the
+        # band. Every one of them belongs to the terminal, and the last one is the
+        # pane's bottom edge.
+        first_grid = (header + band) if header is not None else 1
+        grid_rows = list(range(first_grid, first_grid + rows_open))
+        gaps = [row for row in grid_rows if self.pane_row_blank(row, first, last)]
+        newest_at_bottom = bool(grid_rows) and not self.pane_row_blank(
+            grid_rows[-1], first, last
+        )
+        self.cli("pane", "panel", "hide", human, "tasks")
+
         # The served document is the contract the panels are drawn from.
         badges = [item["id"] for item in document["items"] if item["id"].startswith("context:attention.badge:")]
         assert any(":1:" in badge for badge in badges), badges
@@ -363,12 +396,17 @@ class PanelViewDemo(ReadinessDemo):
                   "messages_panel": {"shows_the_message_rows": "review the panel when you can" in Path(messages_text).read_text()},
                   "click_focused_assignee": {"focused_before": before, "focused_after": after},
                   "b_panel_shows_own_debt": "waiting on you: unblock" in Path(text_b).read_text(),
-                  "split": {"pane": a, "pty_rows_without_panel": rows_closed, "pty_rows_with_panel": rows_open,
+                  "split": {"pane": human, "a_shell_pane_holds_the_panel": True,
+                            "view_published_for_a_shell_pane": view_published,
+                            "panel_drawn": panel_drawn,
+                            "pty_rows_without_panel": rows_closed,
+                            "pty_rows_with_panel": rows_open,
+                            "drawn_band_rows": band,
+                            "rows_freed": rows_closed - rows_open,
+                            "rows_freed_equals_the_band": rows_closed - rows_open == band,
                             "pty_cols_unchanged": cols_open == cols_closed,
-                            "rows_freed": band,
-                            "drawn_band_rows": divider - header + 2,
-                            "pty_shrank_with_the_panel": rows_open < rows_closed,
-                            "blank_row_under_the_panel": self.pane_row_blank(divider + 1)},
+                            "newest_line_at_the_bottom_edge": newest_at_bottom,
+                            "blank_rows_between_the_panel_and_the_bottom": gaps},
                   "captures": {"expanded": str(expanded_text), "messages": str(messages_text),
                                "collapsed": str(collapsed_text), "unavailable": str(unavailable_text),
                                "b": str(text_b), "split_filled": str(filled_text)}}

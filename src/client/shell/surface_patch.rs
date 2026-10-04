@@ -30,12 +30,50 @@ fn apply_row(row: &crate::protocol::PaneSurfacePatchRow, frame: &mut FrameData) 
     true
 }
 
+/// Rows a panel moved a pane's grid down by, by pane id: the band it reserved at
+/// the pane's top. Patch rows are written in the pane's own coordinates, so a row
+/// for a panelled pane belongs that many rows lower.
+type PanelShifts = std::collections::HashMap<String, u16>;
+
+fn shifted_row(
+    row: &crate::protocol::PaneSurfacePatchRow,
+    panes: &[crate::protocol::PaneSurfacePane],
+    shifts: &PanelShifts,
+) -> Option<crate::protocol::PaneSurfacePatchRow> {
+    if shifts.is_empty() {
+        return Some(row.clone());
+    }
+    let pane = panes.iter().find(|pane| {
+        row.x >= pane.inner_rect.x
+            && row.x < pane.inner_rect.x.saturating_add(pane.inner_rect.width)
+            && row.y >= pane.inner_rect.y
+            && row.y < pane.inner_rect.y.saturating_add(pane.inner_rect.height)
+    })?;
+    let Some(band) = shifts.get(&pane.pane_id).copied().filter(|band| *band > 0) else {
+        return Some(row.clone());
+    };
+    let bottom = pane.inner_rect.y.saturating_add(pane.inner_rect.height);
+    let moved = row.y.saturating_add(band);
+    // A row that would land outside the pane, or still inside the band, is
+    // dropped: the panel owns that edge and the next compose blends it there.
+    if moved >= bottom || moved < pane.inner_rect.y.saturating_add(band) {
+        return None;
+    }
+    let mut shifted = row.clone();
+    shifted.y = moved;
+    Some(shifted)
+}
+
 fn apply_patch_to_surface(
     surface: &mut crate::protocol::PaneSurfaceFrame,
     patch: &crate::protocol::PaneSurfacePatch,
+    shifts: &PanelShifts,
 ) -> bool {
     for row in &patch.rows {
-        if !apply_row(row, &mut surface.frame) {
+        let Some(shifted) = shifted_row(row, &patch.panes, shifts) else {
+            continue;
+        };
+        if !apply_row(&shifted, &mut surface.frame) {
             return false;
         }
     }
@@ -185,6 +223,7 @@ impl ClientShellState {
             .map(|hit| hit.rect)
             .chain(self.pane_panel_areas.iter().copied())
             .collect::<Vec<_>>();
+        let shifts = self.pane_panel_band_rows.clone();
         let fast_path_blocker = fast_path_blocker(self, &patch);
         if let Some(reason) = fast_path_blocker {
             crate::render_prof::event(reason);
@@ -225,7 +264,7 @@ impl ClientShellState {
             let applied = self
                 .pane_surface
                 .as_mut()
-                .is_some_and(|surface| apply_patch_to_surface(surface, &patch));
+                .is_some_and(|surface| apply_patch_to_surface(surface, &patch, &shifts));
             if !applied {
                 return ClientPaneSurfacePatchOutcome::Rejected;
             }
@@ -272,7 +311,7 @@ impl ClientShellState {
             self.reconcile_input_source();
         } else {
             let mut next = current.clone();
-            if !apply_patch_to_surface(&mut next, &patch) {
+            if !apply_patch_to_surface(&mut next, &patch, &shifts) {
                 return ClientPaneSurfacePatchOutcome::Rejected;
             }
             self.set_pane_surface(next);
