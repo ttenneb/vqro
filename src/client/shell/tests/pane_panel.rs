@@ -877,10 +877,11 @@ fn documents_with_one_namespace_keep_their_rows_apart() {
 }
 
 #[test]
-fn a_child_chain_that_loops_still_terminates() {
-    // Two items that name each other as parent: the walk must bound its work even
-    // though the host would not serve this, so a malformed document cannot hang
-    // the render.
+fn a_reachable_child_cycle_still_terminates() {
+    // A loop the walk actually reaches: root -> a -> b -> a. An earlier version of
+    // this test named two roots as each other's parent, which the walk never
+    // followed, so it exercised no guard at all. The repeated id is what a malformed
+    // document needs for the cycle to exist, and the walk's bound is what stops it.
     let projection = serde_json::json!({
         "contract":"host.documents.v1", "boot_id":"boot-1", "revision":1,
         "documents":[{"provider_priority":1,"document":{
@@ -888,9 +889,9 @@ fn a_child_chain_that_loops_still_terminates() {
             "surface":"navigation","target":{"kind":"session"},
             "items":[
                 {"id":"root","role":"section","label":"Tasks","view":{"pane_id":"pane_1","view_id":"tasks","state":"open"}},
-                {"id":"a","parent_id":"b","role":"section","label":"A","view":{"state":"open"}},
-                {"id":"b","parent_id":"a","role":"section","label":"B","view":{"state":"open"}},
-                {"id":"reach","parent_id":"a","role":"section","label":"Reachable","view":{"state":"open"}}
+                {"id":"a","parent_id":"root","role":"section","label":"Reached A","view":{"state":"open"}},
+                {"id":"b","parent_id":"a","role":"section","label":"Reached B","view":{"state":"open"}},
+                {"id":"a","parent_id":"b","role":"section","label":"Reached A again","view":{"state":"open"}}
             ],"actions":[],"required_capabilities":[]}}]
     });
     let mut state = panel_state(None, false);
@@ -907,7 +908,11 @@ fn a_child_chain_that_loops_still_terminates() {
         .or_default()
         .insert("tasks".into());
     let text = text_of(&mut state);
+    // Reaching the loop and returning at all is the assertion: without the bound this
+    // render would not finish.
     assert!(text.contains("Tasks"), "{text}");
+    assert!(text.contains("Reached A"), "{text}");
+    assert!(text.contains("Reached B"), "{text}");
 }
 
 #[test]
@@ -1251,10 +1256,12 @@ fn a_background_patch_keeps_the_composes_cursor_in_the_pane() {
 }
 
 #[test]
-fn a_cycle_across_two_documents_is_never_walked_as_one_tree() {
-    // Two documents that each name the other's item as a parent: individually
-    // acyclic, combined a loop. Document-scoped children mean neither can reach
-    // into the other, so rows stay isolated and the walk terminates.
+fn a_parent_link_across_documents_is_not_followed() {
+    // Two documents that name each other's item as a parent. Document-scoped
+    // children mean neither link is followed, so rows stay isolated. This is an
+    // isolation fence, not a cycle fence: with the links dropped there is no
+    // combined loop to walk - the reachable-cycle guard is
+    // a_reachable_child_cycle_still_terminates.
     let projection = serde_json::json!({
         "contract":"host.documents.v1", "boot_id":"boot-1", "revision":1,
         "documents":[
@@ -1356,4 +1363,62 @@ fn a_long_run_of_patches_keeps_the_cache_and_the_grid_in_step() {
         composed.contains(&last),
         "a full compose shows the latest update a band lower at row {composed_row}: {composed:?}"
     );
+}
+
+#[test]
+fn the_fast_path_and_a_full_compose_agree_without_a_panel() {
+    // A valid, consistent comparison: no injected bands, no second pane that only
+    // exists in one of the two views, and every emitted row is checked rather than
+    // counted. Where the fast path applies at all, it must write exactly what a full
+    // compose shows at those coordinates. (A panelled pane never reaches here: it
+    // declines the fast path and takes the full compose, which is fenced by
+    // a_panelled_panes_patch_takes_the_full_compose_and_composes_correctly.)
+    let mut state = panel_state(None, false);
+    text_of(&mut state);
+    assert!(
+        state.pane_panel_band_rows.is_empty(),
+        "no pane has a panel, so no band is injected"
+    );
+    let surface_pane = state
+        .pane_surface
+        .as_ref()
+        .expect("surface")
+        .panes
+        .first()
+        .cloned()
+        .expect("a pane");
+    let mut emitted = 0_usize;
+    for (index, symbol) in ["P", "Q", "R", "S"].iter().enumerate() {
+        let row = surface_pane.inner_rect.y.saturating_add(index as u16);
+        let patch = pane_patch_row(&state, &surface_pane, row, symbol);
+        let ClientPaneSurfacePatchOutcome::Applied(Some(composed)) =
+            state.apply_pane_surface_patch(patch)
+        else {
+            panic!("the fast path applies a patch without a panel");
+        };
+        assert!(
+            !composed.rows.is_empty(),
+            "the fast path emits the changed row, not nothing"
+        );
+        let frame = state.compose(106, 30).expect("frame");
+        for change in &composed.rows {
+            for (offset, cell) in change.cells.iter().enumerate() {
+                let index = usize::from(change.y) * 106 + usize::from(change.x) + offset;
+                let full = frame
+                    .cells
+                    .get(index)
+                    .map(|cell| cell.symbol.clone())
+                    .unwrap_or_default();
+                assert_eq!(
+                    full,
+                    cell.symbol,
+                    "fast and full agree at ({}, {})",
+                    change.x + offset as u16,
+                    change.y
+                );
+                emitted += 1;
+            }
+        }
+    }
+    assert!(emitted >= 4, "every emitted row was compared: {emitted}");
 }
