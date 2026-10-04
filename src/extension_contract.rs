@@ -15,9 +15,6 @@ pub const HOST_DOCUMENT_CONTRACT_V1: &str = "host.document.v1";
 pub const HOST_VIEW_CONTRACT_V1: &str = "host.view.v1";
 pub const MAX_VIEW_DEPTH: usize = 8;
 pub const MAX_VIEW_ACTION_CHARS: usize = 24;
-pub const MAX_VIEW_CHOICES: usize = 4;
-pub const MIN_VIEW_CHOICES: usize = 2;
-pub const MAX_VIEW_INPUT_CHARS: usize = 240;
 pub const MAX_DOCUMENT_PROVIDERS: usize = 16;
 pub const MAX_DOCUMENT_ITEMS: usize = 512;
 const MAX_SPACES_ITEMS: usize = MAX_DOCUMENT_ITEMS;
@@ -405,45 +402,10 @@ pub struct HostDocumentAction {
     pub subject_id: Option<String>,
     #[serde(default)]
     pub confirmation: HostConfirmation,
-    /// View only: how the user answers this action in a view. Absent means a
-    /// plain button.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub view: Option<HostViewAction>,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct HostViewAction {
-    /// A 2-4 option choice the user answers in the view. The chosen key travels
-    /// back as the action's `subject_id`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub choice: Option<HostViewChoice>,
-    /// A one-line text field answered in the view. The text travels back as the
-    /// action's `subject_id`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub input: Option<HostViewInput>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct HostViewChoice {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub prompt: Option<String>,
-    pub options: Vec<HostViewChoiceOption>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub default_key: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct HostViewChoiceOption {
-    pub key: String,
-    pub label: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct HostViewInput {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub prompt: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub placeholder: Option<String>,
+    // v1 is read-only: how a user answers an action inside a panel is deferred
+    // until the interaction model is designed, so no shape for it is frozen
+    // here. An unknown field is ignored by any client, so the shape can be added
+    // later without breaking this one.
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -921,7 +883,6 @@ impl HostDocumentV1 {
         for action in &self.actions {
             validate_local_id(&action.id)?;
             validate_text(&action.label)?;
-            validate_view_action_fields(action, is_view)?;
             match &action.operation {
                 HostDocumentOperation::Extension { name } => validate_local_id(name)?,
                 HostDocumentOperation::Host { effect } => {
@@ -1121,58 +1082,6 @@ fn validate_view_item_fields(
     }
     if let Some(view_id) = &view.view_id {
         validate_local_id(view_id)?;
-    }
-    Ok(())
-}
-
-fn validate_view_action_fields(
-    action: &HostDocumentAction,
-    is_view: bool,
-) -> Result<(), HostDocumentError> {
-    if !is_view {
-        return if action.view.is_some() {
-            invalid("view action fields require the view contract")
-        } else {
-            Ok(())
-        };
-    }
-    let Some(view) = &action.view else {
-        return Ok(());
-    };
-    if view.choice.is_some() && view.input.is_some() {
-        return invalid("a view action cannot both choose and type");
-    }
-    if let Some(choice) = &view.choice {
-        if choice.options.len() < MIN_VIEW_CHOICES || choice.options.len() > MAX_VIEW_CHOICES {
-            return invalid("a view choice needs two to four options");
-        }
-        let mut keys = HashSet::with_capacity(choice.options.len());
-        for option in &choice.options {
-            validate_local_id(&option.key)?;
-            validate_text(&option.label)?;
-            if !keys.insert(option.key.as_str()) {
-                return invalid("view choice option keys must be unique");
-            }
-        }
-        if let Some(default) = &choice.default_key {
-            if !keys.contains(default.as_str()) {
-                return invalid("view choice default must be one of its options");
-            }
-        }
-        if let Some(prompt) = &choice.prompt {
-            validate_text(prompt)?;
-        }
-    }
-    if let Some(input) = &view.input {
-        if let Some(prompt) = &input.prompt {
-            validate_text(prompt)?;
-        }
-        if let Some(placeholder) = &input.placeholder {
-            if placeholder.chars().count() > MAX_VIEW_INPUT_CHARS {
-                return invalid("view input placeholder is too long");
-            }
-            validate_text(placeholder)?;
-        }
     }
     Ok(())
 }
@@ -1527,104 +1436,6 @@ mod tests {
     }
 
     #[test]
-    fn view_choice_needs_two_to_four_unique_options() {
-        let mut document = view_document();
-        document.actions.push(HostDocumentAction {
-            id: "answer".into(),
-            label: "Answer".into(),
-            operation: HostDocumentOperation::Extension {
-                name: "decision.answer".into(),
-            },
-            subject_id: Some("panel:1:row".into()),
-            confirmation: HostConfirmation::None,
-            view: Some(HostViewAction {
-                choice: Some(HostViewChoice {
-                    prompt: Some("Keep it?".into()),
-                    options: vec![HostViewChoiceOption {
-                        key: "keep".into(),
-                        label: "Keep".into(),
-                    }],
-                    default_key: Some("keep".into()),
-                }),
-                input: None,
-            }),
-        });
-        document.items[1].action_ids.push("answer".into());
-        assert!(document
-            .validate()
-            .unwrap_err()
-            .0
-            .contains("two to four options"));
-        let action = document.actions.last_mut().unwrap();
-        let choice = action.view.as_mut().unwrap().choice.as_mut().unwrap();
-        choice.options.push(HostViewChoiceOption {
-            key: "change".into(),
-            label: "Change".into(),
-        });
-        document.validate().unwrap();
-        // A default must be one of the options, and a choice cannot also type.
-        document
-            .actions
-            .last_mut()
-            .unwrap()
-            .view
-            .as_mut()
-            .unwrap()
-            .choice
-            .as_mut()
-            .unwrap()
-            .default_key = Some("later".into());
-        assert!(document
-            .validate()
-            .unwrap_err()
-            .0
-            .contains("must be one of its options"));
-        document
-            .actions
-            .last_mut()
-            .unwrap()
-            .view
-            .as_mut()
-            .unwrap()
-            .choice
-            .as_mut()
-            .unwrap()
-            .default_key = None;
-        document
-            .actions
-            .last_mut()
-            .unwrap()
-            .view
-            .as_mut()
-            .unwrap()
-            .input = Some(HostViewInput {
-            prompt: None,
-            placeholder: None,
-        });
-        assert!(document
-            .validate()
-            .unwrap_err()
-            .0
-            .contains("cannot both choose and type"));
-    }
-
-    #[test]
-    fn an_unknown_view_kind_is_accepted_because_it_is_a_string() {
-        // The block set grows append-only: an unknown kind must validate (so the
-        // view arrives and Vqro can draw "unsupported" in place), unlike an
-        // unknown enum variant, which would reject the whole view.
-        let mut document = view_document();
-        document.items[1].view.as_mut().unwrap().kind = Some("table".into());
-        document.validate().unwrap();
-        document.items[1].view.as_mut().unwrap().kind = Some("not a kind".into());
-        assert!(document
-            .validate()
-            .unwrap_err()
-            .0
-            .contains("invalid local id"));
-    }
-
-    #[test]
     fn view_action_text_is_bounded() {
         let mut document = view_document();
         document.items[1].view.as_mut().unwrap().action =
@@ -1688,7 +1499,6 @@ mod tests {
                 },
                 subject_id: Some("member:1".into()),
                 confirmation: HostConfirmation::None,
-                view: None,
             }],
             required_capabilities: Vec::new(),
         }

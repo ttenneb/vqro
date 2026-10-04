@@ -33,8 +33,9 @@ expected.
   input through the rename dialog. Vqro also draws the loading, empty,
   unavailable and "unsupported" states (pipeline behavior, not blocks);
 - fixed panel sizes, scrolling, persisted display state, the
-  `vqro pane panel` command, the "show when an agent starts" rule, in-view
-  action errors, and the reference extension with render tests.
+  `vqro pane panel` command, the "show when an agent starts" rule (on by
+  default), the Vqro-drawn unsupported and unavailable states, badges, and the
+  reference tests. Panels are **read-only**: see the row above.
 
 **Deferred:**
 
@@ -45,6 +46,7 @@ expected.
 | Overlay placement | Later; v1 is split plus popover |
 | Drag-to-reorder, rename as an action (the rename dialog's text field is still used for text input), extension context-menu items, selection | The sidebar step |
 | Text, key-value and table blocks | The Terminal Inspector migration |
+| Actions, a 2-4 option choice and one-line text input **in a panel**, and the too-small-pane popover that opens one | A later interaction slice, after the interaction model is designed (owner, 2026-10-04) |
 
 ## Vocabulary
 
@@ -91,6 +93,7 @@ expected.
 | 2026-10-03 | **A pane's split panel is its top edge slot**, full pane width, above the agent, so it reads as part of the pane's frame and header rather than as terminal output. A right-side column and a bottom slot are not v1. The terminal resizes once, on open, close or user resize. |
 | 2026-10-03 | **Panel height fits its content**, capped at about a third of the pane, and it scrolls past that. It sizes to the content when the panel opens or when the user expands or collapses a section; a live update never resizes the terminal (rows that no longer fit scroll, and rows that go away keep the height until the next open, expand, collapse or drag). The user can drag the edge between the panel and the terminal; their size wins and is remembered per client. |
 | 2026-10-03 | **Section headers stay pinned while rows scroll**, and a pane's panel area stacks published sections under one another (Tasks, then Messages), each with its own header, summary and collapse marker. |
+| 2026-10-04 | **v1 stays read-only** (owner decision): panels show and jump, and no action, 2-4 option choice or one-line text is rendered in a panel. Rendering them, and the small-pane popover, moves to a later slice, and the owner wants to revisit the interaction model itself first, which is not designed yet. The format freezes no shape for answering an action: an unknown field is ignored by any client, so the shape can be added when the model exists. |
 | 2026-10-04 | **The compatibility promise is drawn, in v1**: a view block whose kind Vqro does not know renders `unsupported <kind>` in place (a row keeps its position and label; a section keeps its edge), and a view the user opened whose provider stopped publishing renders `unavailable` with one `extension unavailable` row, keeping its edge for the return. Loading stays deferred. |
 | 2026-10-04 | **Panels are on by default, and one PTY is arbitrated, never raced.** `ui.show_panels_on_agent_start` defaults to true (views stay hidden until the user toggles them or an agent starts; false is the opt-out). When several attached clients claim different panel sizes for one pane, the **smallest claimed terminal wins**, whatever order the claims arrive in: the largest panel always fits, no client's terminal is drawn under another client's panel, a claim from another shell boot is stale, and with no claims the pane returns to its layout geometry. |
 | 2026-10-04 | **Panel display state is keyed by terminal id**, not pane id, so a pane that moves between tabs keeps its panels, height and collapsed rows. The join comes from the published views (a pane has exactly one terminal, so a placement in that pane is authoritative); a pane whose terminal appears in no view falls back to its pane id. The generation-1 snapshot codec is frozen, so the join is not added to it. |

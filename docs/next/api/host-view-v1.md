@@ -76,55 +76,17 @@ contract:
 ## Actions
 
 An action is a button (`operation` = `extension` or a capability-gated `host`
-effect), with an optional `view` block for the way the user answers it:
+effect) with a `subject_id` naming the item it belongs to and an optional
+`confirmation`. Every action reference must name an action in the same document,
+and Vqro drops a click whose item no longer exists.
 
-```json
-{ "id": "answer", "label": "Answer", "operation": {"kind": "extension", "name": "decision.answer"},
-  "subject_id": "panel:w2:p2:task:1",
-  "view": { "choice": { "prompt": "Keep it?", "options": [{"key":"keep","label":"Keep"}],
-                        "default_key": "keep" } } }
-```
+**v1 renders no actions.** Panels show and jump only; how a user answers an
+action inside a panel (a 2-4 option choice, a one-line text field) is deferred
+to a later slice, together with the interaction model it belongs to, so no shape
+for it is frozen here. Adding one later is safe: an unknown field is ignored by
+every client.
 
-- `choice` needs two to four options with unique keys; `default_key` must be one
-  of them.
-- `input` is a one-line text field (the rename dialog's field).
-- A choice and an input are mutually exclusive.
-- Every action reference must name an action in the same document, and an
-  action's `subject_id` must name the item it belongs to; Vqro drops a click
-  whose item no longer exists.
-
-## Compatibility: unknown blocks
-
-`kind` is a free string, never a closed enum: an unknown variant would make an
-older client reject the whole view, while an unknown string lets it draw
-`unsupported <kind>` **in place** — the row keeps its tree position and label,
-and a section that Vqro cannot draw still reserves its edge and says so. The
-block set can therefore grow without breaking an older surface.
-
-`unavailable` is Vqro-owned too: when a pane has a view open and the provider
-stops publishing it (the extension failed or was disabled), Vqro keeps the
-panel's edge reserved and draws the header with `unavailable` and one
-`extension unavailable` row, instead of silently dropping a panel the user
-opened. When the provider returns, the view is drawn again.
-
-## What Vqro owns
-
-- **Placement**: the pane's top edge slot, full pane width, above the terminal.
-  Sections stack in it in document order.
-- **Height**: it fits the content when it opens or when the user expands or
-  collapses a section, capped at about a third of the pane; past that it
-  scrolls. A live update never resizes the terminal, and a drag on the edge
-  wins and is remembered per client.
-- **Display state** (per client, persisted): which views are open, the height,
-  collapsed sections and collapsed rows. Extensions never see it and cannot
-  open themselves.
-- **States**: loading, empty (`└─ nothing to show`), unavailable and
-  unsupported are drawn by Vqro, never by an extension.
-- **Interaction**: the header collapses its section, a row's marker collapses
-  its children, clicking a row's terminal link focuses that pane's terminal,
-  and the wheel scrolls the slice.
-
-## Several clients at one pane
+## Several clients at one pane## Several clients at one pane
 
 One PTY serves every attached client, so panel sizes are arbitrated, never
 raced:

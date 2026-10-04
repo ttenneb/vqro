@@ -10423,17 +10423,6 @@
                 "string",
                 "null"
               ]
-            },
-            "view": {
-              "anyOf": [
-                {
-                  "$ref": "#/schemas/success_response/$defs/HostViewAction"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "description": "View only: how the user answers this action in a view. Absent means a\nplain button."
             }
           },
           "required": [
@@ -10815,91 +10804,6 @@
           "required": [
             "terminal_id"
           ],
-          "type": "object"
-        },
-        "HostViewAction": {
-          "properties": {
-            "choice": {
-              "anyOf": [
-                {
-                  "$ref": "#/schemas/success_response/$defs/HostViewChoice"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "description": "A 2-4 option choice the user answers in the view. The chosen key travels\nback as the action's `subject_id`."
-            },
-            "input": {
-              "anyOf": [
-                {
-                  "$ref": "#/schemas/success_response/$defs/HostViewInput"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "description": "A one-line text field answered in the view. The text travels back as the\naction's `subject_id`."
-            }
-          },
-          "type": "object"
-        },
-        "HostViewChoice": {
-          "properties": {
-            "default_key": {
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "options": {
-              "items": {
-                "$ref": "#/schemas/success_response/$defs/HostViewChoiceOption"
-              },
-              "type": "array"
-            },
-            "prompt": {
-              "type": [
-                "string",
-                "null"
-              ]
-            }
-          },
-          "required": [
-            "options"
-          ],
-          "type": "object"
-        },
-        "HostViewChoiceOption": {
-          "properties": {
-            "key": {
-              "type": "string"
-            },
-            "label": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "key",
-            "label"
-          ],
-          "type": "object"
-        },
-        "HostViewInput": {
-          "properties": {
-            "placeholder": {
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "prompt": {
-              "type": [
-                "string",
-                "null"
-              ]
-            }
-          },
           "type": "object"
         },
         "HostViewItem": {

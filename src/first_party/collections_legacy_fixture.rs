@@ -70,7 +70,6 @@ pub(crate) fn project(
                 },
                 subject_id: Some(item_id),
                 confirmation: HostConfirmation::None,
-                view: None,
             });
         }
     }
@@ -105,7 +104,6 @@ pub(crate) fn project(
             },
             subject_id: Some(item_id),
             confirmation: HostConfirmation::None,
-            view: None,
         });
     }
     let document = HostDocumentV1 {
