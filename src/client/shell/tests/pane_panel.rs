@@ -1199,3 +1199,66 @@ fn a_cycle_across_two_documents_is_never_walked_as_one_tree() {
         "the other document's item must not be walked in: {text}"
     );
 }
+
+#[test]
+fn a_long_run_of_patches_keeps_the_cache_and_the_grid_in_step() {
+    // QA's long-run probe, as a fence: a hundred successive live updates to a
+    // panelled pane. Each one moves the row by its band in the fast output while
+    // the host's own cache keeps it where the host wrote it, and the run must not
+    // drift or drop the latest.
+    let mut state = panel_state(None, true);
+    text_of(&mut state);
+    let surface_pane = state
+        .pane_surface
+        .as_ref()
+        .expect("surface")
+        .panes
+        .first()
+        .cloned()
+        .expect("a pane");
+    let band = *state
+        .pane_panel_band_rows
+        .get(&surface_pane.pane_id)
+        .expect("the pane has a band");
+    assert!(band > 0, "the pane has a panel band");
+    let row = surface_pane.inner_rect.y.saturating_add(5);
+    let mut last = String::new();
+    for step in 0..100_u32 {
+        let symbol = format!("{}", (b'a' + (step % 26) as u8) as char);
+        let patch = pane_patch_row(&state, &surface_pane, row, &symbol);
+        let outcome = state.apply_pane_surface_patch(patch);
+        assert!(
+            !matches!(outcome, ClientPaneSurfacePatchOutcome::Rejected),
+            "update {step} is accepted"
+        );
+        last = symbol;
+    }
+    // The host's own cache still has the latest at the row the host wrote.
+    let surface = state.pane_surface.as_ref().expect("surface");
+    let width = usize::from(surface.frame.width);
+    let cached = surface
+        .frame
+        .cells
+        .get(usize::from(row) * width + usize::from(surface_pane.inner_rect.x))
+        .map(|cell| cell.symbol.clone())
+        .unwrap_or_default();
+    assert_eq!(cached, last, "the raw cache holds the latest update");
+    // And a full compose shows it a band lower, with the grid.
+    let frame = state.compose(106, 30).expect("frame");
+    let area = state.layout(106, 30).pane_surface;
+    let composed_row = usize::from(area.y + row + band);
+    let composed = frame
+        .cells
+        .chunks(106)
+        .nth(composed_row)
+        .map(|line| {
+            line.iter()
+                .map(|cell| cell.symbol.as_str())
+                .collect::<String>()
+        })
+        .unwrap_or_default();
+    assert!(
+        composed.contains(&last),
+        "a full compose shows the latest update a band lower at row {composed_row}: {composed:?}"
+    );
+}
