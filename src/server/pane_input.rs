@@ -8,7 +8,7 @@ use crate::protocol::{AttachScrollDirection, AttachScrollSource, ClientPaneInput
 pub(super) enum UnsentTextEffect {
     /// The editor may hold text the human has not sent.
     MayHold,
-    /// The human submitted or cleared the line, so the editor is empty.
+    /// The human submitted the line, so the editor no longer holds it.
     Cleared,
 }
 
@@ -18,9 +18,11 @@ pub(super) enum UnsentTextEffect {
 ///
 /// Any non-release key, text commit or paste may put text in the editor
 /// (autocomplete, history recall, a submitted line edited again), so only the
-/// known submit and clear keys prove the editor empty: an unmodified Enter,
-/// Ctrl-C and Ctrl-U. Releases and mouse events prove nothing, a modified
-/// Enter inserts a newline, and Esc proves nothing about the editor.
+/// submit key proves the editor empty: a plain, unmodified Enter, which takes
+/// the editor's content as the submitted input. Modified Enter inserts a
+/// newline, and the keys that look like clears prove nothing: Ctrl-C copies the
+/// selection, Ctrl-U deletes to the line start only (Pi's
+/// `tui.editor.deleteToLineStart`), releases and mouse events prove nothing.
 pub(super) fn human_input_unsent_text(events: &[ClientPaneInputEvent]) -> Option<UnsentTextEffect> {
     let mut effect = None;
     for event in events {
@@ -33,10 +35,7 @@ pub(super) fn human_input_unsent_text(events: &[ClientPaneInputEvent]) -> Option
             } => {
                 if *kind == crate::protocol::ClientKeyKind::Release {
                     None
-                } else if (*code == crate::protocol::ClientKeyCode::Enter && *modifiers == 0)
-                    || (KeyModifiers::from_bits_truncate(*modifiers) == KeyModifiers::CONTROL
-                        && matches!(code, crate::protocol::ClientKeyCode::Char('c' | 'u')))
-                {
+                } else if *code == crate::protocol::ClientKeyCode::Enter && *modifiers == 0 {
                     Some(UnsentTextEffect::Cleared)
                 } else {
                     Some(UnsentTextEffect::MayHold)
@@ -57,11 +56,13 @@ pub(super) fn human_input_unsent_text(events: &[ClientPaneInputEvent]) -> Option
 /// What raw input forwarded by a directly attached client proves about the
 /// target editor's unsent text: `None` proves nothing. Attach forwards the
 /// outer terminal's bytes verbatim, so the last byte decides, as for a key
-/// batch: a trailing Return, Ctrl-C or Ctrl-U is the human submitting or
-/// clearing the line and anything else may have added text.
+/// batch: a trailing Return is the human submitting the line and anything else
+/// may have added text. Ctrl-C and Ctrl-U are not clears here either: they are
+/// only codes once the outer terminal has encoded them, and in Pi they copy or
+/// delete to the line start.
 pub(super) fn attach_input_unsent_text(data: &[u8]) -> Option<UnsentTextEffect> {
     match *data.last()? {
-        b'\r' | b'\x03' | b'\x15' => Some(UnsentTextEffect::Cleared),
+        b'\r' => Some(UnsentTextEffect::Cleared),
         _ => Some(UnsentTextEffect::MayHold),
     }
 }
@@ -425,27 +426,29 @@ mod tests {
         .expect("pane input key")
     }
 
-    /// Only input that submits or clears a line proves the editor empty; every
-    /// other key or byte may have put text there (autocomplete, history, a line
-    /// edited again after submitting it).
+    /// Only the submit key proves the editor empty; every other key or byte may
+    /// have left text in it (autocomplete, history, a line edited again, or a
+    /// partial delete such as Pi's `tui.editor.deleteToLineStart` on Ctrl-U).
     #[test]
-    fn forwarded_human_input_marks_unsent_text_except_submit_and_clear() {
+    fn forwarded_human_input_marks_unsent_text_except_the_submit_key() {
         use UnsentTextEffect::{Cleared, MayHold};
 
         let cases = [
             (key(KeyCode::Enter, KeyModifiers::NONE), Some(Cleared)),
-            (
-                key(KeyCode::Char('c'), KeyModifiers::CONTROL),
-                Some(Cleared),
-            ),
-            (
-                key(KeyCode::Char('u'), KeyModifiers::CONTROL),
-                Some(Cleared),
-            ),
             (key(KeyCode::Char('h'), KeyModifiers::NONE), Some(MayHold)),
             (key(KeyCode::Up, KeyModifiers::NONE), Some(MayHold)),
             (key(KeyCode::Tab, KeyModifiers::NONE), Some(MayHold)),
             (key(KeyCode::Backspace, KeyModifiers::NONE), Some(MayHold)),
+            // Delete-to-line-start and copy-selection are not clears: text can
+            // survive them (Pi: `tui.editor.deleteToLineStart`, `tui.input.copy`).
+            (
+                key(KeyCode::Char('u'), KeyModifiers::CONTROL),
+                Some(MayHold),
+            ),
+            (
+                key(KeyCode::Char('c'), KeyModifiers::CONTROL),
+                Some(MayHold),
+            ),
             (
                 key(KeyCode::Char('r'), KeyModifiers::CONTROL),
                 Some(MayHold),
@@ -506,8 +509,10 @@ mod tests {
         let attached = [
             (b"".as_slice(), None),
             (b"\r".as_slice(), Some(Cleared)),
-            (b"\x03".as_slice(), Some(Cleared)),
-            (b"\x15".as_slice(), Some(Cleared)),
+            // Not clears on the raw path either: the outer terminal's own bytes
+            // for Ctrl-C and Ctrl-U prove nothing about the editor.
+            (b"\x03".as_slice(), Some(MayHold)),
+            (b"\x15".as_slice(), Some(MayHold)),
             (b"x".as_slice(), Some(MayHold)),
             (b"half typed\r".as_slice(), Some(Cleared)),
             (b"\x1b[A".as_slice(), Some(MayHold)),
