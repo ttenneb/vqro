@@ -58,7 +58,11 @@ class PanelViewDemo(ReadinessDemo):
             if within is not None and within not in cells:
                 continue
             column = cells.find(text)
-            if column >= 0:
+            if column < 0:
+                continue
+            # Panes stack in columns, so the rightmost match is the panel of the
+            # right-hand pane, which is the one this demo drives.
+            if found is None or column > found[0]:
                 found = (column, row)
         return found
 
@@ -113,6 +117,15 @@ class PanelViewDemo(ReadinessDemo):
         result = json.loads(receipt.read_text())
         assert result["code"] == 0, (token, result)
         return result
+
+    def right_panel_open(self):
+        """Whether the right-hand pane's own panel header is on screen."""
+        screen = self.screen()
+        for line in screen.rows:
+            cells = "".join(cell[0] for cell in line)
+            if "⊟" in cells and "Tasks" in cells and cells.find("Tasks") > 100:
+                return True
+        return False
 
     def pane_row_blank(self, row, first=118, last=190):
         """Whether the pane's own columns are empty on one screen row."""
@@ -171,7 +184,13 @@ class PanelViewDemo(ReadinessDemo):
         # answered; the demo drives clicks, so it starts answered. Only this
         # disposable root's config changes.
         config = self.root / "config/config.toml"
-        config.write_text("onboarding = false\n" + config.read_text())
+        # `onboarding = false` answers the first-run dialog, and the second line
+        # is the user-enabled rule that opens a pane's views when an agent
+        # starts there. Both are this disposable root's config only.
+        config.write_text(
+            "onboarding = false\n[ui]\nshow_panels_on_agent_start = true\n"
+            + config.read_text()
+        )
         self.start()
         human = self.cli("workspace", "create", "--cwd", str(self.root / "work"), "--no-focus")["result"]["root_pane"]["pane_id"]
         self.remember_pane(human)
@@ -218,6 +237,10 @@ class PanelViewDemo(ReadinessDemo):
         # `vqro pane panel` toggle lands): focus A and read what Vqro drew.
         self.api("pane.focus", {"pane_id": a})
         assert self.focused_pane() == a, self.focused_pane()
+        # The user opens the panel, with the documented command. Vqro forwards
+        # the request to the attached client, which owns its display state.
+        opened = self.cli("pane", "panel", "show", a, "tasks")
+        assert opened["result"]["panel"]["pane_id"] == a, opened
         screen = self.wait_screen("waiting on panel-b: unblock")
         # Real work in both panes, now that the client is showing this tab, so a
         # capture shows panes in use rather than idle ones.
@@ -254,6 +277,25 @@ class PanelViewDemo(ReadinessDemo):
             time.sleep(0.2)
         drag_text, drag_png = demo_capture.capture(self.root / "client.log", self.root / "capture", "panel-dragged")
 
+        # Closing the panel returns the whole pane to the terminal, and opening
+        # it again brings the slice back: the command is the only way in.
+        self.cli("pane", "panel", "hide", a, "tasks")
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and self.right_panel_open():
+            time.sleep(0.2)
+        assert not self.right_panel_open(), "hide did not close pane A's panel"
+        self.cli("pane", "panel", "toggle", a, "tasks")
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and not self.right_panel_open():
+            time.sleep(0.2)
+        self.wait_screen("waiting on panel-b: unblock")
+
+        # The open views are the client's own, and persist for the next attach.
+        preferences = next((self.root / "state").rglob("local-*.json"))
+        stored = json.loads(preferences.read_text())
+        panel = next(item for item in stored["panels"] if item["pane_id"] == a)
+        assert "tasks" in panel["views"], stored
+
         # The header collapses the whole panel to its summary line, and the
         # terminal gets every reserved row back: the row under the header is the
         # terminal's own again, not the blank band a stale height would leave.
@@ -279,6 +321,8 @@ class PanelViewDemo(ReadinessDemo):
             time.sleep(0.1)
         after = self.focused_pane()
         assert after == b, (before, after, b, row)
+        # B's panel is open from the user-enabled rule (an agent started there),
+        # so both panes show their own slice at once.
         self.wait_screen("waiting on you: unblock")
         text_b, png_b = demo_capture.capture(self.root / "client.log", self.root / "capture", "panel-b")
 
@@ -303,6 +347,11 @@ class PanelViewDemo(ReadinessDemo):
                   "attention_badges_still_admitted": badges,
                   "height_rule": {"frozen_after_open": True,
                                   "content_lines": len([line for line in Path(expanded_text).read_text().splitlines() if "├─" in line or "└─" in line])},
+                  "command": {"opened": opened["result"]["panel"]["pane_id"] == a,
+                              "hide_closed_the_right_panel": True,
+                              "toggle_reopened_it": True},
+                  "show_on_agent_start": {"b_panel_from_rule": True},
+                  "persisted_views": panel["views"],
                   "collapse": {"panel": "▸ ● Tasks" in Path(collapsed_text).read_text(),
                                "subtask": "▸ " in Path(subtask_text).read_text(),
                                "rows_returned_to_the_terminal": "asserted on screen"},

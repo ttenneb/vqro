@@ -7,9 +7,9 @@ use crate::api::schema::{
     PaneFocusDirectionReason, PaneFocusDirectionResult, PaneInfo, PaneInputSetParams,
     PaneLayoutPane, PaneLayoutParams, PaneLayoutRect, PaneLayoutSnapshot, PaneLayoutSplit,
     PaneListParams, PaneMoveDestination, PaneMoveParams, PaneMoveReason, PaneMoveResult,
-    PaneNeighborParams, PaneNeighborResult, PaneProcessInfo, PaneProcessInfoParams,
-    PaneProcessInfoProcess, PaneReadParams, PaneReadResult, PaneReleaseAgentParams,
-    PaneRenameParams, PaneReportAgentParams, PaneReportAgentSessionParams,
+    PaneNeighborParams, PaneNeighborResult, PanePanelAction, PanePanelParams, PanePanelResult,
+    PaneProcessInfo, PaneProcessInfoParams, PaneProcessInfoProcess, PaneReadParams, PaneReadResult,
+    PaneReleaseAgentParams, PaneRenameParams, PaneReportAgentParams, PaneReportAgentSessionParams,
     PaneReportMetadataParams, PaneResizeParams, PaneResizeReason, PaneResizeResult,
     PaneScrollParams, PaneSelectionReadParams, PaneSendInputParams, PaneSendKeysParams,
     PaneSendTextParams, PaneSplitParams, PaneSwapParams, PaneSwapReason, PaneSwapResult,
@@ -1595,6 +1595,39 @@ impl App {
         }
         self.state.mark_session_dirty();
         self.schedule_session_save();
+    }
+
+    /// A user's pane panel request: Vqro validates the pane and forwards the
+    /// request to attached clients, which own their own display state.
+    pub(super) fn handle_pane_panel(&mut self, id: String, params: PanePanelParams) -> String {
+        let Some((ws_idx, pane_id)) = self.resolve_optional_pane(params.pane_id.as_deref()) else {
+            return encode_error(id, "pane_not_found", "pane not found");
+        };
+        let Some(pane_public_id) = self.public_pane_id(ws_idx, pane_id) else {
+            return encode_error(id, "pane_not_found", "pane not found");
+        };
+        let action = match params.action {
+            PanePanelAction::Show => crate::protocol::endpoint::ServerPanePanelAction::Show,
+            PanePanelAction::Hide => crate::protocol::endpoint::ServerPanePanelAction::Hide,
+            PanePanelAction::Toggle => crate::protocol::endpoint::ServerPanePanelAction::Toggle,
+        };
+        let _ = self
+            .event_tx
+            .try_send(crate::events::AppEvent::PanePanelRequested {
+                pane_id: pane_public_id.clone(),
+                view_id: params.view.clone(),
+                action,
+            });
+        encode_success(
+            id,
+            ResponseResult::PanePanel {
+                panel: PanePanelResult {
+                    pane_id: pane_public_id,
+                    view: params.view,
+                    action: params.action,
+                },
+            },
+        )
     }
 
     pub(super) fn handle_pane_zoom(&mut self, id: String, params: PaneZoomParams) -> String {

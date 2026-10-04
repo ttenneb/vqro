@@ -2063,6 +2063,7 @@ impl HeadlessServer {
                 pane_viewport_enabled,
                 pane_view_enabled,
                 terminal_views_enabled,
+                pane_panels_enabled,
                 writer,
             } => {
                 if self.handoff_in_progress {
@@ -2112,6 +2113,7 @@ impl HeadlessServer {
                 connection.shell_pane_viewport_enabled = pane_viewport_enabled;
                 connection.shell_pane_view_enabled = pane_view_enabled;
                 connection.shell_terminal_views_enabled = terminal_views_enabled;
+                connection.shell_pane_panels_enabled = pane_panels_enabled;
                 connection.shell_surface_active = surface_active;
                 connection.shell_projection_revision = 1;
                 let config_diagnostic = if endpoint_keybindings {
@@ -2942,6 +2944,61 @@ impl HeadlessServer {
                     );
                 }
                 true
+            }
+            ServerEvent::ClientShellPanePanels {
+                client_id,
+                mut panels,
+            } => {
+                if !self.clients.get(&client_id).is_some_and(|client| {
+                    client.is_active_shell_client() && client.shell_pane_panels_enabled
+                }) || panels.boot_id != self.client_shell_boot_id
+                {
+                    return false;
+                }
+                let Some(target) = self.shell_target_for_client(client_id) else {
+                    return false;
+                };
+                let allowed = self
+                    .app
+                    .state
+                    .workspaces
+                    .get(target.workspace_index)
+                    .and_then(|workspace| workspace.tabs.get(target.tab_index))
+                    .map(|tab| tab.layout.pane_ids())
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter_map(|pane_id| {
+                        self.app
+                            .public_pane_id(target.workspace_index, pane_id)
+                            .map(|public_id| (public_id, pane_id))
+                    })
+                    .collect::<HashMap<_, _>>();
+                if panels.claims.len() > crate::protocol::endpoint::MAX_PANE_PANEL_CLAIMS {
+                    return false;
+                }
+                let mut seen = HashSet::new();
+                for claim in &mut panels.claims {
+                    if claim.pane_id.len() > 128
+                        || !allowed.contains_key(&claim.pane_id)
+                        || !seen.insert(claim.pane_id.clone())
+                    {
+                        return false;
+                    }
+                    claim.size.cols = claim.size.cols.clamp(1, 1000);
+                    claim.size.rows = claim.size.rows.clamp(1, 1000);
+                }
+                if self
+                    .clients
+                    .get(&client_id)
+                    .and_then(|client| client.shell_pane_panels.as_ref())
+                    == Some(&panels)
+                {
+                    return false;
+                }
+                if let Some(client) = self.clients.get_mut(&client_id) {
+                    client.shell_pane_panels = Some(panels);
+                }
+                self.resize_shell_tab_if_controller(client_id, true)
             }
             ServerEvent::ClientShellPaneViewport {
                 client_id,

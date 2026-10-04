@@ -923,6 +923,10 @@ pub struct UiConfig {
     pub mobile_width_threshold: u16,
     /// Capture mouse input for Herdr's mouse UI. Default: true.
     pub mouse_capture: bool,
+    /// Open a pane's published views when an agent starts there. Default:
+    /// false: only the user opens views, unless they turn this rule on.
+    #[serde(default)]
+    pub show_panels_on_agent_start: bool,
     /// Copy text selected with the mouse. Default: true.
     pub copy_on_select: bool,
     /// Host cursor policy. Default: auto.
@@ -1174,6 +1178,7 @@ impl Default for UiConfig {
             sidebar_collapsed_mode: SidebarCollapsedModeConfig::Compact,
             mobile_width_threshold: DEFAULT_MOBILE_WIDTH_THRESHOLD,
             mouse_capture: true,
+            show_panels_on_agent_start: false,
             copy_on_select: true,
             host_cursor: HostCursorModeConfig::Auto,
             right_click_passthrough_modifier: RightClickPassthroughModifierConfig::default(),

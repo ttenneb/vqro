@@ -84,16 +84,21 @@ impl PanePanelDisplay {
 /// the pane's effective viewport, and the hits to register.
 pub(super) struct PanePanelRender {
     pub(super) hits: Vec<PanePanelHit>,
-    /// The pane whose viewport the panel claims, when a panel is open.
-    pub(super) claimed: Option<(String, Rect)>,
+    /// Every pane whose panel is open, with the terminal rect it claims.
+    pub(super) claims: Vec<(String, Rect)>,
     /// The height the panel was drawn at: the content fit, capped by the pane.
     /// The caller freezes it at an open, expand or collapse, so a later live
     /// update scrolls instead of resizing the terminal.
     pub(super) drawn_height: Option<u16>,
+    /// The pane whose height was drawn, for the caller to freeze.
+    pub(super) drawn_pane: Option<String>,
 }
 
 /// A published view that fills one pane's panel slot.
 struct PanelView<'a> {
+    /// The extension's own id for this view, which the user names to
+    /// `vqro pane panel`.
+    view_id: String,
     /// Stable identity of this section inside the pane's panel area.
     key: String,
     title: &'a str,
@@ -287,11 +292,33 @@ fn flatten<'a>(
     rows
 }
 
+/// Every view id a pane publishes, whatever the user has open.
+pub(super) fn published_views(documents: &HostDocumentsProjectionV1, pane_id: &str) -> Vec<String> {
+    let mut ids = Vec::new();
+    for entry in &documents.documents {
+        for item in &entry.document.items {
+            let Some(view) = item.view.as_ref() else {
+                continue;
+            };
+            let (Some(item_pane), Some(view_id)) =
+                (view.pane_id.as_deref(), view.view_id.as_deref())
+            else {
+                continue;
+            };
+            if item_pane == pane_id && !item.flags.disabled && !ids.iter().any(|id| id == view_id) {
+                ids.push(view_id.to_owned());
+            }
+        }
+    }
+    ids
+}
+
 /// Select the panel views published for one pane. Items that name a pane and a
 /// view id are roots; their descendants are the rows.
 fn panel_views<'a>(
     documents: &'a HostDocumentsProjectionV1,
     pane_id: &str,
+    open_views: &BTreeSet<String>,
     collapsed: &BTreeSet<String>,
 ) -> Vec<PanelView<'a>> {
     let mut views = Vec::new();
@@ -320,10 +347,11 @@ fn panel_views<'a>(
             else {
                 continue;
             };
-            if item_pane != pane_id || item.flags.disabled {
+            if item_pane != pane_id || item.flags.disabled || !open_views.contains(_view_id) {
                 continue;
             }
             views.push(PanelView {
+                view_id: _view_id.to_owned(),
                 key: format!("{}.{}", document.namespace, item.id),
                 title: item.label.as_str(),
                 summary: item.detail.as_deref().unwrap_or_default(),
@@ -341,25 +369,55 @@ pub(super) fn render(
     documents: &HostDocumentsProjectionV1,
     snapshot: &ClientShellSnapshot,
     panes: &[PaneHit],
-    focused_pane: Option<&str>,
+    open: &HashMap<String, BTreeSet<String>>,
+    inspector_pane: Option<&str>,
+    displays: &HashMap<String, PanePanelDisplay>,
+    palette: &Palette,
+    out: &mut PanePanelRender,
+) {
+    for pane in panes {
+        let Some(open_views) = open.get(&pane.pane_id) else {
+            continue;
+        };
+        if open_views.is_empty() {
+            continue;
+        }
+        let display = displays.get(&pane.pane_id).cloned().unwrap_or_default();
+        render_pane(
+            buffer,
+            documents,
+            snapshot,
+            pane,
+            open_views,
+            inspector_pane,
+            &display,
+            palette,
+            out,
+        );
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_pane(
+    buffer: &mut Buffer,
+    documents: &HostDocumentsProjectionV1,
+    snapshot: &ClientShellSnapshot,
+    pane: &PaneHit,
+    open_views: &BTreeSet<String>,
     inspector_pane: Option<&str>,
     display: &PanePanelDisplay,
     palette: &Palette,
     out: &mut PanePanelRender,
 ) {
-    // Spike stand-in for the user's toggle: v1 opens views only from a user
-    // action, and `vqro pane panel` plus per-client persistence land next. Until
-    // then one real pane proves the pipeline: the focused pane.
-    let Some(focused_pane) = focused_pane else {
-        return;
-    };
-    let Some(pane) = panes.iter().find(|pane| pane.pane_id == focused_pane) else {
-        return;
-    };
     if inspector_pane == Some(pane.pane_id.as_str()) {
         return;
     }
-    let views = panel_views(documents, &pane.pane_id, &display.collapsed_rows);
+    let views = panel_views(
+        documents,
+        &pane.pane_id,
+        open_views,
+        &display.collapsed_rows,
+    );
     if views.is_empty() {
         return;
     }
@@ -520,14 +578,13 @@ pub(super) fn render(
             action: PanePanelAction::ResizePanel,
         });
     }
-    if let Some(claimed) = out.claimed.as_mut() {
-        if claimed.0 == pane.pane_id {
-            claimed.1 = geometry.terminal;
-        }
+    if let Some(claimed) = out.claims.iter_mut().find(|claim| claim.0 == pane.pane_id) {
+        claimed.1 = geometry.terminal;
     } else {
-        out.claimed = Some((pane.pane_id.clone(), geometry.terminal));
+        out.claims.push((pane.pane_id.clone(), geometry.terminal));
     }
     out.drawn_height = Some(geometry.panel.height);
+    out.drawn_pane = Some(pane.pane_id.clone());
 }
 
 /// One drawable line of the scrolling region.
@@ -763,6 +820,183 @@ fn draw_row(
     }
 }
 
+impl ClientShellState {
+    /// Apply one user request from the server: open, close or toggle a view on
+    /// a pane. Only a user action ever opens a view.
+    pub(crate) fn apply_pane_panel_request(
+        &mut self,
+        request: crate::protocol::endpoint::ServerPanePanelRequest,
+    ) -> bool {
+        let Some(documents) = self
+            .endpoints
+            .iter()
+            .find(|endpoint| endpoint.endpoint_id == self.active_endpoint_id)
+            .and_then(ClientShellEndpoint::current_host_documents)
+        else {
+            return false;
+        };
+        let available = published_views(documents, &request.pane_id);
+        if available.is_empty() {
+            return false;
+        }
+        let wanted = match request.view_id.as_deref() {
+            Some(view_id) if available.iter().any(|id| id == view_id) => vec![view_id.to_owned()],
+            Some(_) => return false,
+            None => available,
+        };
+        let open = self
+            .pane_panel_open
+            .entry(request.pane_id.clone())
+            .or_default();
+        for view_id in wanted {
+            match request.action {
+                crate::protocol::endpoint::ServerPanePanelAction::Show => {
+                    open.insert(view_id);
+                }
+                crate::protocol::endpoint::ServerPanePanelAction::Hide => {
+                    open.remove(&view_id);
+                }
+                crate::protocol::endpoint::ServerPanePanelAction::Toggle => {
+                    if !open.remove(&view_id) {
+                        open.insert(view_id);
+                    }
+                }
+            }
+        }
+        if open.is_empty() {
+            self.pane_panel_open.remove(&request.pane_id);
+        }
+        // A user open, close or toggle re-fits the panel to its content.
+        self.pane_panel_display
+            .entry(request.pane_id)
+            .or_default()
+            .refit();
+        self.persist_pane_panels();
+        true
+    }
+
+    /// Show the pane's views when an agent starts there, if the client setting
+    /// asks for it. A rule the user enabled, never the extension.
+    pub(crate) fn apply_show_panels_on_agent_start(&mut self) -> bool {
+        if !self.config.show_panels_on_agent_start {
+            return false;
+        }
+        let Some(snapshot) = self.snapshot.as_deref() else {
+            return false;
+        };
+        let agents = snapshot
+            .agents
+            .iter()
+            .map(|agent| agent.pane_id.clone())
+            .collect::<Vec<_>>();
+        let Some(documents) = self
+            .endpoints
+            .iter()
+            .find(|endpoint| endpoint.endpoint_id == self.active_endpoint_id)
+            .and_then(ClientShellEndpoint::current_host_documents)
+            .cloned()
+        else {
+            return false;
+        };
+        let mut changed = false;
+        for pane_id in agents {
+            if self
+                .pane_panel_open
+                .get(&pane_id)
+                .is_some_and(|views| !views.is_empty())
+            {
+                continue;
+            }
+            let available = published_views(&documents, &pane_id);
+            if available.is_empty() {
+                continue;
+            }
+            // Only a pane that gained an agent since the last projection.
+            if !self.panes_with_agents.insert(pane_id.clone()) {
+                continue;
+            }
+            self.pane_panel_open
+                .entry(pane_id)
+                .or_default()
+                .insert(available[0].clone());
+            changed = true;
+        }
+        self.panes_with_agents.retain(|pane_id| {
+            snapshot
+                .agents
+                .iter()
+                .any(|agent| &agent.pane_id == pane_id)
+        });
+        if changed {
+            self.persist_pane_panels();
+        }
+        changed
+    }
+
+    /// Persist which views are open and how their panels look, per pane.
+    pub(super) fn persist_pane_panels(&mut self) {
+        let Some(path) = self.config.preferences_path.clone() else {
+            return;
+        };
+        let mut preferences = self.config.preferences.clone();
+        preferences.panels = self
+            .pane_panel_open
+            .iter()
+            .filter(|(_, views)| !views.is_empty())
+            .map(|(pane_id, views)| {
+                let display = self
+                    .pane_panel_display
+                    .get(pane_id)
+                    .cloned()
+                    .unwrap_or_default();
+                preferences::ClientPanelPreference {
+                    pane_id: pane_id.clone(),
+                    views: views.iter().cloned().collect(),
+                    height: display.user_height,
+                    collapsed_views: display.collapsed_views.iter().cloned().collect(),
+                    collapsed_rows: display.collapsed_rows.iter().cloned().collect(),
+                }
+            })
+            .collect();
+        preferences
+            .panels
+            .sort_by(|left, right| left.pane_id.cmp(&right.pane_id));
+        self.config.preferences = preferences.clone();
+        let mut outcome = ClientShellInput::default();
+        if let Err(error) = preferences::store(&path, preferences) {
+            self.set_endpoint_error(error);
+            outcome.repaint = true;
+        }
+    }
+
+    /// Restore the persisted panels once the pane identities are known.
+    pub(super) fn restore_pane_panels(&mut self) {
+        if !self.pane_panel_open.is_empty() {
+            return;
+        }
+        let Some(snapshot) = self.snapshot.as_deref() else {
+            return;
+        };
+        let live = snapshot
+            .panes
+            .iter()
+            .map(|pane| pane.pane_id.clone())
+            .collect::<std::collections::BTreeSet<_>>();
+        let panels = self.config.preferences.panels.clone();
+        for panel in panels {
+            if !live.contains(&panel.pane_id) {
+                continue;
+            }
+            self.pane_panel_open
+                .insert(panel.pane_id.clone(), panel.views.iter().cloned().collect());
+            let display = self.pane_panel_display.entry(panel.pane_id).or_default();
+            display.user_height = panel.height;
+            display.collapsed_views = panel.collapsed_views.iter().cloned().collect();
+            display.collapsed_rows = panel.collapsed_rows.iter().cloned().collect();
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -799,6 +1033,7 @@ mod tests {
             view: None,
         };
         let view = |key: &str, count: usize| PanelView {
+            view_id: "tasks".into(),
             key: key.to_string(),
             title: "Tasks",
             summary: "",

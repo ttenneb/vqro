@@ -3955,6 +3955,39 @@
           ],
           "type": "object"
         },
+        "PanePanelAction": {
+          "enum": [
+            "show",
+            "hide",
+            "toggle"
+          ],
+          "type": "string"
+        },
+        "PanePanelParams": {
+          "description": "One user request to open, close or toggle a pane panel view. Vqro forwards\nit to the attached clients that advertise the pane-panels control; a client\nkeeps its own view state and ignores requests it cannot place.",
+          "properties": {
+            "action": {
+              "$ref": "#/schemas/request/$defs/PanePanelAction"
+            },
+            "pane_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "view": {
+              "description": "The extension's view id (\"tasks\"); absent means every view the pane\npublishes.",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "action"
+          ],
+          "type": "object"
+        },
         "PaneProcessInfoParams": {
           "properties": {
             "pane_id": {
@@ -7338,6 +7371,22 @@
             },
             "params": {
               "$ref": "#/schemas/request/$defs/PaneRenameParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "PanePanel",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/PanePanelParams"
             }
           },
           "required": [
@@ -11840,6 +11889,35 @@
           ],
           "type": "object"
         },
+        "PanePanelAction": {
+          "enum": [
+            "show",
+            "hide",
+            "toggle"
+          ],
+          "type": "string"
+        },
+        "PanePanelResult": {
+          "properties": {
+            "action": {
+              "$ref": "#/schemas/success_response/$defs/PanePanelAction"
+            },
+            "pane_id": {
+              "type": "string"
+            },
+            "view": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "pane_id",
+            "action"
+          ],
+          "type": "object"
+        },
         "PaneProcessInfo": {
           "properties": {
             "foreground_process_group_id": {
@@ -13649,6 +13727,22 @@
               "required": [
                 "type",
                 "zoom"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "panel": {
+                  "$ref": "#/schemas/success_response/$defs/PanePanelResult"
+                },
+                "type": {
+                  "const": "pane_panel",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "panel"
               ],
               "type": "object"
             },

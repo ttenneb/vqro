@@ -27,6 +27,7 @@ impl ClientShellState {
     }
 
     pub(super) fn persist_chrome_preferences(&mut self, outcome: &mut ClientShellInput) {
+        let panels = self.config.preferences.panels.clone();
         let Some(path) = self.config.preferences_path.as_deref() else {
             return;
         };
@@ -61,6 +62,7 @@ impl ClientShellState {
                 .then_some(self.config.agent_panel_sort),
             collapsed_groups,
             remote_collapsed_groups,
+            panels,
         };
         if let Err(error) = preferences::store(path, preferences) {
             self.set_endpoint_error(error);
@@ -148,6 +150,7 @@ impl ClientShellConfig {
             prompt_new_workspace_name: config.ui.prompt_new_workspace_name,
             confirm_close: config.ui.confirm_close,
             mouse_capture: config.ui.mouse_capture,
+            show_panels_on_agent_start: config.ui.show_panels_on_agent_start,
             mouse_scroll_lines: config.ui.mouse_scroll_lines(),
             right_click_passthrough_modifiers: config.ui.right_click_passthrough_modifiers(),
             redraw_on_focus_gained: config.ui.redraw_on_focus_gained,
@@ -347,6 +350,7 @@ impl ClientShellConfig {
                 self.prompt_new_workspace_name = ui.prompt_new_workspace_name;
                 self.confirm_close = ui.confirm_close;
                 self.mouse_capture = ui.mouse_capture;
+                self.show_panels_on_agent_start = ui.show_panels_on_agent_start;
                 self.mouse_scroll_lines = ui.mouse_scroll_lines();
                 self.right_click_passthrough_modifiers = ui.right_click_passthrough_modifiers();
                 self.redraw_on_focus_gained = ui.redraw_on_focus_gained;

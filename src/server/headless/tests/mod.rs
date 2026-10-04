@@ -628,6 +628,7 @@ async fn client_shell_attach_seeds_workspace() {
             pane_view_enabled: false,
             terminal_views_enabled: false,
             writer,
+            pane_panels_enabled: false,
         })
     );
 
@@ -663,6 +664,7 @@ async fn client_shell_endpoint_request_uses_the_selected_connection() {
             pane_view_enabled: false,
             terminal_views_enabled: false,
             writer,
+            pane_panels_enabled: false,
         })
     );
     let _initial_snapshot = control_rx.recv().expect("initial shell snapshot");
@@ -757,6 +759,7 @@ async fn native_endpoint_lane_dispatches_methods_outside_the_frozen_bridge() {
             pane_view_enabled: false,
             terminal_views_enabled: false,
             writer,
+            pane_panels_enabled: false,
         })
     );
     let _initial_snapshot = control_rx.recv().expect("initial shell snapshot");
@@ -852,6 +855,7 @@ async fn client_shell_pairs_agent_view_set_replacement_and_clear_with_snapshots(
             pane_view_enabled: false,
             terminal_views_enabled: false,
             writer,
+            pane_panels_enabled: false,
         })
     );
     let initial = client_shell_snapshot(read_server_message(
@@ -946,6 +950,7 @@ async fn host_documents_control_is_sent_only_when_negotiated() {
                 pane_view_enabled: false,
                 terminal_views_enabled: false,
                 writer,
+                pane_panels_enabled: false,
             })
         );
         let _snapshot = client_shell_snapshot(read_server_message(
@@ -1012,6 +1017,7 @@ async fn client_shell_receives_metadata_then_shell_free_pane_surface() {
             pane_view_enabled: false,
             terminal_views_enabled: false,
             writer,
+            pane_panels_enabled: false,
         })
     );
     let snapshot = client_shell_snapshot(read_server_message(
@@ -1194,6 +1200,7 @@ fn connect_test_shell(
             pane_view_enabled: false,
             terminal_views_enabled: false,
             writer,
+            pane_panels_enabled: false,
         })
     );
     (control, render)
@@ -1660,6 +1667,7 @@ async fn client_shell_config_diagnostics_follow_keybinding_ownership() {
             pane_view_enabled: false,
             terminal_views_enabled: false,
             writer: local_writer,
+            pane_panels_enabled: false,
         })
     );
     let local_snapshot = client_shell_snapshot(read_server_message(
@@ -1689,6 +1697,7 @@ async fn client_shell_config_diagnostics_follow_keybinding_ownership() {
             pane_view_enabled: false,
             terminal_views_enabled: false,
             writer: endpoint_writer,
+            pane_panels_enabled: false,
         })
     );
     let endpoint_snapshot = client_shell_snapshot(read_server_message(
@@ -3696,6 +3705,7 @@ async fn public_api_focus_replaces_every_client_shell_projection() {
             pane_view_enabled: false,
             terminal_views_enabled: false,
             writer,
+            pane_panels_enabled: false,
         })
     );
     let initial_revision = client_shell_snapshot(read_server_message(
@@ -4054,6 +4064,7 @@ async fn client_shell_streams_and_targets_popup_terminal_content() {
             pane_view_enabled: false,
             terminal_views_enabled: false,
             writer,
+            pane_panels_enabled: false,
         })
     );
     let _snapshot = client_shell_snapshot(read_server_message(

@@ -14,6 +14,21 @@ pub(super) struct ClientRemoteCollapsedGroups {
     pub(super) collapsed_groups: Vec<String>,
 }
 
+/// Which pane panel views a client had open, and how they looked. Per client,
+/// keyed by the pane identity the server reports.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub(super) struct ClientPanelPreference {
+    pub(super) pane_id: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(super) views: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) height: Option<u16>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(super) collapsed_views: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(super) collapsed_rows: Vec<String>,
+}
+
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub(super) struct ClientChromePreferences {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -28,6 +43,9 @@ pub(super) struct ClientChromePreferences {
     pub(super) collapsed_groups: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(super) remote_collapsed_groups: Vec<ClientRemoteCollapsedGroups>,
+    /// Open pane panels. Presentation state stays with the client.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(super) panels: Vec<ClientPanelPreference>,
 }
 
 pub(super) fn path_for_local_endpoint(socket_path: &Path) -> PathBuf {

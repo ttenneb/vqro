@@ -109,6 +109,9 @@ pub(crate) struct ClientShellConfig {
     pub(super) startup_config_diagnostic: Option<String>,
     pub(super) startup_server_notice: Option<String>,
     pub(super) startup_onboarding: bool,
+    /// Open a pane's views when an agent starts there. Off unless the user
+    /// turns it on: only the user opens views.
+    pub(super) show_panels_on_agent_start: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1120,6 +1123,13 @@ pub(crate) struct ClientShellState {
     pub(super) collection_preview_heights: HashMap<String, u16>,
     /// Panel collapse state per pane: per client, never shared.
     pub(super) pane_panel_display: HashMap<String, super::pane_panel::PanePanelDisplay>,
+    /// Which views the user (or the show-on-agent-start rule) has open, per
+    /// pane, by the extension's own view id. Per client, never shared.
+    pub(super) pane_panel_open: HashMap<String, std::collections::BTreeSet<String>>,
+    /// The last pane panel claim sent, so it is sent only when it changes.
+    pub(super) last_pane_panels: Option<crate::protocol::endpoint::ClientPanePanels>,
+    /// Panes that already had an agent when the rule last ran.
+    pub(super) panes_with_agents: std::collections::BTreeSet<String>,
     pub(super) collection_entered_pane: Option<String>,
     pub(super) collection_maximized_pane: Option<(String, String)>,
     /// Stable local presentation preferences; never carries connection/action authority.
@@ -1313,6 +1323,9 @@ impl ClientShellState {
             collection_expanded_members: HashMap::new(),
             collection_preview_heights: HashMap::new(),
             pane_panel_display: HashMap::new(),
+            pane_panel_open: HashMap::new(),
+            last_pane_panels: None,
+            panes_with_agents: Default::default(),
             collection_entered_pane: None,
             collection_maximized_pane: None,
             recovery_presentations: HashMap::new(),
@@ -1577,6 +1590,9 @@ impl ClientShellState {
         self.collection_expanded_members.clear();
         self.collection_preview_heights.clear();
         self.pane_panel_display.clear();
+        self.pane_panel_open.clear();
+        self.last_pane_panels = None;
+        self.panes_with_agents.clear();
         self.collection_entered_pane = None;
         self.collection_maximized_pane = None;
         self.terminal_view_surfaces.clear();
@@ -1945,6 +1961,10 @@ impl ClientShellState {
             }
         }
         self.snapshot = Some(snapshot);
+        // Pane identities are known now: restore the user's own panels, then
+        // apply the show-on-agent-start rule if the user enabled it.
+        self.restore_pane_panels();
+        let _ = self.apply_show_panels_on_agent_start();
         let focused_repository = self.focused_repository_id();
         if let Some(ClientShellOverlay::Extensions(extensions)) = self.overlay.as_mut() {
             extensions.repository_context = focused_repository;

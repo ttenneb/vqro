@@ -579,6 +579,12 @@ impl HeadlessServer {
                 request.boot_id == self.client_shell_boot_id
                     && request.projection_revision == client.shell_projection_revision
             });
+        // Panels a client has open: these panes' terminals are the claimed
+        // size, so the ordinary layout pass must not resize them back.
+        let pane_panels = client.shell_pane_panels.clone().filter(|request| {
+            request.boot_id == self.client_shell_boot_id
+                && request.projection_revision == client.shell_projection_revision
+        });
         let viewport_pane_id = pane_viewport
             .as_ref()
             .filter(|request| request.size.is_some())
@@ -598,6 +604,12 @@ impl HeadlessServer {
                     .as_ref()
                     .into_iter()
                     .flat_map(|interest| interest.views.iter().map(|view| &view.pane_id)),
+            )
+            .chain(
+                pane_panels
+                    .as_ref()
+                    .into_iter()
+                    .flat_map(|panels| panels.claims.iter().map(|claim| &claim.pane_id)),
             )
             .filter_map(|pane_id| self.app.parse_pane_id(pane_id))
             .filter_map(|(workspace_index, pane_id)| {
@@ -679,6 +691,47 @@ impl HeadlessServer {
                             }
                         }
                     }
+                }
+            }
+        }
+        if let Some(panels) = pane_panels {
+            for claim in panels.claims {
+                let Some((workspace_index, pane_id)) = self.app.parse_pane_id(&claim.pane_id)
+                else {
+                    continue;
+                };
+                if workspace_index != target.workspace_index {
+                    continue;
+                }
+                let Some(terminal_id) = self
+                    .app
+                    .state
+                    .workspaces
+                    .get(workspace_index)
+                    .and_then(|workspace| workspace.tabs.get(target.tab_index))
+                    .and_then(|tab| tab.terminal_id(pane_id))
+                else {
+                    continue;
+                };
+                if self
+                    .app
+                    .state
+                    .direct_attach_resize_locks
+                    .contains(terminal_id)
+                {
+                    continue;
+                }
+                if let Some(runtime) = self.app.state.runtime_for_pane_in_workspace(
+                    &self.app.terminal_runtimes,
+                    workspace_index,
+                    pane_id,
+                ) {
+                    runtime.resize(
+                        claim.size.rows,
+                        claim.size.cols,
+                        cell_size.width_px,
+                        cell_size.height_px,
+                    );
                 }
             }
         }

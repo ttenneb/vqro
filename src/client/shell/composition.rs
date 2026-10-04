@@ -626,38 +626,33 @@ impl ClientShellState {
             .map(|inspector| inspector.pane_id.as_str());
         let mut panel_render = pane_panel::PanePanelRender {
             hits: Vec::new(),
-            claimed: None,
+            claims: Vec::new(),
             drawn_height: None,
+            drawn_pane: None,
         };
         if let Some(documents) = host_documents {
             if self
                 .supports_endpoint_capability(crate::protocol::endpoint::PANE_VIEWPORT_CAPABILITY)
             {
-                let display = snapshot
-                    .focused_pane_id
-                    .as_deref()
-                    .and_then(|pane_id| self.pane_panel_display.get(pane_id))
-                    .cloned()
-                    .unwrap_or_default();
                 pane_panel::render(
                     &mut composed,
                     documents,
                     snapshot,
                     &self.hits.panes,
-                    snapshot.focused_pane_id.as_deref(),
+                    &self.pane_panel_open,
                     inspector_pane,
-                    &display,
+                    &self.pane_panel_display,
                     &self.config.palette,
                     &mut panel_render,
                 );
             }
         }
         self.hits.pane_panels = panel_render.hits;
-        // Opening the panel is when it sizes to its content. From then on the
+        // Opening a panel is when it sizes to its content. From then on the
         // height is fixed: a live update scrolls instead of resizing the PTY,
         // and the user's own dragged height always wins.
         if let (Some(pane_id), Some(drawn_height)) = (
-            snapshot.focused_pane_id.as_deref(),
+            panel_render.drawn_pane.as_deref(),
             panel_render.drawn_height,
         ) {
             let display = self
@@ -672,46 +667,53 @@ impl ClientShellState {
             self.chrome_drag,
             Some(ClientChromeDrag::PanePanelEdge { .. })
         );
-        // A panel takes its edge from the pane's terminal, and the claimed
-        // viewport is what the server resizes that pane's PTY to. Closing the
-        // panel releases the claim so the pane returns to layout geometry.
-        let panel_request = match &panel_render.claimed {
-            Some((pane_id, terminal)) => Some(contributions::viewport_request(
-                &snapshot.boot_id,
-                snapshot.revision,
-                pane_id,
-                Some(*terminal),
-            )),
-            None => self.last_pane_panel_viewport.as_ref().map(|previous| {
-                crate::protocol::endpoint::ClientPaneViewportRequest {
-                    size: None,
-                    ..previous.clone()
-                }
-            }),
-        };
-        if let Some(request) = panel_request.filter(|_| !panel_dragging) {
-            if self.last_pane_panel_viewport.as_ref() != Some(&request) {
-                if let Some((pane_id, terminal)) = panel_render.claimed.as_ref() {
-                    if let Some(hit) = self
-                        .hits
-                        .panes
-                        .iter_mut()
-                        .find(|hit| &hit.pane_id == pane_id)
-                    {
-                        hit.inner_rect = *terminal;
-                        hit.scrollbar_rect = None;
-                    }
-                }
+        // Every open panel's terminal is claimed in one request, so the server
+        // resizes each pane's PTY once and never on a live document update.
+        if self.supports_endpoint_capability(crate::protocol::endpoint::PANE_PANELS_CAPABILITY)
+            && !panel_dragging
+        {
+            let claims = panel_render
+                .claims
+                .iter()
+                .map(
+                    |(pane_id, terminal)| crate::protocol::endpoint::ClientPanePanelClaim {
+                        pane_id: pane_id.clone(),
+                        size: crate::protocol::ClientSurfaceSize {
+                            cols: terminal.width.max(1),
+                            rows: terminal.height.max(1),
+                        },
+                    },
+                )
+                .collect::<Vec<_>>();
+            let request = crate::protocol::endpoint::ClientPanePanels {
+                boot_id: snapshot.boot_id.clone(),
+                projection_revision: snapshot.revision,
+                claims,
+            };
+            if self.last_pane_panels.as_ref() != Some(&request) {
                 if let Ok(data) = serde_json::to_string(&request) {
-                    self.last_pane_panel_viewport = Some(request);
+                    self.last_pane_panels = Some(request);
                     self.pending_endpoint_controls.push((
                         self.active_endpoint_id.clone(),
                         ClientMessage::EndpointControl {
-                            kind: crate::protocol::endpoint::PANE_VIEWPORT_KIND.into(),
+                            kind: crate::protocol::endpoint::PANE_PANELS_KIND.into(),
                             data,
                         },
                     ));
                 }
+            }
+        }
+        // A claimed pane's hits move to the smaller terminal rect, so mouse,
+        // selection and the terminal's own scrollbar map inside it.
+        for (pane_id, terminal) in &panel_render.claims {
+            if let Some(hit) = self
+                .hits
+                .panes
+                .iter_mut()
+                .find(|hit| &hit.pane_id == pane_id)
+            {
+                hit.inner_rect = *terminal;
+                hit.scrollbar_rect = None;
             }
         }
         frame.replace_from_ratatui_buffer_preserving_effects(&composed, cursor.clone());
