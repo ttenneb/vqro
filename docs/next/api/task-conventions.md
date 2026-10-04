@@ -39,8 +39,9 @@ convention introduces no host API, Pi tool, task delivery or activation mechanis
   durable message owns records that final text as a durable reply message to the
   exact sender binding, always with `reply_to` (a same-sender batch links its
   newest message). Ownership is positive: the run's own observed input carries the
-  delivery's unique message id, so a different, transformed-without-it or
-  truncated prompt is not proven and gets no automatic reply (the pane keeps its
+  delivery's unique message id, and that observation is untruncated; anything else
+  — a different, transformed-without-it or truncated prompt — is not proven and gets
+  no automatic reply (the pane keeps its
   "no reply" label so the recipient answers explicitly); a run
   that wins the race, or a handoff queued behind in-flight work, is thereby
   never routed an unrelated turn's text. A delivered

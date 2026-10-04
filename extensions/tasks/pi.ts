@@ -171,10 +171,11 @@ export default function (pi: ExtensionAPI) {
         const current = pending; pending = undefined;
         const prompt = fact.prompt ?? "";
         // Positive ownership: this run's own input carries the delivery id, so the
-        // SDK is running this delivery. Anything else — a human turn that won the
-        // race, a busy-queued follow-up, transformed input — is not proven, so no
-        // automatic reply is sent and the pane is told so.
-        const owns = current !== undefined && prompt.includes(current.marker);
+        // SDK is running this delivery. A truncated observation is not complete
+        // proof, and anything else — a human turn that won the race, a busy-queued
+        // follow-up, transformed input — is not proven either: none of those is
+        // sent an automatic reply, and the pane is told so.
+        const owns = current !== undefined && fact.prompt_truncated !== true && prompt.includes(current.marker);
         replyTo = owns && current ? current.target : undefined;
         if (current && !owns) {
           record({ kind: "no-reply", recipient: current.target.execution, reason: "delivery-not-run" });

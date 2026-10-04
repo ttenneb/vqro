@@ -239,6 +239,27 @@ test("a transformed or prefix prompt is not the delivered run", async () => {
   }
 });
 
+test("a truncated prompt observation is declined even when the marker survives", async () => {
+  jest.useFakeTimers();
+  try {
+    // Two maximum-size bodies exceed the adapter's 64 KiB fact cap, so the
+    // observed prompt is truncated while the leading marker survives.
+    const messages = [messageFixture("m1", "a".repeat(32768)), messageFixture("m2", "b".repeat(32768))];
+    const h = mailboxHarness(messages);
+    await h.emit("session_start", {});
+    jest.advanceTimersByTime(MAILBOX_POLL_MS + 5);
+    await flush();
+    expect(Buffer.byteLength(h.sent[0])).toBeGreaterThan(65536);
+    await h.emit("before_agent_start", { prompt: h.sent[0] });
+    await h.emit("turn_end", turnText("answer from a truncated observation"));
+    await h.emit("agent_settled", {});
+    expect(sends(h)).toHaveLength(0);
+    expect(h.entries).toContainEqual(expect.objectContaining({ data: expect.objectContaining({ kind: "no-reply", reason: "delivery-not-run" }) }));
+  } finally {
+    jest.useRealTimers();
+  }
+});
+
 test("a run whose input carries the delivery id answers it even after a transform", async () => {
   jest.useFakeTimers();
   try {

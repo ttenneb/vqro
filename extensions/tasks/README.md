@@ -13,7 +13,8 @@ never pane typing. When a delivered message owns an agent turn, that turn's
 final text is recorded as a durable reply message to the exact sender binding,
 always with `reply_to` (a same-sender batch links its newest message). Ownership
 is positive: the run's own observed input carries the delivery's unique message
-id, so a different, transformed-without-it or truncated prompt is not proven, is
+id and that observation is untruncated, so a different,
+transformed-without-it or truncated prompt is not proven, is
 not auto-replied, and keeps its "no reply" label so the recipient answers
 explicitly. A handoff queued behind
 in-flight work, or a human turn that wins the race, is therefore not auto-replied,
