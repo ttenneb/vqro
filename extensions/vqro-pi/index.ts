@@ -75,13 +75,20 @@ export default function (pi: ExtensionAPI) {
   // The host refuses to type into an editor that already holds the human's
   // unsent text, so it needs to know whether this one does. Only the fact is
   // reported (never the content), once a second, as the same neutral
-  // pane.report_metadata request the other integrations send. Reporting only a
-  // flip is not enough: the host discards a report older than the human's
-  // latest key, and a line typed and deleted between two polls never flips.
-  // The socket write is deliberate: a CLI spawn per pane per second is not
-  // bounded enough to run in every Vqro pane.
+  // pane.report_metadata request the other integrations send. The poll is a
+  // cheap in-process read; a request goes out only when the fact changes, plus
+  // a slow refresh, so one idle pane costs one small request every 10s. The
+  // refresh is what bounds the two cases a change cannot cover: a line typed
+  // and deleted between two polls (no change is ever observed, and the host
+  // discards a report older than the human's latest key), and keys that leave
+  // an empty box empty. Both are refusals, never a write over a draft. The
+  // socket write is deliberate: a CLI spawn per pane per tick is not bounded
+  // enough to run in every Vqro pane.
+  const INPUT_BOX_POLL_MS = 1000;
+  const INPUT_BOX_REFRESH_MS = 10_000;
   let editorPoll: ReturnType<typeof setInterval> | undefined;
   let inputBoxSeq = Date.now() * 1000;
+  let lastInputBox: { hasText: boolean; at: number } | undefined;
 
   function readInputBoxHasText(): boolean | undefined {
     try {
@@ -92,10 +99,14 @@ export default function (pi: ExtensionAPI) {
     }
   }
 
-  function reportInputBox(): void {
+  function reportInputBox(force = false): void {
     const socketPath = process.env.VQRO_SOCKET_PATH;
     const hasText = readInputBoxHasText();
     if (!socketPath || hasText === undefined || state.state === "closed") return;
+    const now = Date.now();
+    const changed = lastInputBox === undefined || lastInputBox.hasText !== hasText;
+    if (!force && !changed && now - (lastInputBox?.at ?? 0) < INPUT_BOX_REFRESH_MS) return;
+    lastInputBox = { hasText, at: now };
     inputBoxSeq += 1;
     const request = JSON.stringify({
       id: `vqro:pi:input-box:${inputBoxSeq}`,
@@ -112,14 +123,15 @@ export default function (pi: ExtensionAPI) {
 
   function watchInputBox(): void {
     if (editorPoll) clearInterval(editorPoll);
-    reportInputBox();
-    editorPoll = setInterval(reportInputBox, 1000);
+    reportInputBox(true);
+    editorPoll = setInterval(() => reportInputBox(), INPUT_BOX_POLL_MS);
     editorPoll.unref?.();
   }
 
   function stopInputBox(): void {
     if (editorPoll) clearInterval(editorPoll);
     editorPoll = undefined;
+    lastInputBox = undefined;
   }
   const adapter: AdapterV1 = {
     version: 1, snapshot, current, exec,
