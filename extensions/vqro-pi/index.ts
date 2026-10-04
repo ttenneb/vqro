@@ -101,6 +101,9 @@ export default function (pi: ExtensionAPI) {
   let inputBoxSeq = Date.now() * 1000;
   let lastSentInputBox: { text: string; at: number } | undefined;
   let dirty = false;
+  /** Set before cancelling an in-flight request, so the cancel cannot drain into
+   *  a replacement socket while the adapter is stopping. */
+  let inputBoxStopped = false;
 
   function readInputBoxText(): string | undefined {
     try {
@@ -143,7 +146,7 @@ export default function (pi: ExtensionAPI) {
    *  are paced and at most one is in flight; a blocked send retries when the
    *  in-flight one settles. */
   function reportInputBox(force = false): void {
-    if (cancelInputBoxRequest) return;
+    if (inputBoxStopped || cancelInputBoxRequest) return;
     const socketPath = process.env.VQRO_SOCKET_PATH;
     const text = readInputBoxText();
     if (!socketPath || text === undefined || state.state === "closed") return;
@@ -187,6 +190,7 @@ export default function (pi: ExtensionAPI) {
 
   function watchInputBox(ctx: any): void {
     stopInputBox();
+    inputBoxStopped = false;
     latestCtx = ctx;
     reportInputBox(true);
     // Interactive-mode key stream, so a key settles into a report right after it
@@ -204,6 +208,7 @@ export default function (pi: ExtensionAPI) {
   }
 
   function stopInputBox(): void {
+    inputBoxStopped = true;
     if (editorPoll) clearInterval(editorPoll);
     editorPoll = undefined;
     if (settleTimer) clearTimeout(settleTimer);
