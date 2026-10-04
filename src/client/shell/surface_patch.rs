@@ -36,27 +36,40 @@ fn apply_row(row: &crate::protocol::PaneSurfacePatchRow, frame: &mut FrameData) 
 /// in the pane's coordinates belongs that many rows lower on screen.
 type PanelShifts = std::collections::HashMap<String, u16>;
 
-/// The band for a raw surface row: the pane it belongs to has one when a client
-/// claimed it for an open panel.
-fn row_band(
-    row: &crate::protocol::PaneSurfacePatchRow,
-    panes: &[crate::protocol::PaneSurfacePane],
-    shifts: &PanelShifts,
-) -> Option<(u16, u16)> {
-    if shifts.is_empty() {
-        return None;
+/// The panes a panel moved down, with the band and height of each: only these
+/// can contain a patch row that has to move, so a row for any other pane costs
+/// one comparison against a short list and no clone.
+struct PanelBands {
+    panes: Vec<(crate::protocol::SurfaceRect, u16)>,
+}
+
+impl PanelBands {
+    fn new(panes: &[crate::protocol::PaneSurfacePane], shifts: &PanelShifts) -> Self {
+        let panes = panes
+            .iter()
+            .filter_map(|pane| {
+                let band = shifts
+                    .get(&pane.pane_id)
+                    .copied()
+                    .filter(|band| *band > 0)?;
+                Some((pane.inner_rect, band))
+            })
+            .collect();
+        Self { panes }
     }
-    let pane = panes.iter().find(|pane| {
-        row.x >= pane.inner_rect.x
-            && row.x < pane.inner_rect.x.saturating_add(pane.inner_rect.width)
-            && row.y >= pane.inner_rect.y
-            && row.y < pane.inner_rect.y.saturating_add(pane.inner_rect.height)
-    })?;
-    let band = shifts
-        .get(&pane.pane_id)
-        .copied()
-        .filter(|band| *band > 0)?;
-    Some((band, pane.inner_rect.height))
+
+    /// `(band, pane height)` for the pane this raw surface row belongs to.
+    fn of(&self, row: &crate::protocol::PaneSurfacePatchRow) -> Option<(u16, u16)> {
+        self.panes
+            .iter()
+            .find(|(rect, _)| {
+                row.x >= rect.x
+                    && row.x < rect.x.saturating_add(rect.width)
+                    && row.y >= rect.y
+                    && row.y < rect.y.saturating_add(rect.height)
+            })
+            .map(|(rect, band)| (*band, rect.height))
+    }
 }
 
 fn apply_patch_to_surface(
@@ -215,6 +228,7 @@ impl ClientShellState {
             .chain(self.pane_panel_areas.iter().copied())
             .collect::<Vec<_>>();
         let shifts = self.pane_panel_band_rows.clone();
+        let bands = PanelBands::new(&patch.panes, &shifts);
         let fast_path_blocker = fast_path_blocker(self, &patch);
         if let Some(reason) = fast_path_blocker {
             crate::render_prof::event(reason);
@@ -236,7 +250,7 @@ impl ClientShellState {
                 .rows
                 .iter()
                 .map(|row| {
-                    let (band, height) = row_band(row, &patch.panes, &shifts).unwrap_or((0, 0));
+                    let (band, height) = bands.of(row).unwrap_or((0, 0));
                     (
                         crate::protocol::PaneSurfacePatchRow {
                             x: area.x.saturating_add(row.x),
