@@ -1357,6 +1357,21 @@ impl ClientShellState {
     /// renderer uses from the terminal-keyed state that is authoritative.
     fn rekey_panels(&mut self) {
         let join = self.pane_terminal_join();
+        // A panel kept under its pane's id while the terminal was unknown moves
+        // to the terminal identity as soon as one is known again, so a provider
+        // outage does not strand it under the fallback key.
+        for (pane_id, terminal_id) in &join {
+            if terminal_id == pane_id || self.panels_by_terminal.contains_key(terminal_id) {
+                continue;
+            }
+            if let Some(views) = self.panels_by_terminal.remove(pane_id) {
+                self.panels_by_terminal.insert(terminal_id.clone(), views);
+            }
+            if let Some(display) = self.display_by_terminal.remove(pane_id) {
+                self.display_by_terminal
+                    .insert(terminal_id.clone(), display);
+            }
+        }
         let live = self
             .snapshot
             .as_deref()
@@ -1409,14 +1424,23 @@ impl ClientShellState {
         let mut panels = HashMap::new();
         let mut displays = HashMap::new();
         for (pane_id, views) in std::mem::take(&mut self.pane_panel_open) {
-            if let Some(terminal_id) = self.pane_terminal_ids.get(&pane_id) {
-                panels.insert(terminal_id.clone(), views);
-            }
+            // The same key the rekey uses: the terminal when it is known, the
+            // pane's own id otherwise. Skipping an unknown terminal here would
+            // drop the user's panel on the floor.
+            let terminal_id = self
+                .pane_terminal_ids
+                .get(&pane_id)
+                .cloned()
+                .unwrap_or_else(|| pane_id.clone());
+            panels.insert(terminal_id, views);
         }
         for (pane_id, display) in std::mem::take(&mut self.pane_panel_display) {
-            if let Some(terminal_id) = self.pane_terminal_ids.get(&pane_id) {
-                displays.insert(terminal_id.clone(), display);
-            }
+            let terminal_id = self
+                .pane_terminal_ids
+                .get(&pane_id)
+                .cloned()
+                .unwrap_or_else(|| pane_id.clone());
+            displays.insert(terminal_id, display);
         }
         // A terminal whose pane is live but has no panel is closed on purpose:
         // forgetting it is what makes closing stick. A terminal whose pane is

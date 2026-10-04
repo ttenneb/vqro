@@ -511,6 +511,137 @@ fn the_wheel_scrolls_the_panel_without_touching_the_terminal() {
     assert!(state.pane_panel_display["pane_1"].height.is_some());
 }
 
+/// Two panes side by side, each with its own terminal, for the fences QA asked
+/// for: the shared fixture has one pane, which cannot prove them.
+fn two_pane_surface() -> PaneSurfaceFrame {
+    let surface_buffer = Buffer::with_lines((0..28).map(|_| "PANE".repeat(25)).collect::<Vec<_>>());
+    let pane = |pane_id: &str, x: u16, width: u16, focused: bool| PaneSurfacePane {
+        pane_id: pane_id.into(),
+        content_revision: 0,
+        rect: SurfaceRect {
+            x,
+            y: 0,
+            width,
+            height: 28,
+        },
+        inner_rect: SurfaceRect {
+            x: x + 1,
+            y: 1,
+            width: width - 2,
+            height: 26,
+        },
+        scrollbar_rect: None,
+        scroll: None,
+        focused,
+        mouse_reporting: false,
+        sgr_pixel_mouse: false,
+        alternate_screen_active: false,
+        pixel_width: 0,
+        pixel_height: 0,
+    };
+    PaneSurfaceFrame {
+        boot_id: "boot-1".into(),
+        projection_revision: 1,
+        surface_revision: 1,
+        frame: FrameData::from_ratatui_buffer_with_hyperlinks(&surface_buffer, None, &[]),
+        panes: vec![pane("pane_1", 0, 50, true), pane("pane_2", 51, 49, false)],
+        collections: Vec::new(),
+        splits: Vec::new(),
+        popup: None,
+        graphics: crate::protocol::SurfaceGraphicsScene::default(),
+    }
+}
+
+fn two_pane_projection() -> serde_json::Value {
+    let mut projection = view_projection(None);
+    let items = projection["documents"][0]["document"]["items"]
+        .as_array_mut()
+        .expect("items");
+    let originals = items.clone();
+    for item in originals {
+        let text = item.to_string().replace("pane_1", "pane_2");
+        let clone: serde_json::Value = serde_json::from_str(&text).expect("clone");
+        items.push(clone);
+    }
+    projection
+}
+
+#[test]
+fn two_open_panes_each_freeze_their_own_height() {
+    let mut state = panel_state(None, false);
+    let mut snapshot = snapshot();
+    snapshot.panes.push(crate::protocol::ClientShellPane {
+        pane_id: "pane_2".into(),
+        workspace_id: "ws_1".into(),
+        tab_id: "tab_1".into(),
+        label: None,
+        cwd: None,
+        foreground_cwd: None,
+        focused: false,
+        right_click_passthrough: false,
+    });
+    state.set_endpoint_snapshot_for_generation(&ClientEndpointId::Local, 1, Box::new(snapshot));
+    state.set_pane_surface(two_pane_surface());
+    let projection: crate::protocol::endpoint::HostDocumentsProjectionV1 =
+        serde_json::from_value(two_pane_projection()).expect("projection");
+    state.set_endpoint_host_documents_for_generation(
+        &ClientEndpointId::Local,
+        1,
+        Box::new(projection),
+    );
+    for pane_id in ["pane_1", "pane_2"] {
+        state
+            .pane_panel_open
+            .entry(pane_id.into())
+            .or_default()
+            .insert("tasks".into());
+    }
+    let text = text_of(&mut state);
+    assert!(text.contains("Panel panels layout"), "{text}");
+    // The fence QA named: the pane drawn first must be frozen too, or its live
+    // updates re-fit and resize the terminal under the user.
+    for pane_id in ["pane_1", "pane_2"] {
+        assert!(
+            state.pane_panel_display[pane_id].height.is_some(),
+            "{pane_id} keeps a frozen height"
+        );
+    }
+}
+
+#[test]
+fn an_open_panel_survives_a_provider_outage_and_returns() {
+    let mut state = panel_state(None, true);
+    state.set_pane_surface(panel_surface());
+    let _ = text_of(&mut state);
+    assert!(state.pane_panel_open.contains_key("pane_1"));
+    let open = state.pane_panel_open["pane_1"].clone();
+    // The provider stops publishing: every placement disappears.
+    let empty: crate::protocol::endpoint::HostDocumentsProjectionV1 =
+        serde_json::from_value(serde_json::json!({
+            "contract":"host.documents.v1", "boot_id":"boot-1", "revision":1, "documents":[]
+        }))
+        .expect("projection");
+    state.set_endpoint_host_documents_for_generation(&ClientEndpointId::Local, 1, Box::new(empty));
+    state.sync_panel_identity();
+    assert_eq!(
+        state.pane_panel_open.get("pane_1"),
+        Some(&open),
+        "the outage does not forget what the user opened"
+    );
+    // It comes back with the provider.
+    let projection: crate::protocol::endpoint::HostDocumentsProjectionV1 =
+        serde_json::from_value(view_projection(None)).expect("projection");
+    state.set_endpoint_host_documents_for_generation(
+        &ClientEndpointId::Local,
+        1,
+        Box::new(projection),
+    );
+    state.sync_panel_identity();
+    state.set_pane_surface(panel_surface());
+    let text = text_of(&mut state);
+    assert!(text.contains("Panel panels layout"), "{text}");
+}
+
 #[test]
 fn persisted_panels_follow_the_terminal_when_the_pane_moves() {
     let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
