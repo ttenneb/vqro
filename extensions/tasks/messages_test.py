@@ -69,6 +69,18 @@ class MessagesTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.invoke({"action": "message_send", "operation_id": "human-recipient", "recipient": HUMAN, "body": "hi"}, A)
 
+    def test_only_an_exact_agent_binding_can_be_addressed(self):
+        # The provider is the validator for an exact binding, including one passed
+        # straight through by the CLI for a reply.
+        for index, bad in enumerate((
+            {"class": "agent", "terminal_id": "t", "agent": "pi"},
+            {"class": "agent", "terminal_id": "t", "agent": "pi", "execution": ""},
+            {"class": "human_unverified", "terminal_id": "t", "uid": 1},
+            {"class": "agent", "terminal_id": "t", "agent": "pi", "execution": "e", "extra": "x"},
+        )):
+            with self.assertRaises(ValueError):
+                self.invoke({"action": "message_send", "operation_id": f"bad-{index}", "recipient": bad, "body": "hi"}, A)
+
     def test_a_large_inbox_is_claimed_in_bounded_batches(self):
         body = "x" * (MAX_BODY_BYTES - 2)
         for index in range(5):

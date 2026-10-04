@@ -68,22 +68,14 @@ def decode_reply(response):
 
 
 def resolve_recipient(target):
-    # An exact agent binding is used as given: the durable record is the authority,
-    # and only that exact execution can claim the message later. This is how the
-    # reply recorder addresses the sender it is answering without re-resolving a
-    # name to whatever runs there now.
+    # An exact agent binding is passed through as given: the durable record is the
+    # authority, only that exact execution can claim the message later, and the
+    # provider revalidates the binding's exact shape before any write.
     if target.startswith("{"):
         try:
-            binding = json.loads(target)
+            return json.loads(target)
         except ValueError as error:
             raise ValueError(f"recipient binding is not valid JSON: {error}") from error
-        keys = {"class", "terminal_id", "agent", "execution"}
-        if not isinstance(binding, dict) or set(binding) != keys or binding["class"] != "agent":
-            raise ValueError("recipient binding must be an exact agent-process binding")
-        for key in keys - {"class"}:
-            if not isinstance(binding[key], str) or not 1 <= len(binding[key].encode()) <= 256:
-                raise ValueError("invalid recipient binding field")
-        return binding
     response = api("agent.get", {"target": target}, "cli:message:resolve", 5)
     if "error" in response:
         raise ValueError(response["error"].get("message", "agent not found"))

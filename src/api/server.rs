@@ -968,44 +968,6 @@ pub(super) fn dispatch_to_app_with_timeout(
     )
 }
 
-/// Dispatch with the local connection peer attached, so the app can classify the
-/// caller (used by the human-only `agent prompt`). No peer means the plain origin.
-pub(super) fn dispatch_to_app_with_peer(
-    request: Request,
-    api_tx: &ApiRequestSender,
-    timeout: Option<Duration>,
-    peer: Option<crate::action_invocation::InvocationPeer>,
-) -> String {
-    let origin = peer.map_or(
-        crate::api::ApiOrigin::LocalSocket,
-        crate::api::ApiOrigin::LocalSocketPeer,
-    );
-    dispatch_to_app(request, api_tx, timeout, None, None, None, origin)
-}
-
-/// Peer-attached caller-timeout dispatch, used by `agent prompt --wait` on Windows.
-#[cfg(windows)]
-pub(super) fn dispatch_to_app_with_caller_timeout_peer(
-    request: Request,
-    api_tx: &ApiRequestSender,
-    timeout: Option<Duration>,
-    peer: Option<crate::action_invocation::InvocationPeer>,
-) -> String {
-    let origin = peer.map_or(
-        crate::api::ApiOrigin::LocalSocket,
-        crate::api::ApiOrigin::LocalSocketPeer,
-    );
-    dispatch_to_app(
-        request,
-        api_tx,
-        timeout,
-        None,
-        None,
-        Some(("timeout", "timed out waiting for agent status")),
-        origin,
-    )
-}
-
 pub(super) fn dispatch_to_app_with_caller_timeout(
     request: Request,
     api_tx: &ApiRequestSender,
@@ -1055,7 +1017,7 @@ pub(super) fn dispatch_stream_frame(
     )
 }
 
-fn dispatch_to_app(
+pub(super) fn dispatch_to_app(
     request: Request,
     api_tx: &ApiRequestSender,
     timeout: Option<Duration>,

@@ -155,15 +155,9 @@ class CliTests(unittest.TestCase):
     def test_message_send_target_can_be_an_exact_agent_binding(self):
         binding = {"class": "agent", "terminal_id": "term_a", "agent": "pi", "execution": "boot:1:2"}
         self.assertEqual(cli.resolve_recipient(json.dumps(binding)), binding)
-        for bad in (
-            json.dumps({"class": "human_unverified", "terminal_id": "t", "agent": "pi", "execution": "e"}),
-            json.dumps({**binding, "extra": "x"}),
-            json.dumps({**binding, "execution": ""}),
-            json.dumps({"class": "agent", "terminal_id": "t", "agent": "pi"}),
-            "{not json",
-        ):
-            with self.assertRaises(ValueError):
-                cli.resolve_recipient(bad)
+        # The provider, not the CLI, rejects a malformed binding before any write.
+        with self.assertRaises(ValueError):
+            cli.resolve_recipient("{not json")
 
     def test_message_grammar_and_help_are_local_without_api(self):
         for args in ([], ["activation", "maybe"], ["send", "only-target"], ["edit", "id", "text"]):

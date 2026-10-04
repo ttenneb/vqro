@@ -8,10 +8,8 @@ use crate::api::schema::{
     Method, Request, ResponseResult, Subscription, SubscriptionEventData,
     SubscriptionEventEnvelope, SuccessResponse,
 };
-#[cfg(windows)]
-use crate::api::server::dispatch_to_app_with_caller_timeout_peer;
 use crate::api::server::{
-    dispatch_to_app_with_caller_timeout, dispatch_to_app_with_peer, dispatch_to_app_with_timeout,
+    dispatch_to_app, dispatch_to_app_with_caller_timeout, dispatch_to_app_with_timeout,
     should_stop_connection, APP_RESPONSE_TIMEOUT, CONNECTION_POLL_INTERVAL,
 };
 use crate::api::subscriptions::ActiveSubscription;
@@ -185,15 +183,22 @@ pub(super) fn prompt_agent(
     running: &Arc<AtomicBool>,
     peer: Option<crate::action_invocation::InvocationPeer>,
 ) -> std::io::Result<Option<String>> {
+    let origin = peer.map_or(
+        crate::api::ApiOrigin::LocalSocket,
+        crate::api::ApiOrigin::LocalSocketPeer,
+    );
     let Some(wait) = params.wait.clone() else {
-        return Ok(Some(dispatch_to_app_with_peer(
+        return Ok(Some(dispatch_to_app(
             Request {
                 id: request_id,
                 method: Method::AgentPrompt(params),
             },
             api_tx,
             None,
-            peer,
+            None,
+            None,
+            None,
+            origin,
         )));
     };
 
@@ -226,14 +231,17 @@ pub(super) fn prompt_agent(
         method: Method::AgentPrompt(params),
     };
     #[cfg(windows)]
-    let prompt_response = dispatch_to_app_with_caller_timeout_peer(
+    let prompt_response = dispatch_to_app(
         prompt_request,
         api_tx,
         remaining_timeout_ms(wait.timeout_ms, wait_started).map(std::time::Duration::from_millis),
-        peer,
+        None,
+        None,
+        Some(("timeout", "timed out waiting for agent status")),
+        origin,
     );
     #[cfg(not(windows))]
-    let prompt_response = dispatch_to_app_with_peer(prompt_request, api_tx, None, peer);
+    let prompt_response = dispatch_to_app(prompt_request, api_tx, None, None, None, None, origin);
     let Ok(prompted) = agent_from_response(&request_id, &prompt_response) else {
         return Ok(Some(prompt_response));
     };
