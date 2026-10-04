@@ -3739,7 +3739,7 @@ async fn public_api_focus_replaces_every_client_shell_projection() {
 }
 
 #[tokio::test]
-async fn forwarded_human_keys_arm_and_clear_possible_unsent_input() {
+async fn forwarded_human_keys_arm_possible_unsent_input() {
     let mut server = test_headless_server();
     let _input_rx = install_focused_test_runtime(&mut server, b"");
     server.app.state.ensure_test_terminals();
@@ -3781,7 +3781,9 @@ async fn forwarded_human_keys_arm_and_clear_possible_unsent_input() {
         });
     };
 
-    // A character the human typed may be sitting unsent in the editor.
+    // A character the human typed may be sitting unsent in the editor: the
+    // forwarded effect has to reach the terminal the guard reads. The clear
+    // direction of the same call is the rule table's job.
     forward(
         &mut server,
         vec![key(
@@ -3791,17 +3793,6 @@ async fn forwarded_human_keys_arm_and_clear_possible_unsent_input() {
         )],
     );
     assert!(server.app.state.terminals[&terminal_id].unsent_input_possible);
-
-    // A plain Enter is the human submitting the line.
-    forward(
-        &mut server,
-        vec![key(
-            crate::protocol::ClientKeyCode::Enter,
-            0,
-            crate::protocol::ClientKeyKind::Press,
-        )],
-    );
-    assert!(!server.app.state.terminals[&terminal_id].unsent_input_possible);
     shutdown_test_runtimes(&mut server);
 }
 
