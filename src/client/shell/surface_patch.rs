@@ -58,14 +58,11 @@ impl PanelBands {
         Self { panes }
     }
 
-    /// For a raw surface row of a pane a panel moved: its band and the composed
-    /// row its pane ends at. Both are in composed coordinates, which is the space
-    /// the fast path writes in.
-    fn of_composed(
+    /// The raw pane rect and band a patch row belongs to, when a panel moved it.
+    fn of(
         &self,
         row: &crate::protocol::PaneSurfacePatchRow,
-        area: Rect,
-    ) -> Option<(u16, u16)> {
+    ) -> Option<(crate::protocol::SurfaceRect, u16)> {
         self.panes
             .iter()
             .find(|(rect, _)| {
@@ -74,15 +71,22 @@ impl PanelBands {
                     && row.y >= rect.y
                     && row.y < rect.y.saturating_add(rect.height)
             })
-            .map(|(rect, band)| {
-                // The row this returns is already band-shifted, so the bound is the
-                // pane's composed bottom: the grid occupies its last rows, and a row
-                // that would land past that has no destination.
-                (
-                    *band,
-                    area.y.saturating_add(rect.y).saturating_add(rect.height),
-                )
+            .copied()
+    }
+
+    /// The band that translates a row into the rect below its panel.
+    fn band_for(&self, row: &crate::protocol::PaneSurfacePatchRow) -> Option<u16> {
+        self.of(row).map(|(_, band)| band)
+    }
+
+    /// Whether any row of this patch has no destination once translated: it comes
+    /// from the pane's last rows, where the grid ends. Such a patch composes.
+    fn any_row_past_grid(&self, rows: &[crate::protocol::PaneSurfacePatchRow]) -> bool {
+        rows.iter().any(|row| {
+            self.of(row).is_some_and(|(rect, band)| {
+                row.y.saturating_add(band) >= rect.y.saturating_add(rect.height)
             })
+        })
     }
 }
 
@@ -113,6 +117,7 @@ fn apply_patch_to_surface(
 fn fast_path_blocker(
     state: &ClientShellState,
     patch: &crate::protocol::PaneSurfacePatch,
+    bands: &PanelBands,
 ) -> Option<&'static str> {
     if state.mode != ClientShellMode::Terminal {
         Some("client_surface_patch.fallback.mode")
@@ -148,29 +153,11 @@ fn fast_path_blocker(
             .any(|hit| hit.pane_id == pane.pane_id)
     }) {
         Some("client_surface_patch.fallback.pane_hits")
-    } else if patch.rows.iter().any(|row| {
+    } else if bands.any_row_past_grid(&patch.rows) {
         // A row a panel moved has a destination below the band, so the fast path
-        // translates it by the band and never paints into the panel. The exception
-        // is a row past the grid, which has no destination at all: that one takes
-        // the compose path, as does any change to the band or pane geometry.
-        patch.panes.iter().any(|pane| {
-            let Some(band) = state
-                .pane_panel_band_rows
-                .get(&pane.pane_id)
-                .copied()
-                .filter(|band| *band > 0)
-            else {
-                return false;
-            };
-            let right = pane.inner_rect.x.saturating_add(pane.inner_rect.width);
-            let bottom = pane.inner_rect.y.saturating_add(pane.inner_rect.height);
-            row.x >= pane.inner_rect.x
-                && row.x < right
-                && row.y >= pane.inner_rect.y
-                && row.y < bottom
-                && row.y.saturating_add(band) >= bottom
-        })
-    }) {
+        // translates it and never paints into the panel. A row from the pane's last
+        // rows has no destination at all and takes the compose path, as does any
+        // change to the band or pane geometry.
         Some("client_surface_patch.fallback.pane_panel_row_past_grid")
     } else {
         None
@@ -267,7 +254,7 @@ impl ClientShellState {
             .collect::<Vec<_>>();
         let shifts = self.pane_panel_band_rows.clone();
         let bands = PanelBands::new(&patch.panes, &shifts);
-        let fast_path_blocker = fast_path_blocker(self, &patch);
+        let fast_path_blocker = fast_path_blocker(self, &patch, &bands);
         if let Some(reason) = fast_path_blocker {
             crate::render_prof::event(reason);
         }
@@ -298,30 +285,25 @@ impl ClientShellState {
                 rows: patch
                     .rows
                     .iter()
-                    .map(|row| {
-                        let moved = bands.of_composed(row, area);
-                        let band = moved.map(|(band, _)| band).unwrap_or(0);
-                        (
-                            crate::protocol::PaneSurfacePatchRow {
-                                x: area.x.saturating_add(row.x),
-                                y: area.y.saturating_add(row.y).saturating_add(band),
-                                cells: row.cells.clone(),
-                            },
-                            moved.map(|(_, bottom)| bottom),
-                        )
+                    .map(|row| crate::protocol::PaneSurfacePatchRow {
+                        x: area.x.saturating_add(row.x),
+                        y: area
+                            .y
+                            .saturating_add(row.y)
+                            .saturating_add(bands.band_for(row).unwrap_or(0)),
+                        cells: row.cells.clone(),
                     })
-                    .filter(|(row, bottom)| {
-                        // A row a panel moved has nowhere to go past its own pane's
-                        // composed bottom: the grid is exactly the rect below the panel.
-                        bottom.is_none_or(|bottom| row.y < bottom)
-                            && !panel_rows.iter().any(|panel| {
-                                row.y >= panel.y
-                                    && row.y < panel.bottom()
-                                    && row.x < panel.right()
-                                    && row.x.saturating_add(row.cells.len() as u16) > panel.x
-                            })
+                    // Only the panel's own cells are filtered: a row with no
+                    // destination never reaches here, because the predicate above
+                    // sends such a patch to the compose path.
+                    .filter(|row| {
+                        !panel_rows.iter().any(|panel| {
+                            row.y >= panel.y
+                                && row.y < panel.bottom()
+                                && row.x < panel.right()
+                                && row.x.saturating_add(row.cells.len() as u16) > panel.x
+                        })
                     })
-                    .map(|(row, _)| row)
                     .collect(),
                 cursor: patch.cursor.clone().map(|cursor| {
                     let y = area.y.saturating_add(cursor.y).saturating_add(cursor_band);
