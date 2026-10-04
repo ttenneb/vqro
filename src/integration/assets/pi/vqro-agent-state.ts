@@ -2,7 +2,7 @@
 // managed by vqro; reinstalling or updating the integration overwrites this file.
 // add custom hooks/plugins beside this file instead of editing it.
 // VQRO_INTEGRATION_ID=pi
-// VQRO_INTEGRATION_VERSION=9
+// VQRO_INTEGRATION_VERSION=10
 // @ts-nocheck
 
 import net from "node:net";
@@ -187,6 +187,53 @@ export default function (pi) {
   let lastState: AgentState | undefined;
   let lastMessage: string | undefined;
   let rootSession = false;
+  let editorUi: any;
+  let editorPoll: ReturnType<typeof setInterval> | undefined;
+  let inputBoxHasText: boolean | undefined;
+
+  // The host refuses to type into an editor that already holds the human's
+  // unsent text, so it needs to know whether this one does. Only the fact is
+  // reported (never the content), and only when it flips: one request per
+  // change of emptiness, polled because Pi changes the editor on its own too
+  // (a restored draft, a submit).
+  function readInputBoxHasText(): boolean | undefined {
+    try {
+      const text = editorUi?.getEditorText?.();
+      return typeof text === "string" ? text.trim().length > 0 : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  function checkInputBox(force = false): void {
+    if (!rootSession) {
+      return;
+    }
+    const next = readInputBoxHasText();
+    if (next === undefined || (!force && next === inputBoxHasText)) {
+      return;
+    }
+    inputBoxHasText = next;
+    void sendRequest({
+      id: `${source}:input-box:${Date.now()}:${Math.random().toString(36).slice(2)}`,
+      method: "pane.report_metadata",
+      params: {
+        pane_id: paneId,
+        source,
+        seq: nextReportSeq(),
+        tokens: { input_box: next ? "has_text" : "empty" },
+      },
+    });
+  }
+
+  function watchEditor(ctx: any): void {
+    if (editorPoll) {
+      clearInterval(editorPoll);
+    }
+    editorUi = ctx?.ui;
+    editorPoll = setInterval(() => checkInputBox(), 1000);
+    editorPoll.unref?.();
+  }
 
   function desiredState() {
     if (blockedCount > 0) {
@@ -238,6 +285,10 @@ export default function (pi) {
     // A reload can replace this extension mid-run without emitting another agent_start.
     agentActive = ctx?.isIdle?.() === false;
     publishState(true);
+    watchEditor(ctx);
+    // Report the empty/typed baseline even when it has not flipped yet, so the
+    // host knows this editor reports at all.
+    checkInputBox(true);
   });
 
   pi.on("agent_start", (_event, ctx) => {
@@ -248,6 +299,7 @@ export default function (pi) {
     void reportSession();
     agentActive = true;
     publishState();
+    checkInputBox();
   });
 
   pi.on("agent_settled", (_event, ctx) => {
@@ -257,5 +309,6 @@ export default function (pi) {
 
     agentActive = false;
     publishState();
+    checkInputBox();
   });
 }

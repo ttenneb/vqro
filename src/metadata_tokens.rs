@@ -1,9 +1,19 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
+/// The generic, integration-reported fact that says whether a terminal's input
+/// box currently holds unsent text, written through the existing metadata
+/// token path. The host names no agent: whoever owns the editor reports it, and
+/// a terminal without a report falls back to the host's forwarded-key
+/// heuristic. Only [`INPUT_BOX_EMPTY`] proves the box is clear; any other value
+/// counts as holding text, so an unknown value fails closed.
+pub(crate) const INPUT_BOX_TOKEN: &str = "input_box";
+pub(crate) const INPUT_BOX_EMPTY: &str = "empty";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct MetadataToken {
     value: String,
+    reported_at: Instant,
     expires_at: Option<Instant>,
 }
 
@@ -52,11 +62,20 @@ impl MetadataTokens {
         for (key, value) in patch {
             match value {
                 Some(value) => {
-                    let token = MetadataToken { value, expires_at };
-                    if self.entries.get(&key) != Some(&token) {
-                        self.entries.insert(key, token);
-                        changed = true;
-                    }
+                    // A re-report of the same value is not a change, but it does
+                    // refresh when the host last saw this fact.
+                    let same_value = self.entries.get(&key).is_some_and(|token| {
+                        token.value == value && token.expires_at == expires_at
+                    });
+                    self.entries.insert(
+                        key,
+                        MetadataToken {
+                            value,
+                            reported_at: now,
+                            expires_at,
+                        },
+                    );
+                    changed |= !same_value;
                 }
                 None => {
                     changed |= self.entries.remove(&key).is_some();
@@ -64,6 +83,21 @@ impl MetadataTokens {
             }
         }
         changed
+    }
+
+    /// The current value of `key`, if a report set one and it has not expired.
+    pub(crate) fn get(&self, key: &str) -> Option<&str> {
+        self.entries.get(key).map(|token| token.value.as_str())
+    }
+
+    /// When the current value of `key` was reported, so a caller can tell a
+    /// report from before a later observation apart.
+    pub(crate) fn reported_at(&self, key: &str) -> Option<Instant> {
+        self.entries.get(key).map(|token| token.reported_at)
+    }
+
+    pub(crate) fn remove(&mut self, key: &str) -> bool {
+        self.entries.remove(key).is_some()
     }
 
     pub(crate) fn key_count_after_patch(&self, patch: &HashMap<String, Option<String>>) -> usize {

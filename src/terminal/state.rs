@@ -150,6 +150,9 @@ pub struct TerminalState {
     /// Set from the forwarded-input effect in `crate::server::pane_input`, not
     /// from screen parsing; cleared for a different or exited agent process.
     pub unsent_input_possible: bool,
+    /// When the host last forwarded human input into this terminal, so an
+    /// editor report can be told from one that predates the human's keys.
+    last_forwarded_input_at: Option<Instant>,
     recent_agent_process_exit: Option<RecentAgentProcessExit>,
     agent_process_acquisition_pending: bool,
     pub pending_agent_resume_plan: Option<crate::agent_resume::AgentResumePlan>,
@@ -186,6 +189,7 @@ impl TerminalState {
             launch_argv: None,
             respawn_shell_on_exit: false,
             unsent_input_possible: false,
+            last_forwarded_input_at: None,
             recent_agent_process_exit: None,
             agent_process_acquisition_pending: false,
             pending_agent_resume_plan: None,
@@ -213,6 +217,46 @@ impl TerminalState {
             self.agent_process_acquisition_pending = true;
         }
         mutation
+    }
+
+    /// Records forwarded human input: whether it left text the human has not
+    /// sent, and when, so a report that predates it can be recognized as stale.
+    pub fn note_forwarded_human_input(&mut self, may_hold_unsent_text: bool, now: Instant) {
+        self.unsent_input_possible = may_hold_unsent_text;
+        self.last_forwarded_input_at = Some(now);
+    }
+
+    /// Whether this terminal's editor may hold unsent human text, so typing into
+    /// it could join the human's line and submit the mix.
+    ///
+    /// An integration's editor report that is at least as new as the last
+    /// forwarded human input is exact evidence and is trusted as reported;
+    /// without one, or when it predates the human's keys, the host falls back to
+    /// the forwarded-key heuristic, which errs toward refusing.
+    pub fn editor_may_hold_unsent_text(&self) -> bool {
+        if let Some(reported_at) = self
+            .metadata_tokens
+            .reported_at(crate::metadata_tokens::INPUT_BOX_TOKEN)
+        {
+            if self
+                .last_forwarded_input_at
+                .is_none_or(|forwarded| reported_at >= forwarded)
+            {
+                return self
+                    .metadata_tokens
+                    .get(crate::metadata_tokens::INPUT_BOX_TOKEN)
+                    != Some(crate::metadata_tokens::INPUT_BOX_EMPTY);
+            }
+        }
+        self.unsent_input_possible
+    }
+
+    /// A different agent process cannot inherit this terminal's editor evidence.
+    fn clear_editor_evidence(&mut self) {
+        self.unsent_input_possible = false;
+        self.last_forwarded_input_at = None;
+        self.metadata_tokens
+            .remove(crate::metadata_tokens::INPUT_BOX_TOKEN);
     }
 
     pub(crate) fn finish_agent_process_acquisition(&mut self) -> bool {
@@ -355,7 +399,7 @@ impl TerminalState {
                 self.detected_agent = agent;
             }
             if previous_detected_agent != self.detected_agent || process_exited {
-                self.unsent_input_possible = false;
+                self.clear_editor_evidence();
             }
             return TerminalStateMutation {
                 effective_state_change: self.recompute_effective_state(
@@ -391,7 +435,7 @@ impl TerminalState {
         }
         self.detected_agent = agent;
         if previous_detected_agent != agent || process_exited {
-            self.unsent_input_possible = false;
+            self.clear_editor_evidence();
         }
         if let Some(agent) = agent {
             let agent_label = crate::detect::agent_label(agent);
@@ -2111,7 +2155,7 @@ impl TerminalState {
         self.fallback_observed_at = None;
         self.hook_authority = None;
         self.persisted_agent_session = None;
-        self.unsent_input_possible = false;
+        self.clear_editor_evidence();
         self.agent_metadata.clear();
         self.metadata_report_agents.clear();
         self.suppressed_full_lifecycle_hook_reports.clear();
@@ -5929,18 +5973,25 @@ mod tests {
     }
 
     #[test]
-    fn human_input_evidence_does_not_survive_the_agent_process() {
+    fn editor_evidence_does_not_survive_the_agent_process() {
         let now = Instant::now();
         let mut terminal = test_terminal();
         terminal.set_detected_state(Some(Agent::Pi), AgentState::Idle);
+        report_input_box(&mut terminal, "empty", now);
 
-        // The same live agent keeps the evidence: its editor is still the one
-        // the human typed into.
-        terminal.unsent_input_possible = true;
+        // The same live agent keeps the evidence: the report is newer than the
+        // human's keys, so it is exact and trusted as reported.
+        terminal.note_forwarded_human_input(true, now);
+        assert!(!terminal.editor_may_hold_unsent_text());
         terminal.set_detected_state(Some(Agent::Pi), AgentState::Working);
-        assert!(terminal.unsent_input_possible);
+        assert!(!terminal.editor_may_hold_unsent_text());
+        // A value the host does not recognize is not evidence of an empty box.
+        report_input_box(&mut terminal, "something_else", now);
+        assert!(terminal.editor_may_hold_unsent_text());
 
-        // The process exited.
+        // The process exited: neither the heuristic nor the report carries over.
+        terminal.note_forwarded_human_input(true, now);
+        report_input_box(&mut terminal, "empty", now);
         terminal.set_detected_state_with_screen_signals_at(
             Some(Agent::Pi),
             AgentState::Unknown,
@@ -5950,17 +6001,33 @@ mod tests {
             true,
             now,
         );
+        assert!(!terminal.editor_may_hold_unsent_text());
         assert!(!terminal.unsent_input_possible);
+        assert!(terminal.metadata_tokens.get("input_box").is_none());
 
         // A different agent took the pane.
-        terminal.unsent_input_possible = true;
+        terminal.note_forwarded_human_input(true, now);
         terminal.set_detected_agent_process_at(Agent::Codex, now);
-        assert!(!terminal.unsent_input_possible);
+        assert!(!terminal.editor_may_hold_unsent_text());
 
         // The pane's agent was respawned.
-        terminal.unsent_input_possible = true;
+        terminal.note_forwarded_human_input(true, now);
+        report_input_box(&mut terminal, "empty", now);
         terminal.clear_agent_runtime_identity_after_respawn();
-        assert!(!terminal.unsent_input_possible);
+        assert!(!terminal.editor_may_hold_unsent_text());
+        assert!(terminal.metadata_tokens.get("input_box").is_none());
+    }
+
+    /// Reports the neutral input-box fact the way an integration does.
+    fn report_input_box(terminal: &mut TerminalState, value: &str, now: Instant) {
+        terminal.metadata_tokens.patch(
+            std::collections::HashMap::from([(
+                crate::metadata_tokens::INPUT_BOX_TOKEN.to_string(),
+                Some(value.to_string()),
+            )]),
+            None,
+            now,
+        );
     }
 
     #[test]

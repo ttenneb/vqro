@@ -1261,7 +1261,7 @@ impl HeadlessServer {
     ) {
         let may_hold = matches!(effect, super::pane_input::UnsentTextEffect::MayHold);
         if let Some(terminal) = self.app.state.terminals.get_mut(&terminal_id) {
-            terminal.unsent_input_possible = may_hold;
+            terminal.note_forwarded_human_input(may_hold, std::time::Instant::now());
         }
     }
 
