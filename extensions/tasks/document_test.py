@@ -59,6 +59,26 @@ class DocumentTests(unittest.TestCase):
         # Placement is required: no placement, no panel row.
         self.assertFalse(any("panel:" in row["id"] for row in document.project(self.store,self.snapshot([]))["items"]))
 
+    def test_messages_view_shows_waiting_claimed_and_missing_replies(self):
+        panel_a={"pane_id":"w1:p1","workspace_id":"w1","tab_id":"w1:t1"}
+        panel_b={"pane_id":"w1:p2","workspace_id":"w1","tab_id":"w1:t1"}
+        agent_b={"class":"agent","terminal_id":"b","agent":"pi","execution":"boot:1:2"}
+        self.invoke({"action":"create","title":"Message anchor","operation_id":"anchor"},caller=A)
+        # The extension's own message path: A sends, B claims.
+        sent=self.store.messages.mutate({"action":"message_send","body":"please review the panel","recipient":agent_b}, A, "2026-10-04T00:00:00.000+00:00")
+        message_id=sent["message"]["id"]
+        self.store.messages.mutate({"action":"message_claim","id":message_id}, agent_b, "2026-10-04T00:01:00.000+00:00")
+        refs=[{"terminal_id":"a","placement":panel_a},{"terminal_id":"b","placement":panel_b}]
+        items=document.project(self.store,self.snapshot(refs))["items"]
+        a_root=next(row for row in items if row["id"]=="panel:w1:p1:messages")
+        self.assertEqual("Messages",a_root["label"])
+        self.assertEqual("1 no reply",a_root["detail"])
+        self.assertTrue(any(row["detail"].startswith("no reply to") for row in items if row["id"].startswith("panel:w1:p1:message:")))
+        b_rows=[row for row in items if row["id"].startswith("panel:w1:p2:message:")]
+        self.assertEqual(1,len(b_rows))
+        self.assertEqual("claimed",b_rows[0]["detail"])
+        self.assertTrue(b_rows[0]["label"].startswith("pi @") or "please review" in b_rows[0]["label"], b_rows[0])
+
     def test_shared_durable_policy_and_placement_move_and_unknown(self):
         task=self.invoke({"action":"create","title":"native","operation_id":"create"})["task"]
         task=self.change(task,"delegate",owner=H)

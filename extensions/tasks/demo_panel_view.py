@@ -169,6 +169,24 @@ class PanelViewDemo(ReadinessDemo):
         documents = self.api("host.document.list", {"namespace": "vqro.tasks"})["result"]["documents"]
         return documents[0]["document"] if documents else None
 
+    def wait_view(self, pane_id, view_id, seconds=20):
+        """Wait until the served document publishes a view the panel can open."""
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline:
+            document = self.panel_document()
+            if document and any(
+                item.get("view", {}).get("pane_id") == pane_id
+                and item.get("view", {}).get("view_id") == view_id
+                for item in document["items"]
+            ):
+                return True
+            self.cli("task", "list")  # an action forces a fresh document sample
+            time.sleep(0.5)
+        document = self.panel_document() or {"items": []}
+        views = sorted({(item.get("view", {}).get("pane_id"), item.get("view", {}).get("view_id"))
+                        for item in document["items"] if item.get("view", {}).get("view_id")})
+        raise RuntimeError(f"{view_id} was never published for {pane_id}; served views: {views}")
+
     def wait_panel_rows(self):
         deadline = time.monotonic() + 20
         while time.monotonic() < deadline:
@@ -245,6 +263,11 @@ class PanelViewDemo(ReadinessDemo):
         # Real work in both panes, now that the client is showing this tab, so a
         # capture shows panes in use rather than idle ones.
         repo = str(Path(__file__).resolve().parents[2])
+        # A real message pair, so the messages view has content: A sends, B
+        # claims. The next document sample carries both views.
+        self.agent("panel-a", "a-message", ["send", "panel-b", "review the panel when you can",
+                                            "--op", "a-message"], tool="message")
+        self.agent("panel-b", "b-message", ["claim", "--op", "b-message"], tool="message")
         for name in ("panel-a", "panel-b"):
             self.work(name, f"{name}-work-log",
                       f"cd {repo} && git log --oneline -4 && echo && vqro task tree | head -4")
@@ -310,6 +333,18 @@ class PanelViewDemo(ReadinessDemo):
         self.click(*self.wait_locate("Tasks", within="⊟"))
         self.wait_screen("▾ ● Tasks")
 
+        # The messages view is the same area and style: hide tasks, show
+        # messages, and the pane shows its message rows.
+        self.wait_view(a, "messages")
+        self.cli("pane", "panel", "hide", a, "tasks")
+        self.cli("pane", "panel", "show", a, "messages")
+        self.wait_screen("review the panel when you can", seconds=30)
+        messages_text, messages_png = demo_capture.capture(
+            self.root / "client.log", self.root / "capture", "panel-messages")
+        self.cli("pane", "panel", "hide", a, "messages")
+        self.cli("pane", "panel", "show", a, "tasks")
+        self.wait_screen("waiting on panel-b: unblock")
+
         # Clicking a row with a terminal link jumps to that pane.
         row = self.wait_locate("waiting on panel-b: unblock", within="└─")
         assert row[0] > 120, f"the panel row is not on screen: {row}"
@@ -351,6 +386,9 @@ class PanelViewDemo(ReadinessDemo):
                               "hide_closed_the_right_panel": True,
                               "toggle_reopened_it": True},
                   "show_on_agent_start": {"b_panel_from_rule": True},
+                  "messages_panel": {
+                      "shows_the_message_rows": "review the panel when you can" in Path(messages_text).read_text(),
+                      "capture": str(messages_png)},
                   "persisted_views": panel["views"],
                   "collapse": {"panel": "▸ ● Tasks" in Path(collapsed_text).read_text(),
                                "subtask": "▸ " in Path(subtask_text).read_text(),

@@ -1106,6 +1106,9 @@ fn validate_view_item_fields(
     if view.view_id.is_some() != view.pane_id.is_some() {
         return invalid("a panel root names both its pane and its view");
     }
+    if view.pane_id.is_none() && item.parent_id.is_none() {
+        return invalid("a view block needs a panel root or a parent section");
+    }
     if let Some(pane_id) = &view.pane_id {
         validate_local_id(pane_id)?;
     }
