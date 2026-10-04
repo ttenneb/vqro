@@ -20,6 +20,10 @@ use crate::terminal::ForwardedInputEffect;
 /// completes, modified Enter inserts a newline, and the keys that look like
 /// clears prove nothing either (Ctrl-C copies the selection, Ctrl-U deletes to
 /// the line start only in Pi).
+///
+/// The `NoText` set assumes Pi's default bindings. A key the user rebinds to
+/// history recall, or anything else that writes text, is then covered only by
+/// the adapter's immediate re-read after a keystroke, not by this split.
 pub(super) fn human_input_unsent_text(
     events: &[ClientPaneInputEvent],
 ) -> Option<ForwardedInputEffect> {
