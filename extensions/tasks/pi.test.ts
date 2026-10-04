@@ -160,6 +160,62 @@ test("a same-sender batch answer links the newest message", async () => {
   }
 });
 
+test("a run another observed input owns is not answered automatically", async () => {
+  jest.useFakeTimers();
+  try {
+    // The SDK stays idle while a human input hook awaits, so an idle handoff
+    // alone does not prove this delivery owns the next run.
+    const h = mailboxHarness([messageFixture("m1", "colleague request")]);
+    await h.emit("session_start", {});
+    await h.emit("input", { source: "interactive", text: "human question" });
+    jest.advanceTimersByTime(MAILBOX_POLL_MS + 5);
+    await flush();
+    expect(h.sent.join("\n")).toContain("colleague request");
+    await h.emit("before_agent_start", { prompt: "human question" });
+    await h.emit("turn_end", turnText("private human answer"));
+    await h.emit("agent_settled", {});
+    expect(sends(h)).toHaveLength(0);
+  } finally {
+    jest.useRealTimers();
+  }
+});
+
+test("a foreign input that wins the run after a handoff is not answered", async () => {
+  jest.useFakeTimers();
+  try {
+    const h = mailboxHarness([messageFixture("m1", "colleague request")]);
+    await h.emit("session_start", {});
+    jest.advanceTimersByTime(MAILBOX_POLL_MS + 5);
+    await flush();
+    await h.emit("input", { source: "interactive", text: "human question" });
+    await h.emit("before_agent_start", { prompt: "human question" });
+    await h.emit("turn_end", turnText("private human answer"));
+    await h.emit("agent_settled", {});
+    expect(sends(h)).toHaveLength(0);
+  } finally {
+    jest.useRealTimers();
+  }
+});
+
+test("the run whose prompt is the delivered content answers it", async () => {
+  jest.useFakeTimers();
+  try {
+    const h = mailboxHarness([messageFixture("m1", "colleague request")]);
+    await h.emit("session_start", {});
+    jest.advanceTimersByTime(MAILBOX_POLL_MS + 5);
+    await flush();
+    // The delivery's own input may also be observed; it is not a foreign input.
+    const delivered = renderMessage(messageFixture("m1", "colleague request"));
+    await h.emit("input", { source: "extension", text: delivered });
+    await h.emit("before_agent_start", { prompt: delivered });
+    await h.emit("turn_end", turnText("answer to the colleague"));
+    await h.emit("agent_settled", {});
+    expect(sends(h)[0]?.args).toEqual(["message", "send", bindingOf("exec-alpha"), "answer to the colleague", "--reply-to", "m1"]);
+  } finally {
+    jest.useRealTimers();
+  }
+});
+
 test("a handoff queued behind a busy SDK does not route the active turn's final", async () => {
   jest.useFakeTimers();
   try {

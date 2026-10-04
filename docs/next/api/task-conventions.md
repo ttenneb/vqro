@@ -35,11 +35,13 @@ convention introduces no host API, Pi tool, task delivery or activation mechanis
   directly in its pane. Pi's question tool is only an example for that direct case;
   the convention is agent-neutral. Creating a decision does not promise a wake or
   notification. Never exploit cooperative human classification through a shell.
-- Final prose is written for whoever started the turn. A turn started by another
-  agent's durable message records that final text as a durable reply message to the
-  exact sender binding and always carries `reply_to` (a same-sender batch links
-  its newest message), so a delivered answer is never automatically re-answered; a delivered
-  reply is never re-answered automatically, so a thread continues with an explicit
+- Final prose is written for whoever started the turn. A run that a delivered
+  durable message owns records that final text as a durable reply message to the
+  exact sender binding, always with `reply_to` (a same-sender batch links its
+  newest message). Ownership is confirmed at run start: a handoff queued behind
+  in-flight work, or one that races another observed input, gets no automatic
+  reply instead of routing an unrelated turn's text. A delivered reply is never
+  automatically re-answered, so a thread continues with an explicit
   `message send --reply-to`. Nothing is typed into a pane. `vqro agent prompt` is
   human-only and its old auto-labelled reply routing is removed. A human-started turn
   is never routed. Remote action still needs the corresponding

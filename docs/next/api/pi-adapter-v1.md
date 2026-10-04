@@ -48,8 +48,8 @@ claim is recorded undelivered rather than injected into a different run; an
 uncertain claim retains CLI recovery information and is not blindly replayed.
 
 Reply recording — exact sender bindings, `reply_to` on every automatic answer,
-no automatic answer to an answer, and no automatic reply for a handoff the SDK
-took while busy — is Tasks consumer policy, documented with Tasks in
+no automatic answer to an answer, and no automatic reply unless the delivered
+input owns the run — is Tasks consumer policy, documented with Tasks in
 [Tasks conventions](task-conventions.md) and
 [`extensions/tasks/README.md`](../../extensions/tasks/README.md).
 The consumer has no broader automatic-reply policy for every claimed message.
