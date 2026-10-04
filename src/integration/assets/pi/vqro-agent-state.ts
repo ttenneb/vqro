@@ -329,4 +329,17 @@ export default function (pi) {
     publishState();
     checkInputBox();
   });
+
+  pi.on("session_shutdown", () => {
+    // Local cleanup only, and no report: a shut-down session must stop
+    // reporting whether the editor has text. The host drops the fact with the
+    // agent process either way.
+    rootSession = false;
+    inputBoxHasText = undefined;
+    editorUi = undefined;
+    if (editorPoll) {
+      clearInterval(editorPoll);
+    }
+    editorPoll = undefined;
+  });
 }
