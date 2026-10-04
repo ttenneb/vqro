@@ -1,4 +1,5 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import net from "node:net";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 
@@ -70,6 +71,56 @@ export default function (pi: ExtensionAPI) {
     if (set.size >= 16 || state.state === "closed") return () => {};
     set.add(listener); return () => { set.delete(listener); };
   }
+
+  // The host refuses to type into an editor that already holds the human's
+  // unsent text, so it needs to know whether this one does. Only the fact is
+  // reported (never the content), once a second, as the same neutral
+  // pane.report_metadata request the other integrations send. Reporting only a
+  // flip is not enough: the host discards a report older than the human's
+  // latest key, and a line typed and deleted between two polls never flips.
+  // The socket write is deliberate: a CLI spawn per pane per second is not
+  // bounded enough to run in every Vqro pane.
+  let editorPoll: ReturnType<typeof setInterval> | undefined;
+  let inputBoxSeq = Date.now() * 1000;
+
+  function readInputBoxHasText(): boolean | undefined {
+    try {
+      const text = latestCtx?.ui?.getEditorText?.();
+      return typeof text === "string" ? text.trim().length > 0 : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  function reportInputBox(): void {
+    const socketPath = process.env.VQRO_SOCKET_PATH;
+    const hasText = readInputBoxHasText();
+    if (!socketPath || hasText === undefined || state.state === "closed") return;
+    inputBoxSeq += 1;
+    const request = JSON.stringify({
+      id: `vqro:pi:input-box:${inputBoxSeq}`,
+      method: "pane.report_metadata",
+      params: { pane_id: pane, source: "vqro:pi", seq: inputBoxSeq, tokens: { input_box: hasText ? "has_text" : "empty" } },
+    });
+    const endpoint = process.platform === "win32" ? `\\\\.\\pipe\\${socketPath}` : socketPath;
+    const socket = net.createConnection(endpoint);
+    socket.on("error", () => socket.destroy());
+    socket.on("connect", () => socket.write(`${request}\n`));
+    socket.on("data", () => socket.destroy());
+    socket.unref?.();
+  }
+
+  function watchInputBox(): void {
+    if (editorPoll) clearInterval(editorPoll);
+    reportInputBox();
+    editorPoll = setInterval(reportInputBox, 1000);
+    editorPoll.unref?.();
+  }
+
+  function stopInputBox(): void {
+    if (editorPoll) clearInterval(editorPoll);
+    editorPoll = undefined;
+  }
   const adapter: AdapterV1 = {
     version: 1, snapshot, current, exec,
     onFact: listener => subscribe(facts, listener),
@@ -100,6 +151,7 @@ export default function (pi: ExtensionAPI) {
   pi.on("session_start", async (_event, ctx) => {
     if (state.state === "closed") return;
     latestCtx = ctx;
+    watchInputBox();
     state.generation += 1; state.run = 0; state.state = "idle";
     state.self = undefined; state.prompt = ""; state.origin = undefined;
     state.final = ""; state.truncated = false; source = "unknown"; state.source = source;
@@ -169,6 +221,7 @@ export default function (pi: ExtensionAPI) {
     await publish("run_settled");
   });
   pi.on("session_shutdown", async () => {
+    stopInputBox();
     state.generation += 1; state.state = "closed";
     unDiscover();
     await publish("session_closed");
