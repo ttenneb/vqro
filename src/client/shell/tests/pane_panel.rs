@@ -363,8 +363,10 @@ fn an_unknown_section_kind_renders_unsupported_and_keeps_its_edge() {
         serde_json::Value::String("timeline".into());
     let mut state = state_with_projection(projection, true);
     let text = text_of(&mut state);
+    // The unknown root is marked in place and keeps its own row: it no longer
+    // replaces the whole stack, so a known sibling in the same pane survives.
     assert!(text.contains("unsupported timeline"), "{text}");
-    assert!(text.contains("unsupported block timeline"), "{text}");
+    assert!(text.contains("Tasks: unsupported timeline"), "{text}");
     let claimed = state
         .hits
         .panes
@@ -717,4 +719,47 @@ fn views_open_by_default_when_an_agent_starts_and_the_user_can_opt_out() {
     off.config.show_panels_on_agent_start = false;
     assert!(!off.apply_show_panels_on_agent_start());
     assert!(off.pane_panel_open.is_empty(), "opting out opens nothing");
+}
+
+#[test]
+fn a_second_root_keeps_its_known_siblings() {
+    // Two roots in one pane, the first of an unknown kind. The known second
+    // root must still draw: the whole stack is not replaced by a placeholder,
+    // and the unknown root gets its own row.
+    let projection = serde_json::json!({
+        "contract":"host.documents.v1", "boot_id":"boot-1", "revision":1,
+        "documents":[{"provider_priority":1,"document":{
+            "contract":"host.view.v1", "namespace":"example.view", "generation":7,"revision":2,
+            "surface":"navigation","target":{"kind":"session"},
+            "items":[
+                {"id":"panel:pane_1:future","role":"section","label":"A future view",
+                 "view":{"pane_id":"pane_1","view_id":"future","kind":"timeline"}},
+                {"id":"panel:pane_1:known","role":"section","label":"Known view",
+                 "detail":"0/1 done","view":{"pane_id":"pane_1","view_id":"tasks","state":"open"}},
+                {"id":"panel:pane_1:known:row","parent_id":"panel:pane_1:known","role":"section",
+                 "label":"A known row","view":{"state":"open"}}
+            ],
+            "actions":[],"required_capabilities":[]
+        }}]
+    });
+    let mut state = panel_state(None, false);
+    let projection: crate::protocol::endpoint::HostDocumentsProjectionV1 =
+        serde_json::from_value(projection).expect("projection");
+    state.set_endpoint_host_documents_for_generation(
+        &ClientEndpointId::Local,
+        1,
+        Box::new(projection),
+    );
+    for view_id in ["future", "tasks"] {
+        state
+            .pane_panel_open
+            .entry("pane_1".into())
+            .or_default()
+            .insert(view_id.into());
+    }
+    let text = text_of(&mut state);
+    assert!(text.contains("A future view"), "the unknown root: {text}");
+    assert!(text.contains("unsupported timeline"), "{text}");
+    assert!(text.contains("Known view"), "the known root: {text}");
+    assert!(text.contains("A known row"), "{text}");
 }

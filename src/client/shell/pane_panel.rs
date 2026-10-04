@@ -137,8 +137,6 @@ pub(super) struct PanePanelRender {
     pub(super) claims: Vec<(String, Rect)>,
     /// For each claimed pane: where the server painted its terminal (the top of
     /// the pane's inner rect) and where it belongs (the rect below the panel).
-    /// The caller projects the cells and the cursor across.
-    pub(super) projected: Vec<(String, Rect, Rect)>,
     /// The panel band each pane reserved, clickable or not: a retained surface
     /// patch must never paint over it.
     pub(super) reserved: Vec<Rect>,
@@ -526,26 +524,6 @@ fn render_pane(
             .unwrap_or(fit)
             .max(headers)
     };
-    if let Some(kind) = views
-        .first()
-        .and_then(|view| view.kind.as_deref())
-        .filter(|kind| !block_kind_supported(Some(kind)))
-    {
-        render_placeholder(
-            buffer,
-            pane,
-            display,
-            &views
-                .iter()
-                .map(|view| view.title.to_owned())
-                .collect::<Vec<_>>(),
-            &format!("unsupported {kind}"),
-            &format!("└─ unsupported block {kind}"),
-            palette,
-            out,
-        );
-        return;
-    }
     let Some(geometry) = geometry(area, panel_height) else {
         return;
     };
@@ -721,6 +699,18 @@ fn render_pane(
     } else {
         out.claims.push((pane.pane_id.clone(), geometry.terminal));
     }
+    // The panel is an overlay, not a resize: the terminal keeps its own rows and
+    // its newest lines stay visible below the panel. The band the panel covers
+    // is reported so a retained patch can never repaint over it.
+    out.reserved.push(Rect::new(
+        geometry.panel.x,
+        geometry.panel.y,
+        geometry.panel.width,
+        geometry
+            .panel
+            .height
+            .saturating_add(geometry.divider.height),
+    ));
     out.drawn
         .push((pane.pane_id.clone(), geometry.panel.height));
 }
@@ -814,6 +804,18 @@ fn render_placeholder(
     } else {
         out.claims.push((pane.pane_id.clone(), geometry.terminal));
     }
+    // The panel is an overlay, not a resize: the terminal keeps its own rows and
+    // its newest lines stay visible below the panel. The band the panel covers
+    // is reported so a retained patch can never repaint over it.
+    out.reserved.push(Rect::new(
+        geometry.panel.x,
+        geometry.panel.y,
+        geometry.panel.width,
+        geometry
+            .panel
+            .height
+            .saturating_add(geometry.divider.height),
+    ));
     out.drawn
         .push((pane.pane_id.clone(), geometry.panel.height));
 }
@@ -1323,8 +1325,8 @@ impl ClientShellState {
         }
     }
 
-    /// Rows a pane's terminal was moved down by its panel, for requests the
-    /// server measures against the pane's inner rect.
+    /// Rows a pane's terminal is covered by its panel, for requests the server
+    /// measures against the pane's own inner rect.
     pub(super) fn panel_row_offset(&self, pane_id: &str) -> u16 {
         self.panel_input_offsets.get(pane_id).copied().unwrap_or(0)
     }

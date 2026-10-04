@@ -627,7 +627,6 @@ impl ClientShellState {
         let mut panel_render = pane_panel::PanePanelRender {
             hits: Vec::new(),
             claims: Vec::new(),
-            projected: Vec::new(),
             reserved: Vec::new(),
             drawn: Vec::new(),
         };
@@ -652,53 +651,6 @@ impl ClientShellState {
         }
         self.hits.pane_panels = panel_render.hits;
         self.pane_panel_areas = panel_render.reserved;
-        // The server paints a pane's terminal from the top of its inner rect.
-        // With a panel open the terminal belongs below the panel, so its rows -
-        // and its cursor - move there; the panel then covers the vacated rows
-        // instead of hiding the terminal's oldest lines.
-        for (pane_id, from, to) in &panel_render.projected {
-            let from = from.intersection(composed.area);
-            let to = to.intersection(composed.area);
-            let rows = from.height.min(to.height);
-            let width = from.width.min(to.width);
-            if from == to || rows == 0 || width == 0 {
-                continue;
-            }
-            for offset in (0..rows).rev() {
-                for column in 0..width {
-                    let source = composed[(from.x + column, from.y + offset)].clone();
-                    composed[(to.x + column, to.y + offset)] = source;
-                }
-            }
-            // The vacated rows and any leftover cell are cleared; the panel
-            // paints over the top band again anyway.
-            for row in from.y..from.bottom().min(to.y) {
-                for column in from.x..from.right() {
-                    composed[(column, row)].reset();
-                }
-            }
-            for row in to.bottom()..from.bottom() {
-                for column in from.x..from.right() {
-                    composed[(column, row)].reset();
-                }
-            }
-            if let Some(cursor) = frame.cursor.as_mut() {
-                if cursor.x >= from.x
-                    && cursor.x < from.right()
-                    && cursor.y >= from.y
-                    && cursor.y < from.bottom()
-                {
-                    cursor.y = to.y.saturating_add(cursor.y.saturating_sub(from.y));
-                }
-            }
-            let panel_offset = to.y.saturating_sub(from.y);
-            if panel_offset > 0 {
-                self.panel_input_offsets
-                    .insert(pane_id.clone(), panel_offset);
-            } else {
-                self.panel_input_offsets.remove(pane_id);
-            }
-        }
         // Opening a panel is when it sizes to its content. From then on the
         // height is fixed: a live update scrolls instead of resizing the PTY,
         // and the user's own dragged height always wins. Every pane that drew a
@@ -780,6 +732,16 @@ impl ClientShellState {
                 .iter_mut()
                 .find(|hit| &hit.pane_id == pane_id)
             {
+                // The panel overlays the terminal's oldest rows instead of
+                // resizing the PTY, so the visible top line is not the grid's
+                // first one: input and selection rows go back by the covered
+                // band. The hit rect becomes the visible terminal.
+                let covered = terminal.y.saturating_sub(hit.inner_rect.y);
+                if covered > 0 {
+                    self.panel_input_offsets.insert(pane_id.clone(), covered);
+                } else {
+                    self.panel_input_offsets.remove(pane_id);
+                }
                 hit.inner_rect = *terminal;
                 hit.scrollbar_rect = None;
             }
