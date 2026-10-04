@@ -80,7 +80,8 @@ export default function (pi: ExtensionAPI) {
   // changed since the last poll (carrying only the empty/has_text fact, never
   // the content), right after a keystroke, and otherwise on a slow refresh. An
   // idle pane therefore costs one small request per 30s, and a pane being typed
-  // in at most one per second. The refresh only bounds the case a text change
+  // in at most one per second, with the latest observation kept until a request
+  // can go out. The refresh only bounds the case a text change
   // cannot see: keys that leave the text alone, which the host treats as no
   // draft at all while an editor report is in hand. Each request is bounded by a
   // timeout and at most one is in flight, so an endpoint that never answers
@@ -91,10 +92,12 @@ export default function (pi: ExtensionAPI) {
   const INPUT_BOX_REFRESH_MS = 30_000;
   const INPUT_BOX_REQUEST_TIMEOUT_MS = 1500;
   const INPUT_BOX_SETTLE_MS = 400;
+  const INPUT_BOX_MIN_INTERVAL_MS = 1000;
   let editorPoll: ReturnType<typeof setInterval> | undefined;
   let stopEditorInput: (() => void) | undefined;
   let cancelInputBoxRequest: (() => void) | undefined;
   let settleTimer: ReturnType<typeof setTimeout> | undefined;
+  let paceTimer: ReturnType<typeof setTimeout> | undefined;
   let inputBoxSeq = Date.now() * 1000;
   let lastSentInputBox: { text: string; at: number } | undefined;
   let pendingInputBox: { text: string } | undefined;
@@ -135,11 +138,22 @@ export default function (pi: ExtensionAPI) {
     socket.unref?.();
   }
 
-  /** Sends the retained observation, and only then caches it as sent. */
+  /** Sends the retained observation, and only then caches it as sent. Sends are
+   *  paced: typing keeps the latest observation instead of one request per key. */
   function sendPendingInputBox(): void {
     if (cancelInputBoxRequest || !pendingInputBox) return;
     const socketPath = process.env.VQRO_SOCKET_PATH;
     if (!socketPath || state.state === "closed") return;
+    const since = Date.now() - (lastSentInputBox?.at ?? 0);
+    if (lastSentInputBox && since < INPUT_BOX_MIN_INTERVAL_MS) {
+      if (paceTimer) clearTimeout(paceTimer);
+      paceTimer = setTimeout(() => {
+        paceTimer = undefined;
+        sendPendingInputBox();
+      }, INPUT_BOX_MIN_INTERVAL_MS - since);
+      paceTimer.unref?.();
+      return;
+    }
     const pending = pendingInputBox;
     pendingInputBox = undefined;
     dirty = false;
@@ -200,6 +214,8 @@ export default function (pi: ExtensionAPI) {
     editorPoll = undefined;
     if (settleTimer) clearTimeout(settleTimer);
     settleTimer = undefined;
+    if (paceTimer) clearTimeout(paceTimer);
+    paceTimer = undefined;
     stopEditorInput?.();
     stopEditorInput = undefined;
     cancelInputBoxRequest?.();

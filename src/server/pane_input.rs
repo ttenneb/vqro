@@ -64,7 +64,13 @@ pub(super) fn human_input_unsent_text(
             ClientPaneInputEvent::Mouse { .. } => None,
         };
         if event_effect.is_some() {
-            effect = event_effect;
+            effect = match event_effect {
+                // A cursor key or an unproven event changes nothing: a batch that
+                // typed or submitted before it keeps that effect, or a trailing
+                // Left would hide the text the same batch wrote.
+                Some(ForwardedInputEffect::NoText) => effect.or(Some(ForwardedInputEffect::NoText)),
+                other => other,
+            };
         }
     }
     effect
@@ -515,6 +521,58 @@ mod tests {
             ]),
             Some(Text)
         );
+
+        // A no-text key in the same batch must not hide what the batch wrote:
+        // the client can deliver a paste or a typed word and a cursor key
+        // together, and the text is still in the editor.
+        let mixed = [
+            (
+                vec![
+                    ClientPaneInputEvent::TextCommit("human draft".into()),
+                    key(KeyCode::Left, KeyModifiers::NONE),
+                ],
+                Some(Text),
+            ),
+            (
+                vec![
+                    ClientPaneInputEvent::TextCommit("human draft".into()),
+                    key(KeyCode::Left, KeyModifiers::NONE),
+                    key(KeyCode::Enter, KeyModifiers::NONE),
+                ],
+                Some(Submitted),
+            ),
+            (
+                vec![
+                    key(KeyCode::Enter, KeyModifiers::NONE),
+                    key(KeyCode::Char('h'), KeyModifiers::NONE),
+                ],
+                Some(Text),
+            ),
+            (
+                vec![
+                    ClientPaneInputEvent::Paste("pasted".into()),
+                    key(KeyCode::Home, KeyModifiers::NONE),
+                ],
+                Some(Text),
+            ),
+            (
+                vec![
+                    released(KeyCode::Char('h')),
+                    key(KeyCode::Left, KeyModifiers::NONE),
+                ],
+                Some(NoText),
+            ),
+            (
+                vec![
+                    key(KeyCode::Enter, KeyModifiers::NONE),
+                    key(KeyCode::Left, KeyModifiers::NONE),
+                ],
+                Some(Submitted),
+            ),
+        ];
+        for (events, expected) in mixed {
+            assert_eq!(human_input_unsent_text(&events), expected, "{events:?}");
+        }
 
         // Attached clients forward the outer terminal's bytes, so the last
         // byte decides the same way.
