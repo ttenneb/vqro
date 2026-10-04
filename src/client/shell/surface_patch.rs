@@ -75,15 +75,12 @@ impl PanelBands {
                     && row.y < rect.y.saturating_add(rect.height)
             })
             .map(|(rect, band)| {
-                // The grid is the rect below the panel: the pane's own last `band`
-                // rows of raw space have no composed row, exactly as the full
-                // compose's projection stops after the destination's rows.
+                // The row this returns is already band-shifted, so the bound is the
+                // pane's composed bottom: the grid occupies its last rows, and a row
+                // that would land past that has no destination.
                 (
                     *band,
-                    area.y
-                        .saturating_add(rect.y)
-                        .saturating_add(rect.height)
-                        .saturating_sub(*band),
+                    area.y.saturating_add(rect.y).saturating_add(rect.height),
                 )
             })
     }
