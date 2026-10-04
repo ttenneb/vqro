@@ -1,0 +1,273 @@
+//! Panel rendering: what Vqro draws from a published view, with no terminal.
+use super::*;
+
+fn view_projection(agent_state: Option<AgentStatus>) -> serde_json::Value {
+    let mut agents = Vec::new();
+    if let Some(status) = agent_state {
+        agents.push(serde_json::json!({
+            "pane_id": "pane_1", "workspace_id": "ws_1", "tab_id": "tab_1",
+            "name": Some("pilot-owner"), "display_agent": serde_json::Value::Null, "agent": Some("pi"),
+            "title": serde_json::Value::Null, "terminal_title": serde_json::Value::Null, "terminal_title_stripped": serde_json::Value::Null,
+            "agent_status": status, "state_change_seq": 1,
+            "state_labels": Vec::<(String, String)>::new(),
+            "tokens": Vec::<(String, String)>::new(), "focused": true
+        }));
+    }
+    serde_json::json!({
+        "contract":"host.documents.v1", "boot_id":"boot-1", "revision":1,
+        "documents":[{"provider_priority":1,"document":{
+            "contract":"host.view.v1", "namespace":"example.view", "generation":7,"revision":2,
+            "surface":"navigation","target":{"kind":"session"},
+            "items":[
+                {"id":"panel:pane_1:tasks","role":"section","label":"Tasks",
+                 "detail":"0/3 done · 1 active · 1 blocked","flags":{"expanded":true},
+                 "view":{"pane_id":"pane_1","view_id":"tasks","state":"in_progress"}},
+                {"id":"panel:pane_1:root","parent_id":"panel:pane_1:tasks","role":"section",
+                 "label":"Panel panels layout","terminal":{"terminal_id":"term_1",
+                   "placement":{"pane_id":"pane_1","workspace_id":"ws_1","tab_id":"tab_1"}},
+                 "view":{"state":"in_progress","since":1700000000}},
+                {"id":"panel:pane_1:child","parent_id":"panel:pane_1:root","role":"section",
+                 "label":"Spike fix","terminal":{"terminal_id":"term_1",
+                   "placement":{"pane_id":"pane_1","workspace_id":"ws_1","tab_id":"tab_1"}},
+                 "view":{"state":"blocked","waiting":"them","action":"unblock",
+                   "since":1700000000}},
+                {"id":"panel:pane_1:subtask","parent_id":"panel:pane_1:child","role":"section",
+                 "label":"Nested check row",
+                 "view":{"state":"open","waiting":"you","action":"report","since":1700000000}},
+                {"id":"panel:pane_2:tasks","role":"section","label":"Other pane",
+                 "view":{"pane_id":"pane_2","view_id":"tasks"}}
+            ],
+            "actions":[],"required_capabilities":[]
+        }}]
+    })
+}
+
+/// One pane big enough to hold a panel, unlike the shared 4x2 fixture.
+fn panel_surface() -> PaneSurfaceFrame {
+    let surface_buffer = Buffer::with_lines((0..28).map(|_| "PANE".repeat(25)).collect::<Vec<_>>());
+    PaneSurfaceFrame {
+        boot_id: "boot-1".into(),
+        projection_revision: 1,
+        surface_revision: 1,
+        frame: FrameData::from_ratatui_buffer_with_hyperlinks(&surface_buffer, None, &[]),
+        panes: vec![PaneSurfacePane {
+            pane_id: "pane_1".into(),
+            content_revision: 0,
+            rect: SurfaceRect {
+                x: 0,
+                y: 0,
+                width: 100,
+                height: 28,
+            },
+            inner_rect: SurfaceRect {
+                x: 1,
+                y: 1,
+                width: 98,
+                height: 26,
+            },
+            scrollbar_rect: None,
+            scroll: None,
+            focused: true,
+            mouse_reporting: false,
+            sgr_pixel_mouse: false,
+            alternate_screen_active: false,
+            pixel_width: 0,
+            pixel_height: 0,
+        }],
+        collections: Vec::new(),
+        splits: Vec::new(),
+        popup: None,
+        graphics: crate::protocol::SurfaceGraphicsScene::default(),
+    }
+}
+
+fn panel_state(agent_state: Option<AgentStatus>, open: bool) -> ClientShellState {
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    state.set_endpoint_status(&ClientEndpointId::Local, ClientEndpointStatus::Online);
+    state.set_endpoint_capabilities_for(
+        &ClientEndpointId::Local,
+        vec![
+            crate::protocol::endpoint::PANE_VIEWPORT_CAPABILITY.into(),
+            crate::protocol::endpoint::PANE_PANELS_CAPABILITY.into(),
+        ],
+    );
+    let mut snapshot = snapshot();
+    if let Some(status) = agent_state {
+        snapshot.agents = serde_json::from_value(serde_json::json!([{
+            "pane_id":"pane_1","workspace_id":"ws_1","tab_id":"tab_1",
+            "name": Some("pilot-owner"), "display_agent": serde_json::Value::Null, "agent": Some("pi"),
+            "title": serde_json::Value::Null, "terminal_title": serde_json::Value::Null, "terminal_title_stripped": serde_json::Value::Null,
+            "agent_status": status, "state_change_seq": 1,
+            "state_labels": [], "tokens": [], "focused": true
+        }]))
+        .expect("agents");
+    }
+    state.set_endpoint_snapshot_for_generation(&ClientEndpointId::Local, 1, Box::new(snapshot));
+    state.set_pane_surface(panel_surface());
+    let projection: crate::protocol::endpoint::HostDocumentsProjectionV1 =
+        serde_json::from_value(view_projection(agent_state)).expect("projection");
+    state.set_endpoint_host_documents_for_generation(
+        &ClientEndpointId::Local,
+        1,
+        Box::new(projection),
+    );
+    if open {
+        state
+            .pane_panel_open
+            .entry("pane_1".into())
+            .or_default()
+            .insert("tasks".into());
+    }
+    state
+}
+
+fn text_of(state: &mut ClientShellState) -> String {
+    let frame = state.compose(106, 30).expect("frame");
+    frame
+        .cells
+        .iter()
+        .map(|cell| cell.symbol.as_str())
+        .collect::<String>()
+}
+
+#[test]
+fn a_view_draws_its_header_rows_glyphs_and_live_link() {
+    let mut state = panel_state(Some(AgentStatus::Working), true);
+    let text = text_of(&mut state);
+    assert!(text.contains("Tasks"), "{text}");
+    assert!(text.contains("⊟"), "header mark: {text}");
+    assert!(text.contains("0/3 done · 1 active · 1 blocked"), "{text}");
+    assert!(text.contains("Panel panels layout"), "{text}");
+    assert!(text.contains("Spike fix"), "{text}");
+    // Pi-style tree lanes: every level indents, and the lanes stay blank
+    // because each row here is its parent's last child.
+    assert!(text.contains("└─ ▾ ◐"), "{text}");
+    assert!(text.contains("   └─ ▾ ⊘"), "{text}");
+    assert!(text.contains("      └─   ○"), "{text}");
+    assert!(text.contains('◐'), "{text}");
+    assert!(text.contains('⊘'), "{text}");
+    // The plain waiting sentence, with the live agent name Vqro joined.
+    assert!(text.contains("waiting on you"), "{text}");
+    assert!(text.contains("waiting on pilot-owner: unblock"), "{text}");
+    // A row with no waiting sentence still names its live assignee.
+    assert!(text.contains("● pilot-owner · "), "{text}");
+    // A view published for another pane never draws here.
+    assert!(!text.contains("Other pane"), "{text}");
+}
+
+#[test]
+fn an_open_panel_claims_the_terminal_and_a_closed_one_claims_nothing() {
+    let mut open = panel_state(None, true);
+    let _ = text_of(&mut open);
+    assert!(
+        !open.hits.pane_panels.is_empty(),
+        "the panel registers its cells"
+    );
+    assert!(
+        open.hits
+            .panes
+            .iter()
+            .any(|pane| pane.pane_id == "pane_1" && pane.inner_rect.y > 1),
+        "the terminal starts below the panel"
+    );
+    let mut closed = panel_state(None, false);
+    let text = text_of(&mut closed);
+    assert!(!text.contains("⊟"), "no panel is drawn: {text}");
+    // With views available and nothing open, the pane shows its own badge.
+    assert!(text.contains('⚑'), "badge: {text}");
+}
+
+#[test]
+fn the_header_collapses_the_panel_and_returns_the_rows() {
+    let mut state = panel_state(None, true);
+    let expanded = text_of(&mut state);
+    assert!(expanded.contains("Panel panels layout"));
+    // The header line is the panel's own toggle.
+    let header = state
+        .hits
+        .pane_panels
+        .iter()
+        .find(|hit| {
+            matches!(
+                hit.action,
+                super::super::pane_panel::PanePanelAction::ToggleView(_)
+            )
+        })
+        .cloned()
+        .expect("header hit");
+    state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: header.rect.x,
+        row: header.rect.y,
+        modifiers: KeyModifiers::empty(),
+    })]);
+    let collapsed = text_of(&mut state);
+    assert!(collapsed.contains('▸'), "collapsed marker: {collapsed}");
+    assert!(collapsed.contains("Tasks"), "{collapsed}");
+    assert!(
+        !collapsed.contains("Panel panels layout"),
+        "rows are hidden: {collapsed}"
+    );
+    // The terminal got every row back.
+    let pane = state
+        .hits
+        .panes
+        .iter()
+        .find(|pane| pane.pane_id == "pane_1")
+        .expect("pane");
+    // Tab bar, header line, divider: the terminal starts under those.
+    assert_eq!(
+        pane.inner_rect.y, 4,
+        "the terminal sits right under the header"
+    );
+}
+
+#[test]
+fn a_row_marker_collapses_only_that_rows_children() {
+    let mut state = panel_state(None, true);
+    let _ = text_of(&mut state);
+    let marker = state
+        .hits
+        .pane_panels
+        .iter()
+        .find(|hit| {
+            matches!(&hit.action, super::super::pane_panel::PanePanelAction::ToggleRow(id) if id == "panel:pane_1:root")
+        })
+        .cloned()
+        .expect("row marker");
+    state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: marker.rect.x,
+        row: marker.rect.y,
+        modifiers: KeyModifiers::empty(),
+    })]);
+    let text = text_of(&mut state);
+    assert!(text.contains("Panel panels layout"), "{text}");
+    assert!(!text.contains("Spike fix"), "child hidden: {text}");
+    assert!(text.contains('▸'), "{text}");
+}
+
+#[test]
+fn an_empty_slice_says_so_instead_of_drawing_nothing() {
+    let mut state = panel_state(None, true);
+    // The same pane, with the row items removed from the document.
+    let projection: crate::protocol::endpoint::HostDocumentsProjectionV1 =
+        serde_json::from_value(serde_json::json!({
+            "contract":"host.documents.v1", "boot_id":"boot-1", "revision":1,
+            "documents":[{"provider_priority":1,"document":{
+                "contract":"host.view.v1", "namespace":"example.view", "generation":7,"revision":2,
+                "surface":"navigation","target":{"kind":"session"},
+                "items":[{"id":"panel:pane_1:tasks","role":"section","label":"Tasks","detail":"settled",
+                          "view":{"pane_id":"pane_1","view_id":"tasks"}}],
+                "actions":[],"required_capabilities":[]
+            }}]
+        }))
+        .expect("projection");
+    state.set_endpoint_host_documents_for_generation(
+        &ClientEndpointId::Local,
+        1,
+        Box::new(projection),
+    );
+    let text = text_of(&mut state);
+    assert!(text.contains("nothing to show"), "{text}");
+}

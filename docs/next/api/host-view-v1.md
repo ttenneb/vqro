@@ -1,0 +1,128 @@
+# `host.view.v1`: the extension view format
+
+Status: shipped in v1 (implementation mandate:
+[extension UI framework](../architecture/extension-ui-framework.md)).
+
+A **view** is what an extension publishes for Vqro to draw. It travels the same
+live path as a host document: a trusted service declaring `provides =
+["host_document"]` returns it from `host.document.render` for one scope, the
+host validates and caches it, and the client receives it in the
+`host.documents.v1` projection. `host.document.v1`/`v2` and the generation-1
+endpoint codecs are unchanged and stay readable.
+
+## Envelope
+
+```json
+{
+  "contract": "host.view.v1",
+  "namespace": "vqro.tasks",
+  "generation": 7,
+  "revision": 12,
+  "surface": "navigation",
+  "target": { "kind": "session" },
+  "items": [ ... ],
+  "actions": [ ... ],
+  "required_capabilities": []
+}
+```
+
+`generation`, `revision`, `surface`, `target`, `actions` and
+`required_capabilities` mean what they mean in `host.document.v1`: a new
+generation replaces the old one, actions are bounded and either routed back to
+the publishing extension or run as a capability-gated host effect, and the
+target names the scope the view belongs to.
+
+**A view that changes must move `revision`.** Vqro re-fetches a provider's view
+only when the version the provider reports for an action changes, so anything
+that changes what a panel shows (a message, a task, an acknowledgement) must
+move it too. An idempotent retry must leave it unchanged.
+
+## Items
+
+An item is a tree node. `id` is unique in the document; `parent_id` nests it
+under another item (at most 8 levels); `label` is one line, truncated by Vqro
+with an ellipsis; `detail` carries a short second line; `terminal` names a
+terminal and Vqro joins its live name and agent state; `action_ids` reference
+the document's actions; `flags` control expansion, selection and attention.
+
+The `view` block is what makes an item drawable, and exists **only** under this
+contract:
+
+```json
+"view": {
+  "pane_id": "w2:p2",        // panel root only: the pane this view fills
+  "view_id": "tasks",        // panel root only: the user names this to `vqro pane panel`
+  "state": "blocked",        // open | in_progress | blocked | reported | done
+  "tone": "danger",          // optional override: default | muted | accent | success | warning | danger
+  "action": "unblock",       // one word Vqro composes the waiting sentence around
+  "waiting": "them",         // you | them: whose move the row waits for
+  "count": 2,                // optional count in a section header
+  "since": 1791072060        // Unix epoch seconds; Vqro draws the age
+}
+```
+
+- A **panel root** (no parent) names both `pane_id` and `view_id` and becomes a
+  section in that pane's panel. `state` on a root is the panel's aggregate.
+- Any other item carrying a `view` block must have a `parent_id`, or the view is
+  rejected: a block that belongs to nothing would silently never draw.
+- Vqro draws the fixed Pi-style glyphs: `○` open, `◐` in progress, `⊘` blocked,
+  `◎` reported, `●` done, toned with the tone set above. Extensions never send
+  glyphs, colours or sizes.
+- Row wording is Vqro's: the extension supplies one action word and whose move
+  it is, and Vqro renders `waiting on you: report · 3m` or
+  `waiting on panel-b: unblock · 3m`, joining the live name from its own facts.
+
+## Actions
+
+An action is a button (`operation` = `extension` or a capability-gated `host`
+effect), with an optional `view` block for the way the user answers it:
+
+```json
+{ "id": "answer", "label": "Answer", "operation": {"kind": "extension", "name": "decision.answer"},
+  "subject_id": "panel:w2:p2:task:1",
+  "view": { "choice": { "prompt": "Keep it?", "options": [{"key":"keep","label":"Keep"}],
+                        "default_key": "keep" } } }
+```
+
+- `choice` needs two to four options with unique keys; `default_key` must be one
+  of them.
+- `input` is a one-line text field (the rename dialog's field).
+- A choice and an input are mutually exclusive.
+- Every action reference must name an action in the same document, and an
+  action's `subject_id` must name the item it belongs to; Vqro drops a click
+  whose item no longer exists.
+
+## What Vqro owns
+
+- **Placement**: the pane's top edge slot, full pane width, above the terminal.
+  Sections stack in it in document order.
+- **Height**: it fits the content when it opens or when the user expands or
+  collapses a section, capped at about a third of the pane; past that it
+  scrolls. A live update never resizes the terminal, and a drag on the edge
+  wins and is remembered per client.
+- **Display state** (per client, persisted): which views are open, the height,
+  collapsed sections and collapsed rows. Extensions never see it and cannot
+  open themselves.
+- **States**: loading, empty (`└─ nothing to show`), unavailable and
+  unsupported are drawn by Vqro, never by an extension.
+- **Interaction**: the header collapses its section, a row's marker collapses
+  its children, clicking a row's terminal link focuses that pane's terminal,
+  and the wheel scrolls the slice.
+
+## User-facing entry points
+
+- `vqro pane panel show|hide|toggle <pane> [<view>]` asks the attached clients
+  to open, close or toggle a view. An older client ignores the request and keeps
+  its own display state.
+- A badge on the pane border, the tab bar and the sidebar row opens the panel
+  for the panes it covers. A pane with views and nothing open draws its own
+  badge.
+- `ui.show_panels_on_agent_start` (off by default) opens a pane's first view
+  when an agent starts there. Only a user action or a user-enabled rule opens a
+  view.
+
+## Bounds
+
+512 items, 8 levels, 4096 characters of text, 256 actions, 24 characters of
+action text, 2–4 choice options. Unknown fields are ignored; an unknown future
+block must degrade to "unsupported" rather than reject the view.

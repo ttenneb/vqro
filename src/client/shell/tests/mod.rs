@@ -259,6 +259,7 @@ mod keybindings_settings;
 mod link_hover;
 mod mobile;
 mod mouse_selection;
+mod pane_panel;
 mod popup_focus_projection;
 mod recovery;
 mod startup_overlays;

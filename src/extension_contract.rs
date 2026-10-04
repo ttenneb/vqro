@@ -1451,6 +1451,179 @@ mod tests {
             .contains("too many workspaces"));
     }
 
+    fn view_item(id: &str, parent: Option<&str>) -> HostDocumentItem {
+        HostDocumentItem {
+            id: id.into(),
+            parent_id: parent.map(str::to_owned),
+            role: HostItemRole::Section,
+            label: "row".into(),
+            detail: None,
+            terminal: None,
+            action_ids: Vec::new(),
+            flags: HostDocumentItemFlags::default(),
+            view: Some(HostViewItem {
+                pane_id: parent.is_none().then(|| "w1:p2".to_owned()),
+                view_id: parent.is_none().then(|| "tasks".to_owned()),
+                state: parent.is_some().then_some(HostViewState::Blocked),
+                tone: None,
+                action: parent.is_some().then(|| "unblock".to_owned()),
+                waiting: parent.is_some().then_some(HostViewWaiting::Them),
+                count: parent.is_none().then_some(2),
+                since: parent.is_some().then_some(1_700_000_000),
+            }),
+        }
+    }
+
+    fn view_document() -> HostDocumentV1 {
+        HostDocumentV1 {
+            contract: HOST_VIEW_CONTRACT_V1.into(),
+            namespace: "example.view".into(),
+            generation: 7,
+            revision: 2,
+            surface: HostSurface::Navigation,
+            target: HostTarget::Session,
+            items: vec![
+                view_item("panel:1", None),
+                view_item("panel:1:row", Some("panel:1")),
+            ],
+            actions: Vec::new(),
+            required_capabilities: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn view_contract_accepts_every_v1_block() {
+        let document = view_document();
+        document.validate().unwrap();
+        // A legacy document may not smuggle view blocks in.
+        let mut legacy = document.clone();
+        legacy.contract = HOST_DOCUMENT_CONTRACT_V1.into();
+        assert!(legacy.validate().unwrap_err().0.contains("view contract"));
+    }
+
+    #[test]
+    fn view_contract_needs_a_panel_root_or_a_parent_for_a_view_block() {
+        let mut document = view_document();
+        document.items[1].parent_id = None;
+        document.items[1].view.as_mut().unwrap().pane_id = None;
+        document.items[1].view.as_mut().unwrap().view_id = None;
+        assert!(document
+            .validate()
+            .unwrap_err()
+            .0
+            .contains("panel root or a parent"));
+        // A panel root names both its pane and its view.
+        let mut document = view_document();
+        document.items[0].view.as_mut().unwrap().view_id = None;
+        assert!(document.validate().unwrap_err().0.contains("both its pane"));
+    }
+
+    #[test]
+    fn view_choice_needs_two_to_four_unique_options() {
+        let mut document = view_document();
+        document.actions.push(HostDocumentAction {
+            id: "answer".into(),
+            label: "Answer".into(),
+            operation: HostDocumentOperation::Extension {
+                name: "decision.answer".into(),
+            },
+            subject_id: Some("panel:1:row".into()),
+            confirmation: HostConfirmation::None,
+            view: Some(HostViewAction {
+                choice: Some(HostViewChoice {
+                    prompt: Some("Keep it?".into()),
+                    options: vec![HostViewChoiceOption {
+                        key: "keep".into(),
+                        label: "Keep".into(),
+                    }],
+                    default_key: Some("keep".into()),
+                }),
+                input: None,
+            }),
+        });
+        document.items[1].action_ids.push("answer".into());
+        assert!(document
+            .validate()
+            .unwrap_err()
+            .0
+            .contains("two to four options"));
+        let action = document.actions.last_mut().unwrap();
+        let choice = action.view.as_mut().unwrap().choice.as_mut().unwrap();
+        choice.options.push(HostViewChoiceOption {
+            key: "change".into(),
+            label: "Change".into(),
+        });
+        document.validate().unwrap();
+        // A default must be one of the options, and a choice cannot also type.
+        let choice = document
+            .actions
+            .last_mut()
+            .unwrap()
+            .view
+            .as_mut()
+            .unwrap()
+            .choice
+            .as_mut()
+            .unwrap();
+        {
+            let choice = document
+                .actions
+                .last_mut()
+                .unwrap()
+                .view
+                .as_mut()
+                .unwrap()
+                .choice
+                .as_mut()
+                .unwrap();
+            choice.default_key = Some("later".into());
+        }
+        assert!(document
+            .validate()
+            .unwrap_err()
+            .0
+            .contains("must be one of its options"));
+        document
+            .actions
+            .last_mut()
+            .unwrap()
+            .view
+            .as_mut()
+            .unwrap()
+            .choice
+            .as_mut()
+            .unwrap()
+            .default_key = None;
+        document
+            .actions
+            .last_mut()
+            .unwrap()
+            .view
+            .as_mut()
+            .unwrap()
+            .input = Some(HostViewInput {
+            prompt: None,
+            placeholder: None,
+        });
+        assert!(document
+            .validate()
+            .unwrap_err()
+            .0
+            .contains("cannot both choose and type"));
+    }
+
+    #[test]
+    fn view_action_text_is_bounded() {
+        let mut document = view_document();
+        document.items[1].view.as_mut().unwrap().action =
+            Some("x".repeat(MAX_VIEW_ACTION_CHARS + 1));
+        assert!(document
+            .validate()
+            .unwrap_err()
+            .0
+            .contains("invalid view action text"));
+    }
+
     fn document() -> HostDocumentV1 {
         HostDocumentV1 {
             contract: HOST_DOCUMENT_CONTRACT_V1.into(),

@@ -777,14 +777,22 @@ fn draw_row(
             .unwrap_or(agent.pane_id.as_str())
     });
     let dim = Style::default().fg(palette.overlay0);
-    let mut tail = waiting_text(row, name);
-    if let Some(age) = row_view.and_then(|view| view.since).and_then(age_label) {
-        if tail.is_empty() {
-            tail = age;
-        } else {
-            tail = format!("{tail} · {age}");
+    // The quiet end of the row: who is on the hook, what they are waiting for
+    // and how long it has been that way. The name appears once, joined live.
+    let sentence = waiting_text(row, name);
+    let mut parts = Vec::new();
+    if let Some(name) = name {
+        if !sentence.contains(name) {
+            parts.push(name.to_owned());
         }
     }
+    if !sentence.is_empty() {
+        parts.push(sentence);
+    }
+    if let Some(age) = row_view.and_then(|view| view.since).and_then(age_label) {
+        parts.push(age);
+    }
+    let tail = parts.join(" · ");
     let tail_width = display_width(&tail);
     let dot_width = if live.is_some() && !tail.is_empty() {
         2
