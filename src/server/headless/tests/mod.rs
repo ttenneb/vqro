@@ -2183,6 +2183,58 @@ async fn repeated_layout_action_reapplies_controller_geometry() {
 }
 
 #[tokio::test]
+async fn a_disconnected_client_stops_owning_its_panel_claim() {
+    // A client that goes away must stop shrinking the pane's terminal: the claim
+    // map is host session state and every layout pass consults it.
+    let mut server = test_headless_server();
+    let mut workspace = crate::workspace::Workspace::test_new("pane-panel-claims");
+    let pane = workspace.tabs[0].root_pane;
+    workspace.insert_test_runtime(
+        pane,
+        crate::terminal::TerminalRuntime::test_with_screen_bytes(80, 24, b"ready"),
+    );
+    server.app.state.workspaces = vec![workspace];
+    server.app.state.active = Some(0);
+    server.app.state.selected = 0;
+    server.app.state.mode = crate::app::Mode::Terminal;
+
+    let (control, _) = connect_test_shell(&mut server, 165, 100, 30);
+    let _ = control.recv().expect("snapshot");
+    server
+        .clients
+        .get_mut(&165)
+        .unwrap()
+        .shell_pane_panels_enabled = true;
+    let boot_id = server.client_shell_boot_id.clone();
+    let public_pane = server.app.public_pane_id(0, pane).unwrap();
+    let revision = server.clients[&165].shell_projection_revision;
+    assert!(
+        server.handle_server_event(ServerEvent::ClientShellPanePanels {
+            client_id: 165,
+            panels: crate::protocol::endpoint::ClientPanePanels {
+                boot_id,
+                projection_revision: revision,
+                claims: vec![crate::protocol::endpoint::ClientPanePanelClaim {
+                    pane_id: public_pane,
+                    size: crate::protocol::ClientSurfaceSize { cols: 60, rows: 12 },
+                }],
+            },
+        })
+    );
+    assert!(
+        server.app.state.pane_panel_claims.contains_key(&pane),
+        "the claim is host session state"
+    );
+
+    assert!(server.handle_server_event(ServerEvent::ClientDisconnected { client_id: 165 }));
+    assert!(
+        !server.app.state.pane_panel_claims.contains_key(&pane),
+        "a disconnected client's claim must not keep shrinking the pane"
+    );
+    shutdown_test_runtimes(&mut server);
+}
+
+#[tokio::test]
 async fn two_clients_claiming_one_pane_get_the_smallest_viewport_regardless_of_order() {
     let mut server = test_headless_server();
     let mut workspace = crate::workspace::Workspace::test_new("pane-panels");

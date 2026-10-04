@@ -31,17 +31,20 @@ fn apply_row(row: &crate::protocol::PaneSurfacePatchRow, frame: &mut FrameData) 
 }
 
 /// Rows a panel moved a pane's grid down by, by pane id: the band it reserved at
-/// the pane's top. Patch rows are written in the pane's own coordinates, so a row
-/// for a panelled pane belongs that many rows lower.
+/// the pane's top. The raw surface cache is the host's own view of the pane and
+/// has no band, so this applies to the *composed* rows only: a row the host wrote
+/// in the pane's coordinates belongs that many rows lower on screen.
 type PanelShifts = std::collections::HashMap<String, u16>;
 
-fn shifted_row(
+/// The band for a raw surface row: the pane it belongs to has one when a client
+/// claimed it for an open panel.
+fn row_band(
     row: &crate::protocol::PaneSurfacePatchRow,
     panes: &[crate::protocol::PaneSurfacePane],
     shifts: &PanelShifts,
-) -> Option<crate::protocol::PaneSurfacePatchRow> {
+) -> Option<(u16, u16)> {
     if shifts.is_empty() {
-        return Some(row.clone());
+        return None;
     }
     let pane = panes.iter().find(|pane| {
         row.x >= pane.inner_rect.x
@@ -49,31 +52,19 @@ fn shifted_row(
             && row.y >= pane.inner_rect.y
             && row.y < pane.inner_rect.y.saturating_add(pane.inner_rect.height)
     })?;
-    let Some(band) = shifts.get(&pane.pane_id).copied().filter(|band| *band > 0) else {
-        return Some(row.clone());
-    };
-    let bottom = pane.inner_rect.y.saturating_add(pane.inner_rect.height);
-    let moved = row.y.saturating_add(band);
-    // A row that would land outside the pane, or still inside the band, is
-    // dropped: the panel owns that edge and the next compose blends it there.
-    if moved >= bottom || moved < pane.inner_rect.y.saturating_add(band) {
-        return None;
-    }
-    let mut shifted = row.clone();
-    shifted.y = moved;
-    Some(shifted)
+    let band = shifts
+        .get(&pane.pane_id)
+        .copied()
+        .filter(|band| *band > 0)?;
+    Some((band, pane.inner_rect.height))
 }
 
 fn apply_patch_to_surface(
     surface: &mut crate::protocol::PaneSurfaceFrame,
     patch: &crate::protocol::PaneSurfacePatch,
-    shifts: &PanelShifts,
 ) -> bool {
     for row in &patch.rows {
-        let Some(shifted) = shifted_row(row, &patch.panes, shifts) else {
-            continue;
-        };
-        if !apply_row(&shifted, &mut surface.frame) {
+        if !apply_row(row, &mut surface.frame) {
             return false;
         }
     }
@@ -232,30 +223,49 @@ impl ClientShellState {
             let (cols, rows) = self.last_composed_size.unwrap_or_default();
             self.layout(cols, rows).pane_surface
         });
+        // The focused pane's band, for the cursor: the host wrote the cursor in the
+        // pane's own coordinates and the panel moved the grid down.
+        let cursor_band = patch
+            .panes
+            .iter()
+            .find(|pane| pane.focused)
+            .and_then(|pane| shifts.get(&pane.pane_id).copied())
+            .unwrap_or(0);
         let composed_patch = fast_path_area.map(|area| ClientComposedSurfacePatch {
             rows: patch
                 .rows
                 .iter()
-                .map(|row| crate::protocol::PaneSurfacePatchRow {
-                    x: area.x.saturating_add(row.x),
-                    y: area.y.saturating_add(row.y),
-                    cells: row.cells.clone(),
+                .map(|row| {
+                    let (band, height) = row_band(row, &patch.panes, &shifts).unwrap_or((0, 0));
+                    (
+                        crate::protocol::PaneSurfacePatchRow {
+                            x: area.x.saturating_add(row.x),
+                            y: area.y.saturating_add(row.y).saturating_add(band),
+                            cells: row.cells.clone(),
+                        },
+                        band,
+                        height,
+                    )
                 })
-                .filter(|row| {
-                    !panel_rows.iter().any(|panel| {
-                        row.y >= panel.y
-                            && row.y < panel.bottom()
-                            && row.x < panel.right()
-                            && row.x.saturating_add(row.cells.len() as u16) > panel.x
-                    })
+                .filter(|(row, band, height)| {
+                    // A composed row outside the pane has nowhere to go: the grid
+                    // is exactly as tall as the rect below the panel.
+                    (*band == 0 || *height == 0 || row.y < area.y.saturating_add(*height))
+                        && !panel_rows.iter().any(|panel| {
+                            row.y >= panel.y
+                                && row.y < panel.bottom()
+                                && row.x < panel.right()
+                                && row.x.saturating_add(row.cells.len() as u16) > panel.x
+                        })
                 })
+                .map(|(row, _, _)| row)
                 .collect(),
             cursor: patch
                 .cursor
                 .clone()
                 .map(|cursor| crate::protocol::CursorState {
                     x: area.x.saturating_add(cursor.x),
-                    y: area.y.saturating_add(cursor.y),
+                    y: area.y.saturating_add(cursor.y).saturating_add(cursor_band),
                     visible: cursor.visible,
                     shape: cursor.shape,
                 }),
@@ -264,7 +274,7 @@ impl ClientShellState {
             let applied = self
                 .pane_surface
                 .as_mut()
-                .is_some_and(|surface| apply_patch_to_surface(surface, &patch, &shifts));
+                .is_some_and(|surface| apply_patch_to_surface(surface, &patch));
             if !applied {
                 return ClientPaneSurfacePatchOutcome::Rejected;
             }
@@ -311,7 +321,7 @@ impl ClientShellState {
             self.reconcile_input_source();
         } else {
             let mut next = current.clone();
-            if !apply_patch_to_surface(&mut next, &patch, &shifts) {
+            if !apply_patch_to_surface(&mut next, &patch) {
                 return ClientPaneSurfacePatchOutcome::Rejected;
             }
             self.set_pane_surface(next);

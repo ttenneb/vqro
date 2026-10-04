@@ -734,8 +734,10 @@ impl ClientShellState {
                     composed[(column, row)].reset();
                 }
             }
+            // The cursor that reaches the frame is the local clone taken before
+            // the panel drew, so it is the one that travels with its row.
             if band.height > 0 {
-                if let Some(cursor) = frame.cursor.as_mut() {
+                if let Some(cursor) = cursor.as_mut() {
                     if cursor.x >= source.x
                         && cursor.x < source.right()
                         && cursor.y >= source.y

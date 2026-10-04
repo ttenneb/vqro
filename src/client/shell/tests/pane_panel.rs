@@ -936,9 +936,9 @@ fn a_collapsed_panel_still_says_a_missing_view_is_unavailable() {
 
 #[test]
 fn a_retained_patch_row_lands_below_the_panel_with_the_grid() {
-    // The panel moved this pane's grid down by its band, so a patch row the host
-    // computed in the pane's own coordinates belongs a band lower too: otherwise
-    // a live update would paint a row where the grid no longer is.
+    // The host writes patch rows in the pane's own coordinates, and the panel
+    // moved the grid down by its band. The raw surface cache is the host's own
+    // view and stays unshifted; the composed row is the one that moves.
     let mut state = panel_state(None, true);
     text_of(&mut state);
     let pane = state
@@ -947,6 +947,8 @@ fn a_retained_patch_row_lands_below_the_panel_with_the_grid() {
         .iter()
         .find(|pane| pane.pane_id == "pane_1")
         .expect("pane_1");
+    // Screen coordinates for the composed frame, the surface pane's own rect for
+    // the patch the host writes.
     let inner = pane.projected_inner_rect;
     let band = state
         .pane_panel_areas
@@ -981,38 +983,99 @@ fn a_retained_patch_row_lands_below_the_panel_with_the_grid() {
         base_surface_revision: 1,
         surface_revision: 2,
         rows: vec![crate::protocol::PaneSurfacePatchRow {
-            x: inner.x,
-            y: inner.y,
+            x: surface_pane.inner_rect.x,
+            y: surface_pane.inner_rect.y,
             cells: vec![cell],
         }],
-        panes: vec![surface_pane],
+        panes: vec![surface_pane.clone()],
         cursor: None,
     };
+    let outcome = state.apply_pane_surface_patch(patch);
     assert!(
-        !matches!(
-            state.apply_pane_surface_patch(patch),
-            ClientPaneSurfacePatchOutcome::Rejected
-        ),
+        !matches!(outcome, ClientPaneSurfacePatchOutcome::Rejected),
         "the patch must be applied, not rejected"
     );
     let surface = state.pane_surface.as_ref().expect("surface");
     let width = usize::from(surface.frame.width);
-    let symbol_at = |y: u16| {
+    let symbol_at = |surface: &crate::protocol::PaneSurfaceFrame, y: u16, x: u16| {
         surface
             .frame
             .cells
-            .get(usize::from(y) * width + usize::from(inner.x))
+            .get(usize::from(y) * width + usize::from(x))
             .map(|cell| cell.symbol.clone())
             .unwrap_or_default()
     };
-    assert_ne!(
-        symbol_at(inner.y),
-        "Z",
-        "the panel's band is not where the grid row goes"
-    );
+    // The host's own cache keeps the row where the host wrote it.
     assert_eq!(
-        symbol_at(inner.y.saturating_add(band)),
+        symbol_at(
+            surface,
+            surface_pane.inner_rect.y,
+            surface_pane.inner_rect.x
+        ),
         "Z",
-        "the patched row is written a band lower"
+        "the raw surface cache is the host's view and is not shifted"
+    );
+    // A full compose puts it below the panel, with the grid.
+    let frame = state.compose(106, 30).expect("frame");
+    let composed = frame
+        .cells
+        .chunks(106)
+        .map(|row| {
+            row.iter()
+                .map(|cell| cell.symbol.as_str())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        composed[usize::from(inner.y) + usize::from(band)]
+            .chars()
+            .nth(usize::from(inner.x))
+            .unwrap_or_default(),
+        'Z',
+        "the composed row belongs a band lower"
+    );
+    assert_ne!(
+        composed[usize::from(inner.y)]
+            .chars()
+            .nth(usize::from(inner.x))
+            .unwrap_or_default(),
+        'Z',
+        "not in the panel's band"
+    );
+}
+
+#[test]
+fn the_cursor_travels_with_the_grid_below_the_panel() {
+    // The host writes the cursor in the pane's own coordinates. The grid moves
+    // down by the band, so the cursor must reach the frame that many rows lower:
+    // the frame takes the cursor the client cloned before the panel drew.
+    let mut state = panel_state(None, true);
+    let mut surface = panel_surface();
+    let pane_rect = surface.panes[0].inner_rect;
+    surface.frame.cursor = Some(crate::protocol::CursorState {
+        x: pane_rect.x,
+        y: pane_rect.y,
+        visible: true,
+        shape: 0,
+    });
+    state.set_pane_surface(surface);
+    let frame = state.compose(106, 30).expect("frame");
+    let pane = state
+        .hits
+        .panes
+        .iter()
+        .find(|pane| pane.pane_id == "pane_1")
+        .expect("pane_1");
+    let band = state
+        .pane_panel_areas
+        .first()
+        .copied()
+        .expect("reserved band")
+        .height;
+    let cursor = frame.cursor.expect("cursor");
+    assert_eq!(
+        cursor.y,
+        pane.projected_inner_rect.y.saturating_add(band),
+        "the cursor belongs at the top of the rect below the panel"
     );
 }
