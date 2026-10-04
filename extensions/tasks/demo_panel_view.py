@@ -170,6 +170,11 @@ class PanelViewDemo(ReadinessDemo):
             time.sleep(0.5)
         raise RuntimeError("no pane panel view was published")
 
+    def keep_log(self, name):
+        """The client log as of this moment: replay.py turns it into the PNG the
+        human looks at, and demo_capture replays the whole log at capture time."""
+        shutil.copy(self.root / "client.log", self.root / "capture" / f"{name}.log")
+
     def pty_size(self, pane):
         """The pane's own PTY size, read from its TTY: the ground truth for
         whether the panel is a split (the PTY shrinks) or an overlay."""
@@ -248,6 +253,7 @@ class PanelViewDemo(ReadinessDemo):
         screen = self.wait_screen("waiting on panel-b: unblock")
         self.wait_screen("panel-b")  # Vqro joins the live owner name
         expanded_text = demo_capture.capture(self.root / "client.log", self.root / "capture", "panel-expanded")
+        self.keep_log("panel-expanded")
 
         # 2. The open views are the client's own, and persist for the next attach.
         stored = json.loads(next((self.root / "state").rglob("local-*.json")).read_text())
@@ -289,6 +295,7 @@ class PanelViewDemo(ReadinessDemo):
             time.sleep(0.2)
         assert not self.pane_row_blank(header_row + 1), "the reserved rows did not return"
         collapsed_text = demo_capture.capture(self.root / "client.log", self.root / "capture", "panel-collapsed")
+        self.keep_log("panel-collapsed")
         self.click(*self.wait_locate("Tasks", within="⊟"))
         self.wait_screen("▾ ● Tasks")
 
@@ -312,6 +319,7 @@ class PanelViewDemo(ReadinessDemo):
         assert after == b, (before, after, b, row)
         self.wait_screen("waiting on you: unblock")
         text_b = demo_capture.capture(self.root / "client.log", self.root / "capture", "panel-b")
+        self.keep_log("panel-b")
 
         # 8. The panel is a split, not an overlay: the host resizes the pane's PTY
         #    to the rows below the panel and the grid moves there, so the agent's
@@ -357,6 +365,7 @@ class PanelViewDemo(ReadinessDemo):
         time.sleep(1)
         filled_text = demo_capture.capture(self.root / "client.log", self.root / "capture",
                                            "panel-split-filled")
+        self.keep_log("panel-split-filled")
         # The grid's own rows: the PTY's row count, starting directly below the
         # band. Every one of them belongs to the terminal, and the last one is the
         # pane's bottom edge.
