@@ -14,10 +14,12 @@ use crate::terminal::ForwardedInputEffect;
 /// releases cannot write text, so they are [`ForwardedInputEffect::NoText`]:
 /// with an editor report in hand they must not look like a draft, or moving the
 /// cursor in an empty box would refuse for as long as the report predates the
-/// key. Everything that might insert text stays `Text`: ctrl/alt chords recall
-/// history or yank, Tab completes, modified Enter inserts a newline, and the
-/// keys that look like clears prove nothing either (Ctrl-C copies the selection,
-/// Ctrl-U deletes to the line start only in Pi).
+/// key. Up and Down are the exception among the arrows: Pi browses prompt
+/// history with them, which loads text into the editor. Everything else that
+/// might insert text stays `Text`: ctrl/alt chords recall history or yank, Tab
+/// completes, modified Enter inserts a newline, and the keys that look like
+/// clears prove nothing either (Ctrl-C copies the selection, Ctrl-U deletes to
+/// the line start only in Pi).
 pub(super) fn human_input_unsent_text(
     events: &[ClientPaneInputEvent],
 ) -> Option<ForwardedInputEffect> {
@@ -38,8 +40,6 @@ pub(super) fn human_input_unsent_text(
                     code,
                     crate::protocol::ClientKeyCode::Left
                         | crate::protocol::ClientKeyCode::Right
-                        | crate::protocol::ClientKeyCode::Up
-                        | crate::protocol::ClientKeyCode::Down
                         | crate::protocol::ClientKeyCode::Home
                         | crate::protocol::ClientKeyCode::End
                         | crate::protocol::ClientKeyCode::PageUp
@@ -449,8 +449,10 @@ mod tests {
         let cases = [
             (key(KeyCode::Enter, KeyModifiers::NONE), Some(Submitted)),
             (key(KeyCode::Char('h'), KeyModifiers::NONE), Some(Text)),
-            // Cursor movement and function keys cannot write text.
-            (key(KeyCode::Up, KeyModifiers::NONE), Some(NoText)),
+            // Cursor movement and function keys cannot write text, except the
+            // Up/Down arrows, which Pi browses prompt history with.
+            (key(KeyCode::Up, KeyModifiers::NONE), Some(Text)),
+            (key(KeyCode::Down, KeyModifiers::NONE), Some(Text)),
             (key(KeyCode::Left, KeyModifiers::NONE), Some(NoText)),
             (key(KeyCode::Home, KeyModifiers::NONE), Some(NoText)),
             (key(KeyCode::PageDown, KeyModifiers::NONE), Some(NoText)),
