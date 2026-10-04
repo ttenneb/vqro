@@ -1396,8 +1396,14 @@ impl Workspace {
     }
 
     pub(crate) fn test_split(&mut self, direction: Direction) -> PaneId {
+        self.test_split_with_ratio(direction, 0.5)
+    }
+
+    /// Splits the focused pane with an explicit ratio, so a fixture can tile a
+    /// grid of equal panes instead of halving the remaining area each time.
+    pub(crate) fn test_split_with_ratio(&mut self, direction: Direction, ratio: f32) -> PaneId {
         let tab = self.active_tab_mut().expect("workspace must have tab");
-        let new_id = tab.layout.split_focused(direction);
+        let new_id = tab.layout.split_focused_with_ratio(direction, ratio);
         tab.panes.insert(
             new_id,
             PaneState::new(TerminalId::alloc().expect("test terminal identity")),
