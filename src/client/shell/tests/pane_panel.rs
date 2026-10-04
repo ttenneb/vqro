@@ -722,6 +722,35 @@ fn views_open_by_default_when_an_agent_starts_and_the_user_can_opt_out() {
 }
 
 #[test]
+fn the_panel_band_is_reserved_from_retained_patches() {
+    // A retained surface patch must never repaint the band a panel covers, so
+    // the band is recorded per compose. It was never populated before.
+    let mut state = panel_state(None, true);
+    text_of(&mut state);
+    let areas = state.pane_panel_areas.clone();
+    assert_eq!(1, areas.len(), "one open panel: {areas:?}");
+    let area = areas[0];
+    assert!(area.height >= 2, "the header and the divider: {area:?}");
+    let pane = state
+        .hits
+        .panes
+        .iter()
+        .find(|pane| pane.pane_id == "pane_1")
+        .expect("pane_1");
+    assert_eq!(
+        area.x, pane.projected_inner_rect.x,
+        "the band spans the pane"
+    );
+    assert_eq!(area.width, pane.projected_inner_rect.width);
+    let closed = {
+        let mut state = panel_state(None, false);
+        text_of(&mut state);
+        state.pane_panel_areas.clone()
+    };
+    assert!(closed.is_empty(), "no panel, nothing reserved: {closed:?}");
+}
+
+#[test]
 fn a_second_root_keeps_its_known_siblings() {
     // Two roots in one pane, the first of an unknown kind. The known second
     // root must still draw: the whole stack is not replaced by a placeholder,
