@@ -175,11 +175,15 @@ impl ClientShellState {
         // against the server's view of the pane, which does not know the panel
         // reserved an edge of it, so a row that lands inside a panel is dropped
         // and the next compose blends the panel over the patched surface again.
+        // Every band Vqro's own panels reserved, clickable or not: a patch row
+        // that lands in one of them is dropped, so chrome is never repainted
+        // over by a retained surface patch.
         let panel_rows = self
             .hits
             .pane_panels
             .iter()
             .map(|hit| hit.rect)
+            .chain(self.pane_panel_areas.iter().copied())
             .collect::<Vec<_>>();
         let fast_path_blocker = fast_path_blocker(self, &patch);
         if let Some(reason) = fast_path_blocker {

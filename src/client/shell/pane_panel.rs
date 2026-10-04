@@ -135,12 +135,18 @@ pub(super) struct PanePanelRender {
     pub(super) hits: Vec<PanePanelHit>,
     /// Every pane whose panel is open, with the terminal rect it claims.
     pub(super) claims: Vec<(String, Rect)>,
-    /// The height the panel was drawn at: the content fit, capped by the pane.
-    /// The caller freezes it at an open, expand or collapse, so a later live
-    /// update scrolls instead of resizing the terminal.
-    pub(super) drawn_height: Option<u16>,
-    /// The pane whose height was drawn, for the caller to freeze.
-    pub(super) drawn_pane: Option<String>,
+    /// For each claimed pane: where the server painted its terminal (the top of
+    /// the pane's inner rect) and where it belongs (the rect below the panel).
+    /// The caller projects the cells and the cursor across.
+    pub(super) projected: Vec<(String, Rect, Rect)>,
+    /// The panel band each pane reserved, clickable or not: a retained surface
+    /// patch must never paint over it.
+    pub(super) reserved: Vec<Rect>,
+    /// Every pane whose panel was drawn, with the height it was drawn at: the
+    /// content fit, capped by the pane. The caller freezes each at an open,
+    /// expand or collapse, so a later live update scrolls instead of resizing
+    /// the terminal - for every open pane, not just the last one rendered.
+    pub(super) drawn: Vec<(String, u16)>,
 }
 
 /// A published view that fills one pane's panel slot.
@@ -501,7 +507,16 @@ fn render_pane(
     let all_collapsed = views
         .iter()
         .all(|view| display.collapsed_views.contains(&view.view_id));
-    let fit = fit_height(&views, &display.collapsed_views);
+    let missing = open_views
+        .iter()
+        .filter(|view_id| !views.iter().any(|view| &view.view_id == *view_id))
+        .count() as u16;
+    let fit = fit_height(&views, &display.collapsed_views)
+        + views
+            .iter()
+            .filter(|view| !block_kind_supported(view.kind.as_deref()))
+            .count() as u16
+        + missing;
     let panel_height = if all_collapsed {
         headers
     } else {
@@ -561,7 +576,7 @@ fn render_pane(
     // Section headers stay pinned; only the rows scroll, so a section never
     // loses its name or its collapse marker.
     let row_space = visible.saturating_sub(headers);
-    let rows = panel_rows(&views, &display.collapsed_views);
+    let rows = panel_rows(&views, open_views, &display.collapsed_views);
     let overflow = rows.len() as u16 > row_space;
     // The scroll indicator owns the last column, with one quiet column of
     // gutter between it and the content.
@@ -577,6 +592,20 @@ fn render_pane(
     for view in &views {
         let collapsed = display.collapsed_views.contains(&view.view_id);
         let header_rect = Rect::new(geometry.panel.x, y, body_width, 1);
+        if let Some(kind) = view
+            .kind
+            .as_deref()
+            .filter(|kind| !block_kind_supported(Some(kind)))
+        {
+            draw_unsupported_header(buffer, header_rect, view, kind, palette);
+            out.hits.push(PanePanelHit {
+                rect: header_rect,
+                pane_id: pane.pane_id.clone(),
+                action: PanePanelAction::ToggleView(view.view_id.clone()),
+            });
+            y = y.saturating_add(1);
+            continue;
+        }
         draw_header(buffer, header_rect, view, collapsed, palette);
         out.hits.push(PanePanelHit {
             rect: header_rect,
@@ -591,6 +620,26 @@ fn render_pane(
         }
         let row_rect = Rect::new(geometry.panel.x, y, body_width, 1);
         match line {
+            PanelRow::Unsupported { title, kind } => {
+                put_text(
+                    buffer,
+                    row_rect.x,
+                    y,
+                    body_width,
+                    &truncate(&format!("└─ {title}: unsupported {kind}"), body_width),
+                    Style::default().fg(palette.overlay0),
+                );
+            }
+            PanelRow::Unavailable { view_id } => {
+                put_text(
+                    buffer,
+                    row_rect.x,
+                    y,
+                    body_width,
+                    &truncate(&format!("└─ {view_id}: unavailable"), body_width),
+                    Style::default().fg(palette.overlay0),
+                );
+            }
             PanelRow::Empty => {
                 put_text(
                     buffer,
@@ -672,8 +721,8 @@ fn render_pane(
     } else {
         out.claims.push((pane.pane_id.clone(), geometry.terminal));
     }
-    out.drawn_height = Some(geometry.panel.height);
-    out.drawn_pane = Some(pane.pane_id.clone());
+    out.drawn
+        .push((pane.pane_id.clone(), geometry.panel.height));
 }
 
 /// The panel a user opened whose view is no longer published: the extension
@@ -765,24 +814,45 @@ fn render_placeholder(
     } else {
         out.claims.push((pane.pane_id.clone(), geometry.terminal));
     }
-    out.drawn_height = Some(geometry.panel.height);
-    out.drawn_pane = Some(pane.pane_id.clone());
+    out.drawn
+        .push((pane.pane_id.clone(), geometry.panel.height));
 }
 
 /// One drawable line of the scrolling region.
 enum PanelRow<'a> {
     Row(&'a FlatRow<'a>),
     Empty,
+    /// A section whose block kind Vqro does not know, in place.
+    Unsupported {
+        title: &'a str,
+        kind: &'a str,
+    },
+    /// A view the user opened whose provider stopped publishing it.
+    Unavailable {
+        view_id: &'a str,
+    },
 }
 
 /// The rows of every expanded section, in draw order.
 fn panel_rows<'a>(
     views: &'a [PanelView<'a>],
+    open_views: &'a BTreeSet<String>,
     collapsed_views: &BTreeSet<String>,
 ) -> Vec<PanelRow<'a>> {
     let mut rows = Vec::new();
     for view in views {
         if collapsed_views.contains(&view.view_id) {
+            continue;
+        }
+        if let Some(kind) = view
+            .kind
+            .as_deref()
+            .filter(|kind| !block_kind_supported(Some(kind)))
+        {
+            rows.push(PanelRow::Unsupported {
+                title: view.title,
+                kind,
+            });
             continue;
         }
         if view.rows.is_empty() {
@@ -791,6 +861,13 @@ fn panel_rows<'a>(
         }
         for row in &view.rows {
             rows.push(PanelRow::Row(row));
+        }
+    }
+    // A view the user opened that is not published any more says so on its own
+    // row: its siblings keep drawing.
+    for view_id in open_views {
+        if !views.iter().any(|view| &view.view_id == view_id) {
+            rows.push(PanelRow::Unavailable { view_id });
         }
     }
     rows
@@ -839,6 +916,50 @@ fn draw_header(
             .add_modifier(Modifier::BOLD),
     );
     if right_fits {
+        put_text(
+            buffer,
+            rect.x
+                .saturating_add(rect.width.saturating_sub(right_width)),
+            rect.y,
+            right_width,
+            &right,
+            dim,
+        );
+    }
+}
+
+/// A section Vqro cannot draw: its own header, marked unsupported, so it keeps
+/// its place in the stack and says why instead of replacing its siblings.
+fn draw_unsupported_header(
+    buffer: &mut Buffer,
+    rect: Rect,
+    view: &PanelView<'_>,
+    kind: &str,
+    palette: &Palette,
+) {
+    let dim = Style::default().fg(palette.overlay0);
+    put_text(buffer, rect.x, rect.y, 1, "▾", dim);
+    put_text(
+        buffer,
+        rect.x.saturating_add(2),
+        rect.y,
+        1,
+        "?",
+        Style::default().fg(palette.overlay0),
+    );
+    put_text(
+        buffer,
+        rect.x.saturating_add(4),
+        rect.y,
+        rect.width.saturating_sub(4),
+        view.title,
+        Style::default()
+            .fg(palette.text)
+            .add_modifier(Modifier::BOLD),
+    );
+    let right = format!("{HEADER_MARK} · unsupported {kind}");
+    let right_width = display_width(&right);
+    if right_width.saturating_add(8) < rect.width {
         put_text(
             buffer,
             rect.x
@@ -1202,6 +1323,12 @@ impl ClientShellState {
         }
     }
 
+    /// Rows a pane's terminal was moved down by its panel, for requests the
+    /// server measures against the pane's inner rect.
+    pub(super) fn panel_row_offset(&self, pane_id: &str) -> u16 {
+        self.panel_input_offsets.get(pane_id).copied().unwrap_or(0)
+    }
+
     /// The pane-to-terminal join, from the published views: a pane has exactly
     /// one terminal, so a terminal placed in that pane is that pane's terminal.
     fn pane_terminal_join(&self) -> HashMap<String, String> {
@@ -1229,7 +1356,35 @@ impl ClientShellState {
     /// Update the pane-to-terminal join and derive the pane-keyed state the
     /// renderer uses from the terminal-keyed state that is authoritative.
     fn rekey_panels(&mut self) {
-        self.pane_terminal_ids = self.pane_terminal_join();
+        let join = self.pane_terminal_join();
+        let live = self
+            .snapshot
+            .as_deref()
+            .map(|snapshot| {
+                snapshot
+                    .panes
+                    .iter()
+                    .map(|pane| pane.pane_id.clone())
+                    .collect::<std::collections::BTreeSet<_>>()
+            })
+            .unwrap_or_default();
+        // A pane whose terminal is known from before keeps that identity while
+        // it is still live: a provider outage removes every placement, and the
+        // panel must not lose what it is keyed by. A pane that never had a
+        // placement falls back to its own id, so its panels survive anyway.
+        let previous = self.pane_terminal_ids.clone();
+        let mut merged = join;
+        for pane_id in &live {
+            if !merged.contains_key(pane_id) {
+                if let Some(known) = previous.get(pane_id) {
+                    merged.insert(pane_id.clone(), known.clone());
+                } else {
+                    merged.insert(pane_id.clone(), pane_id.clone());
+                }
+            }
+        }
+        merged.retain(|pane_id, _| live.contains(pane_id));
+        self.pane_terminal_ids = merged;
         let mut open = HashMap::new();
         let mut display = HashMap::new();
         for (pane_id, terminal_id) in &self.pane_terminal_ids {

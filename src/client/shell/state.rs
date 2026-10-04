@@ -1142,6 +1142,12 @@ pub(crate) struct ClientShellState {
     pub(super) last_pane_panels: Option<crate::protocol::endpoint::ClientPanePanels>,
     /// Panes that already had an agent when the rule last ran.
     pub(super) panes_with_agents: std::collections::BTreeSet<String>,
+    /// The panel bands Vqro drew, clickable or not, for the patch filter.
+    pub(super) pane_panel_areas: Vec<Rect>,
+    /// Rows a pane's terminal was moved down by its panel. The server paints
+    /// from the top of the pane's inner rect, so terminal-relative input and
+    /// selection coordinates are offset back by this much.
+    pub(super) panel_input_offsets: HashMap<String, u16>,
     pub(super) collection_entered_pane: Option<String>,
     pub(super) collection_maximized_pane: Option<(String, String)>,
     /// Stable local presentation preferences; never carries connection/action authority.
@@ -1341,6 +1347,8 @@ impl ClientShellState {
             display_by_terminal: HashMap::new(),
             last_pane_panels: None,
             panes_with_agents: Default::default(),
+            panel_input_offsets: HashMap::new(),
+            pane_panel_areas: Vec::new(),
             collection_entered_pane: None,
             collection_maximized_pane: None,
             recovery_presentations: HashMap::new(),
@@ -1611,6 +1619,8 @@ impl ClientShellState {
         self.display_by_terminal.clear();
         self.last_pane_panels = None;
         self.panes_with_agents.clear();
+        self.panel_input_offsets.clear();
+        self.pane_panel_areas.clear();
         self.collection_entered_pane = None;
         self.collection_maximized_pane = None;
         self.terminal_view_surfaces.clear();

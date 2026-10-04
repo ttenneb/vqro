@@ -323,6 +323,40 @@ fn an_unknown_block_renders_as_unsupported_in_place() {
 }
 
 #[test]
+fn a_stack_keeps_its_known_sections_beside_a_placeholder() {
+    // One known section and one whose kind Vqro does not know: both draw.
+    let mut projection = unsupported_projection();
+    let items = projection["documents"][0]["document"]["items"]
+        .as_array_mut()
+        .expect("items");
+    let mut known = items[1].clone();
+    known["id"] = serde_json::Value::String("panel:pane_1:known".into());
+    known["label"] = serde_json::Value::String("A known row".into());
+    known["view"] = serde_json::json!({"state": "open"});
+    items.push(known);
+    let mut state = state_with_projection(projection, true);
+    let text = text_of(&mut state);
+    assert!(text.contains("Tasks"), "{text}");
+    assert!(text.contains("A future block"), "{text}");
+    assert!(text.contains('?'), "the unknown block is marked: {text}");
+    assert!(text.contains("A known row"), "{text}");
+}
+
+#[test]
+fn a_missing_view_in_a_stack_says_unavailable_on_its_own_row() {
+    let mut state = panel_state(None, true);
+    // Two views open; only one is published.
+    state
+        .pane_panel_open
+        .entry("pane_1".into())
+        .or_default()
+        .insert("messages".into());
+    let text = text_of(&mut state);
+    assert!(text.contains("Panel panels layout"), "{text}");
+    assert!(text.contains("messages"), "{text}");
+}
+
+#[test]
 fn an_unknown_section_kind_renders_unsupported_and_keeps_its_edge() {
     let mut projection = unsupported_projection();
     projection["documents"][0]["document"]["items"][0]["view"]["kind"] =

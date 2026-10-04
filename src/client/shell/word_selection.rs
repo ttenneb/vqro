@@ -68,11 +68,17 @@ impl ClientShellState {
         }
         gesture.pending_row = Some(row);
         let pane_id = gesture.pane_id.clone();
+        // A pane whose terminal Vqro moved down by its panel: the server still
+        // measures from the pane's inner rect, so the offset goes back on.
+        let offset = self.panel_input_offsets.get(&pane_id).copied().unwrap_or(0);
         let params = crate::api::schema::PaneSelectionReadParams {
             pane_id: pane_id.clone(),
-            anchor: crate::api::schema::PaneTextPoint { row, col: 0 },
+            anchor: crate::api::schema::PaneTextPoint {
+                row: row.saturating_add(u32::from(offset)),
+                col: 0,
+            },
             cursor: crate::api::schema::PaneTextPoint {
-                row,
+                row: row.saturating_add(u32::from(offset)),
                 col: gesture.end_col,
             },
             content_revision: gesture.content_revision,

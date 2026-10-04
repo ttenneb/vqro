@@ -1390,8 +1390,10 @@ impl ClientShellState {
                 match drag {
                     ClientChromeDrag::PanePanelEdge { .. } => {
                         // Releasing the drag is the one resize: the claim is
-                        // sent on the next compose.
+                        // sent on the next compose. The user's size is saved
+                        // once, here, not on every motion event.
                         self.invalidate_pane_surface();
+                        self.persist_pane_panels();
                         outcome.repaint = true;
                         outcome.resize = true;
                     }
@@ -2783,14 +2785,18 @@ impl ClientShellState {
                             if !display.collapsed_views.remove(&key) {
                                 display.collapsed_views.insert(key);
                             }
-                            // An open or collapse re-fits the content.
+                            // An open or collapse re-fits the content, and the
+                            // user's choice is saved right away: a reattach
+                            // must not lose it.
                             display.refit();
+                            self.persist_pane_panels();
                         }
                         super::pane_panel::PanePanelAction::ToggleRow(item_id) => {
                             if !display.collapsed_rows.remove(&item_id) {
                                 display.collapsed_rows.insert(item_id);
                             }
                             display.refit();
+                            self.persist_pane_panels();
                         }
                         super::pane_panel::PanePanelAction::FocusPane(pane_id) => {
                             self.push_endpoint_method(
@@ -3132,9 +3138,20 @@ impl ClientShellState {
     }
 
     fn pane_mouse_position(&self, hit: &PaneHit, mouse: MouseEvent) -> ClientMousePosition {
+        // The client moved this terminal down by its panel; the server still
+        // paints and measures from the pane's inner rect, so the offset goes
+        // back on the way out.
+        let offset = self
+            .panel_input_offsets
+            .get(&hit.pane_id)
+            .copied()
+            .unwrap_or(0);
         let cell = ClientMousePosition::Cell {
             column: mouse.column.saturating_sub(hit.inner_rect.x),
-            row: mouse.row.saturating_sub(hit.inner_rect.y),
+            row: mouse
+                .row
+                .saturating_sub(hit.inner_rect.y)
+                .saturating_add(offset),
         };
         if hit.sgr_pixel_mouse && hit.pixel_width > 0 && hit.pixel_height > 0 {
             self.host_mouse_pixels
@@ -3147,7 +3164,10 @@ impl ClientShellState {
                                     x,
                                     y,
                                     column: mouse.column.saturating_sub(hit.inner_rect.x),
-                                    row: mouse.row.saturating_sub(hit.inner_rect.y),
+                                    row: mouse
+                                        .row
+                                        .saturating_sub(hit.inner_rect.y)
+                                        .saturating_add(offset),
                                 })
                             }
                             crate::input::mouse::Position::Cell { .. } => None,
