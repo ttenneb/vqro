@@ -112,6 +112,7 @@ fn spaces_package_passes_authoritative_host_gate() {
         serde_json::from_value(result).unwrap();
     crate::spaces_extension_contract::validate_spaces_document(&snapshot, &document).unwrap();
     runtime.stop(RuntimeStopReason::Requested);
+    crate::app::App::assert_spaces_component_supersession_for_test(&installed);
     cleanup(root);
 }
 

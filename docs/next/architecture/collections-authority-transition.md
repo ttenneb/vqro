@@ -170,6 +170,10 @@ Before R1, capture operation counts for one and 15 enabled services/scopes, one 
 
 The baseline proves factories/Stores/Instances scale with enabled services rather than clients/frames/views; provider invocations are client-independent; no extension call occurs during frame composition; unrelated scopes are not invoked; client multiplication occurs only in cached fanout; and representative stale/cancel paths remain bounded. Detailed optimization benchmarks stay in R5.
 
+Read-only observation supersession (Collections profile/action-declaration audits and Spaces pure render) retires the obsolete pending ticket, not the component invocation. Obsolete results cannot publish through the existing current-attempt, authority, snapshot, and audit fences. Each service remains bounded to four queued invocations plus one active invocation, shared across all scopes; every invocation retains its deadline. Disable, removal, shutdown, deadline, effect-plan, and write cancellation are unchanged. Genuine failed-runtime recovery is not implied by this supersession rule.
+
+Collections queue pressure coalesces bounded latest scope identities/revisions for fair admission driven by Collections App-event completions, including obsolete outcomes. A deferred scope captures fresh current authority and snapshots; it never replays an old request or advances a document revision merely to retry. Terminal failed inputs are not queue-pressure retries. This is not generic all-package capacity recovery: pure service-read provider completions that return only through a channel do not trigger this drain.
+
 ## Required implementation sequence
 
 ### R0 — Thin contract and baseline freeze

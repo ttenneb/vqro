@@ -3,7 +3,7 @@
 //! The App actor only captures authority and validates completions. Component invocation and all
 //! waits happen on the bounded package worker in `extension_candidate`.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
@@ -152,6 +152,8 @@ pub(crate) struct CollectionsCandidateCoordinator {
     profile_desired_by_scope: HashMap<String, DesiredObservation>,
     action_desired_by_scope: HashMap<String, DesiredObservation>,
     next_attempt_id: u64,
+    deferred_scopes: HashMap<String, (String, TabId, u64)>,
+    deferred_order: VecDeque<String>,
 }
 
 impl CollectionsCandidateCoordinator {
@@ -298,7 +300,10 @@ impl CollectionsCandidateCoordinator {
                 continue;
             };
             if let Some(older) = self.pending.remove(&older_attempt) {
-                older.canceled.store(true, Ordering::Release);
+                // These are read-only profile/declaration audits, not effect plans.
+                // Retire the ticket, not the component: aborting an active host read
+                // stops its runtime. Its eventual result has no pending ticket and
+                // cannot publish. Lifecycle/deadline/effect cancellation is unchanged.
                 self.fail_ticket(older.ticket);
                 superseded_any = true;
             }
@@ -541,6 +546,25 @@ impl CollectionsCandidateCoordinator {
         };
         if desired.get(scope_id) == Some(expected) {
             desired.remove(scope_id);
+        }
+    }
+
+    fn defer_scope(&mut self, workspace_id: String, tab_id: TabId, revision: u64) {
+        let key = tab_id.to_string();
+        if !self.deferred_scopes.contains_key(&key) {
+            if self.deferred_scopes.len() >= MAX_PENDING_CANDIDATE_SCOPES {
+                return;
+            }
+            self.deferred_order.push_back(key.clone());
+        }
+        self.deferred_scopes
+            .insert(key, (workspace_id, tab_id, revision));
+    }
+
+    fn remove_deferred_scope(&mut self, tab_id: &TabId) {
+        let key = tab_id.to_string();
+        if self.deferred_scopes.remove(&key).is_some() {
+            self.deferred_order.retain(|queued| queued != &key);
         }
     }
 
@@ -818,13 +842,45 @@ impl App {
                 );
             if let Err(error) = submission {
                 let mut coordinator = std::mem::take(&mut self.collections_candidate_audits);
+                if error == "package candidate queue is full" {
+                    coordinator.defer_scope(
+                        workspace_id.clone(),
+                        tab_id.clone(),
+                        requested_revision,
+                    );
+                }
                 let rejected = coordinator.fail_submission(work.attempt_id, error);
                 self.collections_candidate_audits = coordinator;
                 return rejected.map(|()| false);
             }
             submitted = true;
         }
+        self.collections_candidate_audits
+            .remove_deferred_scope(&tab_id);
         Ok(submitted)
+    }
+
+    pub(crate) fn drain_deferred_collections_scope(&mut self) {
+        // At most one current scope per completion, including obsolete results.
+        // Capture new authority/snapshots; never retain/replay a failed payload.
+        let Some(key) = self.collections_candidate_audits.deferred_order.pop_front() else {
+            return;
+        };
+        let Some((workspace_id, tab_id, revision)) = self
+            .collections_candidate_audits
+            .deferred_scopes
+            .remove(&key)
+        else {
+            return;
+        };
+        if self.state.workspaces.iter().any(|workspace| {
+            workspace.id == workspace_id && workspace.tabs.iter().any(|tab| tab.id == tab_id)
+        }) {
+            if let Err(error) = self.schedule_collections_candidate(workspace_id, tab_id, revision)
+            {
+                tracing::debug!(%error, "deferred Collections scope was not scheduled");
+            }
+        }
     }
 
     pub(crate) fn finalize_collections_candidate(
@@ -1095,6 +1151,44 @@ pub(super) fn current_state_snapshot(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn deferred_scopes_coalesce_fairly_and_drop_removed_identities() {
+        let mut coordinator = CollectionsCandidateCoordinator::default();
+        let mut workspace = crate::workspace::Workspace::test_new("deferred");
+        workspace.test_add_tab(None);
+        let first = workspace.tabs[0].id.clone();
+        let second = workspace.tabs[1].id.clone();
+        coordinator.defer_scope(workspace.id.clone(), first.clone(), 1);
+        coordinator.defer_scope(workspace.id.clone(), second.clone(), 2);
+        coordinator.defer_scope(workspace.id.clone(), first.clone(), 3);
+        assert_eq!(coordinator.deferred_order.len(), 2);
+        let key = coordinator.deferred_order.pop_front().unwrap();
+        let (workspace_id, tab_id, revision) = coordinator.deferred_scopes.remove(&key).unwrap();
+        assert_eq!(tab_id, first);
+        assert_eq!(revision, 3);
+        // Still-full admission goes to the back, never starves the second scope.
+        coordinator.defer_scope(workspace_id, tab_id, revision);
+        assert_eq!(
+            coordinator.deferred_order.front(),
+            Some(&second.to_string())
+        );
+        coordinator.remove_deferred_scope(&second);
+        assert_eq!(coordinator.deferred_order.len(), 1);
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &crate::config::Config::default(),
+            crate::app::AppPolicy::TEST,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        app.collections_candidate_audits = coordinator;
+        app.drain_deferred_collections_scope();
+        assert!(app.collections_candidate_audits.deferred_scopes.is_empty());
+        assert!(app.collections_candidate_audits.deferred_order.is_empty());
+        assert_eq!(app.collections_candidate_audits.next_attempt_id, 0);
+    }
 
     #[test]
     fn only_superseded_observation_failures_are_retryable() {

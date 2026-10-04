@@ -2167,6 +2167,18 @@ impl App {
         &mut self,
         result: crate::extension_candidate::PackageCandidateInvocationResult,
     ) {
+        let collections =
+            result.package_id == crate::collections_extension_contract::COLLECTIONS_PACKAGE_ID;
+        self.finish_extension_package_candidate_result(result);
+        if collections {
+            self.drain_deferred_collections_scope();
+        }
+    }
+
+    fn finish_extension_package_candidate_result(
+        &mut self,
+        result: crate::extension_candidate::PackageCandidateInvocationResult,
+    ) {
         if self.finish_service_fabric_invocation(&result) {
             return;
         }

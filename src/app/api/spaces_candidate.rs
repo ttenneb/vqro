@@ -69,7 +69,10 @@ impl SpacesCandidateCoordinator {
         {
             return Ok(None);
         }
-        self.cancel_pending();
+        // Pure render supersession retires the ticket, not its component runtime.
+        // finish() rejects the obsolete attempt; disable/error/deadline cancellation
+        // remains unchanged. The service still has at most four queued + one active.
+        self.pending = None;
         self.next_attempt_id = self.next_attempt_id.saturating_add(1).max(1);
         let attempt_id = self.next_attempt_id;
         let deadline = Instant::now() + INVOCATION_TIMEOUT;
@@ -156,6 +159,13 @@ impl SpacesCandidateCoordinator {
 }
 
 impl App {
+    #[cfg(test)]
+    pub(crate) fn assert_spaces_component_supersession_for_test(
+        installed: &crate::extension_package::InstalledPackageV1,
+    ) {
+        tests::assert_real_component_supersession(installed);
+    }
+
     pub(crate) fn spaces_package_provider_generation(&self) -> Option<u64> {
         exact_spaces_binding(self)
             .ok()
@@ -545,13 +555,98 @@ mod tests {
         assert_ne!(begin(&mut app, rebound), first_attempt);
     }
 
+    pub(super) fn assert_real_component_supersession(
+        installed: &crate::extension_package::InstalledPackageV1,
+    ) {
+        let pin = crate::spaces_extension_contract::embedded_spaces_production_pin().unwrap();
+        let factory = crate::extension_runtime::RuntimeFactory::installed(
+            installed,
+            &pin.service_id,
+            &pin.namespace,
+        )
+        .unwrap();
+        let mut app = app_with_exact_package();
+        let first = snapshot("first", 1);
+        let old_attempt = begin(&mut app, first.clone());
+        let old_canceled = app
+            .spaces_candidate_audits
+            .pending
+            .as_ref()
+            .unwrap()
+            .canceled
+            .clone();
+        let mut runtime =
+            crate::extension_runtime::ExtensionRuntimeDispatcher::start(&factory, 1, &old_canceled)
+                .unwrap();
+        let old_result = runtime
+            .invoke(
+                &pin.method,
+                serde_json::to_value(&first).unwrap(),
+                1,
+                Instant::now() + INVOCATION_TIMEOUT,
+                &old_canceled,
+            )
+            .unwrap();
+        // Hold the real component's result outside the App until supersession.
+        // Spaces has no host calls; acceptance is its host snapshot/attempt fence.
+        let second = snapshot("second", 2);
+        let current_attempt = begin(&mut app, second.clone());
+        assert!(!old_canceled.load(Ordering::Acquire));
+        completion(&mut app, old_attempt, Ok(old_result));
+        let key = (
+            pin.namespace.clone(),
+            crate::spaces_extension_contract::SPACES_SCOPE_ID.into(),
+        );
+        assert!(app
+            .host_document_caches
+            .get(&key)
+            .and_then(|cache| cache.current())
+            .is_none());
+        let current_canceled = app
+            .spaces_candidate_audits
+            .pending
+            .as_ref()
+            .unwrap()
+            .canceled
+            .clone();
+        let result = runtime
+            .invoke(
+                &pin.method,
+                serde_json::to_value(&second).unwrap(),
+                1,
+                Instant::now() + INVOCATION_TIMEOUT,
+                &current_canceled,
+            )
+            .unwrap();
+        completion(&mut app, current_attempt, Ok(result));
+        assert_eq!(
+            app.host_document_caches
+                .get(&key)
+                .and_then(|cache| cache.current())
+                .map(|document| document.revision),
+            Some(2)
+        );
+        runtime.stop(crate::extension_runtime::RuntimeStopReason::Requested);
+    }
+
     #[test]
     fn superseded_completion_cannot_replace_the_current_spaces_attempt() {
         let mut app = app_with_exact_package();
         let first = snapshot("first", 1);
         let first_attempt = begin(&mut app, first.clone());
+        let old_canceled = app
+            .spaces_candidate_audits
+            .pending
+            .as_ref()
+            .unwrap()
+            .canceled
+            .clone();
         let second = snapshot("second", 2);
         let second_attempt = begin(&mut app, second.clone());
+        assert!(
+            !old_canceled.load(Ordering::Acquire),
+            "read supersession aborted the component"
+        );
         completion(
             &mut app,
             first_attempt,
