@@ -664,8 +664,11 @@ impl ClientShellState {
         // A pane with views to open and nothing open shows its own badge, so a
         // user can open the panel without knowing a command.
         if let Some(documents) = host_documents {
-            for badge in pane_panel::pane_badges(documents, &self.hits.panes, &self.pane_panel_open)
-            {
+            for badge in pane_panel::pane_badges(
+                &pane_panel::PanelIndex::new(documents),
+                &self.hits.panes,
+                &self.pane_panel_open,
+            ) {
                 render::put_text(
                     &mut composed,
                     badge.rect.x,

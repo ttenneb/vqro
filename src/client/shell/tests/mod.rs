@@ -260,6 +260,7 @@ mod link_hover;
 mod mobile;
 mod mouse_selection;
 mod pane_panel;
+mod pane_panel_profile;
 mod popup_focus_projection;
 mod recovery;
 mod startup_overlays;

@@ -58,7 +58,7 @@ pub(super) struct PaneBadge {
 /// Plan one badge per pane that has published views but nothing open. Pure:
 /// the caller draws the labels and registers the hits.
 pub(super) fn pane_badges(
-    documents: &HostDocumentsProjectionV1,
+    documents: &PanelIndex<'_>,
     panes: &[PaneHit],
     open: &HashMap<String, BTreeSet<String>>,
 ) -> Vec<PaneBadge> {
@@ -72,7 +72,7 @@ pub(super) fn pane_badges(
         {
             continue;
         }
-        let available = published_views(documents, &pane.pane_id);
+        let available = documents.published_views(&pane.pane_id);
         if available.is_empty() {
             continue;
         }
@@ -311,27 +311,32 @@ fn row_prefix(lanes: &[bool], is_last: bool) -> String {
 
 /// Descend the root's children in document order, honouring collapsed rows.
 fn flatten<'a>(
-    children: &HashMap<&str, Vec<&'a HostDocumentItem>>,
+    index: &PanelIndex<'a>,
+    namespace: &'a str,
     root: &str,
     collapsed: &BTreeSet<String>,
 ) -> Vec<FlatRow<'a>> {
+    let children = &index.children;
     let mut rows = Vec::new();
     // (item, ancestor lanes, is last child), pushed in reverse so the next pop
     // is the first child in document order.
     let mut stack: Vec<(&HostDocumentItem, Vec<bool>, bool)> = Vec::new();
     for (index, item) in children
-        .get(root)
+        .get(&(namespace, root))
         .map(Vec::as_slice)
         .unwrap_or_default()
         .iter()
         .enumerate()
         .rev()
     {
-        let total = children.get(root).map(Vec::len).unwrap_or(0);
+        let total = children.get(&(namespace, root)).map(Vec::len).unwrap_or(0);
         stack.push((item, Vec::new(), index == total - 1));
     }
     while let Some((item, lanes, is_last)) = stack.pop() {
-        let descendants = children.get(item.id.as_str()).cloned().unwrap_or_default();
+        let descendants = children
+            .get(&(namespace, item.id.as_str()))
+            .cloned()
+            .unwrap_or_default();
         rows.push(FlatRow {
             item,
             lanes: lanes.clone(),
@@ -349,6 +354,57 @@ fn flatten<'a>(
         }
     }
     rows
+}
+
+/// One pass over the published documents, reused by every pane in a frame.
+/// Building this per pane made the panel path scale with panes times items.
+pub(super) struct PanelIndex<'a> {
+    /// `(priority, namespace, item)` in render order.
+    items: Vec<(i32, &'a str, &'a HostDocumentItem)>,
+    children: HashMap<(&'a str, &'a str), Vec<&'a HostDocumentItem>>,
+}
+
+impl<'a> PanelIndex<'a> {
+    pub(super) fn new(documents: &'a HostDocumentsProjectionV1) -> Self {
+        let mut entries = documents.documents.iter().collect::<Vec<_>>();
+        entries.sort_by(|left, right| {
+            right
+                .provider_priority
+                .cmp(&left.provider_priority)
+                .then_with(|| left.document.namespace.cmp(&right.document.namespace))
+        });
+        let mut items = Vec::new();
+        let mut children: HashMap<(&str, &str), Vec<&HostDocumentItem>> = HashMap::new();
+        for entry in entries {
+            let namespace = entry.document.namespace.as_str();
+            for item in &entry.document.items {
+                if let Some(parent) = item.parent_id.as_deref() {
+                    children.entry((namespace, parent)).or_default().push(item);
+                }
+                items.push((entry.provider_priority, namespace, item));
+            }
+        }
+        Self { items, children }
+    }
+
+    /// Every view id a pane publishes, whatever the user has open.
+    pub(super) fn published_views(&self, pane_id: &str) -> Vec<String> {
+        let mut ids = Vec::new();
+        for (_, _, item) in &self.items {
+            let Some(view) = item.view.as_ref() else {
+                continue;
+            };
+            let (Some(item_pane), Some(view_id)) =
+                (view.pane_id.as_deref(), view.view_id.as_deref())
+            else {
+                continue;
+            };
+            if item_pane == pane_id && !item.flags.disabled && !ids.iter().any(|id| id == view_id) {
+                ids.push(view_id.to_owned());
+            }
+        }
+        ids
+    }
 }
 
 /// Every view id a pane publishes, whatever the user has open.
@@ -375,49 +431,31 @@ pub(super) fn published_views(documents: &HostDocumentsProjectionV1, pane_id: &s
 /// Select the panel views published for one pane. Items that name a pane and a
 /// view id are roots; their descendants are the rows.
 fn panel_views<'a>(
-    documents: &'a HostDocumentsProjectionV1,
+    index: &'a PanelIndex<'a>,
     pane_id: &str,
     open_views: &BTreeSet<String>,
     collapsed: &BTreeSet<String>,
 ) -> Vec<PanelView<'a>> {
     let mut views = Vec::new();
-    let mut entries = documents.documents.iter().collect::<Vec<_>>();
-    entries.sort_by(|left, right| {
-        right
-            .provider_priority
-            .cmp(&left.provider_priority)
-            .then_with(|| left.document.namespace.cmp(&right.document.namespace))
-    });
-    for entry in entries {
-        let document = &entry.document;
-        let items = &document.items;
-        let mut children: HashMap<&str, Vec<&HostDocumentItem>> = HashMap::new();
-        for item in items {
-            if let Some(parent) = item.parent_id.as_deref() {
-                children.entry(parent).or_default().push(item);
-            }
+    for (_, namespace, item) in &index.items {
+        let Some(view) = item.view.as_ref() else {
+            continue;
+        };
+        let (Some(item_pane), Some(view_id)) = (view.pane_id.as_deref(), view.view_id.as_deref())
+        else {
+            continue;
+        };
+        if item_pane != pane_id || item.flags.disabled || !open_views.contains(view_id) {
+            continue;
         }
-        for item in items {
-            let Some(view) = item.view.as_ref() else {
-                continue;
-            };
-            let (Some(item_pane), Some(_view_id)) =
-                (view.pane_id.as_deref(), view.view_id.as_deref())
-            else {
-                continue;
-            };
-            if item_pane != pane_id || item.flags.disabled || !open_views.contains(_view_id) {
-                continue;
-            }
-            views.push(PanelView {
-                view_id: _view_id.to_owned(),
-                kind: view.kind.clone(),
-                title: item.label.as_str(),
-                summary: item.detail.as_deref().unwrap_or_default(),
-                state: view.state,
-                rows: flatten(&children, item.id.as_str(), collapsed),
-            });
-        }
+        views.push(PanelView {
+            view_id: view_id.to_owned(),
+            kind: view.kind.clone(),
+            title: item.label.as_str(),
+            summary: item.detail.as_deref().unwrap_or_default(),
+            state: view.state,
+            rows: flatten(index, namespace, item.id.as_str(), collapsed),
+        });
     }
     views
 }
@@ -434,6 +472,9 @@ pub(super) fn render(
     palette: &Palette,
     out: &mut PanePanelRender,
 ) {
+    // One index for every pane in this frame: rebuilding it per pane made the
+    // panel path scale with panes times published items.
+    let index = PanelIndex::new(documents);
     for pane in panes {
         let Some(open_views) = open.get(&pane.pane_id) else {
             continue;
@@ -444,7 +485,7 @@ pub(super) fn render(
         let display = displays.get(&pane.pane_id).cloned().unwrap_or_default();
         render_pane(
             buffer,
-            documents,
+            &index,
             snapshot,
             pane,
             open_views,
@@ -459,7 +500,7 @@ pub(super) fn render(
 #[allow(clippy::too_many_arguments)]
 fn render_pane(
     buffer: &mut Buffer,
-    documents: &HostDocumentsProjectionV1,
+    documents: &PanelIndex<'_>,
     snapshot: &ClientShellSnapshot,
     pane: &PaneHit,
     open_views: &BTreeSet<String>,
