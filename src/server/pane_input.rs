@@ -2,6 +2,93 @@ use bytes::Bytes;
 use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers, MouseEventKind};
 
 use crate::protocol::{AttachScrollDirection, AttachScrollSource, ClientPaneInputEvent};
+use crate::terminal::ForwardedInputEffect;
+
+/// What forwarded human pane input could have done to the target editor:
+/// `None` proves nothing. The last proving event decides, so a typed line
+/// followed by Enter reads as submitted.
+///
+/// Input that can put text in the editor is [`ForwardedInputEffect::Text`], and
+/// the only submit key is a plain unmodified Enter, which takes the editor's
+/// content as the submitted input. Cursor movement, Esc, function keys and
+/// releases cannot write text, so they are [`ForwardedInputEffect::NoText`]:
+/// with an editor report in hand they must not look like a draft, or moving the
+/// cursor in an empty box would refuse for as long as the report predates the
+/// key. Up and Down are the exception among the arrows: Pi browses prompt
+/// history with them, which loads text into the editor. Everything else that
+/// might insert text stays `Text`: ctrl/alt chords recall history or yank, Tab
+/// completes, modified Enter inserts a newline, and the keys that look like
+/// clears prove nothing either (Ctrl-C copies the selection, Ctrl-U deletes to
+/// the line start only in Pi).
+///
+/// The `NoText` set assumes Pi's default bindings. A key the user rebinds to
+/// history recall, or anything else that writes text, is then covered only by
+/// the adapter's immediate re-read after a keystroke, not by this split.
+pub(super) fn human_input_unsent_text(
+    events: &[ClientPaneInputEvent],
+) -> Option<ForwardedInputEffect> {
+    let mut effect = None;
+    for event in events {
+        let event_effect = match event {
+            ClientPaneInputEvent::Key {
+                code,
+                modifiers,
+                kind,
+                ..
+            } => {
+                if *kind == crate::protocol::ClientKeyKind::Release {
+                    None
+                } else if *code == crate::protocol::ClientKeyCode::Enter && *modifiers == 0 {
+                    Some(ForwardedInputEffect::Submitted)
+                } else if matches!(
+                    code,
+                    crate::protocol::ClientKeyCode::Left
+                        | crate::protocol::ClientKeyCode::Right
+                        | crate::protocol::ClientKeyCode::Home
+                        | crate::protocol::ClientKeyCode::End
+                        | crate::protocol::ClientKeyCode::PageUp
+                        | crate::protocol::ClientKeyCode::PageDown
+                        | crate::protocol::ClientKeyCode::Insert
+                        | crate::protocol::ClientKeyCode::Esc
+                        | crate::protocol::ClientKeyCode::F(_)
+                        | crate::protocol::ClientKeyCode::Null
+                ) {
+                    Some(ForwardedInputEffect::NoText)
+                } else {
+                    Some(ForwardedInputEffect::Text)
+                }
+            }
+            ClientPaneInputEvent::TextCommit(text) | ClientPaneInputEvent::Paste(text) => {
+                (!text.is_empty()).then_some(ForwardedInputEffect::Text)
+            }
+            ClientPaneInputEvent::Mouse { .. } => None,
+        };
+        if event_effect.is_some() {
+            effect = match event_effect {
+                // A cursor key or an unproven event changes nothing: a batch that
+                // typed or submitted before it keeps that effect, or a trailing
+                // Left would hide the text the same batch wrote.
+                Some(ForwardedInputEffect::NoText) => effect.or(Some(ForwardedInputEffect::NoText)),
+                other => other,
+            };
+        }
+    }
+    effect
+}
+
+/// What raw input forwarded by a directly attached client could have done to the
+/// target editor: `None` proves nothing. Attach forwards the outer terminal's
+/// bytes verbatim, so the last byte decides: a trailing Return is the human
+/// submitting the line. Any other bytes count as text even when they are only a
+/// cursor key's escape sequence, because those bytes cannot be told from a
+/// bracket that inserts text; that errs toward refusing, and the editor's own
+/// report settles it.
+pub(super) fn attach_input_unsent_text(data: &[u8]) -> Option<ForwardedInputEffect> {
+    match *data.last()? {
+        b'\r' => Some(ForwardedInputEffect::Submitted),
+        _ => Some(ForwardedInputEffect::Text),
+    }
+}
 
 pub(super) fn downgrade_ineligible_pixel_mouse(
     events: &mut [ClientPaneInputEvent],
@@ -348,6 +435,162 @@ fn apply_client_terminal_input_events(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn key(code: KeyCode, modifiers: KeyModifiers) -> ClientPaneInputEvent {
+        ClientPaneInputEvent::from_terminal_key(crate::input::TerminalKey::new(code, modifiers))
+            .expect("pane input key")
+    }
+
+    fn released(code: KeyCode) -> ClientPaneInputEvent {
+        ClientPaneInputEvent::from_terminal_key(
+            crate::input::TerminalKey::new(code, KeyModifiers::NONE)
+                .with_kind(KeyEventKind::Release),
+        )
+        .expect("pane input key")
+    }
+
+    /// Only the submit key proves the editor empty; every other key or byte may
+    /// have left text in it (autocomplete, history, a line edited again, or a
+    /// partial delete such as Pi's `tui.editor.deleteToLineStart` on Ctrl-U).
+    #[test]
+    fn forwarded_human_input_marks_unsent_text_except_the_submit_key() {
+        use ForwardedInputEffect::{NoText, Submitted, Text};
+
+        let cases = [
+            (key(KeyCode::Enter, KeyModifiers::NONE), Some(Submitted)),
+            (key(KeyCode::Char('h'), KeyModifiers::NONE), Some(Text)),
+            // Cursor movement and function keys cannot write text, except the
+            // Up/Down arrows, which Pi browses prompt history with.
+            (key(KeyCode::Up, KeyModifiers::NONE), Some(Text)),
+            (key(KeyCode::Down, KeyModifiers::NONE), Some(Text)),
+            (key(KeyCode::Left, KeyModifiers::NONE), Some(NoText)),
+            (key(KeyCode::Home, KeyModifiers::NONE), Some(NoText)),
+            (key(KeyCode::PageDown, KeyModifiers::NONE), Some(NoText)),
+            (key(KeyCode::F(5), KeyModifiers::NONE), Some(NoText)),
+            (key(KeyCode::Tab, KeyModifiers::NONE), Some(Text)),
+            (key(KeyCode::Backspace, KeyModifiers::NONE), Some(Text)),
+            // Delete-to-line-start and copy-selection are not clears: text can
+            // survive them (Pi: `tui.editor.deleteToLineStart`, `tui.input.copy`).
+            (key(KeyCode::Char('u'), KeyModifiers::CONTROL), Some(Text)),
+            (key(KeyCode::Char('c'), KeyModifiers::CONTROL), Some(Text)),
+            (key(KeyCode::Char('r'), KeyModifiers::CONTROL), Some(Text)),
+            (key(KeyCode::Esc, KeyModifiers::NONE), Some(NoText)),
+            (key(KeyCode::Enter, KeyModifiers::SHIFT), Some(Text)),
+            (key(KeyCode::Char('c'), KeyModifiers::ALT), Some(Text)),
+            (ClientPaneInputEvent::TextCommit("typed".into()), Some(Text)),
+            (ClientPaneInputEvent::Paste("pasted".into()), Some(Text)),
+            (released(KeyCode::Char('h')), None),
+            (ClientPaneInputEvent::TextCommit(String::new()), None),
+            (ClientPaneInputEvent::Paste(String::new()), None),
+            (
+                ClientPaneInputEvent::Mouse {
+                    kind: crate::protocol::ClientMouseKind::Down(
+                        crate::protocol::ClientMouseButton::Left,
+                    ),
+                    position: crate::protocol::ClientMousePosition::Cell { column: 1, row: 1 },
+                    geometry: None,
+                    modifiers: 0,
+                    lines: 1,
+                },
+                None,
+            ),
+        ];
+        for (event, expected) in cases {
+            assert_eq!(
+                human_input_unsent_text(std::slice::from_ref(&event)),
+                expected,
+                "{event:?}"
+            );
+        }
+        assert_eq!(human_input_unsent_text(&[]), None);
+
+        // A batch is decided by its last proving event, so a line the human
+        // typed and then submitted is not left unsent.
+        assert_eq!(
+            human_input_unsent_text(&[
+                key(KeyCode::Char('h'), KeyModifiers::NONE),
+                released(KeyCode::Char('h')),
+                key(KeyCode::Enter, KeyModifiers::NONE),
+            ]),
+            Some(Submitted)
+        );
+        assert_eq!(
+            human_input_unsent_text(&[
+                key(KeyCode::Char('u'), KeyModifiers::CONTROL),
+                key(KeyCode::Char('h'), KeyModifiers::NONE),
+            ]),
+            Some(Text)
+        );
+
+        // A no-text key in the same batch must not hide what the batch wrote:
+        // the client can deliver a paste or a typed word and a cursor key
+        // together, and the text is still in the editor.
+        let mixed = [
+            (
+                vec![
+                    ClientPaneInputEvent::TextCommit("human draft".into()),
+                    key(KeyCode::Left, KeyModifiers::NONE),
+                ],
+                Some(Text),
+            ),
+            (
+                vec![
+                    ClientPaneInputEvent::TextCommit("human draft".into()),
+                    key(KeyCode::Left, KeyModifiers::NONE),
+                    key(KeyCode::Enter, KeyModifiers::NONE),
+                ],
+                Some(Submitted),
+            ),
+            (
+                vec![
+                    key(KeyCode::Enter, KeyModifiers::NONE),
+                    key(KeyCode::Char('h'), KeyModifiers::NONE),
+                ],
+                Some(Text),
+            ),
+            (
+                vec![
+                    ClientPaneInputEvent::Paste("pasted".into()),
+                    key(KeyCode::Home, KeyModifiers::NONE),
+                ],
+                Some(Text),
+            ),
+            (
+                vec![
+                    released(KeyCode::Char('h')),
+                    key(KeyCode::Left, KeyModifiers::NONE),
+                ],
+                Some(NoText),
+            ),
+            (
+                vec![
+                    key(KeyCode::Enter, KeyModifiers::NONE),
+                    key(KeyCode::Left, KeyModifiers::NONE),
+                ],
+                Some(Submitted),
+            ),
+        ];
+        for (events, expected) in mixed {
+            assert_eq!(human_input_unsent_text(&events), expected, "{events:?}");
+        }
+
+        // Attached clients forward the outer terminal's bytes, so the last
+        // byte decides the same way.
+        let attached = [
+            (b"".as_slice(), None),
+            (b"\r".as_slice(), Some(Submitted)),
+            // Not clears on the raw path either: the outer terminal's own bytes
+            // for Ctrl-C and Ctrl-U prove nothing about the editor.
+            (b"\x03".as_slice(), Some(Text)),
+            (b"\x15".as_slice(), Some(Text)),
+            (b"x".as_slice(), Some(Text)),
+            (b"half typed\r".as_slice(), Some(Submitted)),
+            (b"\x1b[A".as_slice(), Some(Text)),
+        ];
+        for (data, expected) in attached {
+            assert_eq!(attach_input_unsent_text(data), expected, "{data:?}");
+        }
+    }
 
     #[tokio::test]
     async fn terminal_attach_stale_geometry_falls_back_to_the_canonical_cell() {

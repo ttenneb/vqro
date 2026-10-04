@@ -1252,6 +1252,18 @@ impl HeadlessServer {
             .cloned()
     }
 
+    /// Records what forwarded human pane input proves about unsent text in the
+    /// target terminal's editor, for the `agent prompt` guard.
+    fn note_human_pane_input(
+        &mut self,
+        terminal_id: crate::terminal::TerminalId,
+        effect: crate::terminal::ForwardedInputEffect,
+    ) {
+        if let Some(terminal) = self.app.state.terminals.get_mut(&terminal_id) {
+            terminal.note_forwarded_human_input(effect, std::time::Instant::now());
+        }
+    }
+
     fn runtime_for_terminal_id_string(
         &self,
         terminal_id: &str,
@@ -1332,7 +1344,16 @@ impl HeadlessServer {
                 else {
                     return false;
                 };
-                if let Some(runtime) = self.runtime_for_terminal_id_string(terminal_id) {
+                let terminal_id = terminal_id.clone();
+                // Pasting an image path inserts text into the same editor the
+                // human types in, so it can join unsent text the same way.
+                if let Some(terminal_id) = self.terminal_id_by_string(&terminal_id) {
+                    self.note_human_pane_input(
+                        terminal_id,
+                        crate::terminal::ForwardedInputEffect::Text,
+                    );
+                }
+                if let Some(runtime) = self.runtime_for_terminal_id_string(&terminal_id) {
                     let payload = paste_payload_for_runtime(runtime, &path);
                     if let Err(err) = runtime.try_send_bytes(Bytes::from(payload)) {
                         warn!(client_id, terminal_id = %terminal_id, err = %err, "terminal attach clipboard image paste failed");
@@ -2235,7 +2256,13 @@ impl HeadlessServer {
                 else {
                     return false;
                 };
-                if let Some(runtime) = self.runtime_for_terminal_id_string(terminal_id) {
+                let terminal_id = terminal_id.clone();
+                if let Some(effect) = super::pane_input::attach_input_unsent_text(&data) {
+                    if let Some(terminal_id) = self.terminal_id_by_string(&terminal_id) {
+                        self.note_human_pane_input(terminal_id, effect);
+                    }
+                }
+                if let Some(runtime) = self.runtime_for_terminal_id_string(&terminal_id) {
                     if let Err(err) = apply_terminal_attach_input(runtime, data) {
                         warn!(client_id, terminal_id = %terminal_id, err = %err);
                     }
@@ -3069,6 +3096,15 @@ impl HeadlessServer {
                 if let Some(client) = self.clients.get_mut(&client_id) {
                     client
                         .track_shell_input(ClientShellInputTarget::Pane(pane_id.clone()), &events);
+                }
+                if let Some(effect) = super::pane_input::human_input_unsent_text(&events) {
+                    if let Some(terminal_id) = self
+                        .app
+                        .state
+                        .terminal_id_for_pane(workspace_index, runtime_pane_id)
+                    {
+                        self.note_human_pane_input(terminal_id, effect);
+                    }
                 }
                 let foreground_changed =
                     interaction && self.promote_client_to_foreground(client_id);

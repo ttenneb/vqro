@@ -11,7 +11,7 @@ pub(crate) use id::MAX_TERMINAL_ID_BYTES;
 pub use runtime::TerminalRuntime;
 pub(crate) use runtime_registry::TerminalRuntimeRegistry;
 pub use state::{
-    AgentMetadataReport, EffectivePresentation, EffectiveStateChange, TerminalState,
-    TerminalStateMutation,
+    AgentMetadataReport, EffectivePresentation, EffectiveStateChange, ForwardedInputEffect,
+    TerminalState, TerminalStateMutation,
 };
 pub(crate) use title::stripped_terminal_title;

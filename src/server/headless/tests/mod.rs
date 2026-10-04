@@ -3739,6 +3739,108 @@ async fn public_api_focus_replaces_every_client_shell_projection() {
 }
 
 #[tokio::test]
+async fn forwarded_human_keys_arm_possible_unsent_input() {
+    let mut server = test_headless_server();
+    let _input_rx = install_focused_test_runtime(&mut server, b"");
+    server.app.state.ensure_test_terminals();
+    let pane_id = server.app.state.workspaces[0].tabs[0].root_pane;
+    let public_pane_id = server.app.public_pane_id(0, pane_id).unwrap();
+    let terminal_id = server.app.state.terminal_id_for_pane(0, pane_id).unwrap();
+    server.clients.insert(
+        11,
+        ClientConnection::new_with_mode(
+            ClientConnectionMode::ClientShell,
+            (80, 24),
+            crate::kitty_graphics::HostCellSize::default(),
+            1,
+            RenderEncoding::SemanticFrame,
+            None,
+        ),
+    );
+    let key = |code: crate::protocol::ClientKeyCode,
+               modifiers: u8,
+               kind: crate::protocol::ClientKeyKind| {
+        crate::protocol::ClientPaneInputEvent::Key {
+            code,
+            modifiers,
+            kind,
+            repeat_count: 1,
+            shifted_codepoint: None,
+            generated_text: None,
+            tracks_release: true,
+            physical_key_id: None,
+            windows_record: None,
+        }
+    };
+    let forward = |server: &mut HeadlessServer,
+                   events: Vec<crate::protocol::ClientPaneInputEvent>| {
+        let _ = server.handle_server_event(ServerEvent::ClientShellPaneInput {
+            client_id: 11,
+            pane_id: public_pane_id.clone(),
+            events,
+        });
+    };
+
+    // A character the human typed may be sitting unsent in the editor: the
+    // forwarded effect has to reach the terminal the guard reads. The clear
+    // direction of the same call is the rule table's job.
+    forward(
+        &mut server,
+        vec![key(
+            crate::protocol::ClientKeyCode::Char('h'),
+            0,
+            crate::protocol::ClientKeyKind::Press,
+        )],
+    );
+    assert!(server.app.state.terminals[&terminal_id].unsent_input_possible);
+
+    // A mixed batch that writes text and then moves the cursor must still count
+    // as text, or the guard trusts an older empty report and types over it.
+    let report_input_box = |server: &mut HeadlessServer, value: &str| {
+        let response = server.app.handle_api_request(crate::api::schema::Request {
+            id: "req-input-box".into(),
+            method: crate::api::schema::Method::PaneReportMetadata(
+                crate::api::schema::PaneReportMetadataParams {
+                    pane_id: public_pane_id.clone(),
+                    source: "vqro:pi".into(),
+                    agent: Some("pi".into()),
+                    applies_to_source: None,
+                    title: None,
+                    display_agent: None,
+                    state_labels: std::collections::HashMap::new(),
+                    tokens: [("input_box".to_string(), Some(value.to_string()))]
+                        .into_iter()
+                        .collect(),
+                    clear_title: false,
+                    clear_display_agent: false,
+                    clear_state_labels: false,
+                    seq: None,
+                    ttl_ms: None,
+                },
+            ),
+        });
+        assert!(response.contains("ok"), "{response}");
+    };
+    report_input_box(&mut server, "empty");
+    forward(
+        &mut server,
+        vec![
+            crate::protocol::ClientPaneInputEvent::TextCommit("human draft".into()),
+            key(
+                crate::protocol::ClientKeyCode::Left,
+                0,
+                crate::protocol::ClientKeyKind::Press,
+            ),
+        ],
+    );
+    assert!(
+        server.app.state.terminals[&terminal_id].editor_may_hold_unsent_text(),
+        "a batch that wrote text then moved the cursor must not look empty"
+    );
+    shutdown_test_runtimes(&mut server);
+}
+
+#[tokio::test]
 async fn client_shell_input_targets_runtime_without_server_shell_classification() {
     let mut server = test_headless_server();
     let mut input_rx = install_focused_test_runtime(&mut server, b"\x1b[?1000h\x1b[?1006h");

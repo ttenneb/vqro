@@ -193,6 +193,19 @@ impl App {
                 ),
             ));
         }
+        if terminal.editor_may_hold_unsent_text() {
+            // Typing here would join the human's unsent text and let the trailing Enter
+            // submit the mix. The editor's owner says it holds text, or the host
+            // forwarded keys it cannot otherwise account for, so it refuses rather than guess.
+            return Err(encode_error(
+                id,
+                "editor_has_text",
+                format!(
+                    "agent {} has unsent text in its input box; not typing over it",
+                    params.target
+                ),
+            ));
+        }
         #[cfg(windows)]
         let submit_deadline = params
             .wait
@@ -634,7 +647,7 @@ mod tests {
             .unwrap()
             .test_process_pty_bytes(b"\x1b[?2004l");
         let raw_started = std::time::Instant::now();
-        let raw = run_deferred_agent_prompt(
+        let unbracketed = run_deferred_agent_prompt(
             &mut app,
             "req-raw",
             AgentPromptParams {
@@ -643,8 +656,11 @@ mod tests {
                 wait: None,
             },
         );
-        let raw: SuccessResponse = serde_json::from_str(&raw).unwrap();
-        assert!(matches!(raw.result, ResponseResult::AgentPrompted { .. }));
+        let unbracketed: SuccessResponse = serde_json::from_str(&unbracketed).unwrap();
+        assert!(matches!(
+            unbracketed.result,
+            ResponseResult::AgentPrompted { .. }
+        ));
         assert_eq!(rx.try_recv().unwrap(), Bytes::from_static(b"A != B"));
         assert_eq!(rx.try_recv().unwrap(), Bytes::from_static(b"\r"));
         assert!(raw_started.elapsed() >= AGENT_PROMPT_SUBMIT_DELAY);
@@ -661,6 +677,338 @@ mod tests {
         let error: crate::api::schema::ErrorResponse = serde_json::from_str(&rejected).unwrap();
         assert_eq!(error.error.code, "agent_not_found");
         assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn agent_prompt_refuses_to_type_over_the_humans_unsent_text() {
+        let mut app = app_with_agent();
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.state.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        let terminal = app.state.terminals.get_mut(&terminal_id).unwrap();
+        terminal.set_agent_name("reviewer".into());
+        terminal.set_detected_state(Some(Agent::Pi), AgentState::Idle);
+        let (runtime, mut rx) = crate::terminal::TerminalRuntime::test_with_channel(80, 24);
+        app.state.insert_test_runtime(pane_id, runtime);
+
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .unsent_input_possible = true;
+        let response = run_deferred_agent_prompt(
+            &mut app,
+            "req-unsent",
+            AgentPromptParams {
+                target: "reviewer".into(),
+                text: "unrelated prompt".into(),
+                wait: None,
+            },
+        );
+        let error: crate::api::schema::ErrorResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(error.error.code, "editor_has_text");
+        assert!(
+            error.error.message.contains("unsent text"),
+            "error should say what it found: {}",
+            error.error.message
+        );
+        assert!(
+            tokio::time::timeout(
+                AGENT_PROMPT_SUBMIT_DELAY + Duration::from_millis(100),
+                rx.recv()
+            )
+            .await
+            .is_err(),
+            "prompt wrote or scheduled terminal input over unsent text"
+        );
+
+        // The human submitted: the same prompt now goes through untouched.
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .unsent_input_possible = false;
+        let response = run_deferred_agent_prompt(
+            &mut app,
+            "req-clear",
+            AgentPromptParams {
+                target: "reviewer".into(),
+                text: "unrelated prompt".into(),
+                wait: None,
+            },
+        );
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        assert!(matches!(
+            success.result,
+            ResponseResult::AgentPrompted { .. }
+        ));
+        assert_eq!(
+            rx.try_recv().unwrap(),
+            Bytes::from_static(b"unrelated prompt")
+        );
+        assert_eq!(rx.try_recv().unwrap(), Bytes::from_static(b"\r"));
+        assert!(
+            !app.state.terminals[&terminal_id].unsent_input_possible,
+            "typing a prompt is not the human typing; it must not arm the guard"
+        );
+    }
+
+    /// Reports the neutral input-box fact the way an integration does, through
+    /// the public pane metadata path.
+    fn report_input_box(app: &mut App, pane_id: &str, value: &str) {
+        let response = app.handle_pane_report_metadata(
+            "req-input-box".into(),
+            crate::api::schema::PaneReportMetadataParams {
+                pane_id: pane_id.into(),
+                source: "vqro:pi".into(),
+                agent: Some("pi".into()),
+                applies_to_source: None,
+                title: None,
+                display_agent: None,
+                state_labels: std::collections::HashMap::new(),
+                tokens: [("input_box".to_string(), Some(value.to_string()))]
+                    .into_iter()
+                    .collect(),
+                clear_title: false,
+                clear_display_agent: false,
+                clear_state_labels: false,
+                seq: None,
+                ttl_ms: None,
+            },
+        );
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        assert!(
+            matches!(success.result, ResponseResult::Ok {}),
+            "{response}"
+        );
+    }
+
+    /// The human types, then deletes: the forwarded-key heuristic still suspects
+    /// unsent text, but the editor's own report is exact and newer.
+    #[tokio::test]
+    async fn a_reported_empty_input_box_lets_the_prompt_through() {
+        let mut app = app_with_agent();
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.state.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        let terminal = app.state.terminals.get_mut(&terminal_id).unwrap();
+        terminal.set_agent_name("reviewer".into());
+        terminal.set_detected_state(Some(Agent::Pi), AgentState::Idle);
+        terminal.note_forwarded_human_input(
+            crate::terminal::ForwardedInputEffect::Text,
+            std::time::Instant::now(),
+        );
+        let (runtime, mut rx) = crate::terminal::TerminalRuntime::test_with_channel(80, 24);
+        app.state.insert_test_runtime(pane_id, runtime);
+
+        let public_pane_id = app.public_pane_id(0, pane_id).unwrap();
+        report_input_box(&mut app, &public_pane_id, "empty");
+
+        let response = run_deferred_agent_prompt(
+            &mut app,
+            "req-empty-box",
+            AgentPromptParams {
+                target: "reviewer".into(),
+                text: "unrelated prompt".into(),
+                wait: None,
+            },
+        );
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        assert!(
+            matches!(success.result, ResponseResult::AgentPrompted { .. }),
+            "an empty editor must accept the prompt: {response}"
+        );
+        assert_eq!(
+            rx.try_recv().unwrap(),
+            Bytes::from_static(b"unrelated prompt")
+        );
+        assert_eq!(rx.try_recv().unwrap(), Bytes::from_static(b"\r"));
+    }
+
+    #[tokio::test]
+    async fn a_reported_input_box_with_text_refuses_the_prompt() {
+        let mut app = app_with_agent();
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.state.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        let terminal = app.state.terminals.get_mut(&terminal_id).unwrap();
+        terminal.set_agent_name("reviewer".into());
+        terminal.set_detected_state(Some(Agent::Pi), AgentState::Idle);
+        let (runtime, mut rx) = crate::terminal::TerminalRuntime::test_with_channel(80, 24);
+        app.state.insert_test_runtime(pane_id, runtime);
+
+        let public_pane_id = app.public_pane_id(0, pane_id).unwrap();
+        report_input_box(&mut app, &public_pane_id, "has_text");
+
+        let response = run_deferred_agent_prompt(
+            &mut app,
+            "req-text-box",
+            AgentPromptParams {
+                target: "reviewer".into(),
+                text: "unrelated prompt".into(),
+                wait: None,
+            },
+        );
+        let error: crate::api::schema::ErrorResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(error.error.code, "editor_has_text");
+        assert!(rx.try_recv().is_err(), "nothing may be written");
+    }
+
+    /// A report from before the human's latest keys says nothing about what the
+    /// editor holds now, so the host falls back to refusing.
+    #[tokio::test]
+    async fn a_report_older_than_the_humans_keys_does_not_clear_the_guard() {
+        let mut app = app_with_agent();
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.state.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        let terminal = app.state.terminals.get_mut(&terminal_id).unwrap();
+        terminal.set_agent_name("reviewer".into());
+        terminal.set_detected_state(Some(Agent::Pi), AgentState::Idle);
+        let (runtime, mut rx) = crate::terminal::TerminalRuntime::test_with_channel(80, 24);
+        app.state.insert_test_runtime(pane_id, runtime);
+        let public_pane_id = app.public_pane_id(0, pane_id).unwrap();
+        report_input_box(&mut app, &public_pane_id, "empty");
+
+        let forwarded_at = std::time::Instant::now() + Duration::from_millis(1);
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .note_forwarded_human_input(crate::terminal::ForwardedInputEffect::Text, forwarded_at);
+
+        let response = run_deferred_agent_prompt(
+            &mut app,
+            "req-stale-box",
+            AgentPromptParams {
+                target: "reviewer".into(),
+                text: "unrelated prompt".into(),
+                wait: None,
+            },
+        );
+        let error: crate::api::schema::ErrorResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(error.error.code, "editor_has_text");
+        assert!(rx.try_recv().is_err(), "nothing may be written");
+    }
+
+    /// The refresh the adapter sends every 10s carries the value it already
+    /// reported. It must be a server no-op (no revision bump, so no render,
+    /// client fanout, session save or document work) while still counting as a
+    /// newer observation, or the host would keep the report it already had.
+    #[tokio::test]
+    async fn an_unchanged_input_box_report_is_a_no_op_that_still_refreshes() {
+        let mut app = app_with_agent();
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.state.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        let terminal = app.state.terminals.get_mut(&terminal_id).unwrap();
+        terminal.set_agent_name("reviewer".into());
+        terminal.set_detected_state(Some(Agent::Pi), AgentState::Idle);
+        let (runtime, _rx) = crate::terminal::TerminalRuntime::test_with_channel(80, 24);
+        app.state.insert_test_runtime(pane_id, runtime);
+        let public_pane_id = app.public_pane_id(0, pane_id).unwrap();
+
+        report_input_box(&mut app, &public_pane_id, "empty");
+        let revision = app.state.terminals[&terminal_id].revision;
+
+        // The human types after that report, so the report is stale evidence and
+        // the host falls back to refusing.
+        let forwarded_at = std::time::Instant::now() + Duration::from_millis(1);
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .note_forwarded_human_input(crate::terminal::ForwardedInputEffect::Text, forwarded_at);
+        assert!(app.state.terminals[&terminal_id].editor_may_hold_unsent_text());
+
+        // The refresh says the same thing, later.
+        std::thread::sleep(Duration::from_millis(5));
+        report_input_box(&mut app, &public_pane_id, "empty");
+        let terminal = &app.state.terminals[&terminal_id];
+        assert_eq!(
+            terminal.revision, revision,
+            "an unchanged report must not bump the revision, which is what gates render and fanout"
+        );
+        assert!(
+            !terminal.editor_may_hold_unsent_text(),
+            "the refresh must still count as a newer observation than the human's keys"
+        );
+    }
+
+    /// The remaining case behind the refresh: with the editor's own report in
+    /// hand, a key that cannot write text (cursor movement, Esc) is not evidence
+    /// of a draft, so it must not refuse the prompt while the box is empty. A
+    /// key that can write text after that report still does refuse.
+    #[tokio::test]
+    async fn a_cursor_key_in_an_empty_box_does_not_refuse_the_prompt() {
+        let mut app = app_with_agent();
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.state.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        let terminal = app.state.terminals.get_mut(&terminal_id).unwrap();
+        terminal.set_agent_name("reviewer".into());
+        terminal.set_detected_state(Some(Agent::Pi), AgentState::Idle);
+        let (runtime, mut rx) = crate::terminal::TerminalRuntime::test_with_channel(80, 24);
+        app.state.insert_test_runtime(pane_id, runtime);
+        let public_pane_id = app.public_pane_id(0, pane_id).unwrap();
+        report_input_box(&mut app, &public_pane_id, "empty");
+
+        let later = std::time::Instant::now() + Duration::from_millis(1);
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .note_forwarded_human_input(crate::terminal::ForwardedInputEffect::NoText, later);
+        assert!(
+            !app.state.terminals[&terminal_id].editor_may_hold_unsent_text(),
+            "moving the cursor in a reported-empty box is not a draft"
+        );
+        let response = run_deferred_agent_prompt(
+            &mut app,
+            "req-cursor",
+            AgentPromptParams {
+                target: "reviewer".into(),
+                text: "unrelated prompt".into(),
+                wait: None,
+            },
+        );
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        assert!(matches!(
+            success.result,
+            ResponseResult::AgentPrompted { .. }
+        ));
+        assert_eq!(
+            rx.try_recv().unwrap(),
+            Bytes::from_static(b"unrelated prompt")
+        );
+
+        // A key that can write text after the report still refuses, because the
+        // host has no report newer than it.
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .note_forwarded_human_input(
+                crate::terminal::ForwardedInputEffect::Text,
+                std::time::Instant::now() + Duration::from_millis(1),
+            );
+        let refused = run_deferred_agent_prompt(
+            &mut app,
+            "req-typed",
+            AgentPromptParams {
+                target: "reviewer".into(),
+                text: "unrelated prompt".into(),
+                wait: None,
+            },
+        );
+        let error: crate::api::schema::ErrorResponse = serde_json::from_str(&refused).unwrap();
+        assert_eq!(error.error.code, "editor_has_text");
     }
 
     #[tokio::test]

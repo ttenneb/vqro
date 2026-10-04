@@ -1,4 +1,5 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import net from "node:net";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 
@@ -70,6 +71,157 @@ export default function (pi: ExtensionAPI) {
     if (set.size >= 16 || state.state === "closed") return () => {};
     set.add(listener); return () => { set.delete(listener); };
   }
+
+  // The host refuses to type into an editor that already holds the human's
+  // unsent text, so it needs to know whether this one does. Only the fact is
+  // reported (never the content), once a second, as the same neutral
+  // pane.report_metadata request the other integrations send. The poll is a
+  // cheap in-process read of the editor text; a request goes out when the text
+  // changed since the last poll (carrying only the empty/has_text fact, never
+  // the content), right after a keystroke, and otherwise on a slow refresh. An
+  // idle pane therefore costs one small request per 30s, and a pane being typed
+  // in at most one per second, with the latest observation kept until a request
+  // can go out. The refresh only bounds the case a text change
+  // cannot see: keys that leave the text alone, which the host treats as no
+  // draft at all while an editor report is in hand. Each request is bounded by a
+  // timeout and at most one is in flight, so an endpoint that never answers
+  // cannot accumulate sockets, and shutdown cancels the outstanding one. The
+  // socket write is deliberate: a CLI spawn per pane per tick is not bounded
+  // enough to run in every Vqro pane.
+  const INPUT_BOX_POLL_MS = 1000;
+  const INPUT_BOX_REFRESH_MS = 30_000;
+  const INPUT_BOX_REQUEST_TIMEOUT_MS = 1500;
+  const INPUT_BOX_SETTLE_MS = 400;
+  const INPUT_BOX_MIN_INTERVAL_MS = 1000;
+  let editorPoll: ReturnType<typeof setInterval> | undefined;
+  let stopEditorInput: (() => void) | undefined;
+  let cancelInputBoxRequest: (() => void) | undefined;
+  let settleTimer: ReturnType<typeof setTimeout> | undefined;
+  let paceTimer: ReturnType<typeof setTimeout> | undefined;
+  let inputBoxSeq = Date.now() * 1000;
+  let lastSentInputBox: { text: string; at: number } | undefined;
+  let dirty = false;
+  /** Set before cancelling an in-flight request, so the cancel cannot drain into
+   *  a replacement socket while the adapter is stopping. */
+  let inputBoxStopped = false;
+
+  function readInputBoxText(): string | undefined {
+    try {
+      const text = latestCtx?.ui?.getEditorText?.();
+      return typeof text === "string" ? text : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  function sendInputBoxRequest(socketPath: string, request: string): void {
+    if (cancelInputBoxRequest) return;
+    // Unix only: the Vqro Pi profile this adapter ships in needs symlink support.
+    const socket = net.createConnection(socketPath);
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      cancelInputBoxRequest = undefined;
+      socket.destroy();
+      // Anything seen while this was in flight is still owed, re-read now.
+      reportInputBox();
+    };
+    cancelInputBoxRequest = finish;
+    const timeout = setTimeout(finish, INPUT_BOX_REQUEST_TIMEOUT_MS);
+    timeout.unref?.();
+    socket.on("error", finish);
+    socket.on("end", finish);
+    socket.on("data", finish);
+    socket.on("connect", () => {
+      if (settled) return;
+      socket.write(`${request}\n`);
+    });
+    socket.unref?.();
+  }
+
+  /** Reports the current editor fact when the tracker is dirty, when the slow
+   *  refresh is due, or on request. The editor is the truth: no reading is
+   *  stored between observations, so a send can never carry a stale one. Sends
+   *  are paced and at most one is in flight; a blocked send retries when the
+   *  in-flight one settles. */
+  function reportInputBox(force = false): void {
+    if (inputBoxStopped || cancelInputBoxRequest) return;
+    const socketPath = process.env.VQRO_SOCKET_PATH;
+    const text = readInputBoxText();
+    if (!socketPath || text === undefined || state.state === "closed") return;
+    const now = Date.now();
+    const due = lastSentInputBox === undefined || now - lastSentInputBox.at >= INPUT_BOX_REFRESH_MS;
+    if (!force && !dirty && !due) return;
+    const since = now - (lastSentInputBox?.at ?? 0);
+    if (lastSentInputBox && since < INPUT_BOX_MIN_INTERVAL_MS) {
+      if (paceTimer) clearTimeout(paceTimer);
+      paceTimer = setTimeout(() => {
+        paceTimer = undefined;
+        reportInputBox();
+      }, INPUT_BOX_MIN_INTERVAL_MS - since);
+      paceTimer.unref?.();
+      return;
+    }
+    dirty = false;
+    lastSentInputBox = { text, at: now };
+    inputBoxSeq += 1;
+    sendInputBoxRequest(socketPath, JSON.stringify({
+      id: `vqro:pi:input-box:${inputBoxSeq}`,
+      method: "pane.report_metadata",
+      params: { pane_id: pane, source: "vqro:pi", seq: inputBoxSeq, tokens: { input_box: text.trim().length > 0 ? "has_text" : "empty" } },
+    }));
+  }
+
+  /** Records that the editor may differ from the last report, and reports the
+   *  current fact once the input settles. A key settles, so a line typed and
+   *  deleted inside one poll still reports; a poll-observed text change (an
+   *  extension setting a draft) needs no delay. */
+  function markInputBoxDirty(settle: boolean): void {
+    dirty = true;
+    if (!settle) return;
+    if (settleTimer) clearTimeout(settleTimer);
+    settleTimer = setTimeout(() => {
+      settleTimer = undefined;
+      reportInputBox();
+    }, INPUT_BOX_SETTLE_MS);
+    settleTimer.unref?.();
+  }
+
+  function watchInputBox(ctx: any): void {
+    stopInputBox();
+    inputBoxStopped = false;
+    latestCtx = ctx;
+    reportInputBox(true);
+    // Interactive-mode key stream, so a key settles into a report right after it
+    // rather than at the next poll. Absent outside the TUI: the poll still does.
+    stopEditorInput = ctx?.ui?.onTerminalInput?.(() => {
+      markInputBoxDirty(true);
+      return undefined;
+    });
+    editorPoll = setInterval(() => {
+      const text = readInputBoxText();
+      if (text !== undefined && text !== lastSentInputBox?.text) markInputBoxDirty(false);
+      reportInputBox();
+    }, INPUT_BOX_POLL_MS);
+    editorPoll.unref?.();
+  }
+
+  function stopInputBox(): void {
+    inputBoxStopped = true;
+    if (editorPoll) clearInterval(editorPoll);
+    editorPoll = undefined;
+    if (settleTimer) clearTimeout(settleTimer);
+    settleTimer = undefined;
+    if (paceTimer) clearTimeout(paceTimer);
+    paceTimer = undefined;
+    stopEditorInput?.();
+    stopEditorInput = undefined;
+    cancelInputBoxRequest?.();
+    lastSentInputBox = undefined;
+    dirty = false;
+  }
+
   const adapter: AdapterV1 = {
     version: 1, snapshot, current, exec,
     onFact: listener => subscribe(facts, listener),
@@ -99,7 +251,7 @@ export default function (pi: ExtensionAPI) {
   });
   pi.on("session_start", async (_event, ctx) => {
     if (state.state === "closed") return;
-    latestCtx = ctx;
+    watchInputBox(ctx);
     state.generation += 1; state.run = 0; state.state = "idle";
     state.self = undefined; state.prompt = ""; state.origin = undefined;
     state.final = ""; state.truncated = false; source = "unknown"; state.source = source;
@@ -169,6 +321,7 @@ export default function (pi: ExtensionAPI) {
     await publish("run_settled");
   });
   pi.on("session_shutdown", async () => {
+    stopInputBox();
     state.generation += 1; state.state = "closed";
     unDiscover();
     await publish("session_closed");
