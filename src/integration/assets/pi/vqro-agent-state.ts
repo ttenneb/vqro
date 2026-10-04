@@ -205,6 +205,19 @@ export default function (pi) {
     }
   }
 
+  function reportInputBox(hasText: boolean): void {
+    void sendRequest({
+      id: `${source}:input-box:${Date.now()}:${Math.random().toString(36).slice(2)}`,
+      method: "pane.report_metadata",
+      params: {
+        pane_id: paneId,
+        source,
+        seq: nextReportSeq(),
+        tokens: { input_box: hasText ? "has_text" : "empty" },
+      },
+    });
+  }
+
   function checkInputBox(force = false): void {
     if (!rootSession) {
       return;
@@ -214,16 +227,7 @@ export default function (pi) {
       return;
     }
     inputBoxHasText = next;
-    void sendRequest({
-      id: `${source}:input-box:${Date.now()}:${Math.random().toString(36).slice(2)}`,
-      method: "pane.report_metadata",
-      params: {
-        pane_id: paneId,
-        source,
-        seq: nextReportSeq(),
-        tokens: { input_box: next ? "has_text" : "empty" },
-      },
-    });
+    reportInputBox(next);
   }
 
   function watchEditor(ctx: any): void {
@@ -231,7 +235,21 @@ export default function (pi) {
       clearInterval(editorPoll);
     }
     editorUi = ctx?.ui;
-    editorPoll = setInterval(() => checkInputBox(), 1000);
+    // Every tick re-reports, not only a flip: the host discards a report older
+    // than the human's latest key, and a flip-only report would leave it on its
+    // fallback heuristic after any keystroke until the next flip, which may
+    // never come. One small request per second per pane is the whole cost.
+    editorPoll = setInterval(() => {
+      if (!rootSession) {
+        return;
+      }
+      const next = readInputBoxHasText();
+      if (next === undefined) {
+        return;
+      }
+      inputBoxHasText = next;
+      reportInputBox(next);
+    }, 1000);
     editorPoll.unref?.();
   }
 
