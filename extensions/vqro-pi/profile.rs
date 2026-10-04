@@ -34,6 +34,41 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
+/// Temporary compiled profile admission, not runtime package execution.
+/// See docs/next/architecture/temporary-agent-launch-profile-admission.md.
+pub(crate) const BUNDLE: crate::bundled::DefaultBundle = crate::bundled::DefaultBundle {
+    prefix: "pi",
+    assets: &[
+        ("vqro-pi.ts", include_str!("index.ts")),
+        super::tasks::PROFILE_RESOURCE,
+        (
+            "skills/vqro/SKILL.md",
+            include_str!("../../skills/vqro/SKILL.md"),
+        ),
+    ],
+    plugin: None,
+};
+
+fn generation_dir() -> PathBuf {
+    crate::bundled::generation_dir(
+        &crate::bundled::bundled_root(),
+        BUNDLE.prefix,
+        BUNDLE.assets,
+    )
+}
+
+pub(crate) fn apply_pane_env(command: &mut portable_pty::CommandBuilder) {
+    if profile_ready() {
+        command.env("PI_CODING_AGENT_DIR", profile_dir());
+    } else if !opted_out() {
+        command.env_remove("PI_CODING_AGENT_DIR");
+    }
+}
+
+pub(crate) fn notice(executable: &str) -> Option<&'static str> {
+    (executable == "pi" && warning_needed()).then_some(UNAVAILABLE_WARNING)
+}
+
 /// Packages a Vqro-launched Pi must not load: Herdr-coupled or Vqro-competing.
 const EXCLUDED_PACKAGES: &[&str] = &["pi-input-gate", "pi-tasking-herdr-adapter", "rpiv-todo"];
 /// Human agent-dir directories mirrored entry by entry, with the names to drop,
@@ -56,7 +91,7 @@ const PER_ENTRY_DIRS: &[(&str, &[&str])] = &[
 /// `SYSTEM.md` is replaced by [`VQRO_SYSTEM_MD`] rather than linked.
 const UNMIRRORED: &[&str] = &["settings.json", ".ready", "sessions", "tmp", "SYSTEM.md"];
 /// The Vqro system prompt written into the profile.
-const VQRO_SYSTEM_MD: &str = include_str!("../extensions/pi-profile/SYSTEM.md");
+const VQRO_SYSTEM_MD: &str = include_str!("SYSTEM.md");
 /// Package spec prefixes, which carry no local path.
 const SPEC_PREFIXES: &[&str] = &["npm:", "git:", "ssh:", "file:", "http:", "https:"];
 /// Settings keys whose string-array values are paths or patterns resolved
@@ -260,7 +295,7 @@ fn is_owned_pi_asset(root: &Path, path: &Path) -> bool {
 /// asset fails the preparation, so readiness is never claimed without them.
 #[cfg(unix)]
 fn link_profile_assets(profile: &Path) -> io::Result<()> {
-    let generation = crate::bundled::pi_generation_dir();
+    let generation = generation_dir();
     let Some(root) = generation.parent() else {
         return Err(io::Error::other("bundled Pi generation has no parent"));
     };
@@ -306,7 +341,7 @@ fn link_profile_assets(profile: &Path) -> io::Result<()> {
             continue;
         }
         let _ = std::fs::remove_file(&target);
-        std::os::unix::fs::symlink(&source, &target)?;
+        crate::platform::resource_symlink(&source, &target)?;
         tracing::info!(path = %target.display(), "linked a Vqro Pi profile asset");
     }
     Ok(())
@@ -555,7 +590,7 @@ fn link_or_skip(source: &Path, target: &Path) -> io::Result<()> {
     if std::fs::symlink_metadata(target).is_ok() {
         return Ok(());
     }
-    std::os::unix::fs::symlink(source, target)?;
+    crate::platform::resource_symlink(source, target)?;
     tracing::info!(path = %target.display(), "linked a Pi profile entry");
     Ok(())
 }
@@ -649,6 +684,8 @@ mod tests {
         std::env::set_var("PI_CODING_AGENT_DIR", "/inherited");
         assert!(!profile_ready());
         assert!(warning_needed());
+        assert_eq!(notice("pi"), Some(UNAVAILABLE_WARNING));
+        assert_eq!(notice("other-agent"), None);
         assert_eq!(fixture.pane_override(), None);
         fixture.prepare();
         assert!(profile_ready());
@@ -789,10 +826,7 @@ mod tests {
         fixture.prepare();
         // Refactor characterization, not a public pin: deliberate future asset
         // edits may change these expected content addresses.
-        assert_eq!(
-            crate::bundled::pi_generation_dir().file_name().unwrap(),
-            "pi-14d420aa1fdb11d9"
-        );
+        assert_eq!(generation_dir().file_name().unwrap(), "pi-14d420aa1fdb11d9");
         let installed = crate::persist::plugin_registry::load();
         let tasks = installed
             .iter()
@@ -836,7 +870,7 @@ mod tests {
             .unwrap();
         assert_eq!(entry.plugin_root, custom);
         assert!(!entry.enabled);
-        assert!(crate::bundled::pi_generation_dir().exists());
+        assert!(generation_dir().exists());
     }
 
     #[test]

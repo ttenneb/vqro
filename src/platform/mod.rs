@@ -358,6 +358,8 @@ mod remote_bridge_tests;
 #[cfg(unix)]
 mod unix_common;
 #[cfg(unix)]
+pub(crate) use unix_common::resource_symlink;
+#[cfg(unix)]
 pub(crate) use unix_common::{
     begin_cli_output, configure_package_nofollow, create_private_package_directory, end_cli_output,
     forward_remote_bridge_stdio, open_package_staging, write_package_staging_file,

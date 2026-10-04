@@ -1,79 +1,40 @@
-//! Core in-tree extensions installed and enabled by default.
+//! Neutral publication and linking of compiled default resources.
 //!
-//! The tasks provider/pane, the decision queue and messaging all live in the
-//! trusted `vqro.tasks` legacy plugin, and the neutral Pi adapter/Tasks consumer plus the
-//! agent-conventions skill ship with the binary. A plain `vqro` launch publishes
-//! those embedded files as one immutable generation under the Vqro config
-//! directory and links the plugin, so the core experience needs no manual
-//! linking.
+//! The extension-side catalog declares content and distribution choices. The
+//! host publishes those immutable generations and conservatively links declared
+//! plugins, without knowing agent settings, resource policy or product names.
 //!
 //! Installs are conservative: a generation is written only when it is missing or
 //! its content changed. A file that is already there is never rewritten (so a
 //! user edit inside a published generation stays), a missing managed file is
 //! restored from the embedded content, a path that is not a regular file is
-//! refused, a user-linked replacement or an explicitly disabled `vqro.tasks` is
-//! left as it is, and nothing is written through a symlink. Set [`OPT_OUT_ENV`] to
-//! disable the installs and the Pi flags entirely.
-//!
-//! Nothing here touches another product's state: everything is rooted at this
-//! binary's own config directory, and the Pi adapter/skill are only offered to
-//! Pi processes Vqro itself starts in its panes. `~/.pi/agent` and any Herdr
-//! config are never written.
+//! refused, user-linked replacements and explicitly disabled plugins are left
+//! as they are, and nothing is written through a symlink. Set [`OPT_OUT_ENV`] to
+//! disable the defaults. All publication is rooted at this binary's config dir.
 
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 
-const TASKS_PLUGIN_ID: &str = "vqro.tasks";
-
 /// Environment variable that disables the bundled defaults when non-empty and
 /// not `0`.
 pub(crate) const OPT_OUT_ENV: &str = "VQRO_NO_BUNDLED_DEFAULTS";
 
-const TASKS_MANIFEST: &str = include_str!("../extensions/tasks/vqro-extension.toml");
-const TASKS_FILES: &[(&str, &str)] = &[
-    (
-        "provider.py",
-        include_str!("../extensions/tasks/provider.py"),
-    ),
-    ("view.py", include_str!("../extensions/tasks/view.py")),
-    (
-        "document.py",
-        include_str!("../extensions/tasks/document.py"),
-    ),
-    (
-        "decision_queue.py",
-        include_str!("../extensions/tasks/decision_queue.py"),
-    ),
-    (
-        "messages.py",
-        include_str!("../extensions/tasks/messages.py"),
-    ),
-    ("graph.py", include_str!("../extensions/tasks/graph.py")),
-    ("cli.py", include_str!("../extensions/tasks/cli.py")),
-];
-const PI_ADAPTER: &str = include_str!("../extensions/vqro-pi/index.ts");
-const TASKS_PI: &str = include_str!("../extensions/tasks/pi.ts");
-const VQRO_SKILL: &str = include_str!("../skills/vqro/SKILL.md");
-
-/// The tasks plugin files, keyed by path inside the generation directory.
-fn tasks_assets() -> Vec<(&'static str, &'static str)> {
-    let mut assets = vec![("vqro-extension.toml", TASKS_MANIFEST)];
-    assets.extend_from_slice(TASKS_FILES);
-    assets
+pub(crate) struct DefaultBundle {
+    pub(crate) prefix: &'static str,
+    pub(crate) assets: &'static [(&'static str, &'static str)],
+    pub(crate) plugin: Option<DefaultPlugin>,
 }
 
-/// The Pi adapter and conventions skill, keyed by path inside the generation.
-fn pi_assets() -> [(&'static str, &'static str); 3] {
-    [
-        ("vqro-pi.ts", PI_ADAPTER),
-        ("tasks-pi.ts", TASKS_PI),
-        ("skills/vqro/SKILL.md", VQRO_SKILL),
-    ]
+#[derive(Clone, Copy)]
+pub(crate) struct DefaultPlugin {
+    pub(crate) id: &'static str,
+    pub(crate) manifest: &'static str,
+    pub(crate) legacy_directory: &'static str,
 }
 
-fn bundled_root() -> PathBuf {
+pub(crate) fn bundled_root() -> PathBuf {
     crate::config::config_dir().join("bundled")
 }
 
@@ -102,7 +63,7 @@ fn generation_id(assets: &[(&str, &str)]) -> String {
         .collect()
 }
 
-fn generation_dir(root: &Path, prefix: &str, assets: &[(&str, &str)]) -> PathBuf {
+pub(crate) fn generation_dir(root: &Path, prefix: &str, assets: &[(&str, &str)]) -> PathBuf {
     root.join(format!("{prefix}-{}", generation_id(assets)))
 }
 
@@ -111,7 +72,7 @@ fn generation_dir(root: &Path, prefix: &str, assets: &[(&str, &str)]) -> PathBuf
 /// A pre-existing symlink at the root, a managed directory, a nested directory or
 /// a managed file must never redirect a managed write to an unrelated file.
 /// Same-user, non-adversarial scope; this only preserves unrelated data. Shared
-/// by the bundled defaults and the Pi profile.
+/// by default-resource publication and trusted launch profiles.
 pub(crate) fn safe_under(root: &Path, path: &Path) -> io::Result<()> {
     let relative = path.strip_prefix(root).map_err(|_| {
         io::Error::other(format!(
@@ -234,12 +195,21 @@ pub(crate) fn ensure_defaults() -> io::Result<()> {
     }
     let root = bundled_root();
     std::fs::create_dir_all(&root)?;
-    let tasks_dir = publish_generation(&root, "tasks", &tasks_assets())?;
-    publish_generation(&root, "pi", &pi_assets())?;
-    link_tasks_plugin(&root, &tasks_dir)
+    // Publish the complete composition before touching registry links, retaining
+    // the previous preparation/error order.
+    let directories = crate::default_extensions::BUNDLES
+        .iter()
+        .map(|bundle| publish_generation(&root, bundle.prefix, bundle.assets))
+        .collect::<io::Result<Vec<_>>>()?;
+    for (bundle, directory) in crate::default_extensions::BUNDLES.iter().zip(directories) {
+        if let Some(plugin) = bundle.plugin {
+            link_default_plugin(&root, &directory, bundle.prefix, plugin)?;
+        }
+    }
+    Ok(())
 }
 
-/// Point `vqro.tasks` at this generation.
+/// Point a declared default plugin at this generation.
 ///
 /// The decision and the mutation happen under one registry lock, so a concurrent
 /// first launch or explicit link cannot duplicate the entry between a check and a
@@ -252,35 +222,53 @@ pub(crate) fn ensure_defaults() -> io::Result<()> {
 /// The `bundled/` subtree is reserved for these generations: an arbitrary user
 /// path elsewhere is never treated as ours, and a path under `bundled/` that is
 /// not one of our addresses is left alone too.
-fn owned_generation(root: &Path, registered: &str) -> bool {
+pub(crate) fn owned_generation(
+    root: &Path,
+    registered: &str,
+    prefix: &str,
+    legacy_directory: &str,
+) -> bool {
     let path = Path::new(registered);
     if path.parent() != Some(root) {
         return false;
     }
-    if path == root.join("tasks") {
+    if path == root.join(legacy_directory) {
         return true;
     }
     path.file_name()
         .and_then(|name| name.to_str())
-        .and_then(|name| name.strip_prefix("tasks-"))
+        .and_then(|name| name.strip_prefix(prefix))
+        .and_then(|suffix| suffix.strip_prefix('-'))
         .is_some_and(|suffix| {
             suffix.len() == 16 && suffix.chars().all(|digit| digit.is_ascii_hexdigit())
         })
 }
 
-fn link_tasks_plugin(root: &Path, tasks_dir: &Path) -> io::Result<()> {
-    let current = tasks_dir.display().to_string();
-    let manifest = tasks_dir.join("vqro-extension.toml").display().to_string();
+fn link_default_plugin(
+    root: &Path,
+    directory: &Path,
+    prefix: &str,
+    declaration: DefaultPlugin,
+) -> io::Result<()> {
+    let current = directory.display().to_string();
+    let manifest = directory.join(declaration.manifest).display().to_string();
     let candidate = crate::app::load_plugin_manifest(&manifest, true)
         .map_err(|(_, message)| io::Error::other(message))?;
-    crate::plugin_paths::ensure_plugin_user_dirs(TASKS_PLUGIN_ID)?;
+    crate::plugin_paths::ensure_plugin_user_dirs(declaration.id)?;
     crate::persist::plugin_registry::update(|plugins| {
         match plugins
             .iter_mut()
-            .find(|plugin| plugin.plugin_id == TASKS_PLUGIN_ID)
+            .find(|entry| entry.plugin_id == declaration.id)
         {
             Some(plugin) => {
-                if plugin.plugin_root != current && owned_generation(root, &plugin.plugin_root) {
+                if plugin.plugin_root != current
+                    && owned_generation(
+                        root,
+                        &plugin.plugin_root,
+                        prefix,
+                        declaration.legacy_directory,
+                    )
+                {
                     plugin.plugin_root = current.clone();
                     plugin.manifest_path = manifest.clone();
                 }
@@ -298,12 +286,6 @@ fn link_tasks_plugin(root: &Path, tasks_dir: &Path) -> io::Result<()> {
         }
     })?;
     Ok(())
-}
-
-/// The published Pi generation directory (adapter + vqro skill), or the path it
-/// will occupy once a plain launch has published it.
-pub(crate) fn pi_generation_dir() -> PathBuf {
-    generation_dir(&bundled_root(), "pi", &pi_assets())
 }
 
 #[cfg(test)]
@@ -383,26 +365,6 @@ mod tests {
             "changed"
         );
         let _ = std::fs::remove_dir_all(&root);
-    }
-
-    #[test]
-    fn owned_generation_matches_only_our_addresses() {
-        let root = PathBuf::from("/cfg/bundled");
-        assert!(owned_generation(
-            &root,
-            "/cfg/bundled/tasks-9547e32d79df4a85"
-        ));
-        assert!(owned_generation(&root, "/cfg/bundled/tasks"));
-        assert!(!owned_generation(&root, "/cfg/bundled/my-dev-checkout"));
-        assert!(!owned_generation(&root, "/cfg/bundled/tasks-nothex"));
-        assert!(!owned_generation(
-            &root,
-            "/cfg/bundled/tasks-9547e32d79df4a8"
-        ));
-        assert!(!owned_generation(
-            &root,
-            "/elsewhere/tasks-9547e32d79df4a85"
-        ));
     }
 
     #[cfg(unix)]

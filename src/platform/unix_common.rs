@@ -1,5 +1,10 @@
 use std::path::{Path, PathBuf};
 
+/// OS primitive only; ownership and no-write-through policy belongs to caller.
+pub(crate) fn resource_symlink(source: &Path, target: &Path) -> std::io::Result<()> {
+    std::os::unix::fs::symlink(source, target)
+}
+
 #[derive(Debug)]
 pub(crate) struct PlatformPersistenceLock {
     _file: std::fs::File,
