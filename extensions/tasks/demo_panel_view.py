@@ -104,6 +104,24 @@ class PanelViewDemo(ReadinessDemo):
             time.sleep(0.05)
         os.write(self.pty_master, at(0, to_column, to_row))
 
+    def work(self, name, token, script):
+        """Have one agent run a real shell script; this demo shows its output."""
+        self.save(f"commands/{token}.json", {"script": script})
+        self.cli("agent", "prompt", name, f"/taskcore {token}")
+        receipt = self.root / f"receipts/{token}.json"
+        self.wait_file(receipt)
+        result = json.loads(receipt.read_text())
+        assert result["code"] == 0, (token, result)
+        return result
+
+    def pane_row_blank(self, row, first=118, last=190):
+        """Whether the pane's own columns are empty on one screen row."""
+        screen = self.screen()
+        if row >= len(screen.rows):
+            return True
+        cells = "".join(cell[0] for cell in screen.rows[row][first:last])
+        return not cells.strip()
+
     def panel_edge(self):
         """The rule under the panel: the drag handle between it and the pane."""
         screen = self.screen()
@@ -201,6 +219,13 @@ class PanelViewDemo(ReadinessDemo):
         self.api("pane.focus", {"pane_id": a})
         assert self.focused_pane() == a, self.focused_pane()
         screen = self.wait_screen("waiting on panel-b: unblock")
+        # Real work in both panes, now that the client is showing this tab, so a
+        # capture shows panes in use rather than idle ones.
+        repo = str(Path(__file__).resolve().parents[2])
+        for name in ("panel-a", "panel-b"):
+            self.work(name, f"{name}-work-log",
+                      f"cd {repo} && git log --oneline -4 && echo && vqro task tree | head -4")
+        self.wait_screen("Task core panel-a-work-log recorded", seconds=30)
         self.cli("task", "list")
         screen = self.wait_screen(subtask["title"])
         self.wait_screen("panel-b")  # Vqro joins the live owner name, not the extension
@@ -229,9 +254,16 @@ class PanelViewDemo(ReadinessDemo):
             time.sleep(0.2)
         drag_text, drag_png = demo_capture.capture(self.root / "client.log", self.root / "capture", "panel-dragged")
 
-        # The header collapses the whole panel to its summary line.
+        # The header collapses the whole panel to its summary line, and the
+        # terminal gets every reserved row back: the row under the header is the
+        # terminal's own again, not the blank band a stale height would leave.
         self.click(*self.wait_locate("Tasks", within="⊟"))
         self.wait_screen("▸ ● Tasks")
+        header_row = self.wait_locate("Tasks", within="⊟")[1]
+        deadline = time.monotonic() + 8
+        while time.monotonic() < deadline and self.pane_row_blank(header_row + 1):
+            time.sleep(0.2)
+        assert not self.pane_row_blank(header_row + 1), "the reserved rows did not return to the terminal"
         collapsed_text, collapsed_png = demo_capture.capture(self.root / "client.log", self.root / "capture", "panel-collapsed")
         self.click(*self.wait_locate("Tasks", within="⊟"))
         self.wait_screen("▾ ● Tasks")
@@ -272,7 +304,8 @@ class PanelViewDemo(ReadinessDemo):
                   "height_rule": {"frozen_after_open": True,
                                   "content_lines": len([line for line in Path(expanded_text).read_text().splitlines() if "├─" in line or "└─" in line])},
                   "collapse": {"panel": "▸ ● Tasks" in Path(collapsed_text).read_text(),
-                               "subtask": "▸ " in Path(subtask_text).read_text()},
+                               "subtask": "▸ " in Path(subtask_text).read_text(),
+                               "rows_returned_to_the_terminal": "asserted on screen"},
                   "scroll": {"tail_reachable_by_wheel": "Queued follow-up 16" in Path(scroll_text).read_text()},
                   "drag": {"shorter_than_the_fit": "Queued follow-up 12" not in Path(drag_text).read_text()},
                   "click_focused_assignee": {"focused_before": before, "focused_after": after},

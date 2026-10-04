@@ -368,8 +368,22 @@ pub(super) fn render(
     let area = pane.projected_inner_rect.intersection(buffer.area);
     // The height is fixed once the panel is open: live updates scroll instead
     // of resizing the terminal, and the user's own size always wins.
+    // One header line per section is the floor: a collapsed panel is its
+    // headers, and the terminal gets every other row back.
+    let headers = views.len() as u16;
+    let all_collapsed = views
+        .iter()
+        .all(|view| display.collapsed_views.contains(&view.key));
     let fit = fit_height(&views, &display.collapsed_views);
-    let panel_height = display.user_height.or(display.height).unwrap_or(fit);
+    let panel_height = if all_collapsed {
+        headers
+    } else {
+        display
+            .user_height
+            .or(display.height)
+            .unwrap_or(fit)
+            .max(headers)
+    };
     let Some(geometry) = geometry(area, panel_height) else {
         return;
     };
@@ -399,7 +413,6 @@ pub(super) fn render(
     let visible = geometry.panel.height;
     // Section headers stay pinned; only the rows scroll, so a section never
     // loses its name or its collapse marker.
-    let headers = views.len() as u16;
     let row_space = visible.saturating_sub(headers);
     let rows = panel_rows(&views, &display.collapsed_views);
     let overflow = rows.len() as u16 > row_space;
@@ -498,12 +511,15 @@ pub(super) fn render(
             palette,
         );
     }
-    // The edge between the panel and the terminal is the drag handle.
-    out.hits.push(PanePanelHit {
-        rect: geometry.divider,
-        pane_id: pane.pane_id.clone(),
-        action: PanePanelAction::ResizePanel,
-    });
+    // The edge between the panel and the terminal is the drag handle, unless
+    // every section is collapsed: there is nothing to resize then.
+    if !all_collapsed {
+        out.hits.push(PanePanelHit {
+            rect: geometry.divider,
+            pane_id: pane.pane_id.clone(),
+            action: PanePanelAction::ResizePanel,
+        });
+    }
     if let Some(claimed) = out.claimed.as_mut() {
         if claimed.0 == pane.pane_id {
             claimed.1 = geometry.terminal;

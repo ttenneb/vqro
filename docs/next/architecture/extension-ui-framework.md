@@ -13,7 +13,10 @@ The decisions below describe the target framework. The
 
 ## First version scope
 
-Accepted by the owner on 2026-10-03 (relayed by the pilot coordinator).
+Accepted by the owner on 2026-10-03 (relayed by the pilot coordinator). The
+panel's look was reviewed and approved for now on 2026-10-04 (top slot,
+content-fit height, Pi-style tree with one line per row); further iteration is
+expected.
 
 **In v1:**
 
@@ -88,6 +91,7 @@ Accepted by the owner on 2026-10-03 (relayed by the pilot coordinator).
 | 2026-10-03 | **A pane's split panel is its top edge slot**, full pane width, above the agent, so it reads as part of the pane's frame and header rather than as terminal output. A right-side column and a bottom slot are not v1. The terminal resizes once, on open, close or user resize. |
 | 2026-10-03 | **Panel height fits its content**, capped at about a third of the pane, and it scrolls past that. It sizes to the content when the panel opens or when the user expands or collapses a section; a live update never resizes the terminal (rows that no longer fit scroll, and rows that go away keep the height until the next open, expand, collapse or drag). The user can drag the edge between the panel and the terminal; their size wins and is remembered per client. |
 | 2026-10-03 | **Section headers stay pinned while rows scroll**, and a pane's panel area stacks published sections under one another (Tasks, then Messages), each with its own header, summary and collapse marker. |
+| 2026-10-04 | **Owner approved the panel look for now** (top edge slot, content-fit height, Pi-style tree and one line per row), expecting further iteration later. A collapsed section is its header line alone: every row it reserved goes back to the terminal. |
 | 2026-10-03 | **Row wording is Vqro's.** The extension supplies one action word and whose move it is; Vqro composes the sentence and joins the live name: `waiting on you: report · 3m`, or `waiting on panel-b: unblock · 3m`. Rows never spell out bookkeeping in extension prose. |
 | 2026-10-03 | **Panels follow the Pi widget's look** (owner review of the first spike): header line `▾ ● Title ⊟ · summary`, one line per row, Pi-style tree connectors (`├─`, `└─`, `│` lanes), per-row `▾`/`▸` for children, the fixed state-glyph set (○ open, ◐ in progress, ⊘ blocked, ◎ reported, ● done) toned with the existing tone set, the title truncated with an ellipsis, and the assignee with its live state, the owed text and the age right-aligned and dim. Clicking the header collapses the panel, a row's marker collapses that row, and clicking a row's assignee jumps to that pane. |
 | 2026-10-03 | **The panel's own summary is the extension's**, drawn after the header title (done/total and the non-zero states). Vqro draws the glyphs, connectors, tones and the age. |
