@@ -135,6 +135,11 @@ pub(super) struct PanePanelRender {
     pub(super) hits: Vec<PanePanelHit>,
     /// Every pane whose panel is open, with the terminal rect it claims.
     pub(super) claims: Vec<(String, Rect)>,
+    /// For each claimed pane: the band the host painted the grid in (the top of
+    /// the pane's inner rect) and the rect below the panel the grid belongs in.
+    /// The caller moves every grid row across, so the agent's newest rows and its
+    /// input box end at the pane's bottom edge and nothing is hidden.
+    pub(super) projected: Vec<(String, Rect, Rect)>,
     /// For each claimed pane: where the server painted its terminal (the top of
     /// the pane's inner rect) and where it belongs (the rect below the panel).
     /// The panel band each pane reserved, clickable or not: a retained surface
@@ -740,9 +745,22 @@ fn render_pane(
     } else {
         out.claims.push((pane.pane_id.clone(), geometry.terminal));
     }
-    // The panel is an overlay, not a resize: the terminal keeps its own rows and
-    // its newest lines stay visible below the panel. The band the panel covers
-    // is reported so a retained patch can never repaint over it.
+    // The panel is a split: the host resized this pane's PTY to the rows below
+    // the panel, so the grid is exactly as tall as that rect and every one of its
+    // rows belongs there. The band they were painted in is the panel's.
+    out.projected.push((
+        pane.pane_id.clone(),
+        Rect::new(
+            area.x,
+            area.y,
+            geometry.terminal.width,
+            geometry
+                .panel
+                .height
+                .saturating_add(geometry.divider.height),
+        ),
+        geometry.terminal,
+    ));
     out.reserved.push(Rect::new(
         geometry.panel.x,
         geometry.panel.y,
@@ -845,9 +863,22 @@ fn render_placeholder(
     } else {
         out.claims.push((pane.pane_id.clone(), geometry.terminal));
     }
-    // The panel is an overlay, not a resize: the terminal keeps its own rows and
-    // its newest lines stay visible below the panel. The band the panel covers
-    // is reported so a retained patch can never repaint over it.
+    // The panel is a split: the host resized this pane's PTY to the rows below
+    // the panel, so the grid is exactly as tall as that rect and every one of its
+    // rows belongs there. The band they were painted in is the panel's.
+    out.projected.push((
+        pane.pane_id.clone(),
+        Rect::new(
+            area.x,
+            area.y,
+            geometry.terminal.width,
+            geometry
+                .panel
+                .height
+                .saturating_add(geometry.divider.height),
+        ),
+        geometry.terminal,
+    ));
     out.reserved.push(Rect::new(
         geometry.panel.x,
         geometry.panel.y,
@@ -1364,12 +1395,6 @@ impl ClientShellState {
             self.set_endpoint_error(error);
             outcome.repaint = true;
         }
-    }
-
-    /// Rows a pane's terminal is covered by its panel, for requests the server
-    /// measures against the pane's own inner rect.
-    pub(super) fn panel_row_offset(&self, pane_id: &str) -> u16 {
-        self.panel_input_offsets.get(pane_id).copied().unwrap_or(0)
     }
 
     /// The pane-to-terminal join, from the published views: a pane has exactly

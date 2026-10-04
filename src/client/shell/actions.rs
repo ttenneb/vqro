@@ -218,15 +218,14 @@ impl ClientShellState {
                             .find(|pane| pane.pane_id == selection.pane_id)?
                             .content_revision;
                         let (anchor, cursor) = selection.ordered_cells();
-                        let offset = self.panel_row_offset(&selection.pane_id);
                         Some(crate::api::schema::PaneSelectionReadParams {
                             pane_id: selection.pane_id.clone(),
                             anchor: crate::api::schema::PaneTextPoint {
-                                row: anchor.0.saturating_add(u32::from(offset)),
+                                row: anchor.0,
                                 col: anchor.1,
                             },
                             cursor: crate::api::schema::PaneTextPoint {
-                                row: cursor.0.saturating_add(u32::from(offset)),
+                                row: cursor.0,
                                 col: cursor.1,
                             },
                             content_revision: Some(content_revision),
@@ -274,17 +273,16 @@ impl ClientShellState {
             // between the displayed frame and this request must not reject the copy.
             .filter(|_| !live);
         let (anchor, cursor) = selection.ordered_cells();
-        let offset = self.panel_row_offset(&pane_id);
         self.push_endpoint_method_with_kind(
             crate::api::schema::Method::PaneSelectionRead(
                 crate::api::schema::PaneSelectionReadParams {
                     pane_id,
                     anchor: crate::api::schema::PaneTextPoint {
-                        row: anchor.0.saturating_add(u32::from(offset)),
+                        row: anchor.0,
                         col: anchor.1,
                     },
                     cursor: crate::api::schema::PaneTextPoint {
-                        row: cursor.0.saturating_add(u32::from(offset)),
+                        row: cursor.0,
                         col: cursor.1,
                     },
                     content_revision,

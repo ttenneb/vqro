@@ -3138,20 +3138,11 @@ impl ClientShellState {
     }
 
     fn pane_mouse_position(&self, hit: &PaneHit, mouse: MouseEvent) -> ClientMousePosition {
-        // The client moved this terminal down by its panel; the server still
-        // paints and measures from the pane's inner rect, so the offset goes
-        // back on the way out.
-        let offset = self
-            .panel_input_offsets
-            .get(&hit.pane_id)
-            .copied()
-            .unwrap_or(0);
+        // The grid's row zero is painted at the top of this rect, so a screen row
+        // inside it is already the grid row the host maps.
         let cell = ClientMousePosition::Cell {
             column: mouse.column.saturating_sub(hit.inner_rect.x),
-            row: mouse
-                .row
-                .saturating_sub(hit.inner_rect.y)
-                .saturating_add(offset),
+            row: mouse.row.saturating_sub(hit.inner_rect.y),
         };
         if hit.sgr_pixel_mouse && hit.pixel_width > 0 && hit.pixel_height > 0 {
             self.host_mouse_pixels
@@ -3164,10 +3155,7 @@ impl ClientShellState {
                                     x,
                                     y,
                                     column: mouse.column.saturating_sub(hit.inner_rect.x),
-                                    row: mouse
-                                        .row
-                                        .saturating_sub(hit.inner_rect.y)
-                                        .saturating_add(offset),
+                                    row: mouse.row.saturating_sub(hit.inner_rect.y),
                                 })
                             }
                             crate::input::mouse::Position::Cell { .. } => None,

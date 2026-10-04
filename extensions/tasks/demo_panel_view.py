@@ -331,6 +331,10 @@ class PanelViewDemo(ReadinessDemo):
         )
         filled_text = demo_capture.capture(self.root / "client.log", self.root / "capture",
                                            "panel-split-filled")
+        # Keep the server's own log: the PTY resize is a host fact, not a client one.
+        server_log = next(iter((self.root / "config").rglob("*server.log")), None)
+        if server_log is not None:
+            shutil.copy(server_log, self.root / "capture" / "server-split.log")
         # The served document is the contract the panels are drawn from.
         badges = [item["id"] for item in document["items"] if item["id"].startswith("context:attention.badge:")]
         assert any(":1:" in badge for badge in badges), badges
@@ -359,7 +363,7 @@ class PanelViewDemo(ReadinessDemo):
                   "messages_panel": {"shows_the_message_rows": "review the panel when you can" in Path(messages_text).read_text()},
                   "click_focused_assignee": {"focused_before": before, "focused_after": after},
                   "b_panel_shows_own_debt": "waiting on you: unblock" in Path(text_b).read_text(),
-                  "split": {"pty_rows_without_panel": rows_closed, "pty_rows_with_panel": rows_open,
+                  "split": {"pane": a, "pty_rows_without_panel": rows_closed, "pty_rows_with_panel": rows_open,
                             "pty_cols_unchanged": cols_open == cols_closed,
                             "rows_freed": band,
                             "drawn_band_rows": divider - header + 2,

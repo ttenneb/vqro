@@ -627,9 +627,42 @@ impl ClientShellState {
         let mut panel_render = pane_panel::PanePanelRender {
             hits: Vec::new(),
             claims: Vec::new(),
+            projected: Vec::new(),
             reserved: Vec::new(),
             drawn: Vec::new(),
         };
+        // The host resized each claimed pane's PTY to the rows below its panel, so
+        // the grid already has exactly those rows. It painted them at the pane's
+        // inner top; take them here, before the panel paints the band, and put
+        // them where the grid belongs. Every grid row moves, so nothing of the
+        // agent's screen is hidden and no band under the panel is left blank.
+        let mut grid_cells: Vec<(String, Rect, Vec<ratatui::buffer::Cell>)> = Vec::new();
+        if host_documents.is_some()
+            && self.supports_endpoint_capability(crate::protocol::endpoint::PANE_PANELS_CAPABILITY)
+        {
+            for pane in &self.hits.panes {
+                if self
+                    .pane_panel_open
+                    .get(&pane.pane_id)
+                    .is_none_or(|views| views.is_empty())
+                {
+                    continue;
+                }
+
+                let area = pane.projected_inner_rect.intersection(composed.area);
+                if area.is_empty() {
+                    continue;
+                }
+                let mut cells =
+                    Vec::with_capacity(usize::from(area.width) * usize::from(area.height));
+                for row in area.y..area.bottom() {
+                    for column in area.x..area.right() {
+                        cells.push(composed[(column, row)].clone());
+                    }
+                }
+                grid_cells.push((pane.pane_id.clone(), area, cells));
+            }
+        }
         // A server that does not advertise the panel control gets no panels:
         // a panel that could not claim its terminal's edge would be drawn over
         // the terminal instead of shrinking it. The connection stays usable.
@@ -650,7 +683,55 @@ impl ClientShellState {
             }
         }
         self.hits.pane_panels = panel_render.hits;
-        self.pane_panel_areas = panel_render.reserved;
+        self.pane_panel_areas = panel_render.reserved.clone();
+        for (pane_id, band, destination) in &panel_render.projected {
+            let Some((_, source, cells)) = grid_cells
+                .iter()
+                .find(|(captured, _, _)| captured == pane_id)
+            else {
+                continue;
+            };
+            let band = band.intersection(composed.area);
+            let destination = destination.intersection(composed.area);
+            let source = source.intersection(composed.area);
+            let rows = destination.height.min(source.height);
+            let width = destination.width.min(source.width);
+            if rows == 0 || width == 0 {
+                continue;
+            }
+            for offset in 0..rows {
+                for column in 0..width {
+                    let index =
+                        usize::from(offset) * usize::from(source.width) + usize::from(column);
+                    if let Some(cell) = cells.get(index) {
+                        composed[(destination.x + column, destination.y + offset)] = cell.clone();
+                    }
+                }
+            }
+            // The panel owns the band the grid came from. Rows the moved grid no
+            // longer fills are cleared, and the cursor travels with its row.
+            for row in destination.bottom()..source.bottom() {
+                for column in source.x..source.right() {
+                    composed[(column, row)].reset();
+                }
+            }
+            if band.height > 0 {
+                if let Some(cursor) = frame.cursor.as_mut() {
+                    if cursor.x >= source.x
+                        && cursor.x < source.right()
+                        && cursor.y >= source.y
+                        && cursor.y < source.bottom()
+                    {
+                        let moved = cursor.y.saturating_add(band.height);
+                        if moved < destination.bottom() {
+                            cursor.y = moved;
+                        } else {
+                            cursor.visible = false;
+                        }
+                    }
+                }
+            }
+        }
         // Opening a panel is when it sizes to its content. From then on the
         // height is fixed: a live update scrolls instead of resizing the PTY,
         // and the user's own dragged height always wins. Every pane that drew a
@@ -735,16 +816,9 @@ impl ClientShellState {
                 .iter_mut()
                 .find(|hit| &hit.pane_id == pane_id)
             {
-                // The panel overlays the terminal's oldest rows instead of
-                // resizing the PTY, so the visible top line is not the grid's
-                // first one: input and selection rows go back by the covered
-                // band. The hit rect becomes the visible terminal.
-                let covered = terminal.y.saturating_sub(hit.inner_rect.y);
-                if covered > 0 {
-                    self.panel_input_offsets.insert(pane_id.clone(), covered);
-                } else {
-                    self.panel_input_offsets.remove(pane_id);
-                }
+                // The moved grid's row zero is painted at this rect's top, so a
+                // screen row inside it is already the grid row the host maps and
+                // no offset is needed on the way back.
                 hit.inner_rect = *terminal;
                 hit.scrollbar_rect = None;
             }
