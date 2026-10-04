@@ -103,6 +103,8 @@ const messageFixture = (id: string, body: string, execution = "exec-alpha", repl
   sender: bindingOf(execution),
 });
 const flush = async () => { for (let i = 0; i < 20; i += 1) await Promise.resolve(); };
+/** Exactly what the adapter hands the SDK, and so the run's prompt when it owns the run. */
+const deliveredContent = (messages: any[]) => messages.map(renderMessage).join("\n\n");
 
 /** A private harness where the consumer polls, claims the given messages and delivers them. */
 function mailboxHarness(claimed: any[], activation = true, consumerFirst = false): Harness {
@@ -124,12 +126,13 @@ afterEach(() => {
 test("a delivered batch is answered by the sender's exact binding with reply_to", async () => {
   jest.useFakeTimers();
   try {
-    const h = mailboxHarness([messageFixture("m1", "please review")]);
+    const messages = [messageFixture("m1", "please review")];
+    const h = mailboxHarness(messages);
     await h.emit("session_start", {});
     jest.advanceTimersByTime(MAILBOX_POLL_MS + 5);
     await flush();
     expect(h.sent.join("\n")).toContain("please review");
-    await h.emit("before_agent_start", { prompt: "please review" });
+    await h.emit("before_agent_start", { prompt: deliveredContent(messages) });
     await h.emit("turn_end", turnText("here is the review"));
     await h.emit("agent_settled", {});
     const recorded = sends(h);
@@ -144,11 +147,12 @@ test("a delivered batch is answered by the sender's exact binding with reply_to"
 test("a same-sender batch answer links the newest message", async () => {
   jest.useFakeTimers();
   try {
-    const h = mailboxHarness([messageFixture("m1", "first"), messageFixture("m2", "second")]);
+    const messages = [messageFixture("m1", "first"), messageFixture("m2", "second")];
+    const h = mailboxHarness(messages);
     await h.emit("session_start", {});
     jest.advanceTimersByTime(MAILBOX_POLL_MS + 5);
     await flush();
-    await h.emit("before_agent_start", { prompt: "first\n\nsecond" });
+    await h.emit("before_agent_start", { prompt: deliveredContent(messages) });
     await h.emit("turn_end", turnText("both answered"));
     await h.emit("agent_settled", {});
     expect(sends(h)[0]?.args).toEqual(["message", "send", bindingOf("exec-alpha"), "both answered", "--reply-to", "m2"]);
@@ -160,11 +164,11 @@ test("a same-sender batch answer links the newest message", async () => {
   }
 });
 
-test("a run another observed input owns is not answered automatically", async () => {
+test("a run whose prompt is not the delivered content is not answered", async () => {
   jest.useFakeTimers();
   try {
-    // The SDK stays idle while a human input hook awaits, so an idle handoff
-    // alone does not prove this delivery owns the next run.
+    // The SDK stays idle while a human input hook awaits: an idle handoff alone
+    // does not prove this delivery owns the next run.
     const h = mailboxHarness([messageFixture("m1", "colleague request")]);
     await h.emit("session_start", {});
     await h.emit("input", { source: "interactive", text: "human question" });
@@ -180,7 +184,7 @@ test("a run another observed input owns is not answered automatically", async ()
   }
 });
 
-test("a foreign input that wins the run after a handoff is not answered", async () => {
+test("a human turn that wins the race after a handoff is not answered", async () => {
   jest.useFakeTimers();
   try {
     const h = mailboxHarness([messageFixture("m1", "colleague request")]);
@@ -200,14 +204,12 @@ test("a foreign input that wins the run after a handoff is not answered", async 
 test("the run whose prompt is the delivered content answers it", async () => {
   jest.useFakeTimers();
   try {
-    const h = mailboxHarness([messageFixture("m1", "colleague request")]);
+    const messages = [messageFixture("m1", "colleague request")];
+    const h = mailboxHarness(messages);
     await h.emit("session_start", {});
     jest.advanceTimersByTime(MAILBOX_POLL_MS + 5);
     await flush();
-    // The delivery's own input may also be observed; it is not a foreign input.
-    const delivered = renderMessage(messageFixture("m1", "colleague request"));
-    await h.emit("input", { source: "extension", text: delivered });
-    await h.emit("before_agent_start", { prompt: delivered });
+    await h.emit("before_agent_start", { prompt: deliveredContent(messages) });
     await h.emit("turn_end", turnText("answer to the colleague"));
     await h.emit("agent_settled", {});
     expect(sends(h)[0]?.args).toEqual(["message", "send", bindingOf("exec-alpha"), "answer to the colleague", "--reply-to", "m1"]);
@@ -237,12 +239,13 @@ test("a handoff queued behind a busy SDK does not route the active turn's final"
 test("a delivered reply never starts another automatic reply", async () => {
   jest.useFakeTimers();
   try {
-    const h = mailboxHarness([messageFixture("m1", "answer", "exec-alpha", "m0")]);
+    const messages = [messageFixture("m1", "answer", "exec-alpha", "m0")];
+    const h = mailboxHarness(messages);
     await h.emit("session_start", {});
     jest.advanceTimersByTime(MAILBOX_POLL_MS + 5);
     await flush();
     expect(h.sent.join("\n")).toContain("answer");
-    await h.emit("before_agent_start", { prompt: "answer" });
+    await h.emit("before_agent_start", { prompt: deliveredContent(messages) });
     await h.emit("turn_end", turnText("thanks, got it"));
     await h.emit("agent_settled", {});
     expect(sends(h)).toHaveLength(0);
@@ -255,11 +258,12 @@ test("a delivered reply never starts another automatic reply", async () => {
 test("a batch from more than one sender is delivered without an automatic reply", async () => {
   jest.useFakeTimers();
   try {
-    const h = mailboxHarness([messageFixture("m1", "one"), messageFixture("m2", "two", "exec-gamma")]);
+    const messages = [messageFixture("m1", "one"), messageFixture("m2", "two", "exec-gamma")];
+    const h = mailboxHarness(messages);
     await h.emit("session_start", {});
     jest.advanceTimersByTime(MAILBOX_POLL_MS + 5);
     await flush();
-    await h.emit("before_agent_start", { prompt: "one\n\ntwo" });
+    await h.emit("before_agent_start", { prompt: deliveredContent(messages) });
     await h.emit("turn_end", turnText("answered both"));
     await h.emit("agent_settled", {});
     expect(sends(h)).toHaveLength(0);
@@ -271,11 +275,12 @@ test("a batch from more than one sender is delivered without an automatic reply"
 test("an empty final turn records no reply and a volatile label", async () => {
   jest.useFakeTimers();
   try {
-    const h = mailboxHarness([messageFixture("m1", "please review")]);
+    const messages = [messageFixture("m1", "please review")];
+    const h = mailboxHarness(messages);
     await h.emit("session_start", {});
     jest.advanceTimersByTime(MAILBOX_POLL_MS + 5);
     await flush();
-    await h.emit("before_agent_start", { prompt: "please review" });
+    await h.emit("before_agent_start", { prompt: deliveredContent(messages) });
     await h.emit("agent_settled", {});
     expect(sends(h)).toHaveLength(0);
     expect(h.entries).toContainEqual(expect.objectContaining({ data: expect.objectContaining({ kind: "no-reply", recipient: "exec-alpha" }) }));
@@ -289,12 +294,13 @@ test("an empty final turn records no reply and a volatile label", async () => {
 test("an explicit message to the origin suppresses the automatic reply", async () => {
   jest.useFakeTimers();
   try {
-    const h = mailboxHarness([messageFixture("m1", "please review")]);
+    const messages = [messageFixture("m1", "please review")];
+    const h = mailboxHarness(messages);
     await h.emit("session_start", {});
     jest.advanceTimersByTime(MAILBOX_POLL_MS + 5);
     await flush();
     const confirmed = JSON.stringify({ message: { id: "m9", recipient_execution: "exec-alpha", state: "waiting", revision: 1 }, operation_id: "op" });
-    await h.emit("before_agent_start", { prompt: "please review" });
+    await h.emit("before_agent_start", { prompt: deliveredContent(messages) });
     await h.emit("tool_result", { toolName: "bash", toolCallId: "t1", content: [{ type: "text", text: confirmed }], isError: false });
     await h.emit("turn_end", turnText("sent it myself"));
     await h.emit("agent_settled", {});
@@ -310,11 +316,12 @@ test("a failed or unrelated message send does not suppress the reply", async () 
   try {
     const other = JSON.stringify({ message: { id: "m9", recipient_execution: "exec-gamma", state: "waiting", revision: 1 }, operation_id: "op" });
     const errors = JSON.stringify({ error: { code: "invalid_request", message: "exec-alpha" } });
-    const h = mailboxHarness([messageFixture("m1", "please review")]);
+    const messages = [messageFixture("m1", "please review")];
+    const h = mailboxHarness(messages);
     await h.emit("session_start", {});
     jest.advanceTimersByTime(MAILBOX_POLL_MS + 5);
     await flush();
-    await h.emit("before_agent_start", { prompt: "please review" });
+    await h.emit("before_agent_start", { prompt: deliveredContent(messages) });
     await h.emit("tool_result", { toolName: "bash", toolCallId: "t1", content: [{ type: "text", text: other }], isError: false });
     await h.emit("tool_result", { toolName: "bash", toolCallId: "t2", content: [{ type: "text", text: errors }], isError: false });
     await h.emit("turn_end", turnText("answer"));
@@ -335,11 +342,12 @@ test("unknown or self identity fails closed", async () => {
   jest.useFakeTimers();
   try {
     // The sender is this pane's own execution: never answer yourself.
-    const h = mailboxHarness([messageFixture("m1", "note", "exec-beta")]);
+    const messages = [messageFixture("m1", "note", "exec-beta")];
+    const h = mailboxHarness(messages);
     await h.emit("session_start", {});
     jest.advanceTimersByTime(MAILBOX_POLL_MS + 5);
     await flush();
-    await h.emit("before_agent_start", { prompt: "note" });
+    await h.emit("before_agent_start", { prompt: deliveredContent(messages) });
     await h.emit("turn_end", turnText("answer"));
     await h.emit("agent_settled", {});
     expect(sends(h)).toHaveLength(0);
@@ -362,10 +370,10 @@ test("routing stays off without the managed Vqro environment", async () => {
 test("unavailable Tasks cannot record a reply", async () => {
   jest.useFakeTimers();
   try {
+    const claimed = [messageFixture("m1", "please review")];
     const h = harness((args) => {
       if (args[0] === "task" && args[1] === "whoami") return { code: 1, stdout: "", stderr: "unavailable" };
       if (args[0] === "agent" && args[1] === "get") return { code: 0, stdout: JSON.stringify({ result: { agent: { name: "beta", execution: "exec-beta" } } }), stderr: "" };
-      const claimed = [messageFixture("m1", "please review")];
       if (args[0] === "message" && args[1] === "list") return { code: 0, stdout: JSON.stringify({ activation: true, waiting: [{ id: "m1" }], messages: [] }), stderr: "" };
       if (args[0] === "message" && args[1] === "claim") return { code: 0, stdout: JSON.stringify({ claimed }), stderr: "" };
       return { code: 0, stdout: "", stderr: "" };
@@ -373,7 +381,7 @@ test("unavailable Tasks cannot record a reply", async () => {
     await h.emit("session_start", {});
     jest.advanceTimersByTime(MAILBOX_POLL_MS + 5);
     await flush();
-    await h.emit("before_agent_start", { prompt: "please review" });
+    await h.emit("before_agent_start", { prompt: deliveredContent(claimed) });
     await h.emit("turn_end", turnText("answer"));
     await h.emit("agent_settled", {});
     expect(sends(h)).toHaveLength(0);
@@ -505,11 +513,12 @@ test("a starting-turn claim after shutdown is recorded, not injected", async () 
 test("consumer loaded before adapter discovers the same interface", async () => {
   jest.useFakeTimers();
   try {
-    const h = mailboxHarness([messageFixture("m1", "please review")], true, true);
+    const messages = [messageFixture("m1", "please review")];
+    const h = mailboxHarness(messages, true, true);
     await h.emit("session_start", {});
     jest.advanceTimersByTime(MAILBOX_POLL_MS + 5);
     await flush();
-    await h.emit("before_agent_start", { prompt: "please review" });
+    await h.emit("before_agent_start", { prompt: deliveredContent(messages) });
     await h.emit("turn_end", turnText("answer"));
     await h.emit("agent_settled", {});
     expect(sends(h)).toHaveLength(1);

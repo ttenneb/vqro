@@ -88,12 +88,10 @@ export default function (pi: ExtensionAPI) {
     detach(); active = candidate;
     const adapter = candidate as AdapterV1;
     let replyTo: ReplyTarget | undefined = undefined, explicit = false, shutDown = false, checking = false;
-    // A delivered batch awaiting the run that consumes it, and the recent input
-    // texts the SDK observed. Ownership is decided at `run_started` from those
-    // two facts: an idle handoff alone does not prove this delivery owns the next
-    // run, because a pending human input can finish first.
+    // A delivered batch awaiting the run that consumes it. Ownership is decided at
+    // `run_started` from the run's own prompt, not from anything observed at
+    // handoff: a pending human input can still win the run.
     let pending: { content: string; target: ReplyTarget | undefined } | undefined = undefined;
-    let recentInputs: string[] = [];
     let poll: ReturnType<typeof setInterval> | undefined;
     let metadataSeq = Date.now() * 1000;
     const record = (data: Record<string, unknown>) => pi.appendEntry("vqro-reply-routing", { ...data, at: new Date().toISOString() });
@@ -129,17 +127,15 @@ export default function (pi: ExtensionAPI) {
         record({ kind: "messages-claimed", ids: messages.map(message => message.id) });
         const content = messages.map(renderMessage).join("\n\n");
         const target = replyTarget(messages);
-        const handoff = await adapter.deliver(content, token);
-        if (shutDown || !adapter.current(token) || handoff === "unavailable") {
+        const delivered = await adapter.deliver(content, token);
+        if (shutDown || !adapter.current(token) || !delivered) {
           undelivered(messages);
           return;
         }
-        // A busy handoff was queued behind a run someone else started, and an
-        // input already in preflight may win the run this handoff was meant to
-        // start. Neither is automatically answered; ownership is confirmed at the
-        // next `run_started`.
-        const raced = recentInputs.some(text => text !== content);
-        pending = handoff === "idle" && !raced ? { content, target } : undefined;
+        // Armed here, owned only by the run whose own prompt is this content: a
+        // busy-queued follow-up, or a human turn that wins the race, settles with
+        // a different prompt and is never answered automatically.
+        pending = delivered && target ? { content, target } : undefined;
       } finally { checking = false; }
     }
     const startPoll = () => {
@@ -158,25 +154,19 @@ export default function (pi: ExtensionAPI) {
       return { message: { customType: "vqro-message", content: messages.map(renderMessage).join("\n\n"), display: true }, discard: () => undelivered(messages) };
     });
     const unFacts = adapter.onFact(async fact => {
-      if (fact.kind === "session_closed") { shutDown = true; replyTo = undefined; pending = undefined; recentInputs = []; stopPoll(); return; }
+      if (fact.kind === "session_closed") { shutDown = true; replyTo = undefined; pending = undefined; stopPoll(); return; }
       if (shutDown) return;
-      if (fact.kind === "session_started") { stopPoll(); replyTo = undefined; pending = undefined; recentInputs = []; explicit = false; startPoll(); return; }
-      if (fact.kind === "input_observed") {
-        const text = typeof fact.text === "string" ? fact.text : "";
-        if (text) recentInputs = [...recentInputs, text].slice(-4);
-        return;
-      }
+      if (fact.kind === "session_started") { stopPoll(); replyTo = undefined; pending = undefined; explicit = false; startPoll(); return; }
       if (fact.kind === "run_started") {
         stopPoll(); explicit = false;
         const current = pending; pending = undefined;
         const prompt = fact.prompt ?? "";
-        // Ownership is decided here, not at handoff: this run answers the delivery
-        // only when the run is not some other observed input's run. A pending human
-        // input that finished first leaves the delivery unanswered rather than
-        // routing the human turn's final text to the colleague.
-        const foreign = recentInputs.some(text => text !== current?.content && text === prompt);
-        recentInputs = [];
-        replyTo = current && !foreign ? current.target : undefined;
+        // Positive ownership: only a run whose own prompt is the delivered content
+        // is answering it. Anything else — a human turn that won the race, a
+        // busy-queued follow-up, a merged or transformed prompt — gets no automatic
+        // reply rather than risking an unrelated turn's text.
+        const owns = current !== undefined && (prompt === current.content || (fact.prompt_truncated === true && prompt.length > 0 && current.content.startsWith(prompt)));
+        replyTo = owns ? current!.target : undefined;
         return;
       }
       if (fact.kind === "tool_observed" && fact.toolName === "bash" && replyTo && !explicit) {
@@ -201,7 +191,7 @@ export default function (pi: ExtensionAPI) {
         await noReply(current);
       }
     });
-    detach = () => { shutDown = true; replyTo = undefined; pending = undefined; recentInputs = []; stopPoll(); unBefore(); unFacts(); };
+    detach = () => { shutDown = true; replyTo = undefined; pending = undefined; stopPoll(); unBefore(); unFacts(); };
   };
   const unReady = pi.events.on("vqro:pi-adapter:v1:ready", connect);
   pi.events.emit("vqro:pi-adapter:v1:discover", {});

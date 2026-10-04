@@ -38,10 +38,10 @@ convention introduces no host API, Pi tool, task delivery or activation mechanis
 - Final prose is written for whoever started the turn. A run that a delivered
   durable message owns records that final text as a durable reply message to the
   exact sender binding, always with `reply_to` (a same-sender batch links its
-  newest message). Ownership is confirmed at run start: a handoff queued behind
-  in-flight work, or one that races another observed input, gets no automatic
-  reply instead of routing an unrelated turn's text. A delivered reply is never
-  automatically re-answered, so a thread continues with an explicit
+  newest message). Ownership is the run's own prompt being the delivered text, so
+  a handoff queued behind in-flight work, or a human turn that wins the race,
+  gets no automatic reply instead of routing an unrelated turn's text. A delivered
+  reply is never automatically re-answered, so a thread continues with an explicit
   `message send --reply-to`. Nothing is typed into a pane. `vqro agent prompt` is
   human-only and its old auto-labelled reply routing is removed. A human-started turn
   is never routed. Remote action still needs the corresponding

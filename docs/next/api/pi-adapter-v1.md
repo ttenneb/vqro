@@ -27,11 +27,8 @@ version1 interface provides:
   the adapter does not choose commands, recipients or product policy.
 - `deliver(content, token)`: explicit queued SDK input with fresh execution and
   shutdown/run checks, at most 128KiB. Both SDK idle and busy paths use followUp
-  queuing; the returned `idle`/`busy`/`unavailable` observation says whether the
-  SDK reported itself idle at handoff (so the queued message is the run that
-  follows) or busy (so it was queued behind work already in flight). A transport
-  result is not agent acceptance; do not replay uncertain effects or infer
-  understanding from a receipt.
+  queuing. A transport result is not agent acceptance; do not replay uncertain
+  effects or infer understanding from a receipt.
 
 Shutdown invalidates retained interfaces/in-flight work and unregisters discovery
 and consumers. Facts never request input themselves. The adapter does not poll
@@ -48,8 +45,8 @@ claim is recorded undelivered rather than injected into a different run; an
 uncertain claim retains CLI recovery information and is not blindly replayed.
 
 Reply recording — exact sender bindings, `reply_to` on every automatic answer,
-no automatic answer to an answer, and no automatic reply unless the delivered
-input owns the run — is Tasks consumer policy, documented with Tasks in
+no automatic answer to an answer, and no automatic reply unless the run's own
+prompt is the delivered text — is Tasks consumer policy, documented with Tasks in
 [Tasks conventions](task-conventions.md) and
 [`extensions/tasks/README.md`](../../extensions/tasks/README.md).
 The consumer has no broader automatic-reply policy for every claimed message.
