@@ -663,15 +663,19 @@ impl ClientShellState {
                 grid_cells.push((pane.pane_id.clone(), area, cells));
             }
         }
+        // One index of the published documents for this frame, shared by the
+        // panel render and the pane badges: building it twice is a second full
+        // pass over every item per frame.
+        let index = host_documents.map(pane_panel::PanelIndex::new);
         // A server that does not advertise the panel control gets no panels:
         // a panel that could not claim its terminal's edge would be drawn over
         // the terminal instead of shrinking it. The connection stays usable.
-        if let Some(documents) = host_documents {
+        if let Some(index) = index.as_ref() {
             if self.supports_endpoint_capability(crate::protocol::endpoint::PANE_PANELS_CAPABILITY)
             {
                 pane_panel::render(
                     &mut composed,
-                    documents,
+                    index,
                     snapshot,
                     &self.hits.panes,
                     &self.pane_panel_open,
@@ -744,12 +748,8 @@ impl ClientShellState {
         }
         // A pane with views to open and nothing open shows its own badge, so a
         // user can open the panel without knowing a command.
-        if let Some(documents) = host_documents {
-            for badge in pane_panel::pane_badges(
-                &pane_panel::PanelIndex::new(documents),
-                &self.hits.panes,
-                &self.pane_panel_open,
-            ) {
+        if let Some(index) = index.as_ref() {
+            for badge in pane_panel::pane_badges(index, &self.hits.panes, &self.pane_panel_open) {
                 render::put_text(
                     &mut composed,
                     badge.rect.x,

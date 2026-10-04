@@ -468,7 +468,7 @@ fn panel_views<'a>(
 #[allow(clippy::too_many_arguments)]
 pub(super) fn render(
     buffer: &mut Buffer,
-    documents: &HostDocumentsProjectionV1,
+    index: &PanelIndex<'_>,
     snapshot: &ClientShellSnapshot,
     panes: &[PaneHit],
     open: &HashMap<String, BTreeSet<String>>,
@@ -477,9 +477,6 @@ pub(super) fn render(
     palette: &Palette,
     out: &mut PanePanelRender,
 ) {
-    // One index for every pane in this frame: rebuilding it per pane made the
-    // panel path scale with panes times published items.
-    let index = PanelIndex::new(documents);
     for pane in panes {
         let Some(open_views) = open.get(&pane.pane_id) else {
             continue;
@@ -490,7 +487,7 @@ pub(super) fn render(
         let display = displays.get(&pane.pane_id).cloned().unwrap_or_default();
         render_pane(
             buffer,
-            &index,
+            index,
             snapshot,
             pane,
             open_views,
@@ -505,7 +502,7 @@ pub(super) fn render(
 #[allow(clippy::too_many_arguments)]
 fn render_pane(
     buffer: &mut Buffer,
-    documents: &PanelIndex<'_>,
+    index: &PanelIndex<'_>,
     snapshot: &ClientShellSnapshot,
     pane: &PaneHit,
     open_views: &BTreeSet<String>,
@@ -517,12 +514,7 @@ fn render_pane(
     if inspector_pane == Some(pane.pane_id.as_str()) {
         return;
     }
-    let views = panel_views(
-        documents,
-        &pane.pane_id,
-        open_views,
-        &display.collapsed_rows,
-    );
+    let views = panel_views(index, &pane.pane_id, open_views, &display.collapsed_rows);
     // The user has views open here and none of them is published any more: the
     // extension failed or was disabled. Vqro owns that state and says so in the
     // same place, instead of silently dropping a panel the user opened.
