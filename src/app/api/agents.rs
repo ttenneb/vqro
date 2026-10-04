@@ -892,6 +892,51 @@ mod tests {
         assert!(rx.try_recv().is_err(), "nothing may be written");
     }
 
+    /// The refresh the adapter sends every 10s carries the value it already
+    /// reported. It must be a server no-op (no revision bump, so no render,
+    /// client fanout, session save or document work) while still counting as a
+    /// newer observation, or the host would keep the report it already had.
+    #[tokio::test]
+    async fn an_unchanged_input_box_report_is_a_no_op_that_still_refreshes() {
+        let mut app = app_with_agent();
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.state.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        let terminal = app.state.terminals.get_mut(&terminal_id).unwrap();
+        terminal.set_agent_name("reviewer".into());
+        terminal.set_detected_state(Some(Agent::Pi), AgentState::Idle);
+        let (runtime, _rx) = crate::terminal::TerminalRuntime::test_with_channel(80, 24);
+        app.state.insert_test_runtime(pane_id, runtime);
+        let public_pane_id = app.public_pane_id(0, pane_id).unwrap();
+
+        report_input_box(&mut app, &public_pane_id, "empty");
+        let revision = app.state.terminals[&terminal_id].revision;
+
+        // The human types after that report, so the report is stale evidence and
+        // the host falls back to refusing.
+        let forwarded_at = std::time::Instant::now() + Duration::from_millis(1);
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .note_forwarded_human_input(true, forwarded_at);
+        assert!(app.state.terminals[&terminal_id].editor_may_hold_unsent_text());
+
+        // The refresh says the same thing, later.
+        std::thread::sleep(Duration::from_millis(5));
+        report_input_box(&mut app, &public_pane_id, "empty");
+        let terminal = &app.state.terminals[&terminal_id];
+        assert_eq!(
+            terminal.revision, revision,
+            "an unchanged report must not bump the revision, which is what gates render and fanout"
+        );
+        assert!(
+            !terminal.editor_may_hold_unsent_text(),
+            "the refresh must still count as a newer observation than the human's keys"
+        );
+    }
+
     #[tokio::test]
     async fn agent_prompt_rejects_blocked_agent_without_writing() {
         let mut app = app_with_agent();
