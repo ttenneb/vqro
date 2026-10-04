@@ -160,3 +160,84 @@ fn render_scale_profile_pane_panels() {
         }
     }
 }
+
+/// One accepted update's cost, at the update frequency QA's gate asks about: the
+/// direct retained patch in the fast path against the fallback that composes. This
+/// is the client's own caller shape (`client/mod.rs`): a fast application presents
+/// the patch's rows; `Applied(None)` composes and presents a frame.
+#[test]
+#[ignore = "wall-clock evidence, run by `just bench-render-scale`"]
+fn render_scale_profile_panel_patch_feed() {
+    let (cols, rows) = (106, 40);
+    for count in [1, 15] {
+        for open in [false, true] {
+            let mut state = panel_state(cols, rows, count, open);
+            let _ = state.compose(cols, rows).expect("warm frame");
+            let pane_id = state
+                .pane_surface
+                .as_ref()
+                .expect("surface")
+                .panes
+                .first()
+                .map(|pane| pane.pane_id.clone())
+                .expect("a pane");
+            let mut samples = Vec::new();
+            let mut fast = 0_usize;
+            let mut fallback = 0_usize;
+            for _ in 0..35 {
+                let start = std::time::Instant::now();
+                for step in 0..20_u32 {
+                    let pane = state
+                        .pane_surface
+                        .as_ref()
+                        .expect("surface")
+                        .panes
+                        .iter()
+                        .find(|pane| pane.pane_id == pane_id)
+                        .cloned()
+                        .expect("pane");
+                    let surface = state.pane_surface.as_ref().expect("surface");
+                    let mut cell = surface.frame.cells.first().cloned().expect("a cell");
+                    cell.symbol = ((b'0' + (step % 10) as u8) as char).to_string();
+                    let patch = crate::protocol::PaneSurfacePatch {
+                        boot_id: "boot-1".into(),
+                        projection_revision: 1,
+                        base_surface_revision: surface.surface_revision,
+                        surface_revision: surface.surface_revision.saturating_add(1),
+                        rows: vec![crate::protocol::PaneSurfacePatchRow {
+                            x: pane.inner_rect.x,
+                            y: pane.inner_rect.y.saturating_add(1),
+                            cells: vec![cell],
+                        }],
+                        panes: vec![pane],
+                        cursor: None,
+                    };
+                    match state.apply_pane_surface_patch(patch) {
+                        crate::client::shell::ClientPaneSurfacePatchOutcome::Applied(Some(
+                            composed,
+                        )) => {
+                            fast += 1;
+                            std::hint::black_box(composed);
+                        }
+                        crate::client::shell::ClientPaneSurfacePatchOutcome::Applied(None) => {
+                            fallback += 1;
+                            std::hint::black_box(state.compose(cols, rows).expect("frame"));
+                        }
+                        crate::client::shell::ClientPaneSurfacePatchOutcome::Rejected => {
+                            panic!("the profile's patches are valid")
+                        }
+                    }
+                }
+                samples.push(start.elapsed().as_micros());
+            }
+            samples.sort_unstable();
+            let median = samples[samples.len() / 2];
+            let p95 = samples[samples.len() * 95 / 100];
+            println!(
+                "panel_patch_feed panes={count} open={open} drawn_panels={} fast_updates={fast} fallback_updates={fallback} per_update_us={:.1} median_20_us={median} p95_20_us={p95}",
+                state.pane_panel_areas.len(),
+                median as f64 / 20.0
+            );
+        }
+    }
+}
