@@ -6560,6 +6560,16 @@ fn headless_scheduled_tasks_clears_disabled_agent_manifest_update_deadline() {
 #[tokio::test]
 async fn headless_scheduled_tasks_start_pending_agent_resume_without_foreground_client() {
     let mut server = test_headless_server();
+    // A shell that stays alive. The resume path spawns the pane shell and then
+    // writes the resume command into it, and the harness default (`/usr/bin/true`)
+    // can be gone before that write lands: under load the write then fails, the
+    // resume is abandoned, and this tick looked flaky for a reason that had
+    // nothing to do with the scheduling it is testing.
+    #[cfg(windows)]
+    const LIVE_SHELL: &str = "cmd.exe";
+    #[cfg(not(windows))]
+    const LIVE_SHELL: &str = "/bin/sh";
+    server.app.state.default_shell = LIVE_SHELL.into();
     let workspace = crate::workspace::Workspace::test_new("restored");
     let pane_id = workspace.tabs[0].root_pane;
     let terminal_id = workspace.terminal_id(pane_id).cloned().unwrap();
@@ -6589,7 +6599,19 @@ async fn headless_scheduled_tasks_start_pending_agent_resume_without_foreground_
         .pending_agent_resume_deadline
         .expect("clientless resume should wait briefly for a host theme");
 
-    assert!(server.handle_scheduled_tasks_headless(deadline, false));
+    assert!(
+        server.handle_scheduled_tasks_headless(deadline, false),
+        "the resume must start at its deadline (plan={}, runtime={}, area={:?}, deadline={:?})",
+        server
+            .app
+            .state
+            .terminals
+            .get(&terminal_id)
+            .is_some_and(|terminal| terminal.pending_agent_resume_plan.is_some()),
+        server.app.terminal_runtimes.get(&terminal_id).is_some(),
+        server.app.state.view.terminal_area,
+        server.app.pending_agent_resume_deadline,
+    );
     assert!(server.app.terminal_runtimes.get(&terminal_id).is_some());
     assert!(server
         .app
