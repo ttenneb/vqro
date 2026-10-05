@@ -825,7 +825,9 @@ mod tests {
         let fixture = ProfileFixture::new("distribution");
         fixture.prepare();
         // Refactor characterization, not a public pin: deliberate future asset
-        // edits may change these expected content addresses.
+        // edits may change these expected content addresses. The Tasks address
+        // was independently recomputed from the unchanged host declaration at
+        // c41ecdc2 after integrating its UI-framework asset changes.
         assert_eq!(generation_dir().file_name().unwrap(), "pi-14d420aa1fdb11d9");
         let installed = crate::persist::plugin_registry::load();
         let tasks = installed
@@ -834,7 +836,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             Path::new(&tasks.plugin_root).file_name().unwrap(),
-            "tasks-f6d7ac8d6d453c9c"
+            "tasks-f00f218365610c28"
         );
         crate::persist::plugin_registry::update(|entries| {
             entries
