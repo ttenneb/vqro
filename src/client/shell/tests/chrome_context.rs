@@ -2508,10 +2508,20 @@ fn empty_collection_surface_renders_and_owns_blank_space_context_menu() {
     assert!(text.contains(" i "), "{text}");
     assert!(text.contains("No terminals in this collection"), "{text}");
     assert!(text.contains("vqro collection add"), "{text}");
-    // The list presentation keeps its own empty state.
-    state
-        .collection_list_views
-        .insert("collection_empty".into());
+    // Clicking the drawn list/terminal control opens the list presentation,
+    // which keeps its own empty state and must not unframe the collection.
+    let toggle = state.hits.collections[0].presentation_toggle;
+    assert!(!toggle.is_empty(), "the control must be a real hit target");
+    state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: toggle.x + 1,
+        row: toggle.y,
+        modifiers: KeyModifiers::empty(),
+    })]);
+    assert!(
+        state.collection_list_views.contains("collection_empty"),
+        "clicking the list control must open the list presentation"
+    );
     let listed = state.compose(106, 20).expect("empty collection list frame");
     let listed_text = listed
         .cells
@@ -2524,6 +2534,21 @@ fn empty_collection_surface_renders_and_owns_blank_space_context_menu() {
         .collect::<Vec<_>>()
         .join("\n");
     assert!(listed_text.contains("No members"), "{listed_text}");
+    let listed_cell = |x: u16, y: u16| {
+        listed.cells[y as usize * listed.width as usize + x as usize]
+            .symbol
+            .clone()
+    };
+    assert_eq!(
+        listed_cell(left, surface_rect.y + 5),
+        "│",
+        "left edge in list"
+    );
+    assert_eq!(
+        listed_cell(right, bottom),
+        "┘",
+        "bottom-right corner in list"
+    );
 
     let collection = state.hits.collections[0].clone();
     let point = (

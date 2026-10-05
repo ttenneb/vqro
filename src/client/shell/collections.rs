@@ -148,6 +148,17 @@ fn inspect_text(inspect_width: u16) -> &'static str {
     }
 }
 
+/// The body inside a collection's frame: its inner rect without the sides and
+/// the bottom border, so a Vqro-drawn body cannot paint over the frame.
+fn collection_body_rect(surface: &CollectionSurface) -> Rect {
+    Rect::new(
+        surface.inner_rect.x.saturating_add(1),
+        surface.inner_rect.y,
+        surface.inner_rect.width.saturating_sub(2),
+        surface.inner_rect.height.saturating_sub(1),
+    )
+}
+
 /// The standalone frame a collection gets while it has no member pane for the
 /// server to draw a border for: the same box a member pane's border draws, in
 /// the same color, so an empty collection is framed instead of blank.
@@ -399,13 +410,7 @@ pub(super) fn render_collection_chrome(
         draw_collection_frame(buffer, surface, palette);
         // The collection's inner rect spans its full width, frame included, so
         // blank only what is inside the box: its sides and bottom stay drawn.
-        let area = Rect::new(
-            surface.inner_rect.x.saturating_add(1),
-            surface.inner_rect.y,
-            surface.inner_rect.width.saturating_sub(2),
-            surface.inner_rect.height.saturating_sub(1),
-        )
-        .intersection(buffer.area);
+        let area = collection_body_rect(surface).intersection(buffer.area);
         let base = Style::default().fg(palette.text).bg(Color::Reset);
         if !area.is_empty() {
             for y in area.y..area.bottom() {
@@ -502,10 +507,10 @@ pub(super) fn render_collection_chrome(
             selected_pane_id: None,
             previous_pane_id: None,
             next_pane_id: None,
-            previous: Rect::default(),
-            next: Rect::default(),
-            presentation_toggle: Rect::default(),
-            inspect: Rect::default(),
+            previous,
+            next,
+            presentation_toggle,
+            inspect,
         });
     }
     hits
@@ -570,15 +575,17 @@ pub(super) fn render_collection_lists(
         .filter(|collection| collection.selected_pane_id.is_none())
         .filter(|collection| list_views.contains(&collection.collection_id))
     {
-        let Some(area) = projection
+        let Some(surface) = projection
             .surfaces
             .iter()
             .find(|surface| surface.collection_id == collection.collection_id)
-            .map(|surface| surface.inner_rect.intersection(buffer.area))
-            .filter(|area| !area.is_empty())
         else {
             continue;
         };
+        let area = collection_body_rect(surface).intersection(buffer.area);
+        if area.is_empty() {
+            continue;
+        }
         let base = Style::default().fg(palette.text).bg(Color::Reset);
         buffer.set_style(area, base);
         for y in area.y..area.bottom() {
