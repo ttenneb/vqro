@@ -88,6 +88,90 @@ pub(super) struct CollectionSurface {
     pub(super) collection_id: String,
     pub(super) rect: Rect,
     pub(super) inner_rect: Rect,
+    /// Focused collection leaf, so its frame can use the focused border color.
+    pub(super) focused: bool,
+}
+
+/// Header control rects for a collection row: previous/next member, the
+/// list/terminal presentation toggle, and inspect.
+fn collection_control_rects(rect: Rect) -> (Rect, Rect, Rect, Rect) {
+    let previous = Rect::new(rect.x, rect.y, 3.min(rect.width), 1);
+    let next = Rect::new(rect.right().saturating_sub(3), rect.y, 3.min(rect.width), 1);
+    let inspect_width = if rect.width >= 72 { 10 } else { 3 };
+    let presentation_width = if rect.width >= 76 {
+        14
+    } else if rect.width >= 44 {
+        10
+    } else {
+        3
+    };
+    let inspect = Rect::new(
+        next.x.saturating_sub(inspect_width),
+        rect.y,
+        inspect_width,
+        1,
+    );
+    let presentation_toggle = Rect::new(
+        inspect.x.saturating_sub(presentation_width),
+        rect.y,
+        presentation_width,
+        1,
+    );
+    (previous, next, presentation_toggle, inspect)
+}
+
+fn presentation_toggle_text(presentation_width: u16, shows_terminal: bool) -> &'static str {
+    if presentation_width >= 14 {
+        if shows_terminal {
+            "[ t terminal ]"
+        } else {
+            "[ ≡ list ]    "
+        }
+    } else if presentation_width >= 10 {
+        if shows_terminal {
+            "[ t term ]"
+        } else {
+            "[ ≡ list ]"
+        }
+    } else if shows_terminal {
+        "[t]"
+    } else {
+        "[≡]"
+    }
+}
+
+fn inspect_text(inspect_width: u16) -> &'static str {
+    if inspect_width >= 10 {
+        " inspect  "
+    } else {
+        " i "
+    }
+}
+
+/// The standalone frame a collection gets while it has no member pane for the
+/// server to draw a border for: the same box a member pane's border draws, in
+/// the same color, so an empty collection is framed instead of blank.
+fn draw_collection_frame(buffer: &mut Buffer, surface: &CollectionSurface, palette: &Palette) {
+    let rect = surface.rect.intersection(buffer.area);
+    if rect.width < 3 || rect.height < 3 {
+        return;
+    }
+    let style = Style::default().fg(if surface.focused {
+        palette.accent
+    } else {
+        palette.overlay0
+    });
+    let block = ratatui::widgets::Block::default()
+        .borders(ratatui::widgets::Borders::ALL)
+        .border_style(style);
+    ratatui::widgets::Widget::render(block, rect, buffer);
+    for y in rect.y..rect.bottom() {
+        for x in rect.x..rect.right() {
+            if x == rect.x || x == rect.right() - 1 || y == rect.y || y == rect.bottom() - 1 {
+                buffer[(x, y)].set_skip(false);
+            }
+        }
+    }
 }
 
 pub(super) fn render_collection_chrome(
@@ -172,28 +256,7 @@ pub(super) fn render_collection_chrome(
                 .set_skip(false);
         }
 
-        let previous = Rect::new(rect.x, rect.y, 3.min(rect.width), 1);
-        let next = Rect::new(rect.right().saturating_sub(3), rect.y, 3.min(rect.width), 1);
-        let inspect_width = if rect.width >= 72 { 10 } else { 3 };
-        let presentation_width = if rect.width >= 76 {
-            14
-        } else if rect.width >= 44 {
-            10
-        } else {
-            3
-        };
-        let inspect = Rect::new(
-            next.x.saturating_sub(inspect_width),
-            rect.y,
-            inspect_width,
-            1,
-        );
-        let presentation_toggle = Rect::new(
-            inspect.x.saturating_sub(presentation_width),
-            rect.y,
-            presentation_width,
-            1,
-        );
+        let (previous, next, presentation_toggle, inspect) = collection_control_rects(rect);
         put(
             buffer,
             previous,
@@ -212,33 +275,13 @@ pub(super) fn render_collection_chrome(
         put(
             buffer,
             presentation_toggle,
-            if presentation_width >= 14 {
-                if shows_terminal {
-                    "[ t terminal ]"
-                } else {
-                    "[ ≡ list ]    "
-                }
-            } else if presentation_width >= 10 {
-                if shows_terminal {
-                    "[ t term ]"
-                } else {
-                    "[ ≡ list ]"
-                }
-            } else if shows_terminal {
-                "[t]"
-            } else {
-                "[≡]"
-            },
+            presentation_toggle_text(presentation_toggle.width, shows_terminal),
             Style::default().fg(palette.overlay1).bg(Color::Reset),
         );
         put(
             buffer,
             inspect,
-            if inspect_width >= 10 {
-                " inspect  "
-            } else {
-                " i "
-            },
+            inspect_text(inspect.width),
             Style::default().fg(palette.teal).bg(Color::Reset),
         );
 
@@ -350,8 +393,31 @@ pub(super) fn render_collection_chrome(
         if header_y < surface.rect.y || surface.inner_rect.width < 12 {
             continue;
         }
-        let rect = Rect::new(surface.inner_rect.x, header_y, surface.inner_rect.width, 1);
+        // Same frame, header and controls as a collection with terminals; only
+        // the member name and the body differ, so an empty collection is never a
+        // blank or unframed area.
+        draw_collection_frame(buffer, surface, palette);
+        // The collection's inner rect spans its full width, frame included, so
+        // blank only what is inside the box: its sides and bottom stay drawn.
+        let area = Rect::new(
+            surface.inner_rect.x.saturating_add(1),
+            surface.inner_rect.y,
+            surface.inner_rect.width.saturating_sub(2),
+            surface.inner_rect.height.saturating_sub(1),
+        )
+        .intersection(buffer.area);
         let base = Style::default().fg(palette.text).bg(Color::Reset);
+        if !area.is_empty() {
+            for y in area.y..area.bottom() {
+                for x in area.x..area.right() {
+                    buffer[(x, y)]
+                        .set_symbol(" ")
+                        .set_style(base)
+                        .set_skip(false);
+                }
+            }
+        }
+        let rect = Rect::new(surface.inner_rect.x, header_y, surface.inner_rect.width, 1);
         buffer.set_style(rect, base);
         for x in rect.x..rect.right() {
             buffer[(x, rect.y)]
@@ -359,11 +425,76 @@ pub(super) fn render_collection_chrome(
                 .set_style(base)
                 .set_skip(false);
         }
-        let text = format!(
-            "  {}  ·  empty collection",
-            collection.label.as_deref().unwrap_or("Collection")
+        let (previous, next, presentation_toggle, inspect) = collection_control_rects(rect);
+        put(
+            buffer,
+            previous,
+            " ‹ ",
+            Style::default().fg(palette.overlay0).bg(Color::Reset),
         );
-        put(buffer, rect, &text, Style::default().fg(palette.overlay1));
+        put(
+            buffer,
+            next,
+            " › ",
+            Style::default().fg(palette.overlay0).bg(Color::Reset),
+        );
+        let shows_terminal =
+            list_views.contains(&collection.collection_id) && maximized_pane.is_none();
+        put(
+            buffer,
+            presentation_toggle,
+            presentation_toggle_text(presentation_toggle.width, shows_terminal),
+            Style::default().fg(palette.overlay1).bg(Color::Reset),
+        );
+        put(
+            buffer,
+            inspect,
+            inspect_text(inspect.width),
+            Style::default().fg(palette.overlay0).bg(Color::Reset),
+        );
+        let content_x = previous.right().saturating_add(1);
+        let content_width = presentation_toggle
+            .x
+            .saturating_sub(content_x)
+            .saturating_sub(1);
+        let label = collection.label.as_deref().unwrap_or("Collection");
+        let text = format!("{label} 0/0 · no terminals");
+        put(
+            buffer,
+            Rect::new(content_x, rect.y, content_width, 1),
+            &text,
+            base,
+        );
+        // The Vqro-drawn empty state: what is missing and the existing command
+        // that adds a pane to this collection.
+        if area.height >= 1 {
+            let title = "No terminals in this collection";
+            let width = u16::try_from(title.len())
+                .unwrap_or(u16::MAX)
+                .min(area.width);
+            let x = area.x.saturating_add(area.width.saturating_sub(width) / 2);
+            let y = area.y.saturating_add(area.height.saturating_sub(2) / 2);
+            put(
+                buffer,
+                Rect::new(x, y, width, 1),
+                title,
+                Style::default().fg(palette.overlay1).bg(Color::Reset),
+            );
+        }
+        if area.height >= 3 {
+            let hint = "add a pane with: vqro collection add <collection> <pane>";
+            let width = u16::try_from(hint.len())
+                .unwrap_or(u16::MAX)
+                .min(area.width);
+            let x = area.x.saturating_add(area.width.saturating_sub(width) / 2);
+            let y = area.y.saturating_add(area.height.saturating_sub(2) / 2 + 1);
+            put(
+                buffer,
+                Rect::new(x, y, width, 1),
+                hint,
+                Style::default().fg(palette.overlay0).bg(Color::Reset),
+            );
+        }
         hits.push(CollectionChromeHit {
             rect,
             surface_rect: surface.rect,
@@ -437,6 +568,7 @@ pub(super) fn render_collection_lists(
         .collections
         .iter()
         .filter(|collection| collection.selected_pane_id.is_none())
+        .filter(|collection| list_views.contains(&collection.collection_id))
     {
         let Some(area) = projection
             .surfaces
