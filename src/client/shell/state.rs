@@ -1144,6 +1144,9 @@ pub(crate) struct ClientShellState {
     pub(super) panes_with_agents: std::collections::BTreeSet<String>,
     /// The panel bands Vqro drew, clickable or not, for the patch filter.
     pub(super) pane_panel_areas: Vec<Rect>,
+    /// Collection surfaces Vqro drew as lists, for the same patch filter: the
+    /// server's patch was computed for the pane, not for the list over it.
+    pub(super) collection_list_areas: Vec<Rect>,
     /// Rows a panel moved each pane's grid down by, by pane id: a retained patch
     /// row for that pane belongs that many rows lower.
     pub(super) pane_panel_band_rows: HashMap<String, u16>,
@@ -1347,6 +1350,7 @@ impl ClientShellState {
             last_pane_panels: None,
             panes_with_agents: Default::default(),
             pane_panel_areas: Vec::new(),
+            collection_list_areas: Vec::new(),
             pane_panel_band_rows: HashMap::new(),
             collection_entered_pane: None,
             collection_maximized_pane: None,
@@ -1619,6 +1623,7 @@ impl ClientShellState {
         self.last_pane_panels = None;
         self.panes_with_agents.clear();
         self.pane_panel_areas.clear();
+        self.collection_list_areas.clear();
         self.collection_entered_pane = None;
         self.collection_maximized_pane = None;
         self.terminal_view_surfaces.clear();

@@ -251,6 +251,10 @@ impl ClientShellState {
             .iter()
             .map(|hit| hit.rect)
             .chain(self.pane_panel_areas.iter().copied())
+            // A collection drawn as a list owns its cells the same way a panel
+            // band does: the patch was computed for the pane, not for the list
+            // Vqro drew over it, so a row that lands inside the list is dropped.
+            .chain(self.collection_list_areas.iter().copied())
             .collect::<Vec<_>>();
         let shifts = self.pane_panel_band_rows.clone();
         let bands = PanelBands::new(&patch.panes, &shifts);

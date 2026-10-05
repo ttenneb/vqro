@@ -2569,3 +2569,178 @@ fn empty_collection_surface_renders_and_owns_blank_space_context_menu() {
         })) if collection_id == "collection_empty"
     ));
 }
+
+/// A collection with two members, shown as a list, over one pane surface.
+fn listed_collection_state() -> ClientShellState {
+    let mut projected = snapshot();
+    projected.panes.push(ClientShellPane {
+        pane_id: "pane_2".into(),
+        workspace_id: "ws_1".into(),
+        tab_id: "tab_1".into(),
+        label: Some("second terminal".into()),
+        cwd: Some("/repo".into()),
+        foreground_cwd: Some("/repo".into()),
+        focused: false,
+        right_click_passthrough: false,
+    });
+    let mut pane_surface = surface();
+    pane_surface.collections = vec![crate::protocol::PaneSurfaceCollection {
+        collection_id: "collection_1".into(),
+        rect: crate::protocol::SurfaceRect {
+            x: 0,
+            y: 0,
+            width: 70,
+            height: 19,
+        },
+        inner_rect: crate::protocol::SurfaceRect {
+            x: 0,
+            y: 1,
+            width: 70,
+            height: 18,
+        },
+        focused: true,
+    }];
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    state.set_snapshot(Box::new(projected));
+    state.structure = Some(Box::new(
+        crate::protocol::endpoint::ClientShellStructureProjection {
+            session_id: "alpha".into(),
+            boot_id: "boot-1".into(),
+            revision: 1,
+            collections: vec![crate::protocol::endpoint::ClientShellCollection {
+                collection_id: "collection_1".into(),
+                workspace_id: "ws_1".into(),
+                tab_id: "tab_1".into(),
+                label: Some("List workflow".into()),
+                selected_pane_id: Some("pane_1".into()),
+                members: vec![
+                    crate::protocol::endpoint::ClientShellCollectionMember {
+                        pane_id: "pane_1".into(),
+                        index: 0,
+                        archived: false,
+                    },
+                    crate::protocol::endpoint::ClientShellCollectionMember {
+                        pane_id: "pane_2".into(),
+                        index: 1,
+                        archived: false,
+                    },
+                ],
+            }],
+            delegations: Vec::new(),
+            repositories: Vec::new(),
+            space_order: Vec::new(),
+        },
+    ));
+    state.set_pane_surface(pane_surface);
+    state.collection_list_views.insert("collection_1".into());
+    state
+}
+
+/// Arrow keys that move the collection list's selection must not also reach the
+/// member's terminal: the shell would run history navigation and redraw its
+/// prompt inside the list, which is the flash the human reported.
+#[test]
+fn arrow_keys_in_the_collection_list_do_not_reach_the_terminal() {
+    let mut state = listed_collection_state();
+    let _ = state.compose(106, 20).expect("collection list frame");
+    let mut outcome = ClientShellInput::default();
+    for code in [
+        crossterm::event::KeyCode::Down,
+        crossterm::event::KeyCode::Down,
+        crossterm::event::KeyCode::Up,
+    ] {
+        state.handle_key(
+            crate::input::TerminalKey::new(code, KeyModifiers::empty()),
+            &mut outcome,
+        );
+    }
+    assert!(
+        !outcome.requests.iter().any(|message| matches!(
+            message,
+            crate::protocol::ClientMessage::ClientShellPaneInput { .. }
+        )),
+        "list-view arrows must not reach the pane: {:?}",
+        outcome.requests
+    );
+    let selected = outcome
+        .actions
+        .iter()
+        .filter_map(|action| match action {
+            ClientShellAction::Endpoint { request, .. } => match &request.method {
+                crate::api::schema::Method::CollectionSelect(params) => {
+                    Some(params.pane_id.clone())
+                }
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        selected.len(),
+        3,
+        "each arrow moves the selection: {selected:?}"
+    );
+    assert_eq!(
+        selected[0], "pane_2",
+        "the first Down selects the next member"
+    );
+}
+
+/// A retained terminal patch row must not paint inside the list a collection
+/// draws: the server computed it for the pane, which the list now covers.
+#[test]
+fn a_terminal_patch_row_is_dropped_inside_the_collection_list() {
+    let mut state = listed_collection_state();
+    let _ = state.compose(106, 20).expect("collection list frame");
+    let area = *state
+        .collection_list_areas
+        .first()
+        .expect("the list area is reserved from patches");
+    let pane = state
+        .pane_surface
+        .as_ref()
+        .expect("surface")
+        .panes
+        .first()
+        .cloned()
+        .expect("pane_1");
+    let mut cell = state
+        .pane_surface
+        .as_ref()
+        .expect("surface")
+        .frame
+        .cells
+        .first()
+        .cloned()
+        .expect("a cell");
+    cell.symbol = "B".into();
+    let surface_revision = state
+        .pane_surface
+        .as_ref()
+        .expect("surface")
+        .surface_revision;
+    let patch = crate::protocol::PaneSurfacePatch {
+        boot_id: "boot-1".into(),
+        projection_revision: 1,
+        base_surface_revision: surface_revision,
+        surface_revision: surface_revision.saturating_add(1),
+        rows: vec![crate::protocol::PaneSurfacePatchRow {
+            x: pane.inner_rect.x,
+            y: area.y.saturating_add(5),
+            cells: vec![cell],
+        }],
+        panes: vec![pane],
+        cursor: None,
+    };
+    let _ = state.apply_pane_surface_patch(patch);
+    let frame = state.compose(106, 20).expect("frame after patch");
+    for y in area.y..area.bottom() {
+        for x in area.x..area.right() {
+            assert_ne!(
+                frame_symbol(&frame, x, y),
+                "B",
+                "the list must not show a terminal patch row at ({x}, {y})"
+            );
+        }
+    }
+}
