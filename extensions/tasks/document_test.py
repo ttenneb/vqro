@@ -15,6 +15,40 @@ H = {"class":"human_unverified", "terminal_id":"human", "uid":os.geteuid()}
 A = {"class":"agent", "terminal_id":"a", "agent":"pi", "execution":"boot:1:1"}
 P = {"pane_id":"w1:p1", "workspace_id":"w1", "tab_id":"w1:t1"}
 
+class AttentionRowTargetTests(unittest.TestCase):
+    """Where a sidebar attention entry sends a click."""
+
+    PLACEMENTS = {
+        "term-owner": {"pane_id": "pane_owner", "workspace_id": "ws", "tab_id": "tab"},
+        "term-reporter": {"pane_id": "pane_reporter", "workspace_id": "ws", "tab_id": "tab"},
+    }
+    OWNER = {"class": "agent", "terminal_id": "term-owner", "agent": "pi"}
+    REPORTER = {"class": "agent", "terminal_id": "term-reporter", "agent": "pi"}
+
+    def target(self, task):
+        return document.attention_row_target(task, self.PLACEMENTS, {task["id"]: task})
+
+    def test_a_waiting_row_points_at_the_pane_where_the_human_acts(self):
+        # The ball is in the human's court, so there is no pane of theirs: the entry
+        # lands on the agent that reported the task instead of doing nothing.
+        task = {"id": "task_1", "state": "started", "owed_action": "answer",
+                "owed_to": {"class": "human_unverified", "terminal_id": "human", "uid": 1000},
+                "owner": self.OWNER, "creator": self.REPORTER}
+        self.assertEqual(self.target(task)["placement"]["pane_id"], "pane_reporter")
+
+    def test_an_owned_row_points_at_the_owner_pane(self):
+        task = {"id": "task_2", "state": "blocked", "owed_action": "unblock",
+                "owed_to": {"class": "agent", "terminal_id": "term-reporter", "agent": "pi"},
+                "owner": self.OWNER, "creator": self.REPORTER}
+        self.assertEqual(self.target(task)["placement"]["pane_id"], "pane_owner")
+
+    def test_a_row_with_no_live_pane_carries_no_terminal(self):
+        gone = {"class": "agent", "terminal_id": "term-gone", "agent": "pi"}
+        task = {"id": "task_3", "state": "started", "owed_action": "start",
+                "owed_to": gone, "owner": gone, "creator": gone}
+        self.assertIsNone(self.target(task))
+
+
 class MessageSubjectTests(unittest.TestCase):
     def test_a_subject_drops_internal_ids_and_keeps_the_sentence(self):
         # The human's dogfood report: a row read "smoke test message from

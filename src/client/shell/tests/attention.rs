@@ -168,3 +168,111 @@ fn tasks_default_is_unavailable_not_zero_and_agents_toggle_keeps_recovery() {
     assert!(text.contains("[tasks]"));
     assert!(state.snapshot.is_some());
 }
+
+/// A sidebar attention (Tasks) list with one row the extension gave a terminal link
+/// for, and one whose agent has no live pane.
+fn attention_rows_state() -> ClientShellState {
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    state.set_endpoint_status(&ClientEndpointId::Local, ClientEndpointStatus::Online);
+    state.set_endpoint_snapshot_for_generation(&ClientEndpointId::Local, 1, Box::new(snapshot()));
+    let projection = serde_json::from_value(serde_json::json!({
+        "contract":"host.documents.v1", "boot_id":"boot-1", "revision":1,
+        "documents":[{"provider_priority":1,"document":{
+            "contract":"host.view.v1", "namespace":"independent.attention", "generation":7,"revision":2,
+            "surface":"navigation","target":{"kind":"session"},
+            "items":[
+                {"id":"context:attention.view:independent:read","role":"section","label":"Work"},
+                {"id":"context:attention.row:task-1","role":"section","label":"A live task",
+                 "detail":"pi @1111 · start",
+                 "terminal":{"terminal_id":"term_1","placement":{"pane_id":"pane_1",
+                   "workspace_id":"ws_1","tab_id":"tab_1"}}},
+                {"id":"context:attention.row:task-2","role":"section","label":"Yesterday's smoke test",
+                 "detail":"pi @2222 · accept"}
+            ],
+            "actions":[],"required_capabilities":[]
+        }}]
+    }))
+    .expect("projection");
+    state.set_endpoint_host_documents_for_generation(
+        &ClientEndpointId::Local,
+        1,
+        Box::new(projection),
+    );
+    state
+}
+
+#[test]
+fn a_sidebar_task_entry_jumps_to_its_pane_and_a_stale_one_says_so() {
+    let mut state = attention_rows_state();
+    let rows = state
+        .endpoints
+        .iter()
+        .find(|endpoint| endpoint.endpoint_id == ClientEndpointId::Local)
+        .and_then(|endpoint| endpoint.attention.as_ref())
+        .map(|nav| nav.rows.clone())
+        .expect("rows");
+    assert_eq!(rows.len(), 2, "both entries are listed");
+    assert_eq!(rows[0].pane_id.as_deref(), Some("pane_1"));
+    assert!(
+        rows[1].pane_id.is_none(),
+        "an entry whose agent has no live pane has nowhere to jump"
+    );
+
+    // The stale entry says so in the rendered row.
+    let frame = state.compose(106, 30).expect("frame");
+    let text = frame
+        .cells
+        .iter()
+        .map(|cell| cell.symbol.as_str())
+        .collect::<String>();
+    assert!(
+        text.contains("not running"),
+        "the stale entry must say it is not running: {text}"
+    );
+    assert!(
+        !text.contains("@2222"),
+        "and it names the agent, not a raw id: {text}"
+    );
+
+    // Clicking the live row focuses its pane.
+    let hit = state
+        .hits
+        .attention
+        .iter()
+        .find(|hit| hit.kind == "attention_row" && hit.ids == vec!["pane_1".to_string()])
+        .cloned()
+        .expect("the live row is clickable");
+    let mut outcome = ClientShellInput::default();
+    state.open_attention(hit, &mut outcome);
+    let focused: Vec<&str> = outcome
+        .actions
+        .iter()
+        .filter_map(|action| match action {
+            ClientShellAction::Endpoint { request, .. } => match &request.method {
+                crate::api::schema::Method::PaneFocus(target) => Some(target.pane_id.as_str()),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect();
+    assert_eq!(focused, vec!["pane_1"], "the entry jumps to its pane");
+
+    // And clicking the stale row reports why nothing happened.
+    let stale = state
+        .hits
+        .attention
+        .iter()
+        .find(|hit| hit.kind == "attention_row" && hit.ids.is_empty())
+        .cloned()
+        .expect("the stale row is clickable too");
+    let mut outcome = ClientShellInput::default();
+    state.open_attention(stale, &mut outcome);
+    assert!(
+        outcome.actions.is_empty(),
+        "a stale entry must not push a focus for a pane that is gone"
+    );
+    assert!(
+        state.endpoint_error.is_some(),
+        "a stale entry tells the user instead of doing nothing"
+    );
+}
