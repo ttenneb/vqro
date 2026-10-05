@@ -16,6 +16,7 @@ pub mod action_choices;
 mod action_invocation;
 mod admission;
 mod agent_execution;
+mod agent_profiles;
 mod agent_resume;
 mod agent_view_eval;
 mod api;
@@ -28,6 +29,8 @@ mod client;
 pub mod collections_extension_contract;
 mod config;
 mod copy_mode;
+#[path = "../extensions/defaults.rs"]
+mod default_extensions;
 mod delegation;
 mod detect;
 mod events;
@@ -66,7 +69,6 @@ mod pane;
 mod pane_contribution;
 mod pane_graphics_files;
 mod persist;
-mod pi_profile;
 mod platform;
 mod plugin_command;
 mod plugin_paths;
@@ -836,8 +838,8 @@ fn main() -> io::Result<()> {
     if let Err(err) = bundled::ensure_defaults() {
         tracing::warn!(err = %err, "failed to prepare bundled default extensions");
     }
-    if let Err(err) = pi_profile::ensure_profile() {
-        tracing::warn!(err = %err, "failed to prepare the Vqro Pi profile");
+    if let Err(err) = agent_profiles::prepare() {
+        tracing::warn!(err = %err, "failed to prepare an agent launch profile");
     }
 
     let saved_federation =

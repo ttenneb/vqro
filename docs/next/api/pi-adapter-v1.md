@@ -54,4 +54,7 @@ The consumer has no broader automatic-reply policy for every claimed message.
 The profile carries the neutral adapter and separately loaded Tasks consumer;
 bundling describes distribution only, not host capability authority. Existing
 profile opt-out, safe symlink/generation publication and warned fallback limits
-remain. The optional profile-module reorganization is deferred.
+remain. Profile policy and resource declarations live outside core under the explicitly
+[temporary compiled launch-profile admission](../architecture/temporary-agent-launch-profile-admission.md).
+The internal host seam does not extend this SDK interface, grant package authority
+or expose runtime registration of launch profiles.

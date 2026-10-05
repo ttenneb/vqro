@@ -198,13 +198,12 @@ impl App {
         argv.extend(params.args);
         let command = crate::platform::interactive_shell_command(&argv, &shell_name)
             .ok_or(AgentStartError::InvalidArgument)?;
-        // Fail closed with a visible line: without the profile, Pi would load the
-        // Herdr adapter that can reach the human's real Herdr server.
-        let command = if kind == crate::detect::Agent::Pi && crate::pi_profile::warning_needed() {
-            format!(
-                "printf '%s\\n' \"{}\"; {command}",
-                crate::pi_profile::UNAVAILABLE_WARNING
-            )
+        // Only the shipped trusted adapter supplies fixed notice text. It owns
+        // executable matching and fresh readiness; installed manifests cannot.
+        let command = if let Some(notice) =
+            crate::agent_profiles::notice(crate::detect::interactive_agent_executable(kind))
+        {
+            format!("printf '%s\\n' \"{notice}\"; {command}")
         } else {
             command
         };

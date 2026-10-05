@@ -34,6 +34,41 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
+/// Temporary compiled profile admission, not runtime package execution.
+/// See docs/next/architecture/temporary-agent-launch-profile-admission.md.
+pub(crate) const BUNDLE: crate::bundled::DefaultBundle = crate::bundled::DefaultBundle {
+    prefix: "pi",
+    assets: &[
+        ("vqro-pi.ts", include_str!("index.ts")),
+        super::tasks::PROFILE_RESOURCE,
+        (
+            "skills/vqro/SKILL.md",
+            include_str!("../../skills/vqro/SKILL.md"),
+        ),
+    ],
+    plugin: None,
+};
+
+fn generation_dir() -> PathBuf {
+    crate::bundled::generation_dir(
+        &crate::bundled::bundled_root(),
+        BUNDLE.prefix,
+        BUNDLE.assets,
+    )
+}
+
+pub(crate) fn apply_pane_env(command: &mut portable_pty::CommandBuilder) {
+    if profile_ready() {
+        command.env("PI_CODING_AGENT_DIR", profile_dir());
+    } else if !opted_out() {
+        command.env_remove("PI_CODING_AGENT_DIR");
+    }
+}
+
+pub(crate) fn notice(executable: &str) -> Option<&'static str> {
+    (executable == "pi" && warning_needed()).then_some(UNAVAILABLE_WARNING)
+}
+
 /// Packages a Vqro-launched Pi must not load: Herdr-coupled or Vqro-competing.
 const EXCLUDED_PACKAGES: &[&str] = &["pi-input-gate", "pi-tasking-herdr-adapter", "rpiv-todo"];
 /// Human agent-dir directories mirrored entry by entry, with the names to drop,
@@ -56,7 +91,7 @@ const PER_ENTRY_DIRS: &[(&str, &[&str])] = &[
 /// `SYSTEM.md` is replaced by [`VQRO_SYSTEM_MD`] rather than linked.
 const UNMIRRORED: &[&str] = &["settings.json", ".ready", "sessions", "tmp", "SYSTEM.md"];
 /// The Vqro system prompt written into the profile.
-const VQRO_SYSTEM_MD: &str = include_str!("../extensions/pi-profile/SYSTEM.md");
+const VQRO_SYSTEM_MD: &str = include_str!("SYSTEM.md");
 /// Package spec prefixes, which carry no local path.
 const SPEC_PREFIXES: &[&str] = &["npm:", "git:", "ssh:", "file:", "http:", "https:"];
 /// Settings keys whose string-array values are paths or patterns resolved
@@ -260,7 +295,7 @@ fn is_owned_pi_asset(root: &Path, path: &Path) -> bool {
 /// asset fails the preparation, so readiness is never claimed without them.
 #[cfg(unix)]
 fn link_profile_assets(profile: &Path) -> io::Result<()> {
-    let generation = crate::bundled::pi_generation_dir();
+    let generation = generation_dir();
     let Some(root) = generation.parent() else {
         return Err(io::Error::other("bundled Pi generation has no parent"));
     };
@@ -306,7 +341,7 @@ fn link_profile_assets(profile: &Path) -> io::Result<()> {
             continue;
         }
         let _ = std::fs::remove_file(&target);
-        std::os::unix::fs::symlink(&source, &target)?;
+        crate::platform::resource_symlink(&source, &target)?;
         tracing::info!(path = %target.display(), "linked a Vqro Pi profile asset");
     }
     Ok(())
@@ -555,7 +590,7 @@ fn link_or_skip(source: &Path, target: &Path) -> io::Result<()> {
     if std::fs::symlink_metadata(target).is_ok() {
         return Ok(());
     }
-    std::os::unix::fs::symlink(source, target)?;
+    crate::platform::resource_symlink(source, target)?;
     tracing::info!(path = %target.display(), "linked a Pi profile entry");
     Ok(())
 }
@@ -574,6 +609,270 @@ mod tests {
 
     fn settings(sources: &[&str]) -> Value {
         serde_json::json!({ "theme": "dracula", "packages": sources })
+    }
+
+    #[cfg(unix)]
+    struct ProfileFixture {
+        root: PathBuf,
+        saved: Vec<(&'static str, Option<std::ffi::OsString>)>,
+        _lock: crate::integration::IntegrationEnvLock,
+    }
+
+    #[cfg(unix)]
+    impl ProfileFixture {
+        fn new(name: &str) -> Self {
+            let lock = crate::integration::integration_env_lock();
+            let root = std::env::temp_dir()
+                .join(format!("profile-lifecycle-{name}-{}", std::process::id()));
+            std::fs::create_dir_all(root.join("home/.pi/agent")).unwrap();
+            let saved = [
+                "HOME",
+                "XDG_CONFIG_HOME",
+                crate::bundled::OPT_OUT_ENV,
+                "PI_CODING_AGENT_DIR",
+            ]
+            .into_iter()
+            .map(|key| (key, std::env::var_os(key)))
+            .collect();
+            std::env::set_var("HOME", root.join("home"));
+            std::env::set_var("XDG_CONFIG_HOME", root.join("config"));
+            std::env::remove_var(crate::bundled::OPT_OUT_ENV);
+            std::env::remove_var("PI_CODING_AGENT_DIR");
+            Self {
+                root,
+                saved,
+                _lock: lock,
+            }
+        }
+
+        fn prepare(&self) {
+            crate::bundled::ensure_defaults().unwrap();
+            ensure_profile().unwrap();
+        }
+
+        fn pane_override(&self) -> Option<PathBuf> {
+            let mut command = portable_pty::CommandBuilder::new("sh");
+            crate::integration::apply_pane_base_env(&mut command);
+            command.get_env("PI_CODING_AGENT_DIR").map(PathBuf::from)
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for ProfileFixture {
+        fn drop(&mut self) {
+            use std::os::unix::fs::PermissionsExt;
+            if profile_dir().exists() {
+                let _ =
+                    std::fs::set_permissions(profile_dir(), std::fs::Permissions::from_mode(0o700));
+            }
+            for (key, value) in &self.saved {
+                match value {
+                    Some(value) => std::env::set_var(key, value),
+                    None => std::env::remove_var(key),
+                }
+            }
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn profile_lifecycle_rechecks_readiness_and_preserves_fallback() {
+        let fixture = ProfileFixture::new("fresh");
+        let human = human_agent_dir().unwrap();
+        std::fs::write(human.join("settings.json"), "{\"theme\":\"old\"}").unwrap();
+        std::env::set_var("PI_CODING_AGENT_DIR", "/inherited");
+        assert!(!profile_ready());
+        assert!(warning_needed());
+        assert_eq!(notice("pi"), Some(UNAVAILABLE_WARNING));
+        assert_eq!(notice("other-agent"), None);
+        assert_eq!(fixture.pane_override(), None);
+        fixture.prepare();
+        assert!(profile_ready());
+        assert_eq!(fixture.pane_override(), Some(profile_dir()));
+        assert!(!warning_needed());
+        std::fs::write(human.join("settings.json"), "{\"theme\":\"new\"}").unwrap();
+        assert!(!profile_ready());
+        assert_eq!(fixture.pane_override(), None);
+        ensure_profile().unwrap();
+        assert!(profile_ready());
+        std::fs::write(profile_dir().join("settings.json"), "{}").unwrap();
+        assert!(!profile_ready());
+        ensure_profile().unwrap();
+        let resource = profile_dir().join("extensions/vqro-pi.ts");
+        std::fs::remove_file(&resource).unwrap();
+        assert!(!profile_ready());
+        // A preserved foreign resource is existence-only readiness, not proof
+        // that its content/owner is ours. Preserve this existing behavior.
+        std::fs::write(&resource, "foreign").unwrap();
+        assert!(profile_ready());
+        std::fs::write(profile_dir().join(READY_MARKER), "bad marker").unwrap();
+        assert!(!profile_ready());
+        ensure_profile().unwrap();
+        let marker = profile_dir().join(READY_MARKER);
+        let saved = fixture.root.join("saved-marker");
+        std::fs::rename(&marker, &saved).unwrap();
+        std::os::unix::fs::symlink(&saved, &marker).unwrap();
+        assert!(profile_ready(), "marker symlinks currently remain readable");
+        std::fs::write(human.join("settings.json"), "{").unwrap();
+        assert!(ensure_profile().is_err());
+        assert!(!profile_ready());
+        assert_eq!(fixture.pane_override(), None);
+        assert!(warning_needed());
+        for value in ["", "0"] {
+            std::env::set_var(crate::bundled::OPT_OUT_ENV, value);
+            assert!(!opted_out());
+        }
+        std::env::set_var(crate::bundled::OPT_OUT_ENV, "1");
+        assert!(opted_out());
+        assert!(!warning_needed());
+        assert_eq!(fixture.pane_override(), Some(PathBuf::from("/inherited")));
+        use std::os::unix::ffi::OsStringExt;
+        std::env::set_var(
+            crate::bundled::OPT_OUT_ENV,
+            std::ffi::OsString::from_vec(vec![0xff]),
+        );
+        assert!(!opted_out(), "non-Unicode opt-out currently fails env::var");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn profile_lifecycle_preserves_read_errors_and_readonly_marker_quirks() {
+        use std::os::unix::fs::PermissionsExt;
+        let fixture = ProfileFixture::new("errors");
+        let settings = human_agent_dir().unwrap().join("settings.json");
+        std::fs::create_dir(&settings).unwrap();
+        fixture.prepare();
+        assert!(profile_ready(), "unreadable settings prepare as empty");
+        std::fs::remove_dir(&settings).unwrap();
+        std::fs::write(&settings, [0xff]).unwrap();
+        ensure_profile().unwrap();
+        assert!(
+            !profile_ready(),
+            "raw source hash differs from empty UTF8 preparation"
+        );
+        std::fs::remove_file(&settings).unwrap();
+        ensure_profile().unwrap();
+        assert!(profile_ready());
+        std::fs::remove_file(profile_dir().join("SYSTEM.md")).unwrap();
+        std::fs::set_permissions(profile_dir(), std::fs::Permissions::from_mode(0o555)).unwrap();
+        assert!(ensure_profile().is_err());
+        assert!(
+            profile_ready(),
+            "unchanged retained marker can still match after readonly failure"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn profile_lifecycle_preserves_special_link_replacement_and_human_targets() {
+        let fixture = ProfileFixture::new("links");
+        let human = human_agent_dir().unwrap();
+        for name in ["settings.json", "auth.json", "models-store.json"] {
+            std::fs::write(human.join(name), "{}").unwrap();
+        }
+        std::fs::write(human.join("SYSTEM.md"), "human system").unwrap();
+        std::fs::create_dir_all(human.join("extensions")).unwrap();
+        std::fs::write(human.join("extensions/keep.ts"), "human extension").unwrap();
+        fixture.prepare();
+        let profile = profile_dir();
+        std::fs::remove_file(profile.join("SYSTEM.md")).unwrap();
+        std::os::unix::fs::symlink(human.join("SYSTEM.md"), profile.join("SYSTEM.md")).unwrap();
+        std::fs::remove_dir_all(profile.join("extensions")).unwrap();
+        std::os::unix::fs::symlink(human.join("extensions"), profile.join("extensions")).unwrap();
+        ensure_profile().unwrap();
+        assert!(!std::fs::symlink_metadata(profile.join("SYSTEM.md"))
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert!(!std::fs::symlink_metadata(profile.join("extensions"))
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        let excluded = profile.join("extensions/herdr-agent-state.ts");
+        std::os::unix::fs::symlink(human.join("extensions/keep.ts"), &excluded).unwrap();
+        let legacy = profile.join("extensions/vqro-reply-routing.ts");
+        std::os::unix::fs::symlink(
+            crate::config::config_dir().join("bundled/pi-0123456789abcdef/vqro-reply-routing.ts"),
+            &legacy,
+        )
+        .unwrap();
+        ensure_profile().unwrap();
+        assert!(std::fs::symlink_metadata(excluded).is_err());
+        assert!(std::fs::symlink_metadata(&legacy).is_err());
+        std::fs::write(&legacy, "foreign legacy file").unwrap();
+        ensure_profile().unwrap();
+        assert_eq!(
+            std::fs::read_to_string(legacy).unwrap(),
+            "foreign legacy file"
+        );
+        for name in ["settings.json", "auth.json", "models-store.json"] {
+            assert_eq!(std::fs::read_to_string(human.join(name)).unwrap(), "{}");
+        }
+        assert_eq!(
+            std::fs::read_to_string(human.join("SYSTEM.md")).unwrap(),
+            "human system"
+        );
+        assert_eq!(
+            std::fs::read_to_string(human.join("extensions/keep.ts")).unwrap(),
+            "human extension"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn profile_lifecycle_preserves_generation_bytes_and_registry_choices() {
+        let fixture = ProfileFixture::new("distribution");
+        fixture.prepare();
+        // Refactor characterization, not a public pin: deliberate future asset
+        // edits may change these expected content addresses. The Tasks address
+        // was independently recomputed from the unchanged host declaration at
+        // c41ecdc2 after integrating its UI-framework asset changes.
+        assert_eq!(generation_dir().file_name().unwrap(), "pi-14d420aa1fdb11d9");
+        let installed = crate::persist::plugin_registry::load();
+        let tasks = installed
+            .iter()
+            .find(|entry| entry.plugin_id == "vqro.tasks")
+            .unwrap();
+        assert_eq!(
+            Path::new(&tasks.plugin_root).file_name().unwrap(),
+            "tasks-f00f218365610c28"
+        );
+        crate::persist::plugin_registry::update(|entries| {
+            entries
+                .iter_mut()
+                .find(|entry| entry.plugin_id == "vqro.tasks")
+                .unwrap()
+                .enabled = false;
+        })
+        .unwrap();
+        crate::bundled::ensure_defaults().unwrap();
+        assert!(
+            !crate::persist::plugin_registry::load()
+                .iter()
+                .find(|entry| entry.plugin_id == "vqro.tasks")
+                .unwrap()
+                .enabled
+        );
+        let custom = fixture.root.join("custom-tasks").display().to_string();
+        crate::persist::plugin_registry::update(|entries| {
+            let entry = entries
+                .iter_mut()
+                .find(|entry| entry.plugin_id == "vqro.tasks")
+                .unwrap();
+            entry.plugin_root = custom.clone();
+            entry.manifest_path = format!("{custom}/vqro-extension.toml");
+        })
+        .unwrap();
+        crate::bundled::ensure_defaults().unwrap();
+        let entries = crate::persist::plugin_registry::load();
+        let entry = entries
+            .iter()
+            .find(|entry| entry.plugin_id == "vqro.tasks")
+            .unwrap();
+        assert_eq!(entry.plugin_root, custom);
+        assert!(!entry.enabled);
+        assert!(generation_dir().exists());
     }
 
     #[test]
