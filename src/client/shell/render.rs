@@ -417,9 +417,12 @@ pub(super) fn render_panel_scroll(
             y,
             1,
             symbol,
+            // The scroll track sits inside the band a panel reserved, so it takes
+            // the panel's own background: a Reset background would let the terminal's
+            // cells show through the chrome.
             Style::default()
                 .fg(color)
-                .bg(ratatui::style::Color::Reset)
+                .bg(palette.panel_bg)
                 .remove_modifier(Modifier::DIM),
         );
     }

@@ -1,5 +1,20 @@
 use super::*;
 
+/// A tab badge is a marker, not a sentence: the attention label ("1 waiting on you")
+/// becomes its count, so the tab keeps its own label readable.
+fn compact_badge_label(label: &str) -> String {
+    let digits = label
+        .trim()
+        .chars()
+        .take_while(|character| character.is_ascii_digit())
+        .collect::<String>();
+    if digits.is_empty() {
+        label.trim().chars().take(4).collect()
+    } else {
+        digits
+    }
+}
+
 const TAB_SCROLL_BUTTON_WIDTH: u16 = 3;
 const MIN_TAB_STRIP_WIDTH: u16 =
     MIN_TAB_WIDTH + NEW_TAB_WIDTH + TAB_SCROLL_BUTTON_WIDTH.saturating_mul(2);
@@ -26,9 +41,14 @@ pub(crate) fn render_tab_bar(
         .iter()
         .map(|tab| {
             let label = tab_label(tab);
+            // The width the tab asks for is the width it draws: the compact badge
+            // label, not the attention sentence, or the badge takes the tab over and
+            // later tabs fall off the strip.
             let badge_width = attention
                 .and_then(|nav| nav.badge("tab", &tab.tab_id))
-                .map_or(0, |label| display_width(&label.label).saturating_add(3));
+                .map_or(0, |label| {
+                    display_width(&compact_badge_label(&label.label)).saturating_add(3)
+                });
             display_width(&label)
                 .saturating_add(badge_width)
                 .saturating_add(4)
@@ -130,10 +150,15 @@ pub(crate) fn render_tab_bar(
             right_padding = padding.saturating_sub(left) as usize,
         );
         put_text(buffer, rect.x, rect.y, rect.width, &text, style);
-        if let Some((nav, badge)) =
-            attention.and_then(|nav| nav.badge("tab", &tab.tab_id).map(|badge| (nav, badge)))
-        {
-            let badge_width = display_width(&badge.label)
+        if let Some(badge) = attention.and_then(|nav| nav.badge("tab", &tab.tab_id)) {
+            // The badge is part of the tab button, not a control inside it: it takes
+            // the tab's own background, so the selected tab's highlight covers it; it
+            // is short enough not to take the tab over; and it registers no hit of
+            // its own, so a click anywhere on the tab selects the tab, which is the
+            // primary action a tab button owes the user. Opening the panes is what
+            // the selected tab's own panels and border badges are for.
+            let label = compact_badge_label(&badge.label);
+            let badge_width = display_width(&label)
                 .saturating_add(2)
                 .min(rect.width.saturating_sub(2));
             let badge_rect = Rect::new(
@@ -147,11 +172,9 @@ pub(crate) fn render_tab_bar(
                 badge_rect.x,
                 badge_rect.y,
                 badge_rect.width,
-                &format!("[{}]", badge.label),
-                Style::default().fg(palette.peach).bg(palette.surface0),
+                &format!("[{label}]"),
+                style.fg(palette.peach),
             );
-            hits.attention
-                .push(nav.hit(badge_rect, "tab", vec![tab.tab_id.clone()]));
         }
         hits.tabs.push((rect, tab.tab_id.clone()));
         first_visible.get_or_insert(index);

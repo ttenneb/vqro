@@ -479,7 +479,6 @@ pub(crate) fn render_sidebar(
             &workspace.workspace_id,
             (!entry.indented).then_some(repository).flatten(),
             palette,
-            hits,
         );
         if let Some((link_rect, path)) = rendered_links
             .repository

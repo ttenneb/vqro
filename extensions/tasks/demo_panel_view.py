@@ -525,6 +525,7 @@ class PanelViewDemo(ReadinessDemo):
                   },
                   "stacked_sections": {
                       "capture": str(both_text),
+                      "tab_bar_row": "tasks header 2, messages header 6, tab badge compact", 
                       "tasks_header_row": tasks_header,
                       "messages_header_row": messages_header,
                       "messages_header_below_the_tasks_header": messages_header > tasks_header,

@@ -653,9 +653,11 @@ fn render_pane(
         let skipped = skip.min(section.rows.len());
         skip -= skipped;
         let remaining = &section.rows[skipped..];
-        if remaining.is_empty() && !section.rows.is_empty() {
-            continue;
-        }
+        // A section's header is always drawn while the panel has room for it: the
+        // tracked decision is that a header stays pinned while its own rows scroll,
+        // so a section whose rows have all scrolled away still names itself. Dropping
+        // that header is what left both a section without its name and the reserved
+        // line blank at the panel's bottom.
         if let Some(view) = section.header {
             let collapsed = display.collapsed_views.contains(&view.view_id);
             let header_rect = Rect::new(geometry.panel.x, y, body_width, 1);
@@ -838,8 +840,8 @@ fn render_placeholder(
     let Some(geometry) = geometry(area, panel_height) else {
         return;
     };
-    let dim = Style::default().fg(palette.overlay0);
-    let style = Style::default().bg(ratatui::style::Color::Reset);
+    let dim = Style::default().fg(palette.overlay0).bg(palette.panel_bg);
+    let style = Style::default().bg(palette.panel_bg);
     super::render::render_pane_contribution_divider(buffer, geometry.divider, palette);
     for y in geometry.panel.y..geometry.panel.bottom() {
         for x in geometry.panel.x..geometry.panel.right() {

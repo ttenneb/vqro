@@ -157,7 +157,6 @@ pub(super) fn render_workspace_badge(
     workspace: &str,
     repository: Option<&crate::protocol::endpoint::ClientShellRepository>,
     palette: &Palette,
-    hits: &mut ShellHitMap,
 ) {
     let Some(nav) = nav else {
         return;
@@ -200,7 +199,9 @@ pub(super) fn render_workspace_badge(
         &format!("[{label}]"),
         Style::default().fg(palette.peach),
     );
-    hits.attention.push(nav.hit(badge_rect, "workspace", ids));
+    // No hit of its own, for the same reason as a tab badge: a click anywhere on the
+    // row, badge included, is the row's own action.
+    let _ = ids;
 }
 
 pub(super) fn render_panel(
