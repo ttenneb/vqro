@@ -1576,3 +1576,125 @@ fn the_fast_path_and_a_full_compose_agree_without_a_panel() {
     }
     assert!(emitted >= 4, "every emitted row was compared: {emitted}");
 }
+
+/// The rendered rows of one composed frame.
+fn composed_rows_of(state: &mut ClientShellState) -> Vec<String> {
+    let frame = state.compose(106, 30).expect("frame");
+    frame
+        .cells
+        .chunks(106)
+        .map(|row| row.iter().map(|cell| cell.symbol.as_str()).collect())
+        .collect()
+}
+
+/// Two views stacked on one pane: Tasks with rows, then Messages with rows. The
+/// human's dogfood report: both headers drew first, with every row below them.
+fn two_section_state() -> ClientShellState {
+    let mut state = panel_state(None, false);
+    let projection = serde_json::json!({
+        "contract":"host.documents.v1", "boot_id":"boot-1", "revision":1,
+        "documents":[{"provider_priority":1,"document":{
+            "contract":"host.view.v1","namespace":"example.tasks","generation":1,"revision":1,
+            "surface":"navigation","target":{"kind":"session"},
+            "items":[
+                {"id":"panel:pane_1:tasks","role":"section","label":"Tasks","detail":"1/2 done",
+                 "view":{"pane_id":"pane_1","view_id":"tasks","state":"in_progress"}},
+                {"id":"panel:pane_1:tasks:row","parent_id":"panel:pane_1:tasks","role":"section",
+                 "label":"A tasks row","view":{"state":"open"}},
+                {"id":"panel:pane_1:messages","role":"section","label":"Messages","detail":"1 waiting",
+                 "view":{"pane_id":"pane_1","view_id":"messages","state":"in_progress"}},
+                {"id":"panel:pane_1:messages:row","parent_id":"panel:pane_1:messages","role":"section",
+                 "label":"A message row","view":{"state":"open"}}
+            ],"actions":[],"required_capabilities":[]}}]
+    });
+    let projection: crate::protocol::endpoint::HostDocumentsProjectionV1 =
+        serde_json::from_value(projection).expect("projection");
+    state.set_endpoint_host_documents_for_generation(
+        &ClientEndpointId::Local,
+        1,
+        Box::new(projection),
+    );
+    for view_id in ["tasks", "messages"] {
+        state
+            .pane_panel_open
+            .entry("pane_1".into())
+            .or_default()
+            .insert(view_id.into());
+    }
+    state
+}
+
+#[test]
+fn each_sections_rows_sit_directly_under_its_own_header() {
+    let mut state = two_section_state();
+    let rows = composed_rows_of(&mut state);
+    let index = |needle: &str| {
+        rows.iter()
+            .position(|row| row.contains(needle))
+            .unwrap_or_else(|| panic!("{needle} is drawn: {rows:?}"))
+    };
+    let tasks_header = index("Tasks");
+    let tasks_row = index("A tasks row");
+    let messages_header = index("Messages");
+    let messages_row = index("A message row");
+    assert!(
+        tasks_header < tasks_row,
+        "the Tasks row belongs under the Tasks header: {rows:?}"
+    );
+    assert!(
+        tasks_row < messages_header,
+        "the Messages header comes after the Tasks rows, not above them: {rows:?}"
+    );
+    assert!(
+        messages_header < messages_row,
+        "the Messages row belongs under the Messages header: {rows:?}"
+    );
+    // The rows are adjacent to their own headers, i.e. nothing of the other
+    // section is in between.
+    assert_eq!(
+        tasks_row,
+        tasks_header + 1,
+        "the Tasks row is the line after its header: {rows:?}"
+    );
+    assert_eq!(
+        messages_row,
+        messages_header + 1,
+        "the Messages row is the line after its header: {rows:?}"
+    );
+}
+
+#[test]
+fn every_cell_of_the_panel_band_is_panel_painted() {
+    // The human's bleed-through report: terminal text showed in the panel's empty
+    // cells. Every cell the band owns must carry the panel background.
+    let mut state = panel_state(None, true);
+    let frame = state.compose(106, 30).expect("frame");
+    let bands = state.pane_panel_areas.clone();
+    assert!(!bands.is_empty(), "the panel reserved a band");
+    let width = 106;
+    let cell_at = |x: u16, y: u16| &frame.cells[usize::from(y) * width + usize::from(x)];
+    let band = bands[0];
+    // The header is painted by the panel with its own background, so it is the
+    // reference for what panel chrome looks like in this frame.
+    let chrome = cell_at(band.x.saturating_add(1), band.y).bg;
+    for band in &bands {
+        for y in band.y..band.y.saturating_add(band.height) {
+            for x in band.x..band.x.saturating_add(band.width) {
+                assert_eq!(
+                    cell_at(x, y).bg,
+                    chrome,
+                    "cell ({x}, {y}) of the band is not panel-painted: {:?}",
+                    cell_at(x, y)
+                );
+            }
+        }
+    }
+    // And the band must not carry the terminal's own background, which is what the
+    // human saw through the panel's empty cells.
+    let terminal_y = bands[0].y.saturating_add(bands[0].height).saturating_add(3);
+    let terminal = cell_at(bands[0].x.saturating_add(4), terminal_y).bg;
+    assert_ne!(
+        chrome, terminal,
+        "the band carries the terminal's background, so its text shows through"
+    );
+}
