@@ -2447,22 +2447,22 @@ fn empty_collection_surface_renders_and_owns_blank_space_context_menu() {
     pane_surface.panes[0].rect = crate::protocol::SurfaceRect {
         x: 0,
         y: 0,
-        width: 40,
+        width: 36,
         height: 19,
     };
     pane_surface.panes[0].inner_rect = pane_surface.panes[0].rect;
     pane_surface.collections = vec![crate::protocol::PaneSurfaceCollection {
         collection_id: "collection_empty".into(),
         rect: crate::protocol::SurfaceRect {
-            x: 40,
+            x: 36,
             y: 0,
-            width: 40,
+            width: 70,
             height: 19,
         },
         inner_rect: crate::protocol::SurfaceRect {
-            x: 40,
+            x: 36,
             y: 1,
-            width: 40,
+            width: 70,
             height: 18,
         },
         focused: true,
@@ -2483,8 +2483,72 @@ fn empty_collection_surface_renders_and_owns_blank_space_context_menu() {
         })
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(text.contains("Empty workflow"), "{text}");
-    assert!(text.contains("No members"), "{text}");
+    // Same frame and header as a collection with terminals: a border around the
+    // surface, the label with 0/0, the list/terminal control, and a Vqro-drawn
+    // empty state naming the existing command that adds a pane.
+    // The header owns the top row, as it does for a collection with terminals, so
+    // the sides and the bottom corners are what a frame shows around it.
+    let cell = |x: u16, y: u16| {
+        frame.cells[y as usize * frame.width as usize + x as usize]
+            .symbol
+            .clone()
+    };
+    let surface_rect = state.hits.collections[0].surface_rect;
+    let left = surface_rect.x;
+    let right = surface_rect.right().saturating_sub(1);
+    let bottom = surface_rect.bottom().saturating_sub(1);
+    assert_eq!(cell(left, surface_rect.y + 5), "│", "left edge");
+    assert_eq!(cell(right, surface_rect.y + 5), "│", "right edge");
+    assert_eq!(cell(left, bottom), "└", "bottom-left corner");
+    assert_eq!(cell(right, bottom), "┘", "bottom-right corner");
+    // The label and count share the header with the controls, so the count fits
+    // while the longer suffix truncates; the body states the rest.
+    assert!(text.contains("Empty workflow 0/0"), "{text}");
+    assert!(text.contains("[ ≡ list ]"), "{text}");
+    assert!(text.contains(" i "), "{text}");
+    assert!(text.contains("No terminals in this collection"), "{text}");
+    assert!(text.contains("vqro collection add"), "{text}");
+    // Clicking the drawn list/terminal control opens the list presentation,
+    // which keeps its own empty state and must not unframe the collection.
+    let toggle = state.hits.collections[0].presentation_toggle;
+    assert!(!toggle.is_empty(), "the control must be a real hit target");
+    state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: toggle.x + 1,
+        row: toggle.y,
+        modifiers: KeyModifiers::empty(),
+    })]);
+    assert!(
+        state.collection_list_views.contains("collection_empty"),
+        "clicking the list control must open the list presentation"
+    );
+    let listed = state.compose(106, 20).expect("empty collection list frame");
+    let listed_text = listed
+        .cells
+        .chunks(listed.width as usize)
+        .map(|row| {
+            row.iter()
+                .map(|cell| cell.symbol.as_str())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(listed_text.contains("No members"), "{listed_text}");
+    let listed_cell = |x: u16, y: u16| {
+        listed.cells[y as usize * listed.width as usize + x as usize]
+            .symbol
+            .clone()
+    };
+    assert_eq!(
+        listed_cell(left, surface_rect.y + 5),
+        "│",
+        "left edge in list"
+    );
+    assert_eq!(
+        listed_cell(right, bottom),
+        "┘",
+        "bottom-right corner in list"
+    );
 
     let collection = state.hits.collections[0].clone();
     let point = (

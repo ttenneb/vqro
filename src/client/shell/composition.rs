@@ -368,6 +368,7 @@ impl ClientShellState {
                     ),
                     frame_bounds,
                 ),
+                focused: collection.focused,
             })
             .collect::<Vec<_>>();
         let topology_signature = pane_surface_topology_signature(surface);
