@@ -951,7 +951,6 @@ enum PanelRow<'a> {
 /// is a section of its own with no header, so its row stays where its section was.
 struct PanelSection<'a> {
     header: Option<&'a PanelView<'a>>,
-    unavailable: Option<&'a str>,
     rows: Vec<PanelRow<'a>>,
 }
 
@@ -981,7 +980,6 @@ fn panel_sections<'a>(
         }
         sections.push(PanelSection {
             header: Some(view),
-            unavailable: None,
             rows,
         });
     }
@@ -989,7 +987,6 @@ fn panel_sections<'a>(
         if !views.iter().any(|view| &view.view_id == view_id) {
             sections.push(PanelSection {
                 header: None,
-                unavailable: Some(view_id.as_str()),
                 rows: vec![PanelRow::Unavailable { view_id }],
             });
         }
