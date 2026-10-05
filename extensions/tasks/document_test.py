@@ -15,6 +15,21 @@ H = {"class":"human_unverified", "terminal_id":"human", "uid":os.geteuid()}
 A = {"class":"agent", "terminal_id":"a", "agent":"pi", "execution":"boot:1:1"}
 P = {"pane_id":"w1:p1", "workspace_id":"w1", "tab_id":"w1:t1"}
 
+class MessageSubjectTests(unittest.TestCase):
+    def test_a_subject_drops_internal_ids_and_keeps_the_sentence(self):
+        # The human's dogfood report: a row read "smoke test message from
+        # task_66c03c..." so the reader had to parse a store key.
+        subject = document.message_subject({"body": "smoke test message from task_66c03c1d"})
+        self.assertNotIn("task_66c03c1d", subject)
+        self.assertIn("smoke test message from", subject)
+        self.assertIn("a task", subject)
+
+    def test_a_subject_stays_bounded_and_handles_an_empty_body(self):
+        self.assertEqual("(no body)", document.message_subject({"body": "   "}))
+        long = document.message_subject({"body": "x" * 400})
+        self.assertLessEqual(len(long), document.MESSAGE_PREVIEW)
+
+
 class DocumentTests(unittest.TestCase):
     def setUp(self):
         self.root=tempfile.TemporaryDirectory()

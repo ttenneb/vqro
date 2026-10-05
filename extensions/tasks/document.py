@@ -126,6 +126,9 @@ def panel_terminal(binding, placement):
 MESSAGE_VIEW = "messages"
 MESSAGE_LIMIT = 8
 MESSAGE_PREVIEW = 60
+# A durable id in an otherwise human sentence. The panel shows what the message is
+# about, not the store's keys.
+INTERNAL_ID = __import__("re").compile(r"\b(?P<kind>task|message|plan)_[0-9a-fA-F]{4,}\b")
 
 
 def message_record(row):
@@ -168,7 +171,13 @@ def executions_by_terminal(known):
 
 def message_subject(record):
     body = " ".join(bounded(record.get("body") or "").split())
-    return body[:MESSAGE_PREVIEW] if body else "(no body)"
+    if not body:
+        return "(no body)"
+    # Internal ids are bookkeeping, not subject matter: "message from task_66c03c"
+    # reads as "message about a task" rather than making the reader parse a hash.
+    body = INTERNAL_ID.sub(lambda match: f"a {match.group('kind').lower()}", body)
+    return body[:MESSAGE_PREVIEW].strip()
+
 
 
 def message_rows(records, execution, known):

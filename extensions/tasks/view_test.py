@@ -104,10 +104,12 @@ class ViewTests(unittest.TestCase):
 
     def test_acceptor_display_distinguishes_stale_unknown_and_other_uid(self):
         owed = {"role": "acceptors", "bindings": [A]}
-        self.assertEqual("acceptors: [stale here] pi @term_a", view.label(owed, {}))
-        self.assertEqual("acceptors: [stale here] pi @term_a", view.label(owed, {"term_a": agent(execution="replacement")}))
-        self.assertEqual("acceptors: [unknown] pi @term_a", view.label(owed, None))
-        self.assertEqual("acceptors: [unknown] pi @term_a", view.label(owed, {"term_a": agent(execution=None)}))
+        # The panel shows a short form, not the terminal's full id: the term_ prefix
+        # is dropped and four characters are enough to tell two panes apart.
+        self.assertEqual("acceptors: [stale here] pi @a", view.label(owed, {}))
+        self.assertEqual("acceptors: [stale here] pi @a", view.label(owed, {"term_a": agent(execution="replacement")}))
+        self.assertEqual("acceptors: [unknown] pi @a", view.label(owed, None))
+        self.assertEqual("acceptors: [unknown] pi @a", view.label(owed, {"term_a": agent(execution=None)}))
         foreign = {**H, "uid": H["uid"] + 1}
         owed["bindings"] = [foreign]
         self.assertIn(f"uid {foreign['uid']}", view.label(owed, {}))
