@@ -317,8 +317,10 @@ class PanelViewDemo(ReadinessDemo):
         self.wait_screen("review the panel when you can", seconds=30)
         both_text = demo_capture.capture(self.root / "client.log", self.root / "capture", "panel-both-sections")
         self.keep_log("panel-both-sections")
-        tasks_header = self.wait_locate("Tasks", within="▾ ●")[1]
-        messages_header = self.wait_locate("Messages", within="▾ ●")[1]
+        # Both panel headers carry the collapse-summary mark; the state glyph differs
+        # per view, so it is not what identifies a header here.
+        tasks_header = self.wait_locate("Tasks", within="⊟")[1]
+        messages_header = self.wait_locate("Messages", within="⊟")[1]
         self.cli("pane", "panel", "hide", a, "messages")
 
         # 5. The header collapses the section, and the terminal gets every
