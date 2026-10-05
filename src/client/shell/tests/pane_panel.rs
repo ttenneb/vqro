@@ -1698,3 +1698,65 @@ fn every_cell_of_the_panel_band_is_panel_painted() {
         "the band carries the terminal's background, so its text shows through"
     );
 }
+
+#[test]
+fn a_click_on_the_row_itself_focuses_the_row_s_pane() {
+    // The human asked to confirm this: the row, not only the assignee text, is what
+    // jumps. A row whose published terminal names a pane takes the row's own rect as
+    // its primary hit; the assignee is a second hit for the same target.
+    let mut state = panel_state(None, true);
+    text_of(&mut state);
+    let row = state
+        .hits
+        .pane_panels
+        .iter()
+        .find(|hit| {
+            matches!(
+                hit.action,
+                super::super::pane_panel::PanePanelAction::FocusPane(_)
+            )
+        })
+        .cloned()
+        .expect("a row with a terminal link is clickable");
+    let super::super::pane_panel::PanePanelAction::FocusPane(target) = row.action.clone() else {
+        unreachable!()
+    };
+    // The hit covers the row, so a click near its left edge (over the label, well
+    // away from the right-aligned assignee) is the row's own focus action.
+    assert!(
+        row.rect.width > 8,
+        "the row hit spans the row, not a label or a name: {:?}",
+        row.rect
+    );
+    let events = vec![
+        RawInputEvent::Mouse(crossterm::event::MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: row.rect.x.saturating_add(1),
+            row: row.rect.y,
+            modifiers: KeyModifiers::empty(),
+        }),
+        RawInputEvent::Mouse(crossterm::event::MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left),
+            column: row.rect.x.saturating_add(1),
+            row: row.rect.y,
+            modifiers: KeyModifiers::empty(),
+        }),
+    ];
+    let outcome = state.handle_raw_events(events);
+    let focused: Vec<&str> = outcome
+        .actions
+        .iter()
+        .filter_map(|action| match action {
+            ClientShellAction::Endpoint { request, .. } => match &request.method {
+                crate::api::schema::Method::PaneFocus(target) => Some(target.pane_id.as_str()),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        focused,
+        vec![target.as_str()],
+        "a click on the row itself focuses the row's pane"
+    );
+}
