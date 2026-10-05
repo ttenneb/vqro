@@ -640,24 +640,21 @@ fn render_pane(
     let scroll = display
         .scroll
         .min((row_count as u16).saturating_sub(row_space));
+    // Pinned headers, in order, then each section's own rows under it. The rows get
+    // whatever the headers leave, in order, and the section that does not fit scrolls
+    // within its own rows - so it can never push a later section's header out of the
+    // band, and the budget follows what is actually drawn, which is what keeps the
+    // panel's bottom line from being left blank.
+    // Every section keeps one line of its own, in order: its header, or for a view the
+    // user opened that is no longer published, its one row. Those lines are pinned, so
+    // a long section can never push a later section's line out of the band.
+    let pool = usize::from(visible).saturating_sub(sections.len());
+    let headers_only = pool == 0;
+    let mut rows_left = pool;
+    let mut scrolled = false;
     let mut y = geometry.panel.y;
-    // Each section draws its own header and then its own rows, so a section's tree
-    // sits directly under its header and its lanes start and end within it. The
-    // scroll skips rows, and a section whose rows have all scrolled away goes with
-    // them rather than leaving a header over another section's rows.
-    let mut skip = usize::from(scroll);
     for section in &sections {
-        if y >= geometry.panel.bottom() {
-            break;
-        }
-        let skipped = skip.min(section.rows.len());
-        skip -= skipped;
-        let remaining = &section.rows[skipped..];
-        // A section's header is always drawn while the panel has room for it: the
-        // tracked decision is that a header stays pinned while its own rows scroll,
-        // so a section whose rows have all scrolled away still names itself. Dropping
-        // that header is what left both a section without its name and the reserved
-        // line blank at the panel's bottom.
+        let mut rest = section.rows.as_slice();
         if let Some(view) = section.header {
             let collapsed = display.collapsed_views.contains(&view.view_id);
             let header_rect = Rect::new(geometry.panel.x, y, body_width, 1);
@@ -676,7 +673,28 @@ fn render_pane(
                 action: PanePanelAction::ToggleView(view.view_id.clone()),
             });
             y = y.saturating_add(1);
+        } else if let Some((first, remaining)) = rest.split_first() {
+            // No header to draw: the section's own row is the line that keeps it in
+            // the band, so it is drawn here and not counted against the pool.
+            let row_rect = Rect::new(geometry.panel.x, y, body_width, 1);
+            draw_plain_row(buffer, row_rect, first, palette);
+            y = y.saturating_add(1);
+            rest = remaining;
         }
+        if headers_only || rest.is_empty() {
+            continue;
+        }
+        // The section that cannot fit its own rows takes the user's scroll; every
+        // other section shows them from the top.
+        let space = rows_left.min(rest.len());
+        let offset = if space < rest.len() && !scrolled {
+            scrolled = true;
+            usize::from(scroll).min(rest.len().saturating_sub(space))
+        } else {
+            0
+        };
+        rows_left = rows_left.saturating_sub(space);
+        let remaining = &rest[offset..offset.saturating_add(space).min(rest.len())];
         for line in remaining {
             if y >= geometry.panel.bottom() {
                 break;
@@ -994,6 +1012,25 @@ fn panel_sections<'a>(
         }
     }
     sections
+}
+
+/// A section line that has no header of its own: an unsupported, unavailable or empty
+/// row, drawn in the same dim style the rows pool uses.
+fn draw_plain_row(buffer: &mut Buffer, rect: Rect, line: &PanelRow<'_>, palette: &Palette) {
+    let text = match line {
+        PanelRow::Unsupported { title, kind } => format!("└─ {title}: unsupported {kind}"),
+        PanelRow::Unavailable { view_id } => format!("└─ {view_id}: unavailable"),
+        PanelRow::Empty => "└─ nothing to show".to_string(),
+        PanelRow::Row(_) => return,
+    };
+    put_text(
+        buffer,
+        rect.x,
+        rect.y,
+        rect.width,
+        &truncate(&text, rect.width),
+        Style::default().fg(palette.overlay0).bg(palette.panel_bg),
+    );
 }
 
 fn draw_header(

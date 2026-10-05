@@ -1760,3 +1760,175 @@ fn a_click_on_the_row_itself_focuses_the_row_s_pane() {
         "a click on the row itself focuses the row's pane"
     );
 }
+
+/// Two sections on one pane where the first has `tasks_rows` rows and the second one,
+/// so the pinned-header layout can be checked at the panel's edge.
+fn long_section_state(tasks_rows: usize) -> ClientShellState {
+    let mut items = vec![serde_json::json!({
+        "id":"panel:pane_1:tasks","role":"section","label":"Tasks","detail":"rows",
+        "view":{"pane_id":"pane_1","view_id":"tasks","state":"in_progress"}
+    })];
+    for row in 0..tasks_rows {
+        items.push(serde_json::json!({
+            "id": format!("panel:pane_1:tasks:row{row}"),
+            "parent_id":"panel:pane_1:tasks","role":"section",
+            "label": format!("Tasks row {row}"),
+            "view":{"state":"open"}
+        }));
+    }
+    items.push(serde_json::json!({
+        "id":"panel:pane_1:messages","role":"section","label":"Messages","detail":"one",
+        "view":{"pane_id":"pane_1","view_id":"messages","state":"open"}
+    }));
+    items.push(serde_json::json!({
+        "id":"panel:pane_1:messages:row","parent_id":"panel:pane_1:messages",
+        "role":"section","label":"A message row","view":{"state":"open"}
+    }));
+    let mut state = panel_state(None, false);
+    let projection: crate::protocol::endpoint::HostDocumentsProjectionV1 =
+        serde_json::from_value(serde_json::json!({
+            "contract":"host.documents.v1","boot_id":"boot-1","revision":1,
+            "documents":[{"provider_priority":1,"document":{
+                "contract":"host.view.v1","namespace":"example.tasks","generation":1,"revision":1,
+                "surface":"navigation","target":{"kind":"session"},
+                "items":items,"actions":[],"required_capabilities":[]
+            }}]
+        }))
+        .expect("projection");
+    state.set_endpoint_host_documents_for_generation(
+        &ClientEndpointId::Local,
+        1,
+        Box::new(projection),
+    );
+    for view_id in ["tasks", "messages"] {
+        state
+            .pane_panel_open
+            .entry("pane_1".into())
+            .or_default()
+            .insert(view_id.into());
+    }
+    state
+}
+
+#[test]
+fn a_long_first_section_keeps_the_next_sections_header_visible() {
+    // The coordinator's contract: headers are pinned and in order, the rows below
+    // them get what remains, and a long section scrolls inside its own rows instead
+    // of pushing a later header out of the band.
+    for rows in [4_usize, 12, 40] {
+        let mut state = long_section_state(rows);
+        let text = text_of(&mut state);
+        assert!(
+            text.contains("Tasks"),
+            "{rows}: the first header stays: {text}"
+        );
+        assert!(
+            text.contains("Messages"),
+            "{rows}: the later header is never pushed out: {text}"
+        );
+        let drawn = composed_rows_of(&mut state);
+        let tasks_header = drawn.iter().position(|row| row.contains("Tasks"));
+        let messages_header = drawn
+            .iter()
+            .position(|row| row.contains("Messages"))
+            .expect("messages header row");
+        assert!(
+            tasks_header < Some(messages_header),
+            "{rows}: headers keep their order"
+        );
+    }
+}
+
+#[test]
+fn the_panel_band_has_no_gap_however_the_sections_fall() {
+    // Every line from the panel's first row to the last is either a header, a row or
+    // the divider: the budget follows what is drawn, so nothing is skipped.
+    for rows in [1_usize, 4, 12, 40] {
+        // A scrolled panel is the case QA found the gap in: the reserved lines were
+        // counted for every header while a scrolled section drew none of its own.
+        for scroll in [0_u16, 2, 6] {
+            let mut state = long_section_state(rows);
+            state
+                .pane_panel_display
+                .entry("pane_1".into())
+                .or_default()
+                .scroll = scroll;
+            let frame = state.compose(106, 30).expect("frame");
+            let band = state
+                .pane_panel_areas
+                .first()
+                .copied()
+                .expect("reserved band");
+            let width = 106;
+            let rows_text: Vec<String> = (band.y..band.y.saturating_add(band.height))
+                .map(|y| {
+                    frame.cells[usize::from(y) * width + usize::from(band.x)
+                        ..usize::from(y) * width + usize::from(band.x.saturating_add(band.width))]
+                        .iter()
+                        .map(|cell| cell.symbol.as_str())
+                        .collect::<String>()
+                })
+                .collect();
+            // The last band line is the divider; at least one line above it carries text.
+            for (offset, row) in rows_text.iter().enumerate() {
+                if offset + 1 == rows_text.len() {
+                    continue;
+                }
+                assert!(
+                    !row.trim().is_empty(),
+                    "{rows} rows at scroll {scroll}: band line {offset} is blank: {rows_text:?}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn the_scrollbar_track_and_the_placeholder_are_panel_painted_too() {
+    // The other two Reset holes QA found: the scroll indicator inside the band, and
+    // the placeholder panel of a view that stopped being published.
+    let mut state = long_section_state(40);
+    let frame = state.compose(106, 30).expect("frame");
+    let band = state
+        .pane_panel_areas
+        .first()
+        .copied()
+        .expect("reserved band");
+    let width = 106;
+    let cell_at = |x: u16, y: u16| &frame.cells[usize::from(y) * width + usize::from(x)];
+    let chrome = cell_at(band.x.saturating_add(1), band.y).bg;
+    // Every cell of the band, the scroll track's last column included.
+    for y in band.y..band.y.saturating_add(band.height) {
+        for x in band.x..band.x.saturating_add(band.width) {
+            assert_eq!(
+                cell_at(x, y).bg,
+                chrome,
+                "({x}, {y}) inside the band is not panel-painted"
+            );
+        }
+    }
+    // And the placeholder panel of an unpublished view.
+    let mut missing = panel_state(None, true);
+    missing
+        .pane_panel_open
+        .entry("pane_1".into())
+        .or_default()
+        .insert("vanished".into());
+    let frame = missing.compose(106, 30).expect("frame");
+    let band = missing
+        .pane_panel_areas
+        .first()
+        .copied()
+        .expect("placeholder band");
+    let chrome =
+        &frame.cells[usize::from(band.y) * width + usize::from(band.x.saturating_add(1))].bg;
+    for y in band.y..band.y.saturating_add(band.height) {
+        for x in band.x..band.x.saturating_add(band.width) {
+            assert_eq!(
+                &frame.cells[usize::from(y) * width + usize::from(x)].bg,
+                chrome,
+                "placeholder cell ({x}, {y}) is not panel-painted"
+            );
+        }
+    }
+}
