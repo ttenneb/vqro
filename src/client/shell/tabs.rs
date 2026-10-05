@@ -9,10 +9,14 @@ fn compact_badge_label(label: &str) -> String {
         .take_while(|character| character.is_ascii_digit())
         .collect::<String>();
     if digits.is_empty() {
-        label.trim().chars().take(4).collect()
-    } else {
-        digits
+        return label.trim().chars().take(4).collect();
     }
+    // A count that keeps growing would eat the tab it belongs to: the badge is a
+    // marker, and "99+" says everything "100" would in this space.
+    if digits.len() > 2 {
+        return format!("{}9+", &digits[..1]);
+    }
+    digits
 }
 
 const TAB_SCROLL_BUTTON_WIDTH: u16 = 3;
@@ -126,6 +130,16 @@ pub(crate) fn render_tab_bar(
         if width == 0 {
             break;
         }
+        // Known before the label is drawn, because the label is centred in the space
+        // the badge leaves rather than across the badge.
+        let badge = attention
+            .and_then(|nav| nav.badge("tab", &tab.tab_id))
+            .map(|badge| compact_badge_label(&badge.label));
+        let badge_width = badge.as_ref().map_or(0, |label| {
+            display_width(label)
+                .saturating_add(2)
+                .min(width.saturating_sub(2))
+        });
         let rect = Rect::new(x, area.y, width, 1);
         let style = if tab.focused {
             let base = Style::default()
@@ -141,7 +155,11 @@ pub(crate) fn render_tab_bar(
         } else {
             Style::default().fg(palette.overlay0).bg(palette.surface0)
         };
-        let padding = width.saturating_sub(display_width(&name));
+        // The label is centred in its own allocation. The badge is drawn over the tail
+        // of the tab, so centring across the whole width would push the name under it:
+        // that is what turned "Plans" into "Pla[100]".
+        let name_width = width.saturating_sub(badge_width).max(1);
+        let padding = name_width.saturating_sub(display_width(&name));
         let left = padding / 2;
         let text = format!(
             "{empty:left$}{name}{empty:right_padding$}",
@@ -149,18 +167,14 @@ pub(crate) fn render_tab_bar(
             left = left as usize,
             right_padding = padding.saturating_sub(left) as usize,
         );
-        put_text(buffer, rect.x, rect.y, rect.width, &text, style);
-        if let Some(badge) = attention.and_then(|nav| nav.badge("tab", &tab.tab_id)) {
+        put_text(buffer, rect.x, rect.y, name_width, &text, style);
+        if let Some(label) = badge {
             // The badge is part of the tab button, not a control inside it: it takes
             // the tab's own background, so the selected tab's highlight covers it; it
             // is short enough not to take the tab over; and it registers no hit of
             // its own, so a click anywhere on the tab selects the tab, which is the
             // primary action a tab button owes the user. Opening the panes is what
             // the selected tab's own panels and border badges are for.
-            let label = compact_badge_label(&badge.label);
-            let badge_width = display_width(&label)
-                .saturating_add(2)
-                .min(rect.width.saturating_sub(2));
             let badge_rect = Rect::new(
                 rect.right().saturating_sub(badge_width + 1),
                 rect.y,

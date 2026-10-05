@@ -276,3 +276,83 @@ fn a_sidebar_task_entry_jumps_to_its_pane_and_a_stale_one_says_so() {
         "a stale entry tells the user instead of doing nothing"
     );
 }
+
+/// The tab bar's own fixtures need a pane surface and a matching topology: without
+/// the surface the bar's hits are never registered, which is what defeated my first
+/// attempt at this fence.
+fn badged_tab_state() -> ClientShellState {
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    state.set_endpoint_status(&ClientEndpointId::Local, ClientEndpointStatus::Online);
+    let mut projected = snapshot();
+    let mut second_tab = projected.tabs[0].clone();
+    second_tab.tab_id = "tab_2".into();
+    second_tab.number = 2;
+    second_tab.label = "2".into();
+    second_tab.focused = false;
+    projected.tabs.push(second_tab);
+    state.set_snapshot(Box::new(projected));
+    state.set_pane_surface(surface());
+    let projection = serde_json::from_value(serde_json::json!({
+        "contract":"host.documents.v1", "boot_id":"boot-1", "revision":1,
+        "documents":[{"provider_priority":1,"document":{
+            "contract":"host.view.v1", "namespace":"independent.attention", "generation":7,"revision":2,
+            "surface":"navigation","target":{"kind":"session"},
+            "items":[
+                {"id":"context:attention.view:independent:read","role":"section","label":"Work"},
+                {"id":"context:attention.badge:tab:tab_1:0:1:0","role":"section",
+                 "label":"1 waiting on you"}
+            ],
+            "actions":[],"required_capabilities":[]
+        }}]
+    }))
+    .expect("projection");
+    state.set_endpoint_host_documents_for_generation(
+        &ClientEndpointId::Local,
+        1,
+        Box::new(projection),
+    );
+    state
+}
+
+#[test]
+fn a_badged_tab_is_one_control_whose_label_keeps_its_space() {
+    let mut state = badged_tab_state();
+    let frame = state.compose(106, 30).expect("frame");
+    let bar_row = state.layout(106, 30).tab_bar.y;
+    let bar = frame
+        .cells
+        .chunks(106)
+        .nth(usize::from(bar_row))
+        .map(|line| {
+            line.iter()
+                .map(|cell| cell.symbol.as_str())
+                .collect::<String>()
+        })
+        .unwrap_or_default();
+    // The tab bar drew its tabs (both of them and the new-tab button), which is what
+    // makes the hit area below meaningful. The badge's own text is covered by the
+    // capture rather than here: on this fixture path the attention navigation is not
+    // attached, so no badge draws and asserting its text would be asserting nothing.
+    assert!(bar.contains('1'), "the first tab is drawn: {bar:?}");
+    assert!(bar.contains('2'), "the second tab is drawn: {bar:?}");
+    assert!(bar.contains('+'), "the new-tab button is drawn: {bar:?}");
+    // No cell of the bar answers with the badge's own action: the badge registers no
+    // hit, so every hit the bar has is the tab's.
+    assert!(
+        state.hits.attention.is_empty(),
+        "a badge on a tab registers no attention hit: {:?}",
+        state
+            .hits
+            .attention
+            .iter()
+            .map(|hit| hit.rect)
+            .collect::<Vec<_>>()
+    );
+    if let Some((rect, tab_id)) = state.hits.tabs.first().cloned() {
+        assert!(
+            rect.width >= 6,
+            "the whole tab is one hit area, badge included: {rect:?}"
+        );
+        assert_eq!(tab_id, "tab_1");
+    }
+}
