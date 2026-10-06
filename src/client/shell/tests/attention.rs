@@ -511,29 +511,34 @@ fn a_workspace_row_badge_is_part_of_its_row() {
 
 #[test]
 fn a_clipped_badged_tab_never_reaches_the_renderer_with_a_zero_width_badge() {
-    // QA's P2 at 21407313: a tab clipped to a single cell with a badge was split into
-    // (label 1, badge 0), but still drew its badge - a zero-width rect at the tab's own
-    // first cell, over the label - and tripped the draw site's own assert. Compose every
-    // narrow width, so the case is exercised through the renderer and not just in the
-    // arithmetic.
-    let mut narrowest = u16::MAX;
-    for width in 20_u16..=100 {
-        let mut state = attention_badge_state(1, 1);
-        let _ = state.compose(width, 30).expect("frame");
-        narrowest = narrowest.min(
-            state
-                .hits
-                .tabs
-                .iter()
-                .map(|(rect, _)| rect.width)
-                .min()
-                .unwrap_or(u16::MAX),
+    // QA's P2 at 21407313: a tab clipped to a few cells with a badge split into
+    // (label n, badge 0) but still drew the badge - a zero-width rect at the tab's own
+    // first cell, over the label - which tripped the draw site's own assert. A compose
+    // never clips a tab this far (the bar stops drawing them long before), so the
+    // renderer is called directly with the narrow areas that do.
+    let config = ClientShellConfig::from_config(&Config::default());
+    let projected = snapshot();
+    let mut state = attention_badge_state(1, 1);
+    state.compose(106, 30).expect("frame");
+    let nav = state.endpoints[0].attention.clone();
+    for width in 1_u16..=8 {
+        let area = Rect::new(0, 0, width, 1);
+        let mut buffer = Buffer::empty(area);
+        let mut hits = ShellHitMap::default();
+        let mut tab_scroll = 0_usize;
+        let mut reveal_focused_tab = false;
+        render::tabs::render_tab_bar(
+            &mut buffer,
+            area,
+            &projected,
+            &config,
+            &mut tab_scroll,
+            &mut reveal_focused_tab,
+            None,
+            nav.as_ref(),
+            &mut hits,
         );
     }
-    assert_eq!(
-        narrowest, 1,
-        "a one-cell badged tab was composed, which is the case under test"
-    );
 }
 
 #[test]

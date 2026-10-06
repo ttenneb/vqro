@@ -1915,10 +1915,13 @@ fn an_unavailable_section_does_not_spend_the_row_budget() {
         .copied()
         .expect("reserved band");
     let width = 106;
+    // The band's last column is the scroll track, and its last line is the divider:
+    // both draw in every state, so the content columns are what carries a gap.
+    let content_width = usize::from(band.width).saturating_sub(1);
     let rows_text: Vec<String> = (band.y..band.y.saturating_add(band.height))
         .map(|y| {
             frame.cells[usize::from(y) * width + usize::from(band.x)
-                ..usize::from(y) * width + usize::from(band.x.saturating_add(band.width))]
+                ..usize::from(y) * width + usize::from(band.x) + content_width]
                 .iter()
                 .map(|cell| cell.symbol.as_str())
                 .collect::<String>()
@@ -1932,8 +1935,8 @@ fn an_unavailable_section_does_not_spend_the_row_budget() {
         rows_text.iter().any(|row| row.contains("Tasks row")),
         "the published section still draws its rows: {rows_text:?}"
     );
-    // No line is left over: every line of this band is a header, a row or the
-    // unpublished view's own line, so none of them was paid for twice.
+    // No line is left over: every content line of this band is a header, a row, the
+    // unpublished view's own line or the divider, so none of them was paid for twice.
     for (offset, row) in rows_text.iter().enumerate() {
         assert!(
             !row.trim().is_empty(),
