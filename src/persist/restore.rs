@@ -1804,7 +1804,7 @@ mod tests {
         };
         let mut imports = HashMap::new();
         let mut aliases = HashMap::new();
-        let (workspaces, _terminals, _runtimes) = restore_handoff(
+        let (workspaces, terminals, _runtimes) = restore_handoff(
             &snapshot,
             0,
             test_restore_shell(),
@@ -1868,6 +1868,12 @@ mod tests {
                 "raw pane {old_raw} keeps public pane number {public_number}: {aliases:?}"
             );
         }
+        let mut state = crate::app::AppState::test_new();
+        state.workspaces = workspaces;
+        state.terminals = terminals;
+        state.pane_id_aliases = aliases;
+        state.active = Some(0);
+        state.assert_invariants_for_test();
     }
 
     #[test]

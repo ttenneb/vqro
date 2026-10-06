@@ -1,0 +1,43 @@
+{
+  "version": 7,
+  "collections_authority": {
+    "contract": "collections_authority.v1",
+    "phase": "legacy",
+    "authority_epoch": 1,
+    "minimum_reader_version": 7
+  },
+  "workspaces": [{
+    "id": "w2",
+    "identity_cwd": ".",
+    "public_pane_numbers": {"900001": 1, "900002": 2, "900003": 3},
+    "next_public_pane_number": 4,
+    "public_tab_numbers": [1],
+    "next_public_tab_number": 2,
+    "tabs": [{
+      "layout": {"Split": {
+        "direction": "Horizontal",
+        "ratio": 0.5,
+        "first": {"Collection": "collection_6100001"},
+        "second": {"Pane": 900003}
+      }},
+      "collections": [{
+        "id": "collection_6100001",
+        "members": [900001, 900002],
+        "selected": 900001,
+        "archived": []
+      }],
+      "panes": {
+        "900001": {"terminal_id": "term_11111111111111111111111111111111", "cwd": "."},
+        "900002": {"terminal_id": "term_22222222222222222222222222222222", "cwd": "."},
+        "900003": {"terminal_id": "term_33333333333333333333333333333333", "cwd": "."}
+      },
+      "zoomed": false,
+      "focused": 900001,
+      "focused_leaf": {"type": "collection", "id": "collection_6100001"},
+      "root_pane": 900003
+    }],
+    "active_tab": 0
+  }],
+  "active": 0,
+  "selected": 0
+}
