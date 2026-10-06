@@ -283,12 +283,10 @@ fn feed_output(app: &mut App) {
 
 fn summarize(mut samples: Vec<Duration>) -> StageStats {
     samples.sort_unstable();
-    let count = samples.len();
-    assert!(count > 0, "a profile must contain measured samples");
     StageStats {
-        median_us: samples[count / 2].as_micros(),
-        p95_us: samples[(count - 1) * 95 / 100].as_micros(),
-        max_us: samples[count - 1].as_micros(),
+        median_us: samples[SAMPLE_COUNT / 2].as_micros(),
+        p95_us: samples[(SAMPLE_COUNT - 1) * 95 / 100].as_micros(),
+        max_us: samples[SAMPLE_COUNT - 1].as_micros(),
     }
 }
 
@@ -485,58 +483,6 @@ async fn render_scale_profile() {
     print_token_rule_profiles();
     print_recovery_browser_profile();
     print_terminal_views_profile();
-}
-
-/// Manual duration probe only: the default render_scale_profile remains forty
-/// samples. Bound both time and samples; reuse the same active fixtures and feed.
-#[tokio::test(flavor = "current_thread")]
-#[ignore = "manual bounded active pipeline sampling; requires an explicit duration"]
-async fn active_pipeline_duration_probe() {
-    let seconds: u64 = std::env::var("HERDR_PERF_SAMPLE_SECONDS")
-        .expect("set HERDR_PERF_SAMPLE_SECONDS explicitly")
-        .parse()
-        .expect("sample duration must be an integer");
-    assert!(
-        (1..=60).contains(&seconds),
-        "sample duration must be 1..=60 seconds"
-    );
-    let duration = Duration::from_secs(seconds);
-    const MAX_DURATION_SAMPLES: usize = 100_000;
-    for count in [1, 15] {
-        let mut pipeline = RenderPipeline::new(active_panes(count));
-        for _ in 0..WARMUP_COUNT {
-            feed_output(&mut pipeline.app);
-            black_box(pipeline.render_once());
-        }
-        let mut server = Vec::with_capacity(SAMPLE_COUNT);
-        let mut client = Vec::with_capacity(SAMPLE_COUNT);
-        let mut total = Vec::with_capacity(SAMPLE_COUNT);
-        let started = Instant::now();
-        for _ in 0..MAX_DURATION_SAMPLES {
-            if started.elapsed() >= duration {
-                break;
-            }
-            feed_output(&mut pipeline.app);
-            let (server_elapsed, client_elapsed) = pipeline.render_once();
-            server.push(server_elapsed);
-            client.push(client_elapsed);
-            total.push(server_elapsed + client_elapsed);
-        }
-        let elapsed = started.elapsed();
-        let samples = total.len();
-        assert!(
-            samples < MAX_DURATION_SAMPLES,
-            "sample cap reached before requested duration"
-        );
-        let server = summarize(server);
-        let client = summarize(client);
-        let total = summarize(total);
-        println!(
-            "ACTIVE_DURATION count={count} seconds={seconds} samples={samples} elapsed_ms={} server_median_us={} client_median_us={} median_us={} p95_us={} max_us={}",
-            elapsed.as_millis(), server.median_us, client.median_us,
-            total.median_us, total.p95_us, total.max_us,
-        );
-    }
 }
 
 #[cfg(test)]

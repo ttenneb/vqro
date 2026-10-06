@@ -2038,6 +2038,56 @@ mod tests {
                 1
             );
         }
+
+        // A file can mix an earlier missing pane with repeated container IDs,
+        // but recovery dissolves the duplicates before installing host state.
+        let split = |first, second| LayoutSnapshot::Split {
+            direction: super::super::snapshot::DirectionSnapshot::Horizontal,
+            ratio: 0.5,
+            first: Box::new(first),
+            second: Box::new(second),
+        };
+        let mut malformed = snap;
+        malformed.layout = split(
+            LayoutSnapshot::Pane(999),
+            split(
+                LayoutSnapshot::Collection(collection),
+                LayoutSnapshot::Collection(collection),
+            ),
+        );
+        malformed.panes = (1..=3)
+            .map(|old| {
+                (
+                    old,
+                    super::super::snapshot::PaneSnapshot::without_terminal_id(PathBuf::from("/")),
+                )
+            })
+            .collect();
+        let decoded: TabSnapshot =
+            serde_json::from_slice(&serde_json::to_vec(&malformed).unwrap()).unwrap();
+        let (typed, remap) = restore_typed_node_remapped(&decoded);
+        // Simulate successful restoration of the actual file's pane records;
+        // the earlier missing layout reference is deliberately not a survivor.
+        let file_survivors: HashSet<_> = decoded.panes.keys().map(|old| remap[old]).collect();
+        let expected = vec![remap[&1], remap[&2], remap[&3]];
+        assert_eq!(decoded.panes.len(), 3);
+        assert_eq!(file_survivors.len(), 3);
+        assert_eq!(file_survivors, expected.iter().copied().collect());
+        assert!(file_survivors
+            .iter()
+            .all(|pane| remap.values().any(|mapped| mapped == pane)));
+        assert!(!file_survivors.contains(&remap[&999]));
+        let repaired = recover_typed_layout(
+            &decoded,
+            typed,
+            &remap,
+            &file_survivors,
+            &mut HashSet::new(),
+        )
+        .unwrap();
+        assert!(repaired.layout.collection_ids().is_empty());
+        assert_eq!(repaired.layout.pane_ids(), expected);
+        assert!(repaired.legacy_collection_snapshots.is_empty());
     }
 
     #[test]

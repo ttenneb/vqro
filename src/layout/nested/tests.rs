@@ -244,50 +244,64 @@ fn nested_geometry_and_selected_visibility_preserve_geometric_leaf_focus() {
 fn nested_adversarial_app_mutations_keep_identity_and_terminal_authority_without_ptys() {
     let mut state = crate::app::state::AppState::test_with_adversarial_identity_state();
     state.assert_invariants_for_test();
-    let active = state.workspaces[0].active_tab;
-    let mut panes: Vec<_> = state.workspaces[0].tabs[active]
+    let target_tab = state.workspaces[0]
+        .tabs
+        .iter()
+        .position(|tab| tab.panes.len() > 1)
+        .expect("adversarial state must include a multi-pane tab");
+    let mut panes: Vec<_> = state.workspaces[0].tabs[target_tab]
         .panes
         .keys()
         .copied()
         .collect();
     panes.sort_by_key(|pane| pane.raw());
+    assert!(panes.len() >= 2, "move/reorder fence requires two panes");
     let identities: Vec<_> = panes
         .iter()
         .map(|pane| {
             (
                 *pane,
                 state.workspaces[0].public_pane_number(*pane),
-                state.workspaces[0].tabs[active].panes[pane]
+                state.workspaces[0].tabs[target_tab].panes[pane]
                     .attached_terminal_id
                     .clone(),
             )
         })
         .collect();
+    let assert_identities = |state: &crate::app::state::AppState| {
+        state.assert_invariants_for_test();
+        let mut placed = state.workspaces[0].tabs[target_tab].layout.pane_ids();
+        placed.sort_by_key(|pane| pane.raw());
+        assert_eq!(
+            placed, panes,
+            "raw pane identities must survive every mutation"
+        );
+        for (pane, number, terminal) in &identities {
+            assert_eq!(state.workspaces[0].public_pane_number(*pane), *number);
+            assert_eq!(
+                &state.workspaces[0].tabs[target_tab].panes[pane].attached_terminal_id,
+                terminal
+            );
+        }
+    };
     let children = panes.iter().copied().map(TypedNode::Leaf).collect();
-    state.workspaces[0].tabs[active].layout =
+    state.workspaces[0].tabs[target_tab].layout =
         TileLayout::from_tree(stack(700_001, 0, children), LayoutLeaf::Pane(panes[0])).unwrap();
-    state.assert_invariants_for_test();
-    assert!(state.workspaces[0].tabs[active]
+    assert_identities(&state);
+    assert!(state.workspaces[0].tabs[target_tab]
         .layout
         .new_stack_at(&[0], box_id(700_002)));
-    state.assert_invariants_for_test();
-    if panes.len() > 1 {
-        assert!(state.workspaces[0].tabs[active]
-            .layout
-            .move_into_stack(&[1], box_id(700_002), 1));
-        state.assert_invariants_for_test();
-        assert!(state.workspaces[0].tabs[active]
-            .layout
-            .reorder_stack_child(box_id(700_002), 0, 1));
-        state.assert_invariants_for_test();
-        state.workspaces[0].tabs[active].layout.focus_pane(panes[1]);
-        state.assert_invariants_for_test();
-    }
-    for (pane, number, terminal) in identities {
-        assert_eq!(state.workspaces[0].public_pane_number(pane), number);
-        assert_eq!(
-            state.workspaces[0].tabs[active].panes[&pane].attached_terminal_id,
-            terminal
-        );
-    }
+    assert_identities(&state);
+    assert!(state.workspaces[0].tabs[target_tab]
+        .layout
+        .move_into_stack(&[1], box_id(700_002), 1));
+    assert_identities(&state);
+    assert!(state.workspaces[0].tabs[target_tab]
+        .layout
+        .reorder_stack_child(box_id(700_002), 0, 1));
+    assert_identities(&state);
+    state.workspaces[0].tabs[target_tab]
+        .layout
+        .focus_pane(panes[1]);
+    assert_identities(&state);
 }
