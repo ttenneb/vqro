@@ -1738,6 +1738,103 @@ mod tests {
     }
 
     #[test]
+    fn adversarial_collection_restore_remaps_every_member_without_changing_geometry() {
+        let mut state = crate::app::AppState::test_with_adversarial_identity_state();
+        let tab = state.workspaces[0]
+            .tabs
+            .iter_mut()
+            .find(|tab| tab.panes.len() > 1)
+            .unwrap();
+        let root = tab.root_pane;
+        let mut members: Vec<_> = tab.panes.keys().copied().filter(|id| *id != root).collect();
+        members.sort_by_key(|id| id.raw());
+        let collection = tab
+            .create_collection_near(
+                LayoutLeaf::Pane(root),
+                Direction::Vertical,
+                0.35,
+                Some("restore members".into()),
+            )
+            .unwrap();
+        for member in &members {
+            tab.collect_tiled_pane(*member, collection).unwrap();
+        }
+        tab.select_collection_member(collection, members[1])
+            .unwrap();
+        tab.set_collection_member_archived(collection, members[0], true)
+            .unwrap();
+        tab.layout
+            .focus_leaf(LayoutLeaf::Collection(collection.into()));
+        state.assert_invariants_for_test();
+        let snapshot = super::super::snapshot::capture(
+            &state.workspaces,
+            &state.repositories,
+            &state.space_order,
+            &state.terminals,
+            &crate::terminal::TerminalRuntimeRegistry::new(),
+            state.active,
+            state.selected,
+        );
+        let mut restored_ids = HashSet::new();
+        for (saved, original) in snapshot.workspaces[0]
+            .tabs
+            .iter()
+            .zip(&state.workspaces[0].tabs)
+        {
+            let (node, remap) = restore_typed_node_remapped(saved);
+            let surviving = remap.values().copied().collect();
+            let recovered =
+                recover_typed_layout(saved, node, &remap, &surviving, &mut restored_ids).unwrap();
+            let layout = &recovered.layout;
+            assert_eq!(
+                layout.pane_ids().iter().copied().collect::<HashSet<_>>(),
+                surviving
+            );
+            assert_eq!(layout.pane_ids().len(), original.panes.len());
+            assert!(original.panes.keys().all(|old| remap[&old.raw()] != *old));
+            let area = ratatui::layout::Rect::new(0, 0, 120, 40);
+            assert_eq!(
+                layout
+                    .panes(area)
+                    .iter()
+                    .map(|pane| (pane.id, pane.rect))
+                    .collect::<Vec<_>>(),
+                original
+                    .layout
+                    .panes(area)
+                    .iter()
+                    .map(|pane| (remap[&pane.id.raw()], pane.rect))
+                    .collect::<Vec<_>>(),
+            );
+            if let Some(restored) = layout.collection(collection.into()) {
+                assert_eq!(
+                    restored.members(),
+                    members
+                        .iter()
+                        .map(|id| remap[&id.raw()])
+                        .collect::<Vec<_>>()
+                );
+                assert_eq!(restored.selected(), Some(remap[&members[1].raw()]));
+                assert_eq!(
+                    layout.focused_leaf(),
+                    LayoutLeaf::Collection(collection.into())
+                );
+                assert_eq!(layout.focused(), remap[&members[1].raw()]);
+                let policy = &recovered.legacy_collection_snapshots[&collection.into()];
+                assert_eq!(policy.label.as_deref(), Some("restore members"));
+                assert_eq!(
+                    policy.archived(),
+                    &HashSet::from([remap[&members[0].raw()]])
+                );
+            } else {
+                assert!(original.layout.collection(collection.into()).is_none());
+            }
+        }
+        assert_eq!(restored_ids, HashSet::from([collection.into()]));
+        state.assert_invariants_for_test();
+    }
+
+    #[test]
     fn legacy_collection_restore_repairs_duplicate_missing_and_over_limit_members_without_losing_panes(
     ) {
         use super::super::snapshot::{CollectionSnapshot, LayoutSnapshot, TabSnapshot};
