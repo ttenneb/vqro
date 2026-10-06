@@ -941,6 +941,127 @@ mod tests {
     }
 
     #[test]
+    fn handoff_v3_snapshot_v7_preserves_adversarial_identity_and_hidden_runtime_bijection() {
+        use crate::collections_extension_contract::{
+            CollectionsAuthorityPackageV1, CollectionsAuthorityPhaseV1,
+            CollectionsAuthorityStateV1, CollectionsAuthorityV1,
+            COLLECTIONS_DOCUMENT_PROFILE_CONTRACT_V1, COLLECTIONS_PACKAGE_ID,
+        };
+        let mut state = crate::app::AppState::test_with_adversarial_identity_state();
+        let tab = state.workspaces[0]
+            .tabs
+            .iter_mut()
+            .find(|tab| tab.panes.len() > 1)
+            .unwrap();
+        let root = tab.root_pane;
+        let mut members: Vec<_> = tab.panes.keys().copied().filter(|id| *id != root).collect();
+        members.sort_by_key(|id| id.raw());
+        let collection = tab
+            .create_collection_near(
+                crate::layout::LayoutLeaf::Pane(root),
+                ratatui::layout::Direction::Horizontal,
+                0.4,
+                Some("handoff members".into()),
+            )
+            .unwrap();
+        for member in &members {
+            tab.collect_tiled_pane(*member, collection).unwrap();
+        }
+        tab.select_collection_member(collection, members[1])
+            .unwrap();
+        state.assert_invariants_for_test();
+        let mut snapshot = crate::persist::capture(
+            &state.workspaces,
+            &state.repositories,
+            &state.space_order,
+            &state.terminals,
+            &crate::terminal::TerminalRuntimeRegistry::new(),
+            state.active,
+            state.selected,
+        );
+        snapshot.version = 7;
+        snapshot.collections_authority = CollectionsAuthorityV1 {
+            phase: CollectionsAuthorityPhaseV1::Package,
+            authority_epoch: 2,
+            package: Some(CollectionsAuthorityPackageV1 {
+                package_id: COLLECTIONS_PACKAGE_ID.into(),
+                service_id: "collections".into(),
+                package_sha256: "a".repeat(64),
+                component_sha256: "b".repeat(64),
+                profile_contract: COLLECTIONS_DOCUMENT_PROFILE_CONTRACT_V1.into(),
+            }),
+            state: Some(CollectionsAuthorityStateV1 {
+                store_generation: 2,
+                namespace_revision: 3,
+            }),
+            migration_id: Some("nested_panes_characterization".into()),
+            ..CollectionsAuthorityV1::default()
+        };
+        snapshot.collections_action_sequence = 9;
+        let snapshot =
+            crate::persist::parse_snapshot(&serde_json::to_string(&snapshot).unwrap()).unwrap();
+        assert_eq!(snapshot.version, 7);
+        assert_eq!(snapshot.collections_action_sequence, 9);
+        let panes = snapshot
+            .workspaces
+            .iter()
+            .flat_map(|workspace| &workspace.tabs)
+            .flat_map(|tab| &tab.panes)
+            .map(|(&id, pane)| {
+                runtime_for(
+                    id,
+                    Some(
+                        crate::persist::terminal_id_for_pane_snapshot(pane)
+                            .unwrap()
+                            .to_string(),
+                    ),
+                )
+            })
+            .collect();
+        let mut manifest = HandoffManifest {
+            version: HANDOFF_VERSION,
+            source_version: "current".into(),
+            source_protocol: crate::protocol::PROTOCOL_VERSION,
+            expected_version: None,
+            expected_protocol: None,
+            snapshot,
+            panes,
+            deferred_panes: Vec::new(),
+            api_window_title: None,
+        };
+        manifest
+            .panes
+            .sort_by_key(|runtime| std::cmp::Reverse(runtime.pane_id));
+        let encoded = serde_json::to_string(&manifest).unwrap();
+        preflight_handoff_json_versions(&encoded).unwrap();
+        let mut decoded: HandoffManifest = serde_json::from_str(&encoded).unwrap();
+        validate_and_normalize_manifest(&mut decoded).unwrap();
+        assert_eq!(
+            serde_json::to_value(&decoded).unwrap(),
+            serde_json::to_value(&manifest).unwrap()
+        );
+        assert_eq!(decoded.snapshot.version, 7);
+        assert!(members.iter().all(|id| decoded
+            .panes
+            .iter()
+            .any(|runtime| runtime.pane_id == id.raw())));
+
+        // A valid set of terminal IDs is insufficient: each runtime must still
+        // belong to the exact saved pane, including non-selected members.
+        let hidden = decoded
+            .panes
+            .iter()
+            .position(|runtime| runtime.pane_id == members[0].raw())
+            .unwrap();
+        let other = (hidden + 1) % decoded.panes.len();
+        let hidden_id = decoded.panes[hidden].terminal_id.clone();
+        decoded.panes[hidden].terminal_id = decoded.panes[other].terminal_id.clone();
+        decoded.panes[other].terminal_id = hidden_id;
+        assert!(validate_and_normalize_manifest(&mut decoded).is_err());
+        state.assert_invariants_for_test();
+    }
+
+    #[test]
     fn handoff_v3_rejects_duplicate_or_non_bijective_runtime_entries() {
         let snapshot = one_pane_snapshot();
         let terminal_id = crate::persist::terminal_id_for_pane_snapshot(

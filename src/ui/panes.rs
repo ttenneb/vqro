@@ -1229,6 +1229,65 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn background_collection_resize_only_sizes_selected_member_and_preserves_identity() {
+        let mut app = AppState::test_with_adversarial_identity_state();
+        app.pane_borders = PaneBordersConfig::Off;
+        app.pane_scrollbars = false;
+        let workspace = &mut app.workspaces[0];
+        let tab_index = workspace
+            .tabs
+            .iter()
+            .position(|tab| tab.panes.len() > 1)
+            .unwrap();
+        assert_ne!(tab_index, workspace.active_tab);
+        let tab = &mut workspace.tabs[tab_index];
+        let root = tab.root_pane;
+        let mut members: Vec<_> = tab.panes.keys().copied().filter(|id| *id != root).collect();
+        members.sort_by_key(|id| id.raw());
+        let collection = tab
+            .create_collection_near(
+                crate::layout::LayoutLeaf::Pane(root),
+                ratatui::layout::Direction::Vertical,
+                0.5,
+                Some("background".into()),
+            )
+            .unwrap();
+        for member in &members {
+            tab.collect_tiled_pane(*member, collection).unwrap();
+        }
+        tab.select_collection_member(collection, members[0])
+            .unwrap();
+        let hidden_terminal = tab.panes[&members[1]].attached_terminal_id.clone();
+        for pane in [root, members[0], members[1]] {
+            workspace.insert_test_runtime(
+                pane,
+                TerminalRuntime::test_with_screen_bytes(40, 8, b"ready"),
+            );
+        }
+        app.assert_invariants_for_test();
+        let runtimes = TerminalRuntimeRegistry::new();
+        let area = Rect::new(0, 0, 120, 40);
+        super::super::compute_view_with_runtime_registry(&mut app, &runtimes, area);
+        let runtime = |pane| &app.workspaces[0].test_runtimes[&pane];
+        let selected_size = runtime(members[0]).current_size();
+        assert_ne!(selected_size, (8, 40));
+        assert_eq!(runtime(members[1]).current_size(), (8, 40));
+        app.workspaces[0].tabs[tab_index]
+            .select_collection_member(collection, members[1])
+            .unwrap();
+        super::super::compute_view_with_runtime_registry(&mut app, &runtimes, area);
+        assert_eq!(
+            app.workspaces[0].test_runtimes[&members[1]].current_size(),
+            selected_size
+        );
+        assert_eq!(
+            app.workspaces[0].tabs[tab_index].panes[&members[1]].attached_terminal_id,
+            hidden_terminal
+        );
+        app.assert_invariants_for_test();
+    }
+
+    #[tokio::test]
     async fn collection_preview_reserves_one_header_row_from_terminal_geometry() {
         let mut app = AppState::test_new();
         app.pane_borders = PaneBordersConfig::Off;

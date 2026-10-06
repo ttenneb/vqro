@@ -1548,6 +1548,106 @@ mod tests {
     }
 
     #[test]
+    fn adversarial_collection_mutations_keep_terminal_authority_and_public_identity() {
+        use crate::layout::{LayoutLeaf, PanePlacement};
+        use ratatui::layout::Direction;
+        let mut state = AppState::test_with_adversarial_identity_state();
+        let workspace = &state.workspaces[0];
+        let tab_index = workspace
+            .tabs
+            .iter()
+            .position(|tab| tab.panes.len() > 1)
+            .unwrap();
+        let root = workspace.tabs[tab_index].root_pane;
+        let mut members: Vec<_> = workspace.tabs[tab_index]
+            .panes
+            .keys()
+            .copied()
+            .filter(|id| *id != root)
+            .collect();
+        members.sort_by_key(|id| id.raw());
+        let identities: Vec<_> = members
+            .iter()
+            .map(|id| {
+                (
+                    *id,
+                    workspace.public_pane_number(*id),
+                    workspace.tabs[tab_index].panes[id]
+                        .attached_terminal_id
+                        .clone(),
+                )
+            })
+            .collect();
+        let terminal_id = identities[0].2.clone();
+        state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_hook_authority(
+                "test:custom".into(),
+                "custom".into(),
+                crate::detect::AgentState::Working,
+                Some("terminal-owned".into()),
+                Some(7),
+            );
+        let authority = state.terminals[&terminal_id].hook_authority.clone();
+        assert!(authority.is_some());
+        let collection = state.workspaces[0].tabs[tab_index]
+            .create_collection_near(
+                LayoutLeaf::Pane(root),
+                Direction::Horizontal,
+                0.4,
+                Some("identity".into()),
+            )
+            .unwrap();
+        for member in &members {
+            state.workspaces[0].tabs[tab_index]
+                .collect_tiled_pane(*member, collection)
+                .unwrap();
+            state.assert_invariants_for_test();
+        }
+        state.workspaces[0].tabs[tab_index]
+            .select_collection_member(collection, members[1])
+            .unwrap();
+        state.workspaces[0].tabs[tab_index]
+            .reorder_collection_member(collection, members[0], 1)
+            .unwrap();
+        state.assert_invariants_for_test();
+        for member in &members {
+            state.workspaces[0].tabs[tab_index]
+                .promote_collection_member_near(*member, collection, root, Direction::Vertical, 0.5)
+                .unwrap();
+            assert_eq!(
+                state.workspaces[0].tabs[tab_index]
+                    .layout
+                    .placement(*member),
+                Some(PanePlacement::Tiled)
+            );
+            state.assert_invariants_for_test();
+        }
+        // Current Collections retain their empty leaf until explicitly closed.
+        assert!(state.workspaces[0].tabs[tab_index]
+            .collection(collection)
+            .unwrap()
+            .members()
+            .is_empty());
+        state.workspaces[0].tabs[tab_index]
+            .remove_empty_collection(collection)
+            .unwrap();
+        state.assert_invariants_for_test();
+        for (id, number, terminal) in identities {
+            assert_eq!(state.workspaces[0].public_pane_number(id), number);
+            assert_eq!(
+                state.workspaces[0].tabs[tab_index].panes[&id].attached_terminal_id,
+                terminal
+            );
+        }
+        let terminal = &state.terminals[&terminal_id];
+        assert_eq!(terminal.hook_authority, authority);
+        assert_eq!(terminal.state, crate::detect::AgentState::Working);
+    }
+
+    #[test]
     fn adversarial_identity_state_satisfies_app_invariants_after_mutation() {
         let mut state = AppState::test_with_adversarial_identity_state();
         state.assert_invariants_for_test();

@@ -2546,6 +2546,101 @@ mod tests {
     }
 
     #[test]
+    fn adversarial_identity_capture_preserves_tab_order_public_numbers_and_hidden_members() {
+        let mut state = AppState::test_with_adversarial_identity_state();
+        let workspace = &mut state.workspaces[0];
+        let tab = workspace
+            .tabs
+            .iter_mut()
+            .find(|tab| tab.panes.len() > 1)
+            .unwrap();
+        let root = tab.root_pane;
+        let mut members: Vec<_> = tab.panes.keys().copied().filter(|id| *id != root).collect();
+        members.sort_by_key(|id| id.raw());
+        let collection = tab
+            .create_collection_near(
+                crate::layout::LayoutLeaf::Pane(root),
+                Direction::Vertical,
+                0.35,
+                Some("hidden identities".into()),
+            )
+            .unwrap();
+        for member in &members {
+            tab.collect_tiled_pane(*member, collection).unwrap();
+        }
+        tab.select_collection_member(collection, members[1])
+            .unwrap();
+        tab.set_collection_member_archived(collection, members[0], true)
+            .unwrap();
+        tab.layout
+            .focus_leaf(crate::layout::LayoutLeaf::Collection(collection.into()));
+        tab.zoomed = true;
+        state.assert_invariants_for_test();
+
+        let snapshot = capture_from_state(&state);
+        let decoded = parse_snapshot(&serde_json::to_string(&snapshot).unwrap()).unwrap();
+        let saved = &decoded.workspaces[0];
+        let workspace = &state.workspaces[0];
+        assert_eq!(saved.id.as_deref(), Some(workspace.id.as_str()));
+        assert_eq!(saved.active_tab, workspace.active_tab);
+        assert_eq!(
+            saved.public_tab_numbers,
+            workspace
+                .tabs
+                .iter()
+                .map(|tab| tab.number)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            saved.next_public_tab_number,
+            workspace.next_public_tab_number
+        );
+        assert_eq!(
+            saved.next_public_pane_number,
+            workspace.next_public_pane_number
+        );
+        assert_eq!(
+            saved.public_pane_numbers,
+            workspace
+                .public_pane_numbers
+                .iter()
+                .map(|(id, number)| (id.raw(), *number))
+                .collect()
+        );
+        for (saved_tab, tab) in saved.tabs.iter().zip(&workspace.tabs) {
+            assert_eq!(saved_tab.id.as_ref().unwrap().validated().unwrap(), tab.id);
+            assert_eq!(saved_tab.root_pane, Some(tab.root_pane.raw()));
+            assert_eq!(saved_tab.focused, Some(tab.layout.focused().raw()));
+            assert_eq!(saved_tab.zoomed, tab.zoomed);
+            assert_eq!(saved_tab.panes.len(), tab.panes.len());
+            for (id, pane) in &tab.panes {
+                assert_eq!(
+                    terminal_id_for_pane_snapshot(&saved_tab.panes[&id.raw()]).unwrap(),
+                    pane.attached_terminal_id
+                );
+            }
+        }
+        let saved_collection = saved
+            .tabs
+            .iter()
+            .flat_map(|tab| &tab.collections)
+            .find(|saved| saved.id == collection)
+            .unwrap();
+        assert_eq!(
+            saved_collection.members,
+            members.iter().map(|id| id.raw()).collect::<Vec<_>>()
+        );
+        assert_eq!(saved_collection.selected, Some(members[1].raw()));
+        assert_eq!(saved_collection.archived, vec![members[0].raw()]);
+        assert!(
+            !normalize_identity_changes(&mut decoded.clone(), false)
+                .unwrap()
+                .changed
+        );
+        state.assert_invariants_for_test();
+    }
+
+    #[test]
     fn collection_saved_layout_round_trip_preserves_ids_members_selection_archive_and_focus() {
         let mut state = state_with_workspaces(&["collections"]);
         let root = state.workspaces[0].tabs[0].root_pane;
