@@ -1738,8 +1738,12 @@ mod tests {
         let member_a = 900_001_u32;
         let member_b = 900_002_u32;
         let outside = 900_003_u32;
-        let pane = || PaneSnapshot {
-            terminal_id: None,
+        // A saved pane carries its own terminal, so the alias can be checked against the
+        // pane that really holds it rather than against a count or a set.
+        let pane = |terminal: &str| PaneSnapshot {
+            terminal_id: Some(
+                serde_json::from_value(serde_json::json!(terminal)).expect("raw terminal id"),
+            ),
             cwd: std::path::PathBuf::from("/tmp"),
             label: None,
             agent_name: None,
@@ -1755,7 +1759,7 @@ mod tests {
                 identity_cwd: std::path::PathBuf::from("/tmp"),
                 checkout: None,
                 worktree_space: None,
-                public_pane_numbers: HashMap::new(),
+                public_pane_numbers: HashMap::from([(member_a, 1), (member_b, 2), (outside, 3)]),
                 next_public_pane_number: 4,
                 public_tab_numbers: vec![1],
                 next_public_tab_number: 2,
@@ -1776,9 +1780,9 @@ mod tests {
                         archived: Vec::new(),
                     }],
                     panes: HashMap::from([
-                        (member_a, pane()),
-                        (member_b, pane()),
-                        (outside, pane()),
+                        (member_a, pane("term_11111111111111111111111111111111")),
+                        (member_b, pane("term_22222222222222222222222222222222")),
+                        (outside, pane("term_33333333333333333333333333333333")),
                     ]),
                     zoomed: false,
                     focused: Some(member_a),
@@ -1836,6 +1840,34 @@ mod tests {
             mapped.is_subset(&live),
             "every alias names a live pane: {aliases:?}"
         );
+        // The exact pairing, per pre-handoff raw id: the alias must land on the pane
+        // that carries that pane's own terminal and its public pane number, so swapping
+        // two members' aliases fails here even though the keys and the count are right.
+        let workspace = &workspaces[0];
+        let tab = &workspace.tabs[0];
+        for (old_raw, terminal, public_number) in [
+            (member_a, "term_11111111111111111111111111111111", 1_usize),
+            (member_b, "term_22222222222222222222222222222222", 2),
+            (outside, "term_33333333333333333333333333333333", 3),
+        ] {
+            let pane_id = aliases
+                .get(&old_raw)
+                .copied()
+                .unwrap_or_else(|| panic!("an alias for raw pane {old_raw}: {aliases:?}"));
+            let pane = tab.panes.get(&pane_id).unwrap_or_else(|| {
+                panic!("raw pane {old_raw} aliases onto a live pane: {pane_id:?}")
+            });
+            assert_eq!(
+                pane.attached_terminal_id.as_str(),
+                terminal,
+                "raw pane {old_raw} aliases onto the pane carrying {terminal}: {aliases:?}"
+            );
+            assert_eq!(
+                workspace.public_pane_number(pane_id),
+                Some(public_number),
+                "raw pane {old_raw} keeps public pane number {public_number}: {aliases:?}"
+            );
+        }
     }
 
     #[test]
