@@ -716,7 +716,7 @@ impl App {
                 }
                 if pending.params.focus {
                     let _ = self.state.workspaces[pending.workspace_index].tabs[pending.tab_index]
-                        .focus_layout_leaf(crate::layout::LayoutLeaf::Collection(
+                        .focus_layout_leaf(crate::layout::LayoutLeaf::Stack(
                             pending.reserved_id.into(),
                         ));
                 }

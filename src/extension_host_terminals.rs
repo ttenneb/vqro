@@ -544,16 +544,23 @@ pub(crate) fn build_snapshot(
     >,
     fence: HostTerminalsLeaseFenceV1,
 ) -> Result<HostTerminalsSnapshotV1, RuntimeErrorBodyV1> {
-    // Scalar/count preflight happens before any response-sized allocation.
+    // Structural/count preflight precedes allocating terminal response records.
     if tab.panes.len() > crate::admission::MAX_TAB_PANES {
         return Err(resource_error("tab terminal admission bound was exceeded"));
     }
     let mut container_count = 0_usize;
+    let mut expected_container_ids = HashSet::new();
     for container in tab.layout.collections() {
+        // Match the former side map's unique-identity preflight. Diagnose
+        // duplicate placement later in leaf order, so it cannot mask an
+        // earlier missing or duplicated terminal.
+        if !expected_container_ids.insert(container.id) {
+            continue;
+        }
         container_count = container_count
             .checked_add(1)
             .ok_or_else(|| resource_error("container count overflowed"))?;
-        if container.members().len() > crate::admission::MAX_GROUP_MEMBERS {
+        if container.member_count() > crate::admission::MAX_GROUP_MEMBERS {
             return Err(resource_error(
                 "container member admission bound was exceeded",
             ));
@@ -561,16 +568,6 @@ pub(crate) fn build_snapshot(
     }
     if container_count > crate::admission::MAX_GROUPS_PER_TAB {
         return Err(resource_error("container admission bound was exceeded"));
-    }
-    let expected_container_ids: HashSet<_> = tab
-        .layout
-        .collections()
-        .map(|container| container.id)
-        .collect();
-    if expected_container_ids.len() != container_count {
-        return Err(malformed_error(
-            "container map contains duplicate identities",
-        ));
     }
     let leaves = tab.layout.leaves();
     if leaves.len() != tab.layout.leaf_count() {
@@ -603,7 +600,7 @@ pub(crate) fn build_snapshot(
                 }
                 layout.push(HostTerminalLayoutItemV1::Tiled { terminal_id });
             }
-            crate::layout::LayoutLeaf::Collection(container_id) => {
+            crate::layout::LayoutLeaf::Stack(container_id) => {
                 if !seen_containers.insert(container_id) {
                     return Err(malformed_error("layout duplicates a container identity"));
                 }
@@ -611,17 +608,17 @@ pub(crate) fn build_snapshot(
                     .layout
                     .collection(container_id)
                     .ok_or_else(|| malformed_error("layout references a missing container"))?;
-                if container.members().len() > crate::admission::MAX_GROUP_MEMBERS {
+                if container.member_count() > crate::admission::MAX_GROUP_MEMBERS {
                     return Err(resource_error(
                         "container member admission bound was exceeded",
                     ));
                 }
-                let mut terminal_ids = Vec::with_capacity(container.members().len());
+                let mut terminal_ids = Vec::with_capacity(container.member_count());
                 for pane_id in container.members() {
-                    if !seen_panes.insert(*pane_id) {
+                    if !seen_panes.insert(pane_id) {
                         return Err(malformed_error("terminal placement is duplicated"));
                     }
-                    let terminal_id = terminal_for(*pane_id)?;
+                    let terminal_id = terminal_for(pane_id)?;
                     if !seen_terminals.insert(terminal_id.clone()) {
                         return Err(malformed_error("terminal identity is duplicated"));
                     }
@@ -907,24 +904,16 @@ mod tests {
         let root = crate::layout::TypedNode::Split {
             direction: Direction::Horizontal,
             ratio: 0.5,
-            first: Box::new(crate::layout::TypedNode::Leaf(
-                crate::layout::LayoutLeaf::Pane(panes[0]),
-            )),
+            first: Box::new(crate::layout::TypedNode::Leaf(panes[0])),
             second: Box::new(crate::layout::TypedNode::Split {
                 direction: Direction::Vertical,
                 ratio: 0.5,
-                first: Box::new(crate::layout::TypedNode::Leaf(
-                    crate::layout::LayoutLeaf::Pane(panes[1]),
-                )),
+                first: Box::new(crate::layout::TypedNode::Leaf(panes[1])),
                 second: Box::new(crate::layout::TypedNode::Split {
                     direction: Direction::Horizontal,
                     ratio: 0.5,
-                    first: Box::new(crate::layout::TypedNode::Leaf(
-                        crate::layout::LayoutLeaf::Collection(first_container),
-                    )),
-                    second: Box::new(crate::layout::TypedNode::Leaf(
-                        crate::layout::LayoutLeaf::Collection(first_container),
-                    )),
+                    first: Box::new(crate::layout::TypedNode::empty_stack(first_container)),
+                    second: Box::new(crate::layout::TypedNode::empty_stack(first_container)),
                 }),
             }),
         };

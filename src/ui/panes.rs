@@ -57,16 +57,11 @@ pub(crate) fn pane_inner_rect(area: Rect, borders: Borders) -> Rect {
 /// Collections reserve their first inner row for structural chrome. The server
 /// owns this geometry even while clients choose not to render the header.
 fn collection_content_rect(
-    tab: &crate::workspace::Tab,
+    selected_stack_panes: &[crate::layout::PaneId],
     pane_id: crate::layout::PaneId,
     area: Rect,
 ) -> Rect {
-    if !tab
-        .layout
-        .collections()
-        .any(|collection| collection.selected() == Some(pane_id))
-        || area.height == 0
-    {
+    if !selected_stack_panes.contains(&pane_id) || area.height == 0 {
         return area;
     }
     Rect::new(
@@ -258,6 +253,7 @@ pub(super) fn resize_tab_panes_except(
     excluded_panes: &std::collections::HashSet<crate::layout::PaneId>,
 ) {
     let multi_pane = tab.layout.pane_count() > 1;
+    let selected_stack_panes = tab.layout.selected_stack_panes();
 
     if tab.zoomed {
         let focused_id = tab.layout.focused();
@@ -269,8 +265,11 @@ pub(super) fn resize_tab_panes_except(
             } else {
                 Borders::NONE
             };
-            let pane_inner =
-                collection_content_rect(tab, focused_id, pane_inner_rect(area, borders));
+            let pane_inner = collection_content_rect(
+                &selected_stack_panes,
+                focused_id,
+                pane_inner_rect(area, borders),
+            );
             let inner_rect = terminal_inner_rect(rt, pane_inner, app.pane_scrollbars);
             // A pane a client claimed for an open panel is sized by that claim:
             // the layout must not resize its PTY back, on this or any other path.
@@ -295,8 +294,11 @@ pub(super) fn resize_tab_panes_except(
         app.pane_gaps,
         app.pane_outer_borders,
     ) {
-        let pane_inner =
-            collection_content_rect(tab, info.id, pane_inner_rect(info.rect, info.borders));
+        let pane_inner = collection_content_rect(
+            &selected_stack_panes,
+            info.id,
+            pane_inner_rect(info.rect, info.borders),
+        );
 
         if let Some((terminal_id, rt)) =
             runtime_for_tab_pane(app, terminal_runtimes, workspace_index, tab, info.id)
@@ -337,6 +339,7 @@ pub(super) fn compute_pane_infos_for_tab(
     };
 
     let multi_pane = tab.layout.pane_count() > 1;
+    let selected_stack_panes = tab.layout.selected_stack_panes();
 
     if tab.zoomed {
         let focused_id = tab.layout.focused();
@@ -345,7 +348,11 @@ pub(super) fn compute_pane_infos_for_tab(
         } else {
             Borders::NONE
         };
-        let pane_inner = collection_content_rect(tab, focused_id, pane_inner_rect(area, borders));
+        let pane_inner = collection_content_rect(
+            &selected_stack_panes,
+            focused_id,
+            pane_inner_rect(area, borders),
+        );
         let mut inner_rect = pane_inner;
         let mut scrollbar_rect = None;
         if let Some(rt) = app.runtime_for_pane_in_workspace(terminal_runtimes, ws_idx, focused_id) {
@@ -386,8 +393,11 @@ pub(super) fn compute_pane_infos_for_tab(
     );
 
     for info in &mut pane_infos {
-        let pane_inner =
-            collection_content_rect(tab, info.id, pane_inner_rect(info.rect, info.borders));
+        let pane_inner = collection_content_rect(
+            &selected_stack_panes,
+            info.id,
+            pane_inner_rect(info.rect, info.borders),
+        );
 
         let mut inner_rect = pane_inner;
         let mut scrollbar_rect = None;
@@ -1334,7 +1344,7 @@ mod tests {
         app.workspaces[0].tabs[0].zoomed = true;
         assert!(app.workspaces[0].tabs[0]
             .layout
-            .focus_leaf(crate::layout::LayoutLeaf::Collection(collection.into())));
+            .focus_leaf(crate::layout::LayoutLeaf::Stack(collection.into())));
         let zoomed = compute_pane_infos(
             &app,
             &TerminalRuntimeRegistry::new(),
