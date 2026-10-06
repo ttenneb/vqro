@@ -371,6 +371,11 @@ impl ClientShellState {
                 focused: collection.focused,
             })
             .collect::<Vec<_>>();
+        self.collection_list_areas = collection_surfaces
+            .iter()
+            .filter(|surface| self.collection_list_views.contains(&surface.collection_id))
+            .map(|surface| surface.rect)
+            .collect();
         let topology_signature = pane_surface_topology_signature(surface);
         self.hits.pane_splits = surface
             .splits

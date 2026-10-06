@@ -2569,3 +2569,222 @@ fn empty_collection_surface_renders_and_owns_blank_space_context_menu() {
         })) if collection_id == "collection_empty"
     ));
 }
+
+/// A collection with two members, shown as a list, over one pane surface.
+fn listed_collection_state() -> ClientShellState {
+    let mut projected = snapshot();
+    projected.panes.push(ClientShellPane {
+        pane_id: "pane_2".into(),
+        workspace_id: "ws_1".into(),
+        tab_id: "tab_1".into(),
+        label: Some("second terminal".into()),
+        cwd: Some("/repo".into()),
+        foreground_cwd: Some("/repo".into()),
+        focused: false,
+        right_click_passthrough: false,
+    });
+    let mut pane_surface = surface();
+    pane_surface.collections = vec![crate::protocol::PaneSurfaceCollection {
+        collection_id: "collection_1".into(),
+        rect: crate::protocol::SurfaceRect {
+            x: 0,
+            y: 0,
+            width: 70,
+            height: 19,
+        },
+        inner_rect: crate::protocol::SurfaceRect {
+            x: 0,
+            y: 1,
+            width: 70,
+            height: 18,
+        },
+        focused: true,
+    }];
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    state.set_snapshot(Box::new(projected));
+    state.structure = Some(Box::new(
+        crate::protocol::endpoint::ClientShellStructureProjection {
+            session_id: "alpha".into(),
+            boot_id: "boot-1".into(),
+            revision: 1,
+            collections: vec![crate::protocol::endpoint::ClientShellCollection {
+                collection_id: "collection_1".into(),
+                workspace_id: "ws_1".into(),
+                tab_id: "tab_1".into(),
+                label: Some("List workflow".into()),
+                selected_pane_id: Some("pane_1".into()),
+                members: vec![
+                    crate::protocol::endpoint::ClientShellCollectionMember {
+                        pane_id: "pane_1".into(),
+                        index: 0,
+                        archived: false,
+                    },
+                    crate::protocol::endpoint::ClientShellCollectionMember {
+                        pane_id: "pane_2".into(),
+                        index: 1,
+                        archived: false,
+                    },
+                ],
+            }],
+            delegations: Vec::new(),
+            repositories: Vec::new(),
+            space_order: Vec::new(),
+        },
+    ));
+    state.set_pane_surface(pane_surface);
+    state.collection_list_views.insert("collection_1".into());
+    state
+}
+
+/// Arrow keys that move the collection list's selection must not also reach the
+/// member's terminal: the shell would run history navigation and redraw its
+/// prompt inside the list, which is the flash the human reported.
+#[test]
+fn arrow_keys_in_the_collection_list_do_not_reach_the_terminal() {
+    let mut state = listed_collection_state();
+    let _ = state.compose(106, 20).expect("collection list frame");
+    let mut outcome = ClientShellInput::default();
+    for code in [
+        crossterm::event::KeyCode::Down,
+        crossterm::event::KeyCode::Down,
+        crossterm::event::KeyCode::Up,
+    ] {
+        state.handle_key(
+            crate::input::TerminalKey::new(code, KeyModifiers::empty()),
+            &mut outcome,
+        );
+    }
+    assert!(
+        !outcome.requests.iter().any(|message| matches!(
+            message,
+            crate::protocol::ClientMessage::ClientShellPaneInput { .. }
+        )),
+        "list-view arrows must not reach the pane: {:?}",
+        outcome.requests
+    );
+    let selected = outcome
+        .actions
+        .iter()
+        .filter_map(|action| match action {
+            ClientShellAction::Endpoint { request, .. } => match &request.method {
+                crate::api::schema::Method::CollectionSelect(params) => {
+                    Some(params.pane_id.clone())
+                }
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        selected.len(),
+        3,
+        "each arrow moves the selection: {selected:?}"
+    );
+    assert_eq!(
+        selected[0], "pane_2",
+        "the first Down selects the next member"
+    );
+}
+
+/// A retained terminal patch row must not paint inside the list a collection
+/// draws: the server computed it for the pane, which the list now covers.
+#[test]
+fn a_terminal_patch_row_and_cursor_are_dropped_inside_the_collection_list() {
+    // QA's P2: the earlier version ignored the patch outcome and recomposed, which
+    // redraws the list whatever the filter did, so it could not see the direct path.
+    // This one asks for the emitted patch, applies exactly that to the frame the user
+    // is already looking at, and carries a cursor the list must suppress.
+    let mut state = listed_collection_state();
+    let before = state.compose(106, 20).expect("collection list frame");
+    let area = *state
+        .collection_list_areas
+        .first()
+        .expect("the list area is reserved from patches");
+    let pane = state
+        .pane_surface
+        .as_ref()
+        .expect("surface")
+        .panes
+        .first()
+        .cloned()
+        .expect("pane_1");
+    let mut cell = state
+        .pane_surface
+        .as_ref()
+        .expect("surface")
+        .frame
+        .cells
+        .first()
+        .cloned()
+        .expect("a cell");
+    cell.symbol = "B".into();
+    let surface_revision = state
+        .pane_surface
+        .as_ref()
+        .expect("surface")
+        .surface_revision;
+    // The row and the cursor are in the pane's own grid, which is what the server
+    // computed the patch against: both compose into the list the client drew over it.
+    let x = pane.inner_rect.x.saturating_add(1);
+    let y = pane.inner_rect.y.saturating_add(1);
+    let patch = crate::protocol::PaneSurfacePatch {
+        boot_id: "boot-1".into(),
+        projection_revision: 1,
+        base_surface_revision: surface_revision,
+        surface_revision: surface_revision.saturating_add(1),
+        rows: vec![crate::protocol::PaneSurfacePatchRow {
+            x,
+            y,
+            cells: vec![cell],
+        }],
+        panes: vec![pane],
+        cursor: Some(crate::protocol::CursorState {
+            x,
+            y,
+            visible: true,
+            shape: 2,
+        }),
+    };
+    let outcome = state.apply_pane_surface_patch(patch);
+    let ClientPaneSurfacePatchOutcome::Applied(Some(composed)) = outcome else {
+        panic!("a row inside the grid keeps the fast path: {outcome:?}");
+    };
+    for row in &composed.rows {
+        let width = u16::try_from(row.cells.len()).unwrap_or(1);
+        let inside_y = row.y >= area.y && row.y < area.bottom();
+        let inside_x = row.x < area.right() && row.x.saturating_add(width) > area.x;
+        assert!(
+            !(inside_y && inside_x),
+            "the emitted patch leaves the list alone: ({}, {}) x{width} in {area:?}",
+            row.x,
+            row.y
+        );
+    }
+    let cursor = composed.cursor.expect("the patch carried a cursor");
+    assert!(
+        !cursor.visible,
+        "a list suppresses the terminal cursor inside it: {cursor:?}"
+    );
+    // Applying everything the patch emitted to the previous frame leaves the list
+    // exactly as it was.
+    let mut patched = before.clone();
+    for row in &composed.rows {
+        for (offset, emitted) in row.cells.iter().enumerate() {
+            let column = row.x.saturating_add(offset as u16);
+            if column < patched.width && row.y < patched.height {
+                patched.cells
+                    [usize::from(row.y) * usize::from(patched.width) + usize::from(column)] =
+                    emitted.clone();
+            }
+        }
+    }
+    for y in area.y..area.bottom() {
+        for x in area.x..area.right() {
+            assert_eq!(
+                frame_symbol(&patched, x, y),
+                frame_symbol(&before, x, y),
+                "the list is unchanged at ({x}, {y})"
+            );
+        }
+    }
+}
