@@ -20,6 +20,18 @@ fn compact_badge_label(label: &str) -> String {
     digits
 }
 
+/// How a tab splits its own cells between its label and a badge on it: the badge
+/// takes the tab's tail, leaving a cell of gutter before the right edge, and the
+/// label gets everything strictly before that. The two allocations are disjoint -
+/// a label centred across the badge's cells is what turned "Plans" into "Pla[100]".
+fn tab_cell_split(width: u16, badge_width: u16) -> (u16, u16) {
+    let badge = badge_width.min(width.saturating_sub(1));
+    let label = width
+        .saturating_sub(badge)
+        .saturating_sub(u16::from(badge > 0));
+    (label, badge)
+}
+
 const TAB_SCROLL_BUTTON_WIDTH: u16 = 3;
 const MIN_TAB_STRIP_WIDTH: u16 =
     MIN_TAB_WIDTH + NEW_TAB_WIDTH + TAB_SCROLL_BUTTON_WIDTH.saturating_mul(2);
@@ -136,11 +148,16 @@ pub(crate) fn render_tab_bar(
         let badge = attention
             .and_then(|nav| nav.badge("tab", &tab.tab_id))
             .map(|badge| compact_badge_label(&badge.label));
-        let badge_width = badge.as_ref().map_or(0, |label| {
-            display_width(label)
-                .saturating_add(2)
-                .min(width.saturating_sub(2))
-        });
+        let (name_width, badge_width) = {
+            let wanted = badge
+                .as_ref()
+                .map_or(0, |label| display_width(label).saturating_add(2));
+            if badge.is_some() {
+                tab_cell_split(width, wanted)
+            } else {
+                (width, 0)
+            }
+        };
         let rect = Rect::new(x, area.y, width, 1);
         let style = if tab.focused {
             let base = Style::default()
@@ -156,10 +173,8 @@ pub(crate) fn render_tab_bar(
         } else {
             Style::default().fg(palette.overlay0).bg(palette.surface0)
         };
-        // The label is centred in its own allocation. The badge is drawn over the tail
-        // of the tab, so centring across the whole width would push the name under it:
-        // that is what turned "Plans" into "Pla[100]".
-        let name_width = width.saturating_sub(badge_width).max(1);
+        // The label is centred in its own allocation, which the badge's cells are not
+        // part of: centring across the whole width would push the name under the badge.
         let padding = name_width.saturating_sub(display_width(&name));
         let left = padding / 2;
         let text = format!(
@@ -181,6 +196,10 @@ pub(crate) fn render_tab_bar(
                 rect.y,
                 badge_width,
                 1,
+            );
+            debug_assert!(
+                badge_rect.x >= rect.x.saturating_add(name_width),
+                "the label and the badge never share a cell"
             );
             put_text(
                 buffer,
@@ -452,7 +471,7 @@ fn tab_label(tab: &ClientShellTab) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::compact_badge_label;
+    use super::{compact_badge_label, tab_cell_split};
 
     #[test]
     fn a_tab_badge_count_is_capped_at_two_digits() {
@@ -466,5 +485,36 @@ mod tests {
         assert_eq!(compact_badge_label("100000"), "99+");
         // A label with no count keeps a short word instead of an empty badge.
         assert_eq!(compact_badge_label("  blocked "), "bloc");
+    }
+
+    #[test]
+    fn a_tab_badge_and_its_label_never_share_a_cell() {
+        // QA's P3: the label used to be allocated `width - badge_width`, which is the
+        // badge's own first cell as well, so on a clipped tab the badge overwrote the
+        // last cell of the label's allocation. Every width and badge size must split
+        // into two allocations that do not overlap, and the label keeps one cell.
+        for width in 1_u16..40 {
+            for badge_width in 0_u16..8 {
+                let (label, badge) = tab_cell_split(width, badge_width);
+                let badge_start = width
+                    .saturating_sub(badge)
+                    .saturating_sub(u16::from(badge > 0));
+                assert!(
+                    label <= badge_start,
+                    "width {width}, badge {badge_width}: label {label} overlaps a badge \
+                     starting at {badge_start}"
+                );
+                assert!(label + badge <= width, "width {width}, badge {badge_width}");
+                if badge > 0 {
+                    // A badge so large that it needs the whole tab is the one case the
+                    // label can go without a cell; anything smaller leaves it one.
+                    assert!(
+                        label >= 1 || badge >= width.saturating_sub(1),
+                        "width {width}, badge {badge_width}: a badge that does not take the \
+                         whole tab leaves the label a cell"
+                    );
+                }
+            }
+        }
     }
 }

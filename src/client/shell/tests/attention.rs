@@ -314,29 +314,206 @@ fn badged_tab_state() -> ClientShellState {
     state
 }
 
-#[test]
-fn a_badged_tab_is_one_control_whose_label_keeps_its_space() {
-    let mut state = badged_tab_state();
-    let frame = state.compose(106, 30).expect("frame");
-    let bar_row = state.layout(106, 30).tab_bar.y;
-    let bar = frame
+/// Real attention on the active endpoint, so a badge is actually drawn and its cells
+/// can be clicked: two tabs and the workspace row, each badge carrying a count.
+fn attention_badge_state(tab_count: u64, workspace_count: u64) -> ClientShellState {
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    state.set_endpoint_status(&ClientEndpointId::Local, ClientEndpointStatus::Online);
+    let mut projected = snapshot();
+    let mut second_tab = projected.tabs[0].clone();
+    second_tab.tab_id = "tab_2".into();
+    second_tab.number = 2;
+    second_tab.label = "2".into();
+    second_tab.focused = false;
+    projected.tabs.push(second_tab);
+    // The endpoint's own snapshot and documents: attention is attached to the active
+    // endpoint, which is what the tab bar and the agent sidebar draw from.
+    state.set_endpoint_snapshot_for_generation(&ClientEndpointId::Local, 1, Box::new(projected));
+    state.set_pane_surface(surface());
+    // The workspace rows belong to the agent sidebar; the badge under test is on one.
+    state.show_agents = true;
+    let projection = serde_json::from_value(serde_json::json!({
+        "contract":"host.documents.v1", "boot_id":"boot-1", "revision":1,
+        "documents":[{"provider_priority":1,"document":{
+            "contract":"host.view.v1", "namespace":"independent.attention", "generation":7,"revision":2,
+            "surface":"navigation","target":{"kind":"session"},
+            "items":[
+                {"id":"context:attention.view:independent:read","role":"section","label":"Work"},
+                {"id":"context:attention.badge:tab:tab_1:0:1:0","role":"section",
+                 "label": format!("{tab_count} waiting on you")},
+                {"id":"context:attention.badge:workspace:ws_1:1:0:0","role":"section",
+                 "label": format!("{workspace_count} waiting on you")}
+            ],
+            "actions":[],"required_capabilities":[]
+        }}]
+    }))
+    .expect("projection");
+    state.set_endpoint_host_documents_for_generation(
+        &ClientEndpointId::Local,
+        1,
+        Box::new(projection),
+    );
+    state
+}
+
+fn click(state: &mut ClientShellState, column: u16, row: u16) -> ClientShellInput {
+    state.handle_raw_events(vec![
+        RawInputEvent::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column,
+            row,
+            modifiers: KeyModifiers::empty(),
+        }),
+        RawInputEvent::Mouse(MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left),
+            column,
+            row,
+            modifiers: KeyModifiers::empty(),
+        }),
+    ])
+}
+
+fn composed_rows(frame: &FrameData, width: u16) -> Vec<String> {
+    frame
         .cells
-        .chunks(106)
-        .nth(usize::from(bar_row))
-        .map(|line| {
-            line.iter()
-                .map(|cell| cell.symbol.as_str())
-                .collect::<String>()
+        .chunks(usize::from(width))
+        .map(|line| line.iter().map(|cell| cell.symbol.as_str()).collect())
+        .collect()
+}
+
+#[test]
+fn a_tab_badge_is_part_of_its_tab_and_shows_a_capped_count() {
+    // QA's P2 at f0e31328: the earlier fence explicitly rendered no badge, so its
+    // "no attention hit" assertion could not fail. Real attention, a real composed
+    // badge, and a click on the badge's own cells.
+    for (count, expected) in [(1_u64, "[1]"), (100, "[99+]")] {
+        let mut state = attention_badge_state(count, 1);
+        let frame = state.compose(106, 30).expect("frame");
+        let bar_row = state.layout(106, 30).tab_bar.y;
+        let bar = &composed_rows(&frame, 106)[usize::from(bar_row)];
+        let column =
+            bar.find(expected)
+                .unwrap_or_else(|| panic!("the tab shows {expected}: {bar:?}")) as u16;
+        let (tab_rect, tab_id) = state
+            .hits
+            .tabs
+            .first()
+            .cloned()
+            .expect("the tab bar registered its tab");
+        assert_eq!(tab_id, "tab_1");
+        assert!(
+            tab_rect.x <= column && column < tab_rect.right(),
+            "the badge's cells are inside the tab: {tab_rect:?} at column {column}"
+        );
+        // A badge on a tab registers no hit of its own, so every hit the bar has is
+        // the tab's: a click on the badge cells is a click on the tab.
+        assert!(
+            state.hits.attention.is_empty(),
+            "a tab badge registers no attention hit: {:?}",
+            state
+                .hits
+                .attention
+                .iter()
+                .map(|hit| hit.rect)
+                .collect::<Vec<_>>()
+        );
+        let outcome = click(&mut state, column, bar_row);
+        let focused = outcome
+            .actions
+            .iter()
+            .filter_map(|action| match action {
+                ClientShellAction::Endpoint { request, .. } => match &request.method {
+                    crate::api::schema::Method::TabFocus(target) => Some(target.tab_id.clone()),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            focused,
+            vec!["tab_1".to_string()],
+            "a click on the badge's cells selects that tab"
+        );
+        assert!(
+            state.pane_panel_open.is_empty(),
+            "the badge has no action of its own: {:?}",
+            state.pane_panel_open
+        );
+    }
+}
+
+#[test]
+fn a_workspace_row_badge_is_part_of_its_row() {
+    // The same supersession on the sidebar side: the badge is drawn inside the row,
+    // and a click on its cells is a click on the row's workspace.
+    let mut state = attention_badge_state(1, 1);
+    let frame = state.compose(106, 30).expect("frame");
+    let rows = composed_rows(&frame, 106);
+    // The badge's text is the attention label in brackets, drawn inside the row: find
+    // the row that carries it and the badge's own first cell, so a truncated badge
+    // still yields the cells to click.
+    let (row_index, column) = rows
+        .iter()
+        .enumerate()
+        .find_map(|(index, row)| {
+            row.contains("waiting on you")
+                .then(|| row.find('['))
+                .flatten()
+                .map(|column| (index, column as u16))
         })
-        .unwrap_or_default();
-    // The tab bar drew its tabs (both of them and the new-tab button), which is what
-    // makes the hit area below meaningful. The badge's own text is covered by the
-    // capture rather than here: on this fixture path the attention navigation is not
-    // attached, so no badge draws and asserting its text would be asserting nothing.
-    assert!(bar.contains('1'), "the first tab is drawn: {bar:?}");
-    assert!(bar.contains('2'), "the second tab is drawn: {bar:?}");
-    assert!(bar.contains('+'), "the new-tab button is drawn: {bar:?}");
-    // No cell of the bar answers with the badge's own action: the badge registers no
+        .unwrap_or_else(|| panic!("the workspace row draws its badge: {rows:?}"));
+    let workspace_rect = state
+        .hits
+        .workspaces
+        .iter()
+        .find(|hit| hit.workspace_id == "ws_1")
+        .map(|hit| hit.rect)
+        .expect("the sidebar registered its workspace row");
+    assert!(
+        super::contains(workspace_rect, (column, row_index as u16)),
+        "the badge's cells are inside the row: {workspace_rect:?} at ({column}, {row_index})"
+    );
+    assert!(
+        state.hits.attention.is_empty(),
+        "a workspace badge registers no attention hit: {:?}",
+        state
+            .hits
+            .attention
+            .iter()
+            .map(|hit| hit.rect)
+            .collect::<Vec<_>>()
+    );
+    let outcome = click(&mut state, column, row_index as u16);
+    let focused = outcome
+        .actions
+        .iter()
+        .filter_map(|action| match action {
+            ClientShellAction::Endpoint { request, .. } => match &request.method {
+                crate::api::schema::Method::WorkspaceFocus(target) => {
+                    Some(target.workspace_id.clone())
+                }
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        focused,
+        vec!["ws_1".to_string()],
+        "a click on the badge's cells selects the row's workspace"
+    );
+    assert!(
+        state.pane_panel_open.is_empty(),
+        "the badge has no action of its own: {:?}",
+        state.pane_panel_open
+    );
+}
+
+#[test]
+fn badged_tabs_keep_their_own_hit_area_and_no_badge_hit() {
+    let mut state = badged_tab_state();
+    let _ = state.compose(106, 30).expect("frame");
+    // No cell of the bar answers with a badge's own action: the badge registers no
     // hit, so every hit the bar has is the tab's.
     assert!(
         state.hits.attention.is_empty(),
