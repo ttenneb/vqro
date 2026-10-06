@@ -8,7 +8,7 @@ use tokio::sync::{mpsc, Notify};
 use crate::events::AppEvent;
 #[cfg(test)]
 use crate::layout::TypedNode;
-use crate::layout::{CollectionId, LayoutLeaf, Node, PaneId, PanePlacement, TileLayout};
+use crate::layout::{CollectionId, LayoutLeaf, PaneId, PanePlacement, TileLayout};
 use crate::legacy_collection_snapshot::LegacyCollectionSnapshot;
 use crate::pane::{PaneLaunchEnv, PaneState};
 use crate::render_signal::RenderSignal;
@@ -882,7 +882,7 @@ impl Tab {
             custom_name,
             number,
             root_pane: pane_id,
-            layout: TileLayout::from_saved(Node::Pane(pane_id), pane_id),
+            layout: TileLayout::for_pane(pane_id),
             legacy_collection_snapshots: HashMap::new(),
             panes,
             #[cfg(test)]
@@ -1437,7 +1437,7 @@ mod tests {
             .collect_tiled_pane(member, collection)
             .unwrap();
 
-        let replacement = TileLayout::from_typed_saved(
+        let replacement = TileLayout::from_tree(
             TypedNode::Split {
                 direction: Direction::Horizontal,
                 ratio: 0.5,
@@ -1445,7 +1445,6 @@ mod tests {
                 second: Box::new(TypedNode::Leaf(member)),
             },
             LayoutLeaf::Pane(root),
-            Vec::new(),
         )
         .unwrap();
         workspace.tabs[0].replace_layout_without_collections(replacement, root);

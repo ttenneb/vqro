@@ -40,7 +40,7 @@ impl App {
         }
     }
 
-    pub(super) fn capture_session_snapshot(&self) -> crate::persist::SessionSnapshot {
+    pub(crate) fn capture_session_snapshot(&self) -> crate::persist::SessionSnapshot {
         let mut snapshot = crate::persist::capture(
             &self.state.workspaces,
             &self.state.repositories,
@@ -58,18 +58,10 @@ impl App {
             .filter_map(|id| self.state.delegations.get(id).cloned())
             .collect();
         snapshot.collections_authority = self.collections_authority.clone();
-        let package_authority = self.collections_authority.phase
-            == crate::collections_extension_contract::CollectionsAuthorityPhaseV1::Package;
-        snapshot.collections_action_sequence = if package_authority {
-            self.next_collections_action_id
-        } else {
-            0
-        };
-        snapshot.version = if package_authority {
-            crate::persist::SNAPSHOT_VERSION
-        } else {
-            crate::persist::LEGACY_SNAPSHOT_WRITER_VERSION
-        };
+        // A previously durable high-water never decreases, even if authority
+        // is currently legacy/unavailable. Session v8 can always represent it.
+        snapshot.collections_action_sequence = self.next_collections_action_id;
+        snapshot.version = crate::persist::SNAPSHOT_VERSION;
         snapshot
     }
 

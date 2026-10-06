@@ -205,6 +205,51 @@ pub enum LayoutNode {
     },
 }
 
+/// Neutral, read-only tree export; independent from legacy pane-only layout methods.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct LayoutTreeDescription {
+    pub kind: String,
+    pub workspace_id: String,
+    pub tab_id: String,
+    pub zoomed: bool,
+    pub focused: LayoutTreeFocus,
+    pub root: LayoutTreeNode,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum LayoutTreeNode {
+    Pane {
+        pane_id: String,
+    },
+    Stack {
+        box_id: String,
+        selected: usize,
+        children: Vec<LayoutTreeNode>,
+    },
+    Split {
+        direction: SplitDirection,
+        ratio: f32,
+        first: Box<LayoutTreeNode>,
+        second: Box<LayoutTreeNode>,
+    },
+    #[serde(other)]
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum LayoutTreeFocus {
+    Pane {
+        pane_id: String,
+    },
+    Stack {
+        box_id: String,
+    },
+    #[serde(other)]
+    Unknown,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema, Default)]
 pub struct LayoutPane {
     #[serde(default, skip_serializing_if = "Option::is_none")]

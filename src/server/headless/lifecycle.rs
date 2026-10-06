@@ -75,29 +75,7 @@ impl HeadlessServer {
             }
         }
 
-        let mut snapshot = crate::persist::capture(
-            &self.app.state.workspaces,
-            &self.app.state.repositories,
-            &self.app.state.space_order,
-            &self.app.state.terminals,
-            &self.app.terminal_runtimes,
-            self.app.state.active,
-            self.app.state.selected,
-        );
-        snapshot.delegations = self
-            .app
-            .state
-            .delegations
-            .preorder()
-            .into_iter()
-            .filter_map(|id| self.app.state.delegations.get(id).cloned())
-            .collect();
-        snapshot.collections_authority = self.app.collections_authority.clone();
-        if self.app.collections_authority.phase
-            == crate::collections_extension_contract::CollectionsAuthorityPhaseV1::Package
-        {
-            snapshot.version = crate::persist::SNAPSHOT_VERSION;
-        }
+        let snapshot = self.app.capture_session_snapshot();
 
         let mut handoff_entries = Vec::new();
         for (terminal_id, runtime) in self.app.terminal_runtimes.iter() {

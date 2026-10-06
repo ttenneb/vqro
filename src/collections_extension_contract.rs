@@ -310,16 +310,6 @@ impl Default for CollectionsAuthorityV1 {
 }
 
 impl CollectionsAuthorityV1 {
-    pub(crate) fn is_default_legacy(&self) -> bool {
-        self.phase == CollectionsAuthorityPhaseV1::Legacy
-            && self.contract == COLLECTIONS_AUTHORITY_CONTRACT_V1
-            && self.authority_epoch == 1
-            && self.package.is_none()
-            && self.state.is_none()
-            && self.migration_id.is_none()
-            && self.minimum_reader_version == COLLECTIONS_PACKAGE_AUTHORITY_MINIMUM_READER_VERSION
-    }
-
     pub fn validate(&self) -> Result<(), CollectionsContractError> {
         if self.contract != COLLECTIONS_AUTHORITY_CONTRACT_V1
             || self.authority_epoch == 0

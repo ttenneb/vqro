@@ -62,11 +62,27 @@ fn spawn_server_with_env(
     api_socket: &Path,
     extra_env: &[(&str, &str)],
 ) -> SpawnedHerdr {
+    spawn_server_binary_with_env(
+        Path::new(env!("CARGO_BIN_EXE_vqro")),
+        config_home,
+        runtime_dir,
+        api_socket,
+        extra_env,
+    )
+}
+
+fn spawn_server_binary_with_env(
+    binary: &Path,
+    config_home: &Path,
+    runtime_dir: &Path,
+    api_socket: &Path,
+    extra_env: &[(&str, &str)],
+) -> SpawnedHerdr {
     fs::create_dir_all(config_home.join("vqro-dev")).unwrap();
     fs::create_dir_all(runtime_dir).unwrap();
     fs::write(
         config_home.join("vqro-dev/config.toml"),
-        "onboarding = false\n",
+        "onboarding = false\n[update]\nversion_check = false\nmanifest_check = false\n",
     )
     .unwrap();
 
@@ -78,7 +94,7 @@ fn spawn_server_with_env(
             pixel_height: 0,
         })
         .unwrap();
-    let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_vqro"));
+    let mut cmd = CommandBuilder::new(binary);
     cmd.arg("server");
     cmd.env("XDG_CONFIG_HOME", config_home);
     cmd.env("XDG_RUNTIME_DIR", runtime_dir);
@@ -1200,17 +1216,36 @@ fn assert_saved_handoff_collection(session_path: &Path) {
         serde_json::from_slice(&fs::read(session_path).unwrap()).unwrap();
     let workspace = &saved["workspaces"][0];
     let tab = &workspace["tabs"][0];
-    assert_eq!(
-        tab["layout"]["Split"]["first"]["Collection"],
-        "collection_6100001"
-    );
+    let stack = &tab["layout"]["Split"]["first"]["Stack"];
+    let is_tree = saved["version"].as_u64().unwrap() == current_snapshot_version() as u64;
+    if is_tree {
+        assert_eq!(stack["id"], "collection_6100001");
+    } else {
+        assert_eq!(
+            tab["layout"]["Split"]["first"]["Collection"],
+            "collection_6100001"
+        );
+    }
     let collections = tab["collections"].as_array().unwrap();
     assert_eq!(collections.len(), 1);
     let collection = &collections[0];
     assert_eq!(collection["id"], "collection_6100001");
-    let members = collection["members"].as_array().unwrap();
+    let members: Vec<_> = if is_tree {
+        assert!(collection.get("members").is_none());
+        assert!(collection.get("selected").is_none());
+        assert_eq!(stack["selected"], 0);
+        stack["children"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|child| child["Pane"].clone())
+            .collect()
+    } else {
+        let members = collection["members"].as_array().unwrap();
+        assert_eq!(collection["selected"], members[0]);
+        members.clone()
+    };
     assert_eq!(members.len(), 2);
-    assert_eq!(collection["selected"], members[0]);
     assert_eq!(collection["archived"].as_array().unwrap().len(), 0);
     for (index, raw) in members.iter().enumerate() {
         let raw = raw.as_u64().unwrap().to_string();
@@ -1248,16 +1283,59 @@ fn assert_handoff_pane_identity(socket: &Path, target: &str, number: usize) {
     assert_eq!(pane["tab_id"], "w2:t1");
 }
 
+fn current_snapshot_version() -> u32 {
+    include_str!("../src/persist/snapshot.rs")
+        .lines()
+        .find_map(|line| line.strip_prefix("pub(crate) const SNAPSHOT_VERSION: u32 = "))
+        .expect("snapshot source of truth")
+        .trim_end_matches(';')
+        .parse()
+        .unwrap()
+}
+
 #[test]
 fn live_handoff_preserves_hidden_collection_member_identity_and_io() {
+    hidden_member_handoff(None, None);
+}
+
+#[test]
+#[ignore = "requires the approved previous binary in a private root"]
+fn session_v8_cross_version_hidden_member_conversion_and_downgrade_refusal() {
+    let old =
+        PathBuf::from(std::env::var("SESSION_V8_OLD_BINARY").expect("pinned previous binary"));
+    let target = std::env::var("SESSION_V8_TARGET_BINARY")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from(env!("CARGO_BIN_EXE_vqro")));
+    hidden_member_handoff(Some(&old), Some(&target));
+}
+
+fn hidden_member_handoff(source_binary: Option<&Path>, target_binary: Option<&Path>) {
     let _lock = test_lock();
     let base = unique_test_dir();
+    fs::create_dir_all(&base).unwrap();
+    let pinned_source = source_binary.map(|binary| {
+        use sha2::Digest;
+        let bytes = fs::read(binary).unwrap();
+        assert_eq!(
+            format!("{:x}", sha2::Sha256::digest(&bytes)),
+            "12341bd294acdeeb3c39480b8ea9aac279c80b8e3368b5657ac34352e4392469"
+        );
+        let copy = base.join("previous-vqro");
+        fs::copy(binary, &copy).unwrap();
+        copy
+    });
+    let source_binary = pinned_source.as_deref();
     let config_home = base.join("config");
     let runtime_dir = base.join("runtime");
     let api_socket = runtime_dir.join("herdr.sock");
     let client_socket = runtime_dir.join("herdr-client.sock");
     let session_dir = config_home.join("vqro-dev");
     fs::create_dir_all(&session_dir).unwrap();
+    if source_binary.is_some() {
+        // The approved deployed binary is release-profile (vqro), while the
+        // candidate is debug-profile (vqro-dev). Both must use this one private store.
+        std::os::unix::fs::symlink("vqro-dev", config_home.join("vqro")).unwrap();
+    }
     let mut fixture: serde_json::Value = serde_json::from_str(include_str!(
         "fixtures/session/hidden-member-handoff-v7.json"
     ))
@@ -1295,7 +1373,9 @@ fn live_handoff_preserves_hidden_collection_member_identity_and_io() {
     let state_home = base.join("state");
     fs::create_dir_all(&home).unwrap();
     fs::create_dir_all(&state_home).unwrap();
-    let spawned = spawn_server_with_env(
+    let startup_started = std::time::Instant::now();
+    let spawned = spawn_server_binary_with_env(
+        source_binary.unwrap_or_else(|| Path::new(env!("CARGO_BIN_EXE_vqro"))),
         &config_home,
         &runtime_dir,
         &api_socket,
@@ -1307,6 +1387,8 @@ fn live_handoff_preserves_hidden_collection_member_identity_and_io() {
     register_runtime_dir(&runtime_dir);
     wait_for_socket(&api_socket, Duration::from_secs(10));
     wait_for_api(&api_socket, Duration::from_secs(10));
+    let startup_durable_by_api_ready = startup_started.elapsed();
+    let close_started = std::time::Instant::now();
     assert_ok(request(
         &api_socket,
         serde_json::json!({"id":"test:warmup-close","method":"workspace.close","params":{"workspace_id":"w1"}}),
@@ -1314,10 +1396,12 @@ fn live_handoff_preserves_hidden_collection_member_identity_and_io() {
     assert_hidden_handoff_collection(&api_socket);
     // Closing the warmup triggers a real host checkpoint. Read its actual raw IDs,
     // not the seed's IDs (which were remapped at startup) or a test alias derivation.
+    // The existing save debounce is five seconds: a five-second observer deadline
+    // races that cadence under load. Keep the exact content predicate with margin.
     let session_path = session_dir.join("session.json");
     let mut source = serde_json::Value::Null;
     assert!(
-        support::wait_until(Duration::from_secs(5), Duration::from_millis(25), || {
+        support::wait_until(Duration::from_secs(20), Duration::from_millis(25), || {
             source = fs::read(&session_path)
                 .ok()
                 .and_then(|bytes| serde_json::from_slice(&bytes).ok())
@@ -1333,8 +1417,13 @@ fn live_handoff_preserves_hidden_collection_member_identity_and_io() {
                             .all(|raw| raw.parse::<u32>().is_ok_and(|raw| raw <= 6))
                     })
         }),
-        "source checkpoint: {source}"
+        "source checkpoint: {source}; server log: {}",
+        fs::read_to_string(session_dir.join("vqro-server.log")).unwrap_or_default()
     );
+    println!("source checkpoint timing: source={} startup_durable_by_api_ready_ms={} close_to_observed_checkpoint_ms={} total_startup_to_observed_checkpoint_ms={}",
+        if source_binary.is_some() {"pinned-master-release"} else {"candidate-debug"},
+        startup_durable_by_api_ready.as_millis(), close_started.elapsed().as_millis(),
+        startup_started.elapsed().as_millis());
     assert_saved_handoff_collection(&session_path);
 
     let mut owners = Vec::new();
@@ -1424,9 +1513,30 @@ fn live_handoff_preserves_hidden_collection_member_identity_and_io() {
     assert_eq!(server_generation, generation);
     assert!(error.is_none());
     wait_for_client_shell_bootstrap(&mut client_stream, Duration::from_secs(5)).unwrap();
+    if source_binary.is_some() {
+        assert!(
+            source["version"].as_u64().unwrap() < current_snapshot_version() as u64,
+            "cross-version fence requires an actual old writer checkpoint"
+        );
+        // Seed valid v7 legacy-authority metadata at the last durable checkpoint.
+        // No package grant is fabricated and running pane state is untouched.
+        source = serde_json::from_slice(&fs::read(&session_path).unwrap()).unwrap();
+        source["version"] = serde_json::json!(7);
+        source["collections_authority"] = serde_json::json!({
+            "contract":"collections_authority.v1","phase":"legacy",
+            "authority_epoch":1,"minimum_reader_version":7
+        });
+        source["collections_action_sequence"] = serde_json::json!(9);
+        fs::write(&session_path, source.to_string()).unwrap();
+        assert_eq!(source["collections_action_sequence"], 9);
+    }
+    let source_bytes = fs::read(&session_path).unwrap();
+    let params = target_binary
+        .map(|binary| serde_json::json!({"import_exe":binary}))
+        .unwrap_or_else(|| serde_json::json!({}));
     assert_ok(request(
         &api_socket,
-        serde_json::json!({"id":"test:handoff","method":"server.live_handoff","params":{}}),
+        serde_json::json!({"id":"test:handoff","method":"server.live_handoff","params":params}),
     ));
     assert!(wait_for_message_variant(
         &mut client_stream,
@@ -1439,6 +1549,53 @@ fn live_handoff_preserves_hidden_collection_member_identity_and_io() {
     wait_for_api(&api_socket, Duration::from_secs(10));
     assert_hidden_handoff_collection(&api_socket);
     assert_saved_handoff_collection(&session_dir.join("session.json"));
+    if source_binary.is_some() {
+        let converted: serde_json::Value =
+            serde_json::from_slice(&fs::read(&session_path).unwrap()).unwrap();
+        assert_eq!(
+            converted["version"],
+            current_snapshot_version(),
+            "handoff must durably publish the new format"
+        );
+        let prefix = format!(
+            "session.json.pre-v{}-v{}.",
+            current_snapshot_version(),
+            source["version"]
+        );
+        let backups: Vec<_> = fs::read_dir(&session_dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| {
+                path.file_name()
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .starts_with(&prefix)
+            })
+            .collect();
+        assert_eq!(
+            backups.len(),
+            1,
+            "handoff conversion must back up the last source checkpoint"
+        );
+        assert_eq!(fs::read(&backups[0]).unwrap(), source_bytes);
+        let log = wait_for_file_contains(
+            &session_dir.join("vqro-server.log"),
+            "exported_collections_action_sequence=0",
+            Duration::from_secs(5),
+        );
+        assert!(
+            log.contains("source_snapshot_version=6"),
+            "must exercise the real old live exporter"
+        );
+        assert!(
+            converted["collections_action_sequence"]
+                .as_u64()
+                .unwrap_or(0)
+                >= source["collections_action_sequence"].as_u64().unwrap(),
+            "old live export must not lower the durable action high-water: {converted}"
+        );
+    }
 
     // Public IDs alone miss the bug: peers can still name pre-handoff raw IDs.
     // Exact pane/terminal pairing also proves each tested alias names a live pane.
@@ -1482,6 +1639,53 @@ fn live_handoff_preserves_hidden_collection_member_identity_and_io() {
         &api_socket,
         serde_json::json!({"id":"test:stop","method":"server.stop","params":{}}),
     ));
+    if let Some(previous) = source_binary {
+        assert!(
+            support::wait_until(Duration::from_secs(5), Duration::from_millis(25), || {
+                !api_socket.exists()
+            }),
+            "new server must stop before downgrade test"
+        );
+        let authoritative = fs::read(&session_path).unwrap();
+        let after_ordinary_save: serde_json::Value =
+            serde_json::from_slice(&authoritative).unwrap();
+        assert!(
+            after_ordinary_save["collections_action_sequence"]
+                .as_u64()
+                .unwrap_or(0)
+                >= source["collections_action_sequence"].as_u64().unwrap(),
+            "ordinary post-import save must retain the adopted action high-water"
+        );
+        let rejected = spawn_server_binary_with_env(
+            previous,
+            &config_home,
+            &runtime_dir,
+            &api_socket,
+            &[
+                ("HOME", home.to_str().unwrap()),
+                ("XDG_STATE_HOME", state_home.to_str().unwrap()),
+            ],
+        );
+        wait_for_api(&api_socket, Duration::from_secs(10));
+        // The previous build refuses restoring future bytes and fences saves;
+        // it remains available only for generic recovery of an empty session.
+        let log = wait_for_file_contains(
+            &session_dir.join("vqro-server.log"),
+            &format!(
+                "session file version {} is newer than supported",
+                current_snapshot_version()
+            ),
+            Duration::from_secs(5),
+        );
+        assert!(log.contains("session load rejected"));
+        assert_eq!(fs::read(&session_path).unwrap(), authoritative);
+        assert_ok(request(
+            &api_socket,
+            serde_json::json!({"id":"test:downgrade-stop","method":"server.stop","params":{}}),
+        ));
+        drop(rejected);
+        assert_eq!(fs::read(&session_path).unwrap(), authoritative);
+    }
     cleanup_test_base(&base);
 }
 
@@ -2703,7 +2907,7 @@ fn run_legacy_v1_source_harness(commit: bool) {
         wait_for_api(&api_socket, Duration::from_secs(10));
         let published: serde_json::Value =
             serde_json::from_slice(&fs::read(&session_path).unwrap()).unwrap();
-        assert_eq!(published["version"], 6);
+        assert_eq!(published["version"], current_snapshot_version());
         assert!(published["workspaces"].as_array().unwrap().is_empty());
         let _ = request(
             &api_socket,

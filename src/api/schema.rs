@@ -214,6 +214,8 @@ pub enum Method {
     PaneTelemetry(PaneTelemetryParams),
     #[serde(rename = "layout.export")]
     LayoutExport(LayoutExportParams),
+    #[serde(rename = "layout.tree.export")]
+    LayoutTreeExport(LayoutExportParams),
     #[serde(rename = "layout.apply")]
     LayoutApply(LayoutApplyParams),
     #[serde(rename = "layout.set_split_ratio")]

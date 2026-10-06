@@ -11,8 +11,8 @@ use crate::workspace::Workspace;
 
 /// Current structural session snapshot format version.
 /// Maximum snapshot version this binary can read.
-pub(crate) const SNAPSHOT_VERSION: u32 = 7;
-/// Legacy-authority sessions remain byte-compatible until the atomic authority cutover.
+pub(crate) const SNAPSHOT_VERSION: u32 = 8;
+/// Admitted input version from pre-tree legacy-authority writers. Never written.
 pub(crate) const LEGACY_SNAPSHOT_WRITER_VERSION: u32 = 6;
 /// Pane history has no terminal-identity fields and remains wire-compatible at v4.
 pub(super) const HISTORY_SNAPSHOT_VERSION: u32 = 4;
@@ -44,11 +44,8 @@ pub struct SessionSnapshot {
     /// Session-wide delegation provenance. Pane IDs refer to pre-restore IDs.
     #[serde(default)]
     pub delegations: Vec<crate::delegation::DelegationRecord>,
-    /// Single durable Collections feature-authority owner. Version 7 readers require this field.
-    #[serde(
-        default,
-        skip_serializing_if = "crate::collections_extension_contract::CollectionsAuthorityV1::is_default_legacy"
-    )]
+    /// Single durable Collections feature-authority owner. Required since version 7.
+    #[serde(default)]
     pub collections_authority: crate::collections_extension_contract::CollectionsAuthorityV1,
     /// Durable high-water mark for package action tickets and state idempotency keys.
     #[serde(default, skip_serializing_if = "is_zero_u64")]
@@ -136,14 +133,11 @@ pub struct TabSnapshot {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CollectionSnapshot {
     pub id: crate::layout::CollectionId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
-    #[serde(default)]
-    pub members: Vec<u32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub selected: Option<u32>,
     #[serde(default)]
     pub archived: Vec<u32>,
 }
@@ -152,7 +146,7 @@ pub struct CollectionSnapshot {
 #[serde(tag = "type", content = "id", rename_all = "snake_case")]
 pub enum LayoutLeafSnapshot {
     Pane(u32),
-    Collection(crate::layout::CollectionId),
+    Stack(crate::layout::CollectionId),
 }
 
 /// Bounded persistence DTO. Validation into a logical `TerminalId` happens in
@@ -312,11 +306,15 @@ pub struct PaneHistorySnapshot {
     pub lines: usize,
 }
 
-/// Serializable BSP tree.
+/// Canonical durable tree. Membership and selection have no parallel record.
 #[derive(Clone, Serialize, Deserialize)]
 pub enum LayoutSnapshot {
     Pane(u32),
-    Collection(crate::layout::CollectionId),
+    Stack {
+        id: crate::layout::CollectionId,
+        selected: usize,
+        children: Vec<LayoutSnapshot>,
+    },
     Split {
         direction: DirectionSnapshot,
         ratio: f32,
@@ -390,12 +388,22 @@ struct RawSessionSnapshot {
     collections_action_sequence: u64,
 }
 
-fn migrate_snapshot(raw: RawSessionSnapshot) -> Result<(SessionSnapshot, bool), String> {
+fn migrate_snapshot(
+    raw: RawSessionSnapshot,
+    normalize: bool,
+) -> Result<(SessionSnapshot, bool), String> {
     let original_version = raw.version;
     let workspaces = raw
         .workspaces
         .into_iter()
-        .map(migrate_workspace)
+        .enumerate()
+        .map(|(index, mut workspace)| {
+            if original_version <= 7 {
+                super::convert_v7::convert_workspace(&mut workspace)
+                    .map_err(|error| format!("workspace {index}: {error}"))?;
+            }
+            migrate_workspace(workspace)
+        })
         .collect::<Result<Vec<_>, _>>()?;
     let (migrated_repositories, migrated_space_order) =
         crate::repository::migrate_workspace_projection(&workspaces);
@@ -410,11 +418,11 @@ fn migrate_snapshot(raw: RawSessionSnapshot) -> Result<(SessionSnapshot, bool), 
         raw.space_order
     };
     let collections_authority = match raw.collections_authority {
-        Some(authority) if original_version >= SNAPSHOT_VERSION => authority,
+        Some(authority) if original_version >= 7 => authority,
         Some(_) => {
             return Err("Collections authority cannot appear before snapshot version 7".into())
         }
-        None if original_version >= SNAPSHOT_VERSION => {
+        None if original_version >= 7 => {
             return Err("snapshot version 7 requires Collections authority".into());
         }
         None => crate::collections_extension_contract::CollectionsAuthorityV1::default(),
@@ -422,7 +430,7 @@ fn migrate_snapshot(raw: RawSessionSnapshot) -> Result<(SessionSnapshot, bool), 
     collections_authority
         .validate()
         .map_err(|error| format!("invalid Collections authority: {error}"))?;
-    if original_version < SNAPSHOT_VERSION && raw.collections_action_sequence != 0 {
+    if original_version < 7 && raw.collections_action_sequence != 0 {
         return Err("Collections action sequence cannot appear before snapshot version 7".into());
     }
     if raw.collections_action_sequence > MAX_COLLECTIONS_ACTION_SEQUENCE {
@@ -443,7 +451,7 @@ fn migrate_snapshot(raw: RawSessionSnapshot) -> Result<(SessionSnapshot, bool), 
         collections_action_sequence: raw.collections_action_sequence,
     };
     super::restore::validate_snapshot_pane_admission(&snapshot)?;
-    let normalized = normalize_terminal_identities(&mut snapshot, false)?;
+    let normalized = normalize && normalize_terminal_identities(&mut snapshot, false)?;
     Ok((snapshot, normalized))
 }
 
@@ -492,13 +500,7 @@ where
     T: FnMut() -> std::io::Result<crate::workspace::TabId>,
     U: FnMut() -> std::io::Result<crate::terminal::TerminalId>,
 {
-    let target_version = if snapshot.collections_authority.phase
-        == crate::collections_extension_contract::CollectionsAuthorityPhaseV1::Package
-    {
-        SNAPSHOT_VERSION
-    } else {
-        LEGACY_SNAPSHOT_WRITER_VERSION
-    };
+    let target_version = SNAPSHOT_VERSION;
     let schema_version_changed = snapshot.version != target_version;
     let mut changed = schema_version_changed;
     let mut internal_identities_changed = false;
@@ -508,7 +510,11 @@ where
     fn collect_layout_panes(layout: &LayoutSnapshot, panes: &mut Vec<u32>) {
         match layout {
             LayoutSnapshot::Pane(id) => panes.push(*id),
-            LayoutSnapshot::Collection(_) => {}
+            LayoutSnapshot::Stack { children, .. } => {
+                for child in children {
+                    collect_layout_panes(child, panes);
+                }
+            }
             LayoutSnapshot::Split { first, second, .. } => {
                 collect_layout_panes(first, panes);
                 collect_layout_panes(second, panes);
@@ -902,7 +908,9 @@ fn legacy_identity_cwd(snap: &LegacyWorkspaceSnapshot) -> PathBuf {
 fn first_pane_id_in_layout(layout: &LayoutSnapshot) -> Option<u32> {
     match layout {
         LayoutSnapshot::Pane(id) => Some(*id),
-        LayoutSnapshot::Collection(_) => None,
+        LayoutSnapshot::Stack {
+            selected, children, ..
+        } => children.get(*selected).and_then(first_pane_id_in_layout),
         LayoutSnapshot::Split { first, second, .. } => {
             first_pane_id_in_layout(first).or_else(|| first_pane_id_in_layout(second))
         }
@@ -933,7 +941,11 @@ pub(crate) fn reserve_empty_collection(
                     direction: direction.clone(),
                     ratio,
                     first: Box::new(old),
-                    second: Box::new(LayoutSnapshot::Collection(collection_id)),
+                    second: Box::new(LayoutSnapshot::Stack {
+                        id: collection_id,
+                        selected: 0,
+                        children: Vec::new(),
+                    }),
                 };
                 true
             }
@@ -977,12 +989,10 @@ pub(crate) fn reserve_empty_collection(
     tab.collections.push(CollectionSnapshot {
         id: collection_id,
         label: None,
-        members: Vec::new(),
-        selected: None,
         archived: Vec::new(),
     });
     if focus {
-        tab.focused_leaf = Some(LayoutLeafSnapshot::Collection(collection_id));
+        tab.focused_leaf = Some(LayoutLeafSnapshot::Stack(collection_id));
     }
     Ok(())
 }
@@ -1001,7 +1011,7 @@ pub fn capture(
     selected: usize,
 ) -> SessionSnapshot {
     SessionSnapshot {
-        version: LEGACY_SNAPSHOT_WRITER_VERSION,
+        version: SNAPSHOT_VERSION,
         workspaces: workspaces
             .iter()
             .map(|workspace| capture_workspace(workspace, terminals, terminal_runtimes))
@@ -1122,16 +1132,12 @@ fn capture_tab(
             },
         );
     }
-    // Snapshot v4 remains the exact legacy shape. This joins the extracted
-    // neutral placement state with temporary Collections compatibility policy;
-    // it is legacy repair, not package-authoritative Collections persistence.
+    // Only product policy is persisted here; stack placement is in the tree.
     let mut collections: Vec<_> = tab
         .collections()
         .map(|collection| CollectionSnapshot {
             id: collection.id(),
             label: collection.legacy_label().map(str::to_owned),
-            members: collection.members().iter().map(|id| id.raw()).collect(),
-            selected: collection.selected().map(|id| id.raw()),
             archived: collection
                 .legacy_archived_members()
                 .map(|id| id.raw())
@@ -1201,16 +1207,22 @@ fn capture_pane_history(
 fn capture_layout_leaf(leaf: crate::layout::LayoutLeaf) -> LayoutLeafSnapshot {
     match leaf {
         crate::layout::LayoutLeaf::Pane(id) => LayoutLeafSnapshot::Pane(id.raw()),
-        crate::layout::LayoutLeaf::Stack(id) => LayoutLeafSnapshot::Collection(id.into()),
+        crate::layout::LayoutLeaf::Stack(id) => LayoutLeafSnapshot::Stack(id.into()),
     }
 }
 
 fn capture_typed_node(node: &crate::layout::TypedNode) -> LayoutSnapshot {
     match node {
         crate::layout::TypedNode::Leaf(id) => LayoutSnapshot::Pane(id.raw()),
-        // Explicit v6/v7 projection; remove in stage 2. Production only creates
-        // flat pane stacks until the nested session codec is introduced.
-        crate::layout::TypedNode::Stack { id, .. } => LayoutSnapshot::Collection((*id).into()),
+        crate::layout::TypedNode::Stack {
+            id,
+            selected,
+            children,
+        } => LayoutSnapshot::Stack {
+            id: (*id).into(),
+            selected: *selected,
+            children: children.iter().map(capture_typed_node).collect(),
+        },
         crate::layout::TypedNode::Split {
             direction,
             ratio,
@@ -1262,7 +1274,27 @@ pub(super) fn parse_snapshot_with_status(content: &str) -> Result<(SessionSnapsh
             raw.version, SNAPSHOT_VERSION
         ));
     }
-    migrate_snapshot(raw)
+    migrate_snapshot(raw, true)
+}
+
+/// Handoff converts legacy layout DTOs without repairing identity. The manifest
+/// validator must still prove canonical identities before accepting descriptors.
+#[cfg(unix)]
+pub(crate) fn deserialize_handoff_snapshot<'de, D>(
+    deserializer: D,
+) -> Result<SessionSnapshot, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = RawSessionSnapshot::deserialize(deserializer)?;
+    if raw.version > SNAPSHOT_VERSION {
+        return Err(serde::de::Error::custom(
+            "downgrade unsupported: future handoff snapshot",
+        ));
+    }
+    migrate_snapshot(raw, false)
+        .map(|(snapshot, _)| snapshot)
+        .map_err(serde::de::Error::custom)
 }
 
 pub(crate) fn parse_snapshot(content: &str) -> Result<SessionSnapshot, String> {
@@ -1364,7 +1396,7 @@ mod tests {
     fn root_split_ratio(tab: &TabSnapshot) -> Option<f32> {
         match &tab.layout {
             LayoutSnapshot::Split { ratio, .. } => Some(*ratio),
-            LayoutSnapshot::Pane(_) | LayoutSnapshot::Collection(_) => None,
+            LayoutSnapshot::Pane(_) | LayoutSnapshot::Stack { .. } => None,
         }
     }
 
@@ -1458,7 +1490,7 @@ mod tests {
         assert_eq!(candidate.workspaces[0].tabs[0].collections.len(), 1);
         assert!(matches!(
             candidate.workspaces[0].tabs[0].focused_leaf,
-            Some(LayoutLeafSnapshot::Collection(id)) if id == collection_id
+            Some(LayoutLeafSnapshot::Stack(id)) if id == collection_id
         ));
         assert!(state.workspaces[0].tabs[0]
             .collection(collection_id)
@@ -1486,7 +1518,7 @@ mod tests {
             delegations: Vec::new(),
             collections_authority: Default::default(),
             collections_action_sequence: 0,
-            version: LEGACY_SNAPSHOT_WRITER_VERSION,
+            version: SNAPSHOT_VERSION,
             repositories: Vec::new(),
             space_order: Vec::new(),
             workspaces: vec![],
@@ -1593,7 +1625,7 @@ mod tests {
             sidebar_width: Some(26),
             sidebar_section_split: Some(0.5),
             collapsed_space_keys: std::collections::HashSet::new(),
-            version: LEGACY_SNAPSHOT_WRITER_VERSION,
+            version: SNAPSHOT_VERSION,
         };
 
         let json = serde_json::to_string_pretty(&snap).unwrap();
@@ -1623,7 +1655,7 @@ mod tests {
     fn current_session_fixture_parses() {
         let snap = parse_snapshot(session_fixture("current-herdr")).unwrap();
 
-        assert_eq!(snap.version, LEGACY_SNAPSHOT_WRITER_VERSION);
+        assert_eq!(snap.version, SNAPSHOT_VERSION);
         assert_eq!(snap.workspaces.len(), 2);
         assert_eq!(snap.active, Some(0));
         assert_eq!(snap.selected, 0);
@@ -1640,7 +1672,7 @@ mod tests {
     fn current_dev_session_fixture_parses_additive_fields() {
         let snap = parse_snapshot(session_fixture("current-herdr-dev")).unwrap();
 
-        assert_eq!(snap.version, LEGACY_SNAPSHOT_WRITER_VERSION);
+        assert_eq!(snap.version, SNAPSHOT_VERSION);
         assert_eq!(snap.workspaces.len(), 2);
         assert_eq!(snap.sidebar_section_split, Some(0.4));
         assert_eq!(snap.workspaces[0].active_tab, 1);
@@ -1650,7 +1682,7 @@ mod tests {
     #[test]
     fn old_snapshot_defaults_sidebar_fields() {
         let json = serde_json::json!({
-            "version": SNAPSHOT_VERSION - 1,
+            "version": LEGACY_SNAPSHOT_WRITER_VERSION,
             "workspaces": [],
             "active": null,
             "selected": 0
@@ -1666,7 +1698,7 @@ mod tests {
     #[test]
     fn old_pane_snapshot_with_embedded_history_is_ignored() {
         let json = serde_json::json!({
-            "version": SNAPSHOT_VERSION - 1,
+            "version": LEGACY_SNAPSHOT_WRITER_VERSION,
             "workspaces": [{
                 "id": "wtest",
                 "identity_cwd": "/tmp",
@@ -1704,7 +1736,7 @@ mod tests {
         let snap = parse_snapshot(session_fixture("legacy-pre-tabs-v2")).unwrap();
         let ws = &snap.workspaces[0];
 
-        assert_eq!(snap.version, LEGACY_SNAPSHOT_WRITER_VERSION);
+        assert_eq!(snap.version, SNAPSHOT_VERSION);
         assert_eq!(snap.workspaces.len(), 1);
         assert_eq!(ws.custom_name.as_deref(), Some("legacy"));
         assert_eq!(ws.identity_cwd, PathBuf::from("/tmp/pion"));
@@ -1829,6 +1861,46 @@ mod tests {
         let snapshot = capture_from_state(&state);
         assert_eq!(snapshot.workspaces[0].tabs[0].focused, Some(second.raw()));
         assert_ne!(snapshot.workspaces[0].tabs[0].focused, Some(root.raw()));
+    }
+
+    #[test]
+    fn maximal_admitted_legacy_split_chain_survives_v8_reader_roundtrip() {
+        let last = crate::admission::MAX_TAB_PANES as u32;
+        let mut layout = serde_json::json!({"Collection":"collection_900001"});
+        for id in 1..last {
+            layout = serde_json::json!({"Split":{
+                "direction":"Horizontal","ratio":0.5,
+                "first":{"Pane":id},"second":layout
+            }});
+        }
+        let panes: serde_json::Map<String, serde_json::Value> = (1..=last)
+            .map(|id| {
+                (
+                    id.to_string(),
+                    serde_json::json!({
+                        "cwd":"/", "terminal_id":format!("term_{id:032x}")
+                    }),
+                )
+            })
+            .collect();
+        let original = serde_json::json!({
+            "version":6,"repositories":[],"space_order":[],"active":0,"selected":0,
+            "workspaces":[{"id":"w1","identity_cwd":"/","active_tab":0,
+                "public_tab_numbers":[1],"next_public_tab_number":2,
+                "tabs":[{"id":"tab_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "layout":layout,"panes":panes,"focused":last,"root_pane":last,
+                "zoomed":false,"collections":[{"id":"collection_900001",
+                    "members":[last],"selected":last,"archived":[]}]
+            }]}]
+        });
+        let legacy = serde_json::to_string(&original).unwrap();
+        let converted = parse_snapshot(&legacy).expect("legacy source must be reader-valid");
+        let current = serde_json::to_string(&converted).unwrap();
+        assert!(
+            parse_snapshot(&current).is_ok(),
+            "a successful conversion must not publish an unreadable v8 file: {:?}",
+            parse_snapshot(&current).err()
+        );
     }
 
     #[test]
@@ -2086,7 +2158,7 @@ mod tests {
     fn old_unversioned_snapshot_normalizes_to_current_version() {
         let json = r#"{"workspaces":[],"active":null,"selected":0}"#;
         let snap = parse_snapshot(json).unwrap();
-        assert_eq!(snap.version, LEGACY_SNAPSHOT_WRITER_VERSION);
+        assert_eq!(snap.version, SNAPSHOT_VERSION);
     }
 
     #[test]
@@ -2105,7 +2177,7 @@ mod tests {
         }"#;
         let (snapshot, changed) = parse_snapshot_with_status(json).unwrap();
         assert!(changed);
-        assert_eq!(snapshot.version, LEGACY_SNAPSHOT_WRITER_VERSION);
+        assert_eq!(snapshot.version, SNAPSHOT_VERSION);
         let tab_id = tab_id_for_snapshot(&snapshot.workspaces[0].tabs[0]).unwrap();
         let first =
             terminal_id_for_pane_snapshot(&snapshot.workspaces[0].tabs[0].panes[&1]).unwrap();
@@ -2209,7 +2281,7 @@ mod tests {
 
         let (snapshot, changed) = parse_snapshot_with_status(&json.to_string()).unwrap();
         assert!(changed);
-        assert_eq!(snapshot.version, LEGACY_SNAPSHOT_WRITER_VERSION);
+        assert_eq!(snapshot.version, SNAPSHOT_VERSION);
         assert_eq!(snapshot.workspaces[0].id.as_deref(), Some("w1"));
         assert_eq!(snapshot.workspaces[1].id.as_deref(), Some("w3"));
         assert_eq!(snapshot.workspaces[2].id.as_deref(), Some("w2"));
@@ -2338,7 +2410,18 @@ mod tests {
             "selected":0
         });
         let (snapshot, changed) = parse_snapshot_with_status(&json.to_string()).unwrap();
-        assert!(!changed);
+        assert!(changed, "legacy schema must roll forward");
+        assert_eq!(snapshot.version, SNAPSHOT_VERSION);
+        assert_eq!(
+            snapshot.workspaces[0].tabs[0]
+                .id
+                .as_ref()
+                .unwrap()
+                .validated()
+                .unwrap()
+                .as_str(),
+            json["workspaces"][0]["tabs"][0]["id"].as_str().unwrap()
+        );
         assert_eq!(
             snapshot.workspaces[0].next_public_tab_number,
             usize::MAX - 1
@@ -2509,7 +2592,7 @@ mod tests {
         snapshot.collections_action_sequence = 9;
         let encoded = serde_json::to_string(&snapshot).unwrap();
         let restored = parse_snapshot(&encoded).unwrap();
-        assert_eq!(restored.version, 7);
+        assert_eq!(restored.version, SNAPSHOT_VERSION);
         assert_eq!(
             restored.collections_authority,
             snapshot.collections_authority
@@ -2624,11 +2707,16 @@ mod tests {
             .flat_map(|tab| &tab.collections)
             .find(|saved| saved.id == collection)
             .unwrap();
+        let saved_stack = saved
+            .tabs
+            .iter()
+            .find_map(|tab| stack_in_snapshot(&tab.layout, collection))
+            .unwrap();
+        assert_eq!(saved_stack.0, 1);
         assert_eq!(
-            saved_collection.members,
-            members.iter().map(|id| id.raw()).collect::<Vec<_>>()
+            serde_json::to_value(saved_stack.1).unwrap(),
+            serde_json::json!([{"Pane": members[0].raw()}, {"Pane": members[1].raw()}])
         );
-        assert_eq!(saved_collection.selected, Some(members[1].raw()));
         assert_eq!(saved_collection.archived, vec![members[0].raw()]);
         assert!(
             !normalize_identity_changes(&mut decoded.clone(), false)
@@ -2670,7 +2758,7 @@ mod tests {
         let snapshot = capture_from_state(&state);
         let json = serde_json::to_string(&snapshot).expect("serialize");
         let shape: serde_json::Value = serde_json::from_str(&json).expect("snapshot json");
-        assert_eq!(shape["version"], LEGACY_SNAPSHOT_WRITER_VERSION);
+        assert_eq!(shape["version"], SNAPSHOT_VERSION);
         assert!(shape["workspaces"][0]["tabs"][0]
             .get("collections")
             .is_some());
@@ -2682,70 +2770,121 @@ mod tests {
         let saved = &tab.collections[0];
         assert_eq!(saved.id, collection);
         assert_eq!(saved.label.as_deref(), Some("helpers"));
-        assert_eq!(saved.members, vec![first.raw(), second.raw()]);
-        assert_eq!(saved.selected, Some(second.raw()));
+        let (selected, children) = stack_in_snapshot(&tab.layout, collection).unwrap();
+        assert_eq!(selected, 1);
+        assert_eq!(
+            serde_json::to_value(children).unwrap(),
+            serde_json::json!([{"Pane": first.raw()}, {"Pane": second.raw()}])
+        );
         assert_eq!(saved.archived, vec![first.raw()]);
         assert_eq!(
             tab.focused_leaf,
-            Some(LayoutLeafSnapshot::Collection(collection))
+            Some(LayoutLeafSnapshot::Stack(collection))
         );
         assert!(matches!(
             tab.layout,
             LayoutSnapshot::Split { ref second, .. }
-                if matches!(second.as_ref(), LayoutSnapshot::Collection(id) if *id == collection)
+                if matches!(second.as_ref(), LayoutSnapshot::Stack { id, .. } if *id == collection)
         ));
     }
 
-    #[test]
-    fn snapshot_v4_collection_json_matches_frozen_golden_shape() {
-        let id = crate::layout::CollectionId::from_raw(7_300_001).unwrap();
-        let snapshot = SessionSnapshot {
-            version: 4,
-            workspaces: vec![WorkspaceSnapshot {
-                id: Some("workspace".into()),
-                custom_name: None,
-                identity_cwd: PathBuf::from("/tmp"),
-                checkout: None,
-                worktree_space: None,
-                public_pane_numbers: HashMap::new(),
-                next_public_pane_number: 0,
-                public_tab_numbers: Vec::new(),
-                next_public_tab_number: 0,
-                tabs: vec![TabSnapshot {
-                    id: None,
-                    custom_name: None,
-                    layout: LayoutSnapshot::Collection(id),
-                    collections: vec![CollectionSnapshot {
-                        id,
-                        label: Some("helpers".into()),
-                        members: vec![11, 12],
-                        selected: Some(12),
-                        archived: vec![11],
-                    }],
-                    panes: HashMap::new(),
-                    zoomed: false,
-                    focused: None,
-                    focused_leaf: Some(LayoutLeafSnapshot::Collection(id)),
-                    root_pane: None,
-                }],
-                active_tab: 0,
-            }],
-            repositories: Vec::new(),
-            space_order: Vec::new(),
-            active: Some(0),
-            selected: 0,
-            sidebar_width: None,
-            sidebar_section_split: None,
-            collapsed_space_keys: std::collections::HashSet::new(),
-            delegations: Vec::new(),
-            collections_authority: Default::default(),
-            collections_action_sequence: 0,
-        };
+    fn stack_in_snapshot(
+        node: &LayoutSnapshot,
+        target: crate::layout::CollectionId,
+    ) -> Option<(usize, &[LayoutSnapshot])> {
+        match node {
+            LayoutSnapshot::Stack {
+                id,
+                selected,
+                children,
+            } if *id == target => Some((*selected, children)),
+            LayoutSnapshot::Stack { children, .. } => children
+                .iter()
+                .find_map(|child| stack_in_snapshot(child, target)),
+            LayoutSnapshot::Split { first, second, .. } => {
+                stack_in_snapshot(first, target).or_else(|| stack_in_snapshot(second, target))
+            }
+            LayoutSnapshot::Pane(_) => None,
+        }
+    }
 
+    #[test]
+    fn v8_capture_round_trip_is_total_for_nested_split_stack_and_empty_children() {
+        use crate::layout::{LayoutLeaf, TileLayout, TypedNode};
+        let mut state = state_with_workspaces(&["nested"]);
+        let root = state.workspaces[0].tabs[0].root_pane;
+        let member = state.workspaces[0].test_split(Direction::Horizontal);
+        let outside = state.workspaces[0].test_split(Direction::Vertical);
+        state.ensure_test_terminals();
+        let outer = crate::layout::CollectionId::from_raw(7_500_001).unwrap();
+        let inner = crate::layout::CollectionId::from_raw(7_500_002).unwrap();
+        let empty = crate::layout::CollectionId::from_raw(7_500_003).unwrap();
+        let tree = TypedNode::Stack {
+            id: outer.into(),
+            selected: 1,
+            children: vec![
+                TypedNode::Leaf(root),
+                TypedNode::Split {
+                    direction: Direction::Vertical,
+                    ratio: 0.37,
+                    first: Box::new(TypedNode::Stack {
+                        id: inner.into(),
+                        selected: 1,
+                        children: vec![
+                            TypedNode::empty_stack(empty.into()),
+                            TypedNode::Leaf(member),
+                        ],
+                    }),
+                    second: Box::new(TypedNode::Leaf(outside)),
+                },
+            ],
+        };
+        state.workspaces[0].tabs[0].layout =
+            TileLayout::from_tree(tree, LayoutLeaf::Stack(outer.into())).unwrap();
+        assert!(!state.workspaces[0].tabs[0].layout.is_pane_visible(root));
+        let captured = capture_from_state(&state);
+        let expected = serde_json::json!({"Stack":{"id":outer,"selected":1,"children":[
+            {"Pane":root.raw()},
+            {"Split":{"direction":"Vertical","ratio":0.37_f32,"first":{
+                "Stack":{"id":inner,"selected":1,"children":[{"Stack":{"id":empty,"selected":0,"children":[]}},{"Pane":member.raw()}]}
+            },"second":{"Pane":outside.raw()}}}
+        ]}});
         assert_eq!(
-            serde_json::to_string(&snapshot).unwrap(),
-            r#"{"version":4,"workspaces":[{"id":"workspace","custom_name":null,"identity_cwd":"/tmp","public_pane_numbers":{},"next_public_pane_number":0,"public_tab_numbers":[],"next_public_tab_number":0,"tabs":[{"custom_name":null,"layout":{"Collection":"collection_7300001"},"collections":[{"id":"collection_7300001","label":"helpers","members":[11,12],"selected":12,"archived":[11]}],"panes":{},"zoomed":false,"focused":null,"focused_leaf":{"type":"collection","id":"collection_7300001"},"root_pane":null}],"active_tab":0}],"repositories":[],"space_order":[],"active":0,"selected":0,"sidebar_width":null,"sidebar_section_split":null,"collapsed_space_keys":[],"delegations":[]}"#
+            serde_json::to_value(&captured.workspaces[0].tabs[0].layout).unwrap(),
+            expected
         );
+        let decoded = parse_snapshot(&serde_json::to_string(&captured).unwrap()).unwrap();
+        assert_eq!(
+            serde_json::to_value(&decoded.workspaces[0].tabs[0].layout).unwrap(),
+            expected
+        );
+        assert_eq!(
+            decoded.workspaces[0].tabs[0].focused_leaf,
+            Some(LayoutLeafSnapshot::Stack(outer))
+        );
+        assert_eq!(decoded.workspaces[0].tabs[0].panes.len(), 3);
+        state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn frozen_v4_collection_writer_shape_converts_to_canonical_tree() {
+        let snapshot = parse_snapshot(include_str!(
+            "../../tests/fixtures/session/collection-layout-v4.json"
+        ))
+        .unwrap();
+        assert_eq!(snapshot.version, SNAPSHOT_VERSION);
+        let tab = &snapshot.workspaces[0].tabs[0];
+        let policy = &tab.collections[0];
+        assert_eq!(policy.id.raw(), 7_300_001);
+        assert_eq!(policy.label.as_deref(), Some("helpers"));
+        assert_eq!(policy.archived, vec![11]);
+        let (selected, children) = stack_in_snapshot(&tab.layout, policy.id).unwrap();
+        assert_eq!(selected, 1);
+        assert_eq!(
+            serde_json::to_value(children).unwrap(),
+            serde_json::json!([{"Pane":11},{"Pane":12}])
+        );
+        assert_eq!(tab.focused_leaf, Some(LayoutLeafSnapshot::Stack(policy.id)));
     }
 
     #[test]
@@ -2782,7 +2921,7 @@ mod tests {
             delegations: Vec::new(),
             collections_authority: Default::default(),
             collections_action_sequence: 0,
-            version: LEGACY_SNAPSHOT_WRITER_VERSION,
+            version: SNAPSHOT_VERSION,
             repositories: Vec::new(),
             space_order: Vec::new(),
             workspaces: vec![WorkspaceSnapshot {

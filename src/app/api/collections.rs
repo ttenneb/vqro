@@ -2443,6 +2443,20 @@ mod tests {
     }
 
     #[test]
+    fn legacy_authority_capture_never_lowers_an_adopted_durable_action_high_water() {
+        let mut app = app_with_workspace();
+        let durable = 9;
+        app.next_collections_action_id = durable;
+        assert_eq!(
+            app.collections_authority.phase,
+            crate::collections_extension_contract::CollectionsAuthorityPhaseV1::Legacy
+        );
+        let snapshot = app.capture_session_snapshot();
+        assert_eq!(snapshot.version, crate::persist::SNAPSHOT_VERSION);
+        assert_eq!(snapshot.collections_action_sequence, durable);
+    }
+
+    #[test]
     fn collections_action_sequence_rejects_attempt_id_overflow() {
         let mut app = app_with_workspace();
         app.next_collections_action_id = MAX_COLLECTIONS_ACTION_SEQUENCE;

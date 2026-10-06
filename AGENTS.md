@@ -54,8 +54,9 @@ requires a new or superseding architecture decision.
   restart rebuilds current state rather than replaying stale results. This is
   enforced for that product path only; its full product audit is still pending.
   See [Extension Health R1 product composition](docs/next/architecture/extension-health-r1-product.md).
-- **The generation-1 client endpoint contract is Vqro's compatibility floor.**
-  See [Stable client endpoint contract](#stable-client-endpoint-contract).
+- **Endpoint changes are explicit and versioned.** During development there is
+  no compatibility floor (human-approved 2026-10-04); prefer new codecs and
+  methods over reinterpretation. See [Stable client endpoint contract](#stable-client-endpoint-contract).
 - **Render is pure and multiplicative paths stay narrow.** See
   [Principles](#principles) and [Multiplicative performance paths](#multiplicative-performance-paths).
 
@@ -155,7 +156,34 @@ Examples:
 
 ### Stable client endpoint contract
 
-The client-owned TUI endpoint generation is independent from the private same-install protocol. Vqro inherited endpoint generation 1 from Herdr and keeps it as **Vqro's own** compatibility floor for local connections, and for SSH and Cloud connections once Vqro enables remote use (currently disabled). This makes no promise of interoperability with Herdr; coexistence is enforced by Vqro's separate binary, sockets, and state. Generation 1 must remain available unless retired for a security reason.
+The client-owned TUI endpoint generation is independent from the private
+same-install protocol. Vqro inherited endpoint generation 1 from Herdr; this
+makes no promise of interoperability with Herdr. Coexistence is enforced by
+Vqro's separate binary, sockets, and state; remote use is currently disabled.
+
+**Development-period decision (human-approved 2026-10-04): there is no
+compatibility floor until community/ecosystem building begins.** Frozen codecs
+and fixtures may be retired with an explicit decision, replacement list and
+reason, and a same-PR documentation update. Do not silently reinterpret
+generation 1. Prefer new codec/method names, optional advertised actions and
+`Unknown` fallbacks; the rules below remain the default when practical.
+
+Session v8 does not retire generation 1 or alter its named binary codecs.
+`layout.tree.export` is a new optional advertised method with the neutral
+`layout.tree.v1` JSON result. Existing layout methods keep their selected-only
+pane semantics. Private `PROTOCOL_VERSION` remains 23: no bincode-reachable
+protocol type changes. The inherited stable v0.9.0 and preview
+2026-09-08-62431dbd033b published protocol 22 / endpoint generation 1; Vqro
+master already uses protocol 23 / generation 1. Session versions are independent.
+See [tree export and conversion](docs/next/api/layout-tree-v1.md).
+
+Fixture disposition for this change: endpoint hello/welcome/snapshot v1,
+endpoint method-shapes v1, handoff-manifest v1 and hidden-member-handoff v7 stay
+frozen as input/compatibility contracts. The inline v4 Collection writer golden
+is retained as `tests/fixtures/session/collection-layout-v4.json` conversion
+input; its writer expectation becomes a canonical-tree conversion expectation.
+Tree output and v8 persistence get separate expectations; no old fixture is
+rewritten to bless a wire change.
 
 - Named core codecs are immutable. Do not add, remove, reorder, or reinterpret fields or enum variants reachable from a published codec. Introduce a new codec name and keep the old codec as a fallback instead.
 - Keep baseline JSON handshake and snapshot fields required. New JSON fields must be optional or have field-specific defaults; new enum values need an `Unknown` fallback where older clients can safely ignore them.

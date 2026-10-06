@@ -1459,6 +1459,9 @@ impl App {
                 return self.handle_pane_telemetry(request.id, params);
             }
             Method::LayoutExport(params) => return self.handle_layout_export(request.id, params),
+            Method::LayoutTreeExport(params) => {
+                return self.handle_layout_tree_export(request.id, params)
+            }
             Method::LayoutApply(params) => return self.handle_layout_apply(request.id, params),
             Method::LayoutSetSplitRatio(params) => {
                 return self.handle_layout_set_split_ratio(request.id, params);

@@ -11,6 +11,7 @@ use crate::terminal_container::TerminalContainerId;
 const MAX_BOX_DEPTH: usize = 4;
 
 impl TypedNode {
+    #[cfg(test)]
     pub(crate) fn empty_stack(id: TerminalContainerId) -> Self {
         Self::Stack {
             id,

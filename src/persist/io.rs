@@ -117,6 +117,12 @@ impl std::fmt::Display for AtomicSessionSaveError {
 pub(crate) fn save_session_atomically(
     snapshot: &SessionSnapshot,
 ) -> Result<(), AtomicSessionSaveError> {
+    prepare_session_write(&session_path(), snapshot.version).map_err(|source| {
+        AtomicSessionSaveError {
+            source,
+            outcome: AtomicSessionSaveOutcome::NotPublished,
+        }
+    })?;
     save_session_atomically_to_path_with(
         &session_path(),
         snapshot,
@@ -197,7 +203,81 @@ where
 }
 
 pub(super) fn save_to_path(path: &Path, snapshot: &SessionSnapshot) -> std::io::Result<()> {
+    prepare_session_write(path, snapshot.version)?;
     save_json_to_path(path, snapshot, MAX_SESSION_SNAPSHOT_BYTES)
+}
+
+/// A conversion backup is immutable, byte-exact, private, and durable before
+/// publication. Failed conversion/publication keeps both it and the old file.
+pub(super) fn prepare_session_write(
+    path: &Path,
+    next_version: u32,
+) -> std::io::Result<Option<PathBuf>> {
+    let target = resolve_write_target(path)?;
+    let content = match read_bounded_text(&target, MAX_SESSION_SNAPSHOT_BYTES) {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let old_version = snapshot_file_version(&content).ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "refusing to overwrite unversioned session {}",
+                target.display()
+            ),
+        )
+    })?;
+    if old_version > next_version {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, format!(
+            "downgrade unsupported: session {} is version {old_version}, writer supports {next_version}",
+            target.display(),
+        )));
+    }
+    if old_version == next_version {
+        return Ok(None);
+    }
+    backup_conversion(
+        &target,
+        content.as_bytes(),
+        old_version,
+        next_version,
+        crate::platform::sync_containing_directory,
+    )
+    .map(Some)
+}
+
+fn backup_conversion<SyncDirectory>(
+    target: &Path,
+    original: &[u8],
+    old_version: u32,
+    next_version: u32,
+    sync_directory: SyncDirectory,
+) -> std::io::Result<PathBuf>
+where
+    SyncDirectory: FnOnce(&Path) -> std::io::Result<()>,
+{
+    let file_name = target
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| std::io::Error::other("session path has no UTF-8 file name"))?;
+    let mut random = [0_u8; 16];
+    crate::platform::fill_secure_random(&mut random)?;
+    let suffix = random
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let backup = target.with_file_name(format!(
+        "{file_name}.pre-v{next_version}-v{old_version}.{suffix}.bak"
+    ));
+    let mut file = crate::platform::create_private_state_file(&backup)?;
+    file.write_all(original)?;
+    file.sync_all()?;
+    drop(file);
+    sync_directory(&backup)?;
+    tracing::info!(session = %target.display(), backup = %backup.display(),
+        old_version, next_version, "backed up session before format conversion");
+    Ok(backup)
 }
 
 fn save_json_to_path<T: serde::Serialize>(
@@ -280,6 +360,7 @@ pub(crate) struct StagedHandoffSnapshot {
 #[cfg(unix)]
 impl StagedHandoffSnapshot {
     pub(crate) fn publish(mut self) -> std::io::Result<()> {
+        prepare_session_write(&self.target, SNAPSHOT_VERSION)?;
         crate::platform::durable_replace_file(&self.path, &self.target)?;
         self.published = true;
         Ok(())
@@ -365,6 +446,33 @@ pub(crate) fn load_for_startup() -> StartupSessionLoad {
     load_for_startup_from_path(&session_path())
 }
 
+/// A previous live exporter can omit the action high-water. Consult only this
+/// monotonic fact from the existing checkpoint, never its stale layout/identity.
+#[cfg(unix)]
+pub(crate) fn durable_collections_action_sequence() -> std::io::Result<u64> {
+    checkpoint_collections_action_sequence(&session_path())
+}
+
+#[cfg(any(unix, test))]
+fn checkpoint_collections_action_sequence(path: &Path) -> std::io::Result<u64> {
+    let content = match read_bounded_text(path, MAX_SESSION_SNAPSHOT_BYTES) {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(error) => return Err(error),
+    };
+    super::snapshot::parse_snapshot(&content)
+        .map(|snapshot| snapshot.collections_action_sequence)
+        .map_err(|error| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "cannot reconcile durable Collections high-water from {}: {error}",
+                    path.display()
+                ),
+            )
+        })
+}
+
 fn read_bounded_text(path: &Path, maximum: u64) -> std::io::Result<String> {
     let target = crate::platform::resolve_write_target(path)?;
     let mut file = std::fs::File::open(target)?;
@@ -390,6 +498,15 @@ fn read_bounded_text(path: &Path, maximum: u64) -> std::io::Result<String> {
 }
 
 fn load_for_startup_from_path(path: &Path) -> StartupSessionLoad {
+    load_for_startup_from_path_with(path, |snapshot| {
+        save_json_to_path(path, snapshot, MAX_SESSION_SNAPSHOT_BYTES)
+    })
+}
+
+fn load_for_startup_from_path_with<Publish>(path: &Path, publish: Publish) -> StartupSessionLoad
+where
+    Publish: FnOnce(&SessionSnapshot) -> std::io::Result<()>,
+{
     if let Err(error) = cleanup_stale_handoff_stages(path) {
         warn!(%error, "failed to clean stale handoff snapshot stages");
     }
@@ -404,6 +521,14 @@ fn load_for_startup_from_path(path: &Path) -> StartupSessionLoad {
             return StartupSessionLoad::Rejected(diagnostic);
         }
     };
+    if snapshot_file_version(&content).is_some_and(|version| version < SNAPSHOT_VERSION) {
+        if let Err(error) = prepare_session_write(path, SNAPSHOT_VERSION) {
+            return StartupSessionLoad::Rejected(format!(
+                "failed to back up session {} before conversion: {error}",
+                path.display()
+            ));
+        }
+    }
     match super::snapshot::parse_snapshot_with_status(&content) {
         Ok((snapshot, normalized)) => {
             if let Err(error) = super::restore::validate_snapshot_admission(&snapshot) {
@@ -412,7 +537,7 @@ fn load_for_startup_from_path(path: &Path) -> StartupSessionLoad {
                 return StartupSessionLoad::Rejected(diagnostic);
             }
             if normalized {
-                if let Err(error) = save_to_path(path, &snapshot) {
+                if let Err(error) = publish(&snapshot) {
                     let diagnostic = format!(
                         "failed to durably publish migrated session snapshot before restore: {error}"
                     );
@@ -429,7 +554,7 @@ fn load_for_startup_from_path(path: &Path) -> StartupSessionLoad {
                         "session file version {version} is newer than supported {SNAPSHOT_VERSION}"
                     )
                 } else {
-                    format!("failed to parse existing session file: {err}")
+                    format!("failed to convert session {}: {err}", path.display())
                 }
             } else {
                 format!("failed to parse existing session file: {err}")
@@ -509,7 +634,7 @@ mod tests {
             delegations: Vec::new(),
             collections_authority: Default::default(),
             collections_action_sequence: 0,
-            version: super::super::LEGACY_SNAPSHOT_WRITER_VERSION,
+            version: SNAPSHOT_VERSION,
             repositories: Vec::new(),
             space_order: Vec::new(),
             workspaces: vec![],
@@ -519,6 +644,306 @@ mod tests {
             sidebar_section_split: Some(0.5),
             collapsed_space_keys: std::collections::HashSet::new(),
         }
+    }
+
+    #[test]
+    fn session_v8_conversion_backs_up_exact_legacy_bytes_before_publication() {
+        let path = temp_session_path("v8-backup");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let mut legacy: serde_json::Value = serde_json::from_slice(include_bytes!(
+            "../../tests/fixtures/session/hidden-member-handoff-v7.json"
+        ))
+        .unwrap();
+        legacy["workspaces"][0]["tabs"][0]["id"] =
+            serde_json::json!("tab_44444444444444444444444444444444");
+        let original = serde_json::to_vec_pretty(&legacy).unwrap();
+        let old_version = legacy["version"].as_u64().unwrap();
+        assert_eq!(old_version, 7, "fence must exercise a real legacy v7 input");
+        assert!(
+            legacy["workspaces"][0]["tabs"][0]["layout"]["Split"]["first"]
+                .get("Collection")
+                .is_some()
+        );
+        std::fs::write(&path, &original).unwrap();
+        let StartupSessionLoad::Loaded(snapshot) = load_for_startup_from_path(&path) else {
+            panic!("valid legacy session must convert before restore");
+        };
+        let prefix = format!("session.json.pre-v{SNAPSHOT_VERSION}-v{old_version}.");
+        let backups: Vec<_> = std::fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .starts_with(&prefix)
+            })
+            .collect();
+        assert_eq!(
+            backups.len(),
+            1,
+            "conversion must preserve the old session first"
+        );
+        assert_eq!(std::fs::read(&backups[0]).unwrap(), original);
+        assert_eq!(snapshot.version, SNAPSHOT_VERSION);
+        let converted = serde_json::to_value(&*snapshot).unwrap();
+        let old_tab = &legacy["workspaces"][0]["tabs"][0];
+        let new_tab = &converted["workspaces"][0]["tabs"][0];
+        for field in ["id", "focused", "root_pane", "zoomed"] {
+            assert_eq!(new_tab[field], old_tab[field], "changed {field}");
+        }
+        assert_eq!(
+            new_tab["panes"].as_object().unwrap().len(),
+            old_tab["panes"].as_object().unwrap().len()
+        );
+        for (id, pane) in old_tab["panes"].as_object().unwrap() {
+            for (field, value) in pane.as_object().unwrap() {
+                assert_eq!(
+                    &new_tab["panes"][id][field], value,
+                    "pane {id} changed {field}"
+                );
+            }
+        }
+        for field in [
+            "id",
+            "public_pane_numbers",
+            "next_public_pane_number",
+            "public_tab_numbers",
+            "next_public_tab_number",
+            "active_tab",
+        ] {
+            assert_eq!(
+                converted["workspaces"][0][field],
+                legacy["workspaces"][0][field]
+            );
+        }
+        let old_split = &old_tab["layout"]["Split"];
+        let new_split = &new_tab["layout"]["Split"];
+        assert_eq!(new_split["ratio"], old_split["ratio"]);
+        assert_eq!(new_split["direction"], old_split["direction"]);
+        assert_eq!(new_split["second"], old_split["second"]);
+        let record = &old_tab["collections"][0];
+        let stack = &new_split["first"]["Stack"];
+        assert_eq!(stack["id"], record["id"]);
+        let expected_children: Vec<_> = record["members"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|pane| serde_json::json!({"Pane": pane}))
+            .collect();
+        assert_eq!(stack["children"], serde_json::json!(expected_children));
+        let expected_selection = record["members"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .position(|pane| pane == &record["selected"])
+            .unwrap();
+        assert_eq!(stack["selected"], serde_json::json!(expected_selection));
+        assert!(matches!(
+            load_for_startup_from_path(&path),
+            StartupSessionLoad::Loaded(_)
+        ));
+        assert_eq!(std::fs::read(&backups[0]).unwrap(), original);
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn legacy_v6_writer_is_admitted_with_members_selection_policy_and_backup() {
+        let path = temp_session_path("v6-writer");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let mut legacy: serde_json::Value = serde_json::from_slice(include_bytes!(
+            "../../tests/fixtures/session/hidden-member-handoff-v7.json"
+        ))
+        .unwrap();
+        legacy["version"] = serde_json::json!(super::super::LEGACY_SNAPSHOT_WRITER_VERSION);
+        legacy
+            .as_object_mut()
+            .unwrap()
+            .remove("collections_authority");
+        legacy["workspaces"][0]["tabs"][0]["id"] =
+            serde_json::json!("tab_44444444444444444444444444444444");
+        legacy["workspaces"][0]["tabs"][0]["collections"][0]["selected"] =
+            serde_json::json!(900002);
+        legacy["workspaces"][0]["tabs"][0]["collections"][0]["label"] =
+            serde_json::json!("helpers");
+        legacy["workspaces"][0]["tabs"][0]["collections"][0]["archived"] =
+            serde_json::json!([900001]);
+        legacy["workspaces"][0]["tabs"][0]["layout"]["Split"]["ratio"] = serde_json::json!(0.37);
+        let original = serde_json::to_vec(&legacy).unwrap();
+        assert!(
+            legacy.get("collections_authority").is_none(),
+            "must exercise real legacy writer admission"
+        );
+        std::fs::write(&path, &original).unwrap();
+        let StartupSessionLoad::Loaded(snapshot) = load_for_startup_from_path(&path) else {
+            panic!("legacy v6 writer refused")
+        };
+        let saved = serde_json::to_value(&*snapshot).unwrap();
+        assert_eq!(saved["version"], SNAPSHOT_VERSION);
+        let tab = &saved["workspaces"][0]["tabs"][0];
+        assert_eq!(tab["layout"]["Split"]["first"]["Stack"]["selected"], 1);
+        assert_eq!(
+            tab["layout"]["Split"]["first"]["Stack"]["children"],
+            serde_json::json!([{"Pane":900001},{"Pane":900002}])
+        );
+        assert_eq!(
+            (tab["layout"]["Split"]["ratio"].as_f64().unwrap() as f32).to_bits(),
+            (legacy["workspaces"][0]["tabs"][0]["layout"]["Split"]["ratio"]
+                .as_f64()
+                .unwrap() as f32)
+                .to_bits()
+        );
+        assert_eq!(
+            tab["collections"][0]["archived"],
+            serde_json::json!([900001])
+        );
+        assert_eq!(tab["collections"][0]["label"], "helpers");
+        assert!(tab["collections"][0].get("members").is_none());
+        assert!(tab["collections"][0].get("selected").is_none());
+        let backups: Vec<_> = std::fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|entry| {
+                entry
+                    .extension()
+                    .is_some_and(|extension| extension == "bak")
+            })
+            .collect();
+        assert_eq!(backups.len(), 1);
+        assert_eq!(std::fs::read(&backups[0]).unwrap(), original);
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn failed_v8_conversion_and_publication_keep_original_and_readable_backup() {
+        for fail_publication in [false, true] {
+            let path = temp_session_path("v8-failed-conversion");
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let mut legacy: serde_json::Value = serde_json::from_slice(include_bytes!(
+                "../../tests/fixtures/session/hidden-member-handoff-v7.json"
+            ))
+            .unwrap();
+            if !fail_publication {
+                legacy["workspaces"][0]["tabs"][0]["collections"][0]["selected"] =
+                    serde_json::json!(999);
+            }
+            let original = serde_json::to_vec_pretty(&legacy).unwrap();
+            std::fs::write(&path, &original).unwrap();
+            let StartupSessionLoad::Rejected(error) =
+                load_for_startup_from_path_with(&path, |_| {
+                    assert!(fail_publication, "invalid selection reached publication");
+                    Err(std::io::Error::other("injected failure before replacement"))
+                })
+            else {
+                panic!("conversion/publication must fail closed")
+            };
+            if !fail_publication {
+                assert!(error.contains(path.to_str().unwrap()), "{error}");
+                assert!(
+                    error.contains("6100001") && error.contains("999"),
+                    "{error}"
+                );
+            }
+            assert_eq!(std::fs::read(&path).unwrap(), original);
+            let backups: Vec<_> = std::fs::read_dir(path.parent().unwrap())
+                .unwrap()
+                .map(|entry| entry.unwrap().path())
+                .filter(|entry| {
+                    entry
+                        .extension()
+                        .is_some_and(|extension| extension == "bak")
+                })
+                .collect();
+            assert_eq!(backups.len(), 1);
+            assert_eq!(std::fs::read(&backups[0]).unwrap(), original);
+            std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+        }
+    }
+
+    #[test]
+    fn backup_sync_failure_and_downgrade_refuse_before_session_write() {
+        let path = temp_session_path("v8-backup-sync");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let original = br#"{"version":6,"workspaces":[],"active":null,"selected":0}"#;
+        std::fs::write(&path, original).unwrap();
+        let error = backup_conversion(&path, original, 6, SNAPSHOT_VERSION, |_| {
+            Err(std::io::Error::other("injected directory sync failure"))
+        })
+        .unwrap_err();
+        assert!(error.to_string().contains("directory sync"));
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+        let mut snapshot = empty_snapshot();
+        save_to_path(&path, &snapshot).unwrap();
+        let current = std::fs::read(&path).unwrap();
+        snapshot.version = SNAPSHOT_VERSION - 1;
+        let error = save_to_path(&path, &snapshot).unwrap_err();
+        assert!(error.to_string().contains("downgrade unsupported"));
+        assert_eq!(std::fs::read(&path).unwrap(), current);
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn checkpoint_high_water_reader_is_bounded_explicit_and_has_no_write_effect() {
+        let path = temp_session_path("checkpoint-high-water");
+        assert_eq!(checkpoint_collections_action_sequence(&path).unwrap(), 0);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let mut snapshot = empty_snapshot();
+        snapshot.collections_action_sequence = 9;
+        for version in [7, SNAPSHOT_VERSION] {
+            snapshot.version = version;
+            let original = serde_json::to_vec(&snapshot).unwrap();
+            std::fs::write(&path, &original).unwrap();
+            assert_eq!(checkpoint_collections_action_sequence(&path).unwrap(), 9);
+            assert_eq!(std::fs::read(&path).unwrap(), original);
+        }
+        for original in [
+            b"not JSON".to_vec(),
+            format!(
+                "{{\"version\":{},\"collections_action_sequence\":10}}",
+                SNAPSHOT_VERSION + 1
+            )
+            .into_bytes(),
+        ] {
+            std::fs::write(&path, &original).unwrap();
+            assert!(checkpoint_collections_action_sequence(&path).is_err());
+            assert_eq!(std::fs::read(&path).unwrap(), original);
+        }
+        assert_eq!(
+            std::fs::read_dir(path.parent().unwrap()).unwrap().count(),
+            1,
+            "metadata reconciliation must not create another store or rewrite the old file"
+        );
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn hostile_v8_tree_hits_json_depth_bound_before_admission_without_partial_restore() {
+        let path = temp_session_path("hostile-v8-depth");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        // Build attacker input iteratively: neither the test nor the reader
+        // constructs an unbounded recursive Rust tree before the depth guard.
+        let prefix =
+            r#"{"Split":{"direction":"Horizontal","ratio":0.5,"first":{"Pane":1},"second":"#;
+        let layout = format!("{}{{\"Pane\":2}}{}", prefix.repeat(4096), "}}".repeat(4096));
+        let original = format!(
+            r#"{{"version":{},"workspaces":[{{"id":"w1","identity_cwd":"/","tabs":[{{"layout":{},"panes":{{}},"zoomed":false}}]}}]}}"#,
+            SNAPSHOT_VERSION, layout
+        );
+        assert!(original.len() < MAX_SESSION_SNAPSHOT_BYTES as usize);
+        std::fs::write(&path, &original).unwrap();
+        let StartupSessionLoad::Rejected(error) = load_for_startup_from_path(&path) else {
+            panic!("hostile v8 tree must be rejected, never partially loaded");
+        };
+        assert!(error.contains("recursion limit exceeded"), "{error}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+        assert_eq!(
+            std::fs::read_dir(path.parent().unwrap()).unwrap().count(),
+            1,
+            "a rejected current-format file must not be rewritten or converted"
+        );
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 
     #[test]
@@ -645,16 +1070,10 @@ mod tests {
         let StartupSessionLoad::Loaded(snapshot) = load_for_startup_from_path(&path) else {
             panic!("legacy snapshot should migrate");
         };
-        assert_eq!(
-            snapshot.version,
-            super::super::LEGACY_SNAPSHOT_WRITER_VERSION
-        );
+        assert_eq!(snapshot.version, SNAPSHOT_VERSION);
         let published: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-        assert_eq!(
-            published["version"],
-            super::super::LEGACY_SNAPSHOT_WRITER_VERSION
-        );
+        assert_eq!(published["version"], SNAPSHOT_VERSION);
         let tab_id = published["workspaces"][0]["tabs"][0]["id"]
             .as_str()
             .expect("published tab identity");
@@ -671,7 +1090,7 @@ mod tests {
     fn handoff_staging_is_durable_but_not_authoritative_until_publish() {
         let path = temp_session_path("handoff-stage");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        let old = b"authoritative-old-bytes";
+        let old = br#"{"version":6,"workspaces":[],"active":null,"selected":0}"#;
         std::fs::write(&path, old).unwrap();
         let staged = stage_handoff_snapshot_to_path(&path, &empty_snapshot()).unwrap();
         assert_eq!(std::fs::read(&path).unwrap(), old);
@@ -682,7 +1101,7 @@ mod tests {
             super::super::snapshot::parse_snapshot(&published)
                 .unwrap()
                 .version,
-            super::super::LEGACY_SNAPSHOT_WRITER_VERSION
+            SNAPSHOT_VERSION
         );
         std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
