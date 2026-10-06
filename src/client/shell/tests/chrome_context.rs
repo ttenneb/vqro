@@ -2689,9 +2689,13 @@ fn arrow_keys_in_the_collection_list_do_not_reach_the_terminal() {
 /// A retained terminal patch row must not paint inside the list a collection
 /// draws: the server computed it for the pane, which the list now covers.
 #[test]
-fn a_terminal_patch_row_is_dropped_inside_the_collection_list() {
+fn a_terminal_patch_row_and_cursor_are_dropped_inside_the_collection_list() {
+    // QA's P2: the earlier version ignored the patch outcome and recomposed, which
+    // redraws the list whatever the filter did, so it could not see the direct path.
+    // This one asks for the emitted patch, applies exactly that to the frame the user
+    // is already looking at, and carries a cursor the list must suppress.
     let mut state = listed_collection_state();
-    let _ = state.compose(106, 20).expect("collection list frame");
+    let before = state.compose(106, 20).expect("collection list frame");
     let area = *state
         .collection_list_areas
         .first()
@@ -2719,27 +2723,67 @@ fn a_terminal_patch_row_is_dropped_inside_the_collection_list() {
         .as_ref()
         .expect("surface")
         .surface_revision;
+    // The row and the cursor are in the pane's own grid, which is what the server
+    // computed the patch against: both compose into the list the client drew over it.
+    let x = pane.inner_rect.x.saturating_add(1);
+    let y = pane.inner_rect.y.saturating_add(1);
     let patch = crate::protocol::PaneSurfacePatch {
         boot_id: "boot-1".into(),
         projection_revision: 1,
         base_surface_revision: surface_revision,
         surface_revision: surface_revision.saturating_add(1),
         rows: vec![crate::protocol::PaneSurfacePatchRow {
-            x: pane.inner_rect.x,
-            y: area.y.saturating_add(5),
+            x,
+            y,
             cells: vec![cell],
         }],
         panes: vec![pane],
-        cursor: None,
+        cursor: Some(crate::protocol::CursorState {
+            x,
+            y,
+            visible: true,
+            shape: 2,
+        }),
     };
-    let _ = state.apply_pane_surface_patch(patch);
-    let frame = state.compose(106, 20).expect("frame after patch");
+    let outcome = state.apply_pane_surface_patch(patch);
+    let ClientPaneSurfacePatchOutcome::Applied(Some(composed)) = outcome else {
+        panic!("a row inside the grid keeps the fast path: {outcome:?}");
+    };
+    for row in &composed.rows {
+        let width = u16::try_from(row.cells.len()).unwrap_or(1);
+        let inside_y = row.y >= area.y && row.y < area.bottom();
+        let inside_x = row.x < area.right() && row.x.saturating_add(width) > area.x;
+        assert!(
+            !(inside_y && inside_x),
+            "the emitted patch leaves the list alone: ({}, {}) x{width} in {area:?}",
+            row.x,
+            row.y
+        );
+    }
+    let cursor = composed.cursor.expect("the patch carried a cursor");
+    assert!(
+        !cursor.visible,
+        "a list suppresses the terminal cursor inside it: {cursor:?}"
+    );
+    // Applying everything the patch emitted to the previous frame leaves the list
+    // exactly as it was.
+    let mut patched = before.clone();
+    for row in &composed.rows {
+        for (offset, emitted) in row.cells.iter().enumerate() {
+            let column = row.x.saturating_add(offset as u16);
+            if column < patched.width && row.y < patched.height {
+                patched.cells
+                    [usize::from(row.y) * usize::from(patched.width) + usize::from(column)] =
+                    emitted.clone();
+            }
+        }
+    }
     for y in area.y..area.bottom() {
         for x in area.x..area.right() {
-            assert_ne!(
-                frame_symbol(&frame, x, y),
-                "B",
-                "the list must not show a terminal patch row at ({x}, {y})"
+            assert_eq!(
+                frame_symbol(&patched, x, y),
+                frame_symbol(&before, x, y),
+                "the list is unchanged at ({x}, {y})"
             );
         }
     }

@@ -1,10 +1,12 @@
 use super::*;
 
+#[derive(Debug)]
 pub(crate) struct ClientComposedSurfacePatch {
     pub(crate) rows: Vec<crate::protocol::PaneSurfacePatchRow>,
     pub(crate) cursor: Option<crate::protocol::CursorState>,
 }
 
+#[derive(Debug)]
 pub(crate) enum ClientPaneSurfacePatchOutcome {
     Rejected,
     Applied(Option<ClientComposedSurfacePatch>),
@@ -257,6 +259,9 @@ impl ClientShellState {
             .chain(self.collection_list_areas.iter().copied())
             .collect::<Vec<_>>();
         let shifts = self.pane_panel_band_rows.clone();
+        // The list areas also decide the cursor: a full compose suppresses the terminal
+        // cursor under a list, so the direct path must not paint one there either.
+        let list_areas = self.collection_list_areas.clone();
         let bands = PanelBands::new(&patch.panes, &shifts);
         let fast_path_blocker = fast_path_blocker(self, &patch, &bands);
         if let Some(reason) = fast_path_blocker {
@@ -311,9 +316,13 @@ impl ClientShellState {
                     .collect(),
                 cursor: patch.cursor.clone().map(|cursor| {
                     let y = area.y.saturating_add(cursor.y).saturating_add(cursor_band);
-                    let visible = cursor.visible && cursor_bottom.is_none_or(|bottom| y < bottom);
+                    let x = area.x.saturating_add(cursor.x);
+                    let under_a_list = list_areas.iter().any(|list| super::contains(*list, (x, y)));
+                    let visible = cursor.visible
+                        && cursor_bottom.is_none_or(|bottom| y < bottom)
+                        && !under_a_list;
                     crate::protocol::CursorState {
-                        x: area.x.saturating_add(cursor.x),
+                        x,
                         y,
                         visible,
                         shape: cursor.shape,
