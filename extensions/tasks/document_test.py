@@ -26,7 +26,7 @@ class AttentionRowTargetTests(unittest.TestCase):
     REPORTER = {"class": "agent", "terminal_id": "term-reporter", "agent": "pi"}
 
     def target(self, task):
-        return document.attention_row_target(task, self.PLACEMENTS, {task["id"]: task})
+        return document.attention_row_target(task, self.PLACEMENTS)
 
     def test_a_waiting_row_points_at_the_pane_where_the_human_acts(self):
         # The ball is in the human's court, so there is no pane of theirs: the entry

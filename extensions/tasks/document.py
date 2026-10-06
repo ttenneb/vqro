@@ -6,6 +6,7 @@ durable meaning only: which task, who owes what, and since when.
 """
 import datetime
 import json
+import re
 import sqlite3
 from collections import Counter
 from provider import canonical
@@ -128,7 +129,7 @@ MESSAGE_LIMIT = 8
 MESSAGE_PREVIEW = 60
 # A durable id in an otherwise human sentence. The panel shows what the message is
 # about, not the store's keys.
-INTERNAL_ID = __import__("re").compile(r"\b(?P<kind>task|message|plan)_[0-9a-fA-F]{4,}\b")
+INTERNAL_ID = re.compile(r"\b(?P<kind>task|message|plan)_[0-9a-fA-F]{4,}\b")
 
 
 def message_record(row):
@@ -177,7 +178,6 @@ def message_subject(record):
     # reads as "message about a task" rather than making the reader parse a hash.
     body = INTERNAL_ID.sub(lambda match: f"a {match.group('kind').lower()}", body)
     return body[:MESSAGE_PREVIEW].strip()
-
 
 
 def message_rows(records, execution, known):
@@ -303,7 +303,7 @@ def panel_items(tasks, placements, room):
     return items
 
 
-def attention_row_target(task, placements, tasks_by_id):
+def attention_row_target(task, placements):
     """The terminal link a sidebar attention entry should carry, or None.
 
     A click goes to the owner's pane. When the task is waiting on the human there is
@@ -336,7 +336,6 @@ def project(store, snapshot):
     items.extend({"id": PREFIX + f"measure:{index}", "role": "section", "label": text}
                  for index, text in enumerate(("waiting on you", "blocked", "unavailable")))
     counts, rows = {}, []
-    tasks_by_id = {task["id"]: task for task in tasks}
     for task in tasks:
         categories = attention(task, placements)
         if not categories:
@@ -348,7 +347,7 @@ def project(store, snapshot):
         owner = label(task.get("owner"), None)
         row = {"id": PREFIX + "row:" + task["id"], "role": "section", "label": bounded(task["title"]),
                "detail": bounded(f"{owner} · {task.get('owed_action') or task['state']}"), "flags": {"attention": True}}
-        target = attention_row_target(task, placements, tasks_by_id)
+        target = attention_row_target(task, placements)
         if target is not None:
             row["terminal"] = target
         rows.append(row)

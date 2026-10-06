@@ -218,7 +218,6 @@ pub(super) fn render_workspace_badge(
     );
     // No hit of its own, for the same reason as a tab badge: a click anywhere on the
     // row, badge included, is the row's own action.
-    let _ = ids;
 }
 
 pub(super) fn render_panel(

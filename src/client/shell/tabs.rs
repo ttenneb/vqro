@@ -12,9 +12,10 @@ fn compact_badge_label(label: &str) -> String {
         return label.trim().chars().take(4).collect();
     }
     // A count that keeps growing would eat the tab it belongs to: the badge is a
-    // marker, and "99+" says everything "100" would in this space.
+    // marker, capped at two digits, and "99+" says everything "100" would in this
+    // space.
     if digits.len() > 2 {
-        return format!("{}9+", &digits[..1]);
+        return "99+".to_string();
     }
     digits
 }
@@ -446,5 +447,24 @@ fn tab_label(tab: &ClientShellTab) -> String {
         format!("{} Z", tab.label)
     } else {
         tab.label.clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::compact_badge_label;
+
+    #[test]
+    fn a_tab_badge_count_is_capped_at_two_digits() {
+        // The attention label is a sentence; only its leading count reaches the tab.
+        assert_eq!(compact_badge_label("1 waiting on you"), "1");
+        assert_eq!(compact_badge_label("42 waiting on you"), "42");
+        // Two digits are the cap: the largest count drawn is 99, and everything past
+        // it reads the same, so a growing count cannot take the tab's own label.
+        assert_eq!(compact_badge_label("99 waiting on you"), "99");
+        assert_eq!(compact_badge_label("100 waiting on you"), "99+");
+        assert_eq!(compact_badge_label("100000"), "99+");
+        // A label with no count keeps a short word instead of an empty badge.
+        assert_eq!(compact_badge_label("  blocked "), "bloc");
     }
 }
