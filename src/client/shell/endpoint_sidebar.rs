@@ -698,7 +698,6 @@ pub(super) fn render_expanded(
                         &workspace.workspace_id,
                         (!entry.indented).then_some(repository).flatten(),
                         palette,
-                        hits,
                     );
                 }
                 if endpoint.endpoint_id.is_local() {

@@ -6,6 +6,7 @@ durable meaning only: which task, who owes what, and since when.
 """
 import datetime
 import json
+import re
 import sqlite3
 from collections import Counter
 from provider import canonical
@@ -126,6 +127,9 @@ def panel_terminal(binding, placement):
 MESSAGE_VIEW = "messages"
 MESSAGE_LIMIT = 8
 MESSAGE_PREVIEW = 60
+# A durable id in an otherwise human sentence. The panel shows what the message is
+# about, not the store's keys.
+INTERNAL_ID = re.compile(r"\b(?P<kind>task|message|plan)_[0-9a-fA-F]{4,}\b")
 
 
 def message_record(row):
@@ -168,7 +172,12 @@ def executions_by_terminal(known):
 
 def message_subject(record):
     body = " ".join(bounded(record.get("body") or "").split())
-    return body[:MESSAGE_PREVIEW] if body else "(no body)"
+    if not body:
+        return "(no body)"
+    # Internal ids are bookkeeping, not subject matter: "message from task_66c03c"
+    # reads as "message about a task" rather than making the reader parse a hash.
+    body = INTERNAL_ID.sub(lambda match: f"a {match.group('kind').lower()}", body)
+    return body[:MESSAGE_PREVIEW].strip()
 
 
 def message_rows(records, execution, known):
@@ -294,6 +303,28 @@ def panel_items(tasks, placements, room):
     return items
 
 
+def attention_row_target(task, placements):
+    """The terminal link a sidebar attention entry should carry, or None.
+
+    A click goes to the owner's pane. When the task is waiting on the human there is
+    no pane of theirs to go to, so it goes to the pane of the agent that reported the
+    task instead, which is where the human usually acts on it. When neither has a live
+    placement the entry carries no link, and the client says the agent is not running
+    rather than offering a jump that cannot happen.
+    """
+    owed_to = task.get("owed_to") or {}
+    on_the_human = owed_to.get("class") == "human_unverified" or owed_to.get("role") == "human_unverified"
+    candidates = [task.get("creator")] if on_the_human else [task.get("owner"), task.get("creator")]
+    for candidate in candidates:
+        if candidate is None:
+            continue
+        terminal_id = candidate.get("terminal_id")
+        placement = (placements or {}).get(terminal_id)
+        if terminal_id and placement is not None:
+            return {"terminal_id": terminal_id, "placement": placement}
+    return None
+
+
 def project(store, snapshot):
     refs = snapshot.get("terminals")
     placements = None if refs is None else {row["terminal_id"]: row["placement"] for row in refs}
@@ -316,8 +347,9 @@ def project(store, snapshot):
         owner = label(task.get("owner"), None)
         row = {"id": PREFIX + "row:" + task["id"], "role": "section", "label": bounded(task["title"]),
                "detail": bounded(f"{owner} · {task.get('owed_action') or task['state']}"), "flags": {"attention": True}}
-        if placement:
-            row["terminal"] = {"terminal_id": task["owner"]["terminal_id"], "placement": placement}
+        target = attention_row_target(task, placements)
+        if target is not None:
+            row["terminal"] = target
         rows.append(row)
     for (kind, key), value in sorted(counts.items()):
         items.append({"id": PREFIX + f"badge:{kind}:{key}:{value['human']}:{value['blocked']}:{value['unavailable']}",

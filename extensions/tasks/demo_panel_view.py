@@ -309,9 +309,19 @@ class PanelViewDemo(ReadinessDemo):
         self.cli("pane", "panel", "show", a, "messages")
         self.wait_screen("review the panel when you can", seconds=30)
         messages_text = demo_capture.capture(self.root / "client.log", self.root / "capture", "panel-messages")
-        self.cli("pane", "panel", "hide", a, "messages")
+        # Both sections open at once: each header must sit directly above its own
+        # rows, and the agent's own text (which the collapsed step brings back) must
+        # not show through the panel's empty cells.
         self.cli("pane", "panel", "show", a, "tasks")
         self.wait_screen("waiting on panel-b: unblock")
+        self.wait_screen("review the panel when you can", seconds=30)
+        both_text = demo_capture.capture(self.root / "client.log", self.root / "capture", "panel-both-sections")
+        self.keep_log("panel-both-sections")
+        # Both panel headers carry the collapse-summary mark; the state glyph differs
+        # per view, so it is not what identifies a header here.
+        tasks_header = self.wait_locate("Tasks", within="⊟")[1]
+        messages_header = self.wait_locate("Messages", within="⊟")[1]
+        self.cli("pane", "panel", "hide", a, "messages")
 
         # 5. The header collapses the section, and the terminal gets every
         #    reserved row back: the row under the header is the terminal's own.
@@ -513,7 +523,15 @@ class PanelViewDemo(ReadinessDemo):
                                                  max([n for _, n in o_collapsed_lines] or [0])],
                       "note": "markers are a custom Pi message through registerMessageRenderer, sent idle with triggerTurn false", 
                   },
+                  "stacked_sections": {
+                      "capture": str(both_text),
+                      "tab_bar_row": "tasks header 2, messages header 6, tab badge compact", 
+                      "tasks_header_row": tasks_header,
+                      "messages_header_row": messages_header,
+                      "messages_header_below_the_tasks_header": messages_header > tasks_header,
+                  },
                   "captures": {"expanded": str(expanded_text), "messages": str(messages_text),
+                               "both_sections": str(both_text),
                                "collapsed": str(collapsed_text), "unavailable": str(unavailable_text),
                                "b": str(text_b), "split_filled": str(filled_text),
                                "overflow_open": str(open_text),

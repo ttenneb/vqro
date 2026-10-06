@@ -1576,3 +1576,465 @@ fn the_fast_path_and_a_full_compose_agree_without_a_panel() {
     }
     assert!(emitted >= 4, "every emitted row was compared: {emitted}");
 }
+
+/// The rendered rows of one composed frame.
+fn composed_rows_of(state: &mut ClientShellState) -> Vec<String> {
+    let frame = state.compose(106, 30).expect("frame");
+    frame
+        .cells
+        .chunks(106)
+        .map(|row| row.iter().map(|cell| cell.symbol.as_str()).collect())
+        .collect()
+}
+
+/// Two views stacked on one pane: Tasks with rows, then Messages with rows. The
+/// human's dogfood report: both headers drew first, with every row below them.
+fn two_section_state() -> ClientShellState {
+    let mut state = panel_state(None, false);
+    let projection = serde_json::json!({
+        "contract":"host.documents.v1", "boot_id":"boot-1", "revision":1,
+        "documents":[{"provider_priority":1,"document":{
+            "contract":"host.view.v1","namespace":"example.tasks","generation":1,"revision":1,
+            "surface":"navigation","target":{"kind":"session"},
+            "items":[
+                {"id":"panel:pane_1:tasks","role":"section","label":"Tasks","detail":"1/2 done",
+                 "view":{"pane_id":"pane_1","view_id":"tasks","state":"in_progress"}},
+                {"id":"panel:pane_1:tasks:row","parent_id":"panel:pane_1:tasks","role":"section",
+                 "label":"A tasks row","view":{"state":"open"}},
+                {"id":"panel:pane_1:messages","role":"section","label":"Messages","detail":"1 waiting",
+                 "view":{"pane_id":"pane_1","view_id":"messages","state":"in_progress"}},
+                {"id":"panel:pane_1:messages:row","parent_id":"panel:pane_1:messages","role":"section",
+                 "label":"A message row","view":{"state":"open"}}
+            ],"actions":[],"required_capabilities":[]}}]
+    });
+    let projection: crate::protocol::endpoint::HostDocumentsProjectionV1 =
+        serde_json::from_value(projection).expect("projection");
+    state.set_endpoint_host_documents_for_generation(
+        &ClientEndpointId::Local,
+        1,
+        Box::new(projection),
+    );
+    for view_id in ["tasks", "messages"] {
+        state
+            .pane_panel_open
+            .entry("pane_1".into())
+            .or_default()
+            .insert(view_id.into());
+    }
+    state
+}
+
+#[test]
+fn each_sections_rows_sit_directly_under_its_own_header() {
+    let mut state = two_section_state();
+    let rows = composed_rows_of(&mut state);
+    let index = |needle: &str| {
+        rows.iter()
+            .position(|row| row.contains(needle))
+            .unwrap_or_else(|| panic!("{needle} is drawn: {rows:?}"))
+    };
+    let tasks_header = index("Tasks");
+    let tasks_row = index("A tasks row");
+    let messages_header = index("Messages");
+    let messages_row = index("A message row");
+    assert!(
+        tasks_header < tasks_row,
+        "the Tasks row belongs under the Tasks header: {rows:?}"
+    );
+    assert!(
+        tasks_row < messages_header,
+        "the Messages header comes after the Tasks rows, not above them: {rows:?}"
+    );
+    assert!(
+        messages_header < messages_row,
+        "the Messages row belongs under the Messages header: {rows:?}"
+    );
+    // The rows are adjacent to their own headers, i.e. nothing of the other
+    // section is in between.
+    assert_eq!(
+        tasks_row,
+        tasks_header + 1,
+        "the Tasks row is the line after its header: {rows:?}"
+    );
+    assert_eq!(
+        messages_row,
+        messages_header + 1,
+        "the Messages row is the line after its header: {rows:?}"
+    );
+}
+
+#[test]
+fn every_cell_of_the_panel_band_is_panel_painted() {
+    // The human's bleed-through report: terminal text showed in the panel's empty
+    // cells. Every cell the band owns must carry the panel background.
+    let mut state = panel_state(None, true);
+    let frame = state.compose(106, 30).expect("frame");
+    let bands = state.pane_panel_areas.clone();
+    assert!(!bands.is_empty(), "the panel reserved a band");
+    let width = 106;
+    let cell_at = |x: u16, y: u16| &frame.cells[usize::from(y) * width + usize::from(x)];
+    let band = bands[0];
+    // The header is painted by the panel with its own background, so it is the
+    // reference for what panel chrome looks like in this frame.
+    let chrome = cell_at(band.x.saturating_add(1), band.y).bg;
+    for band in &bands {
+        for y in band.y..band.y.saturating_add(band.height) {
+            for x in band.x..band.x.saturating_add(band.width) {
+                assert_eq!(
+                    cell_at(x, y).bg,
+                    chrome,
+                    "cell ({x}, {y}) of the band is not panel-painted: {:?}",
+                    cell_at(x, y)
+                );
+            }
+        }
+    }
+    // And the band must not carry the terminal's own background, which is what the
+    // human saw through the panel's empty cells.
+    let terminal_y = bands[0].y.saturating_add(bands[0].height).saturating_add(3);
+    let terminal = cell_at(bands[0].x.saturating_add(4), terminal_y).bg;
+    assert_ne!(
+        chrome, terminal,
+        "the band carries the terminal's background, so its text shows through"
+    );
+}
+
+#[test]
+fn a_click_on_the_row_itself_focuses_the_row_s_pane() {
+    // The human asked to confirm this: the row, not only the assignee text, is what
+    // jumps. A row whose published terminal names a pane takes the row's own rect as
+    // its primary hit; the assignee is a second hit for the same target.
+    let mut state = panel_state(None, true);
+    text_of(&mut state);
+    let row = state
+        .hits
+        .pane_panels
+        .iter()
+        .find(|hit| {
+            matches!(
+                hit.action,
+                super::super::pane_panel::PanePanelAction::FocusPane(_)
+            )
+        })
+        .cloned()
+        .expect("a row with a terminal link is clickable");
+    let super::super::pane_panel::PanePanelAction::FocusPane(target) = row.action.clone() else {
+        unreachable!()
+    };
+    // The hit covers the row, so a click near its left edge (over the label, well
+    // away from the right-aligned assignee) is the row's own focus action.
+    assert!(
+        row.rect.width > 8,
+        "the row hit spans the row, not a label or a name: {:?}",
+        row.rect
+    );
+    let events = vec![
+        RawInputEvent::Mouse(crossterm::event::MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: row.rect.x.saturating_add(1),
+            row: row.rect.y,
+            modifiers: KeyModifiers::empty(),
+        }),
+        RawInputEvent::Mouse(crossterm::event::MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left),
+            column: row.rect.x.saturating_add(1),
+            row: row.rect.y,
+            modifiers: KeyModifiers::empty(),
+        }),
+    ];
+    let outcome = state.handle_raw_events(events);
+    let focused: Vec<&str> = outcome
+        .actions
+        .iter()
+        .filter_map(|action| match action {
+            ClientShellAction::Endpoint { request, .. } => match &request.method {
+                crate::api::schema::Method::PaneFocus(target) => Some(target.pane_id.as_str()),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        focused,
+        vec![target.as_str()],
+        "a click on the row itself focuses the row's pane"
+    );
+}
+
+/// Two sections on one pane where the first has `tasks_rows` rows and the second one,
+/// so the pinned-header layout can be checked at the panel's edge.
+fn long_section_state(tasks_rows: usize) -> ClientShellState {
+    long_section_state_with(tasks_rows, 1)
+}
+
+/// A long first section plus a second one, to exercise how the band's row budget is
+/// shared between sections.
+fn long_section_state_with(tasks_rows: usize, messages_rows: usize) -> ClientShellState {
+    let mut items = vec![serde_json::json!({
+        "id":"panel:pane_1:tasks","role":"section","label":"Tasks","detail":"rows",
+        "view":{"pane_id":"pane_1","view_id":"tasks","state":"in_progress"}
+    })];
+    for row in 0..tasks_rows {
+        items.push(serde_json::json!({
+            "id": format!("panel:pane_1:tasks:row{row}"),
+            "parent_id":"panel:pane_1:tasks","role":"section",
+            "label": format!("Tasks row {row}"),
+            "view":{"state":"open"}
+        }));
+    }
+    items.push(serde_json::json!({
+        "id":"panel:pane_1:messages","role":"section","label":"Messages","detail":"one",
+        "view":{"pane_id":"pane_1","view_id":"messages","state":"open"}
+    }));
+    for row in 0..messages_rows {
+        let label = if row == 0 {
+            "A message row".to_string()
+        } else {
+            format!("A message row {row}")
+        };
+        items.push(serde_json::json!({
+            "id": format!("panel:pane_1:messages:row{row}"),
+            "parent_id":"panel:pane_1:messages",
+            "role":"section","label": label,"view":{"state":"open"}
+        }));
+    }
+    let mut state = panel_state(None, false);
+    let projection: crate::protocol::endpoint::HostDocumentsProjectionV1 =
+        serde_json::from_value(serde_json::json!({
+            "contract":"host.documents.v1","boot_id":"boot-1","revision":1,
+            "documents":[{"provider_priority":1,"document":{
+                "contract":"host.view.v1","namespace":"example.tasks","generation":1,"revision":1,
+                "surface":"navigation","target":{"kind":"session"},
+                "items":items,"actions":[],"required_capabilities":[]
+            }}]
+        }))
+        .expect("projection");
+    state.set_endpoint_host_documents_for_generation(
+        &ClientEndpointId::Local,
+        1,
+        Box::new(projection),
+    );
+    for view_id in ["tasks", "messages"] {
+        state
+            .pane_panel_open
+            .entry("pane_1".into())
+            .or_default()
+            .insert(view_id.into());
+    }
+    state
+}
+
+#[test]
+fn a_long_first_section_keeps_the_next_sections_header_visible() {
+    // The coordinator's contract: headers are pinned and in order, the rows below
+    // them get what remains, and a long section scrolls inside its own rows instead
+    // of pushing a later header out of the band.
+    for rows in [4_usize, 12, 40] {
+        let mut state = long_section_state(rows);
+        let text = text_of(&mut state);
+        assert!(
+            text.contains("Tasks"),
+            "{rows}: the first header stays: {text}"
+        );
+        assert!(
+            text.contains("Messages"),
+            "{rows}: the later header is never pushed out: {text}"
+        );
+        let drawn = composed_rows_of(&mut state);
+        let tasks_header = drawn.iter().position(|row| row.contains("Tasks"));
+        let messages_header = drawn
+            .iter()
+            .position(|row| row.contains("Messages"))
+            .expect("messages header row");
+        assert!(
+            tasks_header < Some(messages_header),
+            "{rows}: headers keep their order"
+        );
+    }
+}
+
+#[test]
+fn a_long_first_section_leaves_a_later_sections_rows_reachable() {
+    // QA's P2 at f0e31328: the first section took the whole row pool, so a later
+    // section's rows were never drawn at any scroll offset - only its header was.
+    let mut state = long_section_state_with(40, 3);
+    let drawn = composed_rows_of(&mut state);
+    assert!(
+        drawn.iter().any(|row| row.contains("Tasks")),
+        "the long first header stays: {drawn:?}"
+    );
+    assert!(
+        drawn.iter().any(|row| row.contains("Messages")),
+        "the later header stays: {drawn:?}"
+    );
+    assert!(
+        drawn.iter().any(|row| row.contains("A message row")),
+        "the later section's rows are drawn under it, not starved out: {drawn:?}"
+    );
+}
+
+#[test]
+fn scrolling_reaches_the_later_rows_of_a_later_section() {
+    // The same budget, read from the other end: the offset that moves the long
+    // section also moves the later one, so its own later rows are reachable while
+    // both headers stay where they are.
+    let mut state = long_section_state_with(40, 3);
+    state
+        .pane_panel_display
+        .entry("pane_1".into())
+        .or_default()
+        .scroll = u16::MAX;
+    let drawn = composed_rows_of(&mut state);
+    assert!(
+        drawn.iter().any(|row| row.contains("A message row 2")),
+        "the later section's last row is reachable by scrolling: {drawn:?}"
+    );
+    let tasks_header = drawn.iter().position(|row| row.contains("Tasks"));
+    let messages_header = drawn.iter().position(|row| row.contains("Messages"));
+    assert!(
+        tasks_header < messages_header,
+        "headers keep their order while the rows scroll: {drawn:?}"
+    );
+}
+
+#[test]
+fn an_unavailable_section_does_not_spend_the_row_budget() {
+    // QA's P3 at 21407313: a view the user opened that is no longer published draws its
+    // one row as its own reserved line, so budgeting it a row from the pool as well cost
+    // a published section a row and left a band line blank under rows that were waiting.
+    let mut state = long_section_state_with(8, 1);
+    state
+        .pane_panel_open
+        .entry("pane_1".into())
+        .or_default()
+        .insert("gone".into());
+    let frame = state.compose(106, 30).expect("frame");
+    let band = state
+        .pane_panel_areas
+        .first()
+        .copied()
+        .expect("reserved band");
+    let width = 106;
+    // The band's last column is the scroll track, and its last line is the divider:
+    // both draw in every state, so the content columns are what carries a gap.
+    let content_width = usize::from(band.width).saturating_sub(1);
+    let rows_text: Vec<String> = (band.y..band.y.saturating_add(band.height))
+        .map(|y| {
+            frame.cells[usize::from(y) * width + usize::from(band.x)
+                ..usize::from(y) * width + usize::from(band.x) + content_width]
+                .iter()
+                .map(|cell| cell.symbol.as_str())
+                .collect::<String>()
+        })
+        .collect();
+    assert!(
+        rows_text.iter().any(|row| row.contains("unavailable")),
+        "the unpublished view keeps its own line: {rows_text:?}"
+    );
+    assert!(
+        rows_text.iter().any(|row| row.contains("Tasks row")),
+        "the published section still draws its rows: {rows_text:?}"
+    );
+    // No line is left over: every content line of this band is a header, a row, the
+    // unpublished view's own line or the divider, so none of them was paid for twice.
+    for (offset, row) in rows_text.iter().enumerate() {
+        assert!(
+            !row.trim().is_empty(),
+            "band line {offset} is blank while rows are waiting: {rows_text:?}"
+        );
+    }
+}
+
+#[test]
+fn the_panel_band_has_no_gap_however_the_sections_fall() {
+    // Every line from the panel's first row to the last is either a header, a row or
+    // the divider: the budget follows what is drawn, so nothing is skipped.
+    for rows in [1_usize, 4, 12, 40] {
+        // A scrolled panel is the case QA found the gap in: the reserved lines were
+        // counted for every header while a scrolled section drew none of its own.
+        for scroll in [0_u16, 2, 6] {
+            let mut state = long_section_state(rows);
+            state
+                .pane_panel_display
+                .entry("pane_1".into())
+                .or_default()
+                .scroll = scroll;
+            let frame = state.compose(106, 30).expect("frame");
+            let band = state
+                .pane_panel_areas
+                .first()
+                .copied()
+                .expect("reserved band");
+            let width = 106;
+            let rows_text: Vec<String> = (band.y..band.y.saturating_add(band.height))
+                .map(|y| {
+                    frame.cells[usize::from(y) * width + usize::from(band.x)
+                        ..usize::from(y) * width + usize::from(band.x.saturating_add(band.width))]
+                        .iter()
+                        .map(|cell| cell.symbol.as_str())
+                        .collect::<String>()
+                })
+                .collect();
+            // The last band line is the divider; at least one line above it carries text.
+            for (offset, row) in rows_text.iter().enumerate() {
+                if offset + 1 == rows_text.len() {
+                    continue;
+                }
+                assert!(
+                    !row.trim().is_empty(),
+                    "{rows} rows at scroll {scroll}: band line {offset} is blank: {rows_text:?}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn the_scrollbar_track_and_the_placeholder_are_panel_painted_too() {
+    // The other two Reset holes QA found: the scroll indicator inside the band, and
+    // the placeholder panel of a view that stopped being published.
+    let mut state = long_section_state(40);
+    let frame = state.compose(106, 30).expect("frame");
+    let band = state
+        .pane_panel_areas
+        .first()
+        .copied()
+        .expect("reserved band");
+    let width = 106;
+    let cell_at = |x: u16, y: u16| &frame.cells[usize::from(y) * width + usize::from(x)];
+    let chrome = cell_at(band.x.saturating_add(1), band.y).bg;
+    // Every cell of the band, the scroll track's last column included.
+    for y in band.y..band.y.saturating_add(band.height) {
+        for x in band.x..band.x.saturating_add(band.width) {
+            assert_eq!(
+                cell_at(x, y).bg,
+                chrome,
+                "({x}, {y}) inside the band is not panel-painted"
+            );
+        }
+    }
+    // And the placeholder panel of an unpublished view.
+    let mut missing = panel_state(None, true);
+    missing
+        .pane_panel_open
+        .entry("pane_1".into())
+        .or_default()
+        .insert("vanished".into());
+    let frame = missing.compose(106, 30).expect("frame");
+    let band = missing
+        .pane_panel_areas
+        .first()
+        .copied()
+        .expect("placeholder band");
+    let chrome =
+        &frame.cells[usize::from(band.y) * width + usize::from(band.x.saturating_add(1))].bg;
+    for y in band.y..band.y.saturating_add(band.height) {
+        for x in band.x..band.x.saturating_add(band.width) {
+            assert_eq!(
+                &frame.cells[usize::from(y) * width + usize::from(x)].bg,
+                chrome,
+                "placeholder cell ({x}, {y}) is not panel-painted"
+            );
+        }
+    }
+}

@@ -12,7 +12,18 @@ pub(super) struct AttentionNavigation {
     pub(super) document_key: (String, u64, u64),
     measures: [String; 3],
     pub(super) badges: HashMap<String, HashMap<String, AttentionBadge>>,
-    rows: Vec<(String, String)>,
+    pub(super) rows: Vec<AttentionRow>,
+}
+
+/// One row of the sidebar's attention (Tasks) list. `pane_id` is the pane the row
+/// belongs to when the extension published a terminal link for it: the owner's pane,
+/// or the pane where the human acts. A row without one is an agent that has no live
+/// pane, so there is nowhere to jump and the row says so instead of doing nothing.
+#[derive(Clone, Debug)]
+pub(super) struct AttentionRow {
+    pub(super) label: String,
+    pub(super) detail: String,
+    pub(super) pane_id: Option<String>,
 }
 #[derive(Clone, Debug)]
 pub(super) struct AttentionBadge {
@@ -116,9 +127,15 @@ pub(super) fn navigation(projection: &HostDocumentsProjectionV1) -> Option<Atten
         } else if item.id.starts_with("context:attention.row:")
             || item.id.starts_with("context:attention.overflow:")
         {
-            result
-                .rows
-                .push((item.label.clone(), item.detail.clone().unwrap_or_default()));
+            result.rows.push(AttentionRow {
+                label: item.label.clone(),
+                detail: item.detail.clone().unwrap_or_default(),
+                pane_id: item
+                    .terminal
+                    .as_ref()
+                    .and_then(|terminal| terminal.placement.as_ref())
+                    .map(|placement| placement.pane_id.clone()),
+            });
         } else if let Some(id) = item.id.strip_prefix("context:attention.badge:") {
             let mut parts = id.rsplitn(4, ':');
             let third = parts.next()?.parse::<u64>().ok()?;
@@ -157,7 +174,6 @@ pub(super) fn render_workspace_badge(
     workspace: &str,
     repository: Option<&crate::protocol::endpoint::ClientShellRepository>,
     palette: &Palette,
-    hits: &mut ShellHitMap,
 ) {
     let Some(nav) = nav else {
         return;
@@ -200,7 +216,8 @@ pub(super) fn render_workspace_badge(
         &format!("[{label}]"),
         Style::default().fg(palette.peach),
     );
-    hits.attention.push(nav.hit(badge_rect, "workspace", ids));
+    // No hit of its own, for the same reason as a tab badge: a click anywhere on the
+    // row, badge included, is the row's own action.
 }
 
 pub(super) fn render_panel(
@@ -301,24 +318,55 @@ pub(super) fn render_panel(
     *scroll = (*scroll).min(nav.rows.len().saturating_sub(page.max(1)));
     hits.agent_body = body;
     hits.agent_max_scroll = nav.rows.len().saturating_sub(page.max(1));
-    for (offset, (label, detail)) in nav.rows.iter().skip(*scroll).take(page).enumerate() {
+    for (offset, row) in nav.rows.iter().skip(*scroll).take(page).enumerate() {
         let y = body.y + (start + offset * 2) as u16;
+        // A row whose agent has no live pane has nowhere to jump, so it says so in
+        // its own line rather than looking clickable and doing nothing.
+        let live = row.pane_id.is_some();
+        let (label_style, detail_style) = if live {
+            (Style::default().fg(p.text), Style::default().fg(p.overlay0))
+        } else {
+            (
+                Style::default().fg(p.overlay0),
+                Style::default().fg(p.overlay0),
+            )
+        };
         put_text(
             buffer,
             body.x,
             y,
             body.width,
-            &format!(" {label}"),
-            Style::default().fg(p.text),
+            &format!(" {}", row.label),
+            label_style,
         );
+        // The stale marker is the whole line: appended to the entry's own detail it
+        // would be the part that gets truncated, and this is the line that matters.
+        let detail = if live {
+            row.detail.clone()
+        } else {
+            "not running".to_string()
+        };
         put_text(
             buffer,
             body.x,
             y + 1,
             body.width,
             &format!(" {detail}"),
-            Style::default().fg(p.overlay0),
+            detail_style,
         );
+        // Both lines of the row are the row: the whole entry is one target.
+        hits.attention.push(AttentionHit {
+            rect: Rect::new(body.x, y, body.width, 2),
+            plugin: nav.plugin.clone(),
+            entrypoint: nav.entrypoint.clone(),
+            kind: "attention_row".into(),
+            ids: row
+                .pane_id
+                .clone()
+                .map(|pane_id| vec![pane_id])
+                .unwrap_or_default(),
+            document_key: nav.document_key.clone(),
+        });
     }
 }
 
@@ -378,6 +426,31 @@ impl ClientShellState {
         let Some(snapshot) = self.snapshot.clone() else {
             return;
         };
+        // A row of the list is one target: the pane it belongs to. Clicking it goes
+        // there, which is the primary action a task entry owes the user. A row whose
+        // agent has no live pane says so in the row and reports that here, rather
+        // than silently doing nothing.
+        if launch.kind == "attention_row" {
+            match launch
+                .ids
+                .first()
+                .filter(|pane_id| snapshot.panes.iter().any(|pane| &pane.pane_id == *pane_id))
+            {
+                Some(pane_id) => self.push_endpoint_method(
+                    crate::api::schema::Method::PaneFocus(crate::api::schema::PaneTarget {
+                        pane_id: pane_id.clone(),
+                    }),
+                    outcome,
+                ),
+                None => {
+                    self.endpoint_error = Some(
+                        "that entry's agent has no running pane, so there is nowhere to jump"
+                            .to_string(),
+                    );
+                }
+            }
+            return;
+        }
         // The scope the badge covers: the panes of those panes' tabs.
         let mut panes: Vec<(String, String)> = Vec::new();
         for pane in &snapshot.panes {

@@ -592,7 +592,10 @@ fn render_pane(
     let Some(geometry) = geometry(area, panel_height) else {
         return;
     };
-    let panel_style = Style::default().bg(ratatui::style::Color::Reset);
+    // The band is Vqro chrome. Filling it with the panel background is what stops
+    // the terminal's own text showing through the panel's empty cells; a Reset
+    // background leaves whatever the terminal painted underneath.
+    let panel_style = Style::default().bg(palette.panel_bg);
     super::render::render_pane_contribution_divider(buffer, geometry.divider, palette);
     for y in geometry.panel.y..geometry.panel.bottom() {
         for x in geometry.panel.x..geometry.panel.right() {
@@ -618,9 +621,61 @@ fn render_pane(
     let visible = geometry.panel.height;
     // Section headers stay pinned; only the rows scroll, so a section never
     // loses its name or its collapse marker.
+    // Headers are pinned in the sense that the panel's height reserves one line per
+    // section; the rows below them are what scrolls. Every section keeps one line of
+    // its own, in order: its header, or for a view the user opened that is no longer
+    // published, its one row. Those lines are reserved, so a long section can never
+    // push a later section's line out of the band.
     let row_space = visible.saturating_sub(pinned);
-    let rows = panel_rows(&views, open_views, &display.collapsed_views);
-    let overflow = rows.len() as u16 > row_space;
+    let sections = panel_sections(&views, open_views, &display.collapsed_views);
+    // The rows below the headers share one budget: one row for every section that has
+    // a row, while the budget lasts, and then the rest of the budget to the sections
+    // in order. Reserving that first row is what keeps a long earlier section from
+    // starving a later section's rows out of the band entirely - its header was never
+    // in doubt, its rows are what would go missing - and spending the budget on what
+    // is drawn is what keeps the panel's bottom line from being left blank.
+    // A section with no header (a view the user opened that is no longer published)
+    // already draws its one row as its own reserved line, so it asks the pool for
+    // nothing: budgeting it a row too would leave a band line unused under a section
+    // whose rows are still waiting.
+    let pooled_rows = sections
+        .iter()
+        .map(|section| {
+            section
+                .rows
+                .len()
+                .saturating_sub(usize::from(section.header.is_none()))
+        })
+        .collect::<Vec<_>>();
+    let pool = usize::from(visible).saturating_sub(sections.len());
+    let headers_only = pool == 0;
+    let mut allocation = vec![0_usize; sections.len()];
+    let mut spare = pool;
+    for (index, wanted) in pooled_rows.iter().enumerate() {
+        if *wanted == 0 || spare == 0 {
+            continue;
+        }
+        allocation[index] = 1;
+        spare -= 1;
+    }
+    for (index, wanted) in pooled_rows.iter().enumerate() {
+        if spare == 0 {
+            break;
+        }
+        let give = wanted.saturating_sub(allocation[index]).min(spare);
+        allocation[index] += give;
+        spare -= give;
+    }
+    // One scroll offset moves every section that has more rows than its share, so a
+    // later section's later rows are reachable while every header stays where it is.
+    let most_scrollable = pooled_rows
+        .iter()
+        .zip(&allocation)
+        .max_by_key(|(wanted, allocated)| wanted.saturating_sub(**allocated))
+        .filter(|(wanted, allocated)| **wanted > **allocated);
+    let scroll_total = most_scrollable.map_or(0, |(wanted, _)| *wanted);
+    let scroll_page = most_scrollable.map_or(0, |(_, allocated)| *allocated);
+    let overflow = most_scrollable.is_some();
     // The scroll indicator owns the last column, with one quiet column of
     // gutter between it and the content.
     let body_width = if overflow {
@@ -630,109 +685,121 @@ fn render_pane(
     };
     let scroll = display
         .scroll
-        .min((rows.len() as u16).saturating_sub(row_space));
+        .min(scroll_total.saturating_sub(scroll_page) as u16);
     let mut y = geometry.panel.y;
-    for view in &views {
-        let collapsed = display.collapsed_views.contains(&view.view_id);
-        let header_rect = Rect::new(geometry.panel.x, y, body_width, 1);
-        if let Some(kind) = view
-            .kind
-            .as_deref()
-            .filter(|kind| !block_kind_supported(Some(kind)))
-        {
-            draw_unsupported_header(buffer, header_rect, view, kind, palette);
+    for (index, section) in sections.iter().enumerate() {
+        let mut rest = section.rows.as_slice();
+        if let Some(view) = section.header {
+            let collapsed = display.collapsed_views.contains(&view.view_id);
+            let header_rect = Rect::new(geometry.panel.x, y, body_width, 1);
+            if let Some(kind) = view
+                .kind
+                .as_deref()
+                .filter(|kind| !block_kind_supported(Some(kind)))
+            {
+                draw_unsupported_header(buffer, header_rect, view, kind, palette);
+            } else {
+                draw_header(buffer, header_rect, view, collapsed, palette);
+            }
             out.hits.push(PanePanelHit {
                 rect: header_rect,
                 pane_id: pane.pane_id.clone(),
                 action: PanePanelAction::ToggleView(view.view_id.clone()),
             });
             y = y.saturating_add(1);
+        } else if let Some((first, remaining)) = rest.split_first() {
+            // No header to draw: the section's own row is the line that keeps it in
+            // the band, so it is drawn here and not counted against the pool.
+            let row_rect = Rect::new(geometry.panel.x, y, body_width, 1);
+            draw_plain_row(buffer, row_rect, first, palette);
+            y = y.saturating_add(1);
+            rest = remaining;
+        }
+        if headers_only || rest.is_empty() {
             continue;
         }
-        draw_header(buffer, header_rect, view, collapsed, palette);
-        out.hits.push(PanePanelHit {
-            rect: header_rect,
-            pane_id: pane.pane_id.clone(),
-            action: PanePanelAction::ToggleView(view.view_id.clone()),
-        });
-        y = y.saturating_add(1);
-    }
-    for (drawn, line) in rows.iter().skip(usize::from(scroll)).enumerate() {
-        if drawn as u16 >= row_space {
-            break;
-        }
-        let row_rect = Rect::new(geometry.panel.x, y, body_width, 1);
-        match line {
-            PanelRow::Unsupported { title, kind } => {
-                put_text(
-                    buffer,
-                    row_rect.x,
-                    y,
-                    body_width,
-                    &truncate(&format!("└─ {title}: unsupported {kind}"), body_width),
-                    Style::default().fg(palette.overlay0),
-                );
+        // The section's share of the row budget, with the shared scroll offset
+        // applied to every section that has more rows than its share.
+        let space = allocation[index].min(rest.len());
+        let offset = usize::from(scroll).min(rest.len().saturating_sub(space));
+        let remaining = &rest[offset..offset.saturating_add(space)];
+        for line in remaining {
+            if y >= geometry.panel.bottom() {
+                break;
             }
-            PanelRow::Unavailable { view_id } => {
-                put_text(
-                    buffer,
-                    row_rect.x,
-                    y,
-                    body_width,
-                    &truncate(&format!("└─ {view_id}: unavailable"), body_width),
-                    Style::default().fg(palette.overlay0),
-                );
-            }
-            PanelRow::Empty => {
-                put_text(
-                    buffer,
-                    row_rect.x,
-                    y,
-                    body_width,
-                    &truncate("└─ nothing to show", body_width),
-                    Style::default().fg(palette.overlay0),
-                );
-            }
-            PanelRow::Row(row) => {
-                draw_row(
-                    buffer,
-                    row_rect,
-                    row,
-                    &display.collapsed_rows,
-                    &agents,
-                    body_width,
-                    palette,
-                );
-                let prefix_width = display_width(&row_prefix(&row.lanes, row.is_last));
-                let expandable = row.children > 0;
-                if expandable {
-                    out.hits.push(PanePanelHit {
-                        rect: Rect::new(row_rect.x.saturating_add(prefix_width), y, 2, 1),
-                        pane_id: pane.pane_id.clone(),
-                        action: PanePanelAction::ToggleRow(row.item.id.clone()),
-                    });
+            let row_rect = Rect::new(geometry.panel.x, y, body_width, 1);
+            match line {
+                PanelRow::Unsupported { title, kind } => {
+                    put_text(
+                        buffer,
+                        row_rect.x,
+                        y,
+                        body_width,
+                        &truncate(&format!("└─ {title}: unsupported {kind}"), body_width),
+                        Style::default().fg(palette.overlay0).bg(palette.panel_bg),
+                    );
                 }
-                let target = row
-                    .item
-                    .terminal
-                    .as_ref()
-                    .and_then(|terminal| terminal.placement.as_ref())
-                    .map(|placement| placement.pane_id.clone());
-                let primary = match (&target, expandable) {
-                    (Some(target), _) => Some(PanePanelAction::FocusPane(target.clone())),
-                    (None, true) => Some(PanePanelAction::ToggleRow(row.item.id.clone())),
-                    (None, false) => None,
-                };
-                if let Some(action) = primary {
-                    out.hits.push(PanePanelHit {
-                        rect: row_rect,
-                        pane_id: pane.pane_id.clone(),
-                        action,
-                    });
+                PanelRow::Unavailable { view_id } => {
+                    put_text(
+                        buffer,
+                        row_rect.x,
+                        y,
+                        body_width,
+                        &truncate(&format!("└─ {view_id}: unavailable"), body_width),
+                        Style::default().fg(palette.overlay0).bg(palette.panel_bg),
+                    );
+                }
+                PanelRow::Empty => {
+                    put_text(
+                        buffer,
+                        row_rect.x,
+                        y,
+                        body_width,
+                        &truncate("└─ nothing to show", body_width),
+                        Style::default().fg(palette.overlay0).bg(palette.panel_bg),
+                    );
+                }
+                PanelRow::Row(row) => {
+                    draw_row(
+                        buffer,
+                        row_rect,
+                        row,
+                        &display.collapsed_rows,
+                        &agents,
+                        body_width,
+                        palette,
+                    );
+                    let prefix_width = display_width(&row_prefix(&row.lanes, row.is_last));
+                    let expandable = row.children > 0;
+                    if expandable {
+                        out.hits.push(PanePanelHit {
+                            rect: Rect::new(row_rect.x.saturating_add(prefix_width), y, 2, 1),
+                            pane_id: pane.pane_id.clone(),
+                            action: PanePanelAction::ToggleRow(row.item.id.clone()),
+                        });
+                    }
+                    let target = row
+                        .item
+                        .terminal
+                        .as_ref()
+                        .and_then(|terminal| terminal.placement.as_ref())
+                        .map(|placement| placement.pane_id.clone());
+                    let primary = match (&target, expandable) {
+                        (Some(target), _) => Some(PanePanelAction::FocusPane(target.clone())),
+                        (None, true) => Some(PanePanelAction::ToggleRow(row.item.id.clone())),
+                        (None, false) => None,
+                    };
+                    if let Some(action) = primary {
+                        out.hits.push(PanePanelHit {
+                            rect: row_rect,
+                            pane_id: pane.pane_id.clone(),
+                            action,
+                        });
+                    }
                 }
             }
+            y = y.saturating_add(1);
         }
-        y = y.saturating_add(1);
     }
     if overflow {
         let track = Rect::new(
@@ -744,9 +811,9 @@ fn render_pane(
         super::render::render_panel_scroll(
             buffer,
             track,
-            rows.len(),
+            scroll_total,
             usize::from(scroll),
-            usize::from(row_space),
+            scroll_page,
             palette,
         );
     }
@@ -819,8 +886,8 @@ fn render_placeholder(
     let Some(geometry) = geometry(area, panel_height) else {
         return;
     };
-    let dim = Style::default().fg(palette.overlay0);
-    let style = Style::default().bg(ratatui::style::Color::Reset);
+    let dim = Style::default().fg(palette.overlay0).bg(palette.panel_bg);
+    let style = Style::default().bg(palette.panel_bg);
     super::render::render_pane_contribution_divider(buffer, geometry.divider, palette);
     for y in geometry.panel.y..geometry.panel.bottom() {
         for x in geometry.panel.x..geometry.panel.right() {
@@ -927,43 +994,71 @@ enum PanelRow<'a> {
 }
 
 /// The rows of every expanded section, in draw order.
-fn panel_rows<'a>(
+/// One drawable section: a published view and the rows that belong to it, in the
+/// order the panel stacks them. A view the user opened that is no longer published
+/// is a section of its own with no header, so its row stays where its section was.
+struct PanelSection<'a> {
+    header: Option<&'a PanelView<'a>>,
+    rows: Vec<PanelRow<'a>>,
+}
+
+fn panel_sections<'a>(
     views: &'a [PanelView<'a>],
     open_views: &'a BTreeSet<String>,
     collapsed_views: &BTreeSet<String>,
-) -> Vec<PanelRow<'a>> {
-    let mut rows = Vec::new();
+) -> Vec<PanelSection<'a>> {
+    let mut sections = Vec::new();
     for view in views {
-        if collapsed_views.contains(&view.view_id) {
-            continue;
+        let mut rows = Vec::new();
+        if !collapsed_views.contains(&view.view_id) {
+            if let Some(kind) = view
+                .kind
+                .as_deref()
+                .filter(|kind| !block_kind_supported(Some(kind)))
+            {
+                rows.push(PanelRow::Unsupported {
+                    title: view.title,
+                    kind,
+                });
+            } else if view.rows.is_empty() {
+                rows.push(PanelRow::Empty);
+            } else {
+                rows.extend(view.rows.iter().map(PanelRow::Row));
+            }
         }
-        if let Some(kind) = view
-            .kind
-            .as_deref()
-            .filter(|kind| !block_kind_supported(Some(kind)))
-        {
-            rows.push(PanelRow::Unsupported {
-                title: view.title,
-                kind,
-            });
-            continue;
-        }
-        if view.rows.is_empty() {
-            rows.push(PanelRow::Empty);
-            continue;
-        }
-        for row in &view.rows {
-            rows.push(PanelRow::Row(row));
-        }
+        sections.push(PanelSection {
+            header: Some(view),
+            rows,
+        });
     }
-    // A view the user opened that is not published any more says so on its own
-    // row: its siblings keep drawing.
     for view_id in open_views {
         if !views.iter().any(|view| &view.view_id == view_id) {
-            rows.push(PanelRow::Unavailable { view_id });
+            sections.push(PanelSection {
+                header: None,
+                rows: vec![PanelRow::Unavailable { view_id }],
+            });
         }
     }
-    rows
+    sections
+}
+
+/// A section line that has no header of its own: an unsupported, unavailable or empty
+/// row, drawn in the same dim style the rows pool uses.
+fn draw_plain_row(buffer: &mut Buffer, rect: Rect, line: &PanelRow<'_>, palette: &Palette) {
+    let text = match line {
+        PanelRow::Unsupported { title, kind } => format!("└─ {title}: unsupported {kind}"),
+        PanelRow::Unavailable { view_id } => format!("└─ {view_id}: unavailable"),
+        PanelRow::Empty => "└─ nothing to show".to_string(),
+        PanelRow::Row(_) => return,
+    };
+    put_text(
+        buffer,
+        rect.x,
+        rect.y,
+        rect.width,
+        &truncate(&text, rect.width),
+        Style::default().fg(palette.overlay0).bg(palette.panel_bg),
+    );
 }
 
 fn draw_header(

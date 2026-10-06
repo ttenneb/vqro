@@ -142,11 +142,18 @@ def label(owner, agents):
             names.append(mark + label(binding, agents))
         return "acceptors: " + (", ".join(names) or "unknown")
     if owner.get("role") == "human_unverified" or owner.get("class") == "human_unverified":
+        # A uid is kept here on purpose: two unverified humans on one machine have
+        # to be told apart, and there is no name to use.
         return "human (unverified)" if human_debtor(owner) else f"human (unverified, uid {owner.get('uid')})"
     agent = (agents or {}).get(owner.get("terminal_id"))
     if exact(owner, agent):
         return clean(agent.get("name") or owner.get("agent") or "agent")
-    return clean(owner.get("agent", "unknown")) + " @" + clean(owner.get("terminal_id", "?"))[-12:]
+    # A pane whose agent Vqro cannot join still reads as the agent, with just enough
+    # of the terminal to tell two of them apart; the full id is not for the panel.
+    terminal = clean(owner.get("terminal_id", "?"))
+    if terminal.startswith("term_"):
+        terminal = terminal[len("term_"):]
+    return clean(owner.get("agent", "unknown")) + " @" + terminal[-4:]
 
 
 def recipient(task, tasks):
