@@ -1775,6 +1775,7 @@ mod tests {
             state.active,
             state.selected,
         );
+        assert_eq!(snapshot.version, 6);
         let mut restored_ids = HashSet::new();
         for (saved, original) in snapshot.workspaces[0]
             .tabs

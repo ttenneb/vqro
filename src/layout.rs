@@ -1342,6 +1342,58 @@ mod tests {
     }
 
     #[test]
+    fn legacy_split_pane_keeps_growing_a_deep_binary_branch() {
+        let (mut layout, root) = TileLayout::new();
+        let mut expected = vec![root];
+        for _ in 0..6 {
+            expected.push(layout.split_pane(root, Direction::Horizontal, 0.8).unwrap());
+        }
+        let depth = layout
+            .splits(Rect::new(0, 0, 512, 128))
+            .iter()
+            .map(|split| split.path.len() + 1)
+            .max()
+            .unwrap();
+        assert_eq!(depth, 6);
+        assert_eq!(layout.focused(), root);
+        let placed = layout.pane_ids();
+        assert_eq!(placed.len(), expected.len());
+        assert!(expected.iter().all(|id| placed.contains(id)));
+        assert!(placed
+            .iter()
+            .all(|id| layout.placement(*id) == Some(PanePlacement::Tiled)));
+    }
+
+    #[test]
+    fn legacy_insert_pane_near_preserves_ids_beyond_four_split_levels() {
+        let (mut layout, root) = TileLayout::new();
+        for _ in 0..6 {
+            layout.split_pane(root, Direction::Horizontal, 0.8).unwrap();
+        }
+        let before = layout.pane_ids();
+        let moved = PaneId::alloc();
+        assert!(layout.insert_pane_near(root, moved, Direction::Vertical, 0.8, true));
+        assert_eq!(layout.focused(), moved);
+        assert_eq!(layout.pane_ids().len(), before.len() + 1);
+        assert!(before.iter().all(|id| layout.pane_ids().contains(id)));
+        assert_eq!(layout.placement(moved), Some(PanePlacement::Tiled));
+        assert_eq!(
+            layout
+                .splits(Rect::new(0, 0, 512, 128))
+                .iter()
+                .map(|split| split.path.len() + 1)
+                .max(),
+            Some(7)
+        );
+
+        let tree = layout.typed_root().clone();
+        let focus = layout.focused_leaf();
+        assert!(!layout.insert_pane_near(root, moved, Direction::Horizontal, 0.5, false));
+        assert_eq!(layout.typed_root(), &tree);
+        assert_eq!(layout.focused_leaf(), focus);
+    }
+
+    #[test]
     fn creating_collection_does_not_allocate_or_change_pane_ids() {
         let (mut layout, root) = TileLayout::new();
         let collection =

@@ -991,6 +991,399 @@ impl Tab {
 mod tests {
     use super::*;
 
+    fn deep_legacy_identity_state() -> (crate::app::AppState, usize, PaneId) {
+        let mut state = crate::app::AppState::test_with_adversarial_identity_state();
+        let workspace = &mut state.workspaces[0];
+        let index = workspace
+            .tabs
+            .iter()
+            .position(|tab| tab.panes.len() > 1)
+            .unwrap();
+        workspace.switch_tab(index);
+        let root = workspace.tabs[index].root_pane;
+        for _ in 0..6 {
+            workspace.tabs[index].layout.focus_pane(root);
+            assert_eq!(workspace.tabs[index].layout.focused(), root);
+            workspace.test_split_with_ratio(Direction::Horizontal, 0.8);
+        }
+        state.ensure_test_terminals();
+        state.assert_invariants_for_test();
+        assert!(legacy_split_depth(&state.workspaces[0].tabs[index]) > 4);
+        (state, index, root)
+    }
+
+    fn legacy_split_depth(tab: &Tab) -> usize {
+        tab.layout
+            .splits(ratatui::layout::Rect::new(0, 0, 512, 128))
+            .iter()
+            .map(|split| split.path.len() + 1)
+            .max()
+            .unwrap_or(0)
+    }
+
+    fn saved_legacy_identities(state: &crate::app::AppState) -> Vec<(PaneId, usize, TerminalId)> {
+        state.workspaces[0]
+            .tabs
+            .iter()
+            .flat_map(|tab| &tab.panes)
+            .map(|(id, pane)| {
+                (
+                    *id,
+                    state.workspaces[0].public_pane_number(*id).unwrap(),
+                    pane.attached_terminal_id.clone(),
+                )
+            })
+            .collect()
+    }
+
+    fn assert_legacy_identities(
+        state: &crate::app::AppState,
+        identities: &[(PaneId, usize, TerminalId)],
+    ) {
+        state.assert_invariants_for_test();
+        for (pane, number, terminal) in identities {
+            assert_eq!(state.workspaces[0].public_pane_number(*pane), Some(*number));
+            assert_eq!(state.workspaces[0].terminal_id(*pane), Some(terminal));
+        }
+    }
+
+    #[cfg(unix)]
+    fn assert_deep_legacy_runtime_split(use_argv: bool) {
+        let (mut state, index, root) = deep_legacy_identity_state();
+        let identities = saved_legacy_identities(&state);
+        let depth = legacy_split_depth(&state.workspaces[0].tabs[index]);
+        let terminal_id = TerminalId::alloc().unwrap();
+        let private_root = std::env::temp_dir().join(format!(
+            "vqro-deep-split-{}-{}",
+            std::process::id(),
+            root.raw()
+        ));
+        std::fs::create_dir(&private_root).unwrap();
+        let launch_env = PaneLaunchEnv::from_extra(vec![
+            ("HOME".into(), private_root.display().to_string()),
+            ("XDG_CONFIG_HOME".into(), private_root.display().to_string()),
+            ("XDG_STATE_HOME".into(), private_root.display().to_string()),
+        ]);
+        let argv = vec!["/bin/sh".into(), "-c".into(), "exit 0".into()];
+        let tab = &mut state.workspaces[0].tabs[index];
+        tab.zoomed = true;
+        let result = if use_argv {
+            tab.split_pane_argv(
+                root,
+                terminal_id.clone(),
+                true,
+                Direction::Vertical,
+                Some(0.8),
+                8,
+                40,
+                Some(private_root.clone()),
+                &argv,
+                &launch_env,
+                0,
+                crate::terminal_theme::TerminalTheme::default(),
+                None,
+            )
+        } else {
+            tab.split_pane_shell(
+                root,
+                terminal_id.clone(),
+                true,
+                Direction::Vertical,
+                Some(0.8),
+                8,
+                40,
+                Some(private_root.clone()),
+                0,
+                crate::terminal_theme::TerminalTheme::default(),
+                None,
+                crate::pane::PaneShellConfig::new(
+                    "/bin/sh",
+                    crate::config::ShellModeConfig::NonLogin,
+                ),
+                &launch_env,
+            )
+        };
+        let NewPane {
+            pane_id,
+            terminal,
+            runtime,
+        } = result.expect("deep legacy split must still launch a PTY");
+        runtime.shutdown();
+        std::fs::remove_dir_all(&private_root).unwrap();
+        state.workspaces[0].register_new_pane(pane_id);
+        state.terminals.insert(terminal.id.clone(), terminal);
+        assert_eq!(
+            state.workspaces[0].tabs[index].panes[&pane_id].attached_terminal_id,
+            terminal_id
+        );
+        assert_eq!(state.workspaces[0].tabs[index].layout.focused(), pane_id);
+        assert!(!state.workspaces[0].tabs[index].zoomed);
+        assert_eq!(
+            legacy_split_depth(&state.workspaces[0].tabs[index]),
+            depth + 1
+        );
+        assert_eq!(
+            state.terminals[&terminal_id].launch_argv,
+            use_argv.then_some(argv)
+        );
+        assert_legacy_identities(&state, &identities);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn legacy_tab_split_pane_shell_accepts_a_deep_branch() {
+        assert_deep_legacy_runtime_split(false);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn legacy_tab_split_pane_argv_accepts_a_deep_branch() {
+        assert_deep_legacy_runtime_split(true);
+    }
+
+    #[test]
+    fn legacy_tab_insert_existing_pane_reparents_into_a_deep_branch() {
+        let (mut state, index, root) = deep_legacy_identity_state();
+        let identities = saved_legacy_identities(&state);
+        let tab = &mut state.workspaces[0].tabs[index];
+        let moving = tab
+            .layout
+            .pane_ids()
+            .into_iter()
+            .find(|pane| *pane != root)
+            .unwrap();
+        let moved = tab.take_pane_for_move(moving).unwrap();
+        let depth = legacy_split_depth(tab);
+        tab.zoomed = true;
+        let result = tab.insert_existing_pane(root, moved, Direction::Vertical, 0.8, true);
+        assert!(matches!(result, Ok(id) if id == moving));
+        assert_eq!(tab.layout.focused(), moving);
+        assert!(!tab.zoomed);
+        assert_eq!(legacy_split_depth(tab), depth + 1);
+        assert_legacy_identities(&state, &identities);
+    }
+
+    #[test]
+    fn legacy_deep_insert_rejection_returns_the_same_pane_without_mutation() {
+        let (mut state, index, root) = deep_legacy_identity_state();
+        let identities = saved_legacy_identities(&state);
+        let tab = &mut state.workspaces[0].tabs[index];
+        let moving = tab
+            .layout
+            .pane_ids()
+            .into_iter()
+            .find(|id| *id != root)
+            .unwrap();
+        let terminal = tab.panes[&moving].attached_terminal_id.clone();
+        let moved = tab.take_pane_for_move(moving).unwrap();
+        let missing = PaneId::alloc();
+        tab.zoomed = true;
+        let tree = tab.layout.typed_root().clone();
+        let focus = tab.layout.focused_leaf();
+        let next_pane = PaneId::next_for_test();
+        let returned =
+            match tab.insert_existing_pane(missing, moved, Direction::Vertical, 0.8, true) {
+                Err(returned) => returned,
+                Ok(_) => panic!("missing target accepted a moved pane"),
+            };
+        assert_eq!(returned.pane_id, moving);
+        assert_eq!(returned.pane_state.attached_terminal_id, terminal);
+        assert_eq!(tab.layout.typed_root(), &tree);
+        assert_eq!(tab.layout.focused_leaf(), focus);
+        assert!(tab.zoomed);
+        assert!(!tab.panes.contains_key(&moving));
+        assert_eq!(PaneId::next_for_test(), next_pane);
+        assert!(tab
+            .insert_existing_pane(root, returned, Direction::Vertical, 0.8, true)
+            .is_ok());
+        assert_legacy_identities(&state, &identities);
+    }
+
+    #[test]
+    fn legacy_create_collection_near_accepts_a_deep_branch() {
+        let (mut state, index, root) = deep_legacy_identity_state();
+        let identities = saved_legacy_identities(&state);
+        let tab = &mut state.workspaces[0].tabs[index];
+        let depth = legacy_split_depth(tab);
+        tab.zoomed = true;
+        let id = tab
+            .create_collection_near(
+                LayoutLeaf::Pane(root),
+                Direction::Vertical,
+                0.8,
+                Some("deep".into()),
+            )
+            .unwrap();
+        assert_eq!(legacy_split_depth(tab), depth + 1);
+        assert!(!tab.zoomed);
+        let collection = tab.collection(id).unwrap();
+        assert!(collection.members().is_empty());
+        assert_eq!(collection.selected(), None);
+        assert_eq!(collection.legacy_label(), Some("deep"));
+        assert_legacy_identities(&state, &identities);
+    }
+
+    #[test]
+    fn legacy_promote_collection_member_near_accepts_a_deep_branch() {
+        let (mut state, index, root) = deep_legacy_identity_state();
+        let identities = saved_legacy_identities(&state);
+        let tab = &mut state.workspaces[0].tabs[index];
+        let member = tab
+            .layout
+            .pane_ids()
+            .into_iter()
+            .find(|pane| *pane != root)
+            .unwrap();
+        let id = tab
+            .create_collection_near(
+                LayoutLeaf::Pane(root),
+                Direction::Vertical,
+                0.8,
+                Some("deep".into()),
+            )
+            .unwrap();
+        tab.collect_tiled_pane(member, id).unwrap();
+        let depth = legacy_split_depth(tab);
+        tab.zoomed = true;
+        tab.promote_collection_member_near(member, id, root, Direction::Horizontal, 0.8)
+            .unwrap();
+        assert_eq!(legacy_split_depth(tab), depth + 1);
+        assert_eq!(tab.layout.placement(member), Some(PanePlacement::Tiled));
+        assert_eq!(tab.layout.focused(), member);
+        assert!(!tab.zoomed);
+        assert!(tab.collection(id).unwrap().members().is_empty());
+        assert_legacy_identities(&state, &identities);
+    }
+
+    #[test]
+    fn legacy_tab_split_limit_rejection_preserves_deep_layout_before_pane_allocation() {
+        let (mut state, index, root) = deep_legacy_identity_state();
+        while state.workspaces[0].tabs[index].panes.len() < crate::admission::MAX_TAB_PANES {
+            state.workspaces[0].tabs[index].layout.focus_pane(root);
+            state.workspaces[0].test_split_with_ratio(Direction::Horizontal, 0.95);
+        }
+        state.ensure_test_terminals();
+        let identities = saved_legacy_identities(&state);
+        let tab = &mut state.workspaces[0].tabs[index];
+        tab.zoomed = true;
+        let tree = tab.layout.typed_root().clone();
+        let focus = tab.layout.focused_leaf();
+        let next_pane = PaneId::next_for_test();
+        let launch_env = PaneLaunchEnv::default();
+        let argv = vec!["vqro-missing-command-for-limit-test".into()];
+        for use_argv in [false, true] {
+            let result = if use_argv {
+                tab.split_pane_argv(
+                    root,
+                    TerminalId::alloc().unwrap(),
+                    true,
+                    Direction::Vertical,
+                    Some(0.8),
+                    8,
+                    40,
+                    None,
+                    &argv,
+                    &launch_env,
+                    0,
+                    crate::terminal_theme::TerminalTheme::default(),
+                    None,
+                )
+            } else {
+                tab.split_pane_shell(
+                    root,
+                    TerminalId::alloc().unwrap(),
+                    true,
+                    Direction::Vertical,
+                    Some(0.8),
+                    8,
+                    40,
+                    None,
+                    0,
+                    crate::terminal_theme::TerminalTheme::default(),
+                    None,
+                    crate::pane::PaneShellConfig::new(
+                        "vqro-missing-shell-for-limit-test",
+                        crate::config::ShellModeConfig::NonLogin,
+                    ),
+                    &launch_env,
+                )
+            };
+            let error = match result {
+                Err(error) => error,
+                Ok(new) => {
+                    new.runtime.shutdown();
+                    panic!("tab limit admitted another pane");
+                }
+            };
+            assert_eq!(error.to_string(), "tab pane limit reached");
+            assert_eq!(tab.layout.typed_root(), &tree);
+            assert_eq!(tab.layout.focused_leaf(), focus);
+            assert!(tab.zoomed);
+            assert_eq!(PaneId::next_for_test(), next_pane);
+        }
+        assert_legacy_identities(&state, &identities);
+    }
+
+    #[test]
+    fn legacy_promote_rejects_non_tiled_target_without_reparenting_or_allocating() {
+        let (mut state, index, root) = deep_legacy_identity_state();
+        let identities = saved_legacy_identities(&state);
+        let tab = &mut state.workspaces[0].tabs[index];
+        let members: Vec<_> = tab
+            .layout
+            .pane_ids()
+            .into_iter()
+            .filter(|id| *id != root)
+            .take(2)
+            .collect();
+        let source = tab
+            .create_collection_near(
+                LayoutLeaf::Pane(root),
+                Direction::Vertical,
+                0.8,
+                Some("source".into()),
+            )
+            .unwrap();
+        tab.collect_tiled_pane(members[0], source).unwrap();
+        let target = tab
+            .create_collection_near(
+                LayoutLeaf::Pane(root),
+                Direction::Horizontal,
+                0.8,
+                Some("target".into()),
+            )
+            .unwrap();
+        tab.collect_tiled_pane(members[1], target).unwrap();
+        tab.zoomed = true;
+        let tree = tab.layout.typed_root().clone();
+        let focus = tab.layout.focused_leaf();
+        let next_pane = PaneId::next_for_test();
+        assert_eq!(
+            tab.promote_collection_member_near(
+                members[0],
+                source,
+                members[1],
+                Direction::Vertical,
+                0.5
+            ),
+            Err(CollectionMutationError::TargetNotTiled)
+        );
+        assert_eq!(tab.layout.typed_root(), &tree);
+        assert_eq!(tab.layout.focused_leaf(), focus);
+        assert!(tab.zoomed);
+        assert_eq!(PaneId::next_for_test(), next_pane);
+        for (id, member, label) in [
+            (source, members[0], "source"),
+            (target, members[1], "target"),
+        ] {
+            let collection = tab.collection(id).unwrap();
+            assert_eq!(collection.members(), &[member]);
+            assert_eq!(collection.selected(), Some(member));
+            assert_eq!(collection.legacy_label(), Some(label));
+        }
+        assert_legacy_identities(&state, &identities);
+    }
+
     #[test]
     #[should_panic(expected = "raw archived state must be a subset")]
     fn runtime_invariant_checks_raw_archive_state_without_filtering() {
