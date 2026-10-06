@@ -1,9 +1,8 @@
-//! Neutral placement state for terminals that share one layout leaf.
+//! Stable box identity and the explicit v6/v7 restore record projection.
 //!
-//! The canonical textual container identity is exposed by the public `host.terminals.v1`
-//! snapshot contract. Container members remain pane-backed private state because the current
-//! persisted session format attaches one terminal to one pane; pane identities are not stable
-//! terminal references and must not cross public extension host boundaries.
+//! Stack membership and selection live only in the canonical layout tree. The
+//! temporary record below is consumed at restore, not retained as layout state;
+//! remove that projection in stage 2 with the nested session codec.
 
 use std::collections::HashSet;
 
@@ -96,14 +95,6 @@ pub(crate) struct TerminalContainer {
 }
 
 impl TerminalContainer {
-    pub(crate) fn empty(id: TerminalContainerId) -> Self {
-        Self {
-            id,
-            members: Vec::new(),
-            selected: None,
-        }
-    }
-
     pub(crate) fn from_legacy(
         id: TerminalContainerId,
         members: Vec<PaneId>,
@@ -129,46 +120,6 @@ impl TerminalContainer {
 
     pub(crate) fn selected(&self) -> Option<PaneId> {
         self.selected
-    }
-
-    pub(crate) fn add(&mut self, pane: PaneId) {
-        self.members.push(pane);
-        self.selected.get_or_insert(pane);
-    }
-
-    pub(crate) fn remove(&mut self, pane: PaneId) -> bool {
-        let Some(index) = self.members.iter().position(|member| *member == pane) else {
-            return false;
-        };
-        self.members.remove(index);
-        if self.selected == Some(pane) {
-            self.selected = self
-                .members
-                .get(index)
-                .or_else(|| index.checked_sub(1).and_then(|i| self.members.get(i)))
-                .copied();
-        }
-        true
-    }
-
-    pub(crate) fn select(&mut self, pane: PaneId) -> bool {
-        if !self.members.contains(&pane) {
-            return false;
-        }
-        self.selected = Some(pane);
-        true
-    }
-
-    pub(crate) fn reorder(&mut self, pane: PaneId, index: usize) -> bool {
-        let Some(current) = self.members.iter().position(|member| *member == pane) else {
-            return false;
-        };
-        if index >= self.members.len() {
-            return false;
-        }
-        let pane = self.members.remove(current);
-        self.members.insert(index, pane);
-        true
     }
 }
 
@@ -210,17 +161,20 @@ mod tests {
         let id = TerminalContainerId::from_persisted(8_800_001).expect("container id");
         let first = PaneId::from_raw(1);
         let second = PaneId::from_raw(2);
-        let mut container = TerminalContainer::empty(id);
-        assert_eq!(container.selected(), None);
+        let root = crate::layout::TypedNode::empty_stack(id);
+        let mut layout =
+            crate::layout::TileLayout::from_tree(root, crate::layout::LayoutLeaf::Stack(id))
+                .unwrap();
+        assert_eq!(layout.collection(id).unwrap().selected(), None);
 
-        container.add(first);
-        container.add(second);
-        assert_eq!(container.selected(), Some(first));
-        assert!(container.select(second));
-        assert!(container.remove(second));
-        assert_eq!(container.selected(), Some(first));
-        assert!(container.remove(first));
-        assert_eq!(container.selected(), None);
+        assert!(layout.add_collection_member(id, first));
+        assert!(layout.add_collection_member(id, second));
+        assert_eq!(layout.collection(id).unwrap().selected(), Some(first));
+        assert!(layout.select_collection_member(id, second));
+        assert!(layout.remove_collection_member(id, second));
+        assert_eq!(layout.collection(id).unwrap().selected(), Some(first));
+        assert!(layout.remove_collection_member(id, first));
+        assert_eq!(layout.collection(id).unwrap().selected(), None);
     }
 
     #[test]
@@ -236,9 +190,12 @@ mod tests {
 
     #[test]
     fn terminal_container_has_no_collection_policy_state() {
-        let container = TerminalContainer::empty(
+        let container = TerminalContainer::from_legacy(
             TerminalContainerId::from_persisted(8_800_002).expect("container id"),
-        );
+            Vec::new(),
+            None,
+        )
+        .unwrap();
         let TerminalContainer {
             id,
             members,

@@ -298,7 +298,7 @@ change (layout identity, persisted state, live handoff, protocol), so
 | # | Stage | Work | Waiting |
 |---|---|---|---|
 | 0 | Characterization tests for layout, Collections, session v7 restore and live handoff; roundtable on the design | 2–3 h | ~1 h roundtable |
-| 1 | Core tree: split and stack boxes at any depth (cap 4), panes as leaves, box IDs and names, close rules, geometric focus. Testable with `AppState::test_new()`, no UI change | 4–6 h | ~1 h tests and review |
+| 1 | Core tree: split and stack boxes at any depth (cap 4), panes as leaves, box IDs (names in stage 4), close rules, geometric focus. Testable with `AppState::test_new()`, no UI change | 4–6 h | ~1 h tests and review |
 | 2 | Session v8, v7 conversion with backup, live-upgrade conversion, `PROTOCOL_VERSION` bump, fixture replacement, `AGENTS.md` endpoint section change | 3–4 h | ~1 h |
 | 3 | View panes: view content, scope derivation, per-scope rendering, light frame, Tasks and Messages moved to scopes, panel v1 machinery deleted, badges, agent start rule, `vqro pane view` | 5–7 h | human screenshot review |
 | 4 | Collections absorbed: package and archiving removed, names and stack switcher and list view in core, CLI updated | 4–6 h | ~1 h |

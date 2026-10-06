@@ -375,7 +375,7 @@ impl App {
             tab_id: self.public_tab_id(ws_idx, tab_idx)?,
             zoomed: tab.zoomed,
             focused_pane_id: self.public_pane_id(ws_idx, tab.layout.focused())?,
-            root: self.layout_node_description(ws_idx, tab_idx, tab.layout.root())?,
+            root: self.layout_node_description(ws_idx, tab_idx, &tab.layout.root())?,
         })
     }
 
@@ -650,7 +650,7 @@ fn remap_layout_to_existing_panes<'a>(
         LayoutNode::Pane { pane } => {
             let pane_id = panes.next()?;
             labels.push((pane_id, pane));
-            Some(TypedNode::Leaf(LayoutLeaf::Pane(pane_id)))
+            Some(TypedNode::Leaf(pane_id))
         }
         LayoutNode::Split {
             direction: split_direction,

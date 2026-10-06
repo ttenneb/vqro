@@ -29,7 +29,7 @@ pub struct NewPane {
 }
 
 pub(crate) struct PaneCollection<'a> {
-    container: &'a crate::terminal_container::TerminalContainer,
+    container: crate::layout::StackRef<'a>,
     legacy_snapshot: Option<&'a LegacyCollectionSnapshot>,
 }
 
@@ -43,12 +43,20 @@ impl PaneCollection<'_> {
             .and_then(|snapshot| snapshot.label.as_deref())
     }
 
-    pub(crate) fn members(&self) -> &[PaneId] {
+    pub(crate) fn members(&self) -> Vec<PaneId> {
         self.container.members()
     }
 
     pub(crate) fn selected(&self) -> Option<PaneId> {
         self.container.selected()
+    }
+
+    pub(crate) fn member_count(&self) -> usize {
+        self.container.member_count()
+    }
+
+    pub(crate) fn contains_member(&self, pane: PaneId) -> bool {
+        self.container.contains_member(pane)
     }
 
     pub(crate) fn legacy_is_archived(&self, pane_id: PaneId) -> bool {
@@ -59,8 +67,7 @@ impl PaneCollection<'_> {
     pub(crate) fn legacy_archived_members(&self) -> impl Iterator<Item = PaneId> + '_ {
         self.container
             .members()
-            .iter()
-            .copied()
+            .into_iter()
             .filter(|pane| self.legacy_is_archived(*pane))
     }
 }
@@ -279,14 +286,18 @@ impl Tab {
     }
 
     pub(crate) fn collections(&self) -> impl Iterator<Item = PaneCollection<'_>> {
-        self.layout
-            .collection_ids()
-            .into_iter()
-            .filter_map(|id| self.collection(id.into()))
+        self.layout.collections().map(|container| PaneCollection {
+            legacy_snapshot: self.legacy_collection_snapshots.get(&container.id),
+            container,
+        })
     }
 
     #[cfg(test)]
     pub(super) fn assert_collection_invariants_for_test(&self) {
+        assert!(
+            self.layout.typed_root().valid_structure(),
+            "canonical tree ownership and selection must be valid"
+        );
         let layout_ids: HashSet<_> = self.layout.collection_ids().into_iter().collect();
         let policy_ids: HashSet<_> = self.legacy_collection_snapshots.keys().copied().collect();
         assert!(
@@ -301,11 +312,13 @@ impl Tab {
             let policy = self.legacy_collection_snapshots.get(&container_id);
             let members: HashSet<_> = container.members().iter().copied().collect();
             assert_eq!(members.len(), container.members().len());
-            assert_eq!(
-                container.selected().is_some(),
-                !members.is_empty(),
-                "selection must exist if and only if the container is non-empty"
-            );
+            if policy.is_some() {
+                assert_eq!(
+                    container.selected().is_some(),
+                    !members.is_empty(),
+                    "legacy flat stacks select a pane if and only if non-empty"
+                );
+            }
             assert!(container
                 .selected()
                 .is_none_or(|pane| members.contains(&pane)));
@@ -482,7 +495,7 @@ impl Tab {
             .layout
             .collection(container_id)
             .ok_or(CollectionMutationError::CollectionNotFound)?;
-        if !collection.members().is_empty() {
+        if collection.member_count() != 0 {
             return Err(CollectionMutationError::CollectionNotEmpty);
         }
         if self.layout.leaf_count() <= 1 {
@@ -536,7 +549,7 @@ impl Tab {
         ratio: f32,
     ) -> Result<(), CollectionMutationError> {
         let container_id = TerminalContainerId::from(collection_id);
-        if self.layout.placement(pane_id) != Some(PanePlacement::Collection(container_id)) {
+        if self.layout.placement(pane_id) != Some(PanePlacement::Stack(container_id)) {
             return Err(CollectionMutationError::PaneNotMember);
         }
         if self.layout.placement(target_pane_id) != Some(PanePlacement::Tiled) {
@@ -595,7 +608,7 @@ impl Tab {
         let Some(collection) = layout.collection(container_id) else {
             return Err(CollectionMutationError::CollectionNotFound);
         };
-        if !collection.members().contains(&pane_id) {
+        if !collection.contains_member(pane_id) {
             return Err(CollectionMutationError::PaneNotMember);
         }
         let policy = policies
@@ -1428,8 +1441,8 @@ mod tests {
             TypedNode::Split {
                 direction: Direction::Horizontal,
                 ratio: 0.5,
-                first: Box::new(TypedNode::Leaf(LayoutLeaf::Pane(root))),
-                second: Box::new(TypedNode::Leaf(LayoutLeaf::Pane(member))),
+                first: Box::new(TypedNode::Leaf(root)),
+                second: Box::new(TypedNode::Leaf(member)),
             },
             LayoutLeaf::Pane(root),
             Vec::new(),

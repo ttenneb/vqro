@@ -1201,18 +1201,16 @@ fn capture_pane_history(
 fn capture_layout_leaf(leaf: crate::layout::LayoutLeaf) -> LayoutLeafSnapshot {
     match leaf {
         crate::layout::LayoutLeaf::Pane(id) => LayoutLeafSnapshot::Pane(id.raw()),
-        crate::layout::LayoutLeaf::Collection(id) => LayoutLeafSnapshot::Collection(id.into()),
+        crate::layout::LayoutLeaf::Stack(id) => LayoutLeafSnapshot::Collection(id.into()),
     }
 }
 
 fn capture_typed_node(node: &crate::layout::TypedNode) -> LayoutSnapshot {
     match node {
-        crate::layout::TypedNode::Leaf(crate::layout::LayoutLeaf::Pane(id)) => {
-            LayoutSnapshot::Pane(id.raw())
-        }
-        crate::layout::TypedNode::Leaf(crate::layout::LayoutLeaf::Collection(id)) => {
-            LayoutSnapshot::Collection((*id).into())
-        }
+        crate::layout::TypedNode::Leaf(id) => LayoutSnapshot::Pane(id.raw()),
+        // Explicit v6/v7 projection; remove in stage 2. Production only creates
+        // flat pane stacks until the nested session codec is introduced.
+        crate::layout::TypedNode::Stack { id, .. } => LayoutSnapshot::Collection((*id).into()),
         crate::layout::TypedNode::Split {
             direction,
             ratio,
@@ -2573,7 +2571,7 @@ mod tests {
         tab.set_collection_member_archived(collection, members[0], true)
             .unwrap();
         tab.layout
-            .focus_leaf(crate::layout::LayoutLeaf::Collection(collection.into()));
+            .focus_leaf(crate::layout::LayoutLeaf::Stack(collection.into()));
         tab.zoomed = true;
         state.assert_invariants_for_test();
 
@@ -2667,7 +2665,7 @@ mod tests {
             .unwrap();
         assert!(state.workspaces[0].tabs[0]
             .layout
-            .focus_leaf(crate::layout::LayoutLeaf::Collection(collection.into())));
+            .focus_leaf(crate::layout::LayoutLeaf::Stack(collection.into())));
 
         let snapshot = capture_from_state(&state);
         let json = serde_json::to_string(&snapshot).expect("serialize");

@@ -469,13 +469,9 @@ impl HeadlessServer {
                                 == Some((target.workspace_index, pane_id))
                         })
                     });
-            let collection_selected = tab
-                .layout
-                .collections()
-                .find(|collection| collection.members().contains(&pane_id))
-                .is_none_or(|collection| collection.selected() == Some(pane_id));
             terminal_view_visible
-                || (collection_selected && (!tab.zoomed || tab.layout.focused() == pane_id))
+                || (tab.layout.is_pane_visible(pane_id)
+                    && (!tab.zoomed || tab.layout.focused() == pane_id))
         })
     }
 

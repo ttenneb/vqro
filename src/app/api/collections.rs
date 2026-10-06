@@ -1884,7 +1884,7 @@ impl App {
             workspace_id: self.public_workspace_id(ws_idx),
             tab_id,
             label: package_projection.label.clone(),
-            focused: tab.layout.focused_leaf() == LayoutLeaf::Collection(id.into()),
+            focused: tab.layout.focused_leaf() == LayoutLeaf::Stack(id.into()),
             selected_pane_id: package_projection.selected_pane_id.clone(),
             members: collection
                 .members()
@@ -2012,7 +2012,7 @@ impl App {
         }
         let member_count = self.state.workspaces[ws_idx].tabs[tab_idx]
             .collection(collection_id)
-            .map(|collection| collection.members().len())
+            .map(|collection| collection.member_count())
             .unwrap_or(0);
         if let Err(error) = crate::admission::group_member(member_count) {
             return responses::encode_error(request_id, "resource_limit", error.to_string());
@@ -2047,7 +2047,7 @@ impl App {
             |tab, collection, pane| {
                 tab.select_collection_member(collection, pane)?;
                 if params.focus {
-                    tab.focus_layout_leaf(LayoutLeaf::Collection(collection.into()));
+                    tab.focus_layout_leaf(LayoutLeaf::Stack(collection.into()));
                 }
                 Ok(())
             },
@@ -2155,7 +2155,7 @@ impl App {
                 "promotion target must be in the same tab",
             );
         }
-        let Some(crate::layout::PanePlacement::Collection(collection_id)) =
+        let Some(crate::layout::PanePlacement::Stack(collection_id)) =
             self.state.workspaces[ws_idx].tabs[tab_idx].pane_placement(pane_id)
         else {
             return responses::encode_error(

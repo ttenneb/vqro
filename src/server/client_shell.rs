@@ -558,10 +558,9 @@ pub(super) fn render_pane_surface(
                     .collection_ids()
                     .into_iter()
                     .filter_map(|collection_id| {
-                        let rect = tab.layout.leaf_rect(
-                            crate::layout::LayoutLeaf::Collection(collection_id),
-                            area,
-                        )?;
+                        let rect = tab
+                            .layout
+                            .leaf_rect(crate::layout::LayoutLeaf::Stack(collection_id), area)?;
                         let inner_rect = Rect::new(
                             rect.x,
                             rect.y.saturating_add(1),
@@ -573,7 +572,7 @@ pub(super) fn render_pane_surface(
                             rect: rect.into(),
                             inner_rect: inner_rect.into(),
                             focused: tab.layout.focused_leaf()
-                                == crate::layout::LayoutLeaf::Collection(collection_id),
+                                == crate::layout::LayoutLeaf::Stack(collection_id),
                         })
                     })
                     .collect(),
@@ -989,8 +988,7 @@ mod tests {
                 Some("empty".into()),
             )
             .unwrap();
-        workspace.tabs[0]
-            .focus_layout_leaf(crate::layout::LayoutLeaf::Collection(collection.into()));
+        workspace.tabs[0].focus_layout_leaf(crate::layout::LayoutLeaf::Stack(collection.into()));
         app.state.workspaces = vec![workspace];
         app.state.active = Some(0);
 

@@ -406,7 +406,7 @@ impl App {
         let collection = tab
             .collection(collection_id)
             .ok_or("collection was not found")?;
-        if !collection.members().contains(&pane_id) {
+        if !collection.contains_member(pane_id) {
             return Err("pane is not a collection member".into());
         }
         let terminal_id = tab
