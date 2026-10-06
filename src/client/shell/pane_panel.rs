@@ -634,37 +634,46 @@ fn render_pane(
     // starving a later section's rows out of the band entirely - its header was never
     // in doubt, its rows are what would go missing - and spending the budget on what
     // is drawn is what keeps the panel's bottom line from being left blank.
+    // A section with no header (a view the user opened that is no longer published)
+    // already draws its one row as its own reserved line, so it asks the pool for
+    // nothing: budgeting it a row too would leave a band line unused under a section
+    // whose rows are still waiting.
+    let pooled_rows = sections
+        .iter()
+        .map(|section| {
+            section
+                .rows
+                .len()
+                .saturating_sub(usize::from(section.header.is_none()))
+        })
+        .collect::<Vec<_>>();
     let pool = usize::from(visible).saturating_sub(sections.len());
     let headers_only = pool == 0;
     let mut allocation = vec![0_usize; sections.len()];
     let mut spare = pool;
-    for (index, section) in sections.iter().enumerate() {
-        if section.rows.is_empty() || spare == 0 {
+    for (index, wanted) in pooled_rows.iter().enumerate() {
+        if *wanted == 0 || spare == 0 {
             continue;
         }
         allocation[index] = 1;
         spare -= 1;
     }
-    for (index, section) in sections.iter().enumerate() {
+    for (index, wanted) in pooled_rows.iter().enumerate() {
         if spare == 0 {
             break;
         }
-        let give = section
-            .rows
-            .len()
-            .saturating_sub(allocation[index])
-            .min(spare);
+        let give = wanted.saturating_sub(allocation[index]).min(spare);
         allocation[index] += give;
         spare -= give;
     }
     // One scroll offset moves every section that has more rows than its share, so a
     // later section's later rows are reachable while every header stays where it is.
-    let most_scrollable = sections
+    let most_scrollable = pooled_rows
         .iter()
         .zip(&allocation)
-        .max_by_key(|(section, allocated)| section.rows.len().saturating_sub(**allocated))
-        .filter(|(section, allocated)| section.rows.len() > **allocated);
-    let scroll_total = most_scrollable.map_or(0, |(section, _)| section.rows.len());
+        .max_by_key(|(wanted, allocated)| wanted.saturating_sub(**allocated))
+        .filter(|(wanted, allocated)| **wanted > **allocated);
+    let scroll_total = most_scrollable.map_or(0, |(wanted, _)| *wanted);
     let scroll_page = most_scrollable.map_or(0, |(_, allocated)| *allocated);
     let overflow = most_scrollable.is_some();
     // The scroll indicator owns the last column, with one quiet column of

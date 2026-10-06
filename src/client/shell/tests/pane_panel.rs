@@ -1898,6 +1898,51 @@ fn scrolling_reaches_the_later_rows_of_a_later_section() {
 }
 
 #[test]
+fn an_unavailable_section_does_not_spend_the_row_budget() {
+    // QA's P3 at 21407313: a view the user opened that is no longer published draws its
+    // one row as its own reserved line, so budgeting it a row from the pool as well cost
+    // a published section a row and left a band line blank under rows that were waiting.
+    let mut state = long_section_state_with(8, 1);
+    state
+        .pane_panel_open
+        .entry("pane_1".into())
+        .or_default()
+        .insert("gone".into());
+    let frame = state.compose(106, 30).expect("frame");
+    let band = state
+        .pane_panel_areas
+        .first()
+        .copied()
+        .expect("reserved band");
+    let width = 106;
+    let rows_text: Vec<String> = (band.y..band.y.saturating_add(band.height))
+        .map(|y| {
+            frame.cells[usize::from(y) * width + usize::from(band.x)
+                ..usize::from(y) * width + usize::from(band.x.saturating_add(band.width))]
+                .iter()
+                .map(|cell| cell.symbol.as_str())
+                .collect::<String>()
+        })
+        .collect();
+    assert!(
+        rows_text.iter().any(|row| row.contains("unavailable")),
+        "the unpublished view keeps its own line: {rows_text:?}"
+    );
+    assert!(
+        rows_text.iter().any(|row| row.contains("Tasks row")),
+        "the published section still draws its rows: {rows_text:?}"
+    );
+    // No line is left over: every line of this band is a header, a row or the
+    // unpublished view's own line, so none of them was paid for twice.
+    for (offset, row) in rows_text.iter().enumerate() {
+        assert!(
+            !row.trim().is_empty(),
+            "band line {offset} is blank while rows are waiting: {rows_text:?}"
+        );
+    }
+}
+
+#[test]
 fn the_panel_band_has_no_gap_however_the_sections_fall() {
     // Every line from the panel's first row to the last is either a header, a row or
     // the divider: the budget follows what is drawn, so nothing is skipped.
