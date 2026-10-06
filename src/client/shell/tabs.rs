@@ -158,6 +158,10 @@ pub(crate) fn render_tab_bar(
                 (width, 0)
             }
         };
+        // A badge with no cells left on a tab clipped this small has nowhere to draw:
+        // its rect would start at the tab's own first cell, over the label. Skip it
+        // rather than draw an empty rect there, and leave the label the whole tab.
+        let badge = badge.filter(|_| badge_width > 0);
         let rect = Rect::new(x, area.y, width, 1);
         let style = if tab.focused {
             let base = Style::default()

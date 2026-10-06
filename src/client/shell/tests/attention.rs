@@ -510,6 +510,33 @@ fn a_workspace_row_badge_is_part_of_its_row() {
 }
 
 #[test]
+fn a_clipped_badged_tab_never_reaches_the_renderer_with_a_zero_width_badge() {
+    // QA's P2 at 21407313: a tab clipped to a single cell with a badge was split into
+    // (label 1, badge 0), but still drew its badge - a zero-width rect at the tab's own
+    // first cell, over the label - and tripped the draw site's own assert. Compose every
+    // narrow width, so the case is exercised through the renderer and not just in the
+    // arithmetic.
+    let mut narrowest = u16::MAX;
+    for width in 20_u16..=100 {
+        let mut state = attention_badge_state(1, 1);
+        let _ = state.compose(width, 30).expect("frame");
+        narrowest = narrowest.min(
+            state
+                .hits
+                .tabs
+                .iter()
+                .map(|(rect, _)| rect.width)
+                .min()
+                .unwrap_or(u16::MAX),
+        );
+    }
+    assert_eq!(
+        narrowest, 1,
+        "a one-cell badged tab was composed, which is the case under test"
+    );
+}
+
+#[test]
 fn badged_tabs_keep_their_own_hit_area_and_no_badge_hit() {
     let mut state = badged_tab_state();
     let _ = state.compose(106, 30).expect("frame");
