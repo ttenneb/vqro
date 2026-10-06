@@ -1165,6 +1165,326 @@ fn live_handoff_preserves_pane_process_io() {
     cleanup_test_base(&base);
 }
 
+// Legacy persisted Collections recover generically without a package grant.
+// collection.list remains unavailable; neutral layout facts prove the member is hidden.
+fn assert_hidden_handoff_collection(socket: &Path) {
+    let unavailable = request(
+        socket,
+        serde_json::json!({"id":"test:authority","method":"collection.list","params":{}}),
+    );
+    assert_eq!(
+        unavailable["error"]["code"],
+        "collections_authority_unavailable"
+    );
+    let response = request(
+        socket,
+        serde_json::json!({"id":"test:layout","method":"session.snapshot","params":{}}),
+    );
+    assert_ok(response.clone());
+    let snapshot = &response["result"]["snapshot"];
+    assert_eq!(snapshot["panes"].as_array().unwrap().len(), 3);
+    let layouts = snapshot["layouts"].as_array().unwrap();
+    assert_eq!(layouts.len(), 1);
+    let visible: Vec<_> = layouts[0]["panes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|pane| pane["pane_id"].as_str().unwrap())
+        .collect();
+    assert_eq!(visible, ["w2:p1", "w2:p3"]);
+    assert_eq!(layouts[0]["splits"].as_array().unwrap().len(), 1);
+}
+
+fn assert_saved_handoff_collection(session_path: &Path) {
+    let saved: serde_json::Value =
+        serde_json::from_slice(&fs::read(session_path).unwrap()).unwrap();
+    let workspace = &saved["workspaces"][0];
+    let tab = &workspace["tabs"][0];
+    assert_eq!(
+        tab["layout"]["Split"]["first"]["Collection"],
+        "collection_6100001"
+    );
+    let collections = tab["collections"].as_array().unwrap();
+    assert_eq!(collections.len(), 1);
+    let collection = &collections[0];
+    assert_eq!(collection["id"], "collection_6100001");
+    let members = collection["members"].as_array().unwrap();
+    assert_eq!(members.len(), 2);
+    assert_eq!(collection["selected"], members[0]);
+    assert_eq!(collection["archived"].as_array().unwrap().len(), 0);
+    for (index, raw) in members.iter().enumerate() {
+        let raw = raw.as_u64().unwrap().to_string();
+        assert_eq!(workspace["public_pane_numbers"][&raw], index + 1);
+        assert_eq!(
+            tab["panes"][&raw]["terminal_id"],
+            format!("term_{}", (index + 1).to_string().repeat(32))
+        );
+    }
+    let outside = tab["layout"]["Split"]["second"]["Pane"]
+        .as_u64()
+        .unwrap()
+        .to_string();
+    assert_eq!(workspace["public_pane_numbers"][&outside], 3);
+    assert_eq!(
+        tab["panes"][&outside]["terminal_id"],
+        "term_33333333333333333333333333333333"
+    );
+}
+
+fn assert_handoff_pane_identity(socket: &Path, target: &str, number: usize) {
+    let response = request(
+        socket,
+        serde_json::json!({"id":"test:identity","method":"pane.get","params":{"pane_id":target}}),
+    );
+    assert_ok(response.clone());
+    let pane = &response["result"]["pane"];
+    assert_eq!(pane["pane_id"], format!("w2:p{number}"), "{target}");
+    assert_eq!(
+        pane["terminal_id"],
+        format!("term_{}", number.to_string().repeat(32)),
+        "{target} must resolve to its own terminal"
+    );
+    assert_eq!(pane["workspace_id"], "w2");
+    assert_eq!(pane["tab_id"], "w2:t1");
+}
+
+#[test]
+fn live_handoff_preserves_hidden_collection_member_identity_and_io() {
+    let _lock = test_lock();
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let api_socket = runtime_dir.join("herdr.sock");
+    let client_socket = runtime_dir.join("herdr-client.sock");
+    let session_dir = config_home.join("vqro-dev");
+    fs::create_dir_all(&session_dir).unwrap();
+    let mut fixture: serde_json::Value = serde_json::from_str(include_str!(
+        "fixtures/session/hidden-member-handoff-v7.json"
+    ))
+    .unwrap();
+    fixture["workspaces"][0]["identity_cwd"] = serde_json::json!(base);
+    for pane in fixture["workspaces"][0]["tabs"][0]["panes"]
+        .as_object_mut()
+        .unwrap()
+        .values_mut()
+    {
+        pane["cwd"] = serde_json::json!(base);
+    }
+    // Burn three source IDs with ordinary restored terminals, then close their workspace.
+    // The target starts allocation afresh: every retained child's raw ID must need an alias,
+    // rather than accidentally passing via a numerically identical live pane ID.
+    let warmup_tabs: Vec<_> = (4..=6).map(|number| {
+        let raw = 800_000 + number;
+        serde_json::json!({
+            "layout": {"Pane":raw},
+            "panes": {raw.to_string(): {"cwd":base, "terminal_id":format!("term_{}", number.to_string().repeat(32))}},
+            "zoomed":false,"focused":raw,"root_pane":raw
+        })
+    }).collect();
+    fixture["workspaces"].as_array_mut().unwrap().insert(
+        0,
+        serde_json::json!({
+            "id":"w1", "identity_cwd":base, "tabs":warmup_tabs, "active_tab":0
+        }),
+    );
+    fixture["active"] = serde_json::json!(1);
+    fs::write(session_dir.join("session.json"), fixture.to_string()).unwrap();
+    // Legacy is an admitted persisted authority phase, not a fake package grant.
+    // This exercises loaded authority validation and ordinary server activation.
+    let home = base.join("home");
+    let state_home = base.join("state");
+    fs::create_dir_all(&home).unwrap();
+    fs::create_dir_all(&state_home).unwrap();
+    let spawned = spawn_server_with_env(
+        &config_home,
+        &runtime_dir,
+        &api_socket,
+        &[
+            ("HOME", home.to_str().unwrap()),
+            ("XDG_STATE_HOME", state_home.to_str().unwrap()),
+        ],
+    );
+    register_runtime_dir(&runtime_dir);
+    wait_for_socket(&api_socket, Duration::from_secs(10));
+    wait_for_api(&api_socket, Duration::from_secs(10));
+    assert_ok(request(
+        &api_socket,
+        serde_json::json!({"id":"test:warmup-close","method":"workspace.close","params":{"workspace_id":"w1"}}),
+    ));
+    assert_hidden_handoff_collection(&api_socket);
+    // Closing the warmup triggers a real host checkpoint. Read its actual raw IDs,
+    // not the seed's IDs (which were remapped at startup) or a test alias derivation.
+    let session_path = session_dir.join("session.json");
+    let mut source = serde_json::Value::Null;
+    assert!(
+        support::wait_until(Duration::from_secs(5), Duration::from_millis(25), || {
+            source = fs::read(&session_path)
+                .ok()
+                .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+                .unwrap_or(serde_json::Value::Null);
+            source["workspaces"]
+                .as_array()
+                .is_some_and(|workspaces| workspaces.len() == 1)
+                && source["workspaces"][0]["tabs"][0]["panes"]
+                    .as_object()
+                    .is_some_and(|panes| {
+                        panes
+                            .keys()
+                            .all(|raw| raw.parse::<u32>().is_ok_and(|raw| raw <= 6))
+                    })
+        }),
+        "source checkpoint: {source}"
+    );
+    assert_saved_handoff_collection(&session_path);
+
+    let mut owners = Vec::new();
+    for number in 1..=3 {
+        let public_id = format!("w2:p{number}");
+        let terminal_id = format!("term_{}", number.to_string().repeat(32));
+        let raw = source["workspaces"][0]["tabs"][0]["panes"]
+            .as_object()
+            .unwrap()
+            .iter()
+            .find(|(_, pane)| pane["terminal_id"] == terminal_id)
+            .unwrap()
+            .0;
+        let raw_id = format!("p_{raw}");
+        assert!(
+            raw.parse::<u32>().unwrap() > 3,
+            "source IDs must need remapping: {raw}"
+        );
+        assert_handoff_pane_identity(&api_socket, &public_id, number);
+        let marker = base.join(format!("owner-{number}"));
+        let received = base.join(format!("received-{number}"));
+        let hup = base.join(format!("hup-{number}"));
+        let script = base.join(format!("receiver-{number}.sh"));
+        fs::write(
+            &script,
+            format!(
+                "echo \"$$ $VQRO_PANE_ID\" > {marker}\n\
+                 trap 'echo HUP > {hup}' HUP\n\
+                 while IFS= read -r line; do\n\
+                 echo \"owner{number}:$$:$line\" >> {received}\n\
+                 echo \"owner{number}:$$:$line\"\n\
+                 done\n",
+                marker = marker.display(),
+                hup = hup.display(),
+                received = received.display(),
+            ),
+        )
+        .unwrap();
+        assert_ok(request(
+            &api_socket,
+            serde_json::json!({"id":"test:receiver","method":"pane.send_input","params":{
+                "pane_id":public_id,"text":format!("sh {}", script.display()),"keys":["Enter"]
+            }}),
+        ));
+        let owner = wait_for_file_contains(&marker, &public_id, Duration::from_secs(5));
+        let mut fields = owner.split_whitespace();
+        let pid: u32 = fields.next().unwrap().parse().unwrap();
+        assert_eq!(
+            fields.next(),
+            Some(public_id.as_str()),
+            "child pane identity"
+        );
+        assert_handoff_pane_identity(&api_socket, &raw_id, number);
+        let token = format!("before{number}");
+        assert_ok(request(
+            &api_socket,
+            serde_json::json!({"id":"test:before","method":"pane.send_input","params":{
+                "pane_id":raw_id,"text":token,"keys":["Enter"]
+            }}),
+        ));
+        let expected = format!("owner{number}:{pid}:{token}");
+        wait_for_file_contains(&received, &expected, Duration::from_secs(5));
+        wait_for_output(&api_socket, &raw_id, &expected);
+        owners.push((raw_id, pid, received, hup));
+    }
+    assert_eq!(
+        owners
+            .iter()
+            .map(|owner| &owner.0)
+            .collect::<std::collections::HashSet<_>>()
+            .len(),
+        3
+    );
+    assert_eq!(
+        owners
+            .iter()
+            .map(|owner| owner.1)
+            .collect::<std::collections::HashSet<_>>()
+            .len(),
+        3
+    );
+
+    let mut client_stream = UnixStream::connect(&client_socket).unwrap();
+    let generation = support::CURRENT_ENDPOINT_PROTOCOL_GENERATION;
+    let (server_generation, error) =
+        client_shell_handshake(&mut client_stream, generation, 80, 24).unwrap();
+    assert_eq!(server_generation, generation);
+    assert!(error.is_none());
+    wait_for_client_shell_bootstrap(&mut client_stream, Duration::from_secs(5)).unwrap();
+    assert_ok(request(
+        &api_socket,
+        serde_json::json!({"id":"test:handoff","method":"server.live_handoff","params":{}}),
+    ));
+    assert!(wait_for_message_variant(
+        &mut client_stream,
+        Duration::from_secs(5),
+        SERVER_MESSAGE_SERVER_SHUTDOWN,
+    )
+    .unwrap());
+    drop(spawned);
+    thread::sleep(Duration::from_millis(300));
+    wait_for_api(&api_socket, Duration::from_secs(10));
+    assert_hidden_handoff_collection(&api_socket);
+    assert_saved_handoff_collection(&session_dir.join("session.json"));
+
+    // Public IDs alone miss the bug: peers can still name pre-handoff raw IDs.
+    // Exact pane/terminal pairing also proves each tested alias names a live pane.
+    // The in-process restore fence owns the full assert_invariants_for_test check.
+    // Check the hidden member first so the old derivation fails on that member itself.
+    for index in [1, 0, 2] {
+        let (raw_id, pid, received, hup) = &owners[index];
+        let number = index + 1;
+        assert_handoff_pane_identity(&api_socket, raw_id, number);
+        assert_handoff_pane_identity(&api_socket, &format!("w2:p{number}"), number);
+        assert_eq!(unsafe { libc::kill(*pid as libc::pid_t, 0) }, 0);
+        assert!(!hup.exists(), "owner {number} received HUP");
+        wait_for_output(
+            &api_socket,
+            raw_id,
+            &format!("owner{number}:{pid}:before{number}"),
+        );
+        for (lane, target) in [("raw", raw_id.clone()), ("public", format!("w2:p{number}"))] {
+            let token = format!("after{number}-{lane}");
+            assert_ok(request(
+                &api_socket,
+                serde_json::json!({"id":"test:after","method":"pane.send_input","params":{
+                    "pane_id":target,"text":token,"keys":["Enter"]
+                }}),
+            ));
+            let expected = format!("owner{number}:{pid}:{token}");
+            wait_for_file_contains(received, &expected, Duration::from_secs(5));
+            wait_for_output(&api_socket, raw_id, &expected);
+        }
+    }
+    // Delivery is proved by the same child, not by API success or terminal echo.
+    // Exact logs catch sibling delivery, duplicates, and loss for hidden and visible panes.
+    for (index, (_, pid, received, hup)) in owners.iter().enumerate() {
+        let number = index + 1;
+        assert_eq!(fs::read_to_string(received).unwrap(), format!(
+            "owner{number}:{pid}:before{number}\nowner{number}:{pid}:after{number}-raw\nowner{number}:{pid}:after{number}-public\n"
+        ));
+        assert!(!hup.exists());
+    }
+    assert_ok(request(
+        &api_socket,
+        serde_json::json!({"id":"test:stop","method":"server.stop","params":{}}),
+    ));
+    cleanup_test_base(&base);
+}
+
 #[test]
 fn live_handoff_preserves_keyboard_protocol_for_client_input() {
     let _lock = test_lock();
