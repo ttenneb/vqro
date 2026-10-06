@@ -327,6 +327,7 @@ pub fn restore_handoff(
     default_shell: &str,
     shell_mode: crate::config::ShellModeConfig,
     imports: &mut HashMap<u32, crate::handoff_runtime::ImportedHandoffRuntime>,
+    pane_aliases: &mut HashMap<u32, PaneId>,
     events: mpsc::Sender<AppEvent>,
     render_notify: Arc<Notify>,
     render_dirty: Arc<RenderSignal>,
@@ -347,49 +348,11 @@ pub fn restore_handoff(
         crate::pane::PaneShellConfig::new(default_shell, shell_mode),
         true,
         imports,
+        pane_aliases,
         events,
         render_notify,
         render_dirty,
     )
-}
-
-#[cfg(unix)]
-pub fn handoff_pane_aliases(
-    snapshot: &SessionSnapshot,
-    workspaces: &[Workspace],
-) -> HashMap<u32, PaneId> {
-    let mut aliases = HashMap::new();
-    for (ws_snap, workspace) in snapshot.workspaces.iter().zip(workspaces) {
-        for (tab_snap, tab) in ws_snap.tabs.iter().zip(&workspace.tabs) {
-            let old_ids = collect_snapshot_pane_ids(&tab_snap.layout);
-            let new_ids = tab.layout.pane_ids();
-            for (old_id, new_id) in old_ids.into_iter().zip(new_ids) {
-                if old_id != new_id.raw() {
-                    aliases.insert(old_id, new_id);
-                }
-            }
-        }
-    }
-    aliases
-}
-
-#[cfg(unix)]
-fn collect_snapshot_pane_ids(node: &LayoutSnapshot) -> Vec<u32> {
-    let mut ids = Vec::new();
-    collect_snapshot_ids_inner(node, &mut ids);
-    ids
-}
-
-#[cfg(unix)]
-fn collect_snapshot_ids_inner(node: &LayoutSnapshot, ids: &mut Vec<u32>) {
-    match node {
-        LayoutSnapshot::Pane(id) => ids.push(*id),
-        LayoutSnapshot::Collection(_) => {}
-        LayoutSnapshot::Split { first, second, .. } => {
-            collect_snapshot_ids_inner(first, ids);
-            collect_snapshot_ids_inner(second, ids);
-        }
-    }
 }
 
 fn migrated_public_pane_numbers_by_old_raw(
@@ -434,6 +397,7 @@ fn restore_with_imports_strict(
     shell_config: crate::pane::PaneShellConfig<'_>,
     resume_agents_on_restore: bool,
     imported_panes: &mut HashMap<u32, crate::handoff_runtime::ImportedHandoffRuntime>,
+    pane_aliases: &mut HashMap<u32, PaneId>,
     events: mpsc::Sender<AppEvent>,
     render_notify: Arc<Notify>,
     render_dirty: Arc<RenderSignal>,
@@ -447,6 +411,7 @@ fn restore_with_imports_strict(
         shell_config,
         resume_agents_on_restore,
         imported_panes,
+        pane_aliases,
         events,
         render_notify,
         render_dirty,
@@ -478,6 +443,9 @@ fn restore_with_imports(
     render_notify: Arc<Notify>,
     render_dirty: Arc<RenderSignal>,
 ) -> RestoredSession {
+    // A plain restore keeps no handoff aliases: nothing outside the session names a
+    // pre-restore raw pane id.
+    let mut pane_aliases = HashMap::new();
     restore_with_imports_and_failures(
         snapshot,
         history,
@@ -487,6 +455,7 @@ fn restore_with_imports(
         shell_config,
         resume_agents_on_restore,
         imported_panes,
+        &mut pane_aliases,
         events,
         render_notify,
         render_dirty,
@@ -503,6 +472,7 @@ fn restore_with_imports_and_failures(
     shell_config: crate::pane::PaneShellConfig<'_>,
     resume_agents_on_restore: bool,
     imported_panes: &mut HashMap<u32, crate::handoff_runtime::ImportedHandoffRuntime>,
+    pane_aliases: &mut HashMap<u32, PaneId>,
     events: mpsc::Sender<AppEvent>,
     render_notify: Arc<Notify>,
     render_dirty: Arc<RenderSignal>,
@@ -531,6 +501,7 @@ fn restore_with_imports_and_failures(
             &runtime_context,
             &mut resumed_agent_sessions,
             imported_panes,
+            pane_aliases,
             &mut restored_collection_ids,
         );
         failed_imports += workspace_failed_imports;
@@ -554,6 +525,7 @@ fn restore_workspace(
     runtime_context: &RestoreRuntimeContext<'_>,
     resumed_agent_sessions: &mut HashSet<String>,
     imported_panes: &mut HashMap<u32, crate::handoff_runtime::ImportedHandoffRuntime>,
+    pane_aliases: &mut HashMap<u32, PaneId>,
     restored_collection_ids: &mut HashSet<TerminalContainerId>,
 ) -> RestoreFailures<Option<RestoredWorkspace>> {
     let mut tabs = Vec::new();
@@ -628,13 +600,19 @@ fn restore_workspace(
             next_public_tab_number = next_public_tab_number.max(following_number);
         }
         for pane_id in tab.layout.pane_ids() {
+            let old_raw = reverse_id_map
+                .get(&pane_id)
+                .copied()
+                .unwrap_or(pane_id.raw());
+            // The handoff alias is the map this restore already built, read back: the
+            // raw id a peer still names, to the pane that carries it now. A collection
+            // member is a live pane like any other and belongs here too - deriving the
+            // pairs by position dropped it and shifted the ones behind it.
+            if old_raw != pane_id.raw() {
+                pane_aliases.insert(old_raw, pane_id);
+            }
             let public_number = public_pane_numbers_by_old_raw
-                .get(
-                    &reverse_id_map
-                        .get(&pane_id)
-                        .copied()
-                        .unwrap_or(pane_id.raw()),
-                )
+                .get(&old_raw)
                 .copied()
                 .unwrap_or_else(|| {
                     let number = next_public_pane_number;
@@ -1737,6 +1715,123 @@ mod tests {
         validate_snapshot_admission(&snapshot).expect("semantic overflow is repaired after PTYs");
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn handoff_aliases_pair_a_collection_member_with_the_pane_that_carries_it() {
+        use super::super::snapshot::{
+            CollectionSnapshot, DirectionSnapshot, LayoutSnapshot, PaneSnapshot, TabSnapshot,
+            WorkspaceSnapshot,
+        };
+        use std::collections::BTreeSet;
+
+        // The layout puts a collection before a pane. The old derivation listed the
+        // snapshot's pane leaves in order - a collection leaf is not one - and zipped
+        // them positionally with every live pane, so the members' raw ids were dropped
+        // and the pane's own raw id was paired with whichever pane came first: a member.
+        let collection = CollectionId::from_raw(6_100_001).unwrap();
+        let member_a = 900_001_u32;
+        let member_b = 900_002_u32;
+        let outside = 900_003_u32;
+        let pane = || PaneSnapshot {
+            terminal_id: None,
+            cwd: std::path::PathBuf::from("/tmp"),
+            label: None,
+            agent_name: None,
+            managed_agent_kind: None,
+            agent_session: None,
+            launch_argv: None,
+        };
+        let mut snapshot = SessionSnapshot {
+            version: super::super::snapshot::SNAPSHOT_VERSION,
+            workspaces: vec![WorkspaceSnapshot {
+                id: Some("alias-handoff".into()),
+                custom_name: None,
+                identity_cwd: std::path::PathBuf::from("/tmp"),
+                checkout: None,
+                worktree_space: None,
+                public_pane_numbers: HashMap::new(),
+                next_public_pane_number: 4,
+                public_tab_numbers: vec![1],
+                next_public_tab_number: 2,
+                tabs: vec![TabSnapshot {
+                    id: None,
+                    custom_name: None,
+                    layout: LayoutSnapshot::Split {
+                        direction: DirectionSnapshot::Horizontal,
+                        ratio: 0.5,
+                        first: Box::new(LayoutSnapshot::Collection(collection)),
+                        second: Box::new(LayoutSnapshot::Pane(outside)),
+                    },
+                    collections: vec![CollectionSnapshot {
+                        id: collection,
+                        label: None,
+                        members: vec![member_a, member_b],
+                        selected: Some(member_a),
+                        archived: Vec::new(),
+                    }],
+                    panes: HashMap::from([
+                        (member_a, pane()),
+                        (member_b, pane()),
+                        (outside, pane()),
+                    ]),
+                    zoomed: false,
+                    focused: Some(member_a),
+                    focused_leaf: None,
+                    root_pane: Some(outside),
+                }],
+                active_tab: 0,
+            }],
+            repositories: Vec::new(),
+            space_order: Vec::new(),
+            active: Some(0),
+            selected: 0,
+            sidebar_width: None,
+            sidebar_section_split: None,
+            collapsed_space_keys: HashSet::new(),
+            delegations: Vec::new(),
+            collections_authority: Default::default(),
+            collections_action_sequence: 0,
+        };
+        let mut imports = HashMap::new();
+        let mut aliases = HashMap::new();
+        let (workspaces, _terminals, _runtimes) = restore_handoff(
+            &snapshot,
+            0,
+            test_restore_shell(),
+            crate::config::ShellModeConfig::NonLogin,
+            &mut imports,
+            &mut aliases,
+            mpsc::channel(4).0,
+            Arc::new(Notify::new()),
+            Arc::new(RenderSignal::new()),
+        )
+        .expect("handoff restore");
+
+        let live = workspaces[0].tabs[0]
+            .panes
+            .keys()
+            .copied()
+            .collect::<HashSet<_>>();
+        assert_eq!(live.len(), 3, "the handoff brought every pane up: {live:?}");
+        let keys = aliases.keys().copied().collect::<BTreeSet<_>>();
+        assert_eq!(
+            keys,
+            BTreeSet::from([member_a, member_b, outside]),
+            "every pre-handoff raw pane id keeps an alias, collection members included: \
+             {aliases:?}"
+        );
+        let mapped = aliases.values().copied().collect::<HashSet<_>>();
+        assert_eq!(
+            mapped.len(),
+            3,
+            "the aliases are one-to-one, not shifted onto a sibling: {aliases:?}"
+        );
+        assert!(
+            mapped.is_subset(&live),
+            "every alias names a live pane: {aliases:?}"
+        );
+    }
+
     #[test]
     fn adversarial_collection_restore_remaps_every_member_without_changing_geometry() {
         let mut state = crate::app::AppState::test_with_adversarial_identity_state();
@@ -2730,6 +2825,7 @@ mod tests {
             test_restore_shell(),
             crate::config::ShellModeConfig::NonLogin,
             &mut imports,
+            &mut HashMap::new(),
             mpsc::channel(4).0,
             Arc::new(Notify::new()),
             Arc::new(RenderSignal::new()),

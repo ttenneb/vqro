@@ -1071,17 +1071,18 @@ impl App {
             api_rx,
             event_hub,
         );
+        let mut pane_id_aliases = std::collections::HashMap::new();
         let (workspaces, terminals, runtimes) = crate::persist::restore_handoff(
             snapshot,
             config.advanced.scrollback_limit_bytes,
             &config.terminal.default_shell,
             config.terminal.shell_mode,
             imports,
+            &mut pane_id_aliases,
             app.event_tx.clone(),
             app.render_notify.clone(),
             app.render_dirty.clone(),
         )?;
-        let pane_id_aliases = crate::persist::handoff_pane_aliases(snapshot, &workspaces);
 
         app.state.pane_id_aliases = pane_id_aliases;
         app.state.workspaces = workspaces;

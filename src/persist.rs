@@ -23,9 +23,9 @@ pub(crate) use self::io::{
     load_for_startup, load_history_for_startup, StartupHistoryLoad, StartupSessionLoad,
 };
 #[cfg(unix)]
-pub(crate) use self::restore::validate_snapshot_admission;
+pub use self::restore::restore_handoff;
 #[cfg(unix)]
-pub use self::restore::{handoff_pane_aliases, restore_handoff};
+pub(crate) use self::restore::validate_snapshot_admission;
 pub use self::restore::{restore, restore_delegations};
 #[cfg(unix)]
 pub(crate) use self::snapshot::normalize_identity_changes;
