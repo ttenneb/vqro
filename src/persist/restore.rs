@@ -388,6 +388,9 @@ fn collect_layout_snapshot_pane_ids(node: &LayoutSnapshot, ids: &mut Vec<u32>) {
 }
 
 #[cfg(unix)]
+// The handoff restore threads the session, geometry, shell, imports, aliases and three
+// render hooks; bundling them would hide which are in and out, as `restore_handoff`.
+#[allow(clippy::too_many_arguments)]
 fn restore_with_imports_strict(
     snapshot: &SessionSnapshot,
     history: Option<&SessionHistorySnapshot>,
@@ -463,6 +466,9 @@ fn restore_with_imports(
     .0
 }
 
+// One argument more than the lint allows, for the same reason as its caller: the session,
+// geometry, shell, imports, aliases and render hooks are all in and out here.
+#[allow(clippy::too_many_arguments)]
 fn restore_with_imports_and_failures(
     snapshot: &SessionSnapshot,
     history: Option<&SessionHistorySnapshot>,
@@ -1741,7 +1747,7 @@ mod tests {
             agent_session: None,
             launch_argv: None,
         };
-        let mut snapshot = SessionSnapshot {
+        let snapshot = SessionSnapshot {
             version: super::super::snapshot::SNAPSHOT_VERSION,
             workspaces: vec![WorkspaceSnapshot {
                 id: Some("alias-handoff".into()),
