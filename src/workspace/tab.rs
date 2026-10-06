@@ -1002,7 +1002,8 @@ mod tests {
         workspace.switch_tab(index);
         let root = workspace.tabs[index].root_pane;
         for _ in 0..6 {
-            assert!(workspace.tabs[index].layout.focus_pane(root));
+            workspace.tabs[index].layout.focus_pane(root);
+            assert_eq!(workspace.tabs[index].layout.focused(), root);
             workspace.test_split_with_ratio(Direction::Horizontal, 0.8);
         }
         state.ensure_test_terminals();
