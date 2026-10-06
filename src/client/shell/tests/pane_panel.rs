@@ -1764,6 +1764,12 @@ fn a_click_on_the_row_itself_focuses_the_row_s_pane() {
 /// Two sections on one pane where the first has `tasks_rows` rows and the second one,
 /// so the pinned-header layout can be checked at the panel's edge.
 fn long_section_state(tasks_rows: usize) -> ClientShellState {
+    long_section_state_with(tasks_rows, 1)
+}
+
+/// A long first section plus a second one, to exercise how the band's row budget is
+/// shared between sections.
+fn long_section_state_with(tasks_rows: usize, messages_rows: usize) -> ClientShellState {
     let mut items = vec![serde_json::json!({
         "id":"panel:pane_1:tasks","role":"section","label":"Tasks","detail":"rows",
         "view":{"pane_id":"pane_1","view_id":"tasks","state":"in_progress"}
@@ -1780,10 +1786,18 @@ fn long_section_state(tasks_rows: usize) -> ClientShellState {
         "id":"panel:pane_1:messages","role":"section","label":"Messages","detail":"one",
         "view":{"pane_id":"pane_1","view_id":"messages","state":"open"}
     }));
-    items.push(serde_json::json!({
-        "id":"panel:pane_1:messages:row","parent_id":"panel:pane_1:messages",
-        "role":"section","label":"A message row","view":{"state":"open"}
-    }));
+    for row in 0..messages_rows {
+        let label = if row == 0 {
+            "A message row".to_string()
+        } else {
+            format!("A message row {row}")
+        };
+        items.push(serde_json::json!({
+            "id": format!("panel:pane_1:messages:row{row}"),
+            "parent_id":"panel:pane_1:messages",
+            "role":"section","label": label,"view":{"state":"open"}
+        }));
+    }
     let mut state = panel_state(None, false);
     let projection: crate::protocol::endpoint::HostDocumentsProjectionV1 =
         serde_json::from_value(serde_json::json!({
@@ -1837,6 +1851,50 @@ fn a_long_first_section_keeps_the_next_sections_header_visible() {
             "{rows}: headers keep their order"
         );
     }
+}
+
+#[test]
+fn a_long_first_section_leaves_a_later_sections_rows_reachable() {
+    // QA's P2 at f0e31328: the first section took the whole row pool, so a later
+    // section's rows were never drawn at any scroll offset - only its header was.
+    let mut state = long_section_state_with(40, 3);
+    let drawn = composed_rows_of(&mut state);
+    assert!(
+        drawn.iter().any(|row| row.contains("Tasks")),
+        "the long first header stays: {drawn:?}"
+    );
+    assert!(
+        drawn.iter().any(|row| row.contains("Messages")),
+        "the later header stays: {drawn:?}"
+    );
+    assert!(
+        drawn.iter().any(|row| row.contains("A message row")),
+        "the later section's rows are drawn under it, not starved out: {drawn:?}"
+    );
+}
+
+#[test]
+fn scrolling_reaches_the_later_rows_of_a_later_section() {
+    // The same budget, read from the other end: the offset that moves the long
+    // section also moves the later one, so its own later rows are reachable while
+    // both headers stay where they are.
+    let mut state = long_section_state_with(40, 3);
+    state
+        .pane_panel_display
+        .entry("pane_1".into())
+        .or_default()
+        .scroll = u16::MAX;
+    let drawn = composed_rows_of(&mut state);
+    assert!(
+        drawn.iter().any(|row| row.contains("A message row 2")),
+        "the later section's last row is reachable by scrolling: {drawn:?}"
+    );
+    let tasks_header = drawn.iter().position(|row| row.contains("Tasks"));
+    let messages_header = drawn.iter().position(|row| row.contains("Messages"));
+    assert!(
+        tasks_header < messages_header,
+        "headers keep their order while the rows scroll: {drawn:?}"
+    );
 }
 
 #[test]

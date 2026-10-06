@@ -622,14 +622,51 @@ fn render_pane(
     // Section headers stay pinned; only the rows scroll, so a section never
     // loses its name or its collapse marker.
     // Headers are pinned in the sense that the panel's height reserves one line per
-    // section; the rows below them are what scrolls.
+    // section; the rows below them are what scrolls. Every section keeps one line of
+    // its own, in order: its header, or for a view the user opened that is no longer
+    // published, its one row. Those lines are reserved, so a long section can never
+    // push a later section's line out of the band.
     let row_space = visible.saturating_sub(pinned);
     let sections = panel_sections(&views, open_views, &display.collapsed_views);
-    let row_count = sections
+    // The rows below the headers share one budget: one row for every section that has
+    // a row, while the budget lasts, and then the rest of the budget to the sections
+    // in order. Reserving that first row is what keeps a long earlier section from
+    // starving a later section's rows out of the band entirely - its header was never
+    // in doubt, its rows are what would go missing - and spending the budget on what
+    // is drawn is what keeps the panel's bottom line from being left blank.
+    let pool = usize::from(visible).saturating_sub(sections.len());
+    let headers_only = pool == 0;
+    let mut allocation = vec![0_usize; sections.len()];
+    let mut spare = pool;
+    for (index, section) in sections.iter().enumerate() {
+        if section.rows.is_empty() || spare == 0 {
+            continue;
+        }
+        allocation[index] = 1;
+        spare -= 1;
+    }
+    for (index, section) in sections.iter().enumerate() {
+        if spare == 0 {
+            break;
+        }
+        let give = section
+            .rows
+            .len()
+            .saturating_sub(allocation[index])
+            .min(spare);
+        allocation[index] += give;
+        spare -= give;
+    }
+    // One scroll offset moves every section that has more rows than its share, so a
+    // later section's later rows are reachable while every header stays where it is.
+    let most_scrollable = sections
         .iter()
-        .map(|section| section.rows.len())
-        .sum::<usize>();
-    let overflow = row_count as u16 > row_space;
+        .zip(&allocation)
+        .max_by_key(|(section, allocated)| section.rows.len().saturating_sub(**allocated))
+        .filter(|(section, allocated)| section.rows.len() > **allocated);
+    let scroll_total = most_scrollable.map_or(0, |(section, _)| section.rows.len());
+    let scroll_page = most_scrollable.map_or(0, |(_, allocated)| *allocated);
+    let overflow = most_scrollable.is_some();
     // The scroll indicator owns the last column, with one quiet column of
     // gutter between it and the content.
     let body_width = if overflow {
@@ -639,21 +676,9 @@ fn render_pane(
     };
     let scroll = display
         .scroll
-        .min((row_count as u16).saturating_sub(row_space));
-    // Pinned headers, in order, then each section's own rows under it. The rows get
-    // whatever the headers leave, in order, and the section that does not fit scrolls
-    // within its own rows - so it can never push a later section's header out of the
-    // band, and the budget follows what is actually drawn, which is what keeps the
-    // panel's bottom line from being left blank.
-    // Every section keeps one line of its own, in order: its header, or for a view the
-    // user opened that is no longer published, its one row. Those lines are pinned, so
-    // a long section can never push a later section's line out of the band.
-    let pool = usize::from(visible).saturating_sub(sections.len());
-    let headers_only = pool == 0;
-    let mut rows_left = pool;
-    let mut scrolled = false;
+        .min(scroll_total.saturating_sub(scroll_page) as u16);
     let mut y = geometry.panel.y;
-    for section in &sections {
+    for (index, section) in sections.iter().enumerate() {
         let mut rest = section.rows.as_slice();
         if let Some(view) = section.header {
             let collapsed = display.collapsed_views.contains(&view.view_id);
@@ -684,17 +709,11 @@ fn render_pane(
         if headers_only || rest.is_empty() {
             continue;
         }
-        // The section that cannot fit its own rows takes the user's scroll; every
-        // other section shows them from the top.
-        let space = rows_left.min(rest.len());
-        let offset = if space < rest.len() && !scrolled {
-            scrolled = true;
-            usize::from(scroll).min(rest.len().saturating_sub(space))
-        } else {
-            0
-        };
-        rows_left = rows_left.saturating_sub(space);
-        let remaining = &rest[offset..offset.saturating_add(space).min(rest.len())];
+        // The section's share of the row budget, with the shared scroll offset
+        // applied to every section that has more rows than its share.
+        let space = allocation[index].min(rest.len());
+        let offset = usize::from(scroll).min(rest.len().saturating_sub(space));
+        let remaining = &rest[offset..offset.saturating_add(space)];
         for line in remaining {
             if y >= geometry.panel.bottom() {
                 break;
@@ -783,9 +802,9 @@ fn render_pane(
         super::render::render_panel_scroll(
             buffer,
             track,
-            row_count,
+            scroll_total,
             usize::from(scroll),
-            usize::from(row_space),
+            scroll_page,
             palette,
         );
     }
