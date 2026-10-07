@@ -19,7 +19,7 @@ use tracing::{debug, warn};
 use crate::ipc::LocalStream;
 use crate::protocol::endpoint::{
     EndpointClientHello, EndpointServerWelcome, ENDPOINT_HELLO_KIND, ENDPOINT_PROTOCOL_GENERATION,
-    ENDPOINT_WELCOME_KIND,
+    ENDPOINT_WELCOME_KIND, SURFACE_CODEC_V2,
 };
 use crate::protocol::{
     self, AttachScrollDirection, AttachScrollSource, ClientMessage, ClientPaneInputEvent,
@@ -431,10 +431,6 @@ pub(crate) enum ServerEvent {
         pane_viewport_enabled: bool,
         pane_view_enabled: bool,
         terminal_views_enabled: bool,
-        /// Surface codec selected during the endpoint hello: `shell.surface.v2`
-        /// carries view descriptors, `shell.surface.v1` is the frozen
-        /// terminal-only fallback.
-        surface_codec: String,
         writer: ClientWriter,
     },
     /// A client sent an input message.
@@ -729,7 +725,6 @@ struct ClientShellHandshakeOptions {
     pane_view_enabled: bool,
     terminal_views_enabled: bool,
     native_api_enabled: bool,
-    surface_codec: String,
 }
 
 fn client_shell_handshake_options(
@@ -768,7 +763,6 @@ fn client_shell_handshake_options(
         ]
         .iter()
         .all(|required| has(required)),
-        surface_codec: hello.preferred_surface_codec().to_owned(),
     }
 }
 
@@ -869,6 +863,16 @@ pub(crate) fn handle_client_handshake(
                     "no_common_core",
                     "client and server have no compatible endpoint core codecs".to_owned(),
                 ))
+            } else if !hello.serves_surface_v2() {
+                // Serving is `shell.surface.v2` only. A peer that never
+                // advertised it is refused cleanly here, client-locally, rather
+                // than sent the retired `shell.surface.v1` frame.
+                Some((
+                    "unsupported_surface_codec",
+                    format!(
+                        "client cannot decode the current pane surface codec ({SURFACE_CODEC_V2}); update this client"
+                    ),
+                ))
             } else {
                 client_shell_geometry_error(
                     hello.surface_size,
@@ -942,11 +946,6 @@ pub(crate) fn handle_client_handshake(
         };
         let mut welcome =
             EndpointServerWelcome::compatible(methods.into_iter().map(str::to_owned).collect());
-        // Advertise the exact surface codec this connection negotiated, so the
-        // client knows which envelope to expect for every subsequent surface.
-        if let Some(options) = shell_options.as_ref() {
-            welcome.surface_codec = options.surface_codec.clone();
-        }
         if shell_options
             .as_ref()
             .is_some_and(|options| options.structure_enabled)
@@ -1049,7 +1048,6 @@ pub(crate) fn handle_client_handshake(
             pane_viewport_enabled: options.pane_viewport_enabled,
             pane_view_enabled: options.pane_view_enabled,
             terminal_views_enabled: options.terminal_views_enabled,
-            surface_codec: options.surface_codec.clone(),
             writer,
         }
     } else {
@@ -2407,7 +2405,6 @@ mod tests {
                 pane_viewport_enabled,
                 pane_view_enabled,
                 terminal_views_enabled,
-                surface_codec,
                 writer,
                 host_views_enabled: false,
             } => {
@@ -2422,9 +2419,6 @@ mod tests {
                 assert!(!structure_enabled);
                 assert!(host_documents_enabled);
                 assert!(!terminal_views_enabled);
-                // This test client advertised both surface codecs, so the server
-                // negotiates the additive v2 codec.
-                assert_eq!(surface_codec, crate::protocol::endpoint::SURFACE_CODEC_V2);
                 assert!(!pane_viewport_enabled);
                 assert!(!pane_view_enabled);
                 drop(writer);
@@ -2441,7 +2435,11 @@ mod tests {
     }
 
     #[test]
-    fn v1_only_shell_hello_is_never_refused_and_negotiates_the_v1_surface() {
+    fn v1_only_shell_hello_is_refused_client_locally_without_a_surface() {
+        // Serving is v2-only. A generation-1 peer is refused here, client-locally,
+        // with a clear update message: no v1 frame or patch is ever sent, and no
+        // `ClientShellConnected` event (and so no shared geometry change) is
+        // produced for it.
         let (mut client_stream, server_stream, _path) = local_stream_pair("client-shell-v1-hello");
         let (server_event_tx, mut server_event_rx) = mpsc::channel(4);
         let should_quit = Arc::new(AtomicBool::new(false));
@@ -2456,23 +2454,10 @@ mod tests {
         let welcome: ServerMessage =
             protocol::read_message(&mut client_stream, MAX_FRAME_SIZE).expect("read welcome");
         let welcome = endpoint_welcome(welcome);
-        assert!(welcome.error.is_none(), "a v1-only peer is never refused");
-        assert_eq!(
-            welcome.surface_codec,
-            crate::protocol::endpoint::SURFACE_CODEC_V1
-        );
-
-        match recv_server_event(&mut server_event_rx, "v1 shell connected") {
-            ServerEvent::ClientShellConnected {
-                surface_codec,
-                writer,
-                ..
-            } => {
-                assert_eq!(surface_codec, crate::protocol::endpoint::SURFACE_CODEC_V1);
-                drop(writer);
-            }
-            other => panic!("expected ClientShellConnected, got {other:?}"),
-        }
+        let error = welcome.error.expect("a v1-only peer is refused");
+        assert_eq!(error.code, "unsupported_surface_codec");
+        assert!(error.message.contains(SURFACE_CODEC_V2));
+        assert!(server_event_rx.try_recv().is_err());
 
         drop(client_stream);
         should_quit.store(true, Ordering::Release);

@@ -7,7 +7,7 @@ use crate::app::state::AppState;
 use crate::protocol::render_ansi::{BlitEncoder, EncodedBlit};
 use crate::protocol::{
     CursorState, FrameData, PaneSurfaceFrame, PaneSurfaceFrameV2, PaneSurfacePatch,
-    PaneSurfacePatchV2, PaneSurfaceViewEntryV2, RenderEncoding, ServerMessage, TerminalFrame,
+    PaneSurfaceViewEntryV2, RenderEncoding, ServerMessage, TerminalFrame,
 };
 use crate::terminal::TerminalRuntimeRegistry;
 
@@ -16,12 +16,10 @@ pub(crate) enum ClientRenderState {
     /// Semantic clients compare full frame data and skip identical frames.
     Semantic {
         last_surface: Option<Box<PaneSurfaceFrame>>,
-        /// View descriptors committed with `last_surface`; only a v2 peer ever
-        /// holds any, and a v1 peer is always sent the view-free projection.
+        /// View descriptors committed with `last_surface`. They ride the full
+        /// `shell.surface.v2` payload; patches never change them.
         last_views: Vec<PaneSurfaceViewEntryV2>,
         surface_revision: u64,
-        /// Whether this connection negotiated `shell.surface.v2`.
-        surface_v2: bool,
     },
     /// Terminal-ANSI clients keep a terminal diff encoder and sequence number.
     TerminalAnsi {
@@ -38,7 +36,6 @@ impl ClientRenderState {
                 last_surface: None,
                 last_views: Vec::new(),
                 surface_revision: 0,
-                surface_v2: false,
             },
             RenderEncoding::TerminalAnsi => Self::TerminalAnsi {
                 blit_encoder: BlitEncoder::new(),
@@ -140,25 +137,6 @@ impl ClientRenderState {
         }
     }
 
-    /// Record the surface codec negotiated during the endpoint hello. Only the
-    /// semantic (client-shell) lane carries surfaces; terminal-ANSI connections
-    /// are unaffected.
-    pub(crate) fn set_surface_v2(&mut self, surface_v2: bool) {
-        if let Self::Semantic { surface_v2: v2, .. } = self {
-            *v2 = surface_v2;
-        }
-    }
-
-    pub(crate) fn surface_is_v2(&self) -> bool {
-        matches!(
-            self,
-            Self::Semantic {
-                surface_v2: true,
-                ..
-            }
-        )
-    }
-
     pub(crate) fn prepare_pane_surface(
         &mut self,
         mut surface: PaneSurfaceFrame,
@@ -168,7 +146,6 @@ impl ClientRenderState {
             last_surface,
             last_views,
             surface_revision,
-            surface_v2,
         } = self
         else {
             return None;
@@ -191,21 +168,12 @@ impl ClientRenderState {
         surface.surface_revision = surface_revision.saturating_add(1);
         let mut committed_surface = surface.clone();
         committed_surface.graphics.assets.clear();
-        // A v1 peer is always handed the view-free projection, so `views` is
-        // empty here; a v2 peer gets the descriptors alongside the unchanged v1
-        // frame. Never put a view field on the v1 frame itself.
-        let message = if *surface_v2 {
-            ServerMessage::PaneSurfaceV2(PaneSurfaceFrameV2 {
-                frame: surface,
-                views: views.clone(),
-            })
-        } else {
-            debug_assert!(
-                views.is_empty(),
-                "a shell.surface.v1 peer must be sent the view-free projection"
-            );
-            ServerMessage::PaneSurface(surface)
-        };
+        // Serving is `shell.surface.v2` only: the view descriptors ride the v2
+        // payload and the v1 frame inside it stays the byte-exact terminal shape.
+        let message = ServerMessage::PaneSurfaceV2(PaneSurfaceFrameV2 {
+            frame: surface,
+            views: views.clone(),
+        });
         Some(PreparedRender::Semantic {
             message,
             committed_surface: Box::new(committed_surface),
@@ -219,9 +187,8 @@ impl ClientRenderState {
     ) -> Option<PreparedRender> {
         let Self::Semantic {
             last_surface,
-            last_views,
             surface_revision,
-            surface_v2,
+            ..
         } = self
         else {
             return None;
@@ -235,19 +202,12 @@ impl ClientRenderState {
         }
         let next_revision = surface_revision.saturating_add(1);
         patch.surface_revision = next_revision;
-        // View descriptors are immutable for a placed view: only a topology
-        // change retargets or removes one, which forces a new full surface. So a
-        // patch echoes the committed descriptors and the client replaces its
-        // index with them. A v2 peer with no views pays nothing extra.
-        let message = if *surface_v2 {
-            ServerMessage::PaneSurfacePatchV2(PaneSurfacePatchV2 {
-                patch,
-                views: last_views.clone(),
-            })
-        } else {
-            ServerMessage::PaneSurfacePatch(patch)
-        };
-        Some(PreparedRender::SemanticPatch { message })
+        // A patch carries no view descriptors: a placed view's identity and scope
+        // change only with a topology change, which forces the next full v2
+        // surface. Patches stay the plain terminal-cell update for every codec.
+        Some(PreparedRender::SemanticPatch {
+            message: ServerMessage::PaneSurfacePatch(patch),
+        })
     }
 
     pub(crate) fn commit_sent_frame(&mut self, prepared: PreparedRender) {
@@ -277,9 +237,7 @@ impl ClientRenderState {
                 },
                 PreparedRender::SemanticPatch { message },
             ) => {
-                let (ServerMessage::PaneSurfacePatch(patch)
-                | ServerMessage::PaneSurfacePatchV2(PaneSurfacePatchV2 { patch, .. })) = message
-                else {
+                let ServerMessage::PaneSurfacePatch(patch) = message else {
                     return;
                 };
                 let surface = last_surface
@@ -481,16 +439,14 @@ pub(crate) fn render_tab_surface_virtual(
     app_state: &AppState,
     terminal_runtimes: &TerminalRuntimeRegistry,
     target: Option<crate::ui::TabSurfaceTarget>,
-    layout_override: Option<&crate::layout::TileLayout>,
     area: Rect,
     resize_panes: bool,
     cell_size: crate::kitty_graphics::HostCellSize,
 ) -> RenderedTabSurface {
-    let layout = crate::ui::compute_tab_surface_for_layout(
+    let layout = crate::ui::compute_tab_surface_for(
         app_state,
         terminal_runtimes,
         target,
-        layout_override,
         area,
         resize_panes,
         cell_size,
@@ -611,7 +567,7 @@ mod tests {
             .expect("forced replacement surface");
         assert!(matches!(
             prepared.message(),
-            ServerMessage::PaneSurface(surface) if surface.surface_revision == 2
+            ServerMessage::PaneSurfaceV2(frame) if frame.frame.surface_revision == 2
         ));
         state.commit_sent_frame(prepared);
         assert_eq!(state.last_pane_surface().unwrap().surface_revision, 2);

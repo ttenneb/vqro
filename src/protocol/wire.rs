@@ -1280,22 +1280,13 @@ pub struct PaneSurfacePatch {
     pub cursor: Option<CursorState>,
 }
 
-/// `shell.surface.v2` full surface: the frozen v1 frame plus the view-pane
-/// descriptors that v1 cannot carry. The v1 frame is byte-identical to the
-/// pre-view codec; a peer that negotiated v1 receives `PaneSurface` instead.
+/// `shell.surface.v2` full surface: the unchanged v1 frame plus the view-pane
+/// descriptors that the terminal-only frame cannot carry. Patches do not need a
+/// v2 shape: view descriptors change only with a topology change, which forces a
+/// new full surface, so [`PaneSurfacePatch`] serves both codecs unchanged.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PaneSurfaceFrameV2 {
     pub frame: PaneSurfaceFrame,
-    pub views: Vec<PaneSurfaceViewEntryV2>,
-}
-
-/// `shell.surface.v2` incremental patch: the frozen v1 patch plus the current
-/// view-pane descriptors for the surface. View descriptors only change on a
-/// topology change, which forces a new full v2 surface rather than a patch, so
-/// `views` is the complete current set and the client replaces its index.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PaneSurfacePatchV2 {
-    pub patch: PaneSurfacePatch,
     pub views: Vec<PaneSurfaceViewEntryV2>,
 }
 
@@ -1369,8 +1360,17 @@ pub struct SemanticNotification {
 
 /// Messages sent from the server to the client over the client protocol socket.
 ///
-/// Variant order is frozen for endpoint generation 1. Add compatible endpoint
-/// behavior through `EndpointControl`, and ignore unrecognized named controls.
+/// Variant order is frozen for endpoint generation 1, with one recorded,
+/// generation-scoped extension: [`ServerMessage::PaneSurfaceV2`] is appended
+/// after `EndpointControl` under the human 2026-10-04 option-B no-floor decision
+/// (`docs/next/architecture/nested-panes.md`). bincode cannot add an optional
+/// field to the `shell.surface.v1` frame, and the endpoint hello checks codec
+/// names only, so a generation-1 peer would desync on an in-place field. Serving
+/// is `shell.surface.v2` only: a peer that did not advertise it is refused
+/// client-locally and never receives the appended variant, and a patch is the
+/// unchanged [`ServerMessage::PaneSurfacePatch`]. Remove the variant when the
+/// surface lane is re-cut. Otherwise add compatible endpoint behavior through
+/// `EndpointControl`, and ignore unrecognized named controls.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ServerMessage {
     /// Handshake response: server acknowledges (or rejects) the client.
@@ -1493,15 +1493,14 @@ pub enum ServerMessage {
     /// of endpoint generation 1 and must not change.
     EndpointControl { kind: String, data: String },
 
-    /// `shell.surface.v2` full pane surface: the v1 frame plus view descriptors.
+    /// `shell.surface.v2` full pane surface: the unchanged v1 frame plus view
+    /// descriptors.
     ///
-    /// These two variants are appended after `EndpointControl` so every earlier
-    /// bincode tag is unchanged. A peer that negotiated `shell.surface.v1` never
-    /// receives them and gets [`ServerMessage::PaneSurface`] instead.
+    /// Appended after `EndpointControl` under the recorded generation-scoped
+    /// extension (see the enum doc), so tags `0..=20` are unchanged. Only a peer
+    /// that negotiated `shell.surface.v2` ever receives it; patches stay
+    /// [`ServerMessage::PaneSurfacePatch`].
     PaneSurfaceV2(PaneSurfaceFrameV2),
-
-    /// `shell.surface.v2` incremental pane-surface update.
-    PaneSurfacePatchV2(PaneSurfacePatchV2),
 }
 
 // ---------------------------------------------------------------------------
@@ -2652,31 +2651,6 @@ mod tests {
     }
 
     #[test]
-    fn pane_surface_v2_patch_round_trips_view_descriptors() {
-        let msg = ServerMessage::PaneSurfacePatchV2(PaneSurfacePatchV2 {
-            patch: PaneSurfacePatch {
-                boot_id: "boot-1".into(),
-                projection_revision: 1,
-                base_surface_revision: 1,
-                surface_revision: 2,
-                rows: Vec::new(),
-                panes: vec![surface_pane("w1:p1", true)],
-                cursor: None,
-            },
-            views: vec![PaneSurfaceViewEntryV2 {
-                pane_id: "w1:p2".into(),
-                extension: "vqro.tasks".into(),
-                view: "tasks".into(),
-                scope: vec!["w1:p1".into()],
-            }],
-        });
-        let encoded = bincode::serde::encode_to_vec(&msg, bincode::config::standard()).unwrap();
-        let (decoded, _): (ServerMessage, _) =
-            bincode::serde::decode_from_slice(&encoded, bincode::config::standard()).unwrap();
-        assert_eq!(msg, decoded);
-    }
-
-    #[test]
     fn client_shell_graphics_payload_codec_is_frozen() {
         let key = SurfaceGraphicsAssetKey {
             source: SurfaceGraphicsSource::Terminal {
@@ -2828,29 +2802,14 @@ mod tests {
             }),
             20
         );
-        // The v2 surface variants are appended after `EndpointControl`, so the
-        // generation-1 tags above keep the exact numbering they had before.
+        // The single recorded extension is appended after `EndpointControl`, so
+        // every generation-1 tag above keeps the exact numbering it had before.
         assert_eq!(
             tag(&ServerMessage::PaneSurfaceV2(PaneSurfaceFrameV2 {
                 frame: empty_frame(),
                 views: Vec::new(),
             })),
             21
-        );
-        assert_eq!(
-            tag(&ServerMessage::PaneSurfacePatchV2(PaneSurfacePatchV2 {
-                patch: PaneSurfacePatch {
-                    boot_id: String::new(),
-                    projection_revision: 0,
-                    base_surface_revision: 0,
-                    surface_revision: 0,
-                    rows: Vec::new(),
-                    panes: Vec::new(),
-                    cursor: None,
-                },
-                views: Vec::new(),
-            })),
-            22
         );
     }
 

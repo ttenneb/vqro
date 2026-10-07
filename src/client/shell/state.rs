@@ -1976,9 +1976,16 @@ impl ClientShellState {
         self.pane_surface.is_some()
     }
 
-    /// Install a `shell.surface.v1` frame: terminal-only, no view panes.
+    /// Install a terminal-only frame with no view panes.
     pub(crate) fn set_pane_surface(&mut self, surface: PaneSurfaceFrame) {
         self.set_pane_surface_with_views(surface, Vec::new());
+    }
+
+    /// Reinstall a frame derived from a patch without disturbing the committed
+    /// view descriptors: a patch never changes them.
+    pub(crate) fn reinstall_patched_surface(&mut self, surface: PaneSurfaceFrame) {
+        let views = std::mem::take(&mut self.pane_surface_views);
+        self.set_pane_surface_with_views(surface, views);
     }
 
     /// Install a `shell.surface.v2` frame together with its view descriptors.

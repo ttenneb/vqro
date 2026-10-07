@@ -112,19 +112,14 @@ fn pane_geometry_matches(
 }
 
 impl ClientShellState {
-    /// Apply a `shell.surface.v1` patch: terminal-cell rows only, no views.
+    /// Apply a terminal-cell patch.
+    ///
+    /// A patch carries no view descriptors: a placed view's identity and scope
+    /// change only with a topology change, which forces a new full surface, so
+    /// `pane_surface_views` is left exactly as the last full surface set it.
     pub(crate) fn apply_pane_surface_patch(
         &mut self,
         patch: crate::protocol::PaneSurfacePatch,
-    ) -> ClientPaneSurfacePatchOutcome {
-        self.apply_pane_surface_patch_with_views(patch, Vec::new())
-    }
-
-    /// Apply a `shell.surface.v2` patch and replace the view-descriptor index.
-    pub(crate) fn apply_pane_surface_patch_with_views(
-        &mut self,
-        patch: crate::protocol::PaneSurfacePatch,
-        views: Vec<crate::protocol::PaneSurfaceViewEntryV2>,
     ) -> ClientPaneSurfacePatchOutcome {
         let Some(current) = self.pane_surface.as_ref() else {
             return ClientPaneSurfacePatchOutcome::Rejected;
@@ -304,11 +299,8 @@ impl ClientShellState {
             if !apply_patch_to_surface(&mut next, &patch) {
                 return ClientPaneSurfacePatchOutcome::Rejected;
             }
-            self.set_pane_surface_with_views(next, views.clone());
+            self.reinstall_patched_surface(next);
         }
-        // A v2 patch echoes the committed view descriptors; a v1 patch carries
-        // none. Replacing the index keeps the two in lockstep.
-        self.pane_surface_views = views;
         ClientPaneSurfacePatchOutcome::Applied(composed_patch)
     }
 }

@@ -1047,13 +1047,6 @@ impl HeadlessServer {
                     } else {
                         crate::kitty_graphics::HostCellSize::default()
                     };
-                    // A peer that negotiated `shell.surface.v1` receives the
-                    // terminal-only projection: drop view panes and promote each
-                    // covered terminal into the view's box.
-                    let view_free = !self
-                        .clients
-                        .get(&client_id)
-                        .is_some_and(|client| client.render_state.surface_is_v2());
                     let crate::server::client_shell::RenderedPaneSurface {
                         frame,
                         panes,
@@ -1072,7 +1065,6 @@ impl HeadlessServer {
                         render_cell_size,
                         &shell_graphics_delivery,
                         client_id,
-                        view_free,
                     );
                     crate::render_prof::duration_since(
                         "full_render.render_tab_surface_virtual",

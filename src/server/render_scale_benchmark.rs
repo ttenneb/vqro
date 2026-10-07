@@ -104,7 +104,6 @@ impl RenderPipeline {
             },
             &self.graphics_delivery,
             1,
-            false,
         );
         let server_elapsed = started.elapsed();
         self.graphics_delivery = rendered.graphics_delivery;

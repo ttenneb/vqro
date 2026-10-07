@@ -150,8 +150,10 @@ pub(super) fn clear_endpoint_host_effects(
     let _ = crate::terminal_effects::write_window_title(&mut std::io::stdout(), None);
 }
 
-/// Install a `shell.surface.v1` endpoint pane surface (terminal-only) and
-/// present it. A v1 peer never receives view panes.
+/// Install a terminal-only endpoint pane surface and present it.
+///
+/// Serving is `shell.surface.v2`; this path is retained for the historical
+/// `PaneSurface` decode and for robustness, and carries no view panes.
 pub(super) fn apply_endpoint_pane_surface_v1(
     state: &mut ClientState,
     endpoints: &mut endpoint::EndpointRegistry,
@@ -177,51 +179,6 @@ pub(super) fn apply_endpoint_pane_surface_v2(
         shell.set_pane_surface_with_views(surface, views);
     }
     finish_endpoint_pane_surface(state, endpoints, prefix_input_source);
-}
-
-/// Apply one endpoint pane-surface patch and present the result. `views` is
-/// `Some` for a `shell.surface.v2` patch (descriptors are immutable while a view
-/// stays placed, so the patch echoes the committed set) and `None` for v1.
-pub(super) fn apply_endpoint_pane_surface_patch(
-    state: &mut ClientState,
-    endpoints: &mut endpoint::EndpointRegistry,
-    prefix_input_source: &mut impl crate::platform::PrefixInputSource,
-    patch: crate::protocol::PaneSurfacePatch,
-    views: Option<Vec<crate::protocol::PaneSurfaceViewEntryV2>>,
-) {
-    let patch_started = crate::render_prof::timer();
-    let apply_started = crate::render_prof::timer();
-    let outcome = state.shell.as_mut().map(|shell| match views {
-        Some(views) => shell.apply_pane_surface_patch_with_views(patch, views),
-        None => shell.apply_pane_surface_patch(patch),
-    });
-    crate::render_prof::duration_since("client_surface_patch.apply", apply_started);
-    let compose_fallback = match outcome {
-        Some(shell::ClientPaneSurfacePatchOutcome::Applied(Some(patch))) => {
-            match state.present_surface_patch(patch) {
-                Ok(presented) => !presented,
-                Err(error) => {
-                    warn!(%error, "failed to present retained pane surface patch");
-                    state.request_repaint();
-                    false
-                }
-            }
-        }
-        Some(shell::ClientPaneSurfacePatchOutcome::Applied(None)) => true,
-        Some(shell::ClientPaneSurfacePatchOutcome::Rejected) | None => false,
-    };
-    apply_client_shell_input_source_changes(state, endpoints, prefix_input_source);
-    if compose_fallback {
-        let composed = state
-            .shell
-            .as_mut()
-            .and_then(|shell| shell.compose(state.reported_size.0, state.reported_size.1));
-        if let Some(frame) = composed {
-            state.present_frame(frame);
-        }
-    }
-    crate::render_prof::duration_since("client_surface_patch.total", patch_started);
-    crate::render_prof::flush_if_due();
 }
 
 /// Reconcile host input-source side effects for the just-installed surface and

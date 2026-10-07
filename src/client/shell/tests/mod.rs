@@ -265,7 +265,7 @@ mod recovery;
 mod startup_overlays;
 
 #[test]
-fn v2_surface_index_tracks_view_descriptors_and_v1_clears_it() {
+fn v2_surface_index_tracks_view_descriptors_and_an_empty_install_clears_them() {
     let config = ClientShellConfig::from_config(&Config::default());
     let mut state = ClientShellState::new(config);
     state.set_snapshot(Box::new(snapshot()));

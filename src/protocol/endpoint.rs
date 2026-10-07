@@ -19,8 +19,9 @@ pub const SNAPSHOT_CODEC_V1: &str = "shell.snapshot.v1";
 pub const ENDPOINT_SNAPSHOT_KIND: &str = SNAPSHOT_CODEC_V1;
 pub const SURFACE_CODEC_V1: &str = "shell.surface.v1";
 /// Additive surface codec that carries per-pane view descriptors alongside the
-/// unchanged v1 frame. `shell.surface.v1` stays byte-exactly terminal-only; a
-/// peer that advertises only v1 gets the view-free terminal projection.
+/// unchanged v1 frame. `shell.surface.v1` stays byte-exactly terminal-only and
+/// is retired from serving: a peer that advertises only v1 is refused
+/// client-locally rather than sent a v1 surface.
 pub const SURFACE_CODEC_V2: &str = "shell.surface.v2";
 pub const INPUT_CODEC_V1: &str = "shell.input.semantic.v1";
 pub const BLOB_CODEC_V1: &str = "shell.blob.v1";
@@ -429,19 +430,17 @@ impl EndpointClientHello {
             && self.blob_codecs.iter().any(|codec| codec == BLOB_CODEC_V1)
     }
 
-    /// The surface codec the server should use for this peer: the newest codec
-    /// the client advertised. v2 carries view descriptors; v1 is the frozen
-    /// terminal-only fallback, so a v1-only peer is never refused.
-    pub fn preferred_surface_codec(&self) -> &'static str {
-        if self
-            .surface_codecs
+    /// Whether this peer can be served the current `shell.surface.v2` payload.
+    ///
+    /// Serving is v2-only: a peer that never advertised v2 is refused
+    /// client-locally rather than sent the retired `shell.surface.v1` frame. The
+    /// frozen generation-1 hello still decodes and still satisfies
+    /// [`Self::supports_required_codecs`] for its historical contract; this is a
+    /// separate serving decision, not a decode one.
+    pub fn serves_surface_v2(&self) -> bool {
+        self.surface_codecs
             .iter()
             .any(|codec| codec == SURFACE_CODEC_V2)
-        {
-            SURFACE_CODEC_V2
-        } else {
-            SURFACE_CODEC_V1
-        }
     }
 }
 
@@ -451,7 +450,7 @@ impl EndpointServerWelcome {
             generation: ENDPOINT_PROTOCOL_GENERATION,
             server_version: crate::build_info::version(),
             snapshot_codec: SNAPSHOT_CODEC_V1.into(),
-            surface_codec: SURFACE_CODEC_V1.into(),
+            surface_codec: SURFACE_CODEC_V2.into(),
             input_codec: INPUT_CODEC_V1.into(),
             blob_codec: BLOB_CODEC_V1.into(),
             methods,
@@ -470,7 +469,7 @@ impl EndpointServerWelcome {
             generation: ENDPOINT_PROTOCOL_GENERATION,
             server_version: crate::build_info::version(),
             snapshot_codec: SNAPSHOT_CODEC_V1.into(),
-            surface_codec: SURFACE_CODEC_V1.into(),
+            surface_codec: SURFACE_CODEC_V2.into(),
             input_codec: INPUT_CODEC_V1.into(),
             blob_codec: BLOB_CODEC_V1.into(),
             methods: Vec::new(),
@@ -765,26 +764,27 @@ mod tests {
     }
 
     #[test]
-    fn v1_only_hello_stays_accepted_and_prefers_the_v1_surface() {
-        // The frozen generation-1 hello advertises only `shell.surface.v1`; the
-        // fix must never refuse it. It is degraded to the terminal-only surface.
+    fn v1_only_hello_decodes_historically_but_is_not_served() {
+        // The frozen generation-1 hello advertises only `shell.surface.v1`. It
+        // still decodes and satisfies the historical core-codec contract, but it
+        // is not served the retired v1 surface: `serves_surface_v2` is false.
         let value = hello();
         assert_eq!(value.surface_codecs, vec![SURFACE_CODEC_V1.to_owned()]);
         assert!(value.supports_required_codecs());
-        assert_eq!(value.preferred_surface_codec(), SURFACE_CODEC_V1);
+        assert!(!value.serves_surface_v2());
     }
 
     #[test]
-    fn v2_client_negotiates_the_v2_surface() {
+    fn v2_client_is_served_the_v2_surface() {
         let mut value = hello();
         value.surface_codecs = vec![SURFACE_CODEC_V2.into(), SURFACE_CODEC_V1.into()];
         assert!(value.supports_required_codecs());
-        assert_eq!(value.preferred_surface_codec(), SURFACE_CODEC_V2);
+        assert!(value.serves_surface_v2());
 
-        // Order in the advertised list does not matter: v2 wins whenever present.
+        // Order in the advertised list does not matter.
         let mut reversed = hello();
         reversed.surface_codecs = vec![SURFACE_CODEC_V1.into(), SURFACE_CODEC_V2.into()];
-        assert_eq!(reversed.preferred_surface_codec(), SURFACE_CODEC_V2);
+        assert!(reversed.serves_surface_v2());
     }
 
     #[test]

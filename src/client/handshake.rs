@@ -186,8 +186,9 @@ pub(super) fn do_handshake(
             mouse_capture,
             surface_active,
             snapshot_codecs: vec![SNAPSHOT_CODEC_V1.into()],
-            // Advertise v2 first: it carries view descriptors. The server falls
-            // back to the frozen v1 terminal-only surface when it only knows v1.
+            // Serving is v2-only. v1 stays listed because this client still
+            // decodes the frozen generation-1 frame shape for its historical
+            // contract; it is never served one.
             surface_codecs: vec![SURFACE_CODEC_V2.into(), SURFACE_CODEC_V1.into()],
             input_codecs: vec![INPUT_CODEC_V1.into()],
             blob_codecs: vec![BLOB_CODEC_V1.into()],
@@ -270,10 +271,12 @@ pub(super) fn do_handshake(
                 error: error.message,
             });
         }
+        // Serving is v2-only: a predecessor that offers only `shell.surface.v1`
+        // is refused cleanly, client-locally, instead of being rendered with a
+        // fallback v1 surface.
         if welcome.generation != ENDPOINT_PROTOCOL_GENERATION
             || welcome.snapshot_codec != SNAPSHOT_CODEC_V1
-            || (welcome.surface_codec != SURFACE_CODEC_V2
-                && welcome.surface_codec != SURFACE_CODEC_V1)
+            || welcome.surface_codec != SURFACE_CODEC_V2
             || welcome.input_codec != INPUT_CODEC_V1
             || welcome.blob_codec != BLOB_CODEC_V1
         {

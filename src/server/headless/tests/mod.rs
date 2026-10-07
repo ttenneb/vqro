@@ -112,6 +112,27 @@ fn read_server_message(bytes: Vec<u8>) -> ServerMessage {
     protocol::read_message(&mut cursor, MAX_FRAME_SIZE).expect("decode server message")
 }
 
+/// Unwrap the pane-surface frame from whichever surface codec arrived.
+///
+/// Serving is `shell.surface.v2`; the v1 variant is still matched so a decode
+/// test can assert the historical shape. The v2 envelope's frame value is
+/// identical to what the v1 variant carried.
+fn pane_surface(message: ServerMessage) -> crate::protocol::PaneSurfaceFrame {
+    match message {
+        ServerMessage::PaneSurface(frame) => frame,
+        ServerMessage::PaneSurfaceV2(v2) => v2.frame,
+        other => panic!("expected a pane surface, got {other:?}"),
+    }
+}
+
+fn pane_surface_ref(message: &ServerMessage) -> Option<&crate::protocol::PaneSurfaceFrame> {
+    match message {
+        ServerMessage::PaneSurface(frame) => Some(frame),
+        ServerMessage::PaneSurfaceV2(v2) => Some(&v2.frame),
+        _ => None,
+    }
+}
+
 fn frame_text(frame: &FrameData) -> String {
     frame
         .cells
@@ -627,7 +648,6 @@ async fn client_shell_attach_seeds_workspace() {
             pane_viewport_enabled: false,
             pane_view_enabled: false,
             terminal_views_enabled: false,
-            surface_codec: crate::protocol::endpoint::SURFACE_CODEC_V1.to_owned(),
             writer,
             host_views_enabled: false,
         })
@@ -664,7 +684,6 @@ async fn client_shell_endpoint_request_uses_the_selected_connection() {
             pane_viewport_enabled: false,
             pane_view_enabled: false,
             terminal_views_enabled: false,
-            surface_codec: crate::protocol::endpoint::SURFACE_CODEC_V1.to_owned(),
             writer,
             host_views_enabled: false,
         })
@@ -760,7 +779,6 @@ async fn native_endpoint_lane_dispatches_methods_outside_the_frozen_bridge() {
             pane_viewport_enabled: false,
             pane_view_enabled: false,
             terminal_views_enabled: false,
-            surface_codec: crate::protocol::endpoint::SURFACE_CODEC_V1.to_owned(),
             writer,
             host_views_enabled: false,
         })
@@ -857,7 +875,6 @@ async fn client_shell_pairs_agent_view_set_replacement_and_clear_with_snapshots(
             pane_viewport_enabled: false,
             pane_view_enabled: false,
             terminal_views_enabled: false,
-            surface_codec: crate::protocol::endpoint::SURFACE_CODEC_V1.to_owned(),
             writer,
             host_views_enabled: false,
         })
@@ -953,7 +970,6 @@ async fn host_documents_control_is_sent_only_when_negotiated() {
                 pane_viewport_enabled: false,
                 pane_view_enabled: false,
                 terminal_views_enabled: false,
-                surface_codec: crate::protocol::endpoint::SURFACE_CODEC_V1.to_owned(),
                 writer,
                 host_views_enabled: false,
             })
@@ -1021,7 +1037,6 @@ async fn client_shell_receives_metadata_then_shell_free_pane_surface() {
             pane_viewport_enabled: false,
             pane_view_enabled: false,
             terminal_views_enabled: false,
-            surface_codec: crate::protocol::endpoint::SURFACE_CODEC_V1.to_owned(),
             writer,
             host_views_enabled: false,
         })
@@ -1056,7 +1071,8 @@ async fn client_shell_receives_metadata_then_shell_free_pane_surface() {
 
     server.render_and_stream();
     let initial_surface = match read_server_message(render_rx.recv().expect("pane surface")) {
-        ServerMessage::PaneSurface(surface) => {
+        ServerMessage::PaneSurfaceV2(frame) => {
+            let surface = frame.frame;
             assert_eq!((surface.frame.width, surface.frame.height), (80, 23));
             let text = frame_text(&surface.frame);
             assert!(text.contains("CLIENT_SHELL_LIVE"), "surface: {text:?}");
@@ -1154,7 +1170,7 @@ async fn client_shell_receives_metadata_then_shell_free_pane_surface() {
         .request_repaint();
     server.render_and_stream();
     let full = match read_server_message(render_rx.recv().expect("full comparison surface")) {
-        ServerMessage::PaneSurface(surface) => surface,
+        ServerMessage::PaneSurfaceV2(frame) => frame.frame,
         other => panic!("expected full comparison surface, got {other:?}"),
     };
     assert!(full.surface_revision > retained.surface_revision);
@@ -1205,7 +1221,6 @@ fn connect_test_shell(
             pane_viewport_enabled: false,
             pane_view_enabled: false,
             terminal_views_enabled: false,
-            surface_codec: crate::protocol::endpoint::SURFACE_CODEC_V1.to_owned(),
             writer,
             host_views_enabled: false,
         })
@@ -1245,7 +1260,7 @@ fn recv_pane_surface(
             .recv()
             .unwrap_or_else(|error| panic!("{context}: {error}")),
     ) {
-        ServerMessage::PaneSurface(surface) => surface,
+        ServerMessage::PaneSurfaceV2(frame) => frame.frame,
         other => panic!("{context}: expected pane surface, got {other:?}"),
     }
 }
@@ -1601,7 +1616,7 @@ async fn backpressured_shell_does_not_disable_retained_patches_for_responsive_pe
     server.render_and_stream();
     assert!(matches!(
         read_server_message(slow_render.recv().expect("slow full recovery surface")),
-        ServerMessage::PaneSurface(_)
+        ServerMessage::PaneSurfaceV2(_)
     ));
 
     shutdown_test_runtimes(&mut server);
@@ -1643,7 +1658,7 @@ async fn full_render_backpressure_does_not_disable_responsive_peer_patches() {
     server.render_and_stream();
     assert!(matches!(
         read_server_message(slow_render.recv().expect("slow full recovery surface")),
-        ServerMessage::PaneSurface(_)
+        ServerMessage::PaneSurfaceV2(_)
     ));
 
     shutdown_test_runtimes(&mut server);
@@ -1673,7 +1688,6 @@ async fn client_shell_config_diagnostics_follow_keybinding_ownership() {
             pane_viewport_enabled: false,
             pane_view_enabled: false,
             terminal_views_enabled: false,
-            surface_codec: crate::protocol::endpoint::SURFACE_CODEC_V1.to_owned(),
             writer: local_writer,
             host_views_enabled: false,
         })
@@ -1704,7 +1718,6 @@ async fn client_shell_config_diagnostics_follow_keybinding_ownership() {
             pane_viewport_enabled: false,
             pane_view_enabled: false,
             terminal_views_enabled: false,
-            surface_codec: crate::protocol::endpoint::SURFACE_CODEC_V1.to_owned(),
             writer: endpoint_writer,
             host_views_enabled: false,
         })
@@ -3441,11 +3454,11 @@ async fn client_shell_tabs_render_accept_input_and_resize_independently() {
 
     server.render_and_stream();
     let first_surface = match read_server_message(first_render.recv().expect("first surface")) {
-        ServerMessage::PaneSurface(surface) => surface,
+        ServerMessage::PaneSurfaceV2(frame) => frame.frame,
         other => panic!("expected first pane surface, got {other:?}"),
     };
     let second_surface = match read_server_message(second_render.recv().expect("second surface")) {
-        ServerMessage::PaneSurface(surface) => surface,
+        ServerMessage::PaneSurfaceV2(frame) => frame.frame,
         other => panic!("expected second pane surface, got {other:?}"),
     };
     assert!(frame_text(&first_surface.frame).contains("FIRST_TAB"));
@@ -3713,7 +3726,6 @@ async fn public_api_focus_replaces_every_client_shell_projection() {
             pane_viewport_enabled: false,
             pane_view_enabled: false,
             terminal_views_enabled: false,
-            surface_codec: crate::protocol::endpoint::SURFACE_CODEC_V1.to_owned(),
             writer,
             host_views_enabled: false,
         })
@@ -3750,7 +3762,8 @@ async fn public_api_focus_replaces_every_client_shell_projection() {
         Some(second_id.as_str())
     );
     match read_server_message(render_rx.recv().expect("replacement pane surface")) {
-        ServerMessage::PaneSurface(surface) => {
+        ServerMessage::PaneSurfaceV2(frame) => {
+            let surface = frame.frame;
             assert_eq!(surface.projection_revision, replacement.revision);
         }
         other => panic!("expected replacement pane surface, got {other:?}"),
@@ -4073,7 +4086,6 @@ async fn client_shell_streams_and_targets_popup_terminal_content() {
             pane_viewport_enabled: false,
             pane_view_enabled: false,
             terminal_views_enabled: false,
-            surface_codec: crate::protocol::endpoint::SURFACE_CODEC_V1.to_owned(),
             writer,
             host_views_enabled: false,
         })
@@ -4083,11 +4095,9 @@ async fn client_shell_streams_and_targets_popup_terminal_content() {
     ));
 
     server.render_and_stream();
-    let ServerMessage::PaneSurface(surface) =
-        read_server_message(render_rx.recv().expect("popup surface"))
-    else {
-        panic!("expected pane surface");
-    };
+    let surface = pane_surface(read_server_message(
+        render_rx.recv().expect("popup surface"),
+    ));
     let popup = surface.popup.as_deref().expect("popup terminal surface");
     assert_eq!(popup.terminal_id, popup_terminal_id.as_str());
     assert!(frame_text(&popup.frame).contains("POPUP_SHELL_LIVE"));
@@ -4174,11 +4184,9 @@ async fn client_shell_streams_and_targets_popup_terminal_content() {
 
     assert!(server.app.close_popup_pane());
     server.render_and_stream();
-    let ServerMessage::PaneSurface(surface) =
-        read_server_message(render_rx.recv().expect("popup close surface"))
-    else {
-        panic!("expected pane surface after popup close");
-    };
+    let surface = pane_surface(read_server_message(
+        render_rx.recv().expect("popup close surface"),
+    ));
     assert!(surface.popup.is_none());
     shutdown_test_runtimes(&mut server);
 }

@@ -1,8 +1,7 @@
 use ratatui::{layout::Rect, Frame};
 
 use super::panes::{
-    compute_pane_infos_for_layout, compute_pane_infos_for_tab, render_panes, resize_tab_panes,
-    resize_tab_panes_except,
+    compute_pane_infos_for_tab, render_panes, resize_tab_panes, resize_tab_panes_except,
 };
 use crate::app::AppState;
 use crate::layout::{PaneInfo, SplitBorder};
@@ -60,70 +59,31 @@ pub(crate) fn compute_tab_surface_for(
     resize_panes: bool,
     cell_size: crate::kitty_graphics::HostCellSize,
 ) -> TabSurfaceLayout {
-    compute_tab_surface_for_layout(
-        app,
-        terminal_runtimes,
-        target,
-        None,
-        area,
-        resize_panes,
-        cell_size,
-    )
-}
-
-/// Compute the tab surface from an explicit `layout` instead of the tab's
-/// canonical one. The `shell.surface.v1` projection passes a view-free layout,
-/// so the frame buffer and the pane/split rects both come from that layout.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn compute_tab_surface_for_layout(
-    app: &AppState,
-    terminal_runtimes: &TerminalRuntimeRegistry,
-    target: Option<TabSurfaceTarget>,
-    layout: Option<&crate::layout::TileLayout>,
-    area: Rect,
-    resize_panes: bool,
-    cell_size: crate::kitty_graphics::HostCellSize,
-) -> TabSurfaceLayout {
     let tab = target.and_then(|target| {
         app.workspaces
             .get(target.workspace_index)?
             .tabs
             .get(target.tab_index)
     });
-    let effective_layout = layout.or_else(|| tab.map(|tab| &tab.layout));
-    let split_borders = effective_layout
-        .map(|layout| {
-            if tab.is_some_and(|tab| tab.zoomed) {
+    let split_borders = tab
+        .map(|tab| {
+            if tab.zoomed {
                 Vec::new()
             } else {
-                layout.splits(area)
+                tab.layout.splits(area)
             }
         })
         .unwrap_or_default();
     let pane_infos = target.map_or_else(Vec::new, |target| {
-        if let Some(layout) = layout {
-            compute_pane_infos_for_layout(
-                app,
-                terminal_runtimes,
-                target.workspace_index,
-                target.tab_index,
-                layout,
-                tab.is_some_and(|tab| tab.zoomed),
-                area,
-                resize_panes,
-                cell_size,
-            )
-        } else {
-            compute_pane_infos_for_tab(
-                app,
-                terminal_runtimes,
-                target.workspace_index,
-                target.tab_index,
-                area,
-                resize_panes,
-                cell_size,
-            )
-        }
+        compute_pane_infos_for_tab(
+            app,
+            terminal_runtimes,
+            target.workspace_index,
+            target.tab_index,
+            area,
+            resize_panes,
+            cell_size,
+        )
     });
 
     TabSurfaceLayout {

@@ -539,7 +539,7 @@ impl HeadlessServer {
             // in a graphics-capable surface message rather than invoking the full renderer.
             let (prepared, graphics_delivery) = if let Some((surface, delivery)) = graphics {
                 // This is a graphics refresh of the same layout, so the committed
-                // view descriptors still describe it. A v1 peer holds none.
+                // view descriptors still describe it.
                 let views = client.render_state.last_pane_surface_views().to_vec();
                 (
                     client.render_state.prepare_pane_surface(surface, views),

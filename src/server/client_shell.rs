@@ -451,12 +451,7 @@ pub(super) struct RenderedPaneSurface {
     pub(super) graphics_delivery: crate::kitty_graphics::surface::DeliveryCache,
 }
 
-/// Render the active tab pane surface.
-///
-/// `view_free` selects the `shell.surface.v1` projection: view panes are removed
-/// from the layout (each covered terminal is promoted into the view's box) so a
-/// v1 peer sees exactly what the pre-view build saw, with no hole and no view
-/// descriptor.
+/// Render the active tab pane surface under `shell.surface.v2`.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn render_pane_surface(
     app: &mut app::App,
@@ -467,7 +462,6 @@ pub(super) fn render_pane_surface(
     cell_size: crate::kitty_graphics::HostCellSize,
     graphics_delivery: &crate::kitty_graphics::surface::DeliveryCache,
     client_id: u64,
-    view_free: bool,
 ) -> RenderedPaneSurface {
     let content_revisions_before = target
         .and_then(|target| {
@@ -490,34 +484,18 @@ pub(super) fn render_pane_surface(
             )
         })
         .unwrap_or_default();
-    // The v1 projection renders from a view-free layout: each removed view's box
-    // is promoted to its covered sibling, so the frame buffer and the pane/split
-    // rects both come from the same layout.
-    let projection_layout = view_free
-        .then(|| {
-            target.and_then(|target| {
-                app.state
-                    .workspaces
-                    .get(target.workspace_index)
-                    .and_then(|workspace| workspace.tabs.get(target.tab_index))
-                    .map(|tab| tab.layout.without_view_panes())
-            })
-        })
-        .flatten();
     let (buffer, cursor, hyperlinks, layout) =
         crate::server::render_stream::render_tab_surface_virtual(
             &app.state,
             &app.terminal_runtimes,
             target,
-            projection_layout.as_ref(),
             area,
             resize_panes,
             cell_size,
         );
     // One pass over the tab's view panes: each view pane's content identity and
     // the public ids it covers. A per-pane tree walk would be a search per pane.
-    let view_projection_target = if view_free { None } else { target };
-    let view_projection = view_projection_target
+    let view_projection = target
         .and_then(|target| {
             let workspace = app.state.workspaces.get(target.workspace_index)?;
             let tab = workspace.tabs.get(target.tab_index)?;
@@ -1070,7 +1048,6 @@ mod tests {
             crate::kitty_graphics::HostCellSize::default(),
             &crate::kitty_graphics::surface::DeliveryCache::default(),
             1,
-            false,
         );
 
         assert_eq!(rendered.collections.len(), 1);
@@ -1101,7 +1078,7 @@ mod tests {
     }
 
     #[test]
-    fn v1_surface_projection_drops_view_panes_and_promotes_the_covered_terminal() {
+    fn pane_surface_v2_carries_view_descriptors_and_terminal_geometry() {
         let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
         let mut app = crate::app::App::new(
             &crate::config::Config::default(),
@@ -1132,10 +1109,8 @@ mod tests {
         let delivery = crate::kitty_graphics::surface::DeliveryCache::default();
         let cell_size = crate::kitty_graphics::HostCellSize::default();
 
-        // A v2 peer sees both panes, and the view descriptor names the view's
-        // public pane id and the terminal it covers.
-        let v2 = render_pane_surface(
-            &mut app, target, area, false, false, cell_size, &delivery, 1, false,
+        let rendered = render_pane_surface(
+            &mut app, target, area, false, false, cell_size, &delivery, 1,
         );
         let view_public = app
             .public_pane_id(0, view_pane)
@@ -1143,40 +1118,28 @@ mod tests {
         let root_public = app
             .public_pane_id(0, root)
             .expect("terminal has a public id");
-        assert_eq!(v2.panes.len(), 2);
-        assert_eq!(v2.views.len(), 1);
-        assert_eq!(v2.views[0].pane_id, view_public);
-        assert_eq!(v2.views[0].extension, "vqro.tasks");
-        assert_eq!(v2.views[0].view, "tasks");
-        assert_eq!(v2.views[0].scope, vec![root_public.clone()]);
-
-        // A v1 peer is sent the terminal-only projection: the view pane is gone
-        // and the covered terminal fills its whole pre-view box. One pane fills
-        // the whole tab, so there is no gap where the view used to be.
-        let v1 = render_pane_surface(
-            &mut app, target, area, false, false, cell_size, &delivery, 1, true,
-        );
-        assert!(v1.views.is_empty());
-        assert_eq!(v1.panes.len(), 1, "a v1 surface never carries a view pane");
-        assert_eq!(v1.panes[0].pane_id, root_public);
-        assert_eq!(
-            v1.panes[0].rect,
-            protocol::SurfaceRect {
-                x: 0,
-                y: 0,
-                width: 80,
-                height: 20,
-            }
-        );
-        assert_eq!(
-            v1.panes[0].inner_rect,
-            protocol::SurfaceRect {
-                x: 0,
-                y: 0,
-                width: 80,
-                height: 20,
-            }
-        );
+        // The geometry of both panes is in `panes`; the view descriptor names the
+        // view's public pane id and the terminal it covers, and both panes keep
+        // their own rects (the view is a sibling, not a projection).
+        assert_eq!(rendered.panes.len(), 2);
+        assert_eq!(rendered.views.len(), 1);
+        assert_eq!(rendered.views[0].pane_id, view_public);
+        assert_eq!(rendered.views[0].extension, "vqro.tasks");
+        assert_eq!(rendered.views[0].view, "tasks");
+        assert_eq!(rendered.views[0].scope, vec![root_public.clone()]);
+        let view_rect = rendered
+            .panes
+            .iter()
+            .find(|pane| pane.pane_id == view_public)
+            .map(|pane| pane.rect)
+            .expect("view pane geometry");
+        let root_rect = rendered
+            .panes
+            .iter()
+            .find(|pane| pane.pane_id == root_public)
+            .map(|pane| pane.rect)
+            .expect("terminal pane geometry");
+        assert_eq!(view_rect.width + root_rect.width, 80);
     }
 
     #[test]

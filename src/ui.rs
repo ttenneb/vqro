@@ -41,7 +41,7 @@ pub(crate) use self::status::{
     diagnostic_banner_lines, render_copy_feedback_buffer, render_diagnostic_rows,
 };
 pub(crate) use self::tab_surface::{
-    compute_tab_surface, compute_tab_surface_for_layout, render_tab_surface, resize_tab_surface,
+    compute_tab_surface, compute_tab_surface_for, render_tab_surface, resize_tab_surface,
     resize_tab_surface_except, tab_surface_cursor, tab_surface_hyperlinks, TabSurfaceLayout,
     TabSurfaceTarget, TabSurfaceView,
 };
