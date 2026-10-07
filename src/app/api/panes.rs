@@ -1647,6 +1647,14 @@ impl App {
         let Some((ws_idx, pane_id)) = self.resolve_optional_pane(params.pane_id.as_deref()) else {
             return encode_error(id, "pane_not_found", "pane not found");
         };
+        // A view is a structural pane: refuse the same way a terminal split does
+        // rather than create a layout that restore admission would later reject.
+        let Some(tab_idx) = self.state.workspaces[ws_idx].find_tab_index_for_pane(pane_id) else {
+            return encode_error(id, "pane_not_found", "pane not found");
+        };
+        if let Err(error) = self.admit_new_panes(Some(ws_idx), Some(tab_idx), 1) {
+            return encode_error(id, "resource_limit", error.to_string());
+        }
         let extension = params
             .extension
             .as_deref()
@@ -1932,6 +1940,15 @@ impl App {
         } else {
             ratatui::layout::Direction::Vertical
         };
+        // Refuse rather than mark applied when the structural limits are full:
+        // the marker records that a view was actually added, and a layout restore
+        // would reject must never be created.
+        if self
+            .admit_new_panes(Some(ws_idx), Some(tab_idx), 1)
+            .is_err()
+        {
+            return;
+        }
         if self.state.workspaces[ws_idx]
             .split_pane_with_view(pane_id, &extension, &view, direction, 0.5, false)
             .is_some()
@@ -5274,6 +5291,84 @@ mod tests {
         app.maybe_add_agent_start_view(root);
         assert_eq!(app.state.workspaces[0].tabs[0].layout.view_panes().len(), 1);
         assert_eq!(app.state.workspaces[0].tabs[0].layout.pane_count(), 2);
+    }
+
+    fn add_view_request(pane_id: &str) -> PaneViewParams {
+        PaneViewParams {
+            pane_id: Some(pane_id.to_owned()),
+            action: PaneViewAction::Add,
+            extension: Some("vqro.tasks".into()),
+            view: Some("tasks".into()),
+            direction: Some(crate::api::schema::SplitDirection::Right),
+            ratio: Some(0.5),
+            focus: false,
+        }
+    }
+
+    #[test]
+    fn api_pane_view_add_refuses_at_the_structural_tab_cap_without_growing_the_layout() {
+        // A view adds no PaneState, so a terminal-count check would let it bypass
+        // the tab cap and produce a layout restore admission rejects. The API must
+        // count structural panes and refuse atomically at the cap.
+        let mut app = app_with_linked_worktree();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        let root = app.state.workspaces[0].tabs[0].root_pane;
+        let root_public = app.public_pane_id(0, root).unwrap();
+        let cap = crate::admission::MAX_TAB_PANES;
+
+        let mut added = 0usize;
+        loop {
+            let response = app.handle_pane_view("req".into(), add_view_request(&root_public));
+            if let Ok(success) = serde_json::from_str::<SuccessResponse>(&response) {
+                assert!(matches!(success.result, ResponseResult::PaneView { .. }));
+                added += 1;
+                assert!(added < cap, "the cap must refuse before it is exceeded");
+                continue;
+            }
+            assert_eq!(metadata_error_code(&response), "resource_limit");
+            break;
+        }
+        // One terminal plus the views that fit; the refused add changed nothing.
+        assert_eq!(added + 1, cap);
+        assert_eq!(app.state.workspaces[0].tabs[0].layout.pane_count(), cap);
+    }
+
+    #[test]
+    fn agent_start_view_is_refused_and_unmarked_at_the_structural_cap() {
+        let mut app = app_with_linked_worktree();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.agent_start_view = Some(("vqro.tasks".into(), "tasks".into()));
+        let root = app.state.workspaces[0].tabs[0].root_pane;
+        // Fill the tab with views beside a second terminal, so the root terminal
+        // stays uncovered and the rule must take its add path, not the covered no-op.
+        let second = app.state.workspaces[0].test_split(ratatui::layout::Direction::Horizontal);
+        let second_public = app.public_pane_id(0, second).unwrap();
+        let cap = crate::admission::MAX_TAB_PANES;
+        while app.state.workspaces[0].tabs[0].layout.pane_count() < cap {
+            let response = app.handle_pane_view("req".into(), add_view_request(&second_public));
+            assert!(
+                serde_json::from_str::<SuccessResponse>(&response).is_ok(),
+                "fill refused before the cap"
+            );
+        }
+        assert_eq!(app.state.workspaces[0].tabs[0].layout.pane_count(), cap);
+        let views_before = app.state.workspaces[0].tabs[0].layout.view_panes().len();
+
+        app.maybe_add_agent_start_view(root);
+        assert_eq!(
+            app.state.workspaces[0].tabs[0].layout.view_panes().len(),
+            views_before,
+            "a refused agent-start add must not grow the layout"
+        );
+        assert!(
+            !app.state.workspaces[0]
+                .pane_state(root)
+                .expect("terminal pane")
+                .agent_start_view_applied,
+            "a refused add must not mark the terminal as having a view"
+        );
     }
 
     #[test]

@@ -792,6 +792,16 @@ impl Workspace {
         focus_new_pane: bool,
     ) -> Option<(usize, PaneId)> {
         let tab_idx = self.find_tab_index_for_pane(target)?;
+        // A view is a structural pane: preflight the same structural limits the
+        // terminal split path enforces, so it cannot reach a state restore refuses.
+        if crate::admission::workspace_pane(
+            self.structural_pane_count(),
+            self.tabs[tab_idx].layout.pane_count(),
+        )
+        .is_err()
+        {
+            return None;
+        }
         let pane_number = self.next_public_pane_number;
         let pane = self.tabs[tab_idx].split_with_view(
             target,
@@ -928,8 +938,8 @@ impl Workspace {
         argv: Option<&[String]>,
     ) -> Option<std::io::Result<(usize, crate::workspace::tab::NewPane)>> {
         let tab_idx = self.find_tab_index_for_pane(pane_id)?;
-        let workspace_panes = self.tabs.iter().map(|tab| tab.panes.len()).sum::<usize>();
-        let tab_panes = self.tabs[tab_idx].panes.len();
+        let workspace_panes = self.structural_pane_count();
+        let tab_panes = self.tabs[tab_idx].layout.pane_count();
         if let Err(error) = crate::admission::workspace_pane(workspace_panes, tab_panes) {
             return Some(Err(std::io::Error::other(error.to_string())));
         }
@@ -1299,8 +1309,11 @@ impl Workspace {
             .find_map(|tab| tab.panes.get_mut(&pane_id))
     }
 
-    pub fn pane_count(&self) -> usize {
-        self.tabs.iter().map(|tab| tab.panes.len()).sum()
+    /// Structural panes (terminals and views) in this workspace. This is the
+    /// identity count persistence restores, so runtime admission must use it to
+    /// admit no layout the restore boundary would later refuse.
+    pub(crate) fn structural_pane_count(&self) -> usize {
+        self.tabs.iter().map(|tab| tab.layout.pane_count()).sum()
     }
 
     pub fn terminal_id(&self, pane_id: PaneId) -> Option<&TerminalId> {

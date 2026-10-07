@@ -58,6 +58,21 @@ retained-surface, patch and graphics-asset paths. It is not the smaller change.
   No v1 frame or patch is sent, no shared geometry changes, and no supported
   client is disconnected.
 
+## Serving policy
+
+`shell.surface.v1` is retired from serving, not from decode: serving is
+`shell.surface.v2` only. A peer whose hello does not advertise
+`shell.surface.v2` is refused client-locally with the hello rejection
+`unsupported_surface_codec` ("update this client"); a new client whose welcome
+names only `shell.surface.v1` fails its handshake locally with "update this
+machine". No v1 frame or patch is sent to any peer, no shared geometry changes,
+and no supported client is disconnected. This applies the 2026-10-04 option-B
+entry: older clients are not supported and mismatched client and server refuse
+cleanly, and no mixed-version client can exist today (remote use is disabled and
+every real client ships from the same binary), so a v1 fallback would serve no
+client at the cost of a second projection path. Read this with the removal
+condition below when the surface lane is re-cut.
+
 ## Fixture and expectation disposition
 
 Preserved, not re-blessed: the `_v1` endpoint fixtures, the

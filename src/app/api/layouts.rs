@@ -1185,7 +1185,7 @@ mod tests {
         let error: ErrorResponse = serde_json::from_str(&response).unwrap();
         assert_eq!(error.error.code, "layout_apply_failed");
         assert_eq!(app.state.workspaces[0].tabs.len(), 1);
-        assert_eq!(app.state.workspaces[0].pane_count(), 1);
+        assert_eq!(app.state.workspaces[0].structural_pane_count(), 1);
         assert_eq!(app.state.terminals.len(), 1);
         assert_eq!(app.state.workspaces[0].tabs[0].root_pane, original_pane);
         assert_eq!(
@@ -1225,7 +1225,7 @@ mod tests {
         let error: ErrorResponse = serde_json::from_str(&response).unwrap();
         assert_eq!(error.error.code, "layout_apply_failed");
         assert_eq!(app.state.workspaces[0].tabs.len(), 1);
-        assert_eq!(app.state.workspaces[0].pane_count(), 1);
+        assert_eq!(app.state.workspaces[0].structural_pane_count(), 1);
         assert!(!app
             .event_hub
             .events_after(0)

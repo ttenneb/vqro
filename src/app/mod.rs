@@ -539,16 +539,19 @@ impl App {
         tab_index: Option<usize>,
         additional: usize,
     ) -> Result<(), crate::admission::AdmissionError> {
+        // Count structural identities (terminals and views), the same ones the
+        // restore boundary counts, so a run cannot admit a layout persistence
+        // would refuse. Terminal records alone would let view panes bypass it.
         let workspace_panes = workspace_index
             .and_then(|index| self.state.workspaces.get(index))
-            .map_or(0, crate::workspace::Workspace::pane_count);
+            .map_or(0, crate::workspace::Workspace::structural_pane_count);
         let tab_panes = workspace_index
             .zip(tab_index)
             .and_then(|(workspace, tab)| self.state.workspaces.get(workspace)?.tabs.get(tab))
-            .map_or(0, |tab| tab.panes.len());
+            .map_or(0, |tab| tab.layout.pane_count());
         let session_panes = self
             .state
-            .pane_count()
+            .structural_pane_count()
             .saturating_add(usize::from(self.state.popup_pane.is_some()));
         crate::admission::panes(session_panes, workspace_panes, tab_panes, additional)
     }

@@ -765,7 +765,9 @@ impl Tab {
         launch_env: &PaneLaunchEnv,
         command: Option<SplitCommand<'_>>,
     ) -> std::io::Result<NewPane> {
-        if self.panes.len() >= crate::admission::MAX_TAB_PANES {
+        // Structural panes (terminals and views), not terminal records alone:
+        // views add no PaneState and must still count against the tab limit.
+        if self.layout.pane_count() >= crate::admission::MAX_TAB_PANES {
             return Err(std::io::Error::other("tab pane limit reached"));
         }
         let mut layout = self.layout.clone();
@@ -874,6 +876,9 @@ impl Tab {
         ratio: f32,
         focus_new_pane: bool,
     ) -> Option<PaneId> {
+        if self.layout.pane_count() >= crate::admission::MAX_TAB_PANES {
+            return None;
+        }
         let (pane, _) = self
             .layout
             .split_pane_with_view(target, direction, ratio, extension, view)?;

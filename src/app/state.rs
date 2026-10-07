@@ -962,8 +962,13 @@ impl AppState {
             })
     }
 
-    pub fn pane_count(&self) -> usize {
-        self.workspaces.iter().map(Workspace::pane_count).sum()
+    /// Structural panes (terminals and views) across every workspace. Admission
+    /// and persistence both count these identities, not terminal records alone.
+    pub(crate) fn structural_pane_count(&self) -> usize {
+        self.workspaces
+            .iter()
+            .map(Workspace::structural_pane_count)
+            .sum()
     }
 
     pub fn estimate_pane_size(&self) -> (u16, u16) {
