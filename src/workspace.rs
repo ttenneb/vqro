@@ -1565,14 +1565,9 @@ impl Workspace {
                 tab.number
             );
             max_tab_number = max_tab_number.max(tab.number);
-            assert!(
-                tab.panes.contains_key(&tab.root_pane),
-                "workspace {} tab {} root pane {:?} is missing from tab panes",
-                self.id,
-                tab_idx,
-                tab.root_pane
-            );
-
+            // Structural identities are not terminal records: a placed pane is a
+            // terminal with a `PaneState` or a view, which has none. A view-only
+            // root is placed but has no terminal record.
             let layout_panes = tab.layout.pane_ids();
             let layout_set: std::collections::HashSet<_> = layout_panes.iter().copied().collect();
             assert_eq!(
@@ -1583,6 +1578,13 @@ impl Workspace {
                 tab_idx
             );
             assert!(
+                layout_set.contains(&tab.root_pane),
+                "workspace {} tab {} root pane {:?} is not a placed pane",
+                self.id,
+                tab_idx,
+                tab.root_pane
+            );
+            assert!(
                 layout_set.contains(&tab.layout.focused()),
                 "workspace {} tab {} focused pane {:?} is not in layout",
                 self.id,
@@ -1590,11 +1592,23 @@ impl Workspace {
                 tab.layout.focused()
             );
             let pane_set: std::collections::HashSet<_> = tab.panes.keys().copied().collect();
-            assert_eq!(
-                layout_set, pane_set,
-                "workspace {} tab {} layout panes must exactly match pane states",
-                self.id, tab_idx
+            assert!(
+                pane_set.is_subset(&layout_set),
+                "workspace {} tab {} terminal pane states must all be placed panes",
+                self.id,
+                tab_idx
             );
+            let view_set: std::collections::HashSet<_> =
+                tab.layout.view_panes().into_iter().collect();
+            for pane in &layout_set {
+                assert!(
+                    pane_set.contains(pane) || view_set.contains(pane),
+                    "workspace {} tab {} placed pane {:?} is neither a terminal with a pane state nor a view",
+                    self.id,
+                    tab_idx,
+                    pane
+                );
+            }
             tab.assert_collection_invariants_for_test();
             for collection in tab.collections() {
                 assert!(
@@ -1618,7 +1632,9 @@ impl Workspace {
                     .all(|pane| unique.contains(&pane)));
             }
 
-            for (pane_id, pane) in &tab.panes {
+            // Every placed pane, terminal or view, has one public number and
+            // appears in exactly one tab; only terminal panes own a terminal.
+            for pane_id in &layout_set {
                 assert!(
                     live_panes.insert(*pane_id),
                     "workspace {} pane {:?} appears in more than one tab",
@@ -1627,10 +1643,12 @@ impl Workspace {
                 );
                 assert!(
                     self.public_pane_numbers.contains_key(pane_id),
-                    "workspace {} live pane {:?} has no public pane number",
+                    "workspace {} placed pane {:?} has no public pane number",
                     self.id,
                     pane_id
                 );
+            }
+            for pane in tab.panes.values() {
                 assert!(
                     terminal_ids.insert(pane.attached_terminal_id.clone()),
                     "workspace {} terminal {} is attached to multiple panes",
@@ -1782,6 +1800,36 @@ mod tests {
         let fourth_tab = ws.test_add_tab(None);
         let fourth_root = ws.tabs[fourth_tab].root_pane;
         assert_eq!(ws.public_tab_number_for_pane(fourth_root), Some(4));
+        ws.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn content_aware_invariants_accept_mixed_and_view_only_tabs() {
+        let mut ws = Workspace::test_new("views");
+        let root = ws.tabs[0].root_pane;
+        let (_, view) = ws
+            .split_pane_with_view(
+                root,
+                "vqro.tasks",
+                "tasks",
+                Direction::Horizontal,
+                0.5,
+                false,
+            )
+            .expect("view pane");
+        // Mixed: a terminal with a PaneState beside a view with none. A
+        // terminal-only invariant would fail on the layout/pane equality here.
+        ws.assert_invariants_for_test();
+
+        // View-only: closing the terminal promotes the view to the root. The root
+        // is a placed pane with a public number and no terminal record.
+        ws.close_pane(root);
+        let tab = &ws.tabs[0];
+        assert_eq!(tab.root_pane, view);
+        assert_eq!(tab.layout.view_panes(), vec![view]);
+        assert!(!tab.panes.contains_key(&view));
+        assert!(tab.panes.is_empty());
+        assert!(ws.public_pane_number(view).is_some());
         ws.assert_invariants_for_test();
     }
 

@@ -1443,6 +1443,9 @@ mod tests {
                 false,
             )
             .expect("view pane");
+        // A view-bearing state must satisfy the content-aware invariants before
+        // and after capture/normalization.
+        state.assert_invariants_for_test();
         let mut snapshot = capture_from_state(&state);
         assert!(!snapshot.workspaces[0].tabs[0]
             .panes

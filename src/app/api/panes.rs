@@ -5189,6 +5189,8 @@ mod tests {
         assert_eq!(tab.layout.pane_count(), 2);
         assert!(tab.layout.pane_ids().contains(&view_pane));
         assert!(!tab.panes.contains_key(&view_pane));
+        // A mixed tab (terminal + view) must satisfy the content-aware invariants.
+        app.state.assert_invariants_for_test();
 
         // A view pane's own public identity is a real pane identity.
         let layout = app.handle_layout_tree_export(
@@ -5235,6 +5237,7 @@ mod tests {
             .view_at(view_pane)
             .is_none());
         assert_eq!(app.state.workspaces[0].tabs[0].layout.pane_count(), 1);
+        app.state.assert_invariants_for_test();
     }
 
     #[test]

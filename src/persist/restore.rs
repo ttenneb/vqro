@@ -1467,14 +1467,24 @@ fn recover_typed_layout(
     let mut panes: Vec<_> = surviving.iter().copied().collect();
     panes.sort_by_key(|pane| pane.raw());
     let first = panes.first().copied()?;
+    // A survivor keeps its content identity here too: rebuilding a view as a
+    // terminal `Leaf` would drop its content.
+    let survivor_node = |pane: PaneId| match view_identities.get(&pane) {
+        Some((extension, view)) => TypedNode::View {
+            pane,
+            extension: extension.clone(),
+            view: view.clone(),
+        },
+        None => TypedNode::Leaf(pane),
+    };
     let root = panes
         .into_iter()
         .skip(1)
-        .fold(TypedNode::Leaf(first), |root, pane| TypedNode::Split {
+        .fold(survivor_node(first), |root, pane| TypedNode::Split {
             direction: Direction::Horizontal,
             ratio: 0.5,
             first: Box::new(root),
-            second: Box::new(TypedNode::Leaf(pane)),
+            second: Box::new(survivor_node(pane)),
         });
     let layout = TileLayout::from_tree(root, LayoutLeaf::Pane(first))?;
     exact_survivors(&layout).then_some(RecoveredTabLayout {
