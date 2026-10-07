@@ -1208,8 +1208,8 @@ fn typed_swap_panes(node: &mut TypedNode, first: PaneId, second: PaneId) {
         return;
     };
     let (Some(first_node), Some(second_node)) = (
-        node_at(node, &first_path).cloned(),
-        node_at(node, &second_path).cloned(),
+        node.at(&first_path).cloned(),
+        node.at(&second_path).cloned(),
     ) else {
         return;
     };
@@ -1217,8 +1217,12 @@ fn typed_swap_panes(node: &mut TypedNode, first: PaneId, second: PaneId) {
     // (extension, view) and the terminal keeps its terminal identity. Swapping
     // only the numeric pane ids turns the terminal into a view and the view into
     // a terminal-shaped leaf with no terminal record.
-    set_at(node, &first_path, second_node);
-    set_at(node, &second_path, first_node);
+    if let Some(slot) = node.at_mut(&first_path) {
+        *slot = second_node;
+    }
+    if let Some(slot) = node.at_mut(&second_path) {
+        *slot = first_node;
+    }
 }
 
 fn leaf_path(node: &TypedNode, pane: PaneId) -> Option<Vec<usize>> {
@@ -1247,39 +1251,6 @@ fn leaf_path(node: &TypedNode, pane: PaneId) -> Option<Vec<usize>> {
             })
         }
         _ => None,
-    }
-}
-
-fn node_at<'a>(node: &'a TypedNode, path: &[usize]) -> Option<&'a TypedNode> {
-    let Some((&index, rest)) = path.split_first() else {
-        return Some(node);
-    };
-    match node {
-        TypedNode::Split { first, second, .. } => match index {
-            0 => node_at(first, rest),
-            1 => node_at(second, rest),
-            _ => None,
-        },
-        TypedNode::Stack { children, .. } => node_at(children.get(index)?, rest),
-        _ => None,
-    }
-}
-
-fn set_at(node: &mut TypedNode, path: &[usize], replacement: TypedNode) -> bool {
-    let Some((&index, rest)) = path.split_first() else {
-        *node = replacement;
-        return true;
-    };
-    match node {
-        TypedNode::Split { first, second, .. } => match index {
-            0 => set_at(first, rest, replacement),
-            1 => set_at(second, rest, replacement),
-            _ => false,
-        },
-        TypedNode::Stack { children, .. } => children
-            .get_mut(index)
-            .is_some_and(|child| set_at(child, rest, replacement)),
-        _ => false,
     }
 }
 

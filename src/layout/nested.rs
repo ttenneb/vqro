@@ -73,7 +73,7 @@ impl TypedNode {
         }
     }
 
-    fn at_mut(&mut self, path: &[usize]) -> Option<&mut Self> {
+    pub(crate) fn at_mut(&mut self, path: &[usize]) -> Option<&mut Self> {
         let Some((&index, rest)) = path.split_first() else {
             return Some(self);
         };
