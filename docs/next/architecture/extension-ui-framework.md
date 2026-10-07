@@ -1,6 +1,13 @@
 # Extension UI framework
 
-Status: proposed
+Status: proposed. The split panel described here is **replaced by nested panes**
+([nested panes](nested-panes.md), stage 3): a pane's content is a terminal or an
+extension view, and a view pane covers the terminals of its parent box. The
+approved look (one line per row, Pi-style tree, dim right-aligned detail) is
+unchanged; the pane-attached band, its per-client size claims, the
+`pane_panels_v1` capability, the `vqro pane panel` command and the client-side
+show-on-agent-start rule are removed. Only the first-version scope below still
+describes the retired placement.
 
 Vqro draws all non-terminal UI from views that extensions publish. Extensions
 describe meaning. Vqro owns drawing, theme, focus, input, layout and
@@ -21,8 +28,8 @@ expected.
 **In v1:**
 
 - the new view format and pipeline ([Pipeline](#pipeline));
-- pane **split** panels and **popovers**; the task and messages panels are the
-  first users;
+- pane **split** panels and **popovers**; the task and messages views are the
+  first users (placements superseded by nested panes; popovers unchanged);
 - **badges** on the pane border, the tab and the sidebar row;
 - **v1 building blocks** (final, 2026-10-03; panel look revised by the owner
   on 2026-10-03; per-item `count` and `tone` overrides deferred on 2026-10-04

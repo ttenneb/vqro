@@ -791,10 +791,6 @@ pub struct AppState {
         std::collections::HashMap<crate::terminal::TerminalId, crate::terminal::TerminalState>,
     /// Terminal ids whose size is currently owned by a direct attach client.
     pub direct_attach_resize_locks: std::collections::HashSet<crate::terminal::TerminalId>,
-    /// Panes whose terminal size a client claimed because it has a panel open
-    /// there: the claimed rows and columns, smallest claim across attached
-    /// clients. The layout must not resize these panes back to the layout size.
-    pub pane_panel_claims: std::collections::HashMap<PaneId, (u16, u16)>,
     pub(crate) pane_id_aliases: std::collections::HashMap<u32, PaneId>,
     pub(crate) public_pane_id_aliases: std::collections::HashMap<String, PaneId>,
     pub workspaces: Vec<Workspace>,
@@ -845,6 +841,11 @@ pub struct AppState {
     pub pane_scrollbars: bool,
     pub pane_gaps: bool,
     pub show_agent_labels_on_pane_borders: bool,
+    /// Server-side agent-start rule: add a view pane beside a pane when an agent
+    /// starts there, once per terminal. `agent_start_view` is the
+    /// `<extension>:<view>` identity to add; unset disables the rule.
+    pub show_panels_on_agent_start: bool,
+    pub agent_start_view: Option<(String, String)>,
     pub tab_bar_right: Vec<TabBarStatusSegment>,
     pub tab_bar_right_separator: String,
     /// Expose the focused pane's cursor anchor to the outer terminal even when
@@ -1067,7 +1068,6 @@ impl AppState {
         Self {
             terminals: std::collections::HashMap::new(),
             direct_attach_resize_locks: std::collections::HashSet::new(),
-            pane_panel_claims: std::collections::HashMap::new(),
             pane_id_aliases: std::collections::HashMap::new(),
             public_pane_id_aliases: std::collections::HashMap::new(),
             workspaces: Vec::new(),
@@ -1112,6 +1112,8 @@ impl AppState {
             pane_scrollbars: true,
             pane_gaps: false,
             show_agent_labels_on_pane_borders: false,
+            show_panels_on_agent_start: true,
+            agent_start_view: None,
             tab_bar_right: Vec::new(),
             tab_bar_right_separator: " ".into(),
             reveal_hidden_cursor_for_cjk_ime: false,

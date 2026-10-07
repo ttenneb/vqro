@@ -861,6 +861,46 @@ impl Tab {
         self.detach_pane(pane_id)
     }
 
+    /// Add a view pane beside `target`, beside it in `direction`. The view pane
+    /// has no terminal or runtime; it is a layout pane with content identity.
+    /// Returns the new pane identity, or `None` if the target is unknown or the
+    /// view identity is invalid.
+    pub(crate) fn split_with_view(
+        &mut self,
+        target: PaneId,
+        extension: &str,
+        view: &str,
+        direction: Direction,
+        ratio: f32,
+        focus_new_pane: bool,
+    ) -> Option<PaneId> {
+        let (pane, _) = self
+            .layout
+            .split_pane_with_view(target, direction, ratio, extension, view)?;
+        if focus_new_pane {
+            self.layout.focus_pane(pane);
+        }
+        Some(pane)
+    }
+
+    /// Close a view pane. Returns whether the workspace should close (the last
+    /// pane of the last tab); a view that is the only pane of a tab keeps its tab.
+    pub(crate) fn close_view_pane(&mut self, pane_id: PaneId) -> bool {
+        if self.layout.pane_count() <= 1 {
+            return false;
+        }
+        let next_root = self.promoted_root_if_needed(pane_id);
+        let Some(layout) = self.remove_layout_pane_candidate(pane_id) else {
+            return false;
+        };
+        self.layout = layout;
+        self.zoomed = false;
+        if let Some(next_root) = next_root {
+            self.root_pane = next_root;
+        }
+        true
+    }
+
     pub fn remove_pane(&mut self, pane_id: PaneId) -> Option<DetachedPane> {
         self.detach_pane(pane_id)
     }

@@ -778,6 +778,59 @@ impl Workspace {
         )
     }
 
+    /// Add a view pane beside `target`. Neutral: the caller names the extension
+    /// and view; core records the identity in the canonical tree only and gives
+    /// the pane a public number like any other pane. No terminal or runtime is
+    /// created. Returns the tab index and the new pane.
+    pub fn split_pane_with_view(
+        &mut self,
+        target: PaneId,
+        extension: &str,
+        view: &str,
+        direction: Direction,
+        ratio: f32,
+        focus_new_pane: bool,
+    ) -> Option<(usize, PaneId)> {
+        let tab_idx = self.find_tab_index_for_pane(target)?;
+        let pane_number = self.next_public_pane_number;
+        let pane = self.tabs[tab_idx].split_with_view(
+            target,
+            extension,
+            view,
+            direction,
+            ratio,
+            focus_new_pane,
+        )?;
+        self.register_new_pane_with_number(pane, pane_number);
+        Some((tab_idx, pane))
+    }
+
+    /// Close a view pane. Returns true when the workspace should close (the last
+    /// pane of the last tab).
+    pub fn close_view_pane(&mut self, pane_id: PaneId) -> bool {
+        let Some(tab_idx) = self.find_tab_index_for_pane(pane_id) else {
+            return false;
+        };
+        let pane_count = self.tabs[tab_idx].layout.pane_count();
+        let tab_count = self.tabs.len();
+        if pane_count <= 1 {
+            if tab_count <= 1 {
+                return true;
+            }
+            self.tabs.remove(tab_idx);
+            self.unregister_pane(pane_id);
+            if self.active_tab >= self.tabs.len() {
+                self.active_tab = self.tabs.len() - 1;
+            } else if tab_idx <= self.active_tab && self.active_tab > 0 {
+                self.active_tab -= 1;
+            }
+            return false;
+        }
+        self.tabs[tab_idx].close_view_pane(pane_id);
+        self.unregister_pane(pane_id);
+        false
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn split_pane_with_ratio(
         &mut self,
@@ -1257,9 +1310,9 @@ impl Workspace {
     }
 
     pub fn find_tab_index_for_pane(&self, pane_id: PaneId) -> Option<usize> {
-        self.tabs
-            .iter()
-            .position(|tab| tab.panes.contains_key(&pane_id))
+        self.tabs.iter().position(|tab| {
+            tab.panes.contains_key(&pane_id) || tab.layout.placement(pane_id).is_some()
+        })
     }
 
     pub fn pane_state(&self, pane_id: PaneId) -> Option<&PaneState> {
@@ -1278,6 +1331,18 @@ impl Workspace {
 
     pub fn terminal_id(&self, pane_id: PaneId) -> Option<&TerminalId> {
         self.tabs.iter().find_map(|tab| tab.terminal_id(pane_id))
+    }
+
+    /// True when the pane's content is an extension view, not a terminal.
+    pub fn is_view_pane(&self, pane_id: PaneId) -> bool {
+        self.tab_index_for_pane(pane_id)
+            .and_then(|tab_idx| self.tabs[tab_idx].layout.view_at(pane_id))
+            .is_some()
+    }
+
+    /// The content identity of a placed view pane, wherever it is.
+    pub fn view_content(&self, pane_id: PaneId) -> Option<crate::layout::ViewRef> {
+        self.tabs.iter().find_map(|tab| tab.layout.view_at(pane_id))
     }
 
     pub fn focused_pane_id(&self) -> Option<PaneId> {
@@ -1319,6 +1384,12 @@ impl Workspace {
     fn register_new_pane_with_number(&mut self, pane_id: PaneId, number: usize) {
         self.public_pane_numbers.insert(pane_id, number);
         self.next_public_pane_number = self.next_public_pane_number.max(number + 1);
+    }
+
+    fn tab_index_for_pane(&self, pane_id: PaneId) -> Option<usize> {
+        self.tabs
+            .iter()
+            .position(|tab| tab.layout.placement(pane_id).is_some())
     }
 
     fn unregister_pane(&mut self, pane_id: PaneId) {

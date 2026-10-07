@@ -223,6 +223,8 @@ fn surface(boot_id: &str, revision: u64, pane: &str) -> crate::protocol::PaneSur
             alternate_screen_active: false,
             pixel_width: 0,
             pixel_height: 0,
+            view: None,
+            scope: Vec::new(),
         }],
         collections: Vec::new(),
         splits: Vec::new(),

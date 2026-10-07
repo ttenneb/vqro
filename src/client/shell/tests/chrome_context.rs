@@ -1489,6 +1489,8 @@ fn stale_large_surface_resize_clips_integrated_contributions_and_all_hits() {
             alternate_screen_active: false,
             pixel_width: 0,
             pixel_height: 0,
+            view: None,
+            scope: Vec::new(),
         }],
         collections: Vec::new(),
         splits: vec![crate::protocol::PaneSurfaceSplit {

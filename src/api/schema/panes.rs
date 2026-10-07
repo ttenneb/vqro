@@ -222,6 +222,13 @@ pub enum LayoutTreeNode {
     Pane {
         pane_id: String,
     },
+    /// A pane whose content is an extension view rather than a terminal. Its
+    /// scope is derived from placement and is not part of this export.
+    View {
+        pane_id: String,
+        extension: String,
+        view: String,
+    },
     Stack {
         box_id: String,
         selected: usize,
@@ -293,37 +300,47 @@ pub struct PaneResizeParams {
     pub amount: Option<f32>,
 }
 
-/// One user request to open, close or toggle a pane panel view. Vqro forwards
-/// it to the attached clients that advertise the pane-panels control; a client
-/// keeps its own view state and ignores requests it cannot place.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct PanePanelParams {
+/// The neutral view-pane operation. `add` puts a view pane beside a pane; the
+/// extension and view identity are supplied by the caller, never by a core
+/// Tasks literal. `close` drops a view pane. Views are read-only content.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct PaneViewParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pane_id: Option<String>,
-    /// The extension's view id ("tasks"); absent means every view the pane
-    /// publishes.
+    pub action: PaneViewAction,
+    /// The extension that publishes the view ("vqro.tasks").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extension: Option<String>,
+    /// The view id the extension publishes ("tasks").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub view: Option<String>,
-    pub action: PanePanelAction,
+    /// Split direction for `add`; defaults to right.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub direction: Option<SplitDirection>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ratio: Option<f32>,
+    #[serde(default)]
+    pub focus: bool,
 }
 
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema, Default,
 )]
 #[serde(rename_all = "snake_case")]
-pub enum PanePanelAction {
-    Show,
-    Hide,
+pub enum PaneViewAction {
     #[default]
-    Toggle,
+    Add,
+    Close,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct PanePanelResult {
+pub struct PaneViewResult {
     pub pane_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extension: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub view: Option<String>,
-    pub action: PanePanelAction,
+    pub action: PaneViewAction,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]

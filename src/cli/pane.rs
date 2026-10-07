@@ -1,12 +1,12 @@
 use crate::api::schema::{
     Method, OutputMatch, PaneCurrentParams, PaneDirection, PaneEdgesParams,
     PaneFocusDirectionParams, PaneInputSetParams, PaneLayoutParams, PaneListParams,
-    PaneMoveDestination, PaneMoveParams, PaneNeighborParams, PanePanelAction, PanePanelParams,
-    PaneProcessInfoParams, PaneReadParams, PaneReleaseAgentParams, PaneRenameParams,
-    PaneReportAgentParams, PaneReportAgentSessionParams, PaneReportMetadataParams,
-    PaneResizeParams, PaneRightClickTarget, PaneSendInputParams, PaneSendKeysParams,
-    PaneSendTextParams, PaneSplitParams, PaneSwapParams, PaneTarget, PaneWaitForOutputParams,
-    PaneZoomMode, PaneZoomParams, ReadFormat, ReadSource, Request, SplitDirection,
+    PaneMoveDestination, PaneMoveParams, PaneNeighborParams, PaneProcessInfoParams, PaneReadParams,
+    PaneReleaseAgentParams, PaneRenameParams, PaneReportAgentParams, PaneReportAgentSessionParams,
+    PaneReportMetadataParams, PaneResizeParams, PaneRightClickTarget, PaneSendInputParams,
+    PaneSendKeysParams, PaneSendTextParams, PaneSplitParams, PaneSwapParams, PaneTarget,
+    PaneViewAction, PaneViewParams, PaneWaitForOutputParams, PaneZoomMode, PaneZoomParams,
+    ReadFormat, ReadSource, Request, SplitDirection,
 };
 
 pub(super) fn run_pane_command(args: &[String]) -> std::io::Result<i32> {
@@ -24,7 +24,7 @@ pub(super) fn run_pane_command(args: &[String]) -> std::io::Result<i32> {
         "neighbor" => pane_neighbor(&args[1..]),
         "edges" => pane_edges(&args[1..]),
         "focus" => pane_focus(&args[1..]),
-        "panel" => pane_panel(&args[1..]),
+        "view" => pane_view(&args[1..]),
         "resize" => pane_resize(&args[1..]),
         "zoom" => pane_zoom(&args[1..]),
         "read" => pane_read(&args[1..]),
@@ -199,64 +199,99 @@ fn pane_neighbor(args: &[String]) -> std::io::Result<i32> {
     })?)
 }
 
-fn pane_panel(args: &[String]) -> std::io::Result<i32> {
-    let params = match parse_pane_panel_args(args) {
+fn pane_view(args: &[String]) -> std::io::Result<i32> {
+    let params = match parse_pane_view_args(args) {
         Ok(params) => params,
         Err(message) => {
             eprintln!("{message}");
             return Ok(2);
         }
     };
-    super::runtime::pane_panel(params)
+    super::runtime::pane_view(params)
 }
 
-fn parse_pane_panel_args(args: &[String]) -> Result<PanePanelParams, String> {
+fn parse_pane_view_args(args: &[String]) -> Result<PaneViewParams, String> {
+    const USAGE: &str =
+        "usage: vqro pane view add <pane> <extension>:<view> [--direction right|down] [--ratio R] [--focus] | vqro pane view close <pane>";
     let mut action = None;
     let mut pane_id = None;
+    let mut extension = None;
     let mut view = None;
+    let mut direction = None;
+    let mut ratio = None;
+    let mut focus = false;
     let mut index = 0;
     while index < args.len() {
         match args[index].as_str() {
-            "show" | "hide" | "toggle" if action.is_none() => {
-                action = Some(match args[index].as_str() {
-                    "show" => PanePanelAction::Show,
-                    "hide" => PanePanelAction::Hide,
-                    _ => PanePanelAction::Toggle,
-                });
+            "add" if action.is_none() => {
+                action = Some(PaneViewAction::Add);
                 index += 1;
             }
-            "--pane" => {
+            "close" if action.is_none() => {
+                action = Some(PaneViewAction::Close);
+                index += 1;
+            }
+            "--direction" => {
                 let Some(value) = args.get(index + 1) else {
-                    return Err("missing value for --pane".into());
+                    return Err("missing value for --direction".into());
                 };
-                pane_id = Some(super::normalize_pane_id(value));
+                direction = Some(match value.as_str() {
+                    "right" => SplitDirection::Right,
+                    "down" => SplitDirection::Down,
+                    _ => return Err(USAGE.to_string()),
+                });
                 index += 2;
             }
-            "--view" => {
+            "--ratio" => {
                 let Some(value) = args.get(index + 1) else {
-                    return Err("missing value for --view".into());
+                    return Err("missing value for --ratio".into());
                 };
-                view = Some(value.clone());
+                ratio = Some(value.parse::<f32>().map_err(|_| USAGE.to_string())?);
                 index += 2;
+            }
+            "--focus" => {
+                focus = true;
+                index += 1;
             }
             value if !value.starts_with('-') && action.is_some() && pane_id.is_none() => {
                 pane_id = Some(super::normalize_pane_id(value));
                 index += 1;
             }
-            value if !value.starts_with('-') && action.is_some() && view.is_none() => {
-                view = Some(value.to_owned());
+            value
+                if !value.starts_with('-')
+                    && action == Some(PaneViewAction::Add)
+                    && view.is_none() =>
+            {
+                let (package, id) = value
+                    .split_once(':')
+                    .ok_or_else(|| "view must be <extension>:<view>".to_string())?;
+                if package.is_empty() || id.is_empty() {
+                    return Err("view must be <extension>:<view>".into());
+                }
+                extension = Some(package.to_owned());
+                view = Some(id.to_owned());
                 index += 1;
             }
-            _ => return Err("usage: vqro pane panel show|hide|toggle <pane> [<view>]".to_string()),
+            _ => return Err(USAGE.to_string()),
         }
     }
     let Some(action) = action else {
-        return Err("usage: vqro pane panel show|hide|toggle <pane> [<view>]".to_string());
+        return Err(USAGE.to_string());
     };
-    Ok(PanePanelParams {
+    if pane_id.is_none() {
+        return Err(USAGE.to_string());
+    }
+    if action == PaneViewAction::Add && view.is_none() {
+        return Err(USAGE.to_string());
+    }
+    Ok(PaneViewParams {
         pane_id,
-        view,
         action,
+        extension,
+        view,
+        direction,
+        ratio,
+        focus,
     })
 }
 
@@ -1729,7 +1764,8 @@ fn print_pane_help() {
     eprintln!("  vqro pane neighbor --direction left|right|up|down [--pane ID|--current]");
     eprintln!("  vqro pane edges [--pane ID|--current]");
     eprintln!("  vqro pane focus --direction left|right|up|down [--pane ID|--current]");
-    eprintln!("  vqro pane panel show|hide|toggle <pane_id> [<view>]");
+    eprintln!("  vqro pane view add <pane_id> <extension>:<view> [--direction right|down] [--ratio FLOAT] [--focus]");
+    eprintln!("  vqro pane view close <pane_id>");
     eprintln!(
         "  vqro pane resize --direction left|right|up|down [--amount FLOAT] [--pane ID|--current]"
     );

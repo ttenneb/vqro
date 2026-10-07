@@ -591,6 +591,10 @@ pub(crate) fn build_snapshot(
     for leaf in leaves {
         match leaf {
             crate::layout::LayoutLeaf::Pane(pane_id) => {
+                if tab.terminal_id(pane_id).is_none() {
+                    // A view pane: no terminal placement to describe here.
+                    continue;
+                }
                 if !seen_panes.insert(pane_id) {
                     return Err(malformed_error("terminal placement is duplicated"));
                 }
@@ -614,7 +618,7 @@ pub(crate) fn build_snapshot(
                     ));
                 }
                 let mut terminal_ids = Vec::with_capacity(container.member_count());
-                for pane_id in container.members() {
+                for pane_id in container.terminal_members() {
                     if !seen_panes.insert(pane_id) {
                         return Err(malformed_error("terminal placement is duplicated"));
                     }

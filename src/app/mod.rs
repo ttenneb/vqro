@@ -126,6 +126,13 @@ impl AppPolicy {
     };
 }
 
+/// Parse `<extension>:<view>` for the server-side agent-start rule. A malformed
+/// value disables the rule rather than guessing an identity.
+fn parse_agent_start_view(value: Option<&str>) -> Option<(String, String)> {
+    let (extension, view) = value?.split_once(':')?;
+    (!extension.is_empty() && !view.is_empty()).then(|| (extension.to_owned(), view.to_owned()))
+}
+
 pub struct App {
     pub state: AppState,
     pub(crate) pane_graphics: pane_graphics::Runtime,
@@ -763,7 +770,6 @@ impl App {
         let mut state = AppState {
             terminals: std::collections::HashMap::new(),
             direct_attach_resize_locks: std::collections::HashSet::new(),
-            pane_panel_claims: std::collections::HashMap::new(),
             pane_id_aliases: std::collections::HashMap::new(),
             public_pane_id_aliases: std::collections::HashMap::new(),
             workspaces,
@@ -814,6 +820,8 @@ impl App {
             pane_scrollbars: config.ui.pane_scrollbars,
             pane_gaps: config.ui.pane_gaps,
             show_agent_labels_on_pane_borders: config.ui.show_agent_labels_on_pane_borders,
+            show_panels_on_agent_start: config.ui.show_panels_on_agent_start,
+            agent_start_view: parse_agent_start_view(config.ui.agent_start_view.as_deref()),
             tab_bar_right: Vec::new(),
             tab_bar_right_separator: String::new(),
             reveal_hidden_cursor_for_cjk_ime: config.experimental.reveal_hidden_cursor_for_cjk_ime,
@@ -1325,6 +1333,9 @@ impl App {
                 self.state.pane_gaps = config.ui.pane_gaps;
                 self.state.show_agent_labels_on_pane_borders =
                     config.ui.show_agent_labels_on_pane_borders;
+                self.state.show_panels_on_agent_start = config.ui.show_panels_on_agent_start;
+                self.state.agent_start_view =
+                    parse_agent_start_view(config.ui.agent_start_view.as_deref());
                 self.configure_tab_bar_status(
                     &config.ui.tab_bar_right,
                     &config.ui.tab_bar_right_separator,

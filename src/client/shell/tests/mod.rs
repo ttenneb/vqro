@@ -126,6 +126,8 @@ fn surface() -> PaneSurfaceFrame {
             alternate_screen_active: false,
             pixel_width: 0,
             pixel_height: 0,
+            view: None,
+            scope: Vec::new(),
         }],
         collections: Vec::new(),
         splits: Vec::new(),
@@ -260,8 +262,6 @@ mod keybindings_settings;
 mod link_hover;
 mod mobile;
 mod mouse_selection;
-mod pane_panel;
-mod pane_panel_profile;
 mod popup_focus_projection;
 mod recovery;
 mod startup_overlays;

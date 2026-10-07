@@ -75,6 +75,15 @@ impl App {
             TypedNode::Leaf(pane) => LayoutTreeNode::Pane {
                 pane_id: self.public_pane_id(ws_idx, *pane)?,
             },
+            TypedNode::View {
+                pane,
+                extension,
+                view,
+            } => LayoutTreeNode::View {
+                pane_id: self.public_pane_id(ws_idx, *pane)?,
+                extension: extension.clone(),
+                view: view.clone(),
+            },
             TypedNode::Stack {
                 id,
                 selected,
@@ -469,6 +478,9 @@ impl App {
             TypedNode::Leaf(pane_id) => Some(LayoutNode::Pane {
                 pane: self.layout_pane_description(ws_idx, tab_idx, *pane_id)?,
             }),
+            // The legacy pane-only export has no view semantics; a view branch
+            // has no terminal description and collapses like an empty branch.
+            TypedNode::View { .. } => None,
             TypedNode::Stack {
                 selected, children, ..
             } => children
@@ -480,12 +492,12 @@ impl App {
                 first,
                 second,
             } => {
-                // Only empty structural branches may collapse. A missing pane
+                // Only branches with no terminal may collapse. A missing pane
                 // description is an export error, not an empty layout branch.
-                if first.selected_pane().is_none() {
+                if !subtree_has_terminal(first) {
                     return self.layout_node_description(ws_idx, tab_idx, second);
                 }
-                if second.selected_pane().is_none() {
+                if !subtree_has_terminal(second) {
                     return self.layout_node_description(ws_idx, tab_idx, first);
                 }
                 Some(LayoutNode::Split {
@@ -773,6 +785,17 @@ fn layout_pane_count(node: &LayoutNode) -> usize {
         LayoutNode::Pane { .. } => 1,
         LayoutNode::Split { first, second, .. } => {
             layout_pane_count(first).saturating_add(layout_pane_count(second))
+        }
+    }
+}
+
+fn subtree_has_terminal(node: &TypedNode) -> bool {
+    match node {
+        TypedNode::Leaf(_) => true,
+        TypedNode::View { .. } => false,
+        TypedNode::Stack { children, .. } => children.iter().any(subtree_has_terminal),
+        TypedNode::Split { first, second, .. } => {
+            subtree_has_terminal(first) || subtree_has_terminal(second)
         }
     }
 }

@@ -1931,12 +1931,7 @@ async fn run_client_loop(
                                         generation,
                                         projection,
                                     );
-                                    // Views can arrive after the pane gained
-                                    // its agent, so the user's rule retries
-                                    // here; they also carry the placements the
-                                    // panels are keyed by.
-                                    shell.sync_panel_identity();
-                                    shell.apply_show_panels_on_agent_start()
+                                    true
                                 });
                                 if repaint {
                                     if let Some(frame) = state.shell.as_mut().and_then(|shell| {
@@ -1955,25 +1950,6 @@ async fn run_client_loop(
                                         *surface,
                                     )
                                 });
-                                if repaint {
-                                    if let Some(frame) = state.shell.as_mut().and_then(|shell| {
-                                        shell.compose(state.reported_size.0, state.reported_size.1)
-                                    }) {
-                                        state.present_frame(frame);
-                                    }
-                                    apply_client_shell_input_source_changes(
-                                        &mut state,
-                                        &mut write_stream,
-                                        &mut prefix_input_source,
-                                    );
-                                }
-                                continue;
-                            }
-                            Ok(endpoint::EndpointControlMessage::PanePanelRequest(request)) => {
-                                let repaint = state
-                                    .shell
-                                    .as_mut()
-                                    .is_some_and(|shell| shell.apply_pane_panel_request(*request));
                                 if repaint {
                                     if let Some(frame) = state.shell.as_mut().and_then(|shell| {
                                         shell.compose(state.reported_size.0, state.reported_size.1)

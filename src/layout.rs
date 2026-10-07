@@ -190,7 +190,17 @@ pub enum Node {
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum TypedNode {
+    /// A pane whose content is a terminal (a PTY), addressed by its stable pane ID.
     Leaf(PaneId),
+    /// A pane whose content is an extension view. It keeps the same stable pane
+    /// identity as a terminal pane and is a first-class pane in every structural
+    /// walk; its content identity is the `(extension, view)` pair. The scope of a
+    /// view is derived from its placement, never stored here.
+    View {
+        pane: PaneId,
+        extension: String,
+        view: String,
+    },
     Stack {
         id: TerminalContainerId,
         selected: usize,
@@ -202,6 +212,29 @@ pub(crate) enum TypedNode {
         first: Box<TypedNode>,
         second: Box<TypedNode>,
     },
+}
+
+/// The content identity of a view pane: the extension that publishes it and the
+/// view it publishes. Its scope is derived from placement and never stored.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ViewRef {
+    pub(crate) pane: PaneId,
+    pub(crate) extension: String,
+    pub(crate) view: String,
+}
+
+impl ViewRef {
+    /// Bounds mirror the host view contract's local-id and namespace rules.
+    pub(crate) fn validate(&self) -> bool {
+        fn ok(value: &str, max: usize) -> bool {
+            !value.is_empty()
+                && value.len() <= max
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+        }
+        ok(&self.extension, 120) && ok(&self.view, 64)
+    }
 }
 
 /// Borrowed structural projection used by the legacy Collection boundary.
@@ -218,6 +251,16 @@ impl StackRef<'_> {
         let mut panes = Vec::new();
         for child in self.children {
             child.collect_all_panes(&mut panes);
+        }
+        panes
+    }
+
+    /// The terminals this box holds. View panes are excluded: the host terminal
+    /// contract describes terminals, and a view has no terminal identity.
+    pub(crate) fn terminal_members(&self) -> Vec<PaneId> {
+        let mut panes = Vec::new();
+        for child in self.children {
+            child.collect_terminal_panes(&mut panes);
         }
         panes
     }
@@ -285,6 +328,9 @@ impl TileLayout {
         fn visible(node: &TypedNode, pane: PaneId) -> bool {
             match node {
                 TypedNode::Leaf(id) => *id == pane,
+                TypedNode::View {
+                    pane: view_pane, ..
+                } => *view_pane == pane,
                 TypedNode::Split { first, second, .. } => {
                     visible(first, pane) || visible(second, pane)
                 }
@@ -303,7 +349,7 @@ impl TileLayout {
     pub(crate) fn selected_stack_panes(&self) -> Vec<PaneId> {
         fn collect(node: &TypedNode, panes: &mut Vec<PaneId>) {
             match node {
-                TypedNode::Leaf(_) => {}
+                TypedNode::Leaf(_) | TypedNode::View { .. } => {}
                 TypedNode::Split { first, second, .. } => {
                     collect(first, panes);
                     collect(second, panes);
@@ -365,7 +411,7 @@ impl TileLayout {
     pub(crate) fn collections(&self) -> impl Iterator<Item = StackRef<'_>> {
         fn collect<'a>(node: &'a TypedNode, stacks: &mut Vec<StackRef<'a>>) {
             match node {
-                TypedNode::Leaf(_) => {}
+                TypedNode::Leaf(_) | TypedNode::View { .. } => {}
                 TypedNode::Split { first, second, .. } => {
                     collect(first, stacks);
                     collect(second, stacks);
@@ -404,6 +450,13 @@ impl TileLayout {
         ) -> Option<PanePlacement> {
             match node {
                 TypedNode::Leaf(id) => (*id == pane).then_some(
+                    stack
+                        .map(PanePlacement::Stack)
+                        .unwrap_or(PanePlacement::Tiled),
+                ),
+                TypedNode::View {
+                    pane: view_pane, ..
+                } => (*view_pane == pane).then_some(
                     stack
                         .map(PanePlacement::Stack)
                         .unwrap_or(PanePlacement::Tiled),
@@ -475,10 +528,89 @@ impl TileLayout {
             old,
             target_leaf,
             direction,
-            LayoutLeaf::Pane(new_id),
+            TypedNode::Leaf(new_id),
             valid_split_ratio(ratio),
         );
         Some(new_id)
+    }
+
+    /// Split `target` with a view pane. The view pane carries its own content
+    /// identity and has no terminal or runtime; it is a pane like any other for
+    /// layout, frame, focus and close. Returns the new pane identity.
+    pub(crate) fn split_pane_with_view(
+        &mut self,
+        target: PaneId,
+        direction: Direction,
+        ratio: f32,
+        extension: &str,
+        view: &str,
+    ) -> Option<(PaneId, ViewRef)> {
+        let target_leaf = match self.placement(target)? {
+            PanePlacement::Tiled => LayoutLeaf::Pane(target),
+            PanePlacement::Stack(collection_id) => LayoutLeaf::Stack(collection_id),
+        };
+        let new_id = PaneId::alloc();
+        let content = ViewRef {
+            pane: new_id,
+            extension: extension.to_owned(),
+            view: view.to_owned(),
+        };
+        if !content.validate() {
+            return None;
+        }
+        let old = std::mem::replace(&mut self.root, TypedNode::Leaf(PaneId::from_raw(0)));
+        self.root = typed_split_at(
+            old,
+            target_leaf,
+            direction,
+            TypedNode::view(new_id, &content.extension, &content.view),
+            valid_split_ratio(ratio),
+        );
+        Some((new_id, content))
+    }
+
+    /// The content identity of a placed view pane.
+    pub(crate) fn view_at(&self, pane: PaneId) -> Option<ViewRef> {
+        fn find(node: &TypedNode, pane: PaneId) -> Option<ViewRef> {
+            match node {
+                TypedNode::View { .. } => node.view_ref().filter(|view| view.pane == pane),
+                TypedNode::Leaf(_) => None,
+                TypedNode::Split { first, second, .. } => {
+                    find(first, pane).or_else(|| find(second, pane))
+                }
+                TypedNode::Stack {
+                    selected, children, ..
+                } => children.get(*selected).and_then(|child| find(child, pane)),
+            }
+        }
+        find(&self.root, pane)
+    }
+
+    /// The terminal panes a placed view pane covers, derived from its placement.
+    pub(crate) fn view_scope(&self, view_pane: PaneId) -> Vec<PaneId> {
+        self.root.view_scope(view_pane)
+    }
+
+    /// Every placed view pane, in tree order.
+    pub(crate) fn view_panes(&self) -> Vec<PaneId> {
+        fn collect(node: &TypedNode, out: &mut Vec<PaneId>) {
+            match node {
+                TypedNode::View { pane, .. } => out.push(*pane),
+                TypedNode::Leaf(_) => {}
+                TypedNode::Split { first, second, .. } => {
+                    collect(first, out);
+                    collect(second, out);
+                }
+                TypedNode::Stack { children, .. } => {
+                    for child in children {
+                        collect(child, out);
+                    }
+                }
+            }
+        }
+        let mut panes = Vec::new();
+        collect(&self.root, &mut panes);
+        panes
     }
 
     pub fn insert_pane_near(
@@ -500,7 +632,7 @@ impl TileLayout {
             old,
             LayoutLeaf::Pane(target),
             direction,
-            LayoutLeaf::Pane(moved),
+            TypedNode::Leaf(moved),
             valid_split_ratio(ratio),
         );
         if focus {
@@ -528,7 +660,11 @@ impl TileLayout {
             old,
             target,
             direction,
-            LayoutLeaf::Stack(collection_id),
+            TypedNode::Stack {
+                id: collection_id,
+                selected: 0,
+                children: Vec::new(),
+            },
             valid_split_ratio(ratio),
         );
         true
@@ -609,7 +745,7 @@ impl TileLayout {
         };
         let Some(from) = children
             .iter()
-            .position(|child| matches!(child, TypedNode::Leaf(id) if *id == pane))
+            .position(|child| child.pane_leaf() == Some(pane))
         else {
             return false;
         };
@@ -678,7 +814,10 @@ impl TileLayout {
                 self.focus = match self.root.stack(collection_id) {
                     Some(TypedNode::Stack {
                         selected, children, ..
-                    }) if matches!(children.get(*selected), Some(TypedNode::Leaf(_))) => {
+                    }) if children
+                        .get(*selected)
+                        .is_some_and(|child| child.pane_leaf().is_some()) =>
+                    {
                         LayoutLeaf::Stack(collection_id)
                     }
                     _ => LayoutLeaf::Pane(id),
@@ -839,7 +978,7 @@ fn typed_from_legacy(node: &Node) -> TypedNode {
 
 fn typed_count(node: &TypedNode) -> usize {
     match node {
-        TypedNode::Leaf(_) | TypedNode::Stack { .. } => 1,
+        TypedNode::Leaf(_) | TypedNode::View { .. } | TypedNode::Stack { .. } => 1,
         TypedNode::Split { first, second, .. } => typed_count(first) + typed_count(second),
     }
 }
@@ -847,6 +986,7 @@ fn typed_count(node: &TypedNode) -> usize {
 fn typed_collect_leaves(node: &TypedNode, result: &mut Vec<LayoutLeaf>) {
     match node {
         TypedNode::Leaf(pane) => result.push(LayoutLeaf::Pane(*pane)),
+        TypedNode::View { pane, .. } => result.push(LayoutLeaf::Pane(*pane)),
         TypedNode::Stack { id, .. } => result.push(LayoutLeaf::Stack(*id)),
         TypedNode::Split { first, second, .. } => {
             typed_collect_leaves(first, result);
@@ -858,6 +998,7 @@ fn typed_collect_leaves(node: &TypedNode, result: &mut Vec<LayoutLeaf>) {
 fn typed_leaf_rect(node: &TypedNode, target: LayoutLeaf, area: Rect) -> Option<Rect> {
     match node {
         TypedNode::Leaf(pane) => (LayoutLeaf::Pane(*pane) == target).then_some(area),
+        TypedNode::View { pane, .. } => (LayoutLeaf::Pane(*pane) == target).then_some(area),
         TypedNode::Stack {
             id,
             selected,
@@ -892,6 +1033,7 @@ fn typed_collect_panes(
 ) {
     let pane = match node {
         TypedNode::Leaf(id) => Some((*id, focus == LayoutLeaf::Pane(*id))),
+        TypedNode::View { pane, .. } => Some((*pane, focus == LayoutLeaf::Pane(*pane))),
         TypedNode::Stack {
             id,
             selected,
@@ -969,23 +1111,16 @@ fn typed_split_at(
     node: TypedNode,
     target: LayoutLeaf,
     direction: Direction,
-    new_leaf: LayoutLeaf,
+    added: TypedNode,
     ratio: f32,
 ) -> TypedNode {
     let identity = match &node {
         TypedNode::Leaf(pane) => Some(LayoutLeaf::Pane(*pane)),
+        TypedNode::View { pane, .. } => Some(LayoutLeaf::Pane(*pane)),
         TypedNode::Stack { id, .. } => Some(LayoutLeaf::Stack(*id)),
         TypedNode::Split { .. } => None,
     };
     if identity == Some(target) {
-        let added = match new_leaf {
-            LayoutLeaf::Pane(id) => TypedNode::Leaf(id),
-            LayoutLeaf::Stack(id) => TypedNode::Stack {
-                id,
-                selected: 0,
-                children: Vec::new(),
-            },
-        };
         return TypedNode::Split {
             direction,
             ratio,
@@ -994,7 +1129,7 @@ fn typed_split_at(
         };
     }
     match node {
-        TypedNode::Leaf(_) | TypedNode::Stack { .. } => node,
+        TypedNode::Leaf(_) | TypedNode::View { .. } | TypedNode::Stack { .. } => node,
         TypedNode::Split {
             direction: existing_direction,
             ratio: existing_ratio,
@@ -1003,8 +1138,14 @@ fn typed_split_at(
         } => TypedNode::Split {
             direction: existing_direction,
             ratio: existing_ratio,
-            first: Box::new(typed_split_at(*first, target, direction, new_leaf, ratio)),
-            second: Box::new(typed_split_at(*second, target, direction, new_leaf, ratio)),
+            first: Box::new(typed_split_at(
+                *first,
+                target,
+                direction,
+                added.clone(),
+                ratio,
+            )),
+            second: Box::new(typed_split_at(*second, target, direction, added, ratio)),
         },
     }
 }
@@ -1012,8 +1153,9 @@ fn typed_split_at(
 fn typed_remove(node: TypedNode, target: LayoutLeaf) -> Option<TypedNode> {
     match node {
         TypedNode::Leaf(pane) if LayoutLeaf::Pane(pane) == target => None,
+        TypedNode::View { pane, .. } if LayoutLeaf::Pane(pane) == target => None,
         TypedNode::Stack { id, .. } if target == LayoutLeaf::Stack(id) => None,
-        TypedNode::Leaf(_) => Some(node),
+        TypedNode::Leaf(_) | TypedNode::View { .. } => Some(node),
         TypedNode::Stack {
             id,
             mut selected,
@@ -1056,7 +1198,9 @@ fn typed_swap_panes(node: &mut TypedNode, first: PaneId, second: PaneId) {
     match node {
         TypedNode::Leaf(id) if *id == first => *id = second,
         TypedNode::Leaf(id) if *id == second => *id = first,
-        TypedNode::Leaf(_) | TypedNode::Stack { .. } => {}
+        TypedNode::View { pane, .. } if *pane == first => *pane = second,
+        TypedNode::View { pane, .. } if *pane == second => *pane = first,
+        TypedNode::Leaf(_) | TypedNode::View { .. } | TypedNode::Stack { .. } => {}
         TypedNode::Split {
             first: first_node,
             second: second_node,
@@ -1071,7 +1215,7 @@ fn typed_swap_panes(node: &mut TypedNode, first: PaneId, second: PaneId) {
 fn typed_split_ratios(node: &TypedNode) -> Vec<(Vec<bool>, f32)> {
     fn collect(node: &TypedNode, path: &mut Vec<bool>, result: &mut Vec<(Vec<bool>, f32)>) {
         match node {
-            TypedNode::Leaf(_) | TypedNode::Stack { .. } => {}
+            TypedNode::Leaf(_) | TypedNode::View { .. } | TypedNode::Stack { .. } => {}
             TypedNode::Split {
                 ratio,
                 first,
@@ -1340,7 +1484,7 @@ mod tests {
     fn split_snapshot(layout: &TileLayout) -> Vec<(Direction, f32)> {
         fn collect(node: &TypedNode, out: &mut Vec<(Direction, f32)>) {
             match node {
-                TypedNode::Leaf(_) => {}
+                TypedNode::Leaf(_) | TypedNode::View { .. } => {}
                 TypedNode::Stack {
                     selected, children, ..
                 } => {

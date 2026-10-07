@@ -501,6 +501,32 @@ pub(super) fn render_pane_surface(
                             workspace_index,
                             pane.id,
                         );
+                        let tab = app
+                            .state
+                            .workspaces
+                            .get(workspace_index)
+                            .and_then(|workspace| workspace.tabs.get(target.tab_index));
+                        let view_content =
+                            tab.and_then(|tab| tab.layout.view_at(pane.id)).map(|view| {
+                                protocol::PaneSurfaceView {
+                                    extension: view.extension,
+                                    view: view.view,
+                                }
+                            });
+                        let view_scope = if view_content.is_some() {
+                            tab.map(|tab| {
+                                tab.layout
+                                    .view_scope(pane.id)
+                                    .into_iter()
+                                    .filter_map(|covered| {
+                                        app.public_pane_id(workspace_index, covered)
+                                    })
+                                    .collect()
+                            })
+                            .unwrap_or_default()
+                        } else {
+                            Vec::new()
+                        };
                         let mouse_reporting =
                             runtime.is_some_and(|runtime| runtime.mouse_reporting_enabled());
                         let sgr_pixel_mouse =
@@ -543,6 +569,8 @@ pub(super) fn render_pane_surface(
                                 .is_some_and(|runtime| runtime.alternate_screen_active()),
                             pixel_width,
                             pixel_height,
+                            view: view_content,
+                            scope: view_scope,
                         }
                     })
                 })

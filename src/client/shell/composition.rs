@@ -624,226 +624,48 @@ impl ClientShellState {
                 self.hits.panes.push(preview_hit);
             }
         }
-        // Pane split panels: the focused pane's published views. Drawn before the
-        // transient inspector so an explicitly opened inspector keeps the pane.
-        let inspector_pane = self
-            .inspector
-            .as_ref()
-            .map(|inspector| inspector.pane_id.as_str());
-        let mut panel_render = pane_panel::PanePanelRender {
-            hits: Vec::new(),
-            claims: Vec::new(),
-            projected: Vec::new(),
-            reserved: Vec::new(),
-            drawn: Vec::new(),
-        };
-        // The host resized each claimed pane's PTY to the rows below its panel, so
-        // the grid already has exactly those rows. It painted them at the pane's
-        // inner top; take them here, before the panel paints the band, and put
-        // them where the grid belongs. Every grid row moves, so nothing of the
-        // agent's screen is hidden and no band under the panel is left blank.
-        let mut grid_cells: Vec<(String, Rect, Vec<ratatui::buffer::Cell>)> = Vec::new();
-        if host_documents.is_some()
-            && self.supports_endpoint_capability(crate::protocol::endpoint::PANE_PANELS_CAPABILITY)
-        {
-            for pane in &self.hits.panes {
-                if self
-                    .pane_panel_open
-                    .get(&pane.pane_id)
-                    .is_none_or(|views| views.is_empty())
-                {
-                    continue;
-                }
-
-                let area = pane.projected_inner_rect.intersection(composed.area);
-                if area.is_empty() {
-                    continue;
-                }
-                let mut cells =
-                    Vec::with_capacity(usize::from(area.width) * usize::from(area.height));
-                for row in area.y..area.bottom() {
-                    for column in area.x..area.right() {
-                        cells.push(composed[(column, row)].clone());
-                    }
-                }
-                grid_cells.push((pane.pane_id.clone(), area, cells));
-            }
-        }
-        // One index of the published documents for this frame, shared by the
-        // panel render and the pane badges: building it twice is a second full
-        // pass over every item per frame.
-        // Rows are only read for panes the user has something open in: a frame
-        // where nothing is open needs the item list for badges and nothing more.
-        let any_open = self.hits.panes.iter().any(|pane| {
-            self.pane_panel_open
-                .get(&pane.pane_id)
-                .is_some_and(|views| !views.is_empty())
-        });
+        // View panes: the host projected a content identity and a placement-derived
+        // scope for each one. The client draws the view content and the light or full
+        // frame; panes that are not visible are absent from `hits.panes`, so a hidden
+        // view does no presentation work.
         let index =
-            host_documents.map(|documents| pane_panel::PanelIndex::with_rows(documents, any_open));
-        // A server that does not advertise the panel control gets no panels:
-        // a panel that could not claim its terminal's edge would be drawn over
-        // the terminal instead of shrinking it. The connection stays usable.
-        if let Some(index) = index.as_ref() {
-            if self.supports_endpoint_capability(crate::protocol::endpoint::PANE_PANELS_CAPABILITY)
-            {
-                pane_panel::render(
+            host_documents.map(|documents| pane_panel::PanelIndex::with_rows(documents, true));
+        if let (Some(index), Some(documents)) = (index.as_ref(), host_documents) {
+            let view_panes = surface
+                .panes
+                .iter()
+                .filter_map(|pane| {
+                    let view = pane.view.as_ref()?;
+                    Some((
+                        pane.pane_id.clone(),
+                        view.extension.clone(),
+                        view.view.clone(),
+                        pane.scope.clone(),
+                    ))
+                })
+                .collect::<Vec<_>>();
+            for (pane_id, extension, view, scope) in view_panes {
+                let Some(pane) = self.hits.panes.iter().find(|hit| hit.pane_id == pane_id) else {
+                    continue;
+                };
+                let projection = pane_panel::ViewPaneProjection {
+                    extension: &extension,
+                    view: &view,
+                    scope: &scope,
+                };
+                // A view that shares its box with a covered terminal rides the
+                // shared divider (light frame); a lone or zoomed view gets a full frame.
+                let light_frame = !scope.is_empty();
+                pane_panel::render_view_pane(
                     &mut composed,
                     index,
+                    documents,
                     snapshot,
-                    &self.hits.panes,
-                    &self.pane_panel_open,
-                    inspector_pane,
-                    &self.pane_panel_display,
+                    pane,
+                    &projection,
+                    light_frame,
                     &self.config.palette,
-                    &mut panel_render,
                 );
-            }
-        }
-        self.hits.pane_panels = panel_render.hits;
-        self.pane_panel_areas = panel_render.reserved.clone();
-        self.pane_panel_band_rows.clear();
-        for (pane_id, band, _) in &panel_render.projected {
-            if band.height > 0 {
-                self.pane_panel_band_rows
-                    .insert(pane_id.clone(), band.height);
-            }
-        }
-        for (pane_id, band, destination) in &panel_render.projected {
-            let Some((_, source, cells)) = grid_cells
-                .iter()
-                .find(|(captured, _, _)| captured == pane_id)
-            else {
-                continue;
-            };
-            let band = band.intersection(composed.area);
-            let destination = destination.intersection(composed.area);
-            let source = source.intersection(composed.area);
-            let rows = destination.height.min(source.height);
-            let width = destination.width.min(source.width);
-            if rows == 0 || width == 0 {
-                continue;
-            }
-            for offset in 0..rows {
-                for column in 0..width {
-                    let index =
-                        usize::from(offset) * usize::from(source.width) + usize::from(column);
-                    if let Some(cell) = cells.get(index) {
-                        composed[(destination.x + column, destination.y + offset)] = cell.clone();
-                    }
-                }
-            }
-            // The panel owns the band the grid came from. Rows the moved grid no
-            // longer fills are cleared, and the cursor travels with its row.
-            for row in destination.bottom()..source.bottom() {
-                for column in source.x..source.right() {
-                    composed[(column, row)].reset();
-                }
-            }
-            // The cursor that reaches the frame is the local clone taken before
-            // the panel drew, so it is the one that travels with its row.
-            if band.height > 0 {
-                if let Some(cursor) = cursor.as_mut() {
-                    if cursor.x >= source.x
-                        && cursor.x < source.right()
-                        && cursor.y >= source.y
-                        && cursor.y < source.bottom()
-                    {
-                        let moved = cursor.y.saturating_add(band.height);
-                        if moved < destination.bottom() {
-                            cursor.y = moved;
-                        } else {
-                            cursor.visible = false;
-                        }
-                    }
-                }
-            }
-        }
-        // Opening a panel is when it sizes to its content. From then on the
-        // height is fixed: a live update scrolls instead of resizing the PTY,
-        // and the user's own dragged height always wins. Every pane that drew a
-        // panel is frozen, not only the last one rendered.
-        for (pane_id, drawn_height) in panel_render.drawn {
-            let display = self.pane_panel_display.entry(pane_id).or_default();
-            if display.height.is_none() {
-                display.height = Some(drawn_height);
-            }
-        }
-        // A pane with views to open and nothing open shows its own badge, so a
-        // user can open the panel without knowing a command.
-        if let Some(index) = index.as_ref() {
-            for badge in pane_panel::pane_badges(index, &self.hits.panes, &self.pane_panel_open) {
-                render::put_text(
-                    &mut composed,
-                    badge.rect.x,
-                    badge.rect.y,
-                    badge.rect.width,
-                    &badge.label,
-                    Style::default()
-                        .fg(self.config.palette.peach)
-                        .bg(self.config.palette.panel_bg),
-                );
-                self.hits.pane_panels.push(pane_panel::PanePanelHit {
-                    rect: badge.rect,
-                    pane_id: badge.pane_id,
-                    action: pane_panel::PanePanelAction::OpenViews,
-                });
-            }
-        }
-        let panel_dragging = matches!(
-            self.chrome_drag,
-            Some(ClientChromeDrag::PanePanelEdge { .. })
-        );
-        // Every open panel's terminal is claimed in one request, so the server
-        // resizes each pane's PTY once and never on a live document update.
-        if self.supports_endpoint_capability(crate::protocol::endpoint::PANE_PANELS_CAPABILITY)
-            && !panel_dragging
-        {
-            let claims = panel_render
-                .claims
-                .iter()
-                .map(
-                    |(pane_id, terminal)| crate::protocol::endpoint::ClientPanePanelClaim {
-                        pane_id: pane_id.clone(),
-                        size: crate::protocol::ClientSurfaceSize {
-                            cols: terminal.width.max(1),
-                            rows: terminal.height.max(1),
-                        },
-                    },
-                )
-                .collect::<Vec<_>>();
-            let request = crate::protocol::endpoint::ClientPanePanels {
-                boot_id: snapshot.boot_id.clone(),
-                projection_revision: snapshot.revision,
-                claims,
-            };
-            if self.last_pane_panels.as_ref() != Some(&request) {
-                if let Ok(data) = serde_json::to_string(&request) {
-                    self.last_pane_panels = Some(request);
-                    self.pending_endpoint_controls.push((
-                        self.active_endpoint_id.clone(),
-                        ClientMessage::EndpointControl {
-                            kind: crate::protocol::endpoint::PANE_PANELS_KIND.into(),
-                            data,
-                        },
-                    ));
-                }
-            }
-        }
-        // A claimed pane's hits move to the smaller terminal rect, so mouse,
-        // selection and the terminal's own scrollbar map inside it.
-        for (pane_id, terminal) in &panel_render.claims {
-            if let Some(hit) = self
-                .hits
-                .panes
-                .iter_mut()
-                .find(|hit| &hit.pane_id == pane_id)
-            {
-                // The moved grid's row zero is painted at this rect's top, so a
-                // screen row inside it is already the grid row the host maps and
-                // no offset is needed on the way back.
-                hit.inner_rect = *terminal;
-                hit.scrollbar_rect = None;
             }
         }
         frame.replace_from_ratatui_buffer_preserving_effects(&composed, cursor.clone());

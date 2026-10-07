@@ -1,7 +1,7 @@
 use super::*;
 
 #[test]
-fn a_badge_click_opens_the_scopes_panels_and_never_needs_a_host_method() {
+fn a_badge_click_has_no_action_of_its_own() {
     let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
     state.set_endpoint_status(&ClientEndpointId::Local, ClientEndpointStatus::Online);
     state.set_endpoint_snapshot_for_generation(&ClientEndpointId::Local, 1, Box::new(snapshot()));
@@ -38,29 +38,23 @@ fn a_badge_click_opens_the_scopes_panels_and_never_needs_a_host_method() {
     };
     let mut outcome = ClientShellInput::default();
     state.open_attention(hit.clone(), &mut outcome);
-    // No host method, no action: the click opened the panel in this client.
+    // Recorded decision: a badge click selects its tab and has no action of its
+    // own. The click neither launches anything nor opens a view here.
     assert!(outcome.actions.is_empty());
-    assert_eq!(
-        state
-            .pane_panel_open
-            .get("pane_1")
-            .map(|views| views.contains("tasks")),
-        Some(true)
-    );
     assert_eq!(state.endpoints[0].status, ClientEndpointStatus::Online);
     assert!(state.snapshot.is_some());
-    // A stale document key is rejected before anything opens.
+    // A stale document key is rejected before anything happens.
     let mut fresh = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
     fresh.set_endpoint_status(&ClientEndpointId::Local, ClientEndpointStatus::Online);
     fresh.set_endpoint_snapshot_for_generation(&ClientEndpointId::Local, 1, Box::new(snapshot()));
     let mut stale = ClientShellInput::default();
     fresh.open_attention(hit, &mut stale);
     assert!(stale.actions.is_empty());
-    assert!(fresh.pane_panel_open.is_empty());
+    assert!(fresh.hits.panes.is_empty());
 }
 
 #[test]
-fn a_badge_with_no_views_notices_instead_of_launching_a_tab() {
+fn a_badge_with_no_views_does_nothing_and_stays_connected() {
     let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
     state.set_endpoint_status(&ClientEndpointId::Local, ClientEndpointStatus::Online);
     state.set_endpoint_snapshot_for_generation(&ClientEndpointId::Local, 1, Box::new(snapshot()));
@@ -90,13 +84,11 @@ fn a_badge_with_no_views_notices_instead_of_launching_a_tab() {
     };
     let mut outcome = ClientShellInput::default();
     state.open_attention(hit, &mut outcome);
-    // The extension's own tab view is retired: nothing is launched, the click
-    // reports that this scope has no panel to open.
+    // The extension's own tab view is retired, and a badge has no action of its
+    // own: nothing is launched and nothing is opened.
     assert!(outcome.actions.is_empty());
     assert_eq!(state.endpoints[0].status, ClientEndpointStatus::Online);
-    // The client says why nothing opened, and stays connected.
-    assert!(state.endpoint_error.is_some());
-    assert!(state.pane_panel_open.is_empty());
+    assert!(state.endpoint_error.is_none());
 }
 
 #[test]
@@ -434,11 +426,6 @@ fn a_tab_badge_is_part_of_its_tab_and_shows_a_capped_count() {
             vec!["tab_1".to_string()],
             "a click on the badge's cells selects that tab"
         );
-        assert!(
-            state.pane_panel_open.is_empty(),
-            "the badge has no action of its own: {:?}",
-            state.pane_panel_open
-        );
     }
 }
 
@@ -501,11 +488,6 @@ fn a_workspace_row_badge_is_part_of_its_row() {
         focused,
         vec!["ws_1".to_string()],
         "a click on the badge's cells selects the row's workspace"
-    );
-    assert!(
-        state.pane_panel_open.is_empty(),
-        "the badge has no action of its own: {:?}",
-        state.pane_panel_open
     );
 }
 

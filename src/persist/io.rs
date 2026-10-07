@@ -910,12 +910,14 @@ mod tests {
     fn write_guard_reads_metadata_without_admitting_stale_layout() {
         let path = temp_session_path("header-only-guard");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        let original = br#"{"version":8,"collections_action_sequence":9,"workspaces":"stale"}"#;
-        std::fs::write(&path, original).unwrap();
+        let original = format!(
+            "{{\"version\":{SNAPSHOT_VERSION},\"collections_action_sequence\":9,\"workspaces\":\"stale\"}}"
+        );
+        std::fs::write(&path, &original).unwrap();
         assert!(prepare_session_write(&path, SNAPSHOT_VERSION)
             .unwrap()
             .is_none());
-        assert_eq!(std::fs::read(&path).unwrap(), original);
+        assert_eq!(std::fs::read(&path).unwrap(), original.as_bytes());
         let future = format!(
             "{{\"version\":{},\"workspaces\":\"stale\"}}",
             SNAPSHOT_VERSION + 1

@@ -429,7 +429,6 @@ pub(crate) enum ServerEvent {
         host_documents_enabled: bool,
         host_views_enabled: bool,
         pane_viewport_enabled: bool,
-        pane_panels_enabled: bool,
         pane_view_enabled: bool,
         terminal_views_enabled: bool,
         writer: ClientWriter,
@@ -538,10 +537,6 @@ pub(crate) enum ServerEvent {
     ClientShellPaneViewport {
         client_id: u64,
         viewport: crate::protocol::endpoint::ClientPaneViewportRequest,
-    },
-    ClientShellPanePanels {
-        client_id: u64,
-        panels: crate::protocol::endpoint::ClientPanePanels,
     },
     ClientShellTerminalViewsInterest {
         client_id: u64,
@@ -727,7 +722,6 @@ struct ClientShellHandshakeOptions {
     host_documents_enabled: bool,
     host_views_enabled: bool,
     pane_viewport_enabled: bool,
-    pane_panels_enabled: bool,
     pane_view_enabled: bool,
     terminal_views_enabled: bool,
     native_api_enabled: bool,
@@ -747,12 +741,6 @@ fn client_shell_handshake_options(
         host_documents_enabled: has(crate::protocol::endpoint::HOST_DOCUMENTS_KIND),
         host_views_enabled: has(crate::protocol::endpoint::HOST_VIEWS_KIND),
         pane_viewport_enabled: has(crate::protocol::endpoint::PANE_VIEWPORT_KIND),
-        pane_panels_enabled: [
-            crate::protocol::endpoint::PANE_PANELS_KIND,
-            crate::protocol::endpoint::PANE_PANELS_REQUEST_KIND,
-        ]
-        .iter()
-        .all(|required| has(required)),
         pane_view_enabled: [
             crate::protocol::endpoint::PANE_VIEW_REQUEST_KIND,
             crate::protocol::endpoint::PANE_VIEW_CANCEL_KIND,
@@ -982,14 +970,6 @@ pub(crate) fn handle_client_handshake(
         }
         if shell_options
             .as_ref()
-            .is_some_and(|options| options.pane_panels_enabled)
-        {
-            welcome
-                .capabilities
-                .push(crate::protocol::endpoint::PANE_PANELS_CAPABILITY.into());
-        }
-        if shell_options
-            .as_ref()
             .is_some_and(|options| options.native_api_enabled)
         {
             welcome
@@ -1058,7 +1038,6 @@ pub(crate) fn handle_client_handshake(
             pane_viewport_enabled: options.pane_viewport_enabled,
             pane_view_enabled: options.pane_view_enabled,
             terminal_views_enabled: options.terminal_views_enabled,
-            pane_panels_enabled: options.pane_panels_enabled,
             writer,
         }
     } else {
@@ -1668,18 +1647,6 @@ fn client_read_loop_with_endpoint_controls(
                     client_id,
                     interest,
                 }
-            }
-            ClientMessage::EndpointControl { kind, data }
-                if kind == crate::protocol::endpoint::PANE_PANELS_KIND =>
-            {
-                let panels = match decode_optional_control(&data) {
-                    Ok(panels) => panels,
-                    Err(error) => {
-                        warn!(client_id, %error, "invalid pane panels claim");
-                        continue;
-                    }
-                };
-                ServerEvent::ClientShellPanePanels { client_id, panels }
             }
             ClientMessage::EndpointControl { kind, data }
                 if kind == crate::protocol::endpoint::PANE_VIEWPORT_KIND =>
@@ -2406,7 +2373,6 @@ mod tests {
                 pane_viewport_enabled,
                 pane_view_enabled,
                 terminal_views_enabled,
-                pane_panels_enabled: _,
                 writer,
                 host_views_enabled: false,
             } => {

@@ -903,7 +903,13 @@
           "key": "ui.show_panels_on_agent_start",
           "type": "boolean",
           "default": "true",
-          "description": "Open a pane's published views when an agent starts there. Views stay hidden until the user toggles them or an agent starts; set false to opt out."
+          "description": "Server-side rule: add a view pane beside a pane when an agent starts there, once per terminal. Does nothing unless ui.agent_start_view names a view."
+        },
+        {
+          "key": "ui.agent_start_view",
+          "type": "string",
+          "default": "",
+          "description": "The view the agent-start rule adds, as <extension>:<view> (for example vqro.tasks:tasks). Unset adds nothing."
         },
         {
           "key": "ui.copy_on_select",

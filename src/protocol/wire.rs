@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 // ---------------------------------------------------------------------------
 
 /// Current protocol version. Bumped when wire format changes incompatibly.
-pub const PROTOCOL_VERSION: u32 = 23;
+pub const PROTOCOL_VERSION: u32 = 24;
 
 /// Maximum allowed frame payload size (2 MB). Frames larger than this are
 /// rejected to prevent denial-of-service via oversized length prefixes.
@@ -1091,6 +1091,19 @@ pub struct PaneSurfacePane {
     pub alternate_screen_active: bool,
     pub pixel_width: u32,
     pub pixel_height: u32,
+    /// Present when the pane's content is an extension view instead of a
+    /// terminal. The client draws the view from this identity.
+    pub view: Option<PaneSurfaceView>,
+    /// Public pane ids the view covers, derived by the host from placement. Empty
+    /// for terminal panes. Shared by every client: the scope is a host fact.
+    pub scope: Vec<String>,
+}
+
+/// The content identity of a view pane in a rendered pane surface.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PaneSurfaceView {
+    pub extension: String,
+    pub view: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -2514,6 +2527,91 @@ mod tests {
             encoded_sha256(&msg),
             "0814b99a1dc6eaf7918424aa416c066509cbfb73b72344a809c27cde78cb6dbd"
         );
+    }
+
+    #[test]
+    fn pane_surface_pane_round_trips_terminal_and_view_content() {
+        // A surface pane is bincode: every field is always present on the wire.
+        // A field skipped by the serializer but expected by the deserializer
+        // desyncs the whole client stream, so this asserts both content kinds
+        // round-trip exactly. Red before the fix: the view/scope fields were
+        // serde-skipped and the decode failed with UnexpectedEnd.
+        let rect = SurfaceRect {
+            x: 0,
+            y: 0,
+            width: 80,
+            height: 24,
+        };
+        let terminal = PaneSurfacePane {
+            pane_id: "w1:p1".into(),
+            content_revision: 1,
+            rect,
+            inner_rect: rect,
+            scrollbar_rect: None,
+            scroll: None,
+            focused: true,
+            mouse_reporting: false,
+            sgr_pixel_mouse: false,
+            alternate_screen_active: false,
+            pixel_width: 0,
+            pixel_height: 0,
+            view: None,
+            scope: Vec::new(),
+        };
+        let view = PaneSurfacePane {
+            pane_id: "w1:p2".into(),
+            content_revision: 0,
+            rect,
+            inner_rect: rect,
+            scrollbar_rect: None,
+            scroll: None,
+            focused: false,
+            mouse_reporting: false,
+            sgr_pixel_mouse: false,
+            alternate_screen_active: false,
+            pixel_width: 0,
+            pixel_height: 0,
+            view: Some(PaneSurfaceView {
+                extension: "vqro.tasks".into(),
+                view: "tasks".into(),
+            }),
+            scope: vec!["w1:p1".into()],
+        };
+        let msg = ServerMessage::PaneSurface(PaneSurfaceFrame {
+            boot_id: "boot-1".into(),
+            projection_revision: 1,
+            surface_revision: 1,
+            frame: FrameData {
+                cells: Vec::new(),
+                width: 0,
+                height: 0,
+                cursor: None,
+                hyperlinks: Vec::new(),
+                graphics: Vec::new(),
+            },
+            panes: vec![terminal.clone(), view.clone()],
+            collections: Vec::new(),
+            splits: Vec::new(),
+            popup: None,
+            graphics: SurfaceGraphicsScene::default(),
+        });
+        let encoded = bincode::serde::encode_to_vec(&msg, bincode::config::standard()).unwrap();
+        let (decoded, _): (ServerMessage, _) =
+            bincode::serde::decode_from_slice(&encoded, bincode::config::standard()).unwrap();
+        assert_eq!(msg, decoded);
+        let ServerMessage::PaneSurface(surface) = decoded else {
+            panic!("expected a pane surface");
+        };
+        assert_eq!(surface.panes[0].view, None);
+        assert!(surface.panes[0].scope.is_empty());
+        assert_eq!(
+            surface.panes[1].view,
+            Some(PaneSurfaceView {
+                extension: "vqro.tasks".into(),
+                view: "tasks".into(),
+            })
+        );
+        assert_eq!(surface.panes[1].scope, vec!["w1:p1".to_owned()]);
     }
 
     #[test]

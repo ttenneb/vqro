@@ -927,6 +927,12 @@ pub struct UiConfig {
     /// because the owner's rule is that views are hidden by default and appear
     /// when the user toggles them or when an agent starts. Set false to opt out.
     pub show_panels_on_agent_start: bool,
+    /// The view added beside a pane when an agent starts there, as
+    /// `<extension>:<view>` (for example `vqro.tasks:tasks`). Unset means the
+    /// rule adds nothing: core holds no Tasks literal, and the identity is
+    /// passed in until the extension declares its own agent-start view.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_start_view: Option<String>,
     /// Copy text selected with the mouse. Default: true.
     pub copy_on_select: bool,
     /// Host cursor policy. Default: auto.
@@ -1179,6 +1185,7 @@ impl Default for UiConfig {
             mobile_width_threshold: DEFAULT_MOBILE_WIDTH_THRESHOLD,
             mouse_capture: true,
             show_panels_on_agent_start: true,
+            agent_start_view: None,
             copy_on_select: true,
             host_cursor: HostCursorModeConfig::Auto,
             right_click_passthrough_modifier: RightClickPassthroughModifierConfig::default(),

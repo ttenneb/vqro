@@ -196,9 +196,6 @@ pub(crate) struct ClientConnection {
     /// Whether this client may reserve terminal geometry for pane contributions.
     pub(crate) shell_pane_viewport_enabled: bool,
     pub(crate) shell_pane_view_enabled: bool,
-    /// Whether this client negotiated bounded independent terminal views.
-    pub(crate) shell_pane_panels_enabled: bool,
-    pub(crate) shell_pane_panels: Option<crate::protocol::endpoint::ClientPanePanels>,
     pub(crate) shell_terminal_views_enabled: bool,
     pub(crate) shell_terminal_views_interest:
         Option<crate::protocol::endpoint::ClientTerminalViewsInterest>,
@@ -292,8 +289,6 @@ impl ClientConnection {
             shell_host_views_enabled: false,
             shell_pane_viewport_enabled: false,
             shell_pane_view_enabled: false,
-            shell_pane_panels_enabled: false,
-            shell_pane_panels: None,
             shell_terminal_views_enabled: false,
             shell_terminal_views_interest: None,
             shell_pane_viewport: None,

@@ -241,24 +241,10 @@ impl ClientShellState {
         }
 
         // Vqro's own panel chrome owns its cells. A terminal patch is computed
-        // against the server's view of the pane, which does not know the panel
-        // reserved an edge of it, so a row that lands inside a panel is dropped
-        // and the next compose blends the panel over the patched surface again.
-        // Every band Vqro's own panels reserved, clickable or not: a patch row
-        // that lands in one of them is dropped, so chrome is never repainted
-        // over by a retained surface patch.
-        let panel_rows = self
-            .hits
-            .pane_panels
-            .iter()
-            .map(|hit| hit.rect)
-            .chain(self.pane_panel_areas.iter().copied())
-            // A collection drawn as a list owns its cells the same way a panel
-            // band does: the patch was computed for the pane, not for the list
-            // Vqro drew over it, so a row that lands inside the list is dropped.
-            .chain(self.collection_list_areas.iter().copied())
-            .collect::<Vec<_>>();
-        let shifts = self.pane_panel_band_rows.clone();
+        // Collection lists own their cells: a patch row that lands in one is
+        // dropped, so chrome is never repainted over by a retained surface patch.
+        let panel_rows = self.collection_list_areas.clone();
+        let shifts: PanelShifts = std::collections::HashMap::new();
         // The list areas also decide the cursor: a full compose suppresses the terminal
         // cursor under a list, so the direct path must not paint one there either.
         let list_areas = self.collection_list_areas.clone();

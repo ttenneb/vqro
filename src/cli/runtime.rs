@@ -1,8 +1,8 @@
 use crate::api::schema::{
     EmptyParams, Method, PaneFocusDirectionParams, PaneInputSetParams, PaneMoveParams,
-    PanePanelParams, PaneRenameParams, PaneResizeParams, PaneSplitParams, PaneSwapParams,
-    PaneTarget, PaneZoomParams, Request, TabCreateParams, TabListParams, TabRenameParams,
-    TabTarget, WorkspaceCloseParams, WorkspaceCreateParams, WorkspaceRenameParams, WorkspaceTarget,
+    PaneRenameParams, PaneResizeParams, PaneSplitParams, PaneSwapParams, PaneTarget,
+    PaneZoomParams, Request, TabCreateParams, TabListParams, TabRenameParams, TabTarget,
+    WorkspaceCloseParams, WorkspaceCreateParams, WorkspaceRenameParams, WorkspaceTarget,
     WorktreeCreateParams, WorktreeListParams, WorktreeOpenParams, WorktreeRemoveParams,
 };
 
@@ -110,8 +110,8 @@ pub(super) fn pane_zoom(params: PaneZoomParams) -> std::io::Result<i32> {
     print_method_response("cli:pane:zoom", Method::PaneZoom(params))
 }
 
-pub(super) fn pane_panel(params: PanePanelParams) -> std::io::Result<i32> {
-    print_method_response("cli:pane:panel", Method::PanePanel(params))
+pub(super) fn pane_view(params: crate::api::schema::PaneViewParams) -> std::io::Result<i32> {
+    print_method_response("cli:pane:view", Method::PaneView(params))
 }
 
 pub(super) fn pane_rename(params: PaneRenameParams) -> std::io::Result<i32> {

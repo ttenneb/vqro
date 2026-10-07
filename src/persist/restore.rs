@@ -240,6 +240,7 @@ fn reserve_restored_collection_ids(snapshot: &SessionSnapshot) {
     fn reserve_layout(layout: &LayoutSnapshot) {
         match layout {
             LayoutSnapshot::Pane(_) => {}
+            LayoutSnapshot::View { .. } => {}
             LayoutSnapshot::Stack { id, children, .. } => {
                 let _ = CollectionId::from_raw(id.raw());
                 for child in children {
@@ -275,6 +276,9 @@ fn restored_tab_identity_count(tab: &super::snapshot::TabSnapshot) -> usize {
         match layout {
             super::snapshot::LayoutSnapshot::Pane(id) => {
                 ids.insert(*id);
+            }
+            super::snapshot::LayoutSnapshot::View { pane, .. } => {
+                ids.insert(*pane);
             }
             super::snapshot::LayoutSnapshot::Stack { children, .. } => {
                 for child in children {
@@ -386,6 +390,7 @@ fn migrated_public_pane_numbers_by_old_raw(
 fn collect_layout_snapshot_pane_ids(node: &LayoutSnapshot, ids: &mut Vec<u32>) {
     match node {
         LayoutSnapshot::Pane(id) => ids.push(*id),
+        LayoutSnapshot::View { pane, .. } => ids.push(*pane),
         LayoutSnapshot::Stack { children, .. } => {
             for child in children {
                 collect_layout_snapshot_pane_ids(child, ids);
@@ -719,11 +724,19 @@ fn restore_tab(
     pane_ids.sort_by_key(|(old, _)| *old);
     let pane_ids: Vec<_> = pane_ids.into_iter().map(|(_, new)| new).collect();
 
+    // View panes are panes with no terminal record: they carry their content
+    // identity in the tree, so restore neither creates nor requires a terminal.
+    let mut view_panes = HashSet::new();
+    collect_view_panes(&typed_node, &mut view_panes);
+
     let mut panes = HashMap::new();
     let mut terminals = Vec::new();
     let mut terminal_runtimes = HashMap::new();
     let mut failed_imports = 0;
     for id in &pane_ids {
+        if view_panes.contains(id) {
+            continue;
+        }
         let old_id = reverse_id_map.get(id);
         let saved_pane = old_id.and_then(|old_id| snap.panes.get(old_id));
         let terminal_id = match saved_pane
@@ -834,7 +847,10 @@ fn restore_tab(
                     std::time::Instant::now(),
                 );
             }
-            panes.insert(*id, PaneState::new(terminal_id));
+            let mut pane_state = PaneState::new(terminal_id);
+            pane_state.agent_start_view_applied =
+                saved_pane.is_some_and(|pane| pane.agent_start_view_applied);
+            panes.insert(*id, pane_state);
             terminals.push(terminal);
             continue;
         }
@@ -932,7 +948,10 @@ fn restore_tab(
                         std::time::Instant::now(),
                     );
                 }
-                panes.insert(*id, PaneState::new(terminal_id.clone()));
+                let mut pane_state = PaneState::new(terminal_id.clone());
+                pane_state.agent_start_view_applied =
+                    saved_pane.is_some_and(|pane| pane.agent_start_view_applied);
+                panes.insert(*id, pane_state);
                 terminal_runtimes.insert(terminal_id, runtime);
                 terminals.push(terminal);
             }
@@ -959,7 +978,7 @@ fn restore_tab(
         }
     }
 
-    if panes.is_empty() {
+    if panes.is_empty() && view_panes.is_empty() {
         warn!(
             tab = ?snap.custom_name,
             "no panes could be restored for tab, dropping it"
@@ -967,7 +986,11 @@ fn restore_tab(
         return (None, failed_imports);
     }
 
-    let surviving: HashSet<PaneId> = panes.keys().copied().collect();
+    let surviving: HashSet<PaneId> = panes
+        .keys()
+        .copied()
+        .chain(view_panes.iter().copied())
+        .collect();
     let Some(recovered) = recover_typed_layout(
         snap,
         typed_node,
@@ -1148,6 +1171,9 @@ fn restore_typed_node_remapped(snap: &TabSnapshot) -> (TypedNode, HashMap<u32, P
             LayoutSnapshot::Pane(id) => {
                 ids.insert(*id);
             }
+            LayoutSnapshot::View { pane, .. } => {
+                ids.insert(*pane);
+            }
             LayoutSnapshot::Stack { children, .. } => {
                 for child in children {
                     collect(child, ids);
@@ -1169,6 +1195,11 @@ fn restore_typed_node_remapped(snap: &TabSnapshot) -> (TypedNode, HashMap<u32, P
     fn remap(node: &LayoutSnapshot, ids: &HashMap<u32, PaneId>) -> TypedNode {
         match node {
             LayoutSnapshot::Pane(old) => TypedNode::Leaf(ids[old]),
+            LayoutSnapshot::View {
+                pane,
+                extension,
+                view,
+            } => TypedNode::view(ids[pane], extension.clone(), view.clone()),
             LayoutSnapshot::Stack {
                 id,
                 selected,
@@ -1197,6 +1228,24 @@ fn restore_typed_node_remapped(snap: &TabSnapshot) -> (TypedNode, HashMap<u32, P
     (remap(&snap.layout, &id_map), id_map)
 }
 
+fn collect_view_panes(node: &TypedNode, out: &mut HashSet<PaneId>) {
+    match node {
+        TypedNode::View { pane, .. } => {
+            out.insert(*pane);
+        }
+        TypedNode::Leaf(_) => {}
+        TypedNode::Stack { children, .. } => {
+            for child in children {
+                collect_view_panes(child, out);
+            }
+        }
+        TypedNode::Split { first, second, .. } => {
+            collect_view_panes(first, out);
+            collect_view_panes(second, out);
+        }
+    }
+}
+
 fn recover_typed_layout(
     snap: &TabSnapshot,
     node: TypedNode,
@@ -1207,6 +1256,7 @@ fn recover_typed_layout(
     fn count_collection_leaves(node: &TypedNode, counts: &mut HashMap<TerminalContainerId, usize>) {
         match node {
             TypedNode::Leaf(_) => {}
+            TypedNode::View { .. } => {}
             TypedNode::Stack { id, children, .. } => {
                 *counts.entry(*id).or_default() += 1;
                 for child in children {
@@ -1238,6 +1288,17 @@ fn recover_typed_layout(
             TypedNode::Leaf(id) => {
                 (surviving.contains(&id) && placed.insert(id)).then_some(TypedNode::Leaf(id))
             }
+            // A view pane carries its own content identity and has no terminal
+            // record to be missing; it survives on placement alone.
+            TypedNode::View {
+                pane,
+                extension,
+                view,
+            } => (surviving.contains(&pane) && placed.insert(pane)).then_some(TypedNode::View {
+                pane,
+                extension,
+                view,
+            }),
             TypedNode::Stack {
                 id,
                 selected,
@@ -1321,6 +1382,7 @@ fn recover_typed_layout(
     fn collect_leaves(node: &TypedNode, leaves: &mut Vec<LayoutLeaf>) {
         match node {
             TypedNode::Leaf(pane) => leaves.push(LayoutLeaf::Pane(*pane)),
+            TypedNode::View { pane, .. } => leaves.push(LayoutLeaf::Pane(*pane)),
             TypedNode::Stack { id, children, .. } => {
                 leaves.push(LayoutLeaf::Stack(*id));
                 for child in children {
@@ -1402,6 +1464,11 @@ fn remap_inner(snap: &LayoutSnapshot, id_map: &mut HashMap<u32, PaneId>) -> Node
         LayoutSnapshot::Pane(old_id) => {
             let new_id = PaneId::alloc();
             id_map.insert(*old_id, new_id);
+            Node::Pane(new_id)
+        }
+        LayoutSnapshot::View { pane, .. } => {
+            let new_id = PaneId::alloc();
+            id_map.insert(*pane, new_id);
             Node::Pane(new_id)
         }
         LayoutSnapshot::Stack {
@@ -1706,6 +1773,7 @@ mod tests {
                             managed_agent_kind: None,
                             agent_session: None,
                             launch_argv: None,
+                            agent_start_view_applied: false,
                         },
                     )]),
                     zoomed: false,
@@ -1761,6 +1829,7 @@ mod tests {
             managed_agent_kind: None,
             agent_session: None,
             launch_argv: None,
+            agent_start_view_applied: false,
         };
         let snapshot = SessionSnapshot {
             version: super::super::snapshot::SNAPSHOT_VERSION,
@@ -2488,6 +2557,7 @@ mod tests {
                 managed_agent_kind: None,
                 agent_session: None,
                 launch_argv: None,
+                agent_start_view_applied: false,
             },
         )]);
         let mut layout = super::super::snapshot::LayoutSnapshot::Pane(1);
@@ -2655,6 +2725,7 @@ mod tests {
                                 value: "opencode-session".into(),
                             }),
                             launch_argv: None,
+                            agent_start_view_applied: false,
                         },
                     )]),
                     zoomed: false,
@@ -2747,6 +2818,7 @@ mod tests {
                                 managed_agent_kind: None,
                                 agent_session: None,
                                 launch_argv: None,
+                                agent_start_view_applied: false,
                             },
                         ),
                         (
@@ -2759,6 +2831,7 @@ mod tests {
                                 managed_agent_kind: None,
                                 agent_session: None,
                                 launch_argv: None,
+                                agent_start_view_applied: false,
                             },
                         ),
                     ]),
@@ -2839,6 +2912,7 @@ mod tests {
                     managed_agent_kind: None,
                     agent_session: None,
                     launch_argv: None,
+                    agent_start_view_applied: false,
                 },
             )
         };
@@ -2855,6 +2929,7 @@ mod tests {
                 value: "codex-session".into(),
             }),
             launch_argv: None,
+            agent_start_view_applied: false,
         };
         let mut snapshot = SessionSnapshot {
             delegations: Vec::new(),
@@ -3053,6 +3128,7 @@ mod tests {
                                 value: "codex-session".into(),
                             }),
                             launch_argv: None,
+                            agent_start_view_applied: false,
                         },
                     )]),
                     zoomed: false,
@@ -3219,6 +3295,7 @@ mod tests {
                 managed_agent_kind: None,
                 agent_session: None,
                 launch_argv: None,
+                agent_start_view_applied: false,
             },
         );
         let history = SessionHistorySnapshot {
