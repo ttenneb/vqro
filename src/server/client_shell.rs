@@ -494,7 +494,12 @@ pub(super) fn render_pane_surface(
             cell_size,
         );
     // One pass over the tab's view panes: each view pane's content identity and
-    // the public ids it covers. A per-pane tree walk would be a search per pane.
+    // the public ids it covers. Only eligible (visible) view leaves are walked: a
+    // hidden or zoomed-away view does no presentation work, and the frame below
+    // only reads the panes it drew. A per-pane tree walk would be a search per
+    // pane.
+    let visible_panes: std::collections::HashSet<crate::layout::PaneId> =
+        layout.pane_infos.iter().map(|pane| pane.id).collect();
     let view_projection = target
         .and_then(|target| {
             let workspace = app.state.workspaces.get(target.workspace_index)?;
@@ -503,6 +508,7 @@ pub(super) fn render_pane_surface(
                 tab.layout
                     .view_panes()
                     .into_iter()
+                    .filter(|view_pane| visible_panes.contains(view_pane))
                     .map(|view_pane| {
                         let content = tab.layout.view_at(view_pane);
                         let scope = tab
