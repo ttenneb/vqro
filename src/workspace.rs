@@ -1602,13 +1602,8 @@ impl Workspace {
                 tab.layout.view_panes().into_iter().collect();
             // Content is an exclusive partition: a placed pane is exactly a
             // terminal with a pane state XOR a view. A view that also carried a
-            // terminal pane state would be a fabricated terminal.
-            assert!(
-                pane_set.is_disjoint(&view_set),
-                "workspace {} tab {} a view pane must not also carry a terminal pane state",
-                self.id,
-                tab_idx
-            );
+            // terminal pane state would be a fabricated terminal, so the XOR is
+            // the whole contract (a view id is always a placed pane).
             for pane in &layout_set {
                 assert!(
                     pane_set.contains(pane) ^ view_set.contains(pane),
@@ -1843,7 +1838,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "a view pane must not also carry a terminal pane state")]
+    #[should_panic(expected = "must be exactly a terminal with a pane state or a view")]
     fn invariant_rejects_a_view_that_also_has_a_terminal_pane_state() {
         let mut ws = Workspace::test_new("views");
         let root = ws.tabs[0].root_pane;

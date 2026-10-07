@@ -48,9 +48,10 @@ retained-surface, patch and graphics-asset paths. It is not the smaller change.
   `PaneSurfaceFrame` / `PaneSurfacePatch` bytes are unchanged. Patches stay the
   plain `PaneSurfacePatch` for both codecs: view descriptors change only with a
   topology change, which forces a new full surface.
-- Serving is `shell.surface.v2` only. `shell.surface.v1` is retired **from
-  serving**, not from decode. The client advertises only `shell.surface.v2`, and
-  the welcome names `shell.surface.v2`.
+- Serving is `shell.surface.v2` only: the hello advertises `shell.surface.v2`
+  only, the server requires `shell.surface.v2` in the hello, the welcome names
+  `shell.surface.v2`, and `shell.surface.v1` is retired **from serving**, not
+  from decode.
 - Refusals are client-local. A generation-1 peer that advertises only
   `shell.surface.v1` is refused by this server at the greeting with the hello
   rejection `unsupported_surface_codec` ("update this client"). A new client

@@ -3152,17 +3152,23 @@ fn live_handoff_after_restored_failure_rolls_back_old_server() {
     live_handoff_import_failure_rolls_back_old_server_at("after_restored");
 }
 
-fn tree_has_view(node: &serde_json::Value, pane_id: &str) -> bool {
+fn tree_has_view(node: &serde_json::Value, pane_id: &str, extension: &str, view: &str) -> bool {
     match node {
         serde_json::Value::Object(object) => {
             if object.get("type").and_then(|kind| kind.as_str()) == Some("view")
                 && object.get("pane_id").and_then(|id| id.as_str()) == Some(pane_id)
+                && object.get("extension").and_then(|value| value.as_str()) == Some(extension)
+                && object.get("view").and_then(|value| value.as_str()) == Some(view)
             {
                 return true;
             }
-            object.values().any(|child| tree_has_view(child, pane_id))
+            object
+                .values()
+                .any(|child| tree_has_view(child, pane_id, extension, view))
         }
-        serde_json::Value::Array(items) => items.iter().any(|item| tree_has_view(item, pane_id)),
+        serde_json::Value::Array(items) => items
+            .iter()
+            .any(|item| tree_has_view(item, pane_id, extension, view)),
         _ => false,
     }
 }
@@ -3232,6 +3238,11 @@ fn live_handoff_preserves_a_view_pane_without_a_runtime() {
         Some("view"),
         "view: {view}"
     );
+    assert_eq!(
+        view["result"]["pane"]["pane_id"].as_str(),
+        Some(view_pane.as_str()),
+        "the view's public pane identity is preserved: {view}"
+    );
     assert!(
         view["result"]["pane"]["terminal_id"].is_null(),
         "a view has no terminal: {view}"
@@ -3256,14 +3267,20 @@ fn live_handoff_preserves_a_view_pane_without_a_runtime() {
         "the public pane identity is preserved"
     );
 
-    // The exported tree still holds the view leaf with its identity.
+    // The exported tree still holds the view leaf with the same pane id and
+    // (extension, view) pair.
     let exported = request(
         &api_socket,
         serde_json::json!({"id":"test:tree","method":"layout.tree.export","params":{"tab_id":null,"pane_id":null}}),
     );
     assert!(
-        tree_has_view(&exported["result"]["layout"]["root"], &view_pane),
-        "the view leaf survives the live transfer: {exported}"
+        tree_has_view(
+            &exported["result"]["layout"]["root"],
+            &view_pane,
+            "vqro.tasks",
+            "tasks"
+        ),
+        "the view leaf survives the live transfer with its identity: {exported}"
     );
 
     let _ = request(
