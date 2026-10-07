@@ -18,8 +18,8 @@ use support::{
     cleanup_test_base, client_shell_handshake, read_server_message, register_runtime_dir,
     register_spawned_herdr_pid, unregister_spawned_herdr_pid, wait_for_client_shell_bootstrap,
     wait_for_message_variant, wait_for_message_variants, wait_for_socket, wait_until,
-    CURRENT_ENDPOINT_PROTOCOL_GENERATION as CURRENT_PROTOCOL, SERVER_MESSAGE_PANE_SURFACE,
-    SERVER_MESSAGE_PANE_SURFACE_PATCH, SERVER_MESSAGE_SEMANTIC_NOTIFICATION,
+    CURRENT_ENDPOINT_PROTOCOL_GENERATION as CURRENT_PROTOCOL, SERVER_MESSAGE_PANE_SURFACE_PATCH,
+    SERVER_MESSAGE_PANE_SURFACE_V2, SERVER_MESSAGE_SEMANTIC_NOTIFICATION,
     SERVER_MESSAGE_SERVER_SHUTDOWN,
 };
 
@@ -1596,7 +1596,7 @@ fn client_receives_pane_surface_after_pane_output() {
     assert!(wait_for_message_variant(
         &mut stream,
         Duration::from_secs(5),
-        SERVER_MESSAGE_PANE_SURFACE,
+        SERVER_MESSAGE_PANE_SURFACE_V2,
     )
     .expect("wait for created workspace surface"));
 
@@ -1615,7 +1615,7 @@ fn client_receives_pane_surface_after_pane_output() {
             &mut stream,
             Duration::from_secs(5),
             &[
-                SERVER_MESSAGE_PANE_SURFACE,
+                SERVER_MESSAGE_PANE_SURFACE_V2,
                 SERVER_MESSAGE_PANE_SURFACE_PATCH,
             ],
         )

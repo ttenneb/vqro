@@ -38,7 +38,7 @@ pub use self::snapshot::{
 pub(crate) use self::snapshot::{deserialize_handoff_snapshot, normalize_identity_changes};
 pub(crate) use self::snapshot::{
     parse_snapshot, reserve_empty_collection, validate_snapshot, LEGACY_SNAPSHOT_WRITER_VERSION,
-    SNAPSHOT_VERSION,
+    PREDECESSOR_SNAPSHOT_VERSION, SNAPSHOT_VERSION,
 };
 
 pub(crate) fn collections_checkpoint_paths() -> coordinator::PersistencePaths {

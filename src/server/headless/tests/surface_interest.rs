@@ -80,7 +80,6 @@ async fn metadata_only_shell_is_isolated_until_surface_activation() {
             pane_view_enabled: false,
             terminal_views_enabled: false,
             writer,
-            pane_panels_enabled: false,
             host_views_enabled: false,
         })
     );
@@ -179,11 +178,9 @@ async fn metadata_only_shell_is_isolated_until_surface_activation() {
     assert_eq!(server.effective_size, (101, 37));
 
     server.render_and_stream();
-    let ServerMessage::PaneSurface(surface) =
-        read_server_message(render_rx.recv().expect("activated surface"))
-    else {
-        panic!("expected pane surface");
-    };
+    let surface = pane_surface(read_server_message(
+        render_rx.recv().expect("activated surface"),
+    ));
     assert_eq!((surface.frame.width, surface.frame.height), (101, 37));
     assert!(surface.projection_revision >= activation_floor);
     assert_eq!(surface.surface_revision, 1);
@@ -255,11 +252,9 @@ async fn metadata_only_shell_is_isolated_until_surface_activation() {
     };
     assert!(reactivation_floor > activation_floor);
     server.render_and_stream();
-    let ServerMessage::PaneSurface(surface) =
-        read_server_message(render_rx.recv().expect("reactivated surface"))
-    else {
-        panic!("expected replacement pane surface");
-    };
+    let surface = pane_surface(read_server_message(
+        render_rx.recv().expect("reactivated surface"),
+    ));
     assert!(frame_text(&surface.frame).contains("REACTIVATED"));
     assert!(surface.projection_revision >= reactivation_floor);
     assert_eq!(surface.surface_revision, 2);
@@ -303,7 +298,6 @@ async fn background_surface_activation_preserves_focused_viewer_geometry() {
             pane_view_enabled: false,
             terminal_views_enabled: false,
             writer,
-            pane_panels_enabled: false,
             host_views_enabled: false,
         })
     );
@@ -421,7 +415,6 @@ async fn presentation_sync_epoch_replays_modes_and_title() {
             pane_view_enabled: false,
             terminal_views_enabled: false,
             writer,
-            pane_panels_enabled: false,
             host_views_enabled: false,
         })
     );
@@ -542,7 +535,6 @@ async fn two_headless_servers_drive_atomic_endpoint_handoff() {
             pane_view_enabled: false,
             terminal_views_enabled: false,
             writer: source_writer,
-            pane_panels_enabled: false,
             host_views_enabled: false,
         })
     );
@@ -574,7 +566,6 @@ async fn two_headless_servers_drive_atomic_endpoint_handoff() {
             pane_view_enabled: false,
             terminal_views_enabled: false,
             writer: target_writer,
-            pane_panels_enabled: false,
             host_views_enabled: false,
         })
     );
@@ -719,11 +710,9 @@ async fn two_headless_servers_drive_atomic_endpoint_handoff() {
         snapshot_progress,
         crate::client::endpoint::SurfaceActivationProgress::Pending
     );
-    let ServerMessage::PaneSurface(coherent_surface) =
-        read_server_message(target_render.recv().expect("target replacement surface"))
-    else {
-        panic!("expected target pane surface");
-    };
+    let coherent_surface = pane_surface(read_server_message(
+        target_render.recv().expect("target replacement surface"),
+    ));
     assert_eq!(
         activation.receive_surface(&target_id, 7, coherent_surface),
         crate::client::endpoint::SurfaceActivationProgress::Ready
@@ -794,11 +783,9 @@ async fn two_headless_servers_drive_atomic_endpoint_handoff() {
         sync_progress,
         crate::client::endpoint::SurfaceActivationProgress::Pending
     );
-    let ServerMessage::PaneSurface(sync_surface) =
-        read_server_message(target_render.recv().expect("presentation sync surface"))
-    else {
-        panic!("expected synchronized target surface");
-    };
+    let sync_surface = pane_surface(read_server_message(
+        target_render.recv().expect("presentation sync surface"),
+    ));
     assert_eq!(
         activation.receive_surface(&target_id, 7, sync_surface),
         crate::client::endpoint::SurfaceActivationProgress::Ready

@@ -643,6 +643,19 @@ fn api_schema_json_prints_bundled_schema() {
             .map(serde_json::Map::len),
         Some(5)
     );
+    // Name the published pane content kind rather than trusting a bare count: a
+    // silent removal must not pass as a changed total.
+    assert_eq!(
+        schema["schemas"]["event"]["$defs"]["PaneContent"]["enum"],
+        serde_json::json!(["terminal", "view", "unknown"]),
+        "the pane content kind must be published with its unknown-safe fallback"
+    );
+    assert!(
+        schema["schemas"]["event"]["$defs"]["PaneInfo"]["properties"]
+            .get("content")
+            .is_some(),
+        "PaneInfo must publish its content kind"
+    );
 }
 
 #[test]

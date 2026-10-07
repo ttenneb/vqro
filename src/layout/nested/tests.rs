@@ -305,3 +305,173 @@ fn nested_adversarial_app_mutations_keep_identity_and_terminal_authority_without
         .focus_pane(panes[1]);
     assert_identities(&state);
 }
+
+fn view_node(raw: u32, extension: &str, id: &str) -> TypedNode {
+    TypedNode::view(PaneId::from_raw(raw), extension, id)
+}
+
+#[test]
+fn view_scope_covers_every_terminal_in_its_parent_box() {
+    // split[ view(9), stack[1,2,3] ]: the view's parent is the split, so its
+    // scope is all three terminals, including the two hidden stack members.
+    let root = split(
+        view_node(9, "vqro.tasks", "tasks"),
+        stack(1, 0, vec![pane(1), pane(2), pane(3)]),
+    );
+    let tree = layout(root, 9);
+    assert_eq!(
+        tree.view_scope(PaneId::from_raw(9)),
+        vec![
+            PaneId::from_raw(1),
+            PaneId::from_raw(2),
+            PaneId::from_raw(3)
+        ]
+    );
+}
+
+#[test]
+fn view_scope_uses_the_nearest_parent_container_not_the_root() {
+    // split[ split[ view(9), pane(1) ], pane(2) ]: the view's own box holds only
+    // pane(1), so pane(2) in the outer box is out of scope.
+    let root = split(split(view_node(9, "vqro.tasks", "tasks"), pane(1)), pane(2));
+    let tree = layout(root, 9);
+    assert_eq!(
+        tree.view_scope(PaneId::from_raw(9)),
+        vec![PaneId::from_raw(1)]
+    );
+}
+
+#[test]
+fn lone_view_has_no_scope_and_is_still_one_pane() {
+    let tree = layout(view_node(9, "vqro.tasks", "tasks"), 9);
+    assert!(tree.view_scope(PaneId::from_raw(9)).is_empty());
+    assert_eq!(tree.pane_count(), 1);
+    assert_eq!(tree.focused(), PaneId::from_raw(9));
+    assert!(tree.typed_root().valid_structure());
+}
+
+#[test]
+fn split_pane_with_view_inserts_a_content_bearing_leaf_with_no_terminal() {
+    let target = PaneId::alloc();
+    let mut tree = layout(pane(target.raw()), target.raw());
+    let (view_pane, content) = tree
+        .split_pane_with_view(target, Direction::Horizontal, 0.5, "vqro.tasks", "tasks")
+        .expect("valid view identity is admitted");
+    assert_ne!(view_pane, target);
+    assert_eq!(content.extension, "vqro.tasks");
+    assert_eq!(content.view, "tasks");
+    assert_eq!(
+        tree.view_at(view_pane).map(|view| view.view),
+        Some("tasks".to_owned())
+    );
+    assert!(tree.root.contains_pane(view_pane));
+    assert_eq!(tree.pane_count(), 2);
+    assert_eq!(
+        tree.view_scope(view_pane),
+        vec![target],
+        "the new view covers the pane it was split beside"
+    );
+    assert!(tree.typed_root().valid_structure());
+    assert_eq!(tree.focused(), target);
+}
+
+#[test]
+fn split_pane_with_view_rejects_an_invalid_identity_and_changes_nothing() {
+    let mut tree = layout(pane(1), 1);
+    let before = tree.root.clone();
+    assert!(tree
+        .split_pane_with_view(
+            PaneId::from_raw(1),
+            Direction::Horizontal,
+            0.5,
+            "bad extension",
+            "tasks"
+        )
+        .is_none());
+    assert!(tree
+        .split_pane_with_view(
+            PaneId::from_raw(1),
+            Direction::Horizontal,
+            0.5,
+            "vqro.tasks",
+            ""
+        )
+        .is_none());
+    assert_eq!(tree.root, before);
+    assert_eq!(tree.pane_count(), 1);
+}
+
+#[test]
+fn view_pane_participates_in_focus_close_and_structure_uniqueness() {
+    let mut tree = layout(split(pane(1), view_node(9, "vqro.tasks", "tasks")), 1);
+    let view_pane = PaneId::from_raw(9);
+    tree.focus_pane(view_pane);
+    assert_eq!(tree.focused(), view_pane);
+    assert!(tree.typed_root().valid_structure());
+    assert!(tree.close_pane(view_pane));
+    assert_eq!(tree.pane_count(), 1);
+    assert!(!tree.root.contains_pane(view_pane));
+}
+
+#[test]
+fn swap_moves_a_views_content_and_identity_with_it() {
+    let terminal = PaneId::alloc();
+    let view_pane = PaneId::alloc();
+    let mut tree = layout(
+        split(
+            pane(terminal.raw()),
+            view_node(view_pane.raw(), "vqro.tasks", "tasks"),
+        ),
+        terminal.raw(),
+    );
+    assert!(tree.swap_panes(terminal, view_pane));
+    let root = tree.typed_root();
+    let TypedNode::Split { first, second, .. } = root else {
+        panic!("expected the split");
+    };
+    // The view travels with its identity; the terminal keeps its own.
+    assert!(matches!(**first, TypedNode::View { pane, .. } if pane == view_pane));
+    assert!(matches!(**second, TypedNode::Leaf(pane) if pane == terminal));
+    assert_eq!(
+        tree.view_at(view_pane).map(|content| content.view),
+        Some("tasks".to_owned()),
+        "the view still has its content"
+    );
+    assert!(tree.view_at(terminal).is_none());
+    assert_eq!(
+        tree.view_scope(view_pane),
+        vec![terminal],
+        "the view now covers the terminal beside it"
+    );
+    assert_eq!(tree.pane_count(), 2);
+    assert!(tree.typed_root().valid_structure());
+}
+
+#[test]
+fn swap_moves_two_differently_configured_views_with_their_contents() {
+    let first_view = PaneId::alloc();
+    let second_view = PaneId::alloc();
+    let mut tree = layout(
+        split(
+            view_node(first_view.raw(), "vqro.tasks", "tasks"),
+            view_node(second_view.raw(), "vqro.tasks", "messages"),
+        ),
+        first_view.raw(),
+    );
+    assert!(tree.swap_panes(first_view, second_view));
+    let TypedNode::Split { first, second, .. } = tree.typed_root() else {
+        panic!("expected the split");
+    };
+    // The contents moved with their identities, not into each other.
+    assert!(matches!(**first, TypedNode::View { pane, .. } if pane == second_view));
+    assert!(matches!(**second, TypedNode::View { pane, .. } if pane == first_view));
+    assert_eq!(
+        tree.view_at(first_view).map(|content| content.view),
+        Some("tasks".to_owned())
+    );
+    assert_eq!(
+        tree.view_at(second_view).map(|content| content.view),
+        Some("messages".to_owned())
+    );
+    assert!(tree.typed_root().valid_structure());
+}

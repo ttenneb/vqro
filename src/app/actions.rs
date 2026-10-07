@@ -1494,7 +1494,6 @@ impl AppState {
                 Vec::new()
             }
             AppEvent::WorktreeRuntimeRestoreFailed { .. } => Vec::new(),
-            AppEvent::PanePanelRequested { .. } => Vec::new(),
             AppEvent::UpdateReady {
                 version,
                 install_command,

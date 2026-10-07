@@ -13,7 +13,6 @@ pub(crate) enum EndpointControlMessage {
     Structure(Box<crate::protocol::endpoint::ClientShellStructureProjection>),
     HostDocuments(Box<crate::protocol::endpoint::HostDocumentsProjectionV1>),
     TerminalViewsSurface(Box<crate::protocol::endpoint::ServerTerminalViewsSurface>),
-    PanePanelRequest(Box<crate::protocol::endpoint::ServerPanePanelRequest>),
     PaneViewResult(Box<crate::protocol::endpoint::ServerPaneViewResult>),
     PaneViewActionResult(Box<crate::protocol::endpoint::ServerPaneViewActionResult>),
     NativeApiResponse(crate::native_api::NativeEndpointResponseChunkV1),
@@ -77,11 +76,6 @@ pub(crate) fn decode_endpoint_control(
         return Ok(EndpointControlMessage::TerminalViewsSurface(Box::new(
             surface,
         )));
-    }
-    if kind == crate::protocol::endpoint::PANE_PANELS_REQUEST_KIND {
-        let request = serde_json::from_str(data)
-            .map_err(|error| format!("invalid pane panel request: {error}"))?;
-        return Ok(EndpointControlMessage::PanePanelRequest(Box::new(request)));
     }
     if kind == crate::protocol::endpoint::HOST_DOCUMENTS_KIND {
         let projection: crate::protocol::endpoint::HostDocumentsProjectionV1 =

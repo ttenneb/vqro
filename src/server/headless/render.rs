@@ -1050,6 +1050,7 @@ impl HeadlessServer {
                     let crate::server::client_shell::RenderedPaneSurface {
                         frame,
                         panes,
+                        views,
                         collections,
                         splits,
                         popup,
@@ -1071,6 +1072,7 @@ impl HeadlessServer {
                     );
                     surface_parts = Some((
                         panes,
+                        views,
                         collections,
                         splits,
                         popup,
@@ -1159,34 +1161,37 @@ impl HeadlessServer {
                 })
                 .ok()
             });
-            let has_graphics = surface_parts
-                .as_ref()
-                .is_some_and(|(_, _, _, _, graphics, _)| {
-                    !graphics.assets.is_empty()
-                        || !graphics.placements.is_empty()
-                        || !graphics.retained_assets.is_empty()
-                });
-            let mut next_shell_graphics_delivery = None;
-            let prepared = if let Some((panes, collections, splits, popup, graphics, delivery)) =
+            let has_graphics =
                 surface_parts
-            {
-                next_shell_graphics_delivery = Some(delivery);
-                client
-                    .render_state
-                    .prepare_pane_surface(protocol::PaneSurfaceFrame {
-                        boot_id: self.client_shell_boot_id.clone(),
-                        projection_revision: shell_projection_revision,
-                        surface_revision: 0,
-                        frame,
-                        panes,
-                        collections,
-                        splits,
-                        popup,
-                        graphics,
-                    })
-            } else {
-                client.render_state.prepare_frame(frame)
-            };
+                    .as_ref()
+                    .is_some_and(|(_, _, _, _, _, graphics, _)| {
+                        !graphics.assets.is_empty()
+                            || !graphics.placements.is_empty()
+                            || !graphics.retained_assets.is_empty()
+                    });
+            let mut next_shell_graphics_delivery = None;
+            let prepared =
+                if let Some((panes, views, collections, splits, popup, graphics, delivery)) =
+                    surface_parts
+                {
+                    next_shell_graphics_delivery = Some(delivery);
+                    client.render_state.prepare_pane_surface(
+                        protocol::PaneSurfaceFrame {
+                            boot_id: self.client_shell_boot_id.clone(),
+                            projection_revision: shell_projection_revision,
+                            surface_revision: 0,
+                            frame,
+                            panes,
+                            collections,
+                            splits,
+                            popup,
+                            graphics,
+                        },
+                        views,
+                    )
+                } else {
+                    client.render_state.prepare_frame(frame)
+                };
             let Some(mut prepared) = prepared else {
                 if let Some(framed) = terminal_views_render {
                     match writer.render.try_send(framed) {

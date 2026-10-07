@@ -4,6 +4,35 @@ fn key(code: KeyCode) -> RawInputEvent {
     RawInputEvent::Key(crate::input::TerminalKey::new(code, KeyModifiers::empty()))
 }
 
+#[test]
+fn startup_codec_refusal_notice_is_client_local_and_survives_typing() {
+    // The startup codec refusal is classified as endpoint attention
+    // (`client::endpoint::supervisor::tests::codec_handshake_refusal_is_client_local_attention_while_network_failures_retry`).
+    // The attention route presents it through `receive_endpoint_unavailable`, so
+    // this covers that display and its persistence on the exact route: it is a
+    // client-local notice, and typing in a pane does not dismiss it. (A supported
+    // peer is unaffected; the real-predecessor probe proves that server side.)
+    let mut state = state_with_two_terminals();
+    let message = "client and server have no compatible endpoint core codecs";
+    assert!(state.receive_endpoint_unavailable(message.to_owned()));
+    let notice = state
+        .visible_endpoint_notice
+        .as_ref()
+        .expect("codec refusal notice is shown");
+    assert_eq!(
+        notice.key.kind,
+        super::super::state::ClientEndpointNoticeKind::Unavailable
+    );
+    assert_eq!(notice.title, "Endpoint unavailable");
+    assert_eq!(notice.body, message);
+
+    state.handle_raw_events(vec![key(KeyCode::Char('a'))]);
+    assert!(
+        state.visible_endpoint_notice.is_some(),
+        "typing in a pane must not dismiss the client-local notice"
+    );
+}
+
 fn state_recovery_row(
     state: &ClientShellState,
     index: usize,

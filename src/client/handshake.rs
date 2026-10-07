@@ -12,10 +12,10 @@ use crate::ipc::LocalStream;
 use crate::protocol::endpoint::{
     EndpointClientHello, EndpointServerWelcome, BLOB_CODEC_V1, ENDPOINT_HELLO_KIND,
     ENDPOINT_PROTOCOL_GENERATION, ENDPOINT_WELCOME_KIND, HOST_DOCUMENTS_KIND, HOST_VIEWS_KIND,
-    INPUT_CODEC_V1, PANE_PANELS_KIND, PANE_PANELS_REQUEST_KIND, PANE_VIEWPORT_KIND,
-    PANE_VIEW_ACTION_KIND, PANE_VIEW_ACTION_RESULT_KIND, PANE_VIEW_CANCEL_KIND,
-    PANE_VIEW_CONFIRM_KIND, PANE_VIEW_REQUEST_KIND, PANE_VIEW_RESULT_KIND, SESSION_STRUCTURE_KIND,
-    SNAPSHOT_CODEC_V1, SURFACE_CODEC_V1, TERMINAL_VIEWS_INTEREST_KIND, TERMINAL_VIEWS_SURFACE_KIND,
+    INPUT_CODEC_V1, PANE_VIEWPORT_KIND, PANE_VIEW_ACTION_KIND, PANE_VIEW_ACTION_RESULT_KIND,
+    PANE_VIEW_CANCEL_KIND, PANE_VIEW_CONFIRM_KIND, PANE_VIEW_REQUEST_KIND, PANE_VIEW_RESULT_KIND,
+    SESSION_STRUCTURE_KIND, SNAPSHOT_CODEC_V1, SURFACE_CODEC_V2, TERMINAL_VIEWS_INTEREST_KIND,
+    TERMINAL_VIEWS_SURFACE_KIND,
 };
 use crate::protocol::{
     self, ClientMessage, RenderEncoding, ServerMessage, MAX_FRAME_SIZE, PROTOCOL_VERSION,
@@ -186,7 +186,12 @@ pub(super) fn do_handshake(
             mouse_capture,
             surface_active,
             snapshot_codecs: vec![SNAPSHOT_CODEC_V1.into()],
-            surface_codecs: vec![SURFACE_CODEC_V1.into()],
+            // Advertise only the served codec. v1 is retired from serving and is
+            // not negotiated support: listing it would let a predecessor select
+            // v1 and emit its connected/geometry event before this client rejects
+            // the welcome. This client still decodes the frozen v1 shape for the
+            // historical contract, but never asks to be served it.
+            surface_codecs: vec![SURFACE_CODEC_V2.into()],
             input_codecs: vec![INPUT_CODEC_V1.into()],
             blob_codecs: vec![BLOB_CODEC_V1.into()],
             control_kinds: vec![
@@ -201,8 +206,6 @@ pub(super) fn do_handshake(
                 PANE_VIEW_ACTION_RESULT_KIND.into(),
                 PANE_VIEW_CONFIRM_KIND.into(),
                 TERMINAL_VIEWS_INTEREST_KIND.into(),
-                PANE_PANELS_KIND.into(),
-                PANE_PANELS_REQUEST_KIND.into(),
                 TERMINAL_VIEWS_SURFACE_KIND.into(),
                 crate::native_api::NATIVE_API_REQUEST_KIND_V1.into(),
                 crate::native_api::NATIVE_API_RESPONSE_KIND_V1.into(),
@@ -270,9 +273,12 @@ pub(super) fn do_handshake(
                 error: error.message,
             });
         }
+        // Serving is v2-only: a predecessor that offers only `shell.surface.v1`
+        // is refused cleanly, client-locally, instead of being rendered with a
+        // fallback v1 surface.
         if welcome.generation != ENDPOINT_PROTOCOL_GENERATION
             || welcome.snapshot_codec != SNAPSHOT_CODEC_V1
-            || welcome.surface_codec != SURFACE_CODEC_V1
+            || welcome.surface_codec != SURFACE_CODEC_V2
             || welcome.input_codec != INPUT_CODEC_V1
             || welcome.blob_codec != BLOB_CODEC_V1
         {

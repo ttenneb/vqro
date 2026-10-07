@@ -483,6 +483,16 @@ impl PendingEndpointActivation {
         generation: u64,
         surface: crate::protocol::PaneSurfaceFrame,
     ) -> SurfaceActivationProgress {
+        self.receive_surface_with_views(endpoint_id, generation, surface, Vec::new())
+    }
+
+    pub(crate) fn receive_surface_with_views(
+        &mut self,
+        endpoint_id: &ClientEndpointId,
+        generation: u64,
+        surface: crate::protocol::PaneSurfaceFrame,
+        views: Vec<crate::protocol::PaneSurfaceViewEntryV2>,
+    ) -> SurfaceActivationProgress {
         let lease = match &self.phase {
             ActivationPhase::ActivatingTarget { .. } => &self.target,
             ActivationPhase::RestoringSource { .. } => &self.source,
@@ -499,7 +509,7 @@ impl PendingEndpointActivation {
             ActivationPhase::ActivatingTarget { evidence, .. }
             | ActivationPhase::RestoringSource { evidence, .. }
             | ActivationPhase::SynchronizingPresentation { evidence, .. } => {
-                evidence.record_surface(surface)
+                evidence.record_surface(surface, views)
             }
             _ => unreachable!("checked activation phase"),
         }
@@ -830,7 +840,7 @@ impl PendingEndpointActivation {
         {
             let lease = lease.clone();
             let completion = (**completion).clone();
-            let surface = coherent_completion_surface(
+            let (surface, views) = coherent_completion_surface(
                 shell,
                 &lease,
                 evidence,
@@ -845,7 +855,7 @@ impl PendingEndpointActivation {
                     "endpoint became unavailable during presentation synchronization".into(),
                 );
             }
-            shell.set_pane_surface(surface);
+            shell.set_pane_surface_with_views(surface, views);
             self.start_presentation_effects_fence(endpoints, lease, completion)?;
             return Ok(ActivationCompletion::AwaitingPresentationEffects);
         }
@@ -893,7 +903,7 @@ impl PendingEndpointActivation {
             }
             _ => return Err("endpoint activation completed in an invalid phase".into()),
         };
-        let surface = coherent_completion_surface(
+        let (surface, views) = coherent_completion_surface(
             shell,
             &lease,
             evidence,
@@ -910,7 +920,7 @@ impl PendingEndpointActivation {
         let activated = shell.activate_endpoint_projection(&lease.endpoint_id);
         debug_assert!(activated, "preflighted endpoint projection must activate");
         debug_assert!(shell.endpoint_is_active(endpoints.active_id()));
-        shell.set_pane_surface(surface);
+        shell.set_pane_surface_with_views(surface, views);
         self.start_presentation_sync(endpoints, lease.clone(), completion)?;
         Ok(ActivationCompletion::AwaitingPresentationSync {
             previous: self.source.endpoint_id.clone(),

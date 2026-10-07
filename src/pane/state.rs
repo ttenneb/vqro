@@ -10,6 +10,9 @@ pub struct PaneState {
     pub seen: bool,
     /// Whether unmodified right-click gestures should be forwarded to the pane application.
     pub right_click_passthrough: bool,
+    /// The server-side agent-start rule has already run for this terminal, so a
+    /// later agent start in it does not add another view pane. Persisted.
+    pub agent_start_view_applied: bool,
 }
 
 impl PaneState {
@@ -18,6 +21,7 @@ impl PaneState {
             attached_terminal_id,
             seen: true,
             right_click_passthrough: false,
+            agent_start_view_applied: false,
         }
     }
 }

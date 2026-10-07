@@ -620,7 +620,8 @@ mod tests {
     fn pane_info_with_scroll(scroll: Option<PaneScrollInfo>) -> PaneInfo {
         PaneInfo {
             pane_id: "pane_1".into(),
-            terminal_id: "terminal_1".into(),
+            content: crate::api::schema::PaneContent::Terminal,
+            terminal_id: Some("terminal_1".into()),
             workspace_id: "workspace_1".into(),
             tab_id: "tab_1".into(),
             focused: true,

@@ -109,17 +109,20 @@ impl RenderPipeline {
         self.graphics_delivery = rendered.graphics_delivery;
 
         let started = Instant::now();
-        self.client.set_pane_surface(PaneSurfaceFrame {
-            boot_id: "bench-boot".into(),
-            projection_revision: 1,
-            surface_revision: 0,
-            frame: rendered.frame,
-            panes: rendered.panes,
-            collections: rendered.collections,
-            splits: rendered.splits,
-            popup: rendered.popup,
-            graphics: rendered.graphics,
-        });
+        self.client.set_pane_surface_with_views(
+            PaneSurfaceFrame {
+                boot_id: "bench-boot".into(),
+                projection_revision: 1,
+                surface_revision: 0,
+                frame: rendered.frame,
+                panes: rendered.panes,
+                collections: rendered.collections,
+                splits: rendered.splits,
+                popup: rendered.popup,
+                graphics: rendered.graphics,
+            },
+            rendered.views,
+        );
         black_box(
             self.client
                 .compose(COLS, ROWS)
@@ -268,6 +271,51 @@ fn workspaces(workspace_count: usize) -> Vec<Workspace> {
 
 fn active_panes(pane_count: usize) -> Vec<Workspace> {
     vec![populated_panes(pane_count)]
+}
+
+/// A workspace whose active tab holds `view_count` view panes beside a populated
+/// terminal, so the surface projection walks `view_count` drawn views, each with
+/// positive geometry. Splitting the largest pane along its longer axis keeps the
+/// views pane-sized instead of halving one branch into slivers.
+///
+/// This exercises descriptor/scope projection (content lookup plus the
+/// placement-scope walk), not populated view content composition; no document
+/// fixture is loaded.
+fn view_populated(view_count: usize) -> Workspace {
+    let history = history();
+    let surface = pane_surface_rect();
+    let mut workspace = Workspace::test_new("bench-views");
+    let root = workspace.tabs[0].root_pane;
+    workspace.insert_test_runtime(root, populated_runtime(surface, &history));
+    for _ in 0..view_count {
+        let Some((target, direction)) = workspace.tabs[0]
+            .layout
+            .panes(surface)
+            .into_iter()
+            .max_by_key(|pane| u32::from(pane.rect.width) * u32::from(pane.rect.height))
+            .map(|pane| {
+                let direction = if pane.rect.width >= pane.rect.height {
+                    Direction::Horizontal
+                } else {
+                    Direction::Vertical
+                };
+                (pane.id, direction)
+            })
+        else {
+            break;
+        };
+        if workspace
+            .split_pane_with_view(target, "bench.views", "v", direction, 0.5, false)
+            .is_none()
+        {
+            break;
+        }
+    }
+    workspace
+}
+
+fn view_panes(view_count: usize) -> Vec<Workspace> {
+    vec![view_populated(view_count)]
 }
 
 /// Output keeps arriving between samples, so each sample renders a screen that
@@ -441,6 +489,25 @@ fn print_recovery_browser_profile() {
     print_stage("client shell composition", &rows, |stats| stats.client);
 }
 
+/// The surface projection's view branch at 1 and 15 drawn view panes.
+///
+/// This measures view descriptor/scope projection only (not populated view
+/// content composition, which would need a document fixture); the flat
+/// terminal-only fixture cannot measure this branch at all.
+fn print_view_panes_profile() {
+    let rows = [1usize, 15].map(|count| (count, profile(view_panes, count)));
+    println!("active view panes (view descriptor/scope projection only, no document fixture)");
+    print_stage("server pane surface", &rows, |stats| stats.server);
+    // The combined row includes client compose, which without published
+    // documents does no per-view row work, so it too excludes populated view
+    // content.
+    print_stage(
+        "combined pipeline (client compose draws no view rows without documents)",
+        &rows,
+        |stats| stats.total,
+    );
+}
+
 fn print_terminal_views_profile() {
     println!("independent terminal view projection");
     for count in [1usize, 15] {
@@ -482,6 +549,7 @@ async fn render_scale_profile() {
     print_snapshot_encoding_profiles("active panes", active_panes);
     print_token_rule_profiles();
     print_recovery_browser_profile();
+    print_view_panes_profile();
     print_terminal_views_profile();
 }
 
@@ -519,5 +587,42 @@ mod tests {
             .filter(|info| !info.rect.is_empty())
             .count();
         assert_eq!(missing, 15);
+    }
+
+    /// The view fixture proves its own claim: the requested cardinality of view
+    /// panes is placed, every one is drawn, and every one has positive geometry.
+    /// Without this, a chain of halved splits could report "15 views" while only
+    /// the first few have any area.
+    #[tokio::test(flavor = "current_thread")]
+    async fn view_populated_fixture_places_the_requested_nonzero_views() {
+        let surface = pane_surface_rect();
+        for count in [1usize, 15] {
+            let workspace = view_populated(count);
+            let tab = &workspace.tabs[0];
+            assert_eq!(
+                tab.layout.view_panes().len(),
+                count,
+                "the fixture places {count} view panes"
+            );
+            let drawn_views = tab
+                .layout
+                .panes(surface)
+                .into_iter()
+                .filter(|info| tab.layout.view_at(info.id).is_some())
+                .collect::<Vec<_>>();
+            assert_eq!(
+                drawn_views.len(),
+                count,
+                "the frame draws {count} view panes"
+            );
+            for info in drawn_views {
+                assert!(
+                    !info.rect.is_empty(),
+                    "{count} views: view {:?} has zero-area geometry {:?}",
+                    info.id,
+                    info.rect
+                );
+            }
+        }
     }
 }

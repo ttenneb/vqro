@@ -320,42 +320,6 @@ impl HeadlessServer {
     /// in the headless server — use this method instead.
     ///
     /// Returns true if the event changed visual state (requiring a re-render).
-    /// Send one user panel request to every attached shell client that
-    /// advertises the pane-panels control. Older clients ignore it and keep
-    /// their own display state.
-    pub(super) fn broadcast_pane_panel_request(
-        &mut self,
-        pane_id: &str,
-        view_id: Option<String>,
-        action: crate::protocol::endpoint::ServerPanePanelAction,
-    ) {
-        let request = crate::protocol::endpoint::ServerPanePanelRequest {
-            pane_id: pane_id.to_owned(),
-            view_id,
-            action,
-        };
-        let Ok(data) = serde_json::to_string(&request) else {
-            return;
-        };
-        let targets = self
-            .clients
-            .iter()
-            .filter(|(_, client)| {
-                client.is_active_shell_client() && client.shell_pane_panels_enabled
-            })
-            .map(|(client_id, _)| *client_id)
-            .collect::<Vec<_>>();
-        for client_id in targets {
-            self.send_to_client(
-                client_id,
-                ServerMessage::EndpointControl {
-                    kind: crate::protocol::endpoint::PANE_PANELS_REQUEST_KIND.into(),
-                    data: data.clone(),
-                },
-            );
-        }
-    }
-
     pub(super) fn handle_internal_event_with_forwarding(&mut self, mut ev: AppEvent) -> bool {
         if matches!(&ev, AppEvent::HostRelationshipsDocumentFinished(_)) {
             let AppEvent::HostRelationshipsDocumentFinished(result) = ev else {
@@ -398,15 +362,6 @@ impl HeadlessServer {
         } else {
             None
         };
-        if let AppEvent::PanePanelRequested {
-            pane_id,
-            view_id,
-            action,
-        } = &ev
-        {
-            self.broadcast_pane_panel_request(pane_id, view_id.clone(), *action);
-            return false;
-        }
         let changed = match &ev {
             AppEvent::TerminalBell { pane_id, count } => {
                 if !self.send_to_foreground_client(ServerMessage::TerminalBell { count: *count }) {

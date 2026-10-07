@@ -185,13 +185,20 @@ input; its writer expectation becomes a canonical-tree conversion expectation.
 Tree output and v8 persistence get separate expectations; no old fixture is
 rewritten to bless a wire change.
 
+**Recorded generation-scoped extension (surface codec, 2026-10-07).** The pane
+surface lane is settled by
+[`docs/next/architecture/endpoint-surface-codec-v2.md`](docs/next/architecture/endpoint-surface-codec-v2.md),
+which is normative for this change and must be read before touching that lane.
+`ServerMessage` has one appended variant, `PaneSurfaceV2` (tag 21); serving is
+`shell.surface.v2` only, and patches stay `PaneSurfacePatch`.
+
 - Named core codecs are immutable. Do not add, remove, reorder, or reinterpret fields or enum variants reachable from a published codec. Introduce a new codec name and keep the old codec as a fallback instead.
 - Keep baseline JSON handshake and snapshot fields required. New JSON fields must be optional or have field-specific defaults; new enum values need an `Unknown` fallback where older clients can safely ignore them.
 - Add server features through advertised API methods and optional snapshot data when possible. A missing optional feature must disable only that action, not reject the connection.
 - Do not change the meaning or load-bearing parameter shape of an advertised endpoint method. If an old server could ignore a new field and incorrectly report success, add a new method name or a separately advertised capability and omit that field without it.
 - Missing methods, rejections, timeouts, and unavailable servers are client-local outcomes. They must not disconnect other compatible servers, and typing in a pane must not dismiss their notices.
-- Frozen endpoint fixtures, bincode digests, wire-tag tests, and `tests/fixtures/endpoint-method-shapes-v1.json` are compatibility contracts. Never update a generation-1 expectation merely to bless a wire change; create and negotiate a new codec or method.
-- Existing-value digests cannot detect an appended enum variant. Review every enum reachable from a frozen codec as append-closed even when tests remain green.
+- Frozen endpoint fixtures, bincode digests, wire-tag tests, and `tests/fixtures/endpoint-method-shapes-v1.json` are compatibility contracts. Never update a generation-1 expectation merely to bless a wire change; create and negotiate a new codec or method. The one recorded exception is the appended surface variant above, which is a new codec, not a re-blessed value.
+- Existing-value digests cannot detect an appended enum variant. Review every enum reachable from a frozen codec as append-closed even when tests remain green, except for the single recorded generation-scoped surface variant above.
 
 ## Workflow
 

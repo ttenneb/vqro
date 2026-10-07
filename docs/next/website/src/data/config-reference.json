@@ -900,10 +900,10 @@
           "description": "Capture mouse input for Herdr's mouse UI."
         },
         {
-          "key": "ui.show_panels_on_agent_start",
-          "type": "boolean",
-          "default": "true",
-          "description": "Open a pane's published views when an agent starts there. Views stay hidden until the user toggles them or an agent starts; set false to opt out."
+          "key": "ui.agent_start_view",
+          "type": "string",
+          "default": "",
+          "description": "Server-side agent-start rule: the view added beside a pane when an agent starts there, as <extension>:<view> (for example vqro.tasks:tasks), once per terminal. Setting it is the only switch; unset adds nothing."
         },
         {
           "key": "ui.copy_on_select",
