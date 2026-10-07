@@ -185,23 +185,10 @@ input; its writer expectation becomes a canonical-tree conversion expectation.
 Tree output and v8 persistence get separate expectations; no old fixture is
 rewritten to bless a wire change.
 
-**Recorded generation-scoped extension (surface codec, 2026-10-07).** Under the
-2026-10-04 no-floor decision, `ServerMessage` gains exactly one appended
-variant, `PaneSurfaceV2(PaneSurfaceFrameV2)` (bincode tag 21, after
-`EndpointControl`), carrying the unchanged `shell.surface.v1` frame value plus
-per-pane view descriptors under the new `shell.surface.v2` codec name. The
-in-place field route is unavailable: bincode cannot add an optional field to the
-frame, and the endpoint hello checks codec names only, so a generation-1 peer
-would desync on an appended field. Serving is `shell.surface.v2` only: a peer
-that did not advertise it is refused client-locally (server: hello rejection
-`unsupported_surface_codec`; client: "update this machine"), so no peer that
-skipped the codec ever receives the variant, and incremental patches stay the
-unchanged `PaneSurfacePatch`. The `ServerMessage` doc comment records the same
-extension. Retire the variant when the surface lane is re-cut. Frozen
-expectations are preserved rather than re-blessed: `endpoint-hello-v1.json`,
-`endpoint-welcome-v1.json` and the `PaneSurface` / `PaneSurfacePatch` bincode
-decodes and tags 13/19/20 keep their historical values; new serving-policy tests
-and the v2 payload fixtures use new names.
+**Recorded generation-scoped extension (surface codec, 2026-10-07).** The pane
+surface lane is settled by
+[`docs/next/architecture/endpoint-surface-codec-v2.md`](docs/next/architecture/endpoint-surface-codec-v2.md),
+which is normative for this change and must be read before touching that lane.
 
 - Named core codecs are immutable. Do not add, remove, reorder, or reinterpret fields or enum variants reachable from a published codec. Introduce a new codec name and keep the old codec as a fallback instead.
 - Keep baseline JSON handshake and snapshot fields required. New JSON fields must be optional or have field-specific defaults; new enum values need an `Unknown` fallback where older clients can safely ignore them.
