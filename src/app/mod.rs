@@ -2855,8 +2855,14 @@ mod tests {
         assert_eq!(tab.workspace_id, workspace.workspace_id);
         assert_eq!(root_pane.workspace_id, workspace.workspace_id);
         assert_eq!(root_pane.tab_id, tab.tab_id);
-        assert!(root_pane.terminal_id.starts_with("term_"));
-        assert_ne!(root_pane.terminal_id, root_pane.pane_id);
+        assert!(root_pane
+            .terminal_id
+            .as_deref()
+            .is_some_and(|id| id.starts_with("term_")));
+        assert_ne!(
+            root_pane.terminal_id.as_deref(),
+            Some(root_pane.pane_id.as_str())
+        );
     }
 
     #[test]

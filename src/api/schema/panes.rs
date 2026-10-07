@@ -624,10 +624,43 @@ pub struct PaneReleaseAgentParams {
     pub seq: Option<u64>,
 }
 
+/// What a pane holds. The nested-panes design makes a pane's content kind either
+/// a terminal or an extension view.
+///
+/// A client that does not know a future kind degrades to [`PaneContent::Unknown`]
+/// rather than rejecting the response, and an omitted value means
+/// [`PaneContent::Terminal`] for older servers and clients.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema, Default,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum PaneContent {
+    #[default]
+    Terminal,
+    View,
+    #[serde(other)]
+    Unknown,
+}
+
+impl PaneContent {
+    /// A terminal pane omits the field, so its info stays byte-identical for
+    /// readers that predate the content kind.
+    pub fn is_terminal(&self) -> bool {
+        matches!(self, PaneContent::Terminal)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct PaneInfo {
     pub pane_id: String,
-    pub terminal_id: String,
+    /// What this pane holds. Omitted (the default) means a terminal, so a
+    /// terminal pane's info is unchanged for older readers; a view pane carries
+    /// `content: "view"`.
+    #[serde(default, skip_serializing_if = "PaneContent::is_terminal")]
+    pub content: PaneContent,
+    /// The pane's terminal. Absent for a view pane, never the empty string.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_id: Option<String>,
     pub workspace_id: String,
     pub tab_id: String,
     pub focused: bool,

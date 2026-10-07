@@ -3718,7 +3718,10 @@ mod tests {
         assert_eq!(move_result.previous_tab_id, source_tab_public);
         assert_eq!(move_result.pane.pane_id, move_result.previous_pane_id);
         assert_eq!(move_result.pane.tab_id, target_tab_public);
-        assert_eq!(move_result.pane.terminal_id, source_terminal.to_string());
+        assert_eq!(
+            move_result.pane.terminal_id.as_deref(),
+            Some(source_terminal.as_str())
+        );
         assert_eq!(move_result.closed_tab_id, Some(source_tab_public));
         assert_eq!(move_result.closed_workspace_id, None);
         assert_eq!(move_result.target_layout.panes.len(), 2);
@@ -3835,7 +3838,10 @@ mod tests {
             .starts_with(&format!("{target_workspace_id}:p")));
         assert_eq!(move_result.pane.workspace_id, target_workspace_id);
         assert_eq!(move_result.pane.tab_id, target_tab_id);
-        assert_eq!(move_result.pane.terminal_id, source_terminal.to_string());
+        assert_eq!(
+            move_result.pane.terminal_id.as_deref(),
+            Some(source_terminal.as_str())
+        );
         assert_eq!(app.state.workspaces.len(), 1);
         assert_eq!(
             app.state.workspaces[0].tabs[0].terminal_id(source),
@@ -3889,7 +3895,10 @@ mod tests {
         assert_eq!(move_result.closed_workspace_id, Some(source_workspace_id));
         assert_eq!(move_result.pane.workspace_id, target_workspace_id);
         assert_eq!(move_result.pane.tab_id, target_tab_id);
-        assert_eq!(move_result.pane.terminal_id, source_terminal.to_string());
+        assert_eq!(
+            move_result.pane.terminal_id.as_deref(),
+            Some(source_terminal.as_str())
+        );
         assert_eq!(
             app.state.workspaces[0].tabs[0].terminal_id(source),
             Some(&source_terminal)
@@ -3938,7 +3947,10 @@ mod tests {
         );
         assert_eq!(move_result.closed_tab_id, None);
         assert_eq!(move_result.pane.pane_id, source_public);
-        assert_eq!(move_result.pane.terminal_id, source_terminal.to_string());
+        assert_eq!(
+            move_result.pane.terminal_id.as_deref(),
+            Some(source_terminal.as_str())
+        );
         assert_eq!(app.state.workspaces[0].tabs.len(), 2);
         assert!(app.state.workspaces[0].tabs[0].terminal_id(right).is_some());
         assert_eq!(
@@ -4062,7 +4074,10 @@ mod tests {
             Some(true)
         );
         assert_ne!(move_result.pane.pane_id, source_public);
-        assert_eq!(move_result.pane.terminal_id, source_terminal.to_string());
+        assert_eq!(
+            move_result.pane.terminal_id.as_deref(),
+            Some(source_terminal.as_str())
+        );
         assert_eq!(app.state.workspaces.len(), 1);
         assert_eq!(
             app.state.workspaces[0].tabs[0].terminal_id(source),
@@ -5369,6 +5384,75 @@ mod tests {
                 .agent_start_view_applied,
             "a refused add must not mark the terminal as having a view"
         );
+    }
+
+    #[test]
+    fn api_pane_focus_on_a_view_succeeds_without_an_error_after_mutation() {
+        let mut app = app_with_linked_worktree();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        let root = app.state.workspaces[0].tabs[0].root_pane;
+        let root_public = app.public_pane_id(0, root).unwrap();
+        let response = app.handle_pane_view("req".into(), add_view_request(&root_public));
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        let ResponseResult::PaneView { view } = success.result else {
+            panic!("expected pane view response");
+        };
+        let view_public = view.pane_id;
+
+        // Focusing a view is content-aware: it succeeds with a view `PaneInfo` and
+        // never focuses then reports pane_not_found (which left the mutation but
+        // returned an error).
+        let response = app.handle_pane_focus(
+            "req".into(),
+            PaneTarget {
+                pane_id: view_public.clone(),
+            },
+        );
+        let success: SuccessResponse = serde_json::from_str(&response)
+            .unwrap_or_else(|error| panic!("focusing a view must succeed: {error}; {response}"));
+        let ResponseResult::PaneInfo { pane } = success.result else {
+            panic!("expected pane info response");
+        };
+        assert_eq!(pane.pane_id, view_public);
+        assert_eq!(pane.content, crate::api::schema::PaneContent::View);
+        assert!(pane.terminal_id.is_none(), "a view has no terminal id");
+        assert!(pane.focused);
+        let (_, view_pane) = app.parse_pane_id(&view_public).unwrap();
+        assert_eq!(
+            app.state.workspaces[0].tabs[0].layout.focused(),
+            view_pane,
+            "the layout focus moved to the view"
+        );
+    }
+
+    #[test]
+    fn terminal_pane_info_omits_the_content_kind_and_stays_unchanged() {
+        let mut app = app_with_linked_worktree();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        let root = app.state.workspaces[0].tabs[0].root_pane;
+        let root_public = app.public_pane_id(0, root).unwrap();
+        let response = app.handle_pane_focus(
+            "req".into(),
+            PaneTarget {
+                pane_id: root_public,
+            },
+        );
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        let ResponseResult::PaneInfo { pane } = success.result else {
+            panic!("expected pane info response");
+        };
+        assert_eq!(pane.content, crate::api::schema::PaneContent::Terminal);
+        assert!(pane.terminal_id.is_some());
+        // A terminal omits `content`, so its serialized info is byte-identical to
+        // the shape readers saw before the content kind existed.
+        let json = serde_json::to_value(&pane).unwrap();
+        assert!(
+            !json.as_object().unwrap().contains_key("content"),
+            "a terminal pane must omit the content kind"
+        );
+        assert!(json.get("terminal_id").is_some());
     }
 
     #[test]

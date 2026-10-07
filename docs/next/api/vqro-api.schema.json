@@ -1018,6 +1018,15 @@
           ],
           "type": "string"
         },
+        "PaneContent": {
+          "description": "What a pane holds. The nested-panes design makes a pane's content kind either\na terminal or an extension view.\n\nA client that does not know a future kind degrades to [`PaneContent::Unknown`]\nrather than rejecting the response, and an omitted value means\n[`PaneContent::Terminal`] for older servers and clients.",
+          "enum": [
+            "terminal",
+            "view",
+            "unknown"
+          ],
+          "type": "string"
+        },
         "PaneInfo": {
           "properties": {
             "agent": {
@@ -1038,6 +1047,10 @@
             },
             "agent_status": {
               "$ref": "#/schemas/event/$defs/AgentStatus"
+            },
+            "content": {
+              "$ref": "#/schemas/event/$defs/PaneContent",
+              "description": "What this pane holds. Omitted (the default) means a terminal, so a\nterminal pane's info is unchanged for older readers; a view pane carries\n`content: \"view\"`."
             },
             "cwd": {
               "type": [
@@ -1094,7 +1107,11 @@
               "type": "string"
             },
             "terminal_id": {
-              "type": "string"
+              "description": "The pane's terminal. Absent for a view pane, never the empty string.",
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "terminal_size": {
               "anyOf": [
@@ -1141,7 +1158,6 @@
           },
           "required": [
             "pane_id",
-            "terminal_id",
             "workspace_id",
             "tab_id",
             "focused",
@@ -11571,6 +11587,15 @@
           ],
           "type": "string"
         },
+        "PaneContent": {
+          "description": "What a pane holds. The nested-panes design makes a pane's content kind either\na terminal or an extension view.\n\nA client that does not know a future kind degrades to [`PaneContent::Unknown`]\nrather than rejecting the response, and an omitted value means\n[`PaneContent::Terminal`] for older servers and clients.",
+          "enum": [
+            "terminal",
+            "view",
+            "unknown"
+          ],
+          "type": "string"
+        },
         "PaneDirection": {
           "enum": [
             "left",
@@ -11673,6 +11698,10 @@
             "agent_status": {
               "$ref": "#/schemas/success_response/$defs/AgentStatus"
             },
+            "content": {
+              "$ref": "#/schemas/success_response/$defs/PaneContent",
+              "description": "What this pane holds. Omitted (the default) means a terminal, so a\nterminal pane's info is unchanged for older readers; a view pane carries\n`content: \"view\"`."
+            },
             "cwd": {
               "type": [
                 "string",
@@ -11728,7 +11757,11 @@
               "type": "string"
             },
             "terminal_id": {
-              "type": "string"
+              "description": "The pane's terminal. Absent for a view pane, never the empty string.",
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "terminal_size": {
               "anyOf": [
@@ -11775,7 +11808,6 @@
           },
           "required": [
             "pane_id",
-            "terminal_id",
             "workspace_id",
             "tab_id",
             "focused",
