@@ -273,6 +273,37 @@ fn active_panes(pane_count: usize) -> Vec<Workspace> {
     vec![populated_panes(pane_count)]
 }
 
+/// A workspace whose active tab holds `view_count` view panes beside a populated
+/// terminal, so the surface projection exercises its view branch: each drawn view
+/// costs a content lookup and a placement-scope walk. The view-populated
+/// counterpart of `populated_panes`.
+fn view_populated(view_count: usize) -> Workspace {
+    let history = history();
+    let surface = pane_surface_rect();
+    let mut workspace = Workspace::test_new("bench-views");
+    let root = workspace.tabs[0].root_pane;
+    workspace.insert_test_runtime(root, populated_runtime(surface, &history));
+    let mut target = root;
+    for _ in 0..view_count {
+        let Some((_, view_pane)) = workspace.split_pane_with_view(
+            target,
+            "bench.views",
+            "v",
+            Direction::Horizontal,
+            0.5,
+            false,
+        ) else {
+            break;
+        };
+        target = view_pane;
+    }
+    workspace
+}
+
+fn view_panes(view_count: usize) -> Vec<Workspace> {
+    vec![view_populated(view_count)]
+}
+
 /// Output keeps arriving between samples, so each sample renders a screen that
 /// just changed rather than one frozen frame. The feed itself is outside the
 /// measured region.
@@ -444,6 +475,15 @@ fn print_recovery_browser_profile() {
     print_stage("client shell composition", &rows, |stats| stats.client);
 }
 
+/// The surface projection's view branch at 1 and 15 drawn view panes. The flat
+/// terminal-only fixture cannot measure this branch.
+fn print_view_panes_profile() {
+    let rows = [1usize, 15].map(|count| (count, profile(view_panes, count)));
+    println!("active view panes (surface projection, one workspace)");
+    print_stage("server pane surface", &rows, |stats| stats.server);
+    print_stage("combined pipeline", &rows, |stats| stats.total);
+}
+
 fn print_terminal_views_profile() {
     println!("independent terminal view projection");
     for count in [1usize, 15] {
@@ -485,6 +525,7 @@ async fn render_scale_profile() {
     print_snapshot_encoding_profiles("active panes", active_panes);
     print_token_rule_profiles();
     print_recovery_browser_profile();
+    print_view_panes_profile();
     print_terminal_views_profile();
 }
 

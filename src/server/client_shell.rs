@@ -451,6 +451,21 @@ pub(super) struct RenderedPaneSurface {
     pub(super) graphics_delivery: crate::kitty_graphics::surface::DeliveryCache,
 }
 
+/// The view panes the frame will actually draw, in tree order.
+///
+/// A hidden stack member or a zoomed-away view is not in `drawn`, so the surface
+/// projection never walks it: a hidden view performs no presentation work.
+pub(super) fn drawn_view_panes(
+    layout: &crate::layout::TileLayout,
+    drawn: &std::collections::HashSet<crate::layout::PaneId>,
+) -> Vec<crate::layout::PaneId> {
+    layout
+        .view_panes()
+        .into_iter()
+        .filter(|pane| drawn.contains(pane))
+        .collect()
+}
+
 /// Render the active tab pane surface under `shell.surface.v2`.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn render_pane_surface(
@@ -493,22 +508,19 @@ pub(super) fn render_pane_surface(
             resize_panes,
             cell_size,
         );
-    // One pass over the tab's view panes: each view pane's content identity and
-    // the public ids it covers. Only eligible (visible) view leaves are walked: a
-    // hidden or zoomed-away view does no presentation work, and the frame below
-    // only reads the panes it drew. A per-pane tree walk would be a search per
-    // pane.
-    let visible_panes: std::collections::HashSet<crate::layout::PaneId> =
+    // One pass over the drawn view panes: each one's content identity and the
+    // public ids it covers. A hidden or zoomed-away view is not walked, so it
+    // does no presentation work, and the frame below only reads the panes it
+    // drew. A per-pane tree walk would be a search per pane.
+    let drawn_panes: std::collections::HashSet<crate::layout::PaneId> =
         layout.pane_infos.iter().map(|pane| pane.id).collect();
     let view_projection = target
         .and_then(|target| {
             let workspace = app.state.workspaces.get(target.workspace_index)?;
             let tab = workspace.tabs.get(target.tab_index)?;
             Some(
-                tab.layout
-                    .view_panes()
+                drawn_view_panes(&tab.layout, &drawn_panes)
                     .into_iter()
-                    .filter(|view_pane| visible_panes.contains(view_pane))
                     .map(|view_pane| {
                         let content = tab.layout.view_at(view_pane);
                         let scope = tab
@@ -1146,6 +1158,50 @@ mod tests {
             .map(|pane| pane.rect)
             .expect("terminal pane geometry");
         assert_eq!(view_rect.width + root_rect.width, 80);
+    }
+
+    #[test]
+    fn hidden_and_zoomed_views_do_no_projection_work() {
+        use crate::layout::{LayoutLeaf, PaneId, TileLayout, TypedNode};
+
+        let visible = PaneId::from_raw(1);
+        let hidden = PaneId::from_raw(2);
+        let terminal = PaneId::from_raw(3);
+        // A stack whose selected child is one view and whose other child is a
+        // hidden view, beside a terminal.
+        let stack = TypedNode::Stack {
+            id: crate::terminal_container::TerminalContainerId::parse(9_001).unwrap(),
+            selected: 0,
+            children: vec![
+                TypedNode::View {
+                    pane: visible,
+                    extension: "vqro.tasks".into(),
+                    view: "tasks".into(),
+                },
+                TypedNode::View {
+                    pane: hidden,
+                    extension: "vqro.tasks".into(),
+                    view: "hidden".into(),
+                },
+            ],
+        };
+        let tree = TypedNode::Split {
+            direction: ratatui::layout::Direction::Horizontal,
+            ratio: 0.5,
+            first: Box::new(TypedNode::Leaf(terminal)),
+            second: Box::new(stack),
+        };
+        let layout = TileLayout::from_tree(tree, LayoutLeaf::Pane(visible)).unwrap();
+
+        // The frame drew the terminal and the stack's selected view: only that
+        // view is walked, so the hidden stack member does no presentation work.
+        let drawn = std::collections::HashSet::from([terminal, visible]);
+        assert_eq!(drawn_view_panes(&layout, &drawn), vec![visible]);
+        // A zoomed view draws alone; a zoomed terminal draws no view at all.
+        let zoomed_view = std::collections::HashSet::from([visible]);
+        assert_eq!(drawn_view_panes(&layout, &zoomed_view), vec![visible]);
+        let zoomed_terminal = std::collections::HashSet::from([terminal]);
+        assert!(drawn_view_panes(&layout, &zoomed_terminal).is_empty());
     }
 
     #[test]
