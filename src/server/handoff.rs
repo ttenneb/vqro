@@ -1226,6 +1226,66 @@ mod tests {
     }
 
     #[test]
+    fn live_handoff_preserves_a_view_pane_and_its_agent_start_marker() {
+        // A view pane beside a terminal whose once-per-terminal agent-start marker
+        // is set. A live transfer must keep both the view identity and the marker,
+        // so the replacement neither loses the view nor re-adds one for a terminal
+        // that already got one, and fabricates no terminal for the view.
+        let mut snapshot = one_pane_snapshot();
+        let tab = &mut snapshot.workspaces[0].tabs[0];
+        tab.layout = crate::persist::LayoutSnapshot::Split {
+            direction: crate::persist::DirectionSnapshot::Horizontal,
+            ratio: 0.5,
+            first: Box::new(crate::persist::LayoutSnapshot::Pane(1)),
+            second: Box::new(crate::persist::LayoutSnapshot::View {
+                pane: 2,
+                extension: "vqro.tasks".into(),
+                view: "tasks".into(),
+            }),
+        };
+        tab.panes.get_mut(&1).unwrap().agent_start_view_applied = true;
+        snapshot.workspaces[0].public_pane_numbers.insert(2, 2);
+        snapshot.workspaces[0].next_public_pane_number = 3;
+
+        let terminal_id = crate::persist::terminal_id_for_pane_snapshot(
+            &snapshot.workspaces[0].tabs[0].panes[&1],
+        )
+        .unwrap();
+        let mut manifest = HandoffManifest {
+            version: HANDOFF_VERSION,
+            source_version: "views".into(),
+            source_protocol: crate::protocol::PROTOCOL_VERSION,
+            expected_version: None,
+            expected_protocol: None,
+            snapshot,
+            panes: vec![runtime_for(1, Some(terminal_id.to_string()))],
+            deferred_panes: Vec::new(),
+            api_window_title: None,
+        };
+        validate_and_normalize_manifest(&mut manifest)
+            .expect("view-bearing live handoff is admitted");
+
+        let tab = &manifest.snapshot.workspaces[0].tabs[0];
+        assert!(
+            tab.panes.get(&1).unwrap().agent_start_view_applied,
+            "the once-per-terminal marker survives the live transfer"
+        );
+        let has_view = matches!(
+            &tab.layout,
+            crate::persist::LayoutSnapshot::Split { second, .. }
+                if matches!(**second, crate::persist::LayoutSnapshot::View { pane: 2, .. })
+        );
+        assert!(
+            has_view,
+            "the view pane identity survives the live transfer"
+        );
+        assert!(
+            !tab.panes.contains_key(&2),
+            "no terminal record is fabricated for the view"
+        );
+    }
+
+    #[test]
     fn predecessor_v8_snapshot_is_admitted_for_live_handoff() {
         // The immediately previous release wrote snapshot v8. A normal live
         // upgrade from that build must reach FD admission, not be rejected for a

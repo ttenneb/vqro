@@ -274,28 +274,42 @@ fn active_panes(pane_count: usize) -> Vec<Workspace> {
 }
 
 /// A workspace whose active tab holds `view_count` view panes beside a populated
-/// terminal, so the surface projection exercises its view branch: each drawn view
-/// costs a content lookup and a placement-scope walk. The view-populated
-/// counterpart of `populated_panes`.
+/// terminal, so the surface projection walks `view_count` drawn views, each with
+/// positive geometry. Splitting the largest pane along its longer axis keeps the
+/// views pane-sized instead of halving one branch into slivers.
+///
+/// This exercises descriptor/scope projection (content lookup plus the
+/// placement-scope walk), not populated view content composition; no document
+/// fixture is loaded.
 fn view_populated(view_count: usize) -> Workspace {
     let history = history();
     let surface = pane_surface_rect();
     let mut workspace = Workspace::test_new("bench-views");
     let root = workspace.tabs[0].root_pane;
     workspace.insert_test_runtime(root, populated_runtime(surface, &history));
-    let mut target = root;
     for _ in 0..view_count {
-        let Some((_, view_pane)) = workspace.split_pane_with_view(
-            target,
-            "bench.views",
-            "v",
-            Direction::Horizontal,
-            0.5,
-            false,
-        ) else {
+        let Some((target, direction)) = workspace.tabs[0]
+            .layout
+            .panes(surface)
+            .into_iter()
+            .max_by_key(|pane| u32::from(pane.rect.width) * u32::from(pane.rect.height))
+            .map(|pane| {
+                let direction = if pane.rect.width >= pane.rect.height {
+                    Direction::Horizontal
+                } else {
+                    Direction::Vertical
+                };
+                (pane.id, direction)
+            })
+        else {
             break;
         };
-        target = view_pane;
+        if workspace
+            .split_pane_with_view(target, "bench.views", "v", direction, 0.5, false)
+            .is_none()
+        {
+            break;
+        }
     }
     workspace
 }
@@ -475,11 +489,14 @@ fn print_recovery_browser_profile() {
     print_stage("client shell composition", &rows, |stats| stats.client);
 }
 
-/// The surface projection's view branch at 1 and 15 drawn view panes. The flat
-/// terminal-only fixture cannot measure this branch.
+/// The surface projection's view branch at 1 and 15 drawn view panes.
+///
+/// This measures view descriptor/scope projection only (not populated view
+/// content composition, which would need a document fixture); the flat
+/// terminal-only fixture cannot measure this branch at all.
 fn print_view_panes_profile() {
     let rows = [1usize, 15].map(|count| (count, profile(view_panes, count)));
-    println!("active view panes (surface projection, one workspace)");
+    println!("active view panes (view descriptor/scope projection only, no document fixture)");
     print_stage("server pane surface", &rows, |stats| stats.server);
     print_stage("combined pipeline", &rows, |stats| stats.total);
 }
@@ -563,5 +580,42 @@ mod tests {
             .filter(|info| !info.rect.is_empty())
             .count();
         assert_eq!(missing, 15);
+    }
+
+    /// The view fixture proves its own claim: the requested cardinality of view
+    /// panes is placed, every one is drawn, and every one has positive geometry.
+    /// Without this, a chain of halved splits could report "15 views" while only
+    /// the first few have any area.
+    #[tokio::test(flavor = "current_thread")]
+    async fn view_populated_fixture_places_the_requested_nonzero_views() {
+        let surface = pane_surface_rect();
+        for count in [1usize, 15] {
+            let workspace = view_populated(count);
+            let tab = &workspace.tabs[0];
+            assert_eq!(
+                tab.layout.view_panes().len(),
+                count,
+                "the fixture places {count} view panes"
+            );
+            let drawn_views = tab
+                .layout
+                .panes(surface)
+                .into_iter()
+                .filter(|info| tab.layout.view_at(info.id).is_some())
+                .collect::<Vec<_>>();
+            assert_eq!(
+                drawn_views.len(),
+                count,
+                "the frame draws {count} view panes"
+            );
+            for info in drawn_views {
+                assert!(
+                    !info.rect.is_empty(),
+                    "{count} views: view {:?} has zero-area geometry {:?}",
+                    info.id,
+                    info.rect
+                );
+            }
+        }
     }
 }

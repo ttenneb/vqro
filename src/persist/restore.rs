@@ -2993,6 +2993,113 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cold_restore_preserves_a_view_pane_and_its_agent_start_marker() {
+        let cwd = std::env::current_dir().unwrap();
+        let mut snapshot = SessionSnapshot {
+            delegations: Vec::new(),
+            collections_authority: Default::default(),
+            collections_action_sequence: 0,
+            version: super::super::snapshot::SNAPSHOT_VERSION,
+            repositories: Vec::new(),
+            space_order: Vec::new(),
+            workspaces: vec![WorkspaceSnapshot {
+                id: Some("w1".into()),
+                custom_name: None,
+                identity_cwd: cwd.clone(),
+                checkout: None,
+                worktree_space: None,
+                public_pane_numbers: HashMap::from([(10, 1), (20, 2)]),
+                next_public_pane_number: 3,
+                public_tab_numbers: vec![1],
+                next_public_tab_number: 2,
+                tabs: vec![TabSnapshot {
+                    id: None,
+                    collections: Vec::new(),
+                    focused_leaf: None,
+                    custom_name: None,
+                    layout: LayoutSnapshot::Split {
+                        direction: DirectionSnapshot::Horizontal,
+                        ratio: 0.5,
+                        first: Box::new(LayoutSnapshot::Pane(10)),
+                        second: Box::new(LayoutSnapshot::View {
+                            pane: 20,
+                            extension: "vqro.tasks".into(),
+                            view: "tasks".into(),
+                        }),
+                    },
+                    panes: HashMap::from([(
+                        10,
+                        super::super::snapshot::PaneSnapshot {
+                            terminal_id: None,
+                            cwd: cwd.clone(),
+                            label: None,
+                            agent_name: None,
+                            managed_agent_kind: None,
+                            agent_session: None,
+                            launch_argv: None,
+                            agent_start_view_applied: true,
+                        },
+                    )]),
+                    zoomed: false,
+                    focused: Some(10),
+                    root_pane: Some(10),
+                }],
+                active_tab: 0,
+            }],
+            active: Some(0),
+            selected: 0,
+            sidebar_width: None,
+            sidebar_section_split: None,
+            collapsed_space_keys: Default::default(),
+        };
+        super::super::snapshot::normalize_terminal_identities(&mut snapshot, false).unwrap();
+        let (events, _event_rx) = mpsc::channel(4);
+
+        let (workspaces, _terminals, _runtimes) = restore(
+            &snapshot,
+            None,
+            24,
+            80,
+            0,
+            test_restore_shell(),
+            crate::config::ShellModeConfig::NonLogin,
+            false,
+            events,
+            Arc::new(Notify::new()),
+            Arc::new(RenderSignal::new()),
+        )
+        .unwrap();
+
+        let workspace = workspaces.first().expect("workspace should restore");
+        let pane_for = |number: usize| {
+            workspace
+                .public_pane_numbers
+                .iter()
+                .find_map(|(pane, n)| (*n == number).then_some(*pane))
+                .expect("public pane number")
+        };
+        let terminal = pane_for(1);
+        let view = pane_for(2);
+        // The view keeps its identity and no terminal is fabricated for it.
+        assert_eq!(
+            workspace.view_content(view).map(|content| content.view),
+            Some("tasks".to_owned())
+        );
+        assert_eq!(workspace.terminal_id(view), None);
+        // The marker survives, so a restart does not re-add a view for a terminal
+        // that already got one; the terminal keeps its owned identity.
+        assert!(
+            workspace
+                .pane_state(terminal)
+                .expect("terminal pane")
+                .agent_start_view_applied
+        );
+        assert!(workspace.terminal_id(terminal).is_some());
+        // The content-aware invariants accept the restored mixed tab.
+        workspace.assert_invariants_for_test();
+    }
+
+    #[tokio::test]
     async fn cold_restore_uses_persisted_repaired_public_tab_numbers() {
         let cwd = std::env::current_dir().unwrap();
         let pane_snap = |id: &str| {
