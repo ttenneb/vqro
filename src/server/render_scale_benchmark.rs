@@ -498,7 +498,14 @@ fn print_view_panes_profile() {
     let rows = [1usize, 15].map(|count| (count, profile(view_panes, count)));
     println!("active view panes (view descriptor/scope projection only, no document fixture)");
     print_stage("server pane surface", &rows, |stats| stats.server);
-    print_stage("combined pipeline", &rows, |stats| stats.total);
+    // The combined row includes client compose, which without published
+    // documents does no per-view row work, so it too excludes populated view
+    // content.
+    print_stage(
+        "combined pipeline (client compose draws no view rows without documents)",
+        &rows,
+        |stats| stats.total,
+    );
 }
 
 fn print_terminal_views_profile() {

@@ -1373,6 +1373,16 @@ fn recover_typed_layout(
     }
     let mut view_identities = HashMap::new();
     collect_view_identities(&node, &mut view_identities);
+    // A survivor keeps its content identity wherever it is reattached: rebuilding
+    // a view as a terminal `Leaf` would drop its content.
+    let survivor_node = |pane: PaneId| match view_identities.get(&pane) {
+        Some((extension, view)) => TypedNode::View {
+            pane,
+            extension: extension.clone(),
+            view: view.clone(),
+        },
+        None => TypedNode::Leaf(pane),
+    };
     let mut placed = HashSet::new();
     let mut root = prune(node, surviving, &valid_ids, &mut placed);
     let mut unplaced: Vec<_> = surviving
@@ -1382,14 +1392,7 @@ fn recover_typed_layout(
         .collect();
     unplaced.sort_by_key(|pane| pane.raw());
     for pane in unplaced {
-        let leaf = match view_identities.get(&pane) {
-            Some((extension, view)) => TypedNode::View {
-                pane,
-                extension: extension.clone(),
-                view: view.clone(),
-            },
-            None => TypedNode::Leaf(pane),
-        };
+        let leaf = survivor_node(pane);
         root = Some(match root {
             Some(existing) => TypedNode::Split {
                 direction: Direction::Horizontal,
@@ -1467,16 +1470,6 @@ fn recover_typed_layout(
     let mut panes: Vec<_> = surviving.iter().copied().collect();
     panes.sort_by_key(|pane| pane.raw());
     let first = panes.first().copied()?;
-    // A survivor keeps its content identity here too: rebuilding a view as a
-    // terminal `Leaf` would drop its content.
-    let survivor_node = |pane: PaneId| match view_identities.get(&pane) {
-        Some((extension, view)) => TypedNode::View {
-            pane,
-            extension: extension.clone(),
-            view: view.clone(),
-        },
-        None => TypedNode::Leaf(pane),
-    };
     let root = panes
         .into_iter()
         .skip(1)
