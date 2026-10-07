@@ -805,32 +805,6 @@ impl Workspace {
         Some((tab_idx, pane))
     }
 
-    /// Close a view pane. Returns true when the workspace should close (the last
-    /// pane of the last tab).
-    pub fn close_view_pane(&mut self, pane_id: PaneId) -> bool {
-        let Some(tab_idx) = self.find_tab_index_for_pane(pane_id) else {
-            return false;
-        };
-        let pane_count = self.tabs[tab_idx].layout.pane_count();
-        let tab_count = self.tabs.len();
-        if pane_count <= 1 {
-            if tab_count <= 1 {
-                return true;
-            }
-            self.tabs.remove(tab_idx);
-            self.unregister_pane(pane_id);
-            if self.active_tab >= self.tabs.len() {
-                self.active_tab = self.tabs.len() - 1;
-            } else if tab_idx <= self.active_tab && self.active_tab > 0 {
-                self.active_tab -= 1;
-            }
-            return false;
-        }
-        self.tabs[tab_idx].close_view_pane(pane_id);
-        self.unregister_pane(pane_id);
-        false
-    }
-
     #[allow(clippy::too_many_arguments)]
     pub fn split_pane_with_ratio(
         &mut self,
@@ -1334,12 +1308,6 @@ impl Workspace {
     }
 
     /// True when the pane's content is an extension view, not a terminal.
-    pub fn is_view_pane(&self, pane_id: PaneId) -> bool {
-        self.tab_index_for_pane(pane_id)
-            .and_then(|tab_idx| self.tabs[tab_idx].layout.view_at(pane_id))
-            .is_some()
-    }
-
     /// The content identity of a placed view pane, wherever it is.
     pub fn view_content(&self, pane_id: PaneId) -> Option<crate::layout::ViewRef> {
         self.tabs.iter().find_map(|tab| tab.layout.view_at(pane_id))
@@ -1370,7 +1338,13 @@ impl Workspace {
             return false;
         }
 
-        if let Some((removed, _terminal_id)) = self.tabs[tab_idx].close_pane(pane_id) {
+        // One close entry point: the content kind decides how the pane goes.
+        // A view pane has no terminal or runtime to detach, so it leaves the
+        // layout only; a terminal pane detaches its runtime for shutdown.
+        if self.tabs[tab_idx].layout.view_at(pane_id).is_some() {
+            self.tabs[tab_idx].close_view_pane(pane_id);
+            self.unregister_pane(pane_id);
+        } else if let Some((removed, _terminal_id)) = self.tabs[tab_idx].close_pane(pane_id) {
             self.unregister_pane(removed);
         }
         false
@@ -1384,12 +1358,6 @@ impl Workspace {
     fn register_new_pane_with_number(&mut self, pane_id: PaneId, number: usize) {
         self.public_pane_numbers.insert(pane_id, number);
         self.next_public_pane_number = self.next_public_pane_number.max(number + 1);
-    }
-
-    fn tab_index_for_pane(&self, pane_id: PaneId) -> Option<usize> {
-        self.tabs
-            .iter()
-            .position(|tab| tab.layout.placement(pane_id).is_some())
     }
 
     fn unregister_pane(&mut self, pane_id: PaneId) {

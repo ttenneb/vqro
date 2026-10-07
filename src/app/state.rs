@@ -844,7 +844,6 @@ pub struct AppState {
     /// Server-side agent-start rule: add a view pane beside a pane when an agent
     /// starts there, once per terminal. `agent_start_view` is the
     /// `<extension>:<view>` identity to add; unset disables the rule.
-    pub show_panels_on_agent_start: bool,
     pub agent_start_view: Option<(String, String)>,
     pub tab_bar_right: Vec<TabBarStatusSegment>,
     pub tab_bar_right_separator: String,
@@ -1112,7 +1111,6 @@ impl AppState {
             pane_scrollbars: true,
             pane_gaps: false,
             show_agent_labels_on_pane_borders: false,
-            show_panels_on_agent_start: true,
             agent_start_view: None,
             tab_bar_right: Vec::new(),
             tab_bar_right_separator: " ".into(),

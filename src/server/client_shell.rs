@@ -488,6 +488,35 @@ pub(super) fn render_pane_surface(
             resize_panes,
             cell_size,
         );
+    // One pass over the tab's view panes: each view pane's content identity and
+    // the public ids it covers. A per-pane tree walk would be a search per pane.
+    let view_projection = target
+        .and_then(|target| {
+            let workspace = app.state.workspaces.get(target.workspace_index)?;
+            let tab = workspace.tabs.get(target.tab_index)?;
+            Some(
+                tab.layout
+                    .view_panes()
+                    .into_iter()
+                    .map(|view_pane| {
+                        let content = tab.layout.view_at(view_pane);
+                        let scope = tab
+                            .layout
+                            .view_scope(view_pane)
+                            .into_iter()
+                            .filter_map(|covered| {
+                                app.public_pane_id(target.workspace_index, covered)
+                            })
+                            .collect::<Vec<_>>();
+                        (view_pane, (content, scope))
+                    })
+                    .collect::<std::collections::HashMap<
+                        crate::layout::PaneId,
+                        (Option<crate::layout::ViewRef>, Vec<String>),
+                    >>(),
+            )
+        })
+        .unwrap_or_default();
     let panes = target
         .map(|target| {
             let workspace_index = target.workspace_index;
@@ -501,32 +530,18 @@ pub(super) fn render_pane_surface(
                             workspace_index,
                             pane.id,
                         );
-                        let tab = app
-                            .state
-                            .workspaces
-                            .get(workspace_index)
-                            .and_then(|workspace| workspace.tabs.get(target.tab_index));
-                        let view_content =
-                            tab.and_then(|tab| tab.layout.view_at(pane.id)).map(|view| {
-                                protocol::PaneSurfaceView {
-                                    extension: view.extension,
-                                    view: view.view,
-                                }
-                            });
-                        let view_scope = if view_content.is_some() {
-                            tab.map(|tab| {
-                                tab.layout
-                                    .view_scope(pane.id)
-                                    .into_iter()
-                                    .filter_map(|covered| {
-                                        app.public_pane_id(workspace_index, covered)
-                                    })
-                                    .collect()
+                        let (view_content, view_scope) = view_projection
+                            .get(&pane.id)
+                            .map(|(content, scope)| {
+                                (
+                                    content.as_ref().map(|view| protocol::PaneSurfaceView {
+                                        extension: view.extension.clone(),
+                                        view: view.view.clone(),
+                                    }),
+                                    scope.clone(),
+                                )
                             })
-                            .unwrap_or_default()
-                        } else {
-                            Vec::new()
-                        };
+                            .unwrap_or((None, Vec::new()));
                         let mouse_reporting =
                             runtime.is_some_and(|runtime| runtime.mouse_reporting_enabled());
                         let sgr_pixel_mouse =

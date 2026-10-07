@@ -578,9 +578,12 @@ impl TileLayout {
                 TypedNode::Split { first, second, .. } => {
                     find(first, pane).or_else(|| find(second, pane))
                 }
-                TypedNode::Stack {
-                    selected, children, ..
-                } => children.get(*selected).and_then(|child| find(child, pane)),
+                TypedNode::Stack { children, .. } => {
+                    // Every child, not just the selected one: placement, not
+                    // visibility, decides where a pane is, and `view_panes` and
+                    // `view_scope` walk all children too.
+                    children.iter().find_map(|child| find(child, pane))
+                }
             }
         }
         find(&self.root, pane)

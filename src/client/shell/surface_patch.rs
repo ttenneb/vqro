@@ -32,66 +32,6 @@ fn apply_row(row: &crate::protocol::PaneSurfacePatchRow, frame: &mut FrameData) 
     true
 }
 
-/// Rows a panel moved a pane's grid down by, by pane id: the band it reserved at
-/// the pane's top. The raw surface cache is the host's own view of the pane and
-/// has no band, so this applies to the *composed* rows only: a row the host wrote
-/// in the pane's coordinates belongs that many rows lower on screen.
-type PanelShifts = std::collections::HashMap<String, u16>;
-
-/// The panes a panel moved down, with the band and the surface rect of each: only
-/// these can contain a patch row that has to move, so a row for any other pane
-/// costs one comparison against a short list.
-struct PanelBands {
-    panes: Vec<(crate::protocol::SurfaceRect, u16)>,
-}
-
-impl PanelBands {
-    fn new(panes: &[crate::protocol::PaneSurfacePane], shifts: &PanelShifts) -> Self {
-        let panes = panes
-            .iter()
-            .filter_map(|pane| {
-                let band = shifts
-                    .get(&pane.pane_id)
-                    .copied()
-                    .filter(|band| *band > 0)?;
-                Some((pane.inner_rect, band))
-            })
-            .collect();
-        Self { panes }
-    }
-
-    /// The raw pane rect and band a patch row belongs to, when a panel moved it.
-    fn of(
-        &self,
-        row: &crate::protocol::PaneSurfacePatchRow,
-    ) -> Option<(crate::protocol::SurfaceRect, u16)> {
-        self.panes
-            .iter()
-            .find(|(rect, _)| {
-                row.x >= rect.x
-                    && row.x < rect.x.saturating_add(rect.width)
-                    && row.y >= rect.y
-                    && row.y < rect.y.saturating_add(rect.height)
-            })
-            .copied()
-    }
-
-    /// The band that translates a row into the rect below its panel.
-    fn band_for(&self, row: &crate::protocol::PaneSurfacePatchRow) -> Option<u16> {
-        self.of(row).map(|(_, band)| band)
-    }
-
-    /// Whether any row of this patch has no destination once translated: it comes
-    /// from the pane's last rows, where the grid ends. Such a patch composes.
-    fn any_row_past_grid(&self, rows: &[crate::protocol::PaneSurfacePatchRow]) -> bool {
-        rows.iter().any(|row| {
-            self.of(row).is_some_and(|(rect, band)| {
-                row.y.saturating_add(band) >= rect.y.saturating_add(rect.height)
-            })
-        })
-    }
-}
-
 fn apply_patch_to_surface(
     surface: &mut crate::protocol::PaneSurfaceFrame,
     patch: &crate::protocol::PaneSurfacePatch,
@@ -119,7 +59,6 @@ fn apply_patch_to_surface(
 fn fast_path_blocker(
     state: &ClientShellState,
     patch: &crate::protocol::PaneSurfacePatch,
-    bands: &PanelBands,
 ) -> Option<&'static str> {
     if state.mode != ClientShellMode::Terminal {
         Some("client_surface_patch.fallback.mode")
@@ -155,12 +94,6 @@ fn fast_path_blocker(
             .any(|hit| hit.pane_id == pane.pane_id)
     }) {
         Some("client_surface_patch.fallback.pane_hits")
-    } else if bands.any_row_past_grid(&patch.rows) {
-        // A row a panel moved has a destination below the band, so the fast path
-        // translates it and never paints into the panel. A row from the pane's last
-        // rows has no destination at all and takes the compose path, as does any
-        // change to the band or pane geometry.
-        Some("client_surface_patch.fallback.pane_panel_row_past_grid")
     } else {
         None
     }
@@ -240,16 +173,13 @@ impl ClientShellState {
             }
         }
 
-        // Vqro's own panel chrome owns its cells. A terminal patch is computed
         // Collection lists own their cells: a patch row that lands in one is
         // dropped, so chrome is never repainted over by a retained surface patch.
         let panel_rows = self.collection_list_areas.clone();
-        let shifts: PanelShifts = std::collections::HashMap::new();
         // The list areas also decide the cursor: a full compose suppresses the terminal
         // cursor under a list, so the direct path must not paint one there either.
         let list_areas = self.collection_list_areas.clone();
-        let bands = PanelBands::new(&patch.panes, &shifts);
-        let fast_path_blocker = fast_path_blocker(self, &patch, &bands);
+        let fast_path_blocker = fast_path_blocker(self, &patch);
         if let Some(reason) = fast_path_blocker {
             crate::render_prof::event(reason);
         }
@@ -265,9 +195,6 @@ impl ClientShellState {
             .pane_surface
             .as_ref()
             .and_then(|surface| surface.panes.iter().find(|pane| pane.focused));
-        let cursor_band = focused
-            .and_then(|pane| shifts.get(&pane.pane_id).copied())
-            .unwrap_or(0);
         let composed_patch = fast_path_area.map(|area| {
             // The composed row the focused pane ends at: a cursor at or past it is
             // not visible, which is what a full compose decides too.
@@ -282,10 +209,7 @@ impl ClientShellState {
                     .iter()
                     .map(|row| crate::protocol::PaneSurfacePatchRow {
                         x: area.x.saturating_add(row.x),
-                        y: area
-                            .y
-                            .saturating_add(row.y)
-                            .saturating_add(bands.band_for(row).unwrap_or(0)),
+                        y: area.y.saturating_add(row.y),
                         cells: row.cells.clone(),
                     })
                     // Only the panel's own cells are filtered: a row with no
@@ -301,7 +225,7 @@ impl ClientShellState {
                     })
                     .collect(),
                 cursor: patch.cursor.clone().map(|cursor| {
-                    let y = area.y.saturating_add(cursor.y).saturating_add(cursor_band);
+                    let y = area.y.saturating_add(cursor.y);
                     let x = area.x.saturating_add(cursor.x);
                     let under_a_list = list_areas.iter().any(|list| super::contains(*list, (x, y)));
                     let visible = cursor.visible

@@ -628,22 +628,30 @@ impl ClientShellState {
         // scope for each one. The client draws the view content and the light or full
         // frame; panes that are not visible are absent from `hits.panes`, so a hidden
         // view does no presentation work.
-        let index =
-            host_documents.map(|documents| pane_panel::PanelIndex::with_rows(documents, true));
+        let view_panes = surface
+            .panes
+            .iter()
+            .filter_map(|pane| {
+                let view = pane.view.as_ref()?;
+                Some((
+                    pane.pane_id.clone(),
+                    view.extension.clone(),
+                    view.view.clone(),
+                    pane.scope.clone(),
+                ))
+            })
+            .collect::<Vec<_>>();
+        // Fewer than one view pane: no published item is read for drawing, so a
+        // frame with only terminals pays nothing for the view path.
+        let index = (!view_panes.is_empty())
+            .then(|| {
+                host_documents.map(|documents| pane_panel::PanelIndex::with_rows(documents, true))
+            })
+            .flatten();
         if let (Some(index), Some(documents)) = (index.as_ref(), host_documents) {
-            let view_panes = surface
-                .panes
-                .iter()
-                .filter_map(|pane| {
-                    let view = pane.view.as_ref()?;
-                    Some((
-                        pane.pane_id.clone(),
-                        view.extension.clone(),
-                        view.view.clone(),
-                        pane.scope.clone(),
-                    ))
-                })
-                .collect::<Vec<_>>();
+            // Any focused tab being zoomed means the surface shows one pane only;
+            // a zoomed view gets the full frame, like a view standing alone.
+            let zoomed = snapshot.tabs.iter().any(|tab| tab.focused && tab.zoomed);
             for (pane_id, extension, view, scope) in view_panes {
                 let Some(pane) = self.hits.panes.iter().find(|hit| hit.pane_id == pane_id) else {
                     continue;
@@ -655,7 +663,7 @@ impl ClientShellState {
                 };
                 // A view that shares its box with a covered terminal rides the
                 // shared divider (light frame); a lone or zoomed view gets a full frame.
-                let light_frame = !scope.is_empty();
+                let light_frame = !scope.is_empty() && !zoomed;
                 pane_panel::render_view_pane(
                     &mut composed,
                     index,

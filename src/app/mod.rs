@@ -820,7 +820,6 @@ impl App {
             pane_scrollbars: config.ui.pane_scrollbars,
             pane_gaps: config.ui.pane_gaps,
             show_agent_labels_on_pane_borders: config.ui.show_agent_labels_on_pane_borders,
-            show_panels_on_agent_start: config.ui.show_panels_on_agent_start,
             agent_start_view: parse_agent_start_view(config.ui.agent_start_view.as_deref()),
             tab_bar_right: Vec::new(),
             tab_bar_right_separator: String::new(),
@@ -1333,7 +1332,6 @@ impl App {
                 self.state.pane_gaps = config.ui.pane_gaps;
                 self.state.show_agent_labels_on_pane_borders =
                     config.ui.show_agent_labels_on_pane_borders;
-                self.state.show_panels_on_agent_start = config.ui.show_panels_on_agent_start;
                 self.state.agent_start_view =
                     parse_agent_start_view(config.ui.agent_start_view.as_deref());
                 self.configure_tab_bar_status(

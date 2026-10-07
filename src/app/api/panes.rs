@@ -1882,12 +1882,10 @@ impl App {
     /// The server-side agent-start rule: when an agent is reported on a pane, add
     /// the configured view beside it, once per terminal. Neutral: the extension
     /// and view come from `ui.agent_start_view`; core holds no Tasks literal. It
-    /// does nothing when the rule is off, no view identity is configured, the
-    /// terminal already ran it, or a view pane already covers the terminal.
+    /// does nothing when no view identity is set, the terminal already ran it, or
+    /// a view pane already covers the terminal. Setting the identity is the only
+    /// switch: there is no second on/off setting for the same rule.
     fn maybe_add_agent_start_view(&mut self, pane_id: PaneId) {
-        if !self.state.show_panels_on_agent_start {
-            return;
-        }
         let Some((extension, view)) = self.state.agent_start_view.clone() else {
             return;
         };
@@ -2263,20 +2261,11 @@ impl App {
         }
         let workspace_snapshot = self.workspace_info(ws_idx);
         let terminal_id = self.state.terminal_id_for_pane(ws_idx, pane_id);
-        let is_view = self
-            .state
-            .workspaces
-            .get(ws_idx)
-            .is_some_and(|ws| ws.is_view_pane(pane_id));
         let should_close_workspace = {
             let Some(ws) = self.state.workspaces.get_mut(ws_idx) else {
                 return Err(pane_not_found(id, &target.pane_id));
             };
-            if is_view {
-                ws.close_view_pane(pane_id)
-            } else {
-                ws.close_pane(pane_id)
-            }
+            ws.close_pane(pane_id)
         };
         self.state.delegations.tombstone_pane(pane_id);
         self.state.delegations.gc_tombstones();
@@ -5260,7 +5249,6 @@ mod tests {
         let mut app = app_with_linked_worktree();
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.show_panels_on_agent_start = true;
         app.state.agent_start_view = Some(("vqro.tasks".into(), "tasks".into()));
         let root = app.state.workspaces[0].tabs[0].root_pane;
 
@@ -5289,23 +5277,14 @@ mod tests {
     }
 
     #[test]
-    fn agent_start_rule_does_nothing_when_off_or_unconfigured() {
+    fn agent_start_rule_does_nothing_when_no_identity_is_set() {
         let mut app = app_with_linked_worktree();
         app.state.active = Some(0);
         app.state.selected = 0;
         let root = app.state.workspaces[0].tabs[0].root_pane;
 
-        // Off by configuration.
-        app.state.show_panels_on_agent_start = false;
-        app.state.agent_start_view = Some(("vqro.tasks".into(), "tasks".into()));
-        app.maybe_add_agent_start_view(root);
-        assert!(app.state.workspaces[0].tabs[0]
-            .layout
-            .view_panes()
-            .is_empty());
-
-        // On, but no view identity is passed in: core invents no Tasks literal.
-        app.state.show_panels_on_agent_start = true;
+        // No identity is passed in: core invents no Tasks literal, and setting the
+        // identity is the only switch, so the rule is off.
         app.state.agent_start_view = None;
         app.maybe_add_agent_start_view(root);
         assert!(app.state.workspaces[0].tabs[0]
@@ -5325,7 +5304,6 @@ mod tests {
         let mut app = app_with_linked_worktree();
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.show_panels_on_agent_start = true;
         app.state.agent_start_view = Some(("vqro.tasks".into(), "tasks".into()));
         let root = app.state.workspaces[0].tabs[0].root_pane;
         // A view already covers this terminal (added explicitly by the user).
