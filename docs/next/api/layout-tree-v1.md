@@ -38,10 +38,17 @@ host facts. History remains independently versioned at 4.
 The separate one-way legacy converter admits v6 writers and v7 authority files.
 An old Collection placement becomes a stack with the same stable identity,
 ordered pane children, and selected child index. Split direction and ratio are
-preserved. Older pre-v6 identity normalization remains available. Ambiguous
-legacy placements or records are refused with a file/record diagnostic rather
-than silently losing membership. Restore does not impose the new-operation
-depth cap on existing trees.
+preserved. Older pre-v6 identity normalization remains available. Conversion
+is a shape translation; the existing typed-layout recovery remains the single
+semantic repair rule for duplicate/missing/over-limit membership, unplaced
+policies, nonmember selection and archived references. It retains every admitted
+pane and terminal identity instead of rejecting repairable legacy files. Unknown
+schemas, invalid JSON and unsafe pane/identity admission still refuse. Restore
+does not impose the new-operation depth cap on existing trees.
+
+Stage3 nested-scope rendering is the intended consumer of this optional export.
+The surface is retained for that consumer, not a new privileged product path;
+remove it if stage3 does not consume it.
 
 Untrusted session input stays bounded to 16 MiB and the existing serde_json
 128-level JSON recursion budget, for version 8 as well as legacy input. This
@@ -67,8 +74,12 @@ sequence)` before descriptor admission: the previous exporter omitted that mark,
 and an omission must never lower the durable replay/idempotency barrier. The
 adopted mark survives subsequent captures even under legacy/unavailable authority.
 Only this monotonic metadata is reconciled; no checkpoint layout or identity is
-merged over the live tree. An unreadable, malformed or future checkpoint refuses
-the handoff before descriptor transfer.
+merged over the live tree. The reader extracts only version/action-sequence
+metadata after bounded JSON syntax decoding; it never converts or normalizes a
+stale checkpoint layout. Unreadable/invalid JSON, future versions and invalid
+counter metadata refuse before descriptor transfer. Per-write version guards use
+the same two-field metadata reader. Remove the reconciliation when no pre-v8
+live sender can be a source.
 
 Running terminals are imported rather than restarted. Persistence rolls forward
 through durable temporary-file replacement and never automatically restores a

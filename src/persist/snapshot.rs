@@ -18,7 +18,7 @@ pub(crate) const LEGACY_SNAPSHOT_WRITER_VERSION: u32 = 6;
 pub(super) const HISTORY_SNAPSHOT_VERSION: u32 = 4;
 pub(super) const MAX_SESSION_SNAPSHOT_BYTES: u64 = 16 * 1024 * 1024;
 pub(super) const MAX_HISTORY_SNAPSHOT_BYTES: u64 = 64 * 1024 * 1024;
-const MAX_COLLECTIONS_ACTION_SEQUENCE: u64 = (1 << 60) - 1;
+pub(super) const MAX_COLLECTIONS_ACTION_SEQUENCE: u64 = (1 << 60) - 1;
 
 /// Serializable snapshot of the entire herdr session.
 #[derive(Clone, Serialize, Deserialize)]
@@ -510,11 +510,10 @@ where
     fn collect_layout_panes(layout: &LayoutSnapshot, panes: &mut Vec<u32>) {
         match layout {
             LayoutSnapshot::Pane(id) => panes.push(*id),
-            LayoutSnapshot::Stack { children, .. } => {
-                for child in children {
-                    collect_layout_panes(child, panes);
-                }
-            }
+            // Stack descendants are not synthesized; missing references reach
+            // typed recovery without runtimes. Standalone legacy references
+            // retain the existing layout-only pane rescue.
+            LayoutSnapshot::Stack { .. } => {}
             LayoutSnapshot::Split { first, second, .. } => {
                 collect_layout_panes(first, panes);
                 collect_layout_panes(second, panes);
@@ -1861,6 +1860,22 @@ mod tests {
         let snapshot = capture_from_state(&state);
         assert_eq!(snapshot.workspaces[0].tabs[0].focused, Some(second.raw()));
         assert_ne!(snapshot.workspaces[0].tabs[0].focused, Some(root.raw()));
+    }
+
+    #[test]
+    fn standalone_legacy_layout_reference_without_record_keeps_pane_rescue() {
+        let mut value: serde_json::Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/session/hidden-member-handoff-v7.json"
+        ))
+        .unwrap();
+        value["workspaces"][0]["tabs"][0]["layout"] = serde_json::json!({"Pane":4242});
+        let snapshot = parse_snapshot(&value.to_string()).unwrap();
+        let panes = &snapshot.workspaces[0].tabs[0].panes;
+        assert_eq!(panes.len(), 4);
+        assert!(panes[&4242].terminal_id.is_some());
+        for original in [900001, 900002, 900003] {
+            assert!(panes.contains_key(&original));
+        }
     }
 
     #[test]

@@ -3,6 +3,8 @@ use std::path::{Path, PathBuf};
 
 use tracing::warn;
 
+#[cfg(any(unix, test))]
+use super::snapshot::MAX_COLLECTIONS_ACTION_SEQUENCE;
 use super::snapshot::{
     parse_history_snapshot, snapshot_file_version, SessionHistorySnapshot, SessionSnapshot,
     MAX_HISTORY_SNAPSHOT_BYTES, MAX_SESSION_SNAPSHOT_BYTES, SNAPSHOT_VERSION,
@@ -219,15 +221,7 @@ pub(super) fn prepare_session_write(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error),
     };
-    let old_version = snapshot_file_version(&content).ok_or_else(|| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            format!(
-                "refusing to overwrite unversioned session {}",
-                target.display()
-            ),
-        )
-    })?;
+    let old_version = session_write_metadata(&content)?.version;
     if old_version > next_version {
         return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, format!(
             "downgrade unsupported: session {} is version {old_version}, writer supports {next_version}",
@@ -448,9 +442,26 @@ pub(crate) fn load_for_startup() -> StartupSessionLoad {
 
 /// A previous live exporter can omit the action high-water. Consult only this
 /// monotonic fact from the existing checkpoint, never its stale layout/identity.
+/// Remove when no pre-v8 live sender can be a source.
 #[cfg(unix)]
 pub(crate) fn durable_collections_action_sequence() -> std::io::Result<u64> {
     checkpoint_collections_action_sequence(&session_path())
+}
+
+#[derive(serde::Deserialize)]
+struct SessionWriteMetadata {
+    version: u32,
+    #[serde(default)]
+    collections_action_sequence: u64,
+}
+
+fn session_write_metadata(content: &str) -> std::io::Result<SessionWriteMetadata> {
+    let invalid = |error| std::io::Error::new(std::io::ErrorKind::InvalidData, error);
+    // Bound JSON syntax before extracting the two facts. Deserialize's usual
+    // unknown-field skip does not enforce the tree reader's depth budget.
+    // No layout DTO, legacy conversion or normalization is consulted here.
+    let value: serde_json::Value = serde_json::from_str(content).map_err(invalid)?;
+    serde_json::from_value(value).map_err(invalid)
 }
 
 #[cfg(any(unix, test))]
@@ -460,17 +471,26 @@ fn checkpoint_collections_action_sequence(path: &Path) -> std::io::Result<u64> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
         Err(error) => return Err(error),
     };
-    super::snapshot::parse_snapshot(&content)
-        .map(|snapshot| snapshot.collections_action_sequence)
-        .map_err(|error| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!(
-                    "cannot reconcile durable Collections high-water from {}: {error}",
-                    path.display()
-                ),
-            )
-        })
+    let metadata = session_write_metadata(&content)?;
+    let diagnostic = if metadata.version > SNAPSHOT_VERSION {
+        Some("checkpoint version is newer than this reader")
+    } else if metadata.version < 7 && metadata.collections_action_sequence != 0 {
+        Some("Collections action sequence cannot appear before snapshot version 7")
+    } else if metadata.collections_action_sequence > MAX_COLLECTIONS_ACTION_SEQUENCE {
+        Some("Collections action sequence exceeds the supported range")
+    } else {
+        None
+    };
+    if let Some(diagnostic) = diagnostic {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "cannot reconcile durable Collections high-water from {}: {diagnostic}",
+                path.display()
+            ),
+        ));
+    }
+    Ok(metadata.collections_action_sequence)
 }
 
 fn read_bounded_text(path: &Path, maximum: u64) -> std::io::Result<String> {
@@ -826,14 +846,16 @@ mod tests {
             ))
             .unwrap();
             if !fail_publication {
-                legacy["workspaces"][0]["tabs"][0]["collections"][0]["selected"] =
-                    serde_json::json!(999);
+                // Repairable membership/selection is admitted; an unknown shape
+                // cannot be translated and must preserve the original +backup.
+                legacy["workspaces"][0]["tabs"][0]["layout"] =
+                    serde_json::json!({"UnsupportedLayout":999});
             }
             let original = serde_json::to_vec_pretty(&legacy).unwrap();
             std::fs::write(&path, &original).unwrap();
             let StartupSessionLoad::Rejected(error) =
                 load_for_startup_from_path_with(&path, |_| {
-                    assert!(fail_publication, "invalid selection reached publication");
+                    assert!(fail_publication, "unsupported layout reached publication");
                     Err(std::io::Error::other("injected failure before replacement"))
                 })
             else {
@@ -842,7 +864,7 @@ mod tests {
             if !fail_publication {
                 assert!(error.contains(path.to_str().unwrap()), "{error}");
                 assert!(
-                    error.contains("6100001") && error.contains("999"),
+                    error.contains("UnsupportedLayout") && error.contains("unknown variant"),
                     "{error}"
                 );
             }
@@ -885,6 +907,29 @@ mod tests {
     }
 
     #[test]
+    fn write_guard_reads_metadata_without_admitting_stale_layout() {
+        let path = temp_session_path("header-only-guard");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let original = br#"{"version":8,"collections_action_sequence":9,"workspaces":"stale"}"#;
+        std::fs::write(&path, original).unwrap();
+        assert!(prepare_session_write(&path, SNAPSHOT_VERSION)
+            .unwrap()
+            .is_none());
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+        let future = format!(
+            "{{\"version\":{},\"workspaces\":\"stale\"}}",
+            SNAPSHOT_VERSION + 1
+        );
+        std::fs::write(&path, &future).unwrap();
+        assert!(prepare_session_write(&path, SNAPSHOT_VERSION)
+            .unwrap_err()
+            .to_string()
+            .contains("downgrade unsupported"));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), future);
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
     fn checkpoint_high_water_reader_is_bounded_explicit_and_has_no_write_effect() {
         let path = temp_session_path("checkpoint-high-water");
         assert_eq!(checkpoint_collections_action_sequence(&path).unwrap(), 0);
@@ -898,6 +943,11 @@ mod tests {
             assert_eq!(checkpoint_collections_action_sequence(&path).unwrap(), 9);
             assert_eq!(std::fs::read(&path).unwrap(), original);
         }
+        // Only the counter is authoritative here; a stale layout is not admitted.
+        let original = br#"{"version":7,"collections_action_sequence":9,"workspaces":[{"tabs":[{"layout":{"Collection":"collection_1"},"collections":[]}]}]}"#;
+        std::fs::write(&path, original).unwrap();
+        assert_eq!(checkpoint_collections_action_sequence(&path).unwrap(), 9);
+        assert_eq!(std::fs::read(&path).unwrap(), original);
         for original in [
             b"not JSON".to_vec(),
             format!(

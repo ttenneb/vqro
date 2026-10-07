@@ -563,6 +563,8 @@ pub(crate) fn receive(socket_path: &Path, token: &str) -> io::Result<ReceivedHan
             crate::build_info::version()
         )));
     }
+    // Remove when no pre-v8 live sender can be a source: current exporters
+    // retain the high-water even under legacy or unavailable authority.
     let durable_sequence = crate::persist::durable_collections_action_sequence()?;
     manifest.snapshot.collections_action_sequence = manifest
         .snapshot

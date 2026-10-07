@@ -1987,6 +1987,113 @@ mod tests {
     }
 
     #[test]
+    fn v8_missing_stack_reference_is_pruned_without_inventing_terminal() {
+        let legacy = include_str!("../../tests/fixtures/session/hidden-member-handoff-v7.json");
+        let snapshot = super::super::snapshot::parse_snapshot(legacy).unwrap();
+        let mut value = serde_json::to_value(snapshot).unwrap();
+        value["workspaces"][0]["tabs"][0]["layout"]["Split"]["first"]["Stack"]["children"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({"Pane":999}));
+        let snapshot = super::super::snapshot::parse_snapshot(&value.to_string()).unwrap();
+        let tab = &snapshot.workspaces[0].tabs[0];
+        assert_eq!(tab.panes.len(), 3);
+        assert!(!tab.panes.contains_key(&999));
+        let (typed, map) = restore_typed_node_remapped(tab);
+        let surviving: HashSet<_> = tab
+            .panes
+            .keys()
+            .filter_map(|old| map.get(old).copied())
+            .collect();
+        let recovered =
+            recover_typed_layout(tab, typed, &map, &surviving, &mut HashSet::new()).unwrap();
+        assert_eq!(
+            recovered
+                .layout
+                .pane_ids()
+                .into_iter()
+                .collect::<HashSet<_>>(),
+            surviving
+        );
+        assert_eq!(surviving.len(), 3);
+    }
+
+    #[test]
+    fn v7_conversion_reuses_repair_rules_without_losing_panes_or_terminals() {
+        let original: serde_json::Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/session/hidden-member-handoff-v7.json"
+        ))
+        .unwrap();
+        for fault in 0..4 {
+            let mut value = original.clone();
+            let tab = &mut value["workspaces"][0]["tabs"][0];
+            match fault {
+                0 => {
+                    let mut members = Vec::new();
+                    for _ in 0..=crate::admission::MAX_GROUP_MEMBERS {
+                        members.extend([900001, 900002, 999]);
+                    }
+                    tab["collections"][0]["members"] = serde_json::json!(members);
+                    tab["collections"][0]["archived"] = serde_json::json!([900002, 999]);
+                }
+                1 => tab["collections"] = serde_json::json!([]),
+                2 => tab["collections"]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(serde_json::json!({"id":"collection_6100002","members":[900003]})),
+                _ => {
+                    tab["collections"][0]["selected"] = serde_json::json!(999);
+                    tab["collections"][0]["archived"] = serde_json::json!([900002, 999]);
+                }
+            }
+            let snapshot = super::super::snapshot::parse_snapshot(&value.to_string()).unwrap();
+            validate_snapshot_admission(&snapshot).unwrap();
+            let tab = &snapshot.workspaces[0].tabs[0];
+            let terminal_ids: Vec<_> = tab
+                .panes
+                .values()
+                .map(|pane| pane.terminal_id.clone())
+                .collect();
+            assert_eq!(terminal_ids.len(), 3, "fault {fault}");
+            let (typed, map) = restore_typed_node_remapped(tab);
+            let surviving: HashSet<_> = tab
+                .panes
+                .keys()
+                .filter_map(|old| map.get(old).copied())
+                .collect();
+            let recovered =
+                recover_typed_layout(tab, typed, &map, &surviving, &mut HashSet::new()).unwrap();
+            assert_eq!(
+                recovered
+                    .layout
+                    .pane_ids()
+                    .into_iter()
+                    .collect::<HashSet<_>>(),
+                surviving,
+                "fault {fault}"
+            );
+            assert_eq!(surviving.len(), 3);
+            let collection = CollectionId::from_raw(6_100_001).unwrap();
+            if fault != 1 {
+                assert_eq!(
+                    recovered
+                        .layout
+                        .collection(collection.into())
+                        .unwrap()
+                        .selected(),
+                    map.get(&900001).copied()
+                );
+            }
+            if fault == 0 || fault == 3 {
+                assert_eq!(
+                    recovered.legacy_collection_snapshots[&collection.into()].archived(),
+                    &HashSet::from([map[&900002]])
+                );
+            }
+        }
+    }
+
+    #[test]
     fn legacy_collection_restore_repairs_duplicate_missing_and_over_limit_members_without_losing_panes(
     ) {
         use super::super::snapshot::{CollectionSnapshot, LayoutSnapshot, TabSnapshot};

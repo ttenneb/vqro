@@ -446,15 +446,15 @@ impl App {
             tab_id: self.public_tab_id(ws_idx, tab_idx)?,
             zoomed: tab.zoomed,
             focused_pane_id: self.public_pane_id(ws_idx, tab.layout.focused())?,
-            root: self
-                .layout_node_description(ws_idx, tab_idx, tab.layout.typed_root())
-                .or_else(|| {
-                    self.layout_node_description(
-                        ws_idx,
-                        tab_idx,
-                        &TypedNode::Leaf(tab.layout.focused()),
-                    )
-                })?,
+            root: if tab.layout.typed_root().selected_pane().is_some() {
+                self.layout_node_description(ws_idx, tab_idx, tab.layout.typed_root())?
+            } else {
+                self.layout_node_description(
+                    ws_idx,
+                    tab_idx,
+                    &TypedNode::Leaf(tab.layout.focused()),
+                )?
+            },
         })
     }
 
@@ -479,22 +479,25 @@ impl App {
                 ratio,
                 first,
                 second,
-            } => match (
-                self.layout_node_description(ws_idx, tab_idx, first),
-                self.layout_node_description(ws_idx, tab_idx, second),
-            ) {
-                (Some(first), Some(second)) => Some(LayoutNode::Split {
+            } => {
+                // Only empty structural branches may collapse. A missing pane
+                // description is an export error, not an empty layout branch.
+                if first.selected_pane().is_none() {
+                    return self.layout_node_description(ws_idx, tab_idx, second);
+                }
+                if second.selected_pane().is_none() {
+                    return self.layout_node_description(ws_idx, tab_idx, first);
+                }
+                Some(LayoutNode::Split {
                     direction: match direction {
                         Direction::Horizontal => SplitDirection::Right,
                         Direction::Vertical => SplitDirection::Down,
                     },
                     ratio: *ratio,
-                    first: Box::new(first),
-                    second: Box::new(second),
-                }),
-                (Some(node), None) | (None, Some(node)) => Some(node),
-                (None, None) => None,
-            },
+                    first: Box::new(self.layout_node_description(ws_idx, tab_idx, first)?),
+                    second: Box::new(self.layout_node_description(ws_idx, tab_idx, second)?),
+                })
+            }
         }
     }
 
@@ -864,6 +867,17 @@ mod tests {
         app.state.selected = 0;
         app.state.ensure_test_terminals();
         app
+    }
+
+    #[test]
+    fn layout_export_does_not_hide_an_undescribable_nonempty_pane() {
+        let mut app = app_with_workspace();
+        let root = app.state.workspaces[0].tabs[0].root_pane;
+        let right = app.state.workspaces[0].test_split(Direction::Horizontal);
+        app.state.ensure_test_terminals();
+        app.state.workspaces[0].tabs[0].layout.focus_pane(root);
+        app.state.workspaces[0].tabs[0].panes.remove(&right);
+        assert!(app.layout_description(0, 0).is_none());
     }
 
     #[test]
