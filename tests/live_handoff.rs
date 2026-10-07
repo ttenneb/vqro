@@ -3202,6 +3202,17 @@ fn live_handoff_preserves_a_view_pane_without_a_runtime() {
         .to_string();
     assert_ne!(view_pane, root_pane);
 
+    // Capture the terminal identity before the transfer, so a replacement
+    // identity cannot pass the post-transfer check.
+    let terminal_before = request(
+        &api_socket,
+        serde_json::json!({"id":"test:term-before","method":"pane.get","params":{"pane_id":root_pane}}),
+    );
+    let terminal_id_before = terminal_before["result"]["pane"]["terminal_id"]
+        .as_str()
+        .expect("terminal id before transfer")
+        .to_string();
+
     assert_ok(request(
         &api_socket,
         serde_json::json!({"id":"test:handoff","method":"server.live_handoff","params":{}}),
@@ -3234,7 +3245,16 @@ fn live_handoff_preserves_a_view_pane_without_a_runtime() {
         terminal["result"]["pane"]["content"].is_null(),
         "a terminal omits the content kind: {terminal}"
     );
-    assert!(terminal["result"]["pane"]["terminal_id"].is_string());
+    assert_eq!(
+        terminal["result"]["pane"]["terminal_id"].as_str(),
+        Some(terminal_id_before.as_str()),
+        "terminal identity is preserved through the live transfer: {terminal}"
+    );
+    assert_eq!(
+        terminal["result"]["pane"]["pane_id"].as_str(),
+        Some(root_pane.as_str()),
+        "the public pane identity is preserved"
+    );
 
     // The exported tree still holds the view leaf with its identity.
     let exported = request(

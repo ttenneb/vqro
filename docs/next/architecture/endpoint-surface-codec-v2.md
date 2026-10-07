@@ -49,14 +49,18 @@ retained-surface, patch and graphics-asset paths. It is not the smaller change.
   plain `PaneSurfacePatch` for both codecs: view descriptors change only with a
   topology change, which forces a new full surface.
 - Serving is `shell.surface.v2` only. `shell.surface.v1` is retired **from
-  serving**, not from decode. Hello advertises `["shell.surface.v2","shell.surface.v1"]`;
+  serving**, not from decode. The client advertises only `shell.surface.v2`, and
   the welcome names `shell.surface.v2`.
-- Refusals are client-local, in both directions. A peer whose hello does not
-  advertise `shell.surface.v2` is refused with the hello rejection
-  `unsupported_surface_codec` ("update this client"); a new client whose welcome
-  names only `shell.surface.v1` fails the handshake with "update this machine".
-  No v1 frame or patch is sent, no shared geometry changes, and no supported
-  client is disconnected.
+- Refusals are client-local. A generation-1 peer that advertises only
+  `shell.surface.v1` is refused by this server at the greeting with the hello
+  rejection `unsupported_surface_codec` ("update this client"). A new client
+  meeting a predecessor server that speaks only v1 is refused at the greeting by
+  the predecessor with `no_common_core`: the client no longer lists v1, so there
+  is no common core codec, and the predecessor never selects a v1 welcome. The
+  client's own welcome check (a welcome naming only `shell.surface.v1` fails with
+  "update this machine") is a defensive guard that should not fire on the normal
+  path. No v1 frame or patch is sent, no shared geometry changes, and no
+  supported client is disconnected.
 - The pane API names its content kind: `api::schema::PaneInfo` gains
   `content: PaneContent { terminal, view, unknown }`, and `terminal_id` becomes
   optional and is absent for a view (never the empty string). An omitted
@@ -72,11 +76,13 @@ retained-surface, patch and graphics-asset paths. It is not the smaller change.
 ## Serving policy
 
 `shell.surface.v1` is retired from serving, not from decode: serving is
-`shell.surface.v2` only. A peer whose hello does not advertise
-`shell.surface.v2` is refused client-locally with the hello rejection
-`unsupported_surface_codec` ("update this client"); a new client whose welcome
-names only `shell.surface.v1` fails its handshake locally with "update this
-machine". No v1 frame or patch is sent to any peer, no shared geometry changes,
+`shell.surface.v2` only. The client advertises only `shell.surface.v2`; a
+predecessor server therefore refuses the greeting with `no_common_core` before
+it can emit a v1 welcome. A generation-1 peer that advertises only
+`shell.surface.v1` is refused by this server with the hello rejection
+`unsupported_surface_codec` ("update this client"); the client's welcome check
+("update this machine") is a defensive guard for an invalid welcome, not the
+normal predecessor path. No v1 frame or patch is sent to any peer, no shared geometry changes,
 and no supported client is disconnected. This applies the 2026-10-04 option-B
 entry: older clients are not supported and mismatched client and server refuse
 cleanly, and no mixed-version client can exist today (remote use is disabled and
