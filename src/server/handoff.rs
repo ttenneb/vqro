@@ -328,6 +328,7 @@ fn validate_handoff_version_numbers(handoff_version: u32, snapshot_version: u32)
         HANDOFF_VERSION => {
             snapshot_version == crate::persist::LEGACY_SNAPSHOT_WRITER_VERSION
                 || snapshot_version == 7
+                || snapshot_version == crate::persist::PREDECESSOR_SNAPSHOT_VERSION
                 || snapshot_version == crate::persist::SNAPSHOT_VERSION
         }
         _ => false,
@@ -1222,6 +1223,31 @@ mod tests {
             assert!(validate_and_normalize_manifest(&mut manifest).is_err());
             assert_eq!(serde_json::to_vec(&manifest.snapshot).unwrap(), before);
         }
+    }
+
+    #[test]
+    fn predecessor_v8_snapshot_is_admitted_for_live_handoff() {
+        // The immediately previous release wrote snapshot v8. A normal live
+        // upgrade from that build must reach FD admission, not be rejected for a
+        // missing version number.
+        let mut snapshot = one_pane_snapshot();
+        snapshot.version = crate::persist::PREDECESSOR_SNAPSHOT_VERSION;
+        let terminal_id = crate::persist::terminal_id_for_pane_snapshot(
+            &snapshot.workspaces[0].tabs[0].panes[&1],
+        )
+        .unwrap();
+        let mut manifest = HandoffManifest {
+            version: HANDOFF_VERSION,
+            source_version: "v8".into(),
+            source_protocol: crate::protocol::PROTOCOL_VERSION,
+            expected_version: None,
+            expected_protocol: None,
+            snapshot,
+            panes: vec![runtime_for(1, Some(terminal_id.to_string()))],
+            deferred_panes: Vec::new(),
+            api_window_title: None,
+        };
+        validate_and_normalize_manifest(&mut manifest).expect("v8 live handoff is admitted");
     }
 
     #[test]

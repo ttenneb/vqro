@@ -14,6 +14,10 @@ use crate::workspace::Workspace;
 pub(crate) const SNAPSHOT_VERSION: u32 = 9;
 /// Admitted input version from pre-tree legacy-authority writers. Never written.
 pub(crate) const LEGACY_SNAPSHOT_WRITER_VERSION: u32 = 6;
+/// Snapshot version written by the immediately previous release. Kept as an
+/// admitted live-handoff input so a normal upgrade from that build is not
+/// rejected before FD admission; its `Pane` leaf is unchanged and parses as-is.
+pub(crate) const PREDECESSOR_SNAPSHOT_VERSION: u32 = 8;
 /// Pane history has no terminal-identity fields and remains wire-compatible at v4.
 pub(super) const HISTORY_SNAPSHOT_VERSION: u32 = 4;
 pub(super) const MAX_SESSION_SNAPSHOT_BYTES: u64 = 16 * 1024 * 1024;
@@ -521,7 +525,12 @@ where
     fn collect_layout_panes(layout: &LayoutSnapshot, panes: &mut Vec<u32>) {
         match layout {
             LayoutSnapshot::Pane(id) => panes.push(*id),
-            LayoutSnapshot::View { pane, .. } => panes.push(*pane),
+            // A view is a structural pane with no terminal record. Rescuing it
+            // as a terminal would fabricate an identity and misreport a valid
+            // view-bearing capture as a structural change, which legacy handoff
+            // admission then rejects. Its public number is workspace-level and
+            // normalized separately; the layout leaf keeps the view identity.
+            LayoutSnapshot::View { .. } => {}
             // Stack descendants are not synthesized; missing references reach
             // typed recovery without runtimes. Standalone legacy references
             // retain the existing layout-only pane rescue.
@@ -1413,6 +1422,46 @@ mod tests {
         terminal_runtimes: &TerminalRuntimeRegistry,
     ) -> SessionHistorySnapshot {
         capture_history(&state.workspaces, terminal_runtimes)
+    }
+
+    #[test]
+    fn normalizing_a_view_pane_does_not_fabricate_a_terminal_record() {
+        // A valid view-bearing capture intentionally has no PaneSnapshot for the
+        // view: it is a structural pane, not a terminal. Identity normalization
+        // must not rescue it into a fabricated terminal record or report the
+        // capture as a structural change (legacy handoff admission rejects that
+        // flag, and a fabricated terminal identity would be durable).
+        let mut state = state_with_workspaces(&["view-normalize"]);
+        let root = state.workspaces[0].tabs[0].root_pane;
+        let (_, view_pane) = state.workspaces[0]
+            .split_pane_with_view(
+                root,
+                "vqro.tasks",
+                "tasks",
+                Direction::Horizontal,
+                0.5,
+                false,
+            )
+            .expect("view pane");
+        let mut snapshot = capture_from_state(&state);
+        assert!(!snapshot.workspaces[0].tabs[0]
+            .panes
+            .contains_key(&view_pane.raw()));
+
+        let changes = normalize_identity_changes(&mut snapshot, false).expect("normalize");
+        assert!(
+            !changes.structural_state_changed,
+            "a valid view-bearing capture must not be a structural change"
+        );
+        assert!(
+            !snapshot.workspaces[0].tabs[0]
+                .panes
+                .contains_key(&view_pane.raw()),
+            "normalization must not fabricate a terminal record for a view"
+        );
+        assert!(snapshot.workspaces[0].tabs[0]
+            .panes
+            .contains_key(&root.raw()));
     }
 
     fn root_split_ratio(tab: &TabSnapshot) -> Option<f32> {
