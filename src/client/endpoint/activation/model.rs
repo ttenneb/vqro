@@ -19,6 +19,8 @@ pub(super) struct ActivationEvidence {
     pub(super) focused_tab_id: Option<String>,
     pub(super) focused_pane_id: Option<String>,
     pub(super) surface: Option<crate::protocol::PaneSurfaceFrame>,
+    /// View descriptors paired with `surface` for a `shell.surface.v2` endpoint.
+    pub(super) surface_views: Vec<crate::protocol::PaneSurfaceViewEntryV2>,
 }
 
 impl ActivationEvidence {
@@ -34,7 +36,11 @@ impl ActivationEvidence {
         }
     }
 
-    pub(super) fn record_surface(&mut self, surface: crate::protocol::PaneSurfaceFrame) {
+    pub(super) fn record_surface(
+        &mut self,
+        surface: crate::protocol::PaneSurfaceFrame,
+        views: Vec<crate::protocol::PaneSurfaceViewEntryV2>,
+    ) {
         let replace = self.surface.as_ref().is_none_or(|current| {
             surface.projection_revision > current.projection_revision
                 || (surface.projection_revision == current.projection_revision
@@ -42,11 +48,13 @@ impl ActivationEvidence {
         });
         if replace {
             self.surface = Some(surface);
+            self.surface_views = views;
         }
     }
 
     pub(super) fn invalidate_surface(&mut self) {
         self.surface = None;
+        self.surface_views.clear();
     }
 
     pub(super) fn coherent_surface(

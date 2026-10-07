@@ -104,22 +104,26 @@ impl RenderPipeline {
             },
             &self.graphics_delivery,
             1,
+            false,
         );
         let server_elapsed = started.elapsed();
         self.graphics_delivery = rendered.graphics_delivery;
 
         let started = Instant::now();
-        self.client.set_pane_surface(PaneSurfaceFrame {
-            boot_id: "bench-boot".into(),
-            projection_revision: 1,
-            surface_revision: 0,
-            frame: rendered.frame,
-            panes: rendered.panes,
-            collections: rendered.collections,
-            splits: rendered.splits,
-            popup: rendered.popup,
-            graphics: rendered.graphics,
-        });
+        self.client.set_pane_surface_with_views(
+            PaneSurfaceFrame {
+                boot_id: "bench-boot".into(),
+                projection_revision: 1,
+                surface_revision: 0,
+                frame: rendered.frame,
+                panes: rendered.panes,
+                collections: rendered.collections,
+                splits: rendered.splits,
+                popup: rendered.popup,
+                graphics: rendered.graphics,
+            },
+            rendered.views,
+        );
         black_box(
             self.client
                 .compose(COLS, ROWS)

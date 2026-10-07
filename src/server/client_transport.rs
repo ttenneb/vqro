@@ -431,6 +431,10 @@ pub(crate) enum ServerEvent {
         pane_viewport_enabled: bool,
         pane_view_enabled: bool,
         terminal_views_enabled: bool,
+        /// Surface codec selected during the endpoint hello: `shell.surface.v2`
+        /// carries view descriptors, `shell.surface.v1` is the frozen
+        /// terminal-only fallback.
+        surface_codec: String,
         writer: ClientWriter,
     },
     /// A client sent an input message.
@@ -725,6 +729,7 @@ struct ClientShellHandshakeOptions {
     pane_view_enabled: bool,
     terminal_views_enabled: bool,
     native_api_enabled: bool,
+    surface_codec: String,
 }
 
 fn client_shell_handshake_options(
@@ -763,6 +768,7 @@ fn client_shell_handshake_options(
         ]
         .iter()
         .all(|required| has(required)),
+        surface_codec: hello.preferred_surface_codec().to_owned(),
     }
 }
 
@@ -936,6 +942,11 @@ pub(crate) fn handle_client_handshake(
         };
         let mut welcome =
             EndpointServerWelcome::compatible(methods.into_iter().map(str::to_owned).collect());
+        // Advertise the exact surface codec this connection negotiated, so the
+        // client knows which envelope to expect for every subsequent surface.
+        if let Some(options) = shell_options.as_ref() {
+            welcome.surface_codec = options.surface_codec.clone();
+        }
         if shell_options
             .as_ref()
             .is_some_and(|options| options.structure_enabled)
@@ -1038,6 +1049,7 @@ pub(crate) fn handle_client_handshake(
             pane_viewport_enabled: options.pane_viewport_enabled,
             pane_view_enabled: options.pane_view_enabled,
             terminal_views_enabled: options.terminal_views_enabled,
+            surface_codec: options.surface_codec.clone(),
             writer,
         }
     } else {
@@ -1800,7 +1812,12 @@ mod tests {
             mouse_capture: true,
             surface_active: true,
             snapshot_codecs: vec![crate::protocol::endpoint::SNAPSHOT_CODEC_V1.into()],
-            surface_codecs: vec![crate::protocol::endpoint::SURFACE_CODEC_V1.into()],
+            // The current client advertises the additive v2 surface first and
+            // keeps v1 as the frozen terminal-only fallback.
+            surface_codecs: vec![
+                crate::protocol::endpoint::SURFACE_CODEC_V2.into(),
+                crate::protocol::endpoint::SURFACE_CODEC_V1.into(),
+            ],
             input_codecs: vec![crate::protocol::endpoint::INPUT_CODEC_V1.into()],
             blob_codecs: vec![crate::protocol::endpoint::BLOB_CODEC_V1.into()],
             control_kinds: Vec::new(),
@@ -1809,6 +1826,18 @@ mod tests {
             kind: ENDPOINT_HELLO_KIND.into(),
             data: serde_json::to_string(&hello).unwrap(),
         }
+    }
+
+    /// A generation-1 peer that only ever knew `shell.surface.v1`.
+    fn endpoint_hello_v1_only(surface_cols: u16, surface_rows: u16) -> ClientMessage {
+        let mut hello = endpoint_hello(surface_cols, surface_rows);
+        let ClientMessage::EndpointControl { data, .. } = &mut hello else {
+            unreachable!("endpoint hello helper always returns endpoint control");
+        };
+        let mut payload: EndpointClientHello = serde_json::from_str(data).unwrap();
+        payload.surface_codecs = vec![crate::protocol::endpoint::SURFACE_CODEC_V1.into()];
+        *data = serde_json::to_string(&payload).unwrap();
+        hello
     }
 
     fn endpoint_welcome(message: ServerMessage) -> EndpointServerWelcome {
@@ -2349,6 +2378,11 @@ mod tests {
         let welcome = endpoint_welcome(welcome);
         assert_eq!(welcome.generation, ENDPOINT_PROTOCOL_GENERATION);
         assert!(welcome.error.is_none());
+        // The peer advertised both surface codecs, so the server picks v2.
+        assert_eq!(
+            welcome.surface_codec,
+            crate::protocol::endpoint::SURFACE_CODEC_V2
+        );
         assert!(welcome
             .capabilities
             .iter()
@@ -2373,6 +2407,7 @@ mod tests {
                 pane_viewport_enabled,
                 pane_view_enabled,
                 terminal_views_enabled,
+                surface_codec,
                 writer,
                 host_views_enabled: false,
             } => {
@@ -2387,8 +2422,53 @@ mod tests {
                 assert!(!structure_enabled);
                 assert!(host_documents_enabled);
                 assert!(!terminal_views_enabled);
+                // This test client advertised both surface codecs, so the server
+                // negotiates the additive v2 codec.
+                assert_eq!(surface_codec, crate::protocol::endpoint::SURFACE_CODEC_V2);
                 assert!(!pane_viewport_enabled);
                 assert!(!pane_view_enabled);
+                drop(writer);
+            }
+            other => panic!("expected ClientShellConnected, got {other:?}"),
+        }
+
+        drop(client_stream);
+        should_quit.store(true, Ordering::Release);
+        handle
+            .join()
+            .expect("handshake thread join")
+            .expect("handshake thread result");
+    }
+
+    #[test]
+    fn v1_only_shell_hello_is_never_refused_and_negotiates_the_v1_surface() {
+        let (mut client_stream, server_stream, _path) = local_stream_pair("client-shell-v1-hello");
+        let (server_event_tx, mut server_event_rx) = mpsc::channel(4);
+        let should_quit = Arc::new(AtomicBool::new(false));
+        let handshake_quit = should_quit.clone();
+        let handle = std::thread::spawn(move || {
+            handle_client_handshake(server_stream, 44, &server_event_tx, &handshake_quit)
+        });
+
+        protocol::write_message(&mut client_stream, &endpoint_hello_v1_only(80, 29))
+            .expect("write v1 shell hello");
+
+        let welcome: ServerMessage =
+            protocol::read_message(&mut client_stream, MAX_FRAME_SIZE).expect("read welcome");
+        let welcome = endpoint_welcome(welcome);
+        assert!(welcome.error.is_none(), "a v1-only peer is never refused");
+        assert_eq!(
+            welcome.surface_codec,
+            crate::protocol::endpoint::SURFACE_CODEC_V1
+        );
+
+        match recv_server_event(&mut server_event_rx, "v1 shell connected") {
+            ServerEvent::ClientShellConnected {
+                surface_codec,
+                writer,
+                ..
+            } => {
+                assert_eq!(surface_codec, crate::protocol::endpoint::SURFACE_CODEC_V1);
                 drop(writer);
             }
             other => panic!("expected ClientShellConnected, got {other:?}"),

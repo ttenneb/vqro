@@ -126,8 +126,6 @@ fn surface() -> PaneSurfaceFrame {
             alternate_screen_active: false,
             pixel_width: 0,
             pixel_height: 0,
-            view: None,
-            scope: Vec::new(),
         }],
         collections: Vec::new(),
         splits: Vec::new(),
@@ -265,3 +263,29 @@ mod mouse_selection;
 mod popup_focus_projection;
 mod recovery;
 mod startup_overlays;
+
+#[test]
+fn v2_surface_index_tracks_view_descriptors_and_v1_clears_it() {
+    let config = ClientShellConfig::from_config(&Config::default());
+    let mut state = ClientShellState::new(config);
+    state.set_snapshot(Box::new(snapshot()));
+
+    state.set_pane_surface_with_views(
+        surface(),
+        vec![crate::protocol::PaneSurfaceViewEntryV2 {
+            pane_id: "pane_2".into(),
+            extension: "vqro.tasks".into(),
+            view: "tasks".into(),
+            scope: vec!["pane_1".into()],
+        }],
+    );
+    assert_eq!(state.pane_surface_views.len(), 1);
+    assert_eq!(state.pane_surface_views[0].pane_id, "pane_2");
+    assert_eq!(state.pane_surface_views[0].view, "tasks");
+
+    // A later v1 surface is terminal-only: it must not keep a stale view index.
+    let mut v1 = surface();
+    v1.surface_revision = 2;
+    state.set_pane_surface_with_views(v1, Vec::new());
+    assert!(state.pane_surface_views.is_empty());
+}

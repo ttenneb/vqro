@@ -2064,6 +2064,7 @@ impl HeadlessServer {
                 pane_viewport_enabled,
                 pane_view_enabled,
                 terminal_views_enabled,
+                surface_codec,
                 writer,
             } => {
                 if self.handoff_in_progress {
@@ -2116,6 +2117,9 @@ impl HeadlessServer {
                 connection.shell_terminal_views_enabled = terminal_views_enabled;
                 connection.shell_surface_active = surface_active;
                 connection.shell_projection_revision = 1;
+                connection
+                    .render_state
+                    .set_surface_v2(surface_codec == crate::protocol::endpoint::SURFACE_CODEC_V2);
                 let config_diagnostic = if endpoint_keybindings {
                     self.server_config_diagnostic.as_deref()
                 } else {

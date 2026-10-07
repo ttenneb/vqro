@@ -79,6 +79,7 @@ async fn metadata_only_shell_is_isolated_until_surface_activation() {
             pane_viewport_enabled: false,
             pane_view_enabled: false,
             terminal_views_enabled: false,
+            surface_codec: crate::protocol::endpoint::SURFACE_CODEC_V1.to_owned(),
             writer,
             host_views_enabled: false,
         })
@@ -301,6 +302,7 @@ async fn background_surface_activation_preserves_focused_viewer_geometry() {
             pane_viewport_enabled: false,
             pane_view_enabled: false,
             terminal_views_enabled: false,
+            surface_codec: crate::protocol::endpoint::SURFACE_CODEC_V1.to_owned(),
             writer,
             host_views_enabled: false,
         })
@@ -418,6 +420,7 @@ async fn presentation_sync_epoch_replays_modes_and_title() {
             pane_viewport_enabled: false,
             pane_view_enabled: false,
             terminal_views_enabled: false,
+            surface_codec: crate::protocol::endpoint::SURFACE_CODEC_V1.to_owned(),
             writer,
             host_views_enabled: false,
         })
@@ -538,6 +541,7 @@ async fn two_headless_servers_drive_atomic_endpoint_handoff() {
             pane_viewport_enabled: false,
             pane_view_enabled: false,
             terminal_views_enabled: false,
+            surface_codec: crate::protocol::endpoint::SURFACE_CODEC_V1.to_owned(),
             writer: source_writer,
             host_views_enabled: false,
         })
@@ -569,6 +573,7 @@ async fn two_headless_servers_drive_atomic_endpoint_handoff() {
             pane_viewport_enabled: false,
             pane_view_enabled: false,
             terminal_views_enabled: false,
+            surface_codec: crate::protocol::endpoint::SURFACE_CODEC_V1.to_owned(),
             writer: target_writer,
             host_views_enabled: false,
         })

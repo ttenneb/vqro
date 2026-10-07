@@ -6,8 +6,8 @@ use ratatui::layout::{Position, Rect, Size};
 use crate::app::state::AppState;
 use crate::protocol::render_ansi::{BlitEncoder, EncodedBlit};
 use crate::protocol::{
-    CursorState, FrameData, PaneSurfaceFrame, PaneSurfacePatch, RenderEncoding, ServerMessage,
-    TerminalFrame,
+    CursorState, FrameData, PaneSurfaceFrame, PaneSurfaceFrameV2, PaneSurfacePatch,
+    PaneSurfacePatchV2, PaneSurfaceViewEntryV2, RenderEncoding, ServerMessage, TerminalFrame,
 };
 use crate::terminal::TerminalRuntimeRegistry;
 
@@ -16,7 +16,12 @@ pub(crate) enum ClientRenderState {
     /// Semantic clients compare full frame data and skip identical frames.
     Semantic {
         last_surface: Option<Box<PaneSurfaceFrame>>,
+        /// View descriptors committed with `last_surface`; only a v2 peer ever
+        /// holds any, and a v1 peer is always sent the view-free projection.
+        last_views: Vec<PaneSurfaceViewEntryV2>,
         surface_revision: u64,
+        /// Whether this connection negotiated `shell.surface.v2`.
+        surface_v2: bool,
     },
     /// Terminal-ANSI clients keep a terminal diff encoder and sequence number.
     TerminalAnsi {
@@ -31,7 +36,9 @@ impl ClientRenderState {
         match render_encoding {
             RenderEncoding::SemanticFrame => Self::Semantic {
                 last_surface: None,
+                last_views: Vec::new(),
                 surface_revision: 0,
+                surface_v2: false,
             },
             RenderEncoding::TerminalAnsi => Self::TerminalAnsi {
                 blit_encoder: BlitEncoder::new(),
@@ -43,7 +50,14 @@ impl ClientRenderState {
 
     pub(crate) fn reset_baseline(&mut self) {
         match self {
-            Self::Semantic { last_surface, .. } => *last_surface = None,
+            Self::Semantic {
+                last_surface,
+                last_views,
+                ..
+            } => {
+                *last_surface = None;
+                last_views.clear();
+            }
             Self::TerminalAnsi {
                 blit_encoder,
                 repaint_pending,
@@ -57,7 +71,14 @@ impl ClientRenderState {
 
     pub(crate) fn request_repaint(&mut self) {
         match self {
-            Self::Semantic { last_surface, .. } => *last_surface = None,
+            Self::Semantic {
+                last_surface,
+                last_views,
+                ..
+            } => {
+                *last_surface = None;
+                last_views.clear();
+            }
             Self::TerminalAnsi {
                 repaint_pending, ..
             } => *repaint_pending = true,
@@ -111,13 +132,43 @@ impl ClientRenderState {
         }
     }
 
+    /// View descriptors committed with the last full surface on this connection.
+    pub(crate) fn last_pane_surface_views(&self) -> &[PaneSurfaceViewEntryV2] {
+        match self {
+            Self::Semantic { last_views, .. } => last_views,
+            Self::TerminalAnsi { .. } => &[],
+        }
+    }
+
+    /// Record the surface codec negotiated during the endpoint hello. Only the
+    /// semantic (client-shell) lane carries surfaces; terminal-ANSI connections
+    /// are unaffected.
+    pub(crate) fn set_surface_v2(&mut self, surface_v2: bool) {
+        if let Self::Semantic { surface_v2: v2, .. } = self {
+            *v2 = surface_v2;
+        }
+    }
+
+    pub(crate) fn surface_is_v2(&self) -> bool {
+        matches!(
+            self,
+            Self::Semantic {
+                surface_v2: true,
+                ..
+            }
+        )
+    }
+
     pub(crate) fn prepare_pane_surface(
         &mut self,
         mut surface: PaneSurfaceFrame,
+        views: Vec<PaneSurfaceViewEntryV2>,
     ) -> Option<PreparedRender> {
         let Self::Semantic {
             last_surface,
+            last_views,
             surface_revision,
+            surface_v2,
         } = self
         else {
             return None;
@@ -132,6 +183,7 @@ impl ClientRenderState {
                     && last.popup == surface.popup
                     && last.graphics.placements == surface.graphics.placements
                     && last.graphics.retained_assets == surface.graphics.retained_assets
+                    && *last_views == views
             })
         {
             return None;
@@ -139,9 +191,25 @@ impl ClientRenderState {
         surface.surface_revision = surface_revision.saturating_add(1);
         let mut committed_surface = surface.clone();
         committed_surface.graphics.assets.clear();
+        // A v1 peer is always handed the view-free projection, so `views` is
+        // empty here; a v2 peer gets the descriptors alongside the unchanged v1
+        // frame. Never put a view field on the v1 frame itself.
+        let message = if *surface_v2 {
+            ServerMessage::PaneSurfaceV2(PaneSurfaceFrameV2 {
+                frame: surface,
+                views: views.clone(),
+            })
+        } else {
+            debug_assert!(
+                views.is_empty(),
+                "a shell.surface.v1 peer must be sent the view-free projection"
+            );
+            ServerMessage::PaneSurface(surface)
+        };
         Some(PreparedRender::Semantic {
-            message: ServerMessage::PaneSurface(surface),
+            message,
             committed_surface: Box::new(committed_surface),
+            committed_views: views,
         })
     }
 
@@ -151,7 +219,9 @@ impl ClientRenderState {
     ) -> Option<PreparedRender> {
         let Self::Semantic {
             last_surface,
+            last_views,
             surface_revision,
+            surface_v2,
         } = self
         else {
             return None;
@@ -165,9 +235,19 @@ impl ClientRenderState {
         }
         let next_revision = surface_revision.saturating_add(1);
         patch.surface_revision = next_revision;
-        Some(PreparedRender::SemanticPatch {
-            message: ServerMessage::PaneSurfacePatch(patch),
-        })
+        // View descriptors are immutable for a placed view: only a topology
+        // change retargets or removes one, which forces a new full surface. So a
+        // patch echoes the committed descriptors and the client replaces its
+        // index with them. A v2 peer with no views pays nothing extra.
+        let message = if *surface_v2 {
+            ServerMessage::PaneSurfacePatchV2(PaneSurfacePatchV2 {
+                patch,
+                views: last_views.clone(),
+            })
+        } else {
+            ServerMessage::PaneSurfacePatch(patch)
+        };
+        Some(PreparedRender::SemanticPatch { message })
     }
 
     pub(crate) fn commit_sent_frame(&mut self, prepared: PreparedRender) {
@@ -175,24 +255,33 @@ impl ClientRenderState {
             (
                 Self::Semantic {
                     last_surface,
+                    last_views,
                     surface_revision,
+                    ..
                 },
                 PreparedRender::Semantic {
-                    committed_surface, ..
+                    committed_surface,
+                    committed_views,
+                    ..
                 },
             ) => {
                 *surface_revision = committed_surface.surface_revision;
                 *last_surface = Some(committed_surface);
+                *last_views = committed_views;
             }
             (
                 Self::Semantic {
                     last_surface,
                     surface_revision,
+                    ..
                 },
-                PreparedRender::SemanticPatch {
-                    message: ServerMessage::PaneSurfacePatch(patch),
-                },
+                PreparedRender::SemanticPatch { message },
             ) => {
+                let (ServerMessage::PaneSurfacePatch(patch)
+                | ServerMessage::PaneSurfacePatchV2(PaneSurfacePatchV2 { patch, .. })) = message
+                else {
+                    return;
+                };
                 let surface = last_surface
                     .as_deref_mut()
                     .expect("prepared patch baseline");
@@ -259,6 +348,7 @@ pub(crate) enum PreparedRender {
     Semantic {
         message: ServerMessage,
         committed_surface: Box<PaneSurfaceFrame>,
+        committed_views: Vec<PaneSurfaceViewEntryV2>,
     },
     SemanticPatch {
         message: ServerMessage,
@@ -280,12 +370,13 @@ impl PreparedRender {
     }
 
     pub(crate) fn strip_pane_surface_assets(&mut self) -> bool {
-        let Self::Semantic {
-            message: ServerMessage::PaneSurface(surface),
-            ..
-        } = self
-        else {
+        let Self::Semantic { message, .. } = self else {
             return false;
+        };
+        let surface = match message {
+            ServerMessage::PaneSurface(surface) => surface,
+            ServerMessage::PaneSurfaceV2(frame) => &mut frame.frame,
+            _ => return false,
         };
         if surface.graphics.assets.is_empty() {
             return false;
@@ -390,14 +481,16 @@ pub(crate) fn render_tab_surface_virtual(
     app_state: &AppState,
     terminal_runtimes: &TerminalRuntimeRegistry,
     target: Option<crate::ui::TabSurfaceTarget>,
+    layout_override: Option<&crate::layout::TileLayout>,
     area: Rect,
     resize_panes: bool,
     cell_size: crate::kitty_graphics::HostCellSize,
 ) -> RenderedTabSurface {
-    let layout = crate::ui::compute_tab_surface_for(
+    let layout = crate::ui::compute_tab_surface_for_layout(
         app_state,
         terminal_runtimes,
         target,
+        layout_override,
         area,
         resize_panes,
         cell_size,
@@ -495,12 +588,12 @@ mod tests {
     fn popup_only_surface_changes_are_not_deduplicated() {
         let mut state = ClientRenderState::new(RenderEncoding::SemanticFrame);
         let prepared = state
-            .prepare_pane_surface(popup_surface("first"))
+            .prepare_pane_surface(popup_surface("first"), Vec::new())
             .expect("initial surface");
         state.commit_sent_frame(prepared);
 
         assert!(state
-            .prepare_pane_surface(popup_surface("second"))
+            .prepare_pane_surface(popup_surface("second"), Vec::new())
             .is_some());
     }
 
@@ -508,13 +601,13 @@ mod tests {
     fn forced_full_surface_keeps_the_connection_revision_monotonic() {
         let mut state = ClientRenderState::new(RenderEncoding::SemanticFrame);
         let prepared = state
-            .prepare_pane_surface(popup_surface("first"))
+            .prepare_pane_surface(popup_surface("first"), Vec::new())
             .expect("initial surface");
         state.commit_sent_frame(prepared);
         state.request_repaint();
 
         let prepared = state
-            .prepare_pane_surface(popup_surface("replacement"))
+            .prepare_pane_surface(popup_surface("replacement"), Vec::new())
             .expect("forced replacement surface");
         assert!(matches!(
             prepared.message(),

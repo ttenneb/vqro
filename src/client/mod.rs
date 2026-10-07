@@ -1369,64 +1369,66 @@ async fn run_client_loop(
                         if !endpoint_active {
                             continue;
                         }
-                        let composed = if let Some(shell) = &mut state.shell {
-                            shell.set_pane_surface(surface);
-                            shell.compose(state.reported_size.0, state.reported_size.1)
-                        } else {
-                            None
-                        };
-                        apply_client_shell_input_source_changes(
+                        apply_endpoint_pane_surface_v1(
                             &mut state,
                             &mut write_stream,
                             &mut prefix_input_source,
+                            surface,
                         );
-                        if let Some(frame) = composed {
-                            state.present_frame(frame);
-                        }
                     }
-                    ServerMessage::PaneSurfacePatch(patch) => {
-                        let patch_started = crate::render_prof::timer();
-                        let apply_started = crate::render_prof::timer();
-                        let outcome = state
-                            .shell
-                            .as_mut()
-                            .map(|shell| shell.apply_pane_surface_patch(patch));
-                        crate::render_prof::duration_since(
-                            "client_surface_patch.apply",
-                            apply_started,
-                        );
-                        let compose_fallback = match outcome {
-                            Some(shell::ClientPaneSurfacePatchOutcome::Applied(Some(patch))) => {
-                                match state.present_surface_patch(patch) {
-                                    Ok(presented) => !presented,
-                                    Err(error) => {
-                                        warn!(%error, "failed to present retained pane surface patch");
-                                        state.request_repaint();
-                                        false
-                                    }
+                    ServerMessage::PaneSurfaceV2(frame) => {
+                        let crate::protocol::PaneSurfaceFrameV2 { frame, views } = frame;
+                        if activation_message {
+                            let progress = pending_activation.as_mut().map(|pending| {
+                                pending.receive_surface_with_views(
+                                    &endpoint_id,
+                                    generation,
+                                    frame,
+                                    views.clone(),
+                                )
+                            });
+                            if matches!(progress, Some(endpoint::SurfaceActivationProgress::Ready))
+                            {
+                                if let Some(event) = complete_endpoint_activation(
+                                    &mut state,
+                                    &mut write_stream,
+                                    &mut pending_activation,
+                                    &mut endpoint_commands,
+                                )? {
+                                    scheduled_activation = Some(event);
                                 }
                             }
-                            Some(shell::ClientPaneSurfacePatchOutcome::Applied(None)) => true,
-                            Some(shell::ClientPaneSurfacePatchOutcome::Rejected) | None => false,
-                        };
-                        apply_client_shell_input_source_changes(
+                            continue;
+                        }
+                        if !endpoint_active {
+                            continue;
+                        }
+                        apply_endpoint_pane_surface_v2(
                             &mut state,
                             &mut write_stream,
                             &mut prefix_input_source,
+                            frame,
+                            views,
                         );
-                        if compose_fallback {
-                            let composed = state.shell.as_mut().and_then(|shell| {
-                                shell.compose(state.reported_size.0, state.reported_size.1)
-                            });
-                            if let Some(frame) = composed {
-                                state.present_frame(frame);
-                            }
-                        }
-                        crate::render_prof::duration_since(
-                            "client_surface_patch.total",
-                            patch_started,
+                    }
+                    ServerMessage::PaneSurfacePatch(patch) => {
+                        apply_endpoint_pane_surface_patch(
+                            &mut state,
+                            &mut write_stream,
+                            &mut prefix_input_source,
+                            patch,
+                            None,
                         );
-                        crate::render_prof::flush_if_due();
+                    }
+                    ServerMessage::PaneSurfacePatchV2(frame) => {
+                        let crate::protocol::PaneSurfacePatchV2 { patch, views } = frame;
+                        apply_endpoint_pane_surface_patch(
+                            &mut state,
+                            &mut write_stream,
+                            &mut prefix_input_source,
+                            patch,
+                            Some(views),
+                        );
                     }
                     ServerMessage::Terminal(frame) => {
                         if state.kitty_graphics_enabled

@@ -35,6 +35,7 @@ pub(crate) fn accepts_endpoint_message(
             && matches!(
                 message,
                 ServerMessage::PaneSurface(_)
+                    | ServerMessage::PaneSurfaceV2(_)
                     | ServerMessage::ClientShellEndpointResponseChunk { .. }
             ))
         || (command_response
@@ -120,5 +121,39 @@ mod tests {
                 sgr_pixels: false,
             }
         ));
+    }
+
+    fn empty_frame() -> crate::protocol::PaneSurfaceFrame {
+        crate::protocol::PaneSurfaceFrame {
+            boot_id: "boot".into(),
+            projection_revision: 1,
+            surface_revision: 1,
+            frame: crate::protocol::FrameData {
+                cells: Vec::new(),
+                width: 0,
+                height: 0,
+                cursor: None,
+                hyperlinks: Vec::new(),
+                graphics: Vec::new(),
+            },
+            panes: Vec::new(),
+            collections: Vec::new(),
+            splits: Vec::new(),
+            popup: None,
+            graphics: crate::protocol::SurfaceGraphicsScene::default(),
+        }
+    }
+
+    #[test]
+    fn activation_accepts_both_surface_codecs_and_an_inactive_endpoint_neither() {
+        let v1 = ServerMessage::PaneSurface(empty_frame());
+        let v2 = ServerMessage::PaneSurfaceV2(crate::protocol::PaneSurfaceFrameV2 {
+            frame: empty_frame(),
+            views: Vec::new(),
+        });
+        assert!(accepts_endpoint_message(false, true, false, &v1));
+        assert!(accepts_endpoint_message(false, true, false, &v2));
+        assert!(!accepts_endpoint_message(false, false, false, &v1));
+        assert!(!accepts_endpoint_message(false, false, false, &v2));
     }
 }

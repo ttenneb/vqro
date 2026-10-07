@@ -594,6 +594,42 @@ impl TileLayout {
         self.root.view_scope(view_pane)
     }
 
+    /// This layout with every view pane removed. Each removed view's box is
+    /// promoted to its surviving sibling subtree by the same rule
+    /// [`Self::remove_leaf`] uses, so a covered terminal fills the view's rect
+    /// exactly instead of leaving a hole. This is the `shell.surface.v1`
+    /// projection: a v1 peer never sees a view pane.
+    pub(crate) fn without_view_panes(&self) -> Self {
+        let views = self.view_panes();
+        if views.is_empty() {
+            return self.clone();
+        }
+        let mut root = self.root.clone();
+        for view in views {
+            if !root.contains_pane(view) {
+                continue;
+            }
+            let current = std::mem::replace(&mut root, TypedNode::Leaf(PaneId::from_raw(0)));
+            // A placed view always shares the tab with at least one terminal, so
+            // removing it leaves the root non-empty.
+            root = typed_remove(current, LayoutLeaf::Pane(view))
+                .unwrap_or(TypedNode::Leaf(PaneId::from_raw(0)));
+        }
+        let focus = match self.focus {
+            LayoutLeaf::Pane(pane) if !root.contains_pane(pane) => root
+                .selected_pane()
+                .map(LayoutLeaf::Pane)
+                .unwrap_or(self.focus),
+            other => other,
+        };
+        let prev_focus = self.prev_focus.filter(|pane| root.contains_pane(*pane));
+        Self {
+            root,
+            focus,
+            prev_focus,
+        }
+    }
+
     /// Every placed view pane, in tree order.
     pub(crate) fn view_panes(&self) -> Vec<PaneId> {
         fn collect(node: &TypedNode, out: &mut Vec<PaneId>) {

@@ -335,12 +335,47 @@ pub(super) fn compute_pane_infos_for_tab(
     else {
         return Vec::new();
     };
+    compute_pane_infos_for_layout(
+        app,
+        terminal_runtimes,
+        ws_idx,
+        tab_idx,
+        &tab.layout,
+        tab.zoomed,
+        area,
+        resize_panes,
+        cell_size,
+    )
+}
 
-    let multi_pane = tab.layout.pane_count() > 1;
-    let selected_stack_panes = tab.layout.selected_stack_panes();
+/// Compute pane layout info from an explicit layout instead of the tab's
+/// canonical one. The `shell.surface.v1` projection passes a view-free layout so
+/// the covered terminal's promoted rect and the frame agree.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn compute_pane_infos_for_layout(
+    app: &AppState,
+    terminal_runtimes: &TerminalRuntimeRegistry,
+    ws_idx: usize,
+    tab_idx: usize,
+    layout: &crate::layout::TileLayout,
+    zoomed: bool,
+    area: Rect,
+    resize_panes: bool,
+    cell_size: crate::kitty_graphics::HostCellSize,
+) -> Vec<PaneInfo> {
+    let Some(tab) = app
+        .workspaces
+        .get(ws_idx)
+        .and_then(|workspace| workspace.tabs.get(tab_idx))
+    else {
+        return Vec::new();
+    };
 
-    if tab.zoomed {
-        let focused_id = tab.layout.focused();
+    let multi_pane = layout.pane_count() > 1;
+    let selected_stack_panes = layout.selected_stack_panes();
+
+    if zoomed {
+        let focused_id = layout.focused();
         let borders = if app.pane_borders.shows_borders(multi_pane) && app.pane_outer_borders {
             Borders::ALL
         } else {
@@ -383,7 +418,7 @@ pub(super) fn compute_pane_infos_for_tab(
     }
 
     let mut pane_infos = apply_pane_chrome(
-        tab.layout.panes(area),
+        layout.panes(area),
         app.pane_borders,
         app.pane_gaps,
         app.pane_outer_borders,

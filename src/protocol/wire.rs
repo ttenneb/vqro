@@ -1091,19 +1091,22 @@ pub struct PaneSurfacePane {
     pub alternate_screen_active: bool,
     pub pixel_width: u32,
     pub pixel_height: u32,
-    /// Present when the pane's content is an extension view instead of a
-    /// terminal. The client draws the view from this identity.
-    pub view: Option<PaneSurfaceView>,
-    /// Public pane ids the view covers, derived by the host from placement. Empty
-    /// for terminal panes. Shared by every client: the scope is a host fact.
-    pub scope: Vec<String>,
 }
 
-/// The content identity of a view pane in a rendered pane surface.
+/// The content identity of a view pane in a `shell.surface.v2` surface.
+///
+/// The view/scope facts live only in the v2 wrapper, never on
+/// [`PaneSurfacePane`]: the v1 codec stays byte-exactly terminal-only. The
+/// `pane_id` addresses the matching [`PaneSurfacePane`] entry that carries this
+/// view's geometry and focus.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PaneSurfaceView {
+pub struct PaneSurfaceViewEntryV2 {
+    pub pane_id: String,
     pub extension: String,
     pub view: String,
+    /// Public pane ids the view covers, derived by the host from placement.
+    /// Shared by every client: the scope is a host fact.
+    pub scope: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1275,6 +1278,25 @@ pub struct PaneSurfacePatch {
     pub panes: Vec<PaneSurfacePane>,
     /// Final cursor relative to the pane surface.
     pub cursor: Option<CursorState>,
+}
+
+/// `shell.surface.v2` full surface: the frozen v1 frame plus the view-pane
+/// descriptors that v1 cannot carry. The v1 frame is byte-identical to the
+/// pre-view codec; a peer that negotiated v1 receives `PaneSurface` instead.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PaneSurfaceFrameV2 {
+    pub frame: PaneSurfaceFrame,
+    pub views: Vec<PaneSurfaceViewEntryV2>,
+}
+
+/// `shell.surface.v2` incremental patch: the frozen v1 patch plus the current
+/// view-pane descriptors for the surface. View descriptors only change on a
+/// topology change, which forces a new full v2 surface rather than a patch, so
+/// `views` is the complete current set and the client replaces its index.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PaneSurfacePatchV2 {
+    pub patch: PaneSurfacePatch,
+    pub views: Vec<PaneSurfaceViewEntryV2>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1470,6 +1492,16 @@ pub enum ServerMessage {
     /// This variant is append-only. Its bincode tag and two-string payload are part
     /// of endpoint generation 1 and must not change.
     EndpointControl { kind: String, data: String },
+
+    /// `shell.surface.v2` full pane surface: the v1 frame plus view descriptors.
+    ///
+    /// These two variants are appended after `EndpointControl` so every earlier
+    /// bincode tag is unchanged. A peer that negotiated `shell.surface.v1` never
+    /// receives them and gets [`ServerMessage::PaneSurface`] instead.
+    PaneSurfaceV2(PaneSurfaceFrameV2),
+
+    /// `shell.surface.v2` incremental pane-surface update.
+    PaneSurfacePatchV2(PaneSurfacePatchV2),
 }
 
 // ---------------------------------------------------------------------------
@@ -2529,55 +2561,31 @@ mod tests {
         );
     }
 
-    #[test]
-    fn pane_surface_pane_round_trips_terminal_and_view_content() {
-        // A surface pane is bincode: every field is always present on the wire.
-        // A field skipped by the serializer but expected by the deserializer
-        // desyncs the whole client stream, so this asserts both content kinds
-        // round-trip exactly. Red before the fix: the view/scope fields were
-        // serde-skipped and the decode failed with UnexpectedEnd.
+    fn surface_pane(pane_id: &str, focused: bool) -> PaneSurfacePane {
         let rect = SurfaceRect {
             x: 0,
             y: 0,
             width: 80,
             height: 24,
         };
-        let terminal = PaneSurfacePane {
-            pane_id: "w1:p1".into(),
+        PaneSurfacePane {
+            pane_id: pane_id.into(),
             content_revision: 1,
             rect,
             inner_rect: rect,
             scrollbar_rect: None,
             scroll: None,
-            focused: true,
+            focused,
             mouse_reporting: false,
             sgr_pixel_mouse: false,
             alternate_screen_active: false,
             pixel_width: 0,
             pixel_height: 0,
-            view: None,
-            scope: Vec::new(),
-        };
-        let view = PaneSurfacePane {
-            pane_id: "w1:p2".into(),
-            content_revision: 0,
-            rect,
-            inner_rect: rect,
-            scrollbar_rect: None,
-            scroll: None,
-            focused: false,
-            mouse_reporting: false,
-            sgr_pixel_mouse: false,
-            alternate_screen_active: false,
-            pixel_width: 0,
-            pixel_height: 0,
-            view: Some(PaneSurfaceView {
-                extension: "vqro.tasks".into(),
-                view: "tasks".into(),
-            }),
-            scope: vec!["w1:p1".into()],
-        };
-        let msg = ServerMessage::PaneSurface(PaneSurfaceFrame {
+        }
+    }
+
+    fn empty_surface_frame(panes: Vec<PaneSurfacePane>) -> PaneSurfaceFrame {
+        PaneSurfaceFrame {
             boot_id: "boot-1".into(),
             projection_revision: 1,
             surface_revision: 1,
@@ -2589,29 +2597,83 @@ mod tests {
                 hyperlinks: Vec::new(),
                 graphics: Vec::new(),
             },
-            panes: vec![terminal.clone(), view.clone()],
+            panes,
             collections: Vec::new(),
             splits: Vec::new(),
             popup: None,
             graphics: SurfaceGraphicsScene::default(),
-        });
+        }
+    }
+
+    #[test]
+    fn pane_surface_v1_frame_round_trips_terminal_panes() {
+        // The v1 codec is bincode and byte-exactly terminal-only: every field is
+        // always present on the wire, so a serde-skipped field desynchronizes the
+        // whole client stream. A v1 frame must carry no view or scope field at all.
+        let msg =
+            ServerMessage::PaneSurface(empty_surface_frame(vec![surface_pane("w1:p1", true)]));
         let encoded = bincode::serde::encode_to_vec(&msg, bincode::config::standard()).unwrap();
         let (decoded, _): (ServerMessage, _) =
             bincode::serde::decode_from_slice(&encoded, bincode::config::standard()).unwrap();
         assert_eq!(msg, decoded);
         let ServerMessage::PaneSurface(surface) = decoded else {
-            panic!("expected a pane surface");
+            panic!("expected a v1 pane surface");
         };
-        assert_eq!(surface.panes[0].view, None);
-        assert!(surface.panes[0].scope.is_empty());
-        assert_eq!(
-            surface.panes[1].view,
-            Some(PaneSurfaceView {
+        assert_eq!(surface.panes.len(), 1);
+        assert_eq!(surface.panes[0].pane_id, "w1:p1");
+    }
+
+    #[test]
+    fn pane_surface_v2_frame_round_trips_view_descriptors() {
+        // The v2 wrapper is bincode too. The view descriptors must survive a
+        // round trip, and the terminal-only v1 frame inside must be untouched.
+        let msg = ServerMessage::PaneSurfaceV2(PaneSurfaceFrameV2 {
+            frame: empty_surface_frame(vec![
+                surface_pane("w1:p1", true),
+                surface_pane("w1:p2", false),
+            ]),
+            views: vec![PaneSurfaceViewEntryV2 {
+                pane_id: "w1:p2".into(),
                 extension: "vqro.tasks".into(),
                 view: "tasks".into(),
-            })
-        );
-        assert_eq!(surface.panes[1].scope, vec!["w1:p1".to_owned()]);
+                scope: vec!["w1:p1".into()],
+            }],
+        });
+        let encoded = bincode::serde::encode_to_vec(&msg, bincode::config::standard()).unwrap();
+        let (decoded, _): (ServerMessage, _) =
+            bincode::serde::decode_from_slice(&encoded, bincode::config::standard()).unwrap();
+        assert_eq!(msg, decoded);
+        let ServerMessage::PaneSurfaceV2(surface) = decoded else {
+            panic!("expected a v2 pane surface");
+        };
+        assert_eq!(surface.frame.panes.len(), 2);
+        assert_eq!(surface.views.len(), 1);
+        assert_eq!(surface.views[0].scope, vec!["w1:p1".to_owned()]);
+    }
+
+    #[test]
+    fn pane_surface_v2_patch_round_trips_view_descriptors() {
+        let msg = ServerMessage::PaneSurfacePatchV2(PaneSurfacePatchV2 {
+            patch: PaneSurfacePatch {
+                boot_id: "boot-1".into(),
+                projection_revision: 1,
+                base_surface_revision: 1,
+                surface_revision: 2,
+                rows: Vec::new(),
+                panes: vec![surface_pane("w1:p1", true)],
+                cursor: None,
+            },
+            views: vec![PaneSurfaceViewEntryV2 {
+                pane_id: "w1:p2".into(),
+                extension: "vqro.tasks".into(),
+                view: "tasks".into(),
+                scope: vec!["w1:p1".into()],
+            }],
+        });
+        let encoded = bincode::serde::encode_to_vec(&msg, bincode::config::standard()).unwrap();
+        let (decoded, _): (ServerMessage, _) =
+            bincode::serde::decode_from_slice(&encoded, bincode::config::standard()).unwrap();
+        assert_eq!(msg, decoded);
     }
 
     #[test]
@@ -2765,6 +2827,30 @@ mod tests {
                 data: String::new(),
             }),
             20
+        );
+        // The v2 surface variants are appended after `EndpointControl`, so the
+        // generation-1 tags above keep the exact numbering they had before.
+        assert_eq!(
+            tag(&ServerMessage::PaneSurfaceV2(PaneSurfaceFrameV2 {
+                frame: empty_frame(),
+                views: Vec::new(),
+            })),
+            21
+        );
+        assert_eq!(
+            tag(&ServerMessage::PaneSurfacePatchV2(PaneSurfacePatchV2 {
+                patch: PaneSurfacePatch {
+                    boot_id: String::new(),
+                    projection_revision: 0,
+                    base_surface_revision: 0,
+                    surface_revision: 0,
+                    rows: Vec::new(),
+                    panes: Vec::new(),
+                    cursor: None,
+                },
+                views: Vec::new(),
+            })),
+            22
         );
     }
 

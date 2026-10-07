@@ -441,6 +441,9 @@ pub(super) fn snapshot(
 pub(super) struct RenderedPaneSurface {
     pub(super) frame: FrameData,
     pub(super) panes: Vec<protocol::PaneSurfacePane>,
+    /// View-pane descriptors for a `shell.surface.v2` peer. Always empty for the
+    /// `shell.surface.v1` projection.
+    pub(super) views: Vec<protocol::PaneSurfaceViewEntryV2>,
     pub(super) collections: Vec<protocol::PaneSurfaceCollection>,
     pub(super) splits: Vec<protocol::PaneSurfaceSplit>,
     pub(super) popup: Option<Box<protocol::ClientShellPopupSurface>>,
@@ -448,6 +451,13 @@ pub(super) struct RenderedPaneSurface {
     pub(super) graphics_delivery: crate::kitty_graphics::surface::DeliveryCache,
 }
 
+/// Render the active tab pane surface.
+///
+/// `view_free` selects the `shell.surface.v1` projection: view panes are removed
+/// from the layout (each covered terminal is promoted into the view's box) so a
+/// v1 peer sees exactly what the pre-view build saw, with no hole and no view
+/// descriptor.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn render_pane_surface(
     app: &mut app::App,
     target: Option<crate::ui::TabSurfaceTarget>,
@@ -457,6 +467,7 @@ pub(super) fn render_pane_surface(
     cell_size: crate::kitty_graphics::HostCellSize,
     graphics_delivery: &crate::kitty_graphics::surface::DeliveryCache,
     client_id: u64,
+    view_free: bool,
 ) -> RenderedPaneSurface {
     let content_revisions_before = target
         .and_then(|target| {
@@ -479,18 +490,34 @@ pub(super) fn render_pane_surface(
             )
         })
         .unwrap_or_default();
+    // The v1 projection renders from a view-free layout: each removed view's box
+    // is promoted to its covered sibling, so the frame buffer and the pane/split
+    // rects both come from the same layout.
+    let projection_layout = view_free
+        .then(|| {
+            target.and_then(|target| {
+                app.state
+                    .workspaces
+                    .get(target.workspace_index)
+                    .and_then(|workspace| workspace.tabs.get(target.tab_index))
+                    .map(|tab| tab.layout.without_view_panes())
+            })
+        })
+        .flatten();
     let (buffer, cursor, hyperlinks, layout) =
         crate::server::render_stream::render_tab_surface_virtual(
             &app.state,
             &app.terminal_runtimes,
             target,
+            projection_layout.as_ref(),
             area,
             resize_panes,
             cell_size,
         );
     // One pass over the tab's view panes: each view pane's content identity and
     // the public ids it covers. A per-pane tree walk would be a search per pane.
-    let view_projection = target
+    let view_projection_target = if view_free { None } else { target };
+    let view_projection = view_projection_target
         .and_then(|target| {
             let workspace = app.state.workspaces.get(target.workspace_index)?;
             let tab = workspace.tabs.get(target.tab_index)?;
@@ -517,6 +544,7 @@ pub(super) fn render_pane_surface(
             )
         })
         .unwrap_or_default();
+    let mut views: Vec<protocol::PaneSurfaceViewEntryV2> = Vec::new();
     let panes = target
         .map(|target| {
             let workspace_index = target.workspace_index;
@@ -530,18 +558,14 @@ pub(super) fn render_pane_surface(
                             workspace_index,
                             pane.id,
                         );
-                        let (view_content, view_scope) = view_projection
-                            .get(&pane.id)
-                            .map(|(content, scope)| {
-                                (
-                                    content.as_ref().map(|view| protocol::PaneSurfaceView {
-                                        extension: view.extension.clone(),
-                                        view: view.view.clone(),
-                                    }),
-                                    scope.clone(),
-                                )
-                            })
-                            .unwrap_or((None, Vec::new()));
+                        if let Some((Some(content), scope)) = view_projection.get(&pane.id) {
+                            views.push(protocol::PaneSurfaceViewEntryV2 {
+                                pane_id: pane_id.clone(),
+                                extension: content.extension.clone(),
+                                view: content.view.clone(),
+                                scope: scope.clone(),
+                            });
+                        }
                         let mouse_reporting =
                             runtime.is_some_and(|runtime| runtime.mouse_reporting_enabled());
                         let sgr_pixel_mouse =
@@ -584,8 +608,6 @@ pub(super) fn render_pane_surface(
                                 .is_some_and(|runtime| runtime.alternate_screen_active()),
                             pixel_width,
                             pixel_height,
-                            view: view_content,
-                            scope: view_scope,
                         }
                     })
                 })
@@ -678,6 +700,7 @@ pub(super) fn render_pane_surface(
     RenderedPaneSurface {
         frame: FrameData::from_ratatui_buffer_with_hyperlinks(&buffer, cursor, &hyperlinks),
         panes,
+        views,
         collections,
         splits,
         popup,
@@ -1047,6 +1070,7 @@ mod tests {
             crate::kitty_graphics::HostCellSize::default(),
             &crate::kitty_graphics::surface::DeliveryCache::default(),
             1,
+            false,
         );
 
         assert_eq!(rendered.collections.len(), 1);
@@ -1074,6 +1098,85 @@ mod tests {
             }
         );
         assert!(projected.focused);
+    }
+
+    #[test]
+    fn v1_surface_projection_drops_view_panes_and_promotes_the_covered_terminal() {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = crate::app::App::new(
+            &crate::config::Config::default(),
+            crate::app::AppPolicy::TEST,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        let mut workspace = crate::workspace::Workspace::test_new("plain");
+        let root = workspace.tabs[0].root_pane;
+        let (_, view_pane) = workspace
+            .split_pane_with_view(
+                root,
+                "vqro.tasks",
+                "tasks",
+                ratatui::layout::Direction::Horizontal,
+                0.5,
+                false,
+            )
+            .expect("valid view identity is admitted");
+        app.state.workspaces = vec![workspace];
+        app.state.active = Some(0);
+        let target = Some(crate::ui::TabSurfaceTarget {
+            workspace_index: 0,
+            tab_index: 0,
+        });
+        let area = Rect::new(0, 0, 80, 20);
+        let delivery = crate::kitty_graphics::surface::DeliveryCache::default();
+        let cell_size = crate::kitty_graphics::HostCellSize::default();
+
+        // A v2 peer sees both panes, and the view descriptor names the view's
+        // public pane id and the terminal it covers.
+        let v2 = render_pane_surface(
+            &mut app, target, area, false, false, cell_size, &delivery, 1, false,
+        );
+        let view_public = app
+            .public_pane_id(0, view_pane)
+            .expect("view pane has a public id");
+        let root_public = app
+            .public_pane_id(0, root)
+            .expect("terminal has a public id");
+        assert_eq!(v2.panes.len(), 2);
+        assert_eq!(v2.views.len(), 1);
+        assert_eq!(v2.views[0].pane_id, view_public);
+        assert_eq!(v2.views[0].extension, "vqro.tasks");
+        assert_eq!(v2.views[0].view, "tasks");
+        assert_eq!(v2.views[0].scope, vec![root_public.clone()]);
+
+        // A v1 peer is sent the terminal-only projection: the view pane is gone
+        // and the covered terminal fills its whole pre-view box. One pane fills
+        // the whole tab, so there is no gap where the view used to be.
+        let v1 = render_pane_surface(
+            &mut app, target, area, false, false, cell_size, &delivery, 1, true,
+        );
+        assert!(v1.views.is_empty());
+        assert_eq!(v1.panes.len(), 1, "a v1 surface never carries a view pane");
+        assert_eq!(v1.panes[0].pane_id, root_public);
+        assert_eq!(
+            v1.panes[0].rect,
+            protocol::SurfaceRect {
+                x: 0,
+                y: 0,
+                width: 80,
+                height: 20,
+            }
+        );
+        assert_eq!(
+            v1.panes[0].inner_rect,
+            protocol::SurfaceRect {
+                x: 0,
+                y: 0,
+                width: 80,
+                height: 20,
+            }
+        );
     }
 
     #[test]

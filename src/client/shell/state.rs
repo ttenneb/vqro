@@ -1086,9 +1086,14 @@ pub(crate) struct ClientShellState {
     pub(super) snapshot: Option<Box<ClientShellSnapshot>>,
     pub(super) structure: Option<Box<crate::protocol::endpoint::ClientShellStructureProjection>>,
     pub(super) pane_surface: Option<PaneSurfaceFrame>,
+    /// View-pane descriptors for the displayed surface, from the negotiated
+    /// `shell.surface.v2` wrapper. Empty for a v1 surface, which carries no view
+    /// panes. Kept beside the frame so the frame type stays byte-exact v1.
+    pub(super) pane_surface_views: Vec<crate::protocol::PaneSurfaceViewEntryV2>,
     /// A future projection surface waits here until its matching snapshot arrives. The visible
     /// pane surface always remains an exact snapshot pair.
     pub(super) pending_pane_surface: Option<PaneSurfaceFrame>,
+    pub(super) pending_pane_surface_views: Vec<crate::protocol::PaneSurfaceViewEntryV2>,
     pub(super) graphics: crate::kitty_graphics::surface::ClientState,
     pub(super) graphics_cell_size: crate::kitty_graphics::HostCellSize,
     pub(super) popup_terminal_id: Option<String>,
@@ -1282,7 +1287,9 @@ impl ClientShellState {
             snapshot: None,
             structure: None,
             pane_surface: None,
+            pane_surface_views: Vec::new(),
             pending_pane_surface: None,
+            pending_pane_surface_views: Vec::new(),
             graphics: crate::kitty_graphics::surface::ClientState::default(),
             graphics_cell_size: crate::kitty_graphics::HostCellSize {
                 width_px: 1,
@@ -1575,7 +1582,9 @@ impl ClientShellState {
         self.terminal_view_surfaces.clear();
         self.last_terminal_views_interest = None;
         self.pane_surface = None;
+        self.pane_surface_views.clear();
         self.pending_pane_surface = None;
+        self.pending_pane_surface_views.clear();
         self.input_leases = ClientInputLeases::default();
         self.popup_terminal_id = None;
         self.chrome_drag = None;
@@ -1943,18 +1952,20 @@ impl ClientShellState {
             extensions.repository_context = focused_repository;
         }
         let pending_surface = self.pending_pane_surface.take();
+        let pending_views = std::mem::take(&mut self.pending_pane_surface_views);
         if let Some(surface) = pending_surface {
             let matching = self.snapshot.as_ref().is_some_and(|snapshot| {
                 surface.boot_id == snapshot.boot_id
                     && surface.projection_revision == snapshot.revision
             });
             if matching {
-                self.install_pane_surface(surface, false);
+                self.install_pane_surface(surface, pending_views, false);
             } else if self.snapshot.as_ref().is_some_and(|snapshot| {
                 surface.boot_id == snapshot.boot_id
                     && surface.projection_revision > snapshot.revision
             }) {
                 self.pending_pane_surface = Some(surface);
+                self.pending_pane_surface_views = pending_views;
             }
         }
         self.resume_mobile_switcher_if_ready();
@@ -1965,7 +1976,17 @@ impl ClientShellState {
         self.pane_surface.is_some()
     }
 
+    /// Install a `shell.surface.v1` frame: terminal-only, no view panes.
     pub(crate) fn set_pane_surface(&mut self, surface: PaneSurfaceFrame) {
+        self.set_pane_surface_with_views(surface, Vec::new());
+    }
+
+    /// Install a `shell.surface.v2` frame together with its view descriptors.
+    pub(crate) fn set_pane_surface_with_views(
+        &mut self,
+        surface: PaneSurfaceFrame,
+        views: Vec<crate::protocol::PaneSurfaceViewEntryV2>,
+    ) {
         let Some(snapshot) = self.snapshot.as_ref() else {
             return;
         };
@@ -1984,16 +2005,22 @@ impl ClientShellState {
             // The next expected surface waits separately for its exact snapshot. Keeping the
             // current pair avoids treating this speculative successor as presentation evidence.
             self.pending_pane_surface = Some(surface);
+            self.pending_pane_surface_views = views;
             self.hits = ShellHitMap::default();
             return;
         }
         // A surface that skips one or more revisions supersedes any retained pair, but is still
         // not rendered until its matching snapshot arrives. Retain it monotonically so delayed
         // intermediate surfaces cannot replace it.
-        self.install_pane_surface(surface, true);
+        self.install_pane_surface(surface, views, true);
     }
 
-    fn install_pane_surface(&mut self, mut surface: PaneSurfaceFrame, retain_future: bool) {
+    fn install_pane_surface(
+        &mut self,
+        mut surface: PaneSurfaceFrame,
+        views: Vec<crate::protocol::PaneSurfaceViewEntryV2>,
+        retain_future: bool,
+    ) {
         let Some(snapshot) = self.snapshot.as_ref() else {
             return;
         };
@@ -2172,6 +2199,7 @@ impl ClientShellState {
         self.graphics
             .set_scene(std::mem::take(&mut surface.graphics));
         self.pane_surface = Some(surface);
+        self.pane_surface_views = views;
         self.invalidate_link_hover();
         self.resume_mobile_switcher_if_ready();
         self.reconcile_input_source();
@@ -2258,7 +2286,9 @@ impl ClientShellState {
 
     pub(crate) fn invalidate_pane_surface(&mut self) {
         self.pane_surface = None;
+        self.pane_surface_views.clear();
         self.pending_pane_surface = None;
+        self.pending_pane_surface_views.clear();
         self.hits = ShellHitMap::default();
         self.host_mouse_pixels = None;
     }

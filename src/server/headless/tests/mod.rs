@@ -627,6 +627,7 @@ async fn client_shell_attach_seeds_workspace() {
             pane_viewport_enabled: false,
             pane_view_enabled: false,
             terminal_views_enabled: false,
+            surface_codec: crate::protocol::endpoint::SURFACE_CODEC_V1.to_owned(),
             writer,
             host_views_enabled: false,
         })
@@ -663,6 +664,7 @@ async fn client_shell_endpoint_request_uses_the_selected_connection() {
             pane_viewport_enabled: false,
             pane_view_enabled: false,
             terminal_views_enabled: false,
+            surface_codec: crate::protocol::endpoint::SURFACE_CODEC_V1.to_owned(),
             writer,
             host_views_enabled: false,
         })
@@ -758,6 +760,7 @@ async fn native_endpoint_lane_dispatches_methods_outside_the_frozen_bridge() {
             pane_viewport_enabled: false,
             pane_view_enabled: false,
             terminal_views_enabled: false,
+            surface_codec: crate::protocol::endpoint::SURFACE_CODEC_V1.to_owned(),
             writer,
             host_views_enabled: false,
         })
@@ -854,6 +857,7 @@ async fn client_shell_pairs_agent_view_set_replacement_and_clear_with_snapshots(
             pane_viewport_enabled: false,
             pane_view_enabled: false,
             terminal_views_enabled: false,
+            surface_codec: crate::protocol::endpoint::SURFACE_CODEC_V1.to_owned(),
             writer,
             host_views_enabled: false,
         })
@@ -949,6 +953,7 @@ async fn host_documents_control_is_sent_only_when_negotiated() {
                 pane_viewport_enabled: false,
                 pane_view_enabled: false,
                 terminal_views_enabled: false,
+                surface_codec: crate::protocol::endpoint::SURFACE_CODEC_V1.to_owned(),
                 writer,
                 host_views_enabled: false,
             })
@@ -1016,6 +1021,7 @@ async fn client_shell_receives_metadata_then_shell_free_pane_surface() {
             pane_viewport_enabled: false,
             pane_view_enabled: false,
             terminal_views_enabled: false,
+            surface_codec: crate::protocol::endpoint::SURFACE_CODEC_V1.to_owned(),
             writer,
             host_views_enabled: false,
         })
@@ -1199,6 +1205,7 @@ fn connect_test_shell(
             pane_viewport_enabled: false,
             pane_view_enabled: false,
             terminal_views_enabled: false,
+            surface_codec: crate::protocol::endpoint::SURFACE_CODEC_V1.to_owned(),
             writer,
             host_views_enabled: false,
         })
@@ -1666,6 +1673,7 @@ async fn client_shell_config_diagnostics_follow_keybinding_ownership() {
             pane_viewport_enabled: false,
             pane_view_enabled: false,
             terminal_views_enabled: false,
+            surface_codec: crate::protocol::endpoint::SURFACE_CODEC_V1.to_owned(),
             writer: local_writer,
             host_views_enabled: false,
         })
@@ -1696,6 +1704,7 @@ async fn client_shell_config_diagnostics_follow_keybinding_ownership() {
             pane_viewport_enabled: false,
             pane_view_enabled: false,
             terminal_views_enabled: false,
+            surface_codec: crate::protocol::endpoint::SURFACE_CODEC_V1.to_owned(),
             writer: endpoint_writer,
             host_views_enabled: false,
         })
@@ -3704,6 +3713,7 @@ async fn public_api_focus_replaces_every_client_shell_projection() {
             pane_viewport_enabled: false,
             pane_view_enabled: false,
             terminal_views_enabled: false,
+            surface_codec: crate::protocol::endpoint::SURFACE_CODEC_V1.to_owned(),
             writer,
             host_views_enabled: false,
         })
@@ -4063,6 +4073,7 @@ async fn client_shell_streams_and_targets_popup_terminal_content() {
             pane_viewport_enabled: false,
             pane_view_enabled: false,
             terminal_views_enabled: false,
+            surface_codec: crate::protocol::endpoint::SURFACE_CODEC_V1.to_owned(),
             writer,
             host_views_enabled: false,
         })

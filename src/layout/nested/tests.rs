@@ -311,6 +311,46 @@ fn view_node(raw: u32, extension: &str, id: &str) -> TypedNode {
 }
 
 #[test]
+fn without_view_panes_promotes_the_covered_terminal_into_the_view_box() {
+    // split[ view(9), pane(1) ]: dropping the view promotes pane(1) to fill the
+    // whole tab, exactly its pre-view box. Focus lands on the surviving terminal.
+    let tree = layout(split(view_node(9, "vqro.tasks", "tasks"), pane(1)), 9);
+    let projection = tree.without_view_panes();
+    assert!(projection.view_panes().is_empty());
+    assert_eq!(projection.pane_ids(), vec![PaneId::from_raw(1)]);
+    assert_eq!(projection.focused(), PaneId::from_raw(1));
+    let rects = projection.panes(Rect::new(0, 0, 80, 24));
+    assert_eq!(rects.len(), 1);
+    assert_eq!(
+        rects[0].rect,
+        Rect::new(0, 0, 80, 24),
+        "the covered terminal fills the view's box with no hole"
+    );
+
+    // split[ split[ view(9), pane(1) ], pane(2) ]: only the view's own subtree is
+    // promoted; the unrelated sibling keeps its geometry.
+    let tree = layout(
+        split(split(view_node(9, "vqro.tasks", "tasks"), pane(1)), pane(2)),
+        9,
+    );
+    let projection = tree.without_view_panes();
+    assert!(projection.view_panes().is_empty());
+    assert_eq!(
+        projection.pane_ids(),
+        vec![PaneId::from_raw(1), PaneId::from_raw(2)]
+    );
+    let rects = projection.panes(Rect::new(0, 0, 80, 24));
+    assert_eq!(rects[0].rect, Rect::new(0, 0, 40, 24));
+    assert_eq!(rects[1].rect, Rect::new(40, 0, 40, 24));
+}
+
+#[test]
+fn without_view_panes_on_a_view_free_layout_is_the_same_layout() {
+    let tree = layout(split(pane(1), pane(2)), 1);
+    assert_same(&tree.without_view_panes(), &tree);
+}
+
+#[test]
 fn view_scope_covers_every_terminal_in_its_parent_box() {
     // split[ view(9), stack[1,2,3] ]: the view's parent is the split, so its
     // scope is all three terminals, including the two hidden stack members.

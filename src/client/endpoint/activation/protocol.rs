@@ -71,7 +71,13 @@ pub(super) fn coherent_completion_surface(
     evidence: &ActivationEvidence,
     acknowledgement_revision: Option<u64>,
     geometry: crate::protocol::ClientSurfaceSize,
-) -> Result<crate::protocol::PaneSurfaceFrame, String> {
+) -> Result<
+    (
+        crate::protocol::PaneSurfaceFrame,
+        Vec<crate::protocol::PaneSurfaceViewEntryV2>,
+    ),
+    String,
+> {
     let acknowledgement_revision = acknowledgement_revision.ok_or_else(|| {
         "endpoint activation completed without a surface acknowledgement".to_owned()
     })?;
@@ -79,6 +85,7 @@ pub(super) fn coherent_completion_surface(
         .surface
         .clone()
         .ok_or_else(|| "endpoint activation completed without a surface".to_owned())?;
+    let views = evidence.surface_views.clone();
     if surface.projection_revision < acknowledgement_revision
         || !surface_matches_geometry(&surface, geometry)
     {
@@ -92,7 +99,7 @@ pub(super) fn coherent_completion_surface(
     ) {
         return Err("endpoint activation lost its coherent snapshot/surface pair".into());
     }
-    Ok(surface)
+    Ok((surface, views))
 }
 
 pub(super) fn resize_geometry(

@@ -628,17 +628,16 @@ impl ClientShellState {
         // scope for each one. The client draws the view content and the light or full
         // frame; panes that are not visible are absent from `hits.panes`, so a hidden
         // view does no presentation work.
-        let view_panes = surface
-            .panes
+        let view_panes = self
+            .pane_surface_views
             .iter()
-            .filter_map(|pane| {
-                let view = pane.view.as_ref()?;
-                Some((
-                    pane.pane_id.clone(),
-                    view.extension.clone(),
-                    view.view.clone(),
-                    pane.scope.clone(),
-                ))
+            .map(|entry| {
+                (
+                    entry.pane_id.clone(),
+                    entry.extension.clone(),
+                    entry.view.clone(),
+                    entry.scope.clone(),
+                )
             })
             .collect::<Vec<_>>();
         // Fewer than one view pane: no published item is read for drawing, so a
