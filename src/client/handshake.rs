@@ -14,8 +14,8 @@ use crate::protocol::endpoint::{
     ENDPOINT_PROTOCOL_GENERATION, ENDPOINT_WELCOME_KIND, HOST_DOCUMENTS_KIND, HOST_VIEWS_KIND,
     INPUT_CODEC_V1, PANE_VIEWPORT_KIND, PANE_VIEW_ACTION_KIND, PANE_VIEW_ACTION_RESULT_KIND,
     PANE_VIEW_CANCEL_KIND, PANE_VIEW_CONFIRM_KIND, PANE_VIEW_REQUEST_KIND, PANE_VIEW_RESULT_KIND,
-    SESSION_STRUCTURE_KIND, SNAPSHOT_CODEC_V1, SURFACE_CODEC_V1, SURFACE_CODEC_V2,
-    TERMINAL_VIEWS_INTEREST_KIND, TERMINAL_VIEWS_SURFACE_KIND,
+    SESSION_STRUCTURE_KIND, SNAPSHOT_CODEC_V1, SURFACE_CODEC_V2, TERMINAL_VIEWS_INTEREST_KIND,
+    TERMINAL_VIEWS_SURFACE_KIND,
 };
 use crate::protocol::{
     self, ClientMessage, RenderEncoding, ServerMessage, MAX_FRAME_SIZE, PROTOCOL_VERSION,
@@ -186,10 +186,12 @@ pub(super) fn do_handshake(
             mouse_capture,
             surface_active,
             snapshot_codecs: vec![SNAPSHOT_CODEC_V1.into()],
-            // Serving is v2-only. v1 stays listed because this client still
-            // decodes the frozen generation-1 frame shape for its historical
-            // contract; it is never served one.
-            surface_codecs: vec![SURFACE_CODEC_V2.into(), SURFACE_CODEC_V1.into()],
+            // Advertise only the served codec. v1 is retired from serving and is
+            // not negotiated support: listing it would let a predecessor select
+            // v1 and emit its connected/geometry event before this client rejects
+            // the welcome. This client still decodes the frozen v1 shape for the
+            // historical contract, but never asks to be served it.
+            surface_codecs: vec![SURFACE_CODEC_V2.into()],
             input_codecs: vec![INPUT_CODEC_V1.into()],
             blob_codecs: vec![BLOB_CODEC_V1.into()],
             control_kinds: vec![

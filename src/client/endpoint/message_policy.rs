@@ -34,8 +34,9 @@ pub(crate) fn accepts_endpoint_message(
         || (activation_message
             && matches!(
                 message,
-                ServerMessage::PaneSurface(_)
-                    | ServerMessage::PaneSurfaceV2(_)
+                // Serving is `shell.surface.v2` only; a v1 surface is not a live
+                // activation lane, though the client still decodes its shape.
+                ServerMessage::PaneSurfaceV2(_)
                     | ServerMessage::ClientShellEndpointResponseChunk { .. }
             ))
         || (command_response
@@ -145,14 +146,16 @@ mod tests {
     }
 
     #[test]
-    fn activation_accepts_both_surface_codecs_and_an_inactive_endpoint_neither() {
+    fn activation_accepts_only_the_current_surface_codec_and_an_inactive_endpoint_neither() {
         let v1 = ServerMessage::PaneSurface(empty_frame());
         let v2 = ServerMessage::PaneSurfaceV2(crate::protocol::PaneSurfaceFrameV2 {
             frame: empty_frame(),
             views: Vec::new(),
         });
-        assert!(accepts_endpoint_message(false, true, false, &v1));
+        // Serving is v2 only: the v1 shape still decodes, but it is not a live
+        // activation lane, and an inactive endpoint gets neither.
         assert!(accepts_endpoint_message(false, true, false, &v2));
+        assert!(!accepts_endpoint_message(false, true, false, &v1));
         assert!(!accepts_endpoint_message(false, false, false, &v1));
         assert!(!accepts_endpoint_message(false, false, false, &v2));
     }
