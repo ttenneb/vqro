@@ -1600,10 +1600,19 @@ impl Workspace {
             );
             let view_set: std::collections::HashSet<_> =
                 tab.layout.view_panes().into_iter().collect();
+            // Content is an exclusive partition: a placed pane is exactly a
+            // terminal with a pane state XOR a view. A view that also carried a
+            // terminal pane state would be a fabricated terminal.
+            assert!(
+                pane_set.is_disjoint(&view_set),
+                "workspace {} tab {} a view pane must not also carry a terminal pane state",
+                self.id,
+                tab_idx
+            );
             for pane in &layout_set {
                 assert!(
-                    pane_set.contains(pane) || view_set.contains(pane),
-                    "workspace {} tab {} placed pane {:?} is neither a terminal with a pane state nor a view",
+                    pane_set.contains(pane) ^ view_set.contains(pane),
+                    "workspace {} tab {} placed pane {:?} must be exactly a terminal with a pane state or a view",
                     self.id,
                     tab_idx,
                     pane
@@ -1830,6 +1839,30 @@ mod tests {
         assert!(!tab.panes.contains_key(&view));
         assert!(tab.panes.is_empty());
         assert!(ws.public_pane_number(view).is_some());
+        ws.assert_invariants_for_test();
+    }
+
+    #[test]
+    #[should_panic(expected = "a view pane must not also carry a terminal pane state")]
+    fn invariant_rejects_a_view_that_also_has_a_terminal_pane_state() {
+        let mut ws = Workspace::test_new("views");
+        let root = ws.tabs[0].root_pane;
+        let (_, view) = ws
+            .split_pane_with_view(
+                root,
+                "vqro.tasks",
+                "tasks",
+                Direction::Horizontal,
+                0.5,
+                false,
+            )
+            .expect("view pane");
+        // Fabricate a terminal record for the view: content is an exclusive
+        // partition, so the designated helper must reject this.
+        let terminal_id = crate::terminal::TerminalId::alloc().expect("terminal id");
+        ws.tabs[0]
+            .panes
+            .insert(view, crate::pane::PaneState::new(terminal_id));
         ws.assert_invariants_for_test();
     }
 

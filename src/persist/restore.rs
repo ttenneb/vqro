@@ -2992,71 +2992,28 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn cold_restore_preserves_a_view_pane_and_its_agent_start_marker() {
-        let cwd = std::env::current_dir().unwrap();
-        let mut snapshot = SessionSnapshot {
-            delegations: Vec::new(),
-            collections_authority: Default::default(),
-            collections_action_sequence: 0,
-            version: super::super::snapshot::SNAPSHOT_VERSION,
-            repositories: Vec::new(),
-            space_order: Vec::new(),
-            workspaces: vec![WorkspaceSnapshot {
-                id: Some("w1".into()),
-                custom_name: None,
-                identity_cwd: cwd.clone(),
-                checkout: None,
-                worktree_space: None,
-                public_pane_numbers: HashMap::from([(10, 1), (20, 2)]),
-                next_public_pane_number: 3,
-                public_tab_numbers: vec![1],
-                next_public_tab_number: 2,
-                tabs: vec![TabSnapshot {
-                    id: None,
-                    collections: Vec::new(),
-                    focused_leaf: None,
-                    custom_name: None,
-                    layout: LayoutSnapshot::Split {
-                        direction: DirectionSnapshot::Horizontal,
-                        ratio: 0.5,
-                        first: Box::new(LayoutSnapshot::Pane(10)),
-                        second: Box::new(LayoutSnapshot::View {
-                            pane: 20,
-                            extension: "vqro.tasks".into(),
-                            view: "tasks".into(),
-                        }),
-                    },
-                    panes: HashMap::from([(
-                        10,
-                        super::super::snapshot::PaneSnapshot {
-                            terminal_id: None,
-                            cwd: cwd.clone(),
-                            label: None,
-                            agent_name: None,
-                            managed_agent_kind: None,
-                            agent_session: None,
-                            launch_argv: None,
-                            agent_start_view_applied: true,
-                        },
-                    )]),
-                    zoomed: false,
-                    focused: Some(10),
-                    root_pane: Some(10),
-                }],
-                active_tab: 0,
-            }],
-            active: Some(0),
-            selected: 0,
-            sidebar_width: None,
-            sidebar_section_split: None,
-            collapsed_space_keys: Default::default(),
-        };
-        super::super::snapshot::normalize_terminal_identities(&mut snapshot, false).unwrap();
+    /// capture -> serialize -> parse -> restore, the durable round trip a restart
+    /// actually takes (not a hand-built DTO).
+    fn capture_parse_restore(
+        state: &crate::app::state::AppState,
+    ) -> (
+        Vec<Workspace>,
+        HashMap<crate::terminal::TerminalId, crate::terminal::TerminalState>,
+    ) {
+        let snapshot = crate::persist::capture(
+            &state.workspaces,
+            &state.repositories,
+            &state.space_order,
+            &state.terminals,
+            &crate::terminal::TerminalRuntimeRegistry::new(),
+            state.active,
+            state.selected,
+        );
+        let json = serde_json::to_string(&snapshot).expect("serialize captured session");
+        let parsed = crate::persist::parse_snapshot(&json).expect("parse captured session");
         let (events, _event_rx) = mpsc::channel(4);
-
         let (workspaces, terminals, _runtimes) = restore(
-            &snapshot,
+            &parsed,
             None,
             24,
             80,
@@ -3068,52 +3025,118 @@ mod tests {
             Arc::new(Notify::new()),
             Arc::new(RenderSignal::new()),
         )
-        .unwrap();
+        .expect("restore captured session");
+        (workspaces, terminals)
+    }
 
-        // Exercise the real restored state through both invariant helpers.
+    #[tokio::test]
+    async fn cold_restore_preserves_a_view_pane_and_its_agent_start_marker() {
+        let mut state = crate::app::state::AppState::test_new();
+        let mut workspace = Workspace::test_new("views");
+        let root = workspace.tabs[0].root_pane;
+        workspace
+            .split_pane_with_view(
+                root,
+                "vqro.tasks",
+                "tasks",
+                Direction::Horizontal,
+                0.5,
+                false,
+            )
+            .expect("view pane");
+        workspace
+            .pane_state_mut(root)
+            .expect("terminal pane")
+            .agent_start_view_applied = true;
+        state.workspaces = vec![workspace];
+        state.active = Some(0);
+        state.selected = 0;
+        state.ensure_test_terminals();
+
+        let (workspaces, terminals) = capture_parse_restore(&state);
         let mut app_state = crate::app::state::AppState::test_new();
         app_state.workspaces = workspaces;
         app_state.terminals = terminals;
         app_state.active = Some(0);
         app_state.selected = 0;
         let workspace = &app_state.workspaces[0];
-        let pane_for = |number: usize| {
-            workspace
-                .public_pane_numbers
-                .iter()
-                .find_map(|(pane, n)| (*n == number).then_some(*pane))
-                .expect("public pane number")
-        };
-        let terminal = pane_for(1);
-        let view = pane_for(2);
-        // The view keeps its identity and no terminal is fabricated for it.
+        let tab = &workspace.tabs[0];
+        let view_pane = tab.layout.view_panes()[0];
+        let terminal = tab
+            .layout
+            .pane_ids()
+            .into_iter()
+            .find(|pane| !tab.layout.view_panes().contains(pane))
+            .expect("terminal pane");
         assert_eq!(
-            workspace.view_content(view).map(|content| content.view),
+            workspace
+                .view_content(view_pane)
+                .map(|content| content.view),
             Some("tasks".to_owned())
         );
-        assert_eq!(workspace.terminal_id(view), None);
-        // The marker survives, so a restart does not re-add a view for a terminal
-        // that already got one; the terminal keeps its owned identity.
+        assert_eq!(workspace.terminal_id(view_pane), None);
         assert!(
             workspace
                 .pane_state(terminal)
                 .expect("terminal pane")
                 .agent_start_view_applied
         );
-        assert!(workspace.terminal_id(terminal).is_some());
-        // The terminal set is exactly the terminal pane's terminal; the view owns
-        // no terminal state, so the restore neither drops nor fabricates one.
-        assert_eq!(
-            app_state.terminals.len(),
-            1,
-            "only the terminal pane owns a terminal state"
-        );
+        assert_eq!(app_state.terminals.len(), 1);
         assert_eq!(
             app_state.terminals.keys().next(),
             workspace.terminal_id(terminal)
         );
-        // Both content-aware invariant helpers accept the restored mixed state:
-        // the workspace helper directly, and the app-state helper (which delegates).
+        workspace.assert_invariants_for_test();
+        app_state.assert_invariants_for_test();
+    }
+
+    #[tokio::test]
+    async fn cold_restore_of_a_view_only_tab_keeps_the_view_and_both_helpers() {
+        let mut state = crate::app::state::AppState::test_new();
+        let mut workspace = Workspace::test_new("views");
+        let root = workspace.tabs[0].root_pane;
+        workspace
+            .split_pane_with_view(
+                root,
+                "vqro.tasks",
+                "tasks",
+                Direction::Horizontal,
+                0.5,
+                false,
+            )
+            .expect("view pane");
+        // Close the terminal: the view is promoted to a view-only root.
+        workspace.close_pane(root);
+        assert!(workspace.tabs[0].panes.is_empty());
+        state.workspaces = vec![workspace];
+        state.active = Some(0);
+        state.selected = 0;
+        state.ensure_test_terminals();
+
+        let (workspaces, terminals) = capture_parse_restore(&state);
+        let mut app_state = crate::app::state::AppState::test_new();
+        app_state.workspaces = workspaces;
+        app_state.terminals = terminals;
+        app_state.active = Some(0);
+        app_state.selected = 0;
+        let workspace = &app_state.workspaces[0];
+        let tab = &workspace.tabs[0];
+        assert!(
+            tab.panes.is_empty(),
+            "a view-only tab restores with no terminal record"
+        );
+        let view_pane = tab.layout.view_panes()[0];
+        assert_eq!(tab.root_pane, view_pane);
+        assert_eq!(
+            workspace
+                .view_content(view_pane)
+                .map(|content| content.view),
+            Some("tasks".to_owned())
+        );
+        assert!(
+            app_state.terminals.is_empty(),
+            "no terminal state for a view-only tab"
+        );
         workspace.assert_invariants_for_test();
         app_state.assert_invariants_for_test();
     }
