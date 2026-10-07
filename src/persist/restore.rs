@@ -3101,6 +3101,17 @@ mod tests {
                 .agent_start_view_applied
         );
         assert!(workspace.terminal_id(terminal).is_some());
+        // The terminal set is exactly the terminal pane's terminal; the view owns
+        // no terminal state, so the restore neither drops nor fabricates one.
+        assert_eq!(
+            app_state.terminals.len(),
+            1,
+            "only the terminal pane owns a terminal state"
+        );
+        assert_eq!(
+            app_state.terminals.keys().next(),
+            workspace.terminal_id(terminal)
+        );
         // Both content-aware invariant helpers accept the restored mixed state:
         // the workspace helper directly, and the app-state helper (which delegates).
         workspace.assert_invariants_for_test();

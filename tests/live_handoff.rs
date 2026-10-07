@@ -3151,3 +3151,105 @@ fn postcommit_publication_failure_fails_closed_without_source_resume() {
 fn live_handoff_after_restored_failure_rolls_back_old_server() {
     live_handoff_import_failure_rolls_back_old_server_at("after_restored");
 }
+
+fn tree_has_view(node: &serde_json::Value, pane_id: &str) -> bool {
+    match node {
+        serde_json::Value::Object(object) => {
+            if object.get("type").and_then(|kind| kind.as_str()) == Some("view")
+                && object.get("pane_id").and_then(|id| id.as_str()) == Some(pane_id)
+            {
+                return true;
+            }
+            object.values().any(|child| tree_has_view(child, pane_id))
+        }
+        serde_json::Value::Array(items) => items.iter().any(|item| tree_has_view(item, pane_id)),
+        _ => false,
+    }
+}
+
+#[test]
+fn live_handoff_preserves_a_view_pane_without_a_runtime() {
+    // A view pane has no PTY. The live transfer must keep it as a view (not treat
+    // it as a terminal and not drop it) and keep its public identity and scope.
+    let _lock = test_lock();
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let api_socket = runtime_dir.join("herdr.sock");
+
+    let spawned = spawn_server(&config_home, &runtime_dir, &api_socket);
+    wait_for_socket(&api_socket, Duration::from_secs(10));
+    register_runtime_dir(&runtime_dir);
+    let server_pid = spawned.child.process_id().expect("test server pid");
+
+    let created = request(
+        &api_socket,
+        serde_json::json!({"id":"test:create","method":"workspace.create","params":{"cwd":"/tmp","focus":true}}),
+    );
+    let root_pane = created["result"]["root_pane"]["pane_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let added = request(
+        &api_socket,
+        serde_json::json!({"id":"test:view","method":"pane.view","params":{"pane_id":root_pane,"action":"add","extension":"vqro.tasks","view":"tasks","focus":false}}),
+    );
+    assert_ok(added.clone());
+    let view_pane = added["result"]["view"]["pane_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_ne!(view_pane, root_pane);
+
+    assert_ok(request(
+        &api_socket,
+        serde_json::json!({"id":"test:handoff","method":"server.live_handoff","params":{}}),
+    ));
+    let _replacement_pid =
+        wait_for_replacement_server_pid(&runtime_dir, server_pid, Duration::from_secs(30));
+    wait_for_api(&api_socket, Duration::from_secs(30));
+
+    // The view still reports as a view with no terminal; the terminal keeps its
+    // own identity.
+    let view = request(
+        &api_socket,
+        serde_json::json!({"id":"test:view-get","method":"pane.get","params":{"pane_id":view_pane}}),
+    );
+    assert_eq!(
+        view["result"]["pane"]["content"].as_str(),
+        Some("view"),
+        "view: {view}"
+    );
+    assert!(
+        view["result"]["pane"]["terminal_id"].is_null(),
+        "a view has no terminal: {view}"
+    );
+    let terminal = request(
+        &api_socket,
+        serde_json::json!({"id":"test:term-get","method":"pane.get","params":{"pane_id":root_pane}}),
+    );
+    // A terminal omits `content` (the default), keeping its info byte-identical.
+    assert!(
+        terminal["result"]["pane"]["content"].is_null(),
+        "a terminal omits the content kind: {terminal}"
+    );
+    assert!(terminal["result"]["pane"]["terminal_id"].is_string());
+
+    // The exported tree still holds the view leaf with its identity.
+    let exported = request(
+        &api_socket,
+        serde_json::json!({"id":"test:tree","method":"layout.tree.export","params":{"tab_id":null,"pane_id":null}}),
+    );
+    assert!(
+        tree_has_view(&exported["result"]["layout"]["root"], &view_pane),
+        "the view leaf survives the live transfer: {exported}"
+    );
+
+    let _ = request(
+        &api_socket,
+        serde_json::json!({"id":"test:stop","method":"server.stop","params":{}}),
+    );
+    drop(spawned);
+    cleanup_test_base(&base);
+}
