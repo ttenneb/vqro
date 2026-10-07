@@ -1250,7 +1250,8 @@ mod tests {
         let terminal_id = crate::persist::terminal_id_for_pane_snapshot(
             &snapshot.workspaces[0].tabs[0].panes[&1],
         )
-        .unwrap();
+        .unwrap()
+        .to_string();
         let mut manifest = HandoffManifest {
             version: HANDOFF_VERSION,
             source_version: "views".into(),
@@ -1258,13 +1259,20 @@ mod tests {
             expected_version: None,
             expected_protocol: None,
             snapshot,
-            panes: vec![runtime_for(1, Some(terminal_id.to_string()))],
+            panes: vec![runtime_for(1, Some(terminal_id.clone()))],
             deferred_panes: Vec::new(),
             api_window_title: None,
         };
         validate_and_normalize_manifest(&mut manifest)
             .expect("view-bearing live handoff is admitted");
 
+        // Only the terminal pane owns a runtime/terminal, and its identity is kept.
+        assert_eq!(manifest.panes.len(), 1, "only the terminal has a runtime");
+        assert_eq!(manifest.panes[0].pane_id, 1);
+        assert_eq!(
+            manifest.panes[0].terminal_id.as_deref(),
+            Some(terminal_id.as_str())
+        );
         let tab = &manifest.snapshot.workspaces[0].tabs[0];
         assert!(
             tab.panes.get(&1).unwrap().agent_start_view_applied,
@@ -1282,6 +1290,13 @@ mod tests {
         assert!(
             !tab.panes.contains_key(&2),
             "no terminal record is fabricated for the view"
+        );
+        assert_eq!(
+            crate::persist::terminal_id_for_pane_snapshot(&tab.panes[&1])
+                .ok()
+                .map(|id| id.as_str().to_owned()),
+            Some(terminal_id.clone()),
+            "the terminal identity is preserved through the live transfer"
         );
     }
 

@@ -5430,6 +5430,40 @@ mod tests {
     }
 
     #[test]
+    fn closing_the_last_terminal_leaves_a_view_only_tab_passing_both_invariants() {
+        let mut app = app_with_linked_worktree();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        let root = app.state.workspaces[0].tabs[0].root_pane;
+        let root_public = app.public_pane_id(0, root).unwrap();
+        let response = app.handle_pane_view("req".into(), add_view_request(&root_public));
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        let ResponseResult::PaneView { view } = success.result else {
+            panic!("expected pane view response");
+        };
+        // Mixed (terminal + view) state passes both helpers.
+        app.state.assert_invariants_for_test();
+
+        let response = app.handle_pane_close(
+            "req".into(),
+            PaneTarget {
+                pane_id: root_public,
+            },
+        );
+        assert!(
+            serde_json::from_str::<SuccessResponse>(&response).is_ok(),
+            "closing the terminal should succeed: {response}"
+        );
+        let (_, view_pane) = app.parse_pane_id(&view.pane_id).unwrap();
+        let tab = &app.state.workspaces[0].tabs[0];
+        // View-only: the view is the root and there is no terminal record.
+        assert_eq!(tab.root_pane, view_pane);
+        assert_eq!(tab.layout.view_panes(), vec![view_pane]);
+        assert!(tab.panes.is_empty());
+        app.state.assert_invariants_for_test();
+    }
+
+    #[test]
     fn terminal_pane_info_omits_the_content_kind_and_stays_unchanged() {
         let mut app = app_with_linked_worktree();
         app.state.active = Some(0);

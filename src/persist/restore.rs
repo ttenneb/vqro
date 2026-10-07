@@ -3055,7 +3055,7 @@ mod tests {
         super::super::snapshot::normalize_terminal_identities(&mut snapshot, false).unwrap();
         let (events, _event_rx) = mpsc::channel(4);
 
-        let (workspaces, _terminals, _runtimes) = restore(
+        let (workspaces, terminals, _runtimes) = restore(
             &snapshot,
             None,
             24,
@@ -3070,7 +3070,13 @@ mod tests {
         )
         .unwrap();
 
-        let workspace = workspaces.first().expect("workspace should restore");
+        // Exercise the real restored state through both invariant helpers.
+        let mut app_state = crate::app::state::AppState::test_new();
+        app_state.workspaces = workspaces;
+        app_state.terminals = terminals;
+        app_state.active = Some(0);
+        app_state.selected = 0;
+        let workspace = &app_state.workspaces[0];
         let pane_for = |number: usize| {
             workspace
                 .public_pane_numbers
@@ -3095,8 +3101,10 @@ mod tests {
                 .agent_start_view_applied
         );
         assert!(workspace.terminal_id(terminal).is_some());
-        // The content-aware invariants accept the restored mixed tab.
+        // Both content-aware invariant helpers accept the restored mixed state:
+        // the workspace helper directly, and the app-state helper (which delegates).
         workspace.assert_invariants_for_test();
+        app_state.assert_invariants_for_test();
     }
 
     #[tokio::test]
