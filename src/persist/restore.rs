@@ -1346,6 +1346,33 @@ fn recover_typed_layout(
             },
         }
     }
+    // An unplaced survivor must keep its content identity. A view leaf carries
+    // no terminal record, so reconstructing it as a terminal `Leaf` would drop
+    // the pane's content (data loss); collect the view identities first because
+    // `prune` consumes the tree.
+    fn collect_view_identities(node: &TypedNode, views: &mut HashMap<PaneId, (String, String)>) {
+        match node {
+            TypedNode::View {
+                pane,
+                extension,
+                view,
+            } => {
+                views.insert(*pane, (extension.clone(), view.clone()));
+            }
+            TypedNode::Leaf(_) => {}
+            TypedNode::Stack { children, .. } => {
+                for child in children {
+                    collect_view_identities(child, views);
+                }
+            }
+            TypedNode::Split { first, second, .. } => {
+                collect_view_identities(first, views);
+                collect_view_identities(second, views);
+            }
+        }
+    }
+    let mut view_identities = HashMap::new();
+    collect_view_identities(&node, &mut view_identities);
     let mut placed = HashSet::new();
     let mut root = prune(node, surviving, &valid_ids, &mut placed);
     let mut unplaced: Vec<_> = surviving
@@ -1355,7 +1382,14 @@ fn recover_typed_layout(
         .collect();
     unplaced.sort_by_key(|pane| pane.raw());
     for pane in unplaced {
-        let leaf = TypedNode::Leaf(pane);
+        let leaf = match view_identities.get(&pane) {
+            Some((extension, view)) => TypedNode::View {
+                pane,
+                extension: extension.clone(),
+                view: view.clone(),
+            },
+            None => TypedNode::Leaf(pane),
+        };
         root = Some(match root {
             Some(existing) => TypedNode::Split {
                 direction: Direction::Horizontal,
@@ -2346,6 +2380,56 @@ mod tests {
         .unwrap();
 
         assert!(recovered.layout.collection(id.into()).is_some());
+    }
+
+    #[test]
+    fn unplaced_view_survivor_keeps_its_view_identity() {
+        use super::super::snapshot::{LayoutSnapshot, TabSnapshot};
+
+        let pane = PaneId::from_raw(171);
+        let box_id = crate::terminal_container::TerminalContainerId::parse(7_070_000).unwrap();
+        let snapshot = TabSnapshot {
+            id: None,
+            custom_name: None,
+            layout: LayoutSnapshot::View {
+                pane: 1,
+                extension: "vqro.tasks".into(),
+                view: "tasks".into(),
+            },
+            collections: Vec::new(),
+            panes: HashMap::new(),
+            zoomed: false,
+            focused: Some(1),
+            focused_leaf: Some(LayoutLeafSnapshot::Pane(1)),
+            root_pane: Some(1),
+        };
+        let id_map = HashMap::from([(1, pane)]);
+        let surviving = HashSet::from([pane]);
+        // The view's container id is already restored, so the whole container is
+        // pruned and the view becomes an unplaced survivor.
+        let mut restored_ids = HashSet::from([box_id]);
+        let node = TypedNode::Stack {
+            id: box_id,
+            selected: 0,
+            children: vec![TypedNode::View {
+                pane,
+                extension: "vqro.tasks".into(),
+                view: "tasks".into(),
+            }],
+        };
+
+        let recovered =
+            recover_typed_layout(&snapshot, node, &id_map, &surviving, &mut restored_ids).unwrap();
+        assert_eq!(
+            recovered.layout.pane_ids(),
+            vec![pane],
+            "the view survivor is reattached"
+        );
+        assert_eq!(
+            recovered.layout.view_at(pane).map(|content| content.view),
+            Some("tasks".to_owned()),
+            "an unplaced view survivor keeps its view identity, not a terminal leaf"
+        );
     }
 
     #[test]
