@@ -883,22 +883,22 @@ impl Tab {
         Some(pane)
     }
 
-    /// Close a view pane. Returns whether the workspace should close (the last
-    /// pane of the last tab); a view that is the only pane of a tab keeps its tab.
-    pub(crate) fn close_view_pane(&mut self, pane_id: PaneId) -> bool {
+    /// Remove a view pane from this tab's layout. A view pane has no terminal or
+    /// runtime to detach, so this only edits the tree; a tab whose last view is
+    /// the only pane is left alone, and the caller decides what that means.
+    pub(crate) fn close_view_pane(&mut self, pane_id: PaneId) {
         if self.layout.pane_count() <= 1 {
-            return false;
+            return;
         }
         let next_root = self.promoted_root_if_needed(pane_id);
         let Some(layout) = self.remove_layout_pane_candidate(pane_id) else {
-            return false;
+            return;
         };
         self.layout = layout;
         self.zoomed = false;
         if let Some(next_root) = next_root {
             self.root_pane = next_root;
         }
-        true
     }
 
     pub fn remove_pane(&mut self, pane_id: PaneId) -> Option<DetachedPane> {
