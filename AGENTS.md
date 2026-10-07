@@ -189,6 +189,8 @@ rewritten to bless a wire change.
 surface lane is settled by
 [`docs/next/architecture/endpoint-surface-codec-v2.md`](docs/next/architecture/endpoint-surface-codec-v2.md),
 which is normative for this change and must be read before touching that lane.
+`ServerMessage` has one appended variant, `PaneSurfaceV2` (tag 21); serving is
+`shell.surface.v2` only, and patches stay `PaneSurfacePatch`.
 
 - Named core codecs are immutable. Do not add, remove, reorder, or reinterpret fields or enum variants reachable from a published codec. Introduce a new codec name and keep the old codec as a fallback instead.
 - Keep baseline JSON handshake and snapshot fields required. New JSON fields must be optional or have field-specific defaults; new enum values need an `Unknown` fallback where older clients can safely ignore them.
