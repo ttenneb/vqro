@@ -371,6 +371,7 @@ where
     super::snapshot::validate_snapshot(session_text).map_err(|error| {
         not_published(std::io::Error::new(std::io::ErrorKind::InvalidData, error))
     })?;
+    super::io::prepare_session_write(&paths.session, session.version).map_err(not_published)?;
     let extension_bytes = encode_bounded(extension_state, MAX_STATE_STORE_BYTES, "extension state")
         .map_err(not_published)?;
 
@@ -1315,7 +1316,7 @@ mod tests {
         std::fs::create_dir_all(&directory).unwrap();
         let paths = paths_for_directory(&directory);
         let session = SessionSnapshot {
-            version: super::super::snapshot::LEGACY_SNAPSHOT_WRITER_VERSION,
+            version: super::super::snapshot::SNAPSHOT_VERSION,
             workspaces: Vec::new(),
             repositories: Vec::new(),
             space_order: Vec::new(),
@@ -2096,7 +2097,10 @@ mod tests {
     #[test]
     fn never_rolls_back_after_first_replacement() {
         let (directory, paths, ownership, session, state) = fixture();
-        std::fs::write(&paths.session, b"old-session").unwrap();
+        let mut old = session.clone();
+        old.selected += 1;
+        let old_session = serde_json::to_vec(&old).unwrap();
+        std::fs::write(&paths.session, &old_session).unwrap();
         std::fs::write(&paths.extension_state, b"old-state").unwrap();
         let error = persist_checkpoint_with(&ownership, &paths, &session, &state, |boundary| {
             if boundary == Boundary::SessionReplaced {
@@ -2107,10 +2111,10 @@ mod tests {
         })
         .unwrap_err();
         assert_eq!(error.outcome, PersistenceOutcome::RecoveryRequired);
-        assert_ne!(std::fs::read(&paths.session).unwrap(), b"old-session");
+        assert_ne!(std::fs::read(&paths.session).unwrap(), old_session);
         assert_eq!(std::fs::read(&paths.extension_state).unwrap(), b"old-state");
         recover_checkpoint_at_startup(&ownership, &paths).unwrap();
-        assert_ne!(std::fs::read(&paths.session).unwrap(), b"old-session");
+        assert_ne!(std::fs::read(&paths.session).unwrap(), old_session);
         assert_ne!(std::fs::read(&paths.extension_state).unwrap(), b"old-state");
         drop(ownership);
         std::fs::remove_dir_all(directory).unwrap();

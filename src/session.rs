@@ -830,7 +830,7 @@ mod tests {
             &std::fs::read(vqro_root.join("sessions/from-default/session.json")).unwrap(),
         )
         .unwrap();
-        assert_eq!(imported_snapshot.version, 6);
+        assert_eq!(imported_snapshot.version, crate::persist::SNAPSHOT_VERSION);
         assert!(imported_snapshot.workspaces.is_empty());
         let named =
             import_herdr_session_from_roots(&herdr_root, &vqro_root, Some("source"), "from-named")

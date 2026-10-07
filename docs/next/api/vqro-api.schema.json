@@ -7110,6 +7110,22 @@
         {
           "properties": {
             "method": {
+              "const": "layout.tree.export",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/LayoutExportParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
               "const": "layout.apply",
               "type": "string"
             },
@@ -11322,6 +11338,176 @@
             }
           ]
         },
+        "LayoutTreeDescription": {
+          "description": "Neutral, read-only tree export; independent from legacy pane-only layout methods.",
+          "properties": {
+            "focused": {
+              "$ref": "#/schemas/success_response/$defs/LayoutTreeFocus"
+            },
+            "kind": {
+              "type": "string"
+            },
+            "root": {
+              "$ref": "#/schemas/success_response/$defs/LayoutTreeNode"
+            },
+            "tab_id": {
+              "type": "string"
+            },
+            "workspace_id": {
+              "type": "string"
+            },
+            "zoomed": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "kind",
+            "workspace_id",
+            "tab_id",
+            "zoomed",
+            "focused",
+            "root"
+          ],
+          "type": "object"
+        },
+        "LayoutTreeFocus": {
+          "oneOf": [
+            {
+              "properties": {
+                "pane_id": {
+                  "type": "string"
+                },
+                "type": {
+                  "const": "pane",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "pane_id"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "box_id": {
+                  "type": "string"
+                },
+                "type": {
+                  "const": "stack",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "box_id"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "type": {
+                  "const": "unknown",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type"
+              ],
+              "type": "object"
+            }
+          ]
+        },
+        "LayoutTreeNode": {
+          "oneOf": [
+            {
+              "properties": {
+                "pane_id": {
+                  "type": "string"
+                },
+                "type": {
+                  "const": "pane",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "pane_id"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "box_id": {
+                  "type": "string"
+                },
+                "children": {
+                  "items": {
+                    "$ref": "#/schemas/success_response/$defs/LayoutTreeNode"
+                  },
+                  "type": "array"
+                },
+                "selected": {
+                  "format": "uint",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "type": {
+                  "const": "stack",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "box_id",
+                "selected",
+                "children"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "direction": {
+                  "$ref": "#/schemas/success_response/$defs/SplitDirection"
+                },
+                "first": {
+                  "$ref": "#/schemas/success_response/$defs/LayoutTreeNode"
+                },
+                "ratio": {
+                  "format": "float",
+                  "type": "number"
+                },
+                "second": {
+                  "$ref": "#/schemas/success_response/$defs/LayoutTreeNode"
+                },
+                "type": {
+                  "const": "split",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "direction",
+                "ratio",
+                "first",
+                "second"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "type": {
+                  "const": "unknown",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type"
+              ],
+              "type": "object"
+            }
+          ]
+        },
         "NotificationShowReason": {
           "enum": [
             "shown",
@@ -13745,6 +13931,22 @@
                 },
                 "type": {
                   "const": "layout_export",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "layout"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "layout": {
+                  "$ref": "#/schemas/success_response/$defs/LayoutTreeDescription"
+                },
+                "type": {
+                  "const": "layout_tree_export",
                   "type": "string"
                 }
               },

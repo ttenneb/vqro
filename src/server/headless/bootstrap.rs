@@ -153,7 +153,7 @@ fn run_handoff_import_server(socket_path: &Path, token: &str) -> io::Result<()> 
             &received.manifest.deferred_panes,
             &mut imports,
         )?;
-        // Sync the admitted v6 bytes before asking the source to relinquish
+        // Sync the converted v8 bytes before asking the source to relinquish
         // ownership. The staging name is not authoritative until commit.
         let staged_snapshot = crate::persist::stage_handoff_snapshot(&received.manifest.snapshot)?;
         crate::server::handoff::report_restored(&mut received.stream)?;

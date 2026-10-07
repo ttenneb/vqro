@@ -4,10 +4,11 @@ use ratatui::layout::Direction;
 
 use crate::api::schema::{
     EventData, EventEnvelope, EventKind, LayoutApplyParams, LayoutDescription, LayoutExportParams,
-    LayoutNode, LayoutPane, LayoutSetSplitRatioParams, ResponseResult, SplitDirection,
+    LayoutNode, LayoutPane, LayoutSetSplitRatioParams, LayoutTreeDescription, LayoutTreeFocus,
+    LayoutTreeNode, ResponseResult, SplitDirection,
 };
 use crate::app::{App, Mode};
-use crate::layout::{LayoutLeaf, Node, PaneId, TileLayout, TypedNode};
+use crate::layout::{LayoutLeaf, PaneId, TileLayout, TypedNode};
 use crate::workspace::NewPane;
 
 use super::responses::{encode_error, encode_success};
@@ -29,6 +30,78 @@ impl App {
         };
 
         encode_success(id, ResponseResult::LayoutExport { layout })
+    }
+
+    pub(super) fn handle_layout_tree_export(
+        &mut self,
+        id: String,
+        params: LayoutExportParams,
+    ) -> String {
+        let Some((ws_idx, tab_idx)) = self.resolve_layout_export_target(&params) else {
+            return encode_error(id, "layout_not_found", "layout target not found");
+        };
+        let Some(layout) = self.layout_tree_description(ws_idx, tab_idx) else {
+            return encode_error(id, "layout_not_found", "layout unavailable");
+        };
+        encode_success(id, ResponseResult::LayoutTreeExport { layout })
+    }
+
+    fn layout_tree_description(
+        &self,
+        ws_idx: usize,
+        tab_idx: usize,
+    ) -> Option<LayoutTreeDescription> {
+        let tab = self.state.workspaces.get(ws_idx)?.tabs.get(tab_idx)?;
+        let focused = match tab.layout.focused_leaf() {
+            LayoutLeaf::Pane(pane) => LayoutTreeFocus::Pane {
+                pane_id: self.public_pane_id(ws_idx, pane)?,
+            },
+            LayoutLeaf::Stack(id) => LayoutTreeFocus::Stack {
+                box_id: crate::terminal_container::format_terminal_container_id(id),
+            },
+        };
+        Some(LayoutTreeDescription {
+            kind: "layout.tree.v1".into(),
+            workspace_id: self.public_workspace_id(ws_idx),
+            tab_id: self.public_tab_id(ws_idx, tab_idx)?,
+            zoomed: tab.zoomed,
+            focused,
+            root: self.layout_tree_node(ws_idx, tab.layout.typed_root())?,
+        })
+    }
+
+    fn layout_tree_node(&self, ws_idx: usize, node: &TypedNode) -> Option<LayoutTreeNode> {
+        Some(match node {
+            TypedNode::Leaf(pane) => LayoutTreeNode::Pane {
+                pane_id: self.public_pane_id(ws_idx, *pane)?,
+            },
+            TypedNode::Stack {
+                id,
+                selected,
+                children,
+            } => LayoutTreeNode::Stack {
+                box_id: crate::terminal_container::format_terminal_container_id(*id),
+                selected: *selected,
+                children: children
+                    .iter()
+                    .map(|child| self.layout_tree_node(ws_idx, child))
+                    .collect::<Option<Vec<_>>>()?,
+            },
+            TypedNode::Split {
+                direction,
+                ratio,
+                first,
+                second,
+            } => LayoutTreeNode::Split {
+                direction: match direction {
+                    Direction::Horizontal => SplitDirection::Right,
+                    Direction::Vertical => SplitDirection::Down,
+                },
+                ratio: *ratio,
+                first: Box::new(self.layout_tree_node(ws_idx, first)?),
+                second: Box::new(self.layout_tree_node(ws_idx, second)?),
+            },
+        })
     }
 
     pub(super) fn handle_layout_apply(&mut self, id: String, params: LayoutApplyParams) -> String {
@@ -281,9 +354,7 @@ impl App {
         let Some(first_pane) = existing_panes.first().copied() else {
             return encode_error(id, "invalid_layout", "replacement layout is empty");
         };
-        let Some(layout) =
-            TileLayout::from_typed_saved(root, LayoutLeaf::Pane(first_pane), Vec::new())
-        else {
+        let Some(layout) = TileLayout::from_tree(root, LayoutLeaf::Pane(first_pane)) else {
             return encode_error(id, "invalid_layout", "replacement layout is invalid");
         };
         {
@@ -375,7 +446,15 @@ impl App {
             tab_id: self.public_tab_id(ws_idx, tab_idx)?,
             zoomed: tab.zoomed,
             focused_pane_id: self.public_pane_id(ws_idx, tab.layout.focused())?,
-            root: self.layout_node_description(ws_idx, tab_idx, &tab.layout.root())?,
+            root: if tab.layout.typed_root().selected_pane().is_some() {
+                self.layout_node_description(ws_idx, tab_idx, tab.layout.typed_root())?
+            } else {
+                self.layout_node_description(
+                    ws_idx,
+                    tab_idx,
+                    &TypedNode::Leaf(tab.layout.focused()),
+                )?
+            },
         })
     }
 
@@ -383,26 +462,42 @@ impl App {
         &self,
         ws_idx: usize,
         tab_idx: usize,
-        node: &Node,
+        node: &TypedNode,
     ) -> Option<LayoutNode> {
+        // Published pane-only API semantics stay here, not in the canonical layout.
         match node {
-            Node::Pane(pane_id) => Some(LayoutNode::Pane {
+            TypedNode::Leaf(pane_id) => Some(LayoutNode::Pane {
                 pane: self.layout_pane_description(ws_idx, tab_idx, *pane_id)?,
             }),
-            Node::Split {
+            TypedNode::Stack {
+                selected, children, ..
+            } => children
+                .get(*selected)
+                .and_then(|child| self.layout_node_description(ws_idx, tab_idx, child)),
+            TypedNode::Split {
                 direction,
                 ratio,
                 first,
                 second,
-            } => Some(LayoutNode::Split {
-                direction: match direction {
-                    Direction::Horizontal => SplitDirection::Right,
-                    Direction::Vertical => SplitDirection::Down,
-                },
-                ratio: *ratio,
-                first: Box::new(self.layout_node_description(ws_idx, tab_idx, first)?),
-                second: Box::new(self.layout_node_description(ws_idx, tab_idx, second)?),
-            }),
+            } => {
+                // Only empty structural branches may collapse. A missing pane
+                // description is an export error, not an empty layout branch.
+                if first.selected_pane().is_none() {
+                    return self.layout_node_description(ws_idx, tab_idx, second);
+                }
+                if second.selected_pane().is_none() {
+                    return self.layout_node_description(ws_idx, tab_idx, first);
+                }
+                Some(LayoutNode::Split {
+                    direction: match direction {
+                        Direction::Horizontal => SplitDirection::Right,
+                        Direction::Vertical => SplitDirection::Down,
+                    },
+                    ratio: *ratio,
+                    first: Box::new(self.layout_node_description(ws_idx, tab_idx, first)?),
+                    second: Box::new(self.layout_node_description(ws_idx, tab_idx, second)?),
+                })
+            }
         }
     }
 
@@ -775,6 +870,17 @@ mod tests {
     }
 
     #[test]
+    fn layout_export_does_not_hide_an_undescribable_nonempty_pane() {
+        let mut app = app_with_workspace();
+        let root = app.state.workspaces[0].tabs[0].root_pane;
+        let right = app.state.workspaces[0].test_split(Direction::Horizontal);
+        app.state.ensure_test_terminals();
+        app.state.workspaces[0].tabs[0].layout.focus_pane(root);
+        app.state.workspaces[0].tabs[0].panes.remove(&right);
+        assert!(app.layout_description(0, 0).is_none());
+    }
+
+    #[test]
     fn layout_export_returns_portable_tree() {
         let mut app = app_with_workspace();
         let root = app.state.workspaces[0].tabs[0].root_pane;
@@ -824,6 +930,81 @@ mod tests {
         };
         assert_eq!(pane.label.as_deref(), Some("tests"));
         assert_eq!(pane.pane_id, Some(app.public_pane_id(0, right).unwrap()));
+    }
+
+    #[test]
+    fn tree_export_includes_hidden_members_without_reinterpreting_legacy_layout() {
+        let mut app = app_with_workspace();
+        let root = app.state.workspaces[0].tabs[0].root_pane;
+        let selected_pane = app.state.workspaces[0].test_split(Direction::Horizontal);
+        let hidden = app.state.workspaces[0].test_split(Direction::Vertical);
+        let collection = app.state.workspaces[0].tabs[0]
+            .create_collection_near(LayoutLeaf::Pane(root), Direction::Horizontal, 0.37, None)
+            .unwrap();
+        app.state.workspaces[0].tabs[0]
+            .collect_tiled_pane(selected_pane, collection)
+            .unwrap();
+        app.state.workspaces[0].tabs[0]
+            .collect_tiled_pane(hidden, collection)
+            .unwrap();
+        assert!(!app.state.workspaces[0].tabs[0]
+            .layout
+            .is_pane_visible(hidden));
+        app.state.ensure_test_terminals();
+        let legacy = app.layout_description(0, 0).unwrap();
+        let LayoutNode::Split { first, second, .. } = &legacy.root else {
+            panic!("legacy split")
+        };
+        assert!(
+            matches!(first.as_ref(), LayoutNode::Pane { pane } if pane.pane_id == app.public_pane_id(0, root))
+        );
+        assert!(
+            matches!(second.as_ref(), LayoutNode::Pane { pane } if pane.pane_id == app.public_pane_id(0, selected_pane))
+        );
+        let response = app.handle_layout_tree_export(
+            "req".into(),
+            LayoutExportParams {
+                tab_id: None,
+                pane_id: None,
+            },
+        );
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        let ResponseResult::LayoutTreeExport { layout } = success.result else {
+            panic!("tree export")
+        };
+        assert_eq!(layout.kind, "layout.tree.v1");
+        let LayoutTreeNode::Split { second, .. } = layout.root else {
+            panic!("tree split")
+        };
+        let LayoutTreeNode::Stack {
+            box_id,
+            selected,
+            children,
+        } = *second
+        else {
+            panic!("tree stack")
+        };
+        assert_eq!(
+            box_id,
+            crate::terminal_container::format_terminal_container_id(collection.into())
+        );
+        assert_eq!(selected, 0);
+        assert_eq!(
+            children,
+            vec![
+                LayoutTreeNode::Pane {
+                    pane_id: app.public_pane_id(0, selected_pane).unwrap()
+                },
+                LayoutTreeNode::Pane {
+                    pane_id: app.public_pane_id(0, hidden).unwrap()
+                },
+            ]
+        );
+        let unknown: LayoutTreeNode =
+            serde_json::from_str(r#"{"type":"future_box","children":[]}"#).unwrap();
+        assert_eq!(unknown, LayoutTreeNode::Unknown);
+        assert_eq!(app.layout_description(0, 0).unwrap(), legacy);
+        app.state.assert_invariants_for_test();
     }
 
     #[test]

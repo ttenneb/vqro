@@ -46,6 +46,7 @@ pub(crate) struct HandoffManifest {
     pub source_protocol: u32,
     pub expected_version: Option<String>,
     pub expected_protocol: Option<u32>,
+    #[serde(deserialize_with = "crate::persist::deserialize_handoff_snapshot")]
     pub snapshot: crate::persist::SessionSnapshot,
     pub panes: Vec<crate::handoff_runtime::HandoffRuntimeState>,
     /// Snapshot panes intentionally lacking an FD because native agent resume
@@ -326,6 +327,7 @@ fn validate_handoff_version_numbers(handoff_version: u32, snapshot_version: u32)
         TERMINAL_ID_HANDOFF_VERSION => snapshot_version == 5,
         HANDOFF_VERSION => {
             snapshot_version == crate::persist::LEGACY_SNAPSHOT_WRITER_VERSION
+                || snapshot_version == 7
                 || snapshot_version == crate::persist::SNAPSHOT_VERSION
         }
         _ => false,
@@ -389,7 +391,12 @@ fn validate_and_normalize_manifest(manifest: &mut HandoffManifest) -> io::Result
             || changes.projections_changed
             || changes.structural_state_changed
     );
-    if manifest.version == HANDOFF_VERSION && changes.changed {
+    if manifest.version == HANDOFF_VERSION
+        && (changes.internal_identities_changed
+            || changes.public_identities_changed
+            || changes.projections_changed
+            || changes.structural_state_changed)
+    {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "handoff v3 snapshot was not identity-normalized",
@@ -529,6 +536,11 @@ pub(crate) fn receive(socket_path: &Path, token: &str) -> io::Result<ReceivedHan
     preflight_handoff_json_versions(&manifest_line)?;
     let mut manifest: HandoffManifest =
         serde_json::from_str(&manifest_line).map_err(io::Error::other)?;
+    tracing::info!(
+        exported_collections_action_sequence = manifest.snapshot.collections_action_sequence,
+        source_snapshot_version = manifest.snapshot.version,
+        "received live handoff snapshot metadata"
+    );
     validate_and_normalize_manifest(&mut manifest)?;
     if manifest
         .expected_protocol
@@ -551,6 +563,18 @@ pub(crate) fn receive(socket_path: &Path, token: &str) -> io::Result<ReceivedHan
             crate::build_info::version()
         )));
     }
+    // Remove when no pre-v8 live sender can be a source: current exporters
+    // retain the high-water even under legacy or unavailable authority.
+    let durable_sequence = crate::persist::durable_collections_action_sequence()?;
+    manifest.snapshot.collections_action_sequence = manifest
+        .snapshot
+        .collections_action_sequence
+        .max(durable_sequence);
+    tracing::info!(
+        durable_collections_action_sequence = durable_sequence,
+        imported_collections_action_sequence = manifest.snapshot.collections_action_sequence,
+        "reconciled live handoff action high-water before descriptor admission"
+    );
     stream.write_all(b"validated\n")?;
     stream.flush()?;
     let fds = recv_fds(&stream, manifest.panes.len())?;
@@ -828,7 +852,7 @@ mod tests {
             delegations: Vec::new(),
             collections_authority: Default::default(),
             collections_action_sequence: 0,
-            version: 0,
+            version: crate::persist::SNAPSHOT_VERSION,
             repositories: Vec::new(),
             space_order: Vec::new(),
             workspaces: Vec::new(),
@@ -912,7 +936,7 @@ mod tests {
         .expect("legacy v1 fixture should retain its original wire shape");
 
         validate_and_normalize_manifest(&mut manifest).unwrap();
-        assert_eq!(manifest.snapshot.version, 6);
+        assert_eq!(manifest.snapshot.version, crate::persist::SNAPSHOT_VERSION);
         let snapshot_id = crate::persist::terminal_id_for_pane_snapshot(
             &manifest.snapshot.workspaces[0].tabs[0].panes[&1],
         )
@@ -979,7 +1003,7 @@ mod tests {
             state.active,
             state.selected,
         );
-        snapshot.version = 7;
+        snapshot.version = crate::persist::SNAPSHOT_VERSION;
         snapshot.collections_authority = CollectionsAuthorityV1 {
             phase: CollectionsAuthorityPhaseV1::Package,
             authority_epoch: 2,
@@ -1000,7 +1024,7 @@ mod tests {
         snapshot.collections_action_sequence = 9;
         let snapshot =
             crate::persist::parse_snapshot(&serde_json::to_string(&snapshot).unwrap()).unwrap();
-        assert_eq!(snapshot.version, 7);
+        assert_eq!(snapshot.version, crate::persist::SNAPSHOT_VERSION);
         assert_eq!(snapshot.collections_action_sequence, 9);
         let panes = snapshot
             .workspaces
@@ -1040,7 +1064,7 @@ mod tests {
             serde_json::to_value(&decoded).unwrap(),
             serde_json::to_value(&manifest).unwrap()
         );
-        assert_eq!(decoded.snapshot.version, 7);
+        assert_eq!(decoded.snapshot.version, crate::persist::SNAPSHOT_VERSION);
         assert!(members.iter().all(|id| decoded
             .panes
             .iter()
@@ -1158,7 +1182,7 @@ mod tests {
             api_window_title: None,
         };
         validate_and_normalize_manifest(&mut v2).unwrap();
-        assert_eq!(v2.snapshot.version, 6);
+        assert_eq!(v2.snapshot.version, crate::persist::SNAPSHOT_VERSION);
 
         let mut v3 = HandoffManifest {
             version: HANDOFF_VERSION,
@@ -1227,9 +1251,13 @@ mod tests {
 
     #[test]
     fn raw_future_handoff_is_rejected_before_typed_snapshot_decode() {
-        let raw = r#"{"version":3,"snapshot":{"version":8,"future_identity":{"must":"survive"}}}"#;
+        let raw = serde_json::json!({"version":3,"snapshot":{
+            "version":crate::persist::SNAPSHOT_VERSION + 1,
+            "future_identity":{"must":"survive"}
+        }})
+        .to_string();
         let preserved = raw.as_bytes().to_vec();
-        let error = preflight_handoff_json_versions(raw).unwrap_err();
+        let error = preflight_handoff_json_versions(raw.as_str()).unwrap_err();
         assert!(error.to_string().contains("newer than supported"));
         assert_eq!(raw.as_bytes(), preserved);
     }
@@ -1245,11 +1273,13 @@ mod tests {
         let server = std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
             assert_eq!(read_line_unbuffered(&mut stream).unwrap(), "future-token\n");
-            stream
-                .write_all(
-                    b"{\"version\":3,\"snapshot\":{\"version\":8,\"future_identity\":{\"must\":\"survive\"}}}\n",
-                )
-                .unwrap();
+            let mut raw = serde_json::json!({"version":3,"snapshot":{
+                "version":crate::persist::SNAPSHOT_VERSION + 1,
+                "future_identity":{"must":"survive"}
+            }})
+            .to_string();
+            raw.push('\n');
+            stream.write_all(raw.as_bytes()).unwrap();
             stream.flush().unwrap();
             stream
                 .set_read_timeout(Some(Duration::from_secs(1)))

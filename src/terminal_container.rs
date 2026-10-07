@@ -1,11 +1,6 @@
-//! Stable box identity and the explicit v6/v7 restore record projection.
-//!
-//! Stack membership and selection live only in the canonical layout tree. The
-//! temporary record below is consumed at restore, not retained as layout state;
-//! remove that projection in stage 2 with the nested session codec.
+//! Stable box identity; membership and selection live in the layout tree.
 
-use std::collections::HashSet;
-
+#[cfg(test)]
 use crate::layout::PaneId;
 
 static NEXT_TERMINAL_CONTAINER_ID: std::sync::atomic::AtomicU64 =
@@ -87,42 +82,6 @@ impl TerminalContainerId {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct TerminalContainer {
-    pub(crate) id: TerminalContainerId,
-    members: Vec<PaneId>,
-    selected: Option<PaneId>,
-}
-
-impl TerminalContainer {
-    pub(crate) fn from_legacy(
-        id: TerminalContainerId,
-        members: Vec<PaneId>,
-        selected: Option<PaneId>,
-    ) -> Option<Self> {
-        let unique: HashSet<_> = members.iter().copied().collect();
-        if unique.len() != members.len()
-            || selected.is_some_and(|pane| !unique.contains(&pane))
-            || (selected.is_none() && !members.is_empty())
-        {
-            return None;
-        }
-        Some(Self {
-            id,
-            members,
-            selected,
-        })
-    }
-
-    pub(crate) fn members(&self) -> &[PaneId] {
-        &self.members
-    }
-
-    pub(crate) fn selected(&self) -> Option<PaneId> {
-        self.selected
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -175,34 +134,5 @@ mod tests {
         assert_eq!(layout.collection(id).unwrap().selected(), Some(first));
         assert!(layout.remove_collection_member(id, first));
         assert_eq!(layout.collection(id).unwrap().selected(), None);
-    }
-
-    #[test]
-    fn legacy_container_requires_selection_if_and_only_if_non_empty() {
-        let id = TerminalContainerId::from_persisted(8_800_003).expect("container id");
-        let pane = PaneId::from_raw(1);
-
-        assert!(TerminalContainer::from_legacy(id, vec![pane], Some(pane)).is_some());
-        assert!(TerminalContainer::from_legacy(id, Vec::new(), None).is_some());
-        assert!(TerminalContainer::from_legacy(id, vec![pane], None).is_none());
-        assert!(TerminalContainer::from_legacy(id, Vec::new(), Some(pane)).is_none());
-    }
-
-    #[test]
-    fn terminal_container_has_no_collection_policy_state() {
-        let container = TerminalContainer::from_legacy(
-            TerminalContainerId::from_persisted(8_800_002).expect("container id"),
-            Vec::new(),
-            None,
-        )
-        .unwrap();
-        let TerminalContainer {
-            id,
-            members,
-            selected,
-        } = container;
-        assert_eq!(id.raw(), 8_800_002);
-        assert!(members.is_empty());
-        assert_eq!(selected, None);
     }
 }

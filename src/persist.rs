@@ -5,6 +5,7 @@
 //! Installed plugins are persisted separately at `plugins.json`.
 
 // Kept separate from ordinary session saves so rejected bytes remain authoritative.
+mod convert_v7;
 pub(crate) mod coordinator;
 pub(crate) mod extension_state;
 mod io;
@@ -16,9 +17,9 @@ mod snapshot;
 pub use self::io::load;
 #[cfg(all(test, unix))]
 pub(crate) use self::io::publish_handoff_snapshot_to_path;
-#[cfg(unix)]
-pub(crate) use self::io::stage_handoff_snapshot;
 pub use self::io::{clear, clear_history, save};
+#[cfg(unix)]
+pub(crate) use self::io::{durable_collections_action_sequence, stage_handoff_snapshot};
 pub(crate) use self::io::{
     load_for_startup, load_history_for_startup, StartupHistoryLoad, StartupSessionLoad,
 };
@@ -27,14 +28,14 @@ pub use self::restore::restore_handoff;
 #[cfg(unix)]
 pub(crate) use self::restore::validate_snapshot_admission;
 pub use self::restore::{restore, restore_delegations};
-#[cfg(unix)]
-pub(crate) use self::snapshot::normalize_identity_changes;
 #[cfg(any(unix, test))]
 pub(crate) use self::snapshot::terminal_id_for_pane_snapshot;
 pub use self::snapshot::{
     capture, capture_history, DirectionSnapshot, LayoutSnapshot, SessionHistorySnapshot,
     SessionSnapshot, TabSnapshot, WorkspaceSnapshot,
 };
+#[cfg(unix)]
+pub(crate) use self::snapshot::{deserialize_handoff_snapshot, normalize_identity_changes};
 pub(crate) use self::snapshot::{
     parse_snapshot, reserve_empty_collection, validate_snapshot, LEGACY_SNAPSHOT_WRITER_VERSION,
     SNAPSHOT_VERSION,

@@ -15,12 +15,12 @@ use crate::legacy_collection_snapshot::LegacyCollectionSnapshot;
 use crate::pane::{PaneLaunchEnv, PaneState};
 use crate::render_signal::RenderSignal;
 use crate::terminal::{TerminalId, TerminalRuntime, TerminalState};
-use crate::terminal_container::{TerminalContainer, TerminalContainerId};
+use crate::terminal_container::TerminalContainerId;
 use crate::workspace::Workspace;
 
 use super::snapshot::{
-    CollectionSnapshot, LayoutLeafSnapshot, PaneAgentSessionSnapshot, PaneHistorySnapshot,
-    TabHistorySnapshot, WorkspaceHistorySnapshot,
+    LayoutLeafSnapshot, PaneAgentSessionSnapshot, PaneHistorySnapshot, TabHistorySnapshot,
+    WorkspaceHistorySnapshot,
 };
 use super::{
     DirectionSnapshot, LayoutSnapshot, SessionHistorySnapshot, SessionSnapshot, TabSnapshot,
@@ -240,8 +240,11 @@ fn reserve_restored_collection_ids(snapshot: &SessionSnapshot) {
     fn reserve_layout(layout: &LayoutSnapshot) {
         match layout {
             LayoutSnapshot::Pane(_) => {}
-            LayoutSnapshot::Collection(id) => {
+            LayoutSnapshot::Stack { id, children, .. } => {
                 let _ = CollectionId::from_raw(id.raw());
+                for child in children {
+                    reserve_layout(child);
+                }
             }
             LayoutSnapshot::Split { first, second, .. } => {
                 reserve_layout(first);
@@ -261,7 +264,7 @@ fn reserve_restored_collection_ids(snapshot: &SessionSnapshot) {
         for collection in &tab.collections {
             let _ = CollectionId::from_raw(collection.id.raw());
         }
-        if let Some(LayoutLeafSnapshot::Collection(id)) = tab.focused_leaf {
+        if let Some(LayoutLeafSnapshot::Stack(id)) = tab.focused_leaf {
             let _ = CollectionId::from_raw(id.raw());
         }
     }
@@ -273,7 +276,11 @@ fn restored_tab_identity_count(tab: &super::snapshot::TabSnapshot) -> usize {
             super::snapshot::LayoutSnapshot::Pane(id) => {
                 ids.insert(*id);
             }
-            super::snapshot::LayoutSnapshot::Collection(_) => {}
+            super::snapshot::LayoutSnapshot::Stack { children, .. } => {
+                for child in children {
+                    collect_layout_ids(child, ids);
+                }
+            }
             super::snapshot::LayoutSnapshot::Split { first, second, .. } => {
                 collect_layout_ids(first, ids);
                 collect_layout_ids(second, ids);
@@ -379,7 +386,11 @@ fn migrated_public_pane_numbers_by_old_raw(
 fn collect_layout_snapshot_pane_ids(node: &LayoutSnapshot, ids: &mut Vec<u32>) {
     match node {
         LayoutSnapshot::Pane(id) => ids.push(*id),
-        LayoutSnapshot::Collection(_) => {}
+        LayoutSnapshot::Stack { children, .. } => {
+            for child in children {
+                collect_layout_snapshot_pane_ids(child, ids);
+            }
+        }
         LayoutSnapshot::Split { first, second, .. } => {
             collect_layout_snapshot_pane_ids(first, ids);
             collect_layout_snapshot_pane_ids(second, ids);
@@ -1137,7 +1148,11 @@ fn restore_typed_node_remapped(snap: &TabSnapshot) -> (TypedNode, HashMap<u32, P
             LayoutSnapshot::Pane(id) => {
                 ids.insert(*id);
             }
-            LayoutSnapshot::Collection(_) => {}
+            LayoutSnapshot::Stack { children, .. } => {
+                for child in children {
+                    collect(child, ids);
+                }
+            }
             LayoutSnapshot::Split { first, second, .. } => {
                 collect(first, ids);
                 collect(second, ids);
@@ -1154,7 +1169,15 @@ fn restore_typed_node_remapped(snap: &TabSnapshot) -> (TypedNode, HashMap<u32, P
     fn remap(node: &LayoutSnapshot, ids: &HashMap<u32, PaneId>) -> TypedNode {
         match node {
             LayoutSnapshot::Pane(old) => TypedNode::Leaf(ids[old]),
-            LayoutSnapshot::Collection(id) => TypedNode::empty_stack((*id).into()),
+            LayoutSnapshot::Stack {
+                id,
+                selected,
+                children,
+            } => TypedNode::Stack {
+                id: (*id).into(),
+                selected: *selected,
+                children: children.iter().map(|child| remap(child, ids)).collect(),
+            },
             LayoutSnapshot::Split {
                 direction,
                 ratio,
@@ -1184,8 +1207,11 @@ fn recover_typed_layout(
     fn count_collection_leaves(node: &TypedNode, counts: &mut HashMap<TerminalContainerId, usize>) {
         match node {
             TypedNode::Leaf(_) => {}
-            TypedNode::Stack { id, .. } => {
+            TypedNode::Stack { id, children, .. } => {
                 *counts.entry(*id).or_default() += 1;
+                for child in children {
+                    count_collection_leaves(child, counts);
+                }
             }
             TypedNode::Split { first, second, .. } => {
                 count_collection_leaves(first, counts);
@@ -1195,38 +1221,49 @@ fn recover_typed_layout(
     }
     let mut leaf_counts = HashMap::new();
     count_collection_leaves(&node, &mut leaf_counts);
-    let valid_leaf_ids: HashSet<_> = leaf_counts
+    let valid_ids: HashSet<_> = leaf_counts
         .into_iter()
-        .filter_map(|(id, count)| (count == 1).then_some(id))
-        .collect();
-
-    let mut saved_records = snap.collections.iter().collect::<Vec<_>>();
-    saved_records.sort_by_key(|record| record.id.raw());
-    saved_records.dedup_by_key(|record| record.id);
-    let candidates: Vec<_> = saved_records
-        .into_iter()
-        .filter_map(|record| {
-            let id = TerminalContainerId::from(record.id);
-            (valid_leaf_ids.contains(&id) && !restored_collection_ids.contains(&id))
-                .then_some((id, record))
+        .filter_map(|(id, count)| {
+            (count == 1 && !restored_collection_ids.contains(&id)).then_some(id)
         })
-        .take(crate::admission::MAX_GROUPS_PER_TAB)
         .collect();
-    for (id, _) in &candidates {
-        restored_collection_ids.insert(*id);
-    }
-    let records: HashMap<TerminalContainerId, &CollectionSnapshot> =
-        candidates.into_iter().collect();
+    restored_collection_ids.extend(valid_ids.iter().copied());
     fn prune(
         node: TypedNode,
         surviving: &HashSet<PaneId>,
-        records: &HashMap<TerminalContainerId, &CollectionSnapshot>,
-        seen: &mut HashSet<TerminalContainerId>,
+        valid_ids: &HashSet<TerminalContainerId>,
+        placed: &mut HashSet<PaneId>,
     ) -> Option<TypedNode> {
         match node {
-            TypedNode::Leaf(id) => surviving.contains(&id).then_some(TypedNode::Leaf(id)),
-            TypedNode::Stack { id, .. } => {
-                (records.contains_key(&id) && seen.insert(id)).then_some(TypedNode::empty_stack(id))
+            TypedNode::Leaf(id) => {
+                (surviving.contains(&id) && placed.insert(id)).then_some(TypedNode::Leaf(id))
+            }
+            TypedNode::Stack {
+                id,
+                selected,
+                children,
+            } => {
+                if !valid_ids.contains(&id) {
+                    return None;
+                }
+                let mut retained = Vec::new();
+                let mut retained_indices = Vec::new();
+                for (index, child) in children.into_iter().enumerate() {
+                    if let Some(child) = prune(child, surviving, valid_ids, placed) {
+                        retained.push(child);
+                        retained_indices.push(index);
+                    }
+                }
+                // The selected child survives, or the next then previous child takes its place.
+                let selected = retained_indices
+                    .iter()
+                    .position(|index| *index >= selected)
+                    .unwrap_or_else(|| retained.len().saturating_sub(1));
+                Some(TypedNode::Stack {
+                    id,
+                    selected,
+                    children: retained,
+                })
             }
             TypedNode::Split {
                 direction,
@@ -1234,8 +1271,8 @@ fn recover_typed_layout(
                 first,
                 second,
             } => match (
-                prune(*first, surviving, records, seen),
-                prune(*second, surviving, records, seen),
+                prune(*first, surviving, valid_ids, placed),
+                prune(*second, surviving, valid_ids, placed),
             ) {
                 (Some(first), Some(second)) => Some(TypedNode::Split {
                     direction,
@@ -1248,60 +1285,8 @@ fn recover_typed_layout(
             },
         }
     }
-    let mut collection_ids = HashSet::new();
-    let mut root = prune(node, surviving, &records, &mut collection_ids);
     let mut placed = HashSet::new();
-    fn collect_tiled(node: &TypedNode, placed: &mut HashSet<PaneId>) {
-        match node {
-            TypedNode::Leaf(id) => {
-                placed.insert(*id);
-            }
-            TypedNode::Stack { .. } => {}
-            TypedNode::Split { first, second, .. } => {
-                collect_tiled(first, placed);
-                collect_tiled(second, placed);
-            }
-        }
-    }
-    if let Some(node) = root.as_ref() {
-        collect_tiled(node, &mut placed);
-    }
-    let mut collections = Vec::new();
-    let mut legacy_collection_snapshots = HashMap::new();
-    let mut ids: Vec<_> = collection_ids.into_iter().collect();
-    ids.sort_by_key(|id| id.raw());
-    for id in ids {
-        let saved = records[&id];
-        let mut members_seen = HashSet::new();
-        let members: Vec<_> = saved
-            .members
-            .iter()
-            .filter_map(|old| id_map.get(old).copied())
-            .filter(|pane| {
-                surviving.contains(pane) && !placed.contains(pane) && members_seen.insert(*pane)
-            })
-            .take(crate::admission::MAX_GROUP_MEMBERS)
-            .collect();
-        placed.extend(members.iter().copied());
-        let selected = saved
-            .selected
-            .and_then(|old| id_map.get(&old).copied())
-            .filter(|pane| members.contains(pane))
-            .or_else(|| members.first().copied());
-        let archived = saved
-            .archived
-            .iter()
-            .filter_map(|old| id_map.get(old).copied())
-            .filter(|pane| members.contains(pane))
-            .collect();
-        if let Some(collection) = TerminalContainer::from_legacy(id, members, selected) {
-            legacy_collection_snapshots.insert(
-                id,
-                LegacyCollectionSnapshot::from_legacy(saved.label.clone(), archived),
-            );
-            collections.push(collection);
-        }
-    }
+    let mut root = prune(node, surviving, &valid_ids, &mut placed);
     let mut unplaced: Vec<_> = surviving
         .iter()
         .copied()
@@ -1325,7 +1310,7 @@ fn recover_typed_layout(
         .focused_leaf
         .and_then(|leaf| match leaf {
             LayoutLeafSnapshot::Pane(old) => id_map.get(&old).copied().map(LayoutLeaf::Pane),
-            LayoutLeafSnapshot::Collection(id) => Some(LayoutLeaf::Stack(id.into())),
+            LayoutLeafSnapshot::Stack(id) => Some(LayoutLeaf::Stack(id.into())),
         })
         .or_else(|| {
             snap.focused
@@ -1336,7 +1321,12 @@ fn recover_typed_layout(
     fn collect_leaves(node: &TypedNode, leaves: &mut Vec<LayoutLeaf>) {
         match node {
             TypedNode::Leaf(pane) => leaves.push(LayoutLeaf::Pane(*pane)),
-            TypedNode::Stack { id, .. } => leaves.push(LayoutLeaf::Stack(*id)),
+            TypedNode::Stack { id, children, .. } => {
+                leaves.push(LayoutLeaf::Stack(*id));
+                for child in children {
+                    collect_leaves(child, leaves);
+                }
+            }
             TypedNode::Split { first, second, .. } => {
                 collect_leaves(first, leaves);
                 collect_leaves(second, leaves);
@@ -1347,13 +1337,28 @@ fn recover_typed_layout(
     let focus = saved_focus
         .filter(|focus| leaves.contains(focus))
         .or_else(|| leaves.first().copied())?;
-    let layout = TileLayout::from_typed_saved(root, focus, collections);
+    let layout = TileLayout::from_tree(root, focus);
     let exact_survivors = |layout: &TileLayout| {
         let placed = layout.pane_ids();
         let unique: HashSet<_> = placed.iter().copied().collect();
         placed.len() == unique.len() && unique == *surviving
     };
     if let Some(layout) = layout.filter(exact_survivors) {
+        let mut legacy_collection_snapshots = HashMap::new();
+        for saved in &snap.collections {
+            let id = TerminalContainerId::from(saved.id);
+            if let Some(stack) = layout.collection(id) {
+                let archived = saved
+                    .archived
+                    .iter()
+                    .filter_map(|old| id_map.get(old).copied())
+                    .filter(|pane| stack.contains_member(*pane))
+                    .collect();
+                legacy_collection_snapshots.entry(id).or_insert_with(|| {
+                    LegacyCollectionSnapshot::from_legacy(saved.label.clone(), archived)
+                });
+            }
+        }
         return Some(RecoveredTabLayout {
             layout,
             legacy_collection_snapshots,
@@ -1375,7 +1380,7 @@ fn recover_typed_layout(
             first: Box::new(root),
             second: Box::new(TypedNode::Leaf(pane)),
         });
-    let layout = TileLayout::from_typed_saved(root, LayoutLeaf::Pane(first), Vec::new())?;
+    let layout = TileLayout::from_tree(root, LayoutLeaf::Pane(first))?;
     exact_survivors(&layout).then_some(RecoveredTabLayout {
         layout,
         legacy_collection_snapshots: HashMap::new(),
@@ -1399,7 +1404,12 @@ fn remap_inner(snap: &LayoutSnapshot, id_map: &mut HashMap<u32, PaneId>) -> Node
             id_map.insert(*old_id, new_id);
             Node::Pane(new_id)
         }
-        LayoutSnapshot::Collection(_) => Node::Pane(PaneId::alloc()),
+        LayoutSnapshot::Stack {
+            selected, children, ..
+        } => children
+            .get(*selected)
+            .map(|child| remap_inner(child, id_map))
+            .unwrap_or_else(|| Node::Pane(PaneId::alloc())),
         LayoutSnapshot::Split {
             direction,
             ratio,
@@ -1659,8 +1669,6 @@ mod tests {
             .map(|offset| CollectionSnapshot {
                 id: CollectionId::from_raw(collection.raw() + offset as u64).unwrap(),
                 label: None,
-                members: vec![1; crate::admission::MAX_GROUP_MEMBERS + 1],
-                selected: Some(1),
                 archived: Vec::new(),
             })
             .collect();
@@ -1679,7 +1687,14 @@ mod tests {
                 tabs: vec![TabSnapshot {
                     id: None,
                     custom_name: None,
-                    layout: LayoutSnapshot::Collection(collection),
+                    layout: LayoutSnapshot::Stack {
+                        id: collection,
+                        selected: 0,
+                        children: vec![
+                            LayoutSnapshot::Pane(1);
+                            crate::admission::MAX_GROUP_MEMBERS + 1
+                        ],
+                    },
                     collections,
                     panes: HashMap::from([(
                         1,
@@ -1695,7 +1710,7 @@ mod tests {
                     )]),
                     zoomed: false,
                     focused: Some(1),
-                    focused_leaf: Some(LayoutLeafSnapshot::Collection(collection)),
+                    focused_leaf: Some(LayoutLeafSnapshot::Stack(collection)),
                     root_pane: Some(1),
                 }],
                 active_tab: 0,
@@ -1765,14 +1780,19 @@ mod tests {
                     layout: LayoutSnapshot::Split {
                         direction: DirectionSnapshot::Horizontal,
                         ratio: 0.5,
-                        first: Box::new(LayoutSnapshot::Collection(collection)),
+                        first: Box::new(LayoutSnapshot::Stack {
+                            id: collection,
+                            selected: 0,
+                            children: vec![
+                                LayoutSnapshot::Pane(member_a),
+                                LayoutSnapshot::Pane(member_b),
+                            ],
+                        }),
                         second: Box::new(LayoutSnapshot::Pane(outside)),
                     },
                     collections: vec![CollectionSnapshot {
                         id: collection,
                         label: None,
-                        members: vec![member_a, member_b],
-                        selected: Some(member_a),
                         archived: Vec::new(),
                     }],
                     panes: HashMap::from([
@@ -1909,7 +1929,7 @@ mod tests {
             state.active,
             state.selected,
         );
-        assert_eq!(snapshot.version, 6);
+        assert_eq!(snapshot.version, super::super::snapshot::SNAPSHOT_VERSION);
         let mut restored_ids = HashSet::new();
         for (saved, original) in snapshot.workspaces[0]
             .tabs
@@ -1967,6 +1987,113 @@ mod tests {
     }
 
     #[test]
+    fn v8_missing_stack_reference_is_pruned_without_inventing_terminal() {
+        let legacy = include_str!("../../tests/fixtures/session/hidden-member-handoff-v7.json");
+        let snapshot = super::super::snapshot::parse_snapshot(legacy).unwrap();
+        let mut value = serde_json::to_value(snapshot).unwrap();
+        value["workspaces"][0]["tabs"][0]["layout"]["Split"]["first"]["Stack"]["children"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({"Pane":999}));
+        let snapshot = super::super::snapshot::parse_snapshot(&value.to_string()).unwrap();
+        let tab = &snapshot.workspaces[0].tabs[0];
+        assert_eq!(tab.panes.len(), 3);
+        assert!(!tab.panes.contains_key(&999));
+        let (typed, map) = restore_typed_node_remapped(tab);
+        let surviving: HashSet<_> = tab
+            .panes
+            .keys()
+            .filter_map(|old| map.get(old).copied())
+            .collect();
+        let recovered =
+            recover_typed_layout(tab, typed, &map, &surviving, &mut HashSet::new()).unwrap();
+        assert_eq!(
+            recovered
+                .layout
+                .pane_ids()
+                .into_iter()
+                .collect::<HashSet<_>>(),
+            surviving
+        );
+        assert_eq!(surviving.len(), 3);
+    }
+
+    #[test]
+    fn v7_conversion_reuses_repair_rules_without_losing_panes_or_terminals() {
+        let original: serde_json::Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/session/hidden-member-handoff-v7.json"
+        ))
+        .unwrap();
+        for fault in 0..4 {
+            let mut value = original.clone();
+            let tab = &mut value["workspaces"][0]["tabs"][0];
+            match fault {
+                0 => {
+                    let mut members = Vec::new();
+                    for _ in 0..=crate::admission::MAX_GROUP_MEMBERS {
+                        members.extend([900001, 900002, 999]);
+                    }
+                    tab["collections"][0]["members"] = serde_json::json!(members);
+                    tab["collections"][0]["archived"] = serde_json::json!([900002, 999]);
+                }
+                1 => tab["collections"] = serde_json::json!([]),
+                2 => tab["collections"]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(serde_json::json!({"id":"collection_6100002","members":[900003]})),
+                _ => {
+                    tab["collections"][0]["selected"] = serde_json::json!(999);
+                    tab["collections"][0]["archived"] = serde_json::json!([900002, 999]);
+                }
+            }
+            let snapshot = super::super::snapshot::parse_snapshot(&value.to_string()).unwrap();
+            validate_snapshot_admission(&snapshot).unwrap();
+            let tab = &snapshot.workspaces[0].tabs[0];
+            let terminal_ids: Vec<_> = tab
+                .panes
+                .values()
+                .map(|pane| pane.terminal_id.clone())
+                .collect();
+            assert_eq!(terminal_ids.len(), 3, "fault {fault}");
+            let (typed, map) = restore_typed_node_remapped(tab);
+            let surviving: HashSet<_> = tab
+                .panes
+                .keys()
+                .filter_map(|old| map.get(old).copied())
+                .collect();
+            let recovered =
+                recover_typed_layout(tab, typed, &map, &surviving, &mut HashSet::new()).unwrap();
+            assert_eq!(
+                recovered
+                    .layout
+                    .pane_ids()
+                    .into_iter()
+                    .collect::<HashSet<_>>(),
+                surviving,
+                "fault {fault}"
+            );
+            assert_eq!(surviving.len(), 3);
+            let collection = CollectionId::from_raw(6_100_001).unwrap();
+            if fault != 1 {
+                assert_eq!(
+                    recovered
+                        .layout
+                        .collection(collection.into())
+                        .unwrap()
+                        .selected(),
+                    map.get(&900001).copied()
+                );
+            }
+            if fault == 0 || fault == 3 {
+                assert_eq!(
+                    recovered.legacy_collection_snapshots[&collection.into()].archived(),
+                    &HashSet::from([map[&900002]])
+                );
+            }
+        }
+    }
+
+    #[test]
     fn legacy_collection_restore_repairs_duplicate_missing_and_over_limit_members_without_losing_panes(
     ) {
         use super::super::snapshot::{CollectionSnapshot, LayoutSnapshot, TabSnapshot};
@@ -1984,31 +2111,35 @@ mod tests {
         let mut collections = vec![CollectionSnapshot {
             id: collection,
             label: Some("legacy".into()),
-            members,
-            selected: Some(999),
             archived: vec![2, 999],
         }];
         for offset in 1..=crate::admission::MAX_GROUPS_PER_TAB {
             collections.push(CollectionSnapshot {
                 id: CollectionId::from_raw(collection.raw() + offset as u64).unwrap(),
                 label: None,
-                members: vec![3],
-                selected: Some(3),
                 archived: Vec::new(),
             });
         }
         let snap = TabSnapshot {
             id: None,
             custom_name: None,
-            layout: LayoutSnapshot::Collection(collection),
+            layout: LayoutSnapshot::Stack {
+                id: collection,
+                selected: 0,
+                children: members.into_iter().map(LayoutSnapshot::Pane).collect(),
+            },
             collections,
             panes: HashMap::new(),
             zoomed: false,
             focused: None,
-            focused_leaf: Some(LayoutLeafSnapshot::Collection(collection)),
+            focused_leaf: Some(LayoutLeafSnapshot::Stack(collection)),
             root_pane: Some(1),
         };
-        let typed = TypedNode::empty_stack(collection.into());
+        let typed = TypedNode::Stack {
+            id: collection.into(),
+            selected: 0,
+            children: vec![TypedNode::Leaf(first), TypedNode::Leaf(second)],
+        };
 
         let mut restored_ids = HashSet::new();
         let recovered =
@@ -2051,8 +2182,16 @@ mod tests {
         malformed.layout = split(
             LayoutSnapshot::Pane(999),
             split(
-                LayoutSnapshot::Collection(collection),
-                LayoutSnapshot::Collection(collection),
+                LayoutSnapshot::Stack {
+                    id: collection,
+                    selected: 0,
+                    children: vec![],
+                },
+                LayoutSnapshot::Stack {
+                    id: collection,
+                    selected: 0,
+                    children: vec![],
+                },
             ),
         );
         malformed.panes = (1..=3)
@@ -2099,19 +2238,21 @@ mod tests {
         let record = CollectionSnapshot {
             id,
             label: None,
-            members: vec![1],
-            selected: Some(1),
             archived: Vec::new(),
         };
         let snapshot = |collections| TabSnapshot {
             id: None,
             custom_name: None,
-            layout: LayoutSnapshot::Collection(id),
+            layout: LayoutSnapshot::Stack {
+                id,
+                selected: 0,
+                children: vec![LayoutSnapshot::Pane(1)],
+            },
             collections,
             panes: HashMap::new(),
             zoomed: false,
             focused: Some(1),
-            focused_leaf: Some(LayoutLeafSnapshot::Collection(id)),
+            focused_leaf: Some(LayoutLeafSnapshot::Stack(id)),
             root_pane: Some(1),
         };
         let id_map = HashMap::from([(1, pane)]);
@@ -2148,27 +2289,27 @@ mod tests {
             .map(|raw| CollectionSnapshot {
                 id: CollectionId::from_raw(raw as u64).unwrap(),
                 label: None,
-                members: vec![1],
-                selected: Some(1),
                 archived: Vec::new(),
             })
             .collect::<Vec<_>>();
         collections.push(CollectionSnapshot {
             id: valid_id,
             label: None,
-            members: vec![1],
-            selected: Some(1),
             archived: Vec::new(),
         });
         let snap = TabSnapshot {
             id: None,
             custom_name: None,
-            layout: LayoutSnapshot::Collection(valid_id),
+            layout: LayoutSnapshot::Stack {
+                id: valid_id,
+                selected: 0,
+                children: vec![LayoutSnapshot::Pane(1)],
+            },
             collections,
             panes: HashMap::new(),
             zoomed: false,
             focused: Some(1),
-            focused_leaf: Some(LayoutLeafSnapshot::Collection(valid_id)),
+            focused_leaf: Some(LayoutLeafSnapshot::Stack(valid_id)),
             root_pane: Some(1),
         };
 
@@ -2192,18 +2333,20 @@ mod tests {
         let make_tab = |old_pane| TabSnapshot {
             id: None,
             custom_name: None,
-            layout: LayoutSnapshot::Collection(id),
+            layout: LayoutSnapshot::Stack {
+                id,
+                selected: 0,
+                children: vec![LayoutSnapshot::Pane(old_pane)],
+            },
             collections: vec![CollectionSnapshot {
                 id,
                 label: Some("duplicate".into()),
-                members: vec![old_pane],
-                selected: Some(old_pane),
                 archived: Vec::new(),
             }],
             panes: HashMap::new(),
             zoomed: false,
             focused: Some(old_pane),
-            focused_leaf: Some(LayoutLeafSnapshot::Collection(id)),
+            focused_leaf: Some(LayoutLeafSnapshot::Stack(id)),
             root_pane: Some(old_pane),
         };
         let mut restored_ids = HashSet::new();
@@ -2248,18 +2391,24 @@ mod tests {
         let snap = TabSnapshot {
             id: None,
             custom_name: None,
-            layout: LayoutSnapshot::Collection(id),
+            layout: LayoutSnapshot::Stack {
+                id,
+                selected: 2,
+                children: vec![
+                    LayoutSnapshot::Pane(1),
+                    LayoutSnapshot::Pane(1),
+                    LayoutSnapshot::Pane(999),
+                ],
+            },
             collections: vec![CollectionSnapshot {
                 id,
                 label: None,
-                members: vec![1, 1, 999],
-                selected: Some(999),
                 archived: vec![999],
             }],
             panes: HashMap::new(),
             zoomed: false,
             focused: None,
-            focused_leaf: Some(LayoutLeafSnapshot::Collection(id)),
+            focused_leaf: Some(LayoutLeafSnapshot::Stack(id)),
             root_pane: Some(1),
         };
         let recovered = recover_typed_layout(
@@ -2275,6 +2424,53 @@ mod tests {
         assert_eq!(
             placed.iter().copied().collect::<HashSet<_>>(),
             HashSet::from(panes)
+        );
+    }
+
+    #[test]
+    fn v8_nested_stacks_restore_exact_tree_selection_hidden_members_and_geometry() {
+        let outer = CollectionId::from_raw(7_400_001).unwrap();
+        let inner = CollectionId::from_raw(7_400_002).unwrap();
+        let saved: TabSnapshot = serde_json::from_value(serde_json::json!({
+            "layout":{"Stack":{"id":outer,"selected":1,"children":[
+                {"Pane":1},
+                {"Split":{"direction":"Horizontal","ratio":0.37,
+                    "first":{"Stack":{"id":inner,"selected":1,"children":[{"Pane":2},{"Pane":3}]}},
+                    "second":{"Pane":4}}}
+            ]}},
+            "collections":[{"id":inner,"label":"policy","archived":[2]}],
+            "panes":{"1":{"cwd":"/"},"2":{"cwd":"/"},"3":{"cwd":"/"},"4":{"cwd":"/"}},
+            "zoomed":false,"focused":3,"focused_leaf":{"type":"stack","id":outer},"root_pane":1
+        }))
+        .unwrap();
+        let (typed, ids) = restore_typed_node_remapped(&saved);
+        let expected = typed.clone();
+        let expected_layout =
+            TileLayout::from_tree(expected.clone(), LayoutLeaf::Stack(outer.into())).unwrap();
+        assert_eq!(ids.len(), 4);
+        assert!(!expected_layout.is_pane_visible(ids[&1]));
+        assert!(!expected_layout.is_pane_visible(ids[&2]));
+        let survivors = ids.values().copied().collect();
+        let restored =
+            recover_typed_layout(&saved, typed, &ids, &survivors, &mut HashSet::new()).unwrap();
+        assert_eq!(restored.layout.typed_root(), &expected);
+        assert_eq!(
+            restored.layout.focused_leaf(),
+            expected_layout.focused_leaf()
+        );
+        assert_eq!(restored.layout.pane_ids(), expected_layout.pane_ids());
+        let area = ratatui::layout::Rect::new(3, 4, 121, 43);
+        let geometry = |layout: &TileLayout| {
+            layout
+                .panes(area)
+                .iter()
+                .map(|info| (info.id, info.rect))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(geometry(&restored.layout), geometry(&expected_layout));
+        assert_eq!(
+            restored.legacy_collection_snapshots[&inner.into()].archived(),
+            &HashSet::from([ids[&2]])
         );
     }
 

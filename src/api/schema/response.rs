@@ -176,6 +176,9 @@ pub enum ResponseResult {
     LayoutExport {
         layout: LayoutDescription,
     },
+    LayoutTreeExport {
+        layout: super::panes::LayoutTreeDescription,
+    },
     LayoutApply {
         layout: LayoutDescription,
     },
