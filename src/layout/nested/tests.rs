@@ -412,3 +412,66 @@ fn view_pane_participates_in_focus_close_and_structure_uniqueness() {
     assert_eq!(tree.pane_count(), 1);
     assert!(!tree.root.contains_pane(view_pane));
 }
+
+#[test]
+fn swap_moves_a_views_content_and_identity_with_it() {
+    let terminal = PaneId::alloc();
+    let view_pane = PaneId::alloc();
+    let mut tree = layout(
+        split(
+            pane(terminal.raw()),
+            view_node(view_pane.raw(), "vqro.tasks", "tasks"),
+        ),
+        terminal.raw(),
+    );
+    assert!(tree.swap_panes(terminal, view_pane));
+    let root = tree.typed_root();
+    let TypedNode::Split { first, second, .. } = root else {
+        panic!("expected the split");
+    };
+    // The view travels with its identity; the terminal keeps its own.
+    assert!(matches!(**first, TypedNode::View { pane, .. } if pane == view_pane));
+    assert!(matches!(**second, TypedNode::Leaf(pane) if pane == terminal));
+    assert_eq!(
+        tree.view_at(view_pane).map(|content| content.view),
+        Some("tasks".to_owned()),
+        "the view still has its content"
+    );
+    assert!(tree.view_at(terminal).is_none());
+    assert_eq!(
+        tree.view_scope(view_pane),
+        vec![terminal],
+        "the view now covers the terminal beside it"
+    );
+    assert_eq!(tree.pane_count(), 2);
+    assert!(tree.typed_root().valid_structure());
+}
+
+#[test]
+fn swap_moves_two_differently_configured_views_with_their_contents() {
+    let first_view = PaneId::alloc();
+    let second_view = PaneId::alloc();
+    let mut tree = layout(
+        split(
+            view_node(first_view.raw(), "vqro.tasks", "tasks"),
+            view_node(second_view.raw(), "vqro.tasks", "messages"),
+        ),
+        first_view.raw(),
+    );
+    assert!(tree.swap_panes(first_view, second_view));
+    let TypedNode::Split { first, second, .. } = tree.typed_root() else {
+        panic!("expected the split");
+    };
+    // The contents moved with their identities, not into each other.
+    assert!(matches!(**first, TypedNode::View { pane, .. } if pane == second_view));
+    assert!(matches!(**second, TypedNode::View { pane, .. } if pane == first_view));
+    assert_eq!(
+        tree.view_at(first_view).map(|content| content.view),
+        Some("tasks".to_owned())
+    );
+    assert_eq!(
+        tree.view_at(second_view).map(|content| content.view),
+        Some("messages".to_owned())
+    );
+    assert!(tree.typed_root().valid_structure());
+}

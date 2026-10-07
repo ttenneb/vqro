@@ -1198,20 +1198,88 @@ fn typed_remove(node: TypedNode, target: LayoutLeaf) -> Option<TypedNode> {
 }
 
 fn typed_swap_panes(node: &mut TypedNode, first: PaneId, second: PaneId) {
+    // Address both nodes by path before touching the tree: after the first
+    // replacement two nodes can carry the same pane id, so a second lookup by id
+    // would find the wrong one.
+    let Some(first_path) = leaf_path(node, first) else {
+        return;
+    };
+    let Some(second_path) = leaf_path(node, second) else {
+        return;
+    };
+    let (Some(first_node), Some(second_node)) = (
+        node_at(node, &first_path).cloned(),
+        node_at(node, &second_path).cloned(),
+    ) else {
+        return;
+    };
+    // Swap the whole content-bearing leaves, so the view keeps its
+    // (extension, view) and the terminal keeps its terminal identity. Swapping
+    // only the numeric pane ids turns the terminal into a view and the view into
+    // a terminal-shaped leaf with no terminal record.
+    set_at(node, &first_path, second_node);
+    set_at(node, &second_path, first_node);
+}
+
+fn leaf_path(node: &TypedNode, pane: PaneId) -> Option<Vec<usize>> {
     match node {
-        TypedNode::Leaf(id) if *id == first => *id = second,
-        TypedNode::Leaf(id) if *id == second => *id = first,
-        TypedNode::View { pane, .. } if *pane == first => *pane = second,
-        TypedNode::View { pane, .. } if *pane == second => *pane = first,
-        TypedNode::Leaf(_) | TypedNode::View { .. } | TypedNode::Stack { .. } => {}
-        TypedNode::Split {
-            first: first_node,
-            second: second_node,
-            ..
-        } => {
-            typed_swap_panes(first_node, first, second);
-            typed_swap_panes(second_node, first, second);
+        TypedNode::Leaf(id) if *id == pane => Some(Vec::new()),
+        TypedNode::View {
+            pane: view_pane, ..
+        } if *view_pane == pane => Some(Vec::new()),
+        TypedNode::Split { first, second, .. } => {
+            if let Some(mut path) = leaf_path(first, pane) {
+                path.insert(0, 0);
+                Some(path)
+            } else {
+                leaf_path(second, pane).map(|mut path| {
+                    path.insert(0, 1);
+                    path
+                })
+            }
         }
+        TypedNode::Stack { children, .. } => {
+            children.iter().enumerate().find_map(|(index, child)| {
+                leaf_path(child, pane).map(|mut path| {
+                    path.insert(0, index);
+                    path
+                })
+            })
+        }
+        _ => None,
+    }
+}
+
+fn node_at<'a>(node: &'a TypedNode, path: &[usize]) -> Option<&'a TypedNode> {
+    let Some((&index, rest)) = path.split_first() else {
+        return Some(node);
+    };
+    match node {
+        TypedNode::Split { first, second, .. } => match index {
+            0 => node_at(first, rest),
+            1 => node_at(second, rest),
+            _ => None,
+        },
+        TypedNode::Stack { children, .. } => node_at(children.get(index)?, rest),
+        _ => None,
+    }
+}
+
+fn set_at(node: &mut TypedNode, path: &[usize], replacement: TypedNode) -> bool {
+    let Some((&index, rest)) = path.split_first() else {
+        *node = replacement;
+        return true;
+    };
+    match node {
+        TypedNode::Split { first, second, .. } => match index {
+            0 => set_at(first, rest, replacement),
+            1 => set_at(second, rest, replacement),
+            _ => false,
+        },
+        TypedNode::Stack { children, .. } => children
+            .get_mut(index)
+            .is_some_and(|child| set_at(child, rest, replacement)),
+        _ => false,
     }
 }
 
