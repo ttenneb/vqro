@@ -3410,8 +3410,10 @@ impl PaneRuntime {
     /// Retains the last live cwd after exit without consulting a reused PID.
     pub fn cwd_for_persistence(&self) -> Option<std::path::PathBuf> {
         let pid = self.child_pid.load(Ordering::Acquire);
+        // Same pane-shell resolution as `cwd()`: a Windows shim's launch
+        // directory must not be persisted in place of the real shell's cwd.
         if let Some(cwd) = (!self.cwd_process_exited.load(Ordering::Acquire))
-            .then(|| crate::platform::process_cwd(pid))
+            .then(|| crate::platform::pane_process_cwd(pid))
             .flatten()
             .filter(|cwd| cwd.is_absolute())
         {
