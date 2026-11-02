@@ -360,25 +360,46 @@ pub(super) fn navigator_rows(
         let endpoint_query_matches = !query.is_empty() && text(&endpoint.label);
         let mut endpoint_rows = Vec::new();
         if let Some(snapshot) = endpoint.snapshot.as_deref() {
+            // Build endpoint-local indexes once. Walking each bucket in snapshot
+            // order keeps navigation order and targets identical while a large
+            // pane count no longer multiplies with tabs and workspaces.
+            let mut tabs_by_workspace = HashMap::new();
+            for (index, tab) in snapshot.tabs.iter().enumerate() {
+                tabs_by_workspace
+                    .entry(tab.workspace_id.as_str())
+                    .or_insert_with(Vec::new)
+                    .push(index);
+            }
+            let mut panes_by_tab = HashMap::new();
+            for (index, pane) in snapshot.panes.iter().enumerate() {
+                panes_by_tab
+                    .entry(pane.tab_id.as_str())
+                    .or_insert_with(Vec::new)
+                    .push(index);
+            }
+            let mut agents_by_pane = HashMap::new();
+            for agent in &snapshot.agents {
+                agents_by_pane.insert(agent.pane_id.as_str(), agent);
+            }
             for workspace in &snapshot.workspaces {
                 let workspace_meta = workspace.branch.clone().unwrap_or_default();
                 let mut children = Vec::new();
-                for tab in snapshot
-                    .tabs
-                    .iter()
-                    .filter(|tab| tab.workspace_id == workspace.workspace_id)
-                {
+                let workspace_tabs = tabs_by_workspace
+                    .get(workspace.workspace_id.as_str())
+                    .map(Vec::as_slice)
+                    .unwrap_or_default();
+                for tab in workspace_tabs.iter().map(|&index| &snapshot.tabs[index]) {
                     let mut panes = Vec::new();
-                    for (index, pane) in snapshot
-                        .panes
+                    let tab_panes = panes_by_tab
+                        .get(tab.tab_id.as_str())
+                        .map(Vec::as_slice)
+                        .unwrap_or_default();
+                    for (index, pane) in tab_panes
                         .iter()
-                        .filter(|pane| pane.tab_id == tab.tab_id)
+                        .map(|&index| &snapshot.panes[index])
                         .enumerate()
                     {
-                        let agent = snapshot
-                            .agents
-                            .iter()
-                            .find(|agent| agent.pane_id == pane.pane_id);
+                        let agent = agents_by_pane.get(pane.pane_id.as_str()).copied();
                         let status = agent
                             .map_or(crate::api::schema::AgentStatus::Unknown, |agent| {
                                 agent.agent_status
@@ -421,14 +442,7 @@ pub(super) fn navigator_rows(
                         children.push(ClientNavigatorRow {
                             depth: 1 + depth_offset,
                             label: tab.label.clone(),
-                            meta: format!(
-                                "{} panes",
-                                snapshot
-                                    .panes
-                                    .iter()
-                                    .filter(|pane| pane.tab_id == tab.tab_id)
-                                    .count()
-                            ),
+                            meta: format!("{} panes", tab_panes.len()),
                             status: None,
                             stale,
                             current: false,
