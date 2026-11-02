@@ -430,10 +430,10 @@ use windows_sys::{
             Ole::{CF_DIB, CF_DIBV5, CF_LOCALE, CF_OEMTEXT, CF_TEXT, CF_UNICODETEXT},
             Threading::{
                 GetCurrentProcess, GetExitCodeProcess, GetProcessTimes, OpenProcess, OpenThread,
-                QueryFullProcessImageNameW, ResumeThread, TerminateProcess, CREATE_NO_WINDOW,
-                CREATE_SUSPENDED, DETACHED_PROCESS, PROCESS_BASIC_INFORMATION,
-                PROCESS_QUERY_INFORMATION, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_VM_READ,
-                THREAD_SUSPEND_RESUME,
+                QueryFullProcessImageNameW, ResumeThread, TerminateProcess,
+                CREATE_BREAKAWAY_FROM_JOB, CREATE_NO_WINDOW, CREATE_SUSPENDED, DETACHED_PROCESS,
+                PROCESS_BASIC_INFORMATION, PROCESS_QUERY_INFORMATION,
+                PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_VM_READ, THREAD_SUSPEND_RESUME,
             },
         },
         UI::{
@@ -1420,7 +1420,9 @@ fn launch_server_daemon_with_wmi(command: &std::process::Command) -> std::io::Re
             "working directory",
         )?,
         process_startup_information: Win32_ProcessStartup {
-            create_flags: DETACHED_PROCESS,
+            // Breakaway keeps the daemon out of an inherited kill-on-close job;
+            // WMI reports a refused breakaway as a failed Create.
+            create_flags: DETACHED_PROCESS | CREATE_BREAKAWAY_FROM_JOB,
             environment_variables: effective_command_environment(command)?,
         },
     };
@@ -1541,7 +1543,10 @@ fn current_job_kills_processes_on_close() -> std::io::Result<bool> {
 pub fn detach_server_daemon_command(command: &mut std::process::Command) {
     use std::os::windows::process::CommandExt;
 
-    command.creation_flags(DETACHED_PROCESS);
+    // Leave any inherited job: an outer kill-on-close job would otherwise end the
+    // daemon with its launcher. A host that forbids breakaway fails this spawn
+    // instead of silently starting a launcher-bound server.
+    command.creation_flags(DETACHED_PROCESS | CREATE_BREAKAWAY_FROM_JOB);
 }
 
 pub fn current_process_is_detached_server_daemon() -> bool {
@@ -1549,9 +1554,13 @@ pub fn current_process_is_detached_server_daemon() -> bool {
         return false;
     }
 
-    // Job membership alone does not tie the daemon lifetime to its launcher:
-    // a non-killing job still lets the daemon outlive the process that created it.
-    matches!(current_job_kills_processes_on_close(), Ok(false))
+    // Fail closed: only a process outside every job is provably free of a
+    // launcher. `QueryInformationJobObject(NULL)` reports the *immediate* job
+    // only, and Windows exposes no way to walk the ancestor chain, so an outer
+    // kill-on-close job would still end a process whose inner job is harmless.
+    // Vqro's own daemon launches therefore request breakaway from any inherited
+    // job instead of relying on the immediate job's limits.
+    matches!(current_process_is_in_job(), Ok(false))
 }
 
 pub fn foreground_job(child_pid: u32) -> Option<ForegroundJob> {
@@ -3948,10 +3957,22 @@ mod tests {
     }
 
     #[test]
-    fn windows_daemon_readiness_checks_job_limits_and_console() {
+    fn windows_daemon_readiness_requires_freedom_from_every_job() {
         const CHILD_ENV: &str = "VQRO_TEST_DAEMON_READINESS_CHILD";
         if std::env::var_os(CHILD_ENV).is_some() {
             use super::*;
+
+            // A console-free process outside every job is ready. Reaching that
+            // state needs a runner that permits breakaway; when it does not, the
+            // negative cases below still run and still have to fail closed.
+            if current_process_is_in_job().unwrap() {
+                eprintln!("runner kept the child in a job; skipping the job-free readiness case");
+            } else {
+                assert!(
+                    current_process_is_detached_server_daemon(),
+                    "a console-free process outside every job must be ready"
+                );
+            }
 
             let job = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
             assert!(!job.is_null(), "create test job");
@@ -3962,12 +3983,10 @@ mod tests {
                 "assign child to test job"
             );
             assert!(current_process_is_in_job().unwrap());
-            assert!(
-                current_process_is_detached_server_daemon(),
-                "a console-free process in a non-killing job must be ready"
-            );
 
-            for (flags, ready) in [(JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, false), (0, true)] {
+            // Neither a harmless job nor a kill-on-close job proves freedom from
+            // a launcher: only the immediate job is visible, so both fail closed.
+            for flags in [0, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE] {
                 let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
                 limits.BasicLimitInformation.LimitFlags = flags;
                 assert_ne!(
@@ -3982,23 +4001,30 @@ mod tests {
                     0,
                     "set test job limits"
                 );
-                assert_eq!(current_process_is_detached_server_daemon(), ready);
+                assert!(
+                    !current_process_is_detached_server_daemon(),
+                    "job membership is not proof of detachment (flags {flags:#x})"
+                );
             }
+
+            // A console disqualifies the process regardless of job state.
             assert_ne!(unsafe { AllocConsole() }, 0, "allocate test console");
             assert!(!current_process_is_detached_server_daemon());
             assert_ne!(unsafe { FreeConsole() }, 0, "release test console");
             return;
         }
 
+        use std::os::windows::process::CommandExt;
+
         let mut child = Command::new(std::env::current_exe().unwrap());
         child
             .args([
                 "--exact",
-                "platform::windows::tests::windows_daemon_readiness_checks_job_limits_and_console",
+                "platform::windows::tests::windows_daemon_readiness_requires_freedom_from_every_job",
                 "--nocapture",
             ])
-            .env(CHILD_ENV, "1");
-        super::detach_server_daemon_command(&mut child);
+            .env(CHILD_ENV, "1")
+            .creation_flags(super::DETACHED_PROCESS | super::CREATE_BREAKAWAY_FROM_JOB);
         let output = child.output().expect("run daemon readiness child");
         assert!(
             output.status.success(),

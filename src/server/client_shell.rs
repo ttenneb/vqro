@@ -791,9 +791,46 @@ mod tests {
             api_rx,
             crate::api::EventHub::default(),
         );
-        let mut workspace = crate::workspace::Workspace::test_new("active");
-        workspace.test_add_tab(None);
-        app.state.workspaces = vec![workspace, crate::workspace::Workspace::test_new("hidden")];
+        // Fake runtimes are required for this test to mean anything: the counter
+        // lives on the runtime, and test terminals alone would make every sum
+        // zero even if a projection did read live scroll state.
+        let history = (0..40)
+            .map(|line| format!("line-{line}\r\n"))
+            .collect::<String>();
+        let mut active = crate::workspace::Workspace::test_new("active");
+        let active_pane = active.tabs[0].root_pane;
+        let inactive_pane = active.test_split(ratatui::layout::Direction::Horizontal);
+        let hidden_tab = active.test_add_tab(None);
+        assert_eq!(hidden_tab, 1, "the second tab is the hidden one");
+        let hidden_pane = active.tabs[hidden_tab]
+            .layout
+            .pane_ids()
+            .first()
+            .copied()
+            .expect("hidden tab pane");
+        for pane in [active_pane, inactive_pane, hidden_pane] {
+            active.insert_test_runtime(
+                pane,
+                crate::terminal::TerminalRuntime::test_with_scrollback_bytes(
+                    20,
+                    5,
+                    1000,
+                    history.as_bytes(),
+                ),
+            );
+        }
+        let mut background = crate::workspace::Workspace::test_new("background");
+        let background_pane = background.tabs[0].root_pane;
+        background.insert_test_runtime(
+            background_pane,
+            crate::terminal::TerminalRuntime::test_with_scrollback_bytes(
+                20,
+                5,
+                1000,
+                history.as_bytes(),
+            ),
+        );
+        app.state.workspaces = vec![active, background];
         app.state.active = Some(0);
         app.state.ensure_test_terminals();
         for terminal in app.state.terminals.values_mut() {
@@ -802,8 +839,6 @@ mod tests {
                 crate::detect::AgentState::Working,
             );
         }
-        // Reading live scroll state takes each terminal's core lock; a metadata
-        // projection must not do it, while still reporting the same identities.
         let scroll_reads = |app: &crate::app::App| {
             (0..app.state.workspaces.len())
                 .flat_map(|ws_idx| {
@@ -820,12 +855,25 @@ mod tests {
                 })
                 .sum::<usize>()
         };
-        let before = scroll_reads(&app);
-        let metadata = app.session_snapshot_v1_compat_metadata();
-        let after = scroll_reads(&app);
+
+        // The full projection presents scroll position, so it must read live
+        // scroll state once per pane; the metadata projection must not.
+        let before_full = scroll_reads(&app);
+        let full = app.session_snapshot_v1_compat();
+        let after_full = scroll_reads(&app);
         assert_eq!(
-            before, after,
-            "metadata snapshot must not read scroll state"
+            after_full - before_full,
+            full.panes.len(),
+            "the full projection must read live scroll state for every pane"
+        );
+        assert!(!full.panes.is_empty(), "fixture must produce panes");
+
+        let before_metadata = scroll_reads(&app);
+        let metadata = app.session_snapshot_v1_compat_metadata();
+        let after_metadata = scroll_reads(&app);
+        assert_eq!(
+            before_metadata, after_metadata,
+            "metadata snapshot must not read live scroll state"
         );
         assert!(metadata.panes.iter().all(|pane| pane.scroll.is_none()));
 
