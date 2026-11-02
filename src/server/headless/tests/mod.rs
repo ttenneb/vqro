@@ -1,5 +1,7 @@
 use super::*;
 
+#[path = "event_fairness.rs"]
+mod event_fairness_tests;
 #[path = "pane_graphics.rs"]
 mod pane_graphics_tests;
 #[path = "surface_interest.rs"]

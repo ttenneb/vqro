@@ -81,6 +81,11 @@ mod render;
 mod retained_surface;
 mod surface_interest;
 
+// Producers can refill even a bounded channel while it is being drained.
+// Yield to scheduled work and rendering between batches; the select loop
+// immediately wakes for any messages left in either external queue.
+const EXTERNAL_EVENT_DRAIN_LIMIT: usize = 64;
+
 pub use bootstrap::run_server;
 use lifecycle::wait_for_live_handoff_response_write;
 #[cfg(unix)]
@@ -1243,7 +1248,10 @@ impl HeadlessServer {
     /// Uses the original full-render semantics when pane graphics are dormant.
     fn drain_server_events(&mut self) -> bool {
         let mut changed = false;
-        while !self.should_quit.load(Ordering::Acquire) {
+        for _ in 0..EXTERNAL_EVENT_DRAIN_LIMIT {
+            if self.should_quit.load(Ordering::Acquire) {
+                break;
+            }
             let Ok(ev) = self.server_event_rx.try_recv() else {
                 break;
             };
@@ -1255,7 +1263,10 @@ impl HeadlessServer {
     /// Returns the strongest render impact from the drained event batch.
     fn drain_server_events_with_render_impact(&mut self) -> RenderImpact {
         let mut impact = RenderImpact::None;
-        while !self.should_quit.load(Ordering::Acquire) {
+        for _ in 0..EXTERNAL_EVENT_DRAIN_LIMIT {
+            if self.should_quit.load(Ordering::Acquire) {
+                break;
+            }
             let Ok(ev) = self.server_event_rx.try_recv() else {
                 break;
             };
@@ -3604,7 +3615,10 @@ impl HeadlessServer {
     /// During shutdown, remaining requests get a `server_unavailable` error.
     fn drain_api_requests_with_shutdown_check(&mut self) -> bool {
         let mut changed = false;
-        while !self.should_quit.load(Ordering::Acquire) {
+        for _ in 0..EXTERNAL_EVENT_DRAIN_LIMIT {
+            if self.should_quit.load(Ordering::Acquire) {
+                break;
+            }
             let Ok(msg) = self.app.api_rx.try_recv() else {
                 break;
             };
@@ -3624,7 +3638,10 @@ impl HeadlessServer {
 
     fn drain_api_requests_with_render_impact(&mut self) -> RenderImpact {
         let mut impact = RenderImpact::None;
-        while !self.should_quit.load(Ordering::Acquire) {
+        for _ in 0..EXTERNAL_EVENT_DRAIN_LIMIT {
+            if self.should_quit.load(Ordering::Acquire) {
+                break;
+            }
             let Ok(msg) = self.app.api_rx.try_recv() else {
                 break;
             };

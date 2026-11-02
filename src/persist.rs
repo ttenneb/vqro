@@ -31,6 +31,8 @@ pub(crate) use self::restore::validate_snapshot_admission;
 pub use self::restore::{restore, restore_delegations};
 #[cfg(any(unix, test))]
 pub(crate) use self::snapshot::terminal_id_for_pane_snapshot;
+#[cfg(any(unix, test))]
+pub(crate) use self::snapshot::LEGACY_SNAPSHOT_WRITER_VERSION;
 pub use self::snapshot::{
     capture, capture_history, DirectionSnapshot, LayoutSnapshot, SessionHistorySnapshot,
     SessionSnapshot, TabSnapshot, WorkspaceSnapshot,
@@ -40,8 +42,6 @@ pub(crate) use self::snapshot::{deserialize_handoff_snapshot, normalize_identity
 pub(crate) use self::snapshot::{
     parse_snapshot, reserve_empty_collection, validate_snapshot, SNAPSHOT_VERSION,
 };
-#[cfg(any(unix, test))]
-pub(crate) use self::snapshot::LEGACY_SNAPSHOT_WRITER_VERSION;
 
 pub(crate) fn collections_checkpoint_paths() -> coordinator::PersistencePaths {
     let directory = crate::session::data_dir();
