@@ -1,14 +1,15 @@
 use std::path::{Path, PathBuf};
 
 use crate::api::schema::{
-    EventData, EventEnvelope, EventKind, ResponseResult, WorktreeInfo, WorktreeListParams,
-    WorktreeOpenParams, WorktreeSourceInfo,
+    EventData, EventEnvelope, EventKind, ResponseResult, WorktreeInfo, WorktreeOpenParams,
+    WorktreeSourceInfo,
 };
 use crate::app::App;
 
 use super::responses::{encode_error, encode_success};
 
 mod deferred;
+mod reads;
 
 struct ApiFailure {
     code: &'static str,
@@ -45,26 +46,12 @@ struct WorktreeSource {
 }
 
 impl App {
-    pub(super) fn handle_worktree_list(
+    fn finish_worktree_list(
         &mut self,
         id: String,
-        params: WorktreeListParams,
+        source: WorktreeSource,
+        entries: Vec<crate::worktree::ExistingWorktree>,
     ) -> String {
-        let source = match self.resolve_worktree_list_source(
-            params.workspace_id,
-            params.cwd,
-            params.trust_repository,
-        ) {
-            Ok(source) => source,
-            Err(err) => return encode_error(id, err.code, err.message),
-        };
-        let entries = match crate::worktree::list_existing_worktrees(
-            &source.source_repo_root,
-            params.trust_repository,
-        ) {
-            Ok(entries) => entries,
-            Err(err) => return encode_error(id, "worktree_list_failed", err),
-        };
         let worktrees = entries
             .into_iter()
             .map(|entry| self.worktree_info_for_entry(&source, entry))
@@ -79,31 +66,13 @@ impl App {
         )
     }
 
-    pub(super) fn handle_worktree_open(
+    fn finish_worktree_open(
         &mut self,
         id: String,
         params: WorktreeOpenParams,
+        mut source: WorktreeSource,
+        entry: crate::worktree::ExistingWorktree,
     ) -> String {
-        if params.path.is_some() == params.branch.is_some() {
-            return encode_error(
-                id,
-                "invalid_request",
-                "exactly one of path or branch is required",
-            );
-        }
-        let mut source = match self.resolve_worktree_source(params.workspace_id, params.cwd) {
-            Ok(source) => source,
-            Err(err) => return encode_error(id, err.code, err.message),
-        };
-        let entry = match self.find_worktree_entry(
-            &source,
-            params.path,
-            params.branch,
-            params.trust_repository,
-        ) {
-            Ok(entry) => entry,
-            Err(err) => return encode_error(id, err.code, err.message),
-        };
         if entry.is_bare || entry.is_prunable {
             return encode_error(id, "worktree_not_found", "worktree cannot be opened");
         }
@@ -247,61 +216,8 @@ impl App {
         self.worktree_source_from_workspace(ws_idx)
     }
 
-    fn resolve_worktree_list_source(
-        &mut self,
-        workspace_id: Option<String>,
-        cwd: Option<String>,
-        trust_repository: bool,
-    ) -> Result<WorktreeSource, ApiFailure> {
-        if workspace_id.is_some() && cwd.is_some() {
-            return Err(ApiFailure::new(
-                "invalid_request",
-                "only one of workspace_id or cwd may be supplied",
-            ));
-        }
-
-        if let Some(workspace_id) = workspace_id {
-            let Some(ws_idx) = self.parse_workspace_id(&workspace_id) else {
-                return Err(ApiFailure::new(
-                    "workspace_not_found",
-                    format!("workspace {workspace_id} not found"),
-                ));
-            };
-            return self.worktree_list_source_from_workspace(ws_idx, trust_repository);
-        }
-
-        if let Some(cwd) = cwd {
-            let path = absolute_user_path(&cwd)?;
-            let space = crate::workspace::git_space_metadata(&path).ok_or_else(|| {
-                ApiFailure::new(
-                    "not_git_worktree",
-                    "vqro worktree actions require a path inside a Git work tree",
-                )
-            })?;
-            let workspace_idx = self.list_source_workspace_idx_for_space(&space, trust_repository);
-            return Ok(worktree_source_from_space(
-                space,
-                workspace_idx,
-                true,
-                trust_repository,
-            ));
-        }
-
-        let Some(ws_idx) = self.state.active.or_else(|| {
-            self.state
-                .workspaces
-                .get(self.state.selected)
-                .map(|_| self.state.selected)
-        }) else {
-            return Err(ApiFailure::new(
-                "invalid_request",
-                "workspace_id or cwd is required when no workspace is active",
-            ));
-        };
-        self.worktree_list_source_from_workspace(ws_idx, trust_repository)
-    }
-
     fn worktree_source_from_workspace(&self, ws_idx: usize) -> Result<WorktreeSource, ApiFailure> {
+        self.require_restored_worktree_ready(ws_idx)?;
         let Some(ws) = self.state.workspaces.get(ws_idx) else {
             return Err(ApiFailure::new(
                 "workspace_not_found",
@@ -350,59 +266,39 @@ impl App {
         })
     }
 
-    fn worktree_list_source_from_workspace(
-        &self,
-        ws_idx: usize,
-        trust_repository: bool,
-    ) -> Result<WorktreeSource, ApiFailure> {
-        let Some(ws) = self.state.workspaces.get(ws_idx) else {
+    /// A saved membership whose background validation has not reported yet is
+    /// not a trustworthy source for a worktree action: discovery could still
+    /// replace its group, so refuse without mutating anything.
+    fn require_restored_worktree_ready(&self, ws_idx: usize) -> Result<(), ApiFailure> {
+        if self.state.workspaces.get(ws_idx).is_some_and(|workspace| {
+            self.pending_restored_worktree_spaces
+                .iter()
+                .any(|(id, expected)| {
+                    id == &workspace.id && workspace.worktree_space.as_ref() == Some(expected)
+                })
+        }) {
             return Err(ApiFailure::new(
-                "workspace_not_found",
-                "workspace not found",
+                "worktree_operation_in_progress",
+                "Restored worktree is still loading. Try again shortly.",
             ));
-        };
-        if let Some(membership) = ws.worktree_space() {
-            let source_checkout_path = if membership.is_linked_worktree {
-                membership.repo_root.clone()
-            } else {
-                membership.checkout_path.clone()
-            };
-            let workspace_idx = if membership.is_linked_worktree {
-                self.open_workspace_idx_for_checkout(&membership.repo_root)
-            } else {
-                Some(ws_idx)
-            };
-            return Ok(WorktreeSource {
-                workspace_idx,
-                source_checkout_path,
-                source_repo_root: membership.repo_root.clone(),
-                repo_key: membership.key.clone(),
-                repo_name: membership.label.clone(),
-            });
         }
+        Ok(())
+    }
 
-        let git_space = ws.git_space().cloned().or_else(|| {
-            ws.resolved_identity_cwd_from(&self.state.terminals, &self.terminal_runtimes)
-                .as_deref()
-                .and_then(crate::workspace::git_space_metadata)
-        });
-        let Some(space) = git_space else {
-            return Err(ApiFailure::new(
-                "not_git_worktree",
-                "vqro worktree actions require a workspace inside a Git work tree",
-            ));
-        };
-        let workspace_idx = if space.is_linked_worktree {
-            self.list_source_workspace_idx_for_space(&space, trust_repository)
-        } else {
-            Some(ws_idx)
-        };
-        Ok(worktree_source_from_space(
-            space,
-            workspace_idx,
-            true,
-            trust_repository,
-        ))
+    pub(super) fn require_restored_group_close_ready(
+        &self,
+        request_id: &str,
+        close_indices: &[usize],
+    ) -> Result<(), String> {
+        // Closing one workspace does not trust saved group identity and must
+        // remain possible even when that checkout's metadata is unavailable.
+        if close_indices.len() >= 2 {
+            for &ws_idx in close_indices {
+                self.require_restored_worktree_ready(ws_idx)
+                    .map_err(|err| encode_error(request_id.to_owned(), err.code, err.message))?;
+            }
+        }
+        Ok(())
     }
 
     fn ensure_source_parent_membership(
@@ -438,19 +334,6 @@ impl App {
     ) -> Option<usize> {
         self.find_parent_workspace_by_key(&space.key)
             .or_else(|| self.open_workspace_idx_for_checkout(&space.repo_root))
-    }
-
-    fn list_source_workspace_idx_for_space(
-        &self,
-        space: &crate::workspace::GitSpaceMetadata,
-        trust_repository: bool,
-    ) -> Option<usize> {
-        if space.is_linked_worktree {
-            let parent_checkout = parent_checkout_path_for_space(space, trust_repository);
-            self.open_workspace_idx_for_checkout(&parent_checkout)
-        } else {
-            self.find_parent_workspace_for_space(space)
-        }
     }
 
     fn find_parent_workspace_by_key(&self, repo_key: &str) -> Option<usize> {
@@ -496,52 +379,6 @@ impl App {
             if emit_update {
                 self.emit_workspace_updated(ws_idx);
             }
-        }
-    }
-
-    fn find_worktree_entry(
-        &self,
-        source: &WorktreeSource,
-        path: Option<String>,
-        branch: Option<String>,
-        trust_repository: bool,
-    ) -> Result<crate::worktree::ExistingWorktree, ApiFailure> {
-        let entries =
-            crate::worktree::list_existing_worktrees(&source.source_repo_root, trust_repository)
-                .map_err(|err| ApiFailure::new("worktree_list_failed", err))?;
-        if let Some(path) = path {
-            let expected = absolute_user_path(&path)?;
-            let expected = crate::worktree::canonical_or_original(&expected);
-            entries
-                .into_iter()
-                .find(|entry| crate::worktree::canonical_or_original(&entry.path) == expected)
-                .ok_or_else(|| ApiFailure::new("worktree_not_found", "worktree path not found"))
-        } else if let Some(branch) = branch {
-            let matches = entries
-                .into_iter()
-                .filter(|entry| {
-                    !entry.is_bare
-                        && !entry.is_prunable
-                        && !entry.is_detached
-                        && entry.branch.as_deref() == Some(branch.as_str())
-                })
-                .collect::<Vec<_>>();
-            match matches.len() {
-                0 => Err(ApiFailure::new(
-                    "worktree_not_found",
-                    "worktree branch not found",
-                )),
-                1 => Ok(matches.into_iter().next().expect("one match should exist")),
-                _ => Err(ApiFailure::new(
-                    "ambiguous_worktree_branch",
-                    "multiple worktrees matched branch",
-                )),
-            }
-        } else {
-            Err(ApiFailure::new(
-                "invalid_request",
-                "exactly one of path or branch is required",
-            ))
         }
     }
 
@@ -676,7 +513,7 @@ impl App {
         });
     }
 
-    fn emit_workspace_updated(&mut self, ws_idx: usize) {
+    pub(super) fn emit_workspace_updated(&mut self, ws_idx: usize) {
         self.emit_event(EventEnvelope {
             event: EventKind::WorkspaceUpdated,
             data: EventData::WorkspaceUpdated {
@@ -740,6 +577,49 @@ fn worktree_membership(
         repo_root: source.source_repo_root.clone(),
         checkout_path,
         is_linked_worktree,
+    }
+}
+
+/// Selects the requested entry from an already-fetched list, so discovery runs
+/// once on the worker rather than again on the app loop.
+fn find_worktree_entry(
+    entries: Vec<crate::worktree::ExistingWorktree>,
+    path: Option<String>,
+    branch: Option<String>,
+) -> Result<crate::worktree::ExistingWorktree, ApiFailure> {
+    if let Some(path) = path {
+        let expected = absolute_user_path(&path)?;
+        let expected = crate::worktree::canonical_or_original(&expected);
+        entries
+            .into_iter()
+            .find(|entry| crate::worktree::canonical_or_original(&entry.path) == expected)
+            .ok_or_else(|| ApiFailure::new("worktree_not_found", "worktree path not found"))
+    } else if let Some(branch) = branch {
+        let matches = entries
+            .into_iter()
+            .filter(|entry| {
+                !entry.is_bare
+                    && !entry.is_prunable
+                    && !entry.is_detached
+                    && entry.branch.as_deref() == Some(branch.as_str())
+            })
+            .collect::<Vec<_>>();
+        match matches.len() {
+            0 => Err(ApiFailure::new(
+                "worktree_not_found",
+                "worktree branch not found",
+            )),
+            1 => Ok(matches.into_iter().next().expect("one match should exist")),
+            _ => Err(ApiFailure::new(
+                "ambiguous_worktree_branch",
+                "multiple worktrees matched branch",
+            )),
+        }
+    } else {
+        Err(ApiFailure::new(
+            "invalid_request",
+            "exactly one of path or branch is required",
+        ))
     }
 }
 
@@ -831,6 +711,153 @@ mod tests {
         "/usr/bin/true"
     }
 
+    #[test]
+    fn reordered_but_unchanged_source_read_still_completes() {
+        // Pure workspace reordering keeps the captured identity and provenance,
+        // so the completion is current and must succeed.
+        let repo = create_committed_repo("api-worktree-reordered-source-repo");
+        let mut app = app_with_parent(&repo);
+        let mut sibling = Workspace::test_new("sibling");
+        sibling.identity_cwd = repo.clone();
+        sibling.cached_git_space = Some(crate::workspace::GitSpaceMetadata {
+            key: repo.display().to_string(),
+            checkout_key: repo.display().to_string(),
+            repo_name: "api-worktree-reordered-source-repo".into(),
+            repo_root: repo.clone(),
+            is_linked_worktree: false,
+        });
+        app.state.workspaces.push(sibling);
+        app.state.ensure_test_terminals();
+        let workspace_id = app.state.workspaces[1].id.clone();
+        let (entered, release) = crate::worktree::test_list_gate::block(&repo);
+        let (respond_to, response_rx) = response_channel();
+        assert!(app.handle_deferred_worktree_api_request(
+            Request {
+                id: "req".into(),
+                method: crate::api::schema::Method::WorktreeList(
+                    crate::api::schema::WorktreeListParams {
+                        workspace_id: Some(workspace_id.clone()),
+                        cwd: None,
+                        trust_repository: false,
+                    },
+                ),
+            },
+            respond_to,
+            false,
+        ));
+        entered
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("discovery started");
+        app.state.workspaces.swap(0, 1);
+        release.send(()).unwrap();
+        let event = wait_for_app_event(&mut app);
+        app.handle_internal_event(event);
+        let response: SuccessResponse = serde_json::from_str(
+            &response_rx
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap(),
+        )
+        .unwrap();
+        let ResponseResult::WorktreeList { source, .. } = response.result else {
+            panic!("expected a worktree list result");
+        };
+        assert_eq!(
+            source.source_workspace_id.as_deref(),
+            Some(workspace_id.as_str())
+        );
+        let _ = std::fs::remove_dir_all(repo);
+    }
+
+    #[test]
+    fn stale_workspace_scoped_read_rejects_closed_or_replaced_source() {
+        let repo = create_committed_repo("api-worktree-stale-source-repo");
+        for case in ["closed", "replaced"] {
+            let mut app = app_with_parent(&repo);
+            let workspace_id = app.state.workspaces[0].id.clone();
+            let (entered, release) = crate::worktree::test_list_gate::block(&repo);
+            let (respond_to, response_rx) = response_channel();
+            assert!(app.handle_deferred_worktree_api_request(
+                Request {
+                    id: "req".into(),
+                    method: crate::api::schema::Method::WorktreeList(
+                        crate::api::schema::WorktreeListParams {
+                            workspace_id: Some(workspace_id.clone()),
+                            cwd: None,
+                            trust_repository: false,
+                        },
+                    ),
+                },
+                respond_to,
+                false,
+            ));
+            entered
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .expect("discovery started");
+            match case {
+                "closed" => app.state.workspaces.clear(),
+                _ => {
+                    // Another repository now owns this workspace.
+                    app.state.workspaces[0].worktree_space =
+                        Some(crate::workspace::WorktreeSpaceMembership {
+                            key: "/elsewhere/repo".into(),
+                            label: "elsewhere".into(),
+                            repo_root: "/elsewhere/repo".into(),
+                            checkout_path: "/elsewhere/repo".into(),
+                            is_linked_worktree: false,
+                        });
+                }
+            }
+            let workspace_count_before = app.state.workspaces.len();
+            let membership_before = app
+                .state
+                .workspaces
+                .first()
+                .map(|workspace| workspace.worktree_space.clone());
+            let name_before = app
+                .state
+                .workspaces
+                .first()
+                .and_then(|workspace| workspace.custom_name.clone());
+            let session_dirty_before = app.state.session_dirty;
+            release.send(()).unwrap();
+            let event = wait_for_app_event(&mut app);
+            app.handle_internal_event(event);
+            let response: ErrorResponse = serde_json::from_str(
+                &response_rx
+                    .recv_timeout(std::time::Duration::from_secs(5))
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(response.error.code, "worktree_source_changed", "{case}");
+            assert_eq!(
+                app.state.workspaces.len(),
+                workspace_count_before,
+                "{case}: a stale completion must not create a workspace"
+            );
+            assert_eq!(
+                app.state
+                    .workspaces
+                    .first()
+                    .map(|workspace| workspace.worktree_space.clone()),
+                membership_before,
+                "{case}: a stale completion must not rewrite membership"
+            );
+            assert_eq!(
+                app.state
+                    .workspaces
+                    .first()
+                    .and_then(|workspace| workspace.custom_name.clone()),
+                name_before,
+                "{case}: a stale completion must not rename the source"
+            );
+            assert_eq!(
+                app.state.session_dirty, session_dirty_before,
+                "{case}: a stale completion must not dirty the session"
+            );
+        }
+        let _ = std::fs::remove_dir_all(repo);
+    }
+
     fn app_with_parent(repo: &Path) -> App {
         let mut app = test_app();
         let mut parent = Workspace::test_new("main");
@@ -901,7 +928,7 @@ mod tests {
 
     fn run_deferred_api_request(app: &mut App, request: Request) -> String {
         let (respond_to, response_rx) = response_channel();
-        assert!(app.handle_deferred_worktree_api_request(request, respond_to));
+        assert!(app.handle_deferred_worktree_api_request(request, respond_to, false));
         if let Ok(response) = response_rx.recv_timeout(std::time::Duration::from_millis(50)) {
             return response;
         }
@@ -1043,6 +1070,7 @@ mod tests {
                 }),
             },
             respond_to,
+            false,
         ));
         assert!(response_rx.try_recv().is_err());
 
@@ -1118,7 +1146,7 @@ mod tests {
         };
 
         let (response_tx, response_rx) = response_channel();
-        assert!(app.handle_deferred_worktree_api_request(request(), response_tx));
+        assert!(app.handle_deferred_worktree_api_request(request(), response_tx, false));
         let event = wait_for_app_event(&mut app);
         app.handle_internal_event(event);
         let response = response_rx
@@ -1183,7 +1211,7 @@ mod tests {
         };
 
         let (first_tx, first_rx) = response_channel();
-        assert!(app.handle_deferred_worktree_api_request(request(), first_tx));
+        assert!(app.handle_deferred_worktree_api_request(request(), first_tx, false));
         let event = wait_for_app_event(&mut app);
         app.handle_internal_event(event);
         let response = first_rx
@@ -1194,7 +1222,7 @@ mod tests {
         assert!(app.pending_api_worktree_creates.is_empty());
 
         let (second_tx, second_rx) = response_channel();
-        assert!(app.handle_deferred_worktree_api_request(request(), second_tx));
+        assert!(app.handle_deferred_worktree_api_request(request(), second_tx, false));
         assert!(second_rx.try_recv().is_err());
         let event = wait_for_app_event(&mut app);
         app.handle_internal_event(event);
@@ -1365,15 +1393,18 @@ mod tests {
         let repo = create_committed_repo("api-worktree-open-invalid-cwd-repo");
         let mut app = test_app();
 
-        let response = app.handle_api_request(Request {
-            id: "req".into(),
-            method: crate::api::schema::Method::WorktreeOpen(WorktreeOpenParams {
-                cwd: Some(repo.display().to_string()),
-                path: Some("/tmp/one".into()),
-                branch: Some("worktree/one".into()),
-                ..WorktreeOpenParams::default()
-            }),
-        });
+        let response = run_deferred_api_request(
+            &mut app,
+            Request {
+                id: "req".into(),
+                method: crate::api::schema::Method::WorktreeOpen(WorktreeOpenParams {
+                    cwd: Some(repo.display().to_string()),
+                    path: Some("/tmp/one".into()),
+                    branch: Some("worktree/one".into()),
+                    ..WorktreeOpenParams::default()
+                }),
+            },
+        );
 
         let error: ErrorResponse = serde_json::from_str(&response).unwrap();
         assert_eq!(error.error.code, "invalid_request");
@@ -1456,15 +1487,19 @@ mod tests {
         app.state.workspaces.push(child);
         app.state.ensure_test_terminals();
 
-        let response = app.handle_api_request(Request {
-            id: "req".into(),
-            method: crate::api::schema::Method::WorktreeOpen(WorktreeOpenParams {
-                workspace_id: Some(app.state.workspaces[0].id.clone()),
-                branch: Some("worktree/api-open".into()),
-                focus: true,
-                ..WorktreeOpenParams::default()
-            }),
-        });
+        let workspace_id = app.state.workspaces[0].id.clone();
+        let response = run_deferred_api_request(
+            &mut app,
+            Request {
+                id: "req".into(),
+                method: crate::api::schema::Method::WorktreeOpen(WorktreeOpenParams {
+                    workspace_id: Some(workspace_id),
+                    branch: Some("worktree/api-open".into()),
+                    focus: true,
+                    ..WorktreeOpenParams::default()
+                }),
+            },
+        );
 
         let success: SuccessResponse = serde_json::from_str(&response).unwrap();
         let ResponseResult::WorktreeOpened {
@@ -1534,15 +1569,19 @@ mod tests {
         app.state.active = Some(0);
         app.state.selected = 0;
 
-        let response = app.handle_api_request(Request {
-            id: "req".into(),
-            method: crate::api::schema::Method::WorktreeOpen(WorktreeOpenParams {
-                workspace_id: Some(app.state.workspaces[0].id.clone()),
-                branch: Some("worktree/api-open-label".into()),
-                label: Some("review".into()),
-                ..WorktreeOpenParams::default()
-            }),
-        });
+        let workspace_id = app.state.workspaces[0].id.clone();
+        let response = run_deferred_api_request(
+            &mut app,
+            Request {
+                id: "req".into(),
+                method: crate::api::schema::Method::WorktreeOpen(WorktreeOpenParams {
+                    workspace_id: Some(workspace_id),
+                    branch: Some("worktree/api-open-label".into()),
+                    label: Some("review".into()),
+                    ..WorktreeOpenParams::default()
+                }),
+            },
+        );
 
         let success: SuccessResponse = serde_json::from_str(&response).unwrap();
         let ResponseResult::WorktreeOpened {
@@ -1589,15 +1628,18 @@ mod tests {
         let mut app = test_app_with_event_hub(event_hub.clone());
         app.state.default_shell = test_shell().into();
 
-        let response = app.handle_api_request(Request {
-            id: "req".into(),
-            method: crate::api::schema::Method::WorktreeOpen(WorktreeOpenParams {
-                cwd: Some(repo.display().to_string()),
-                path: Some(repo.display().to_string()),
-                label: Some("source checkout".into()),
-                ..WorktreeOpenParams::default()
-            }),
-        });
+        let response = run_deferred_api_request(
+            &mut app,
+            Request {
+                id: "req".into(),
+                method: crate::api::schema::Method::WorktreeOpen(WorktreeOpenParams {
+                    cwd: Some(repo.display().to_string()),
+                    path: Some(repo.display().to_string()),
+                    label: Some("source checkout".into()),
+                    ..WorktreeOpenParams::default()
+                }),
+            },
+        );
 
         let success: SuccessResponse = serde_json::from_str(&response).unwrap_or_else(|err| {
             panic!("expected success response, got {response}: {err}");
@@ -1657,14 +1699,20 @@ mod tests {
         app.state.workspaces.push(child);
         app.state.ensure_test_terminals();
 
-        let response = app.handle_api_request(Request {
-            id: "req".into(),
-            method: crate::api::schema::Method::WorktreeList(WorktreeListParams {
-                workspace_id: Some(app.state.workspaces[0].id.clone()),
-                cwd: None,
-                trust_repository: false,
-            }),
-        });
+        let workspace_id = app.state.workspaces[0].id.clone();
+        let response = run_deferred_api_request(
+            &mut app,
+            Request {
+                id: "req".into(),
+                method: crate::api::schema::Method::WorktreeList(
+                    crate::api::schema::WorktreeListParams {
+                        workspace_id: Some(workspace_id),
+                        cwd: None,
+                        trust_repository: false,
+                    },
+                ),
+            },
+        );
 
         let success: SuccessResponse = serde_json::from_str(&response).unwrap();
         let ResponseResult::WorktreeList { worktrees, .. } = success.result else {
@@ -1710,21 +1758,24 @@ mod tests {
         app.state.ensure_test_terminals();
 
         for method in [
-            crate::api::schema::Method::WorktreeList(WorktreeListParams {
+            crate::api::schema::Method::WorktreeList(crate::api::schema::WorktreeListParams {
                 workspace_id: Some(child_id),
                 cwd: None,
                 trust_repository: false,
             }),
-            crate::api::schema::Method::WorktreeList(WorktreeListParams {
+            crate::api::schema::Method::WorktreeList(crate::api::schema::WorktreeListParams {
                 workspace_id: None,
                 cwd: Some(checkout.display().to_string()),
                 trust_repository: false,
             }),
         ] {
-            let response = app.handle_api_request(Request {
-                id: "req".into(),
-                method,
-            });
+            let response = run_deferred_api_request(
+                &mut app,
+                Request {
+                    id: "req".into(),
+                    method,
+                },
+            );
             let success: SuccessResponse = serde_json::from_str(&response).unwrap();
             let ResponseResult::WorktreeList { source, worktrees } = success.result else {
                 panic!("expected worktree_list response");
@@ -1767,14 +1818,20 @@ mod tests {
         std::fs::remove_dir_all(&checkout).unwrap();
         let mut app = app_with_parent(&repo);
 
-        let response = app.handle_api_request(Request {
-            id: "req".into(),
-            method: crate::api::schema::Method::WorktreeList(WorktreeListParams {
-                workspace_id: Some(app.state.workspaces[0].id.clone()),
-                cwd: None,
-                trust_repository: false,
-            }),
-        });
+        let workspace_id = app.state.workspaces[0].id.clone();
+        let response = run_deferred_api_request(
+            &mut app,
+            Request {
+                id: "req".into(),
+                method: crate::api::schema::Method::WorktreeList(
+                    crate::api::schema::WorktreeListParams {
+                        workspace_id: Some(workspace_id),
+                        cwd: None,
+                        trust_repository: false,
+                    },
+                ),
+            },
+        );
 
         let success: SuccessResponse = serde_json::from_str(&response).unwrap();
         let ResponseResult::WorktreeList { worktrees, .. } = success.result else {
@@ -1993,6 +2050,7 @@ mod tests {
                 }),
             },
             respond_to,
+            false,
         ));
         assert!(response_rx.try_recv().is_err());
 
@@ -2067,6 +2125,7 @@ mod tests {
                 }),
             },
             first_tx,
+            false,
         ));
         assert!(app.handle_deferred_worktree_api_request(
             Request {
@@ -2078,6 +2137,7 @@ mod tests {
                 }),
             },
             second_tx,
+            false,
         ));
         let response = second_rx
             .recv_timeout(std::time::Duration::from_secs(2))
@@ -2138,6 +2198,7 @@ mod tests {
                 }),
             },
             first_tx,
+            false,
         ));
         assert!(app.handle_deferred_worktree_api_request(
             Request {
@@ -2149,6 +2210,7 @@ mod tests {
                 }),
             },
             second_tx,
+            false,
         ));
         let response = second_rx
             .recv_timeout(std::time::Duration::from_secs(2))
@@ -2185,6 +2247,7 @@ mod tests {
                 }),
             },
             respond_to,
+            false,
         ));
 
         let response = response_rx
@@ -2240,6 +2303,7 @@ mod tests {
                 }),
             },
             respond_to,
+            false,
         ));
 
         let response = response_rx

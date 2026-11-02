@@ -1182,6 +1182,85 @@ fn install_claude_removes_deprecated_completion_hooks_and_preserves_user_hooks()
 }
 
 #[test]
+fn windows_hooks_decode_stdin_as_utf8() {
+    // Windows PowerShell decodes `[Console]::In` with the console input code
+    // page, which corrupts UTF-8 hook payloads on non-UTF-8 locales such as
+    // Korean Windows (CP949) and makes the hook silently drop the session.
+    // Every bundled PowerShell hook must read the raw stdin stream as UTF-8.
+    for (name, asset) in [
+        (
+            "assets/antigravity_cli/herdr-agent-state.ps1",
+            include_str!("assets/antigravity_cli/herdr-agent-state.ps1"),
+        ),
+        (
+            "assets/claude/herdr-agent-state.ps1",
+            include_str!("assets/claude/herdr-agent-state.ps1"),
+        ),
+        (
+            "assets/claude/vqro-agent-state.ps1",
+            include_str!("assets/claude/vqro-agent-state.ps1"),
+        ),
+        (
+            "assets/codex/herdr-agent-state.ps1",
+            include_str!("assets/codex/herdr-agent-state.ps1"),
+        ),
+        (
+            "assets/codex/vqro-agent-state.ps1",
+            include_str!("assets/codex/vqro-agent-state.ps1"),
+        ),
+        (
+            "assets/copilot/herdr-agent-state.ps1",
+            include_str!("assets/copilot/herdr-agent-state.ps1"),
+        ),
+        (
+            "assets/cursor/herdr-agent-state.ps1",
+            include_str!("assets/cursor/herdr-agent-state.ps1"),
+        ),
+        (
+            "assets/devin/herdr-agent-state.ps1",
+            include_str!("assets/devin/herdr-agent-state.ps1"),
+        ),
+        (
+            "assets/droid/herdr-agent-state.ps1",
+            include_str!("assets/droid/herdr-agent-state.ps1"),
+        ),
+        (
+            "assets/grok/herdr-agent-state.ps1",
+            include_str!("assets/grok/herdr-agent-state.ps1"),
+        ),
+        (
+            "assets/kimi/herdr-agent-state.ps1",
+            include_str!("assets/kimi/herdr-agent-state.ps1"),
+        ),
+        (
+            "assets/letta/herdr-agent-session.ps1",
+            include_str!("assets/letta/herdr-agent-session.ps1"),
+        ),
+        (
+            "assets/mastracode/herdr-agent-state.ps1",
+            include_str!("assets/mastracode/herdr-agent-state.ps1"),
+        ),
+        (
+            "assets/qodercli/herdr-agent-state.ps1",
+            include_str!("assets/qodercli/herdr-agent-state.ps1"),
+        ),
+        (
+            "assets/qwen/herdr-agent-session.ps1",
+            include_str!("assets/qwen/herdr-agent-session.ps1"),
+        ),
+    ] {
+        assert!(
+            asset.contains("OpenStandardInput()"),
+            "{name} must read hook stdin as raw UTF-8 bytes"
+        );
+        assert!(
+            !asset.contains("[Console]::In.ReadToEnd()"),
+            "{name} must not let the console code page decode hook stdin"
+        );
+    }
+}
+
+#[test]
 fn claude_v9_integration_status_is_outdated_until_reinstalled() {
     let _lock = integration_env_lock();
     let base = unique_base();
@@ -1204,7 +1283,7 @@ fn claude_v9_integration_status_is_outdated_until_reinstalled() {
 
     assert_eq!(claude.path, hook_path);
     assert_eq!(claude.installed_version, Some(9));
-    assert_eq!(claude.expected_version, 10);
+    assert_eq!(claude.expected_version, 11);
     assert_eq!(claude.state, IntegrationStatusKind::Outdated);
 
     install_claude().unwrap();
@@ -1213,7 +1292,7 @@ fn claude_v9_integration_status_is_outdated_until_reinstalled() {
         hook_path,
         CLAUDE_INTEGRATION_VERSION,
     );
-    assert_eq!(status.installed_version, Some(10));
+    assert_eq!(status.installed_version, Some(11));
     assert_eq!(status.state, IntegrationStatusKind::Current);
 
     std::env::remove_var("HOME");
@@ -1243,7 +1322,7 @@ fn claude_v2_integration_status_is_outdated() {
 
     assert_eq!(claude.path, hook_path);
     assert_eq!(claude.installed_version, Some(2));
-    assert_eq!(claude.expected_version, 10);
+    assert_eq!(claude.expected_version, 11);
     assert_eq!(claude.state, IntegrationStatusKind::Outdated);
 
     std::env::remove_var("HOME");
@@ -1376,7 +1455,7 @@ fn codex_v2_integration_status_is_outdated() {
 
     assert_eq!(codex.path, hook_path);
     assert_eq!(codex.installed_version, Some(2));
-    assert_eq!(codex.expected_version, 8);
+    assert_eq!(codex.expected_version, 9);
     assert_eq!(codex.state, IntegrationStatusKind::Outdated);
 
     std::env::remove_var("HOME");
@@ -3459,7 +3538,7 @@ fn install_qwen_writes_session_hook_and_preserves_settings() {
     assert!(settings.get("permissions").is_some());
     let hook_asset = fs::read_to_string(&installed.hook_path).unwrap();
     assert!(hook_asset.contains("HERDR_INTEGRATION_ID=qwen"));
-    assert!(hook_asset.contains("HERDR_INTEGRATION_VERSION=1"));
+    assert!(hook_asset.contains("HERDR_INTEGRATION_VERSION=2"));
     assert!(hook_asset.contains("herdr:qwen"));
 
     install_qwen().unwrap();
@@ -3845,7 +3924,7 @@ fn cursor_v1_integration_status_is_current() {
     let hook_path = cursor_dir.join(CURSOR_HOOK_INSTALL_NAME);
     fs::write(
         &hook_path,
-        "#!/bin/sh\n# HERDR_INTEGRATION_ID=cursor\n# HERDR_INTEGRATION_VERSION=1\n",
+        "#!/bin/sh\n# HERDR_INTEGRATION_ID=cursor\n# HERDR_INTEGRATION_VERSION=2\n",
     )
     .unwrap();
     std::env::set_var(CURSOR_CONFIG_DIR_ENV_VAR, &cursor_dir);
@@ -4357,7 +4436,7 @@ fn antigravity_cli_v2_install_is_outdated_until_reinstalled() {
     fs::write(
         hook_dir.join(ANTIGRAVITY_CLI_HOOK_INSTALL_NAME),
         ANTIGRAVITY_CLI_HOOK_ASSET
-            .replace("HERDR_INTEGRATION_VERSION=3", "HERDR_INTEGRATION_VERSION=2"),
+            .replace("HERDR_INTEGRATION_VERSION=4", "HERDR_INTEGRATION_VERSION=2"),
     )
     .unwrap();
     std::env::set_var(ANTIGRAVITY_CLI_CONFIG_DIR_ENV_VAR, &agy_dir);
@@ -4371,7 +4450,7 @@ fn antigravity_cli_v2_install_is_outdated_until_reinstalled() {
     let outdated = status();
     assert_eq!(outdated.state, IntegrationStatusKind::Outdated);
     assert_eq!(outdated.installed_version, Some(2));
-    assert_eq!(outdated.expected_version, 3);
+    assert_eq!(outdated.expected_version, 4);
 
     install_antigravity_cli().unwrap();
     assert_eq!(status().state, IntegrationStatusKind::Current);

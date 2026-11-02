@@ -65,6 +65,36 @@ impl App {
         }
     }
 
+    /// Admits a background restore-validation result only for the exact saved
+    /// membership it was started for. A stale completion (workspace closed,
+    /// membership replaced or re-derived) mutates nothing.
+    fn handle_restored_worktree_space_checked(
+        &mut self,
+        workspace_id: String,
+        expected: crate::workspace::WorktreeSpaceMembership,
+        valid: bool,
+    ) {
+        self.pending_restored_worktree_spaces
+            .retain(|(id, space)| id != &workspace_id || space != &expected);
+        let changed_workspace = (!valid)
+            .then(|| {
+                self.state.workspaces.iter().position(|workspace| {
+                    workspace.id == workspace_id
+                        && workspace.worktree_space.as_ref() == Some(&expected)
+                })
+            })
+            .flatten();
+        self.state
+            .handle_app_event(AppEvent::RestoredWorktreeSpaceChecked {
+                workspace_id,
+                expected,
+                valid,
+            });
+        if let Some(ws_idx) = changed_workspace {
+            self.emit_workspace_updated(ws_idx);
+        }
+    }
+
     fn handle_git_status_refreshed(
         &mut self,
         results: Vec<crate::workspace::WorkspaceGitStatus>,
@@ -122,6 +152,16 @@ impl App {
         &mut self,
         ev: AppEvent,
     ) -> Vec<crate::app::actions::PaneStateUpdate> {
+        if let AppEvent::RestoredWorktreeSpaceChecked {
+            workspace_id,
+            expected,
+            valid,
+        } = ev
+        {
+            self.handle_restored_worktree_space_checked(workspace_id, expected, valid);
+            return Vec::new();
+        }
+
         let mut worktree_restore_failed = false;
         let ev = match ev {
             AppEvent::WorktreeRuntimeRestoreFailed {
@@ -386,6 +426,11 @@ impl App {
 
         if let AppEvent::WorktreeRemoveFinished(result) = ev {
             return self.handle_api_worktree_remove_finished(*result);
+        }
+
+        if let AppEvent::WorktreeReadFinished(result) = ev {
+            self.handle_api_worktree_read_finished(*result);
+            return Vec::new();
         }
 
         let mut worktree_restore_updates = Vec::new();
@@ -1305,7 +1350,14 @@ impl App {
             Method::WorkspaceClose(target) => {
                 return self.handle_workspace_close(request.id, target);
             }
-            Method::WorktreeList(params) => return self.handle_worktree_list(request.id, params),
+            Method::WorktreeList(params) => {
+                let _ = params;
+                return responses::encode_error(
+                    request.id,
+                    "invalid_request",
+                    "worktree.list is handled asynchronously by the app runtime",
+                );
+            }
             Method::WorktreeCreate(params) => {
                 let _ = params;
                 return responses::encode_error(
@@ -1314,7 +1366,14 @@ impl App {
                     "worktree.create is handled asynchronously by the app runtime",
                 );
             }
-            Method::WorktreeOpen(params) => return self.handle_worktree_open(request.id, params),
+            Method::WorktreeOpen(params) => {
+                let _ = params;
+                return responses::encode_error(
+                    request.id,
+                    "invalid_request",
+                    "worktree.open is handled asynchronously by the app runtime",
+                );
+            }
             Method::WorktreeRemove(params) => {
                 let _ = params;
                 return responses::encode_error(

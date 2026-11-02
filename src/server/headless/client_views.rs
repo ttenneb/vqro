@@ -313,7 +313,10 @@ impl HeadlessServer {
 
     pub(super) fn deferred_endpoint_navigation_tab_id(response: &[u8]) -> Option<String> {
         let response = serde_json::from_slice::<serde_json::Value>(response).ok()?;
-        if response.pointer("/result/type")?.as_str()? != "worktree_created" {
+        if !matches!(
+            response.pointer("/result/type")?.as_str()?,
+            "worktree_created" | "worktree_opened"
+        ) {
             return None;
         }
         response
@@ -527,7 +530,7 @@ impl HeadlessServer {
         self.app.sync_pending_agent_resume_deadline(now);
         if self
             .app
-            .start_pending_agent_resumes(self.app.pending_agent_resume_due(now))
+            .start_pending_agent_resumes(now, self.app.pending_agent_resume_due(now))
         {
             for client in self.clients.values_mut() {
                 client.request_repaint();
@@ -1058,11 +1061,7 @@ impl HeadlessServer {
             api::schema::Method::TabCreate(params) => params.focus,
             _ => false,
         };
-        let inspect_worktree_open = matches!(
-            &msg.request.method,
-            api::schema::Method::WorktreeOpen(params) if params.focus
-        );
-        let response_proxy = (agent_focus_target.is_some() || inspect_worktree_open).then(|| {
+        let response_proxy = agent_focus_target.is_some().then(|| {
             let (proxy_tx, proxy_rx) = std::sync::mpsc::channel();
             let original = std::mem::replace(&mut msg.respond_to, proxy_tx);
             (original, proxy_rx)
@@ -1086,9 +1085,8 @@ impl HeadlessServer {
         let explicit_focus_succeeded = successful_agent_focus_target
             .or(explicit_public_focus_target)
             .is_some_and(|target| self.default_shell_target() == Some(target));
-        let public_focus_succeeded = explicit_focus_succeeded
-            || (create_focus_requested && target_changed)
-            || (inspect_worktree_open && proxied_request_succeeded);
+        let public_focus_succeeded =
+            explicit_focus_succeeded || (create_focus_requested && target_changed);
         if public_focus_succeeded {
             self.focus_all_shell_clients_on_default_target();
         }

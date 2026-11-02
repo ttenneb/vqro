@@ -660,9 +660,9 @@ fn restore_workspace(
         return (None, failed_imports);
     }
 
-    let worktree_space = restored_worktree_space_membership(snap.worktree_space.clone());
-    let (cached_git_space, cached_auto_label, cached_git_status_key) =
-        crate::workspace::discover_workspace_git_identity(&snap.identity_cwd);
+    // Cold restore keeps the saved membership verbatim. Discovery may block on
+    // unavailable storage, so the only validation is the background worker that
+    // calls `restored_worktree_space_membership` after the session is usable.
 
     (
         Some(Workspace {
@@ -670,13 +670,15 @@ fn restore_workspace(
             custom_name: snap.custom_name.clone(),
             identity_cwd: snap.identity_cwd.clone(),
             cached_identity_cwd: snap.identity_cwd.clone(),
-            cached_auto_label,
-            cached_git_status_key,
-            cached_git_branch: crate::workspace::git_branch(&snap.identity_cwd),
+            // Repository metadata is optional and may block on unavailable
+            // storage. The app refreshes it after restoring the session.
+            cached_auto_label: crate::workspace::fallback_label_from_cwd(&snap.identity_cwd),
+            cached_git_status_key: snap.identity_cwd.clone(),
+            cached_git_branch: None,
             cached_git_ahead_behind: None,
-            cached_git_space,
+            cached_git_space: None,
             checkout: snap.checkout.clone(),
-            worktree_space,
+            worktree_space: snap.worktree_space.clone(),
             metadata_tokens: crate::metadata_tokens::MetadataTokens::default(),
             metadata_token_sequences: HashMap::new(),
             public_pane_numbers,
@@ -1588,6 +1590,128 @@ mod tests {
         assert_eq!(
             resolve_restored_pane(Some(1), &id_map, &surviving, &pane_ids),
             Some(first)
+        );
+    }
+
+    #[tokio::test]
+    async fn restore_keeps_saved_membership_verbatim_without_git_discovery() {
+        // A missing checkout used to be validated synchronously during restore,
+        // which dropped the saved group and could block on unavailable storage.
+        // Restore now keeps it verbatim; only the background worker validates it.
+        let missing = std::env::temp_dir().join(format!(
+            "vqro-unavailable-membership-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        assert!(!missing.exists());
+        let membership = crate::workspace::WorktreeSpaceMembership {
+            key: "saved-repo-key".into(),
+            label: "saved-repo".into(),
+            repo_root: missing.join("repo"),
+            checkout_path: missing.join("checkout"),
+            is_linked_worktree: true,
+        };
+        let cwd = missing.join("checkout");
+        let snapshot = SessionSnapshot {
+            delegations: Vec::new(),
+            collections_authority: Default::default(),
+            collections_action_sequence: 0,
+            version: super::super::snapshot::SNAPSHOT_VERSION,
+            repositories: vec![crate::repository::Repository {
+                id: crate::repository::stable_repository_id(std::path::Path::new(&membership.key)),
+                git_common_dir: missing.join("repo"),
+                label: "saved-repo".into(),
+                custom_name: None,
+                preferred_base: None,
+                checkout_workspace_ids: vec!["workspace".into()],
+                last_focused_workspace_id: None,
+            }],
+            space_order: Vec::new(),
+            workspaces: vec![WorkspaceSnapshot {
+                id: Some("workspace".into()),
+                custom_name: None,
+                identity_cwd: cwd.clone(),
+                checkout: None,
+                worktree_space: Some(membership.clone()),
+                public_pane_numbers: HashMap::new(),
+                next_public_pane_number: 0,
+                public_tab_numbers: Vec::new(),
+                next_public_tab_number: 0,
+                tabs: vec![TabSnapshot {
+                    id: None,
+                    collections: Vec::new(),
+                    focused_leaf: None,
+                    custom_name: None,
+                    layout: LayoutSnapshot::Pane(0),
+                    panes: HashMap::from([(
+                        0,
+                        super::super::snapshot::PaneSnapshot {
+                            terminal_id: None,
+                            cwd,
+                            label: Some("keep my pane".into()),
+                            agent_name: None,
+                            managed_agent_kind: None,
+                            agent_session: None,
+                            launch_argv: None,
+                        },
+                    )]),
+                    zoomed: false,
+                    focused: Some(0),
+                    root_pane: Some(0),
+                }],
+                active_tab: 0,
+            }],
+            active: Some(0),
+            selected: 0,
+            sidebar_width: None,
+            sidebar_section_split: None,
+            collapsed_space_keys: Default::default(),
+        };
+        let (events, _event_rx) = mpsc::channel(4);
+
+        let (workspaces, _terminals, _runtimes) = restore(
+            &snapshot,
+            None,
+            24,
+            80,
+            0,
+            test_restore_shell(),
+            crate::config::ShellModeConfig::NonLogin,
+            false,
+            events,
+            Arc::new(Notify::new()),
+            Arc::new(RenderSignal::new()),
+        )
+        .unwrap();
+
+        let workspace = workspaces.first().expect("workspace is restored");
+        assert_eq!(
+            workspace.worktree_space(),
+            Some(&membership),
+            "cold restore keeps the saved membership verbatim"
+        );
+        assert!(
+            workspace.cached_git_branch.is_none() && workspace.cached_git_space.is_none(),
+            "restore must not run synchronous Git identity discovery"
+        );
+        assert_eq!(
+            workspace.cached_auto_label,
+            crate::workspace::fallback_label_from_cwd(&missing.join("checkout")),
+            "only the non-Git fallback label is derived during restore"
+        );
+        assert_eq!(
+            workspace.cached_git_status_key,
+            missing.join("checkout"),
+            "cached identity defaults to the saved cwd, not a discovered repository"
+        );
+        // The worker predicate is what decides the membership's fate later.
+        assert_eq!(
+            restored_worktree_space_membership(Some(membership.clone())),
+            None,
+            "current predicate is only consulted by background validation"
         );
     }
 

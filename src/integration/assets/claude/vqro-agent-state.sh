@@ -3,7 +3,7 @@
 # managed by vqro; reinstalling or updating the integration overwrites this file.
 # add custom hooks beside this file instead of editing it.
 # VQRO_INTEGRATION_ID=claude
-# VQRO_INTEGRATION_VERSION=10
+# VQRO_INTEGRATION_VERSION=11
 
 set -eu
 

@@ -1,5 +1,7 @@
 use super::*;
 
+#[path = "event_fairness.rs"]
+mod event_fairness_tests;
 mod native_graphics;
 #[path = "pane_graphics.rs"]
 mod pane_graphics_tests;
@@ -63,7 +65,8 @@ fn test_headless_server_with_event_hub(event_hub: api::EventHub) -> HeadlessServ
     let (server_event_tx, server_event_rx) = mpsc::channel(64);
     let should_quit = Arc::new(AtomicBool::new(false));
     #[cfg(windows)]
-    spawn_windows_client_accept_thread(listener, should_quit.clone(), server_event_tx.clone());
+    spawn_windows_client_accept_thread(listener, should_quit.clone(), server_event_tx.clone())
+        .expect("spawn client accept thread");
     let server_keybindings = app_keybindings(&app);
     let headless_size = app.state.headless_size;
 
@@ -6003,6 +6006,115 @@ fn terminal_attach_client_exits_when_worktree_remove_succeeds() {
     assert!(!server.terminal_attach_owners.contains_key(&terminal_id));
     let reason = read_server_shutdown_reason(control_rx.recv().expect("shutdown message"));
     assert_eq!(reason, Some(format!("terminal {terminal_id} exited")));
+}
+
+#[tokio::test]
+async fn worktree_discovery_does_not_block_client_typing() {
+    use api::schema::{Method, WorktreeListParams, WorktreeOpenParams};
+
+    let mut server = test_headless_server();
+    let mut workspace = crate::workspace::Workspace::test_new("worktree-input");
+    let pane_id = workspace.tabs[0].root_pane;
+    let (runtime, mut input_rx) =
+        crate::terminal::TerminalRuntime::test_with_channel_and_scrollback_bytes(80, 24, 0, b"", 4);
+    workspace.insert_test_runtime(pane_id, runtime);
+    let repo = std::env::temp_dir().join(format!("vqro-blocked-git-{}", workspace.id));
+    workspace.identity_cwd = repo.clone();
+    workspace.cached_git_space = Some(crate::workspace::GitSpaceMetadata {
+        key: repo.display().to_string(),
+        checkout_key: repo.display().to_string(),
+        repo_name: "blocked-git".into(),
+        repo_root: repo.clone(),
+        is_linked_worktree: false,
+    });
+    let workspace_id = workspace.id.clone();
+    server.app.state.workspaces = vec![workspace];
+    server.app.state.active = Some(0);
+    server.app.state.selected = 0;
+    let public_pane_id = server.app.public_pane_id(0, pane_id).unwrap();
+    server.clients.insert(
+        11,
+        ClientConnection::new_with_mode(
+            ClientConnectionMode::ClientShell,
+            (80, 24),
+            crate::kitty_graphics::HostCellSize::default(),
+            1,
+            RenderEncoding::SemanticFrame,
+            None,
+        ),
+    );
+    server.foreground_client_id = Some(11);
+
+    for (linked, method) in [
+        (
+            false,
+            Method::WorktreeList(WorktreeListParams {
+                workspace_id: Some(workspace_id.clone()),
+                ..Default::default()
+            }),
+        ),
+        (
+            true,
+            Method::WorktreeList(WorktreeListParams {
+                workspace_id: Some(workspace_id.clone()),
+                ..Default::default()
+            }),
+        ),
+        (
+            false,
+            Method::WorktreeOpen(WorktreeOpenParams {
+                workspace_id: Some(workspace_id),
+                path: Some(repo.display().to_string()),
+                focus: true,
+                ..Default::default()
+            }),
+        ),
+    ] {
+        server.app.state.workspaces[0]
+            .cached_git_space
+            .as_mut()
+            .unwrap()
+            .is_linked_worktree = linked;
+        let (entered, release) = crate::worktree::test_list_gate::block(&repo);
+        let (respond_to, response_rx) = std::sync::mpsc::channel();
+        server.handle_api_request_with_shutdown_check(api::ApiRequestMessage {
+            origin: api::ApiOrigin::LocalSocket,
+            request: api::schema::Request {
+                id: "blocked-read".into(),
+                method,
+            },
+            respond_to,
+            response_write_complete: None,
+        });
+        entered
+            .recv_timeout(Duration::from_secs(5))
+            .expect("Git discovery started");
+        assert!(response_rx.try_recv().is_err(), "Git must still be blocked");
+        server.handle_server_event(ServerEvent::ClientShellPaneInput {
+            client_id: 11,
+            pane_id: public_pane_id.clone(),
+            events: vec![crate::protocol::ClientPaneInputEvent::TextCommit(
+                "x".into(),
+            )],
+        });
+        assert_eq!(
+            input_rx
+                .try_recv()
+                .expect("typing reaches PTY while Git is blocked"),
+            Bytes::from_static(b"x")
+        );
+        release.send(()).unwrap();
+        let event = tokio::time::timeout(Duration::from_secs(5), server.app.event_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        server.handle_internal_event_with_forwarding(event);
+        let response: api::schema::ErrorResponse =
+            serde_json::from_str(&response_rx.recv_timeout(Duration::from_secs(5)).unwrap())
+                .unwrap();
+        assert_eq!(response.error.code, "worktree_list_failed");
+    }
+    shutdown_test_runtimes(&mut server);
 }
 
 #[test]

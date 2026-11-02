@@ -242,6 +242,7 @@ impl HeadlessServer {
         Ok(())
     }
 
+    #[cfg(unix)]
     fn fail_live_handoff_after_commit(&mut self) {
         self.shutting_down = true;
         self.app.state.should_quit = true;

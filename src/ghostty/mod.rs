@@ -1278,6 +1278,29 @@ impl Terminal {
         self.screen_text_rows_range(0, usize::MAX)
     }
 
+    /// Visit a screen row without allocating an owned grapheme vector per cell.
+    /// The borrowed graphemes are valid only for the duration of each callback.
+    /// Rows outside the active screen/history are empty.
+    pub(crate) fn for_each_screen_row_cell(
+        &self,
+        row: u32,
+        mut visit: impl FnMut(CellWide, &[u32]),
+    ) -> Result<(), Error> {
+        if row as usize >= self.total_rows()? {
+            return Ok(());
+        }
+        let cols = self.cols()?;
+        let mut grid_ref = self.grid_ref(ghostty_screen_point(0, row))?;
+        let mut graphemes = Vec::new();
+        for x in 0..cols {
+            grid_ref.x = x;
+            let wide = grid_ref_wide(&grid_ref)?;
+            grid_ref_graphemes_into(&grid_ref, &mut graphemes)?;
+            visit(wide, &graphemes);
+        }
+        Ok(())
+    }
+
     pub(crate) fn screen_text_rows_range(
         &self,
         start_row: usize,
@@ -2308,6 +2331,30 @@ fn grid_ref_graphemes(grid_ref: &ffi::GhosttyGridRef) -> Result<Vec<u32>, Error>
     }
     buffer.truncate(required);
     Ok(buffer)
+}
+
+/// Fills a reusable buffer instead of allocating one vector per cell. Owned
+/// cells keep only this grapheme, so they do not benefit from spare capacity.
+fn grid_ref_graphemes_into(
+    grid_ref: &ffi::GhosttyGridRef,
+    buffer: &mut Vec<u32>,
+) -> Result<(), Error> {
+    let mut required = 0usize;
+    let result =
+        unsafe { ffi::ghostty_grid_ref_graphemes(grid_ref, ptr::null_mut(), 0, &mut required) };
+    if result != ffi::GhosttyResult_GHOSTTY_OUT_OF_SPACE {
+        result.into_result()?;
+    }
+    buffer.resize(required, 0);
+    if required == 0 {
+        return Ok(());
+    }
+    unsafe {
+        ffi::ghostty_grid_ref_graphemes(grid_ref, buffer.as_mut_ptr(), buffer.len(), &mut required)
+            .into_result()?;
+    }
+    buffer.truncate(required);
+    Ok(())
 }
 
 fn grid_ref_wide(grid_ref: &ffi::GhosttyGridRef) -> Result<CellWide, Error> {
@@ -4712,6 +4759,45 @@ mod tests {
         assert_eq!(rows[2].cells[0].graphemes, vec!['界' as u32]);
         assert_eq!(rows[2].cells[1].wide, CellWide::SpacerTail);
         assert_eq!(rows[2].cells[2].graphemes, vec!['e' as u32, 0x301]);
+    }
+
+    #[test]
+    fn borrowed_screen_row_cells_match_owned_cells() {
+        let mut terminal = Terminal::new(12, 4, 100).unwrap();
+        let content = format!(
+            "abcdefghi界Z\r\ne{} X\r\n{}\r\n",
+            "\u{301}".repeat(40),
+            char::from_u32(0x10eeee).unwrap()
+        );
+        for screen in ["", "\x1b[?1049h"] {
+            terminal.write(screen.as_bytes());
+            terminal.write(content.as_bytes());
+            let expected = terminal.screen_text_rows().unwrap();
+            assert!(expected
+                .iter()
+                .flat_map(|row| &row.cells)
+                .any(|cell| cell.graphemes.len() > 4));
+            for (y, row) in expected.iter().enumerate() {
+                let mut actual = Vec::new();
+                terminal
+                    .for_each_screen_row_cell(y as u32, |wide, graphemes| {
+                        actual.push((wide, graphemes.to_vec()));
+                    })
+                    .unwrap();
+                let expected_cells = row
+                    .cells
+                    .iter()
+                    .map(|cell| (cell.wide, cell.graphemes.clone()))
+                    .collect::<Vec<_>>();
+                assert_eq!(actual, expected_cells, "row {y} on {screen:?}");
+            }
+            // Rows past the end visit nothing instead of failing the caller.
+            let mut visited = 0;
+            terminal
+                .for_each_screen_row_cell(u32::MAX, |_, _| visited += 1)
+                .unwrap();
+            assert_eq!(visited, 0);
+        }
     }
 
     #[test]
