@@ -67,8 +67,11 @@ exact-sized `proc_pidinfo(PROC_PIDTBSDINFO)` PID/euid/parent/start observations,
 and a bounded `kern.bootsessionuuid` execution namespace. Its birth value is
 checked start-time seconds × 1,000,000 + microseconds; this is a lifetime key,
 not a portable timestamp format. macOS argument acquisition is capped at 1 MiB
-(including environment), with exactly `argc` NUL-terminated arguments retained;
-environment is excluded from caller matching.
+(including environment), with exactly `argc` NUL-terminated arguments retained.
+Caller capture uses XNU's target-pointer-aligned boundary after the executable
+path, validates its zero padding and rejects empty `argv[0]`; it never skips an
+arbitrary NUL run into later arguments or environment. Environment is excluded
+from caller matching. Target bitness is rechecked across argument capture too.
 
 macOS stops **before** a positively observed foreign-euid ancestor, without
 querying that ancestor's arguments. This is not an error fallback: every retained

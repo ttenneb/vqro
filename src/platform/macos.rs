@@ -29,6 +29,8 @@ pub(crate) use super::unix_common::{
 };
 
 const PROC_PGRP_ONLY: u32 = 2;
+// Darwin proc_info.h pbi_flags ABI; libc does not expose this flag.
+const PROC_FLAG_LP64: u32 = 0x10;
 const SERVER_NOFILE_LIMIT_TARGET: libc::rlim_t = 8192;
 
 /// Kernel credentials for the connected peer, not caller-supplied environment.
@@ -92,7 +94,8 @@ pub(crate) fn invocation_peer_for_process(
         let birth = invocation_birth(&info)?;
         // KERN_PROCARGS2 includes environment too, so bound that acquisition
         // separately from the Linux-equivalent 16 KiB argument limit.
-        let argv = procargs2_argv(&kern_procargs2_bounded(pid, 1024 * 1024)?)?;
+        let argv =
+            invocation_procargs2_argv(&kern_procargs2_bounded(pid, 1024 * 1024)?, info.pbi_flags)?;
         let argv_bytes = argv.iter().try_fold(0usize, |total, arg| {
             total.checked_add(arg.len())?.checked_add(1)
         })?;
@@ -102,6 +105,7 @@ pub(crate) fn invocation_peer_for_process(
         let name = comm_from_bsdinfo(&info)?;
         let current = invocation_bsdinfo(pid)?;
         if current.pbi_uid != uid
+            || (current.pbi_flags & PROC_FLAG_LP64) != (info.pbi_flags & PROC_FLAG_LP64)
             || current.pbi_ppid != info.pbi_ppid
             || invocation_birth(&current) != Some(birth)
         {
@@ -1002,6 +1006,8 @@ pub fn process_agent_hint(pid: u32) -> Option<crate::detect::Agent> {
     super::parse_agent_env_hint(procargs2_env(&buf)?)
 }
 
+// Legacy best-effort foreground metadata/hints only. Caller authority must use
+// invocation_procargs2_argv's exact aligned boundary, including empty argv[0].
 fn procargs2_argv_start(rest: &[u8]) -> Option<usize> {
     let exec_end = rest.iter().position(|&byte| byte == 0)?;
     let mut pos = exec_end;
@@ -1020,7 +1026,37 @@ fn skip_nul_strings(bytes: &[u8], start: usize, count: usize) -> Option<usize> {
     Some(current)
 }
 
+/// Caller authority uses XNU's target-pointer-aligned argv boundary, not the
+/// best-effort metadata reader's NUL scan. Empty argv[0] is legal on Darwin;
+/// skipping all leading NULs could otherwise turn environment into arguments.
+fn invocation_procargs2_argv(buf: &[u8], process_flags: u32) -> Option<Vec<String>> {
+    let rest = buf.get(4..)?;
+    let exec_end = rest.iter().position(|&byte| byte == 0)?;
+    if exec_end == 0 {
+        return None;
+    }
+    // XNU exec_extract_strings aligns ip_startargv after executable_path= and
+    // the path. The 16-byte key is stripped by sysctl_procargsx, preserving
+    // alignment relative to rest. See Apple XNU bsd/kern/kern_exec.c.
+    let pointer_size = if process_flags & PROC_FLAG_LP64 != 0 {
+        8
+    } else {
+        4
+    };
+    let path_end = exec_end.checked_add(1)?;
+    let start = path_end.checked_add(pointer_size - 1)? & !(pointer_size - 1);
+    if rest.get(path_end..start)?.iter().any(|&byte| byte != 0) {
+        return None;
+    }
+    procargs2_argv_at(buf, start)
+}
+
 fn procargs2_argv(buf: &[u8]) -> Option<Vec<String>> {
+    let rest = buf.get(4..)?;
+    procargs2_argv_at(buf, procargs2_argv_start(rest)?)
+}
+
+fn procargs2_argv_at(buf: &[u8], start: usize) -> Option<Vec<String>> {
     if buf.len() < 4 {
         return None;
     }
@@ -1032,7 +1068,7 @@ fn procargs2_argv(buf: &[u8]) -> Option<Vec<String>> {
 
     // Layout: [argc: i32] [exec_path\0] [padding\0...] [argv[0]\0] ... [env\0] ...
     let rest = &buf[4..];
-    let mut current = procargs2_argv_start(rest)?;
+    let mut current = start;
     // Even an empty argument requires a NUL byte. Reject impossible counts
     // before reserving memory from the kernel-supplied argc.
     if argc as usize > rest.len().checked_sub(current)? {
@@ -1321,12 +1357,55 @@ mod tests {
         );
     }
 
+    #[test]
+    fn invocation_procargs_uses_target_alignment_and_rejects_empty_argv0() {
+        for (pointer_size, flags) in [(4, 0), (8, PROC_FLAG_LP64)] {
+            for length in 1..=32 {
+                let path = format!("/{}", "x".repeat(length));
+                for argv in [&[""][..], &["", "node"][..], &["", "pi"][..]] {
+                    let buf = build_procargs2_aligned(&path, argv, &["pi", "claude"], pointer_size);
+                    assert!(
+                        invocation_procargs2_argv(&buf, flags).is_none(),
+                        "empty argv0 must not shift later arguments/environment into authority"
+                    );
+                }
+                let buf = build_procargs2_aligned(
+                    &path,
+                    &["node", "", "pi"],
+                    &["claude", "codex"],
+                    pointer_size,
+                );
+                assert_eq!(
+                    invocation_procargs2_argv(&buf, flags),
+                    Some(vec!["node".into(), "".into(), "pi".into()])
+                );
+            }
+        }
+        let mut buf = build_procargs2_aligned("/bin/node", &["node"], &["pi"], 8);
+        buf[4 + "/bin/node".len() + 1] = b'x';
+        assert!(
+            invocation_procargs2_argv(&buf, PROC_FLAG_LP64).is_none(),
+            "nonzero alignment padding"
+        );
+    }
+
     fn build_procargs2(exec_path: &str, argv: &[&str], env: &[&str]) -> Vec<u8> {
+        build_procargs2_aligned(exec_path, argv, env, 8)
+    }
+
+    fn build_procargs2_aligned(
+        exec_path: &str,
+        argv: &[&str],
+        env: &[&str],
+        pointer_size: usize,
+    ) -> Vec<u8> {
         let mut buf = Vec::new();
         buf.extend_from_slice(&(argv.len() as i32).to_ne_bytes());
         buf.extend_from_slice(exec_path.as_bytes());
         buf.push(0);
-        buf.push(0);
+        while (buf.len() - 4) % pointer_size != 0 {
+            buf.push(0);
+        }
         for arg in argv {
             buf.extend_from_slice(arg.as_bytes());
             buf.push(0);
