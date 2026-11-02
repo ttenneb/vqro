@@ -120,6 +120,9 @@ pub(super) fn sync_client_shell_keyboard_report_all(
     crate::terminal_modes::set_host_kitty_keyboard_report_all(&mut io::stdout(), desired)
         .map_err(ClientError::ConnectionFailed)?;
     state.keyboard_report_all_active = desired;
+    if let Some(shell) = state.shell.as_mut() {
+        shell.set_host_reports_all_keys(desired);
+    }
     Ok(())
 }
 
@@ -135,7 +138,8 @@ pub(super) fn clear_endpoint_host_effects(
     } else {
         state.direct_mouse_capture_preference
     };
-    let sgr_pixels = super::effective_sgr_pixel_mouse(enabled, false, state.pixel_geometry_exact);
+    let sgr_pixels =
+        super::effective_sgr_pixel_mouse(enabled, false, state.pixel_mouse_available());
     if enabled != state.mouse_capture_active
         || sgr_pixels != host_sgr_pixels_active.load(std::sync::atomic::Ordering::Acquire)
     {
@@ -262,7 +266,7 @@ pub(super) fn begin_endpoint_activation(
         state.reported_size.1,
         state.reported_cell_size.0,
         state.reported_cell_size.1,
-        state.pixel_geometry_exact,
+        state.pixel_mouse_available(),
     );
     match endpoint::PendingEndpointActivation::begin(
         shell,
@@ -582,6 +586,7 @@ pub(super) fn install_client_shell_snapshot(
     let generation = connection.generation;
     let project_snapshot =
         !projection_pending && endpoints.active_id() == endpoint_id && connection.surface_active;
+    let pixel_mouse_available = state.pixel_mouse_available();
     let (composed, resize, graphics_cleanup) = if let Some(shell) = &mut state.shell {
         let waits_for_selected_surface = projection_pending
             || (endpoints.active_id() == endpoint_id
@@ -611,7 +616,7 @@ pub(super) fn install_client_shell_snapshot(
                     state.reported_size.1,
                     state.reported_cell_size.0,
                     state.reported_cell_size.1,
-                    state.pixel_geometry_exact,
+                    pixel_mouse_available,
                 )
             }),
             graphics_cleanup,
@@ -657,7 +662,7 @@ pub(super) fn finish_client_shell_input(
             state.reported_size.1,
             state.reported_cell_size.0,
             state.reported_cell_size.1,
-            state.pixel_geometry_exact,
+            state.pixel_mouse_available(),
         );
         if let Some(activation) = pending_activation.as_mut() {
             if let Err(error) = activation.update_resize(resize, endpoints) {

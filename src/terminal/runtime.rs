@@ -487,6 +487,10 @@ impl TerminalRuntime {
         self.0.try_send_bytes(bytes)
     }
 
+    pub(crate) fn validate_input_submission(&self, bytes: &[u8]) -> std::io::Result<()> {
+        self.0.validate_input_submission(bytes)
+    }
+
     pub fn queue_user_input_submission(
         &self,
         text: Bytes,
@@ -621,6 +625,11 @@ impl TerminalRuntime {
     pub(crate) fn test_with_channel(cols: u16, rows: u16) -> (Self, mpsc::Receiver<Bytes>) {
         let (runtime, rx) = crate::pane::PaneRuntime::test_with_channel(cols, rows);
         (Self::wrap(runtime), rx)
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn test_with_actor(actor: crate::pty::actor::PtyIoActorHandle) -> Self {
+        Self::wrap(crate::pane::PaneRuntime::test_with_actor(actor))
     }
 
     pub(crate) fn test_with_channel_capacity(

@@ -40,6 +40,8 @@ use self::agent_detection::{
     DetectionScreenReadInput, PendingIdleConfirmation, ScreenDetectionPublishInput,
     AGENT_PENDING_IDLE_RECHECK, AGENT_STARTUP_GRACE_WINDOW,
 };
+#[cfg(test)]
+pub(crate) use self::terminal::test_encode_key_for_app;
 #[cfg(unix)]
 pub use self::terminal::InputState;
 use self::terminal::{GhosttyPaneTerminal, PaneTerminal};
@@ -3230,12 +3232,26 @@ impl PaneRuntime {
     }
 
     pub fn encode_terminal_key(&self, key: crate::input::TerminalKey) -> Vec<u8> {
-        self.terminal
-            .encode_terminal_key(key, self.keyboard_protocol())
+        self.terminal.encode_terminal_key(key)
     }
 
     pub fn try_send_bytes(&self, bytes: Bytes) -> Result<(), mpsc::error::TrySendError<Bytes>> {
         self.io.try_send_bytes(bytes)
+    }
+
+    /// Preflight a complete API command without changing input queue semantics.
+    pub(crate) fn validate_input_submission(&self, bytes: &[u8]) -> std::io::Result<()> {
+        match &self.io {
+            #[cfg(unix)]
+            PaneRuntimeIo::Actor(actor) => actor.validate_input_submission(bytes),
+            #[cfg(windows)]
+            PaneRuntimeIo::Actor(_) => {
+                let _ = bytes;
+                Ok(())
+            }
+            #[cfg(test)]
+            PaneRuntimeIo::TestChannel { .. } => Ok(()),
+        }
     }
 
     pub fn queue_user_input_submission(
@@ -3456,6 +3472,13 @@ impl PaneRuntime {
 
     pub(crate) fn test_with_channel(cols: u16, rows: u16) -> (Self, mpsc::Receiver<Bytes>) {
         Self::test_with_channel_and_scrollback_bytes(cols, rows, 0, &[], 4)
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn test_with_actor(actor: PtyIoActorHandle) -> Self {
+        let (mut runtime, _) = Self::test_with_channel(80, 24);
+        runtime.io = PaneRuntimeIo::Actor(actor);
+        runtime
     }
 
     pub(crate) fn test_with_channel_capacity(

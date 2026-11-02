@@ -528,6 +528,15 @@ pub fn read_clipboard_text() -> Option<String> {
     }
 }
 
+mod input;
+pub(crate) use input::PtyInputGuard;
+#[cfg(test)]
+mod input_tests;
+
+pub fn clipboard_text_matches(_bytes: &[u8]) -> Option<bool> {
+    None
+}
+
 pub fn open_url(url: &str) -> std::io::Result<Option<std::process::Child>> {
     open_path(std::path::Path::new(url))
 }

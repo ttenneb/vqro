@@ -59,7 +59,7 @@ class WindowsCrossTests(unittest.TestCase):
             self.assertEqual(run.call_count, 2)
             cargo = run.call_args
             self.assertEqual(cargo.args[0], [
-                "cargo", "clippy", "--bin", "vqro", "--locked", "--target",
+                "cargo", "clippy", "--bin", "vqro", "--tests", "--locked", "--target",
                 windows_cross.TARGET, "--", "-D", "warnings",
             ])
             self.assertEqual(cargo.kwargs["env"][windows_cross.LIBC_ENV], str(Path("/sdk/libc.txt")))
