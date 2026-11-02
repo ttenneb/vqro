@@ -1,3 +1,4 @@
+use std::borrow::Borrow;
 use std::fmt;
 
 const TERMINAL_ID_PREFIX: &str = "term_";
@@ -97,6 +98,21 @@ impl fmt::Display for InvalidTerminalId {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
+
+    #[test]
+    fn terminal_ids_support_borrowed_lookup_without_changing_identity() {
+        let id = TerminalId::alloc().unwrap();
+        let serialized = serde_json::to_string(&id).unwrap();
+        let restored: TerminalId = serde_json::from_str(&serialized).unwrap();
+        let mut terminals = HashMap::from([(id.clone(), 1)]);
+
+        assert_eq!(terminals.get(restored.as_str()), Some(&1));
+        assert_eq!(terminals.get("missing-terminal"), None);
+        *terminals.get_mut(restored.as_str()).unwrap() = 2;
+        assert_eq!(terminals.remove(id.as_str()), Some(2));
+        assert!(terminals.is_empty());
+    }
 
     #[test]
     fn allocated_terminal_ids_are_canonical_and_unique() {
@@ -149,5 +165,11 @@ mod tests {
         ] {
             assert!(TerminalId::parse(invalid).is_err(), "accepted {invalid}");
         }
+    }
+}
+
+impl Borrow<str> for TerminalId {
+    fn borrow(&self) -> &str {
+        self.as_str()
     }
 }
