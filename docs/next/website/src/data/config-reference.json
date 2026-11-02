@@ -17,6 +17,12 @@
       "title": "Server",
       "keys": [
         {
+          "key": "server.allow_unelevated_clients",
+          "type": "boolean",
+          "default": "false",
+          "description": "Windows only: allow ordinary same-account clients to control an elevated server. This is not a cosmetic attach check: a medium-integrity process of the same account can then operate the elevated server. Other accounts stay denied. Requires a server restart."
+        },
+        {
           "key": "server.headless_cols",
           "type": "integer",
           "default": "120",

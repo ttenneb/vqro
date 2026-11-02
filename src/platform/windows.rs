@@ -243,6 +243,133 @@ pub(crate) fn replace_file(
     }
 }
 
+/// Set when the operator explicitly consents to ordinary same-account clients
+/// controlling this elevated server (`--allow-unelevated-clients` or
+/// `[server] allow_unelevated_clients = true`). Process-local: a restart
+/// without the consent drops back to refusing ordinary clients.
+static ALLOW_UNELEVATED_CLIENTS: OnceLock<bool> = OnceLock::new();
+
+pub(crate) fn allow_unelevated_clients() {
+    let _ = ALLOW_UNELEVATED_CLIENTS.set(true);
+}
+
+fn allow_unelevated_clients_requested() -> bool {
+    ALLOW_UNELEVATED_CLIENTS.get().copied().unwrap_or(false)
+}
+
+fn current_process_is_elevated() -> std::io::Result<bool> {
+    use windows_sys::Win32::Security::{
+        GetTokenInformation, TokenElevation, TOKEN_ELEVATION, TOKEN_QUERY,
+    };
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+
+    let mut token = null_mut();
+    if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let token = unsafe { OwnedHandle::from_raw_handle(token) };
+    let mut elevation = TOKEN_ELEVATION::default();
+    let mut needed = 0;
+    if unsafe {
+        GetTokenInformation(
+            token.as_raw_handle(),
+            TokenElevation,
+            (&mut elevation as *mut TOKEN_ELEVATION).cast(),
+            size_of::<TOKEN_ELEVATION>() as u32,
+            &mut needed,
+        )
+    } == 0
+    {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(elevation.TokenIsElevated != 0)
+}
+
+fn current_account_sid_text() -> std::io::Result<String> {
+    use widestring::U16CStr;
+    use windows_sys::Win32::Foundation::LocalFree;
+    use windows_sys::Win32::Security::{
+        Authorization::ConvertSidToStringSidW, GetTokenInformation, TokenUser, TOKEN_QUERY,
+        TOKEN_USER,
+    };
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+
+    let mut token = null_mut();
+    if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let token = unsafe { OwnedHandle::from_raw_handle(token) };
+    let mut needed = 0;
+    unsafe { GetTokenInformation(token.as_raw_handle(), TokenUser, null_mut(), 0, &mut needed) };
+    if needed == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // usize storage keeps TOKEN_USER aligned and its trailing SID alive.
+    let mut buffer = vec![0usize; (needed as usize).div_ceil(size_of::<usize>())];
+    if unsafe {
+        GetTokenInformation(
+            token.as_raw_handle(),
+            TokenUser,
+            buffer.as_mut_ptr().cast(),
+            needed,
+            &mut needed,
+        )
+    } == 0
+    {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: GetTokenInformation initialized the aligned TOKEN_USER and SID.
+    let user = unsafe { &*buffer.as_ptr().cast::<TOKEN_USER>() };
+    let mut sid = null_mut();
+    if unsafe { ConvertSidToStringSidW(user.User.Sid, &mut sid) } == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let text = unsafe { U16CStr::from_ptr_str(sid) }.to_string_lossy();
+    unsafe { LocalFree(sid.cast()) };
+    Ok(text)
+}
+
+/// Security descriptor for one of Vqro's local pipes.
+///
+/// The account SID, not the elevated token's owner, is authorized: ordinary and
+/// elevated processes of the same account share it. The mandatory integrity
+/// label then decides whether an ordinary client may connect at all, which is
+/// the only thing consent changes.
+pub(crate) fn local_pipe_security_descriptor(
+    endpoint: super::WindowsPipeEndpoint,
+) -> std::io::Result<interprocess::os::windows::security_descriptor::SecurityDescriptor> {
+    use interprocess::os::windows::security_descriptor::SecurityDescriptor;
+    use widestring::U16CString;
+
+    let elevated = current_process_is_elevated()?;
+    let integrity = super::windows_pipe_integrity(elevated, allow_unelevated_clients_requested());
+    let account_sid = current_account_sid_text()?;
+    let sddl = U16CString::from_str(super::windows_local_pipe_sddl(
+        endpoint,
+        &account_sid,
+        integrity,
+    ))
+    .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidInput, err))?;
+    SecurityDescriptor::deserialize(&sddl)
+}
+
+/// Refusal text for a local connection the server's integrity label denied.
+pub(crate) fn local_server_connection_error(error: std::io::Error) -> std::io::Error {
+    if error.kind() != std::io::ErrorKind::PermissionDenied {
+        return error;
+    }
+    std::io::Error::new(
+        error.kind(),
+        format!(
+            "vqro could not open this server's local pipe. If the running server is \
+             elevated, an ordinary terminal cannot attach: use an administrator terminal, \
+             or stop it there and restart its `vqro server` command with \
+             --allow-unelevated-clients to admit ordinary same-account clients (closes \
+             panes). {error}"
+        ),
+    )
+}
+
 pub(crate) fn set_default_plugin_pane_pwd(
     _env: &mut Vec<(String, String)>,
     _cwd: &std::path::Path,

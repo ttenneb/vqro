@@ -1,6 +1,13 @@
 use crate::api::schema::{EmptyParams, Method, Request, ServerLiveHandoffParams};
 
 pub(super) fn run_server_command(args: &[String]) -> std::io::Result<Option<i32>> {
+    // Consent must be recorded before the server creates its local pipes, which
+    // happens after this dispatcher returns.
+    #[cfg(windows)]
+    if args == ["--allow-unelevated-clients"] {
+        crate::platform::allow_unelevated_clients();
+        return Ok(None);
+    }
     let Some(subcommand) = args.first().map(|arg| arg.as_str()) else {
         return Ok(None);
     };
@@ -259,6 +266,10 @@ fn parse_live_handoff_params(args: &[String]) -> Option<ServerLiveHandoffParams>
 fn print_server_help() {
     eprintln!("vqro server commands:");
     eprintln!("  vqro server                run as headless server");
+    #[cfg(windows)]
+    eprintln!(
+        "  vqro server --allow-unelevated-clients  allow ordinary same-account clients to control this elevated server"
+    );
     eprintln!("  vqro server stop           stop the running server via the API socket");
     eprintln!("  vqro server live-handoff   hand off live panes to a new local server");
     eprintln!("  vqro server reload-config  reload config.toml in the running server");

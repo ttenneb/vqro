@@ -45,6 +45,82 @@ pub(crate) enum TerminalTelemetrySample {
     Unsupported,
 }
 
+/// Windows integrity label used on Vqro's local pipes.
+///
+/// `High` requires at least high integrity, so an ordinary (medium) client of
+/// the same account cannot connect. `Medium` admits ordinary same-account
+/// clients of an elevated server. The label is the only thing that separates
+/// "same account, ordinary process" from "elevated process", because the
+/// account SID is identical in both.
+#[cfg_attr(not(windows), allow(dead_code))] // Consumed by the Windows platform module.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WindowsPipeIntegrity {
+    High,
+    Medium,
+}
+
+impl WindowsPipeIntegrity {
+    fn sddl(self) -> &'static str {
+        match self {
+            Self::High => "HI",
+            Self::Medium => "ME",
+        }
+    }
+}
+
+/// Which endpoints take part in the cross-elevation policy.
+#[cfg_attr(not(windows), allow(dead_code))] // Consumed by the Windows platform module.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WindowsPipeEndpoint {
+    /// The API socket: a client must read and write requests.
+    Api,
+    /// The private terminal socket: full access for the attaching client.
+    Terminal,
+}
+
+impl WindowsPipeEndpoint {
+    fn access(self) -> &'static str {
+        match self {
+            Self::Api => "GRGW",
+            Self::Terminal => "GA",
+        }
+    }
+}
+
+/// The security descriptor string for a Vqro local pipe on Windows.
+///
+/// System and the account SID get the endpoint's access; a mandatory integrity
+/// label then bounds which integrity levels may open the pipe at all. This is a
+/// pure contract: the platform module supplies the account SID, the elevated
+/// bit and whether the operator consented to ordinary clients.
+#[cfg_attr(not(windows), allow(dead_code))] // Consumed by the Windows platform module.
+pub(crate) fn windows_local_pipe_sddl(
+    endpoint: WindowsPipeEndpoint,
+    account_sid: &str,
+    integrity: WindowsPipeIntegrity,
+) -> String {
+    format!(
+        "D:P(A;;GA;;;SY)(A;;{};;;{account_sid})S:(ML;;NRNW;;;{})",
+        endpoint.access(),
+        integrity.sddl()
+    )
+}
+
+/// An elevated Vqro server admits ordinary same-account clients only with
+/// explicit consent. Without consent, an elevated server labels its pipes high
+/// so a medium-integrity client of the same account is refused.
+#[cfg_attr(not(windows), allow(dead_code))] // Consumed by the Windows platform module.
+pub(crate) fn windows_pipe_integrity(
+    process_is_elevated: bool,
+    allow_unelevated_clients: bool,
+) -> WindowsPipeIntegrity {
+    if process_is_elevated && !allow_unelevated_clients {
+        WindowsPipeIntegrity::High
+    } else {
+        WindowsPipeIntegrity::Medium
+    }
+}
+
 #[cfg(not(target_os = "linux"))]
 pub(crate) fn sample_terminal_telemetry(
     _shell_pid: u32,
@@ -769,6 +845,59 @@ mod tests {
         assert_eq!(
             read_limited_reader(input, 16).expect("limited read"),
             LimitedRead::Complete(b"image".to_vec())
+        );
+    }
+
+    #[test]
+    fn windows_pipe_sddl_authorizes_the_account_and_bounds_integrity() {
+        assert_eq!(
+            super::windows_local_pipe_sddl(
+                super::WindowsPipeEndpoint::Api,
+                "S-1-5-21-1-2-3-1001",
+                super::WindowsPipeIntegrity::High,
+            ),
+            "D:P(A;;GA;;;SY)(A;;GRGW;;;S-1-5-21-1-2-3-1001)S:(ML;;NRNW;;;HI)"
+        );
+        assert_eq!(
+            super::windows_local_pipe_sddl(
+                super::WindowsPipeEndpoint::Terminal,
+                "S-1-5-21-1-2-3-1001",
+                super::WindowsPipeIntegrity::Medium,
+            ),
+            "D:P(A;;GA;;;SY)(A;;GA;;;S-1-5-21-1-2-3-1001)S:(ML;;NRNW;;;ME)"
+        );
+        // Both endpoints deny read and write below their integrity label.
+        for endpoint in [
+            super::WindowsPipeEndpoint::Api,
+            super::WindowsPipeEndpoint::Terminal,
+        ] {
+            let sddl = super::windows_local_pipe_sddl(
+                endpoint,
+                "S-1-5-18",
+                super::WindowsPipeIntegrity::High,
+            );
+            assert!(sddl.ends_with("S:(ML;;NRNW;;;HI)"), "{sddl}");
+            assert!(sddl.contains("(A;;GA;;;SY)"), "{sddl}");
+        }
+    }
+
+    #[test]
+    fn elevated_servers_need_consent_before_admitting_ordinary_clients() {
+        use super::{windows_pipe_integrity, WindowsPipeIntegrity};
+        assert_eq!(
+            windows_pipe_integrity(true, false),
+            WindowsPipeIntegrity::High,
+            "an elevated server refuses ordinary same-account clients by default"
+        );
+        assert_eq!(
+            windows_pipe_integrity(true, true),
+            WindowsPipeIntegrity::Medium,
+            "explicit consent admits ordinary same-account clients"
+        );
+        assert_eq!(
+            windows_pipe_integrity(false, false),
+            WindowsPipeIntegrity::Medium,
+            "an ordinary server is reachable by its own account"
         );
     }
 }

@@ -47,7 +47,7 @@ pub(crate) fn connect_local_stream(path: &Path) -> io::Result<LocalStream> {
 
         let name = path.to_string_lossy().to_string();
         let name = name.to_ns_name::<GenericNamespaced>()?;
-        LocalStream::connect(name)
+        LocalStream::connect(name).map_err(crate::platform::local_server_connection_error)
     }
 }
 
@@ -66,12 +66,20 @@ pub(crate) fn bind_local_listener(path: &Path) -> io::Result<LocalListener> {
     #[cfg(windows)]
     {
         use interprocess::local_socket::{prelude::*, GenericNamespaced, ListenerOptions};
+        use interprocess::os::windows::local_socket::ListenerOptionsExt as _;
 
         let name = path.to_string_lossy().to_string();
         let name = name.to_ns_name::<GenericNamespaced>()?;
+        // The account SID plus an integrity label bound who may control this
+        // server; an elevated server refuses ordinary same-account clients
+        // unless the operator consented at startup.
+        let security_descriptor = crate::platform::local_pipe_security_descriptor(
+            crate::platform::WindowsPipeEndpoint::Api,
+        )?;
         let listener = ListenerOptions::new()
             .name(name)
             .reclaim_name(false)
+            .security_descriptor(security_descriptor)
             .create_sync()?;
         fs::write(path, windows_socket_marker())?;
         Ok(listener)
@@ -143,12 +151,13 @@ pub(crate) fn bind_private_local_listener(path: &Path) -> io::Result<LocalListen
     {
         use interprocess::local_socket::{prelude::*, GenericNamespaced, ListenerOptions};
         use interprocess::os::windows::local_socket::ListenerOptionsExt as _;
-        use interprocess::os::windows::security_descriptor::SecurityDescriptor;
-        use widestring::U16CString;
 
-        let sddl = U16CString::from_str("D:P(A;;GA;;;SY)(A;;GA;;;OW)")
-            .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err))?;
-        let security_descriptor = SecurityDescriptor::deserialize(&sddl)?;
+        // Same cross-elevation policy as the API socket: the account SID with an
+        // integrity label, so a lower-integrity process cannot attach terminals
+        // to an elevated server unless the operator consented at startup.
+        let security_descriptor = crate::platform::local_pipe_security_descriptor(
+            crate::platform::WindowsPipeEndpoint::Terminal,
+        )?;
         let name = path.to_string_lossy().to_string();
         let name = name.to_ns_name::<GenericNamespaced>()?;
         let listener = ListenerOptions::new()
