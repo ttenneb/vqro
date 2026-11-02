@@ -39,7 +39,8 @@ execution overrides. Unix foreground process replacement retains the invoking
 CLI PID and direct-shell-child or Pi ancestry. Windows requires an explicit
 `.exe` program (no implicit batch/shell dispatch); the foreground launcher waits
 for its inherited-console child and returns its exit code. Human transparency
-requires kernel executable identities, live SID/birth/parent proof, an enabled
+requires direct kernel loaded-image bindings (host/launcher to one held host
+executable, child to the held declared executable), live SID/birth/parent proof, an enabled
 exact declaration/generation, complete resolved argv including forwarded user
 tail, and the original owned shell root. Bare programs cannot prove this Windows
 human hop: use an absolute trusted executable. No arbitrary grandchild, name or

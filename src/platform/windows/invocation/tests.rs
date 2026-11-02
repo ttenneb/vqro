@@ -58,24 +58,7 @@ fn fixture() -> (InvocationPeer, LauncherEvidence, ForegroundDeclaration) {
         launcher,
         child_sid: sid.clone(),
         launcher_sid: sid,
-        images: [
-            ImageIdentity {
-                volume: 1,
-                index: 1,
-            },
-            ImageIdentity {
-                volume: 1,
-                index: 1,
-            },
-            ImageIdentity {
-                volume: 1,
-                index: 2,
-            },
-            ImageIdentity {
-                volume: 1,
-                index: 2,
-            },
-        ],
+        image_status: [0; 3],
         declaration: declaration.clone(),
     };
     (peer, proof, declaration)
@@ -85,11 +68,11 @@ fn fixture() -> (InvocationPeer, LauncherEvidence, ForegroundDeclaration) {
 fn transparent_launcher_requires_images_full_tail_generation_and_incarnations() {
     let (peer, proof, declaration) = fixture();
     assert!(launcher_evidence_matches(&peer, &proof, &declaration));
-    for field in 0..12 {
+    for field in 0..14 {
         let (peer, mut proof, mut fresh) = fixture();
         match field {
-            0 => proof.images[1].index += 1,
-            1 => proof.images[3].volume += 1,
+            0 => proof.image_status[1] = -1073741790, // STATUS_ACCESS_DENIED
+            1 => proof.image_status[0] = 1, // Positive status is NOT exact STATUS_SUCCESS.
             2 => {
                 proof.declaration.argv.pop();
             }
@@ -102,6 +85,8 @@ fn transparent_launcher_requires_images_full_tail_generation_and_incarnations() 
             9 => proof.launcher_sid = "S-1-5-18".into(),
             10 => proof.child.birth += 1,
             11 => proof.launcher.parent_pid += 1,
+            12 => proof.image_status[2] = -1073741823, // STATUS_UNSUCCESSFUL: different mapped file.
+            13 => proof.image_status[0] = -1073741821, // STATUS_INVALID_INFO_CLASS: no fallback.
             _ => unreachable!(),
         }
         assert!(
@@ -123,6 +108,102 @@ fn reused_parent_ordering_never_proves_the_launcher() {
     peer.ancestry[1].birth = 400;
     proof.launcher.birth = 400;
     assert!(!launcher_evidence_matches(&peer, &proof, &declaration));
+}
+
+#[test]
+fn foreground_freshness_rejects_new_removed_missing_and_capped_descendants() {
+    let snapshot = |children: &[u32]| {
+        let mut entries = vec![WindowsProcessEntry {
+            pid: 10,
+            parent_pid: 1,
+            name: "pwsh.exe".into(),
+            command: OnceLock::new(),
+        }];
+        entries.extend(children.iter().map(|&pid| WindowsProcessEntry {
+            pid,
+            parent_pid: 10,
+            name: "pi.exe".into(),
+            command: OnceLock::new(),
+        }));
+        ProcessSnapshot::new(entries)
+    };
+    let roots = [(10, 100)];
+    let before = foreground_process_set(&roots, &snapshot(&[20])).unwrap();
+    assert_eq!(
+        Some(before.clone()),
+        foreground_process_set(&roots, &snapshot(&[20]))
+    );
+    assert_ne!(
+        Some(before.clone()),
+        foreground_process_set(&roots, &snapshot(&[20, 30]))
+    );
+    assert_ne!(Some(before), foreground_process_set(&roots, &snapshot(&[])));
+    assert!(foreground_process_set(&[(99, 100)], &snapshot(&[20])).is_none());
+    let oversized: Vec<_> = (20..20 + FOREGROUND_QUERY_LIMIT as u32).collect();
+    assert!(foreground_process_set(&roots, &snapshot(&oversized)).is_none());
+    assert!(foreground_topology_is_current(
+        &roots,
+        &snapshot(&[20, 30]),
+        &snapshot(&[20, 30])
+    ));
+    assert!(!foreground_topology_is_current(
+        &roots,
+        &snapshot(&[20]),
+        &snapshot(&[20, 30])
+    ));
+    assert!(!foreground_topology_is_current(
+        &roots,
+        &snapshot(&[20, 30]),
+        &snapshot(&[20])
+    ));
+    let moved = snapshot(&[20, 30]);
+    let mut moved_entries = moved.entries;
+    moved_entries
+        .iter_mut()
+        .find(|entry| entry.pid == 30)
+        .unwrap()
+        .parent_pid = 20;
+    assert!(!foreground_topology_is_current(
+        &roots,
+        &snapshot(&[20, 30]),
+        &ProcessSnapshot::new(moved_entries)
+    ));
+    assert!(!foreground_topology_is_current(
+        &roots,
+        &snapshot(&[20]),
+        &snapshot(&oversized)
+    ));
+}
+
+#[test]
+fn loaded_mapping_rejects_a_rebound_same_name_file() {
+    let executable = std::env::current_exe().unwrap();
+    let file = open_image_file(&executable).expect("held executable");
+    assert_eq!(
+        0,
+        loaded_image_status(unsafe { GetCurrentProcess() }, &file)
+    );
+    let directory = std::env::temp_dir().join(format!(
+        "vqro-image-rebind-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir(&directory).unwrap();
+    let old = directory.join("old-file");
+    let rebound = directory.join(executable.file_name().unwrap());
+    std::fs::write(&old, b"not the running executable").unwrap();
+    std::fs::rename(&old, &rebound).unwrap();
+    let candidate = open_image_file(&rebound).expect("same name, unrelated file");
+    assert_ne!(
+        0,
+        loaded_image_status(unsafe { GetCurrentProcess() }, &candidate)
+    );
+    drop(candidate);
+    std::fs::remove_file(rebound).unwrap();
+    std::fs::remove_dir(directory).unwrap();
 }
 
 #[test]

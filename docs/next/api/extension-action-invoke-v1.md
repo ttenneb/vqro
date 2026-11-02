@@ -93,7 +93,9 @@ SID; inaccessible or missing metadata is never a boundary. Every retained entry
 needs bounded complete argv and fresh SID/birth/parent rechecks, with parent-birth
 ordering to reject reused-parent topology. A complete process snapshot is capped
 at 32768 entries; selected-job evidence queries at most 256 relevant processes
-per pass, then rechecks them. Cap, partial-query or inconsistent evidence yields
+per pass, compares the complete relevant descendant set and parent topology with
+its final fresh snapshot, then rechecks retained metadata. Added/removed/moved
+trees, cap, partial-query or inconsistent evidence yield
 no agent proof. Selection bypasses both foreground caches, covers shell and direct
 known-agent roots, and excludes escaped/out-of-chain jobs. Each request-local
 observation binds root and selected PID/birth; actor lookup still requires the

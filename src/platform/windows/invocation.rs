@@ -38,10 +38,14 @@ pub(crate) fn invocation_peer(stream: &crate::ipc::LocalStream) -> Option<Invoca
 }
 
 fn live_process(pid: u32) -> Option<ProcessHandle> {
+    live_process_with_access(pid, PROCESS_QUERY_LIMITED_INFORMATION)
+}
+
+fn live_process_with_access(pid: u32, access: u32) -> Option<ProcessHandle> {
     if pid == 0 {
         return None;
     }
-    let handle = ProcessHandle::open(pid, PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE)?;
+    let handle = ProcessHandle::open(pid, access | PROCESS_SYNCHRONIZE)?;
     // SAFETY: the RAII handle is live and has query/synchronize rights.
     if unsafe { GetProcessId(handle.0) } != pid
         || unsafe { WaitForSingleObject(handle.0, 0) } != WAIT_TIMEOUT
@@ -272,21 +276,9 @@ fn foreground_selection(roots: &[(u32, u64)], sid: &str) -> Option<Vec<Invocatio
         .iter()
         .map(|entry| (entry.pid, entry.parent_pid))
         .collect();
-    let mut required = HashSet::new();
-    for &(root, _) in roots {
-        required.insert(root);
-        for descendant in descendant_entries(root, &snapshot) {
-            required.insert(descendant.pid);
-            if required.len() > FOREGROUND_QUERY_LIMIT {
-                return None;
-            }
-        }
-    }
-    if required.len() > FOREGROUND_QUERY_LIMIT {
-        return None;
-    }
+    let required = foreground_process_set(roots, &snapshot)?;
     let mut captured = Vec::new();
-    for pid in required {
+    for &pid in &required {
         let (process, handle) = entry(pid, &topology, sid)?;
         let target = snapshot.entry(pid)?;
         if !target.name.eq_ignore_ascii_case(&process.process.name) {
@@ -338,7 +330,17 @@ fn foreground_selection(roots: &[(u32, u64)], sid: &str) -> Option<Vec<Invocatio
     }
     // Bound complete-query work, and reject changes/partial reads rather than
     // selecting from an incomplete tree. Handles retain all queried lifetimes.
-    let fresh_topology = parents()?;
+    let fresh_snapshot = topology_snapshot()?;
+    // Rechecking only old entries misses a new agent/candidate born during
+    // acquisition. Require the entire relevant set unchanged, not a prefix.
+    if !foreground_topology_is_current(roots, &snapshot, &fresh_snapshot) {
+        return None;
+    }
+    let fresh_topology = fresh_snapshot
+        .entries
+        .iter()
+        .map(|entry| (entry.pid, entry.parent_pid))
+        .collect();
     for (expected, _) in &captured {
         let (current, _handle) = entry(expected.pid, &fresh_topology, sid)?;
         if &current != expected {
@@ -346,6 +348,39 @@ fn foreground_selection(roots: &[(u32, u64)], sid: &str) -> Option<Vec<Invocatio
         }
     }
     Some(result)
+}
+
+fn foreground_topology_is_current(
+    roots: &[(u32, u64)],
+    before: &ProcessSnapshot,
+    after: &ProcessSnapshot,
+) -> bool {
+    let Some(required) = foreground_process_set(roots, before) else {
+        return false;
+    };
+    foreground_process_set(roots, after).as_ref() == Some(&required)
+        && required.iter().all(|pid| {
+            before.entry(*pid).map(|entry| entry.parent_pid)
+                == after.entry(*pid).map(|entry| entry.parent_pid)
+        })
+}
+
+fn foreground_process_set(
+    roots: &[(u32, u64)],
+    snapshot: &ProcessSnapshot,
+) -> Option<HashSet<u32>> {
+    let mut required = HashSet::new();
+    for &(root, _) in roots {
+        snapshot.entry(root)?;
+        required.insert(root);
+        for descendant in descendant_entries(root, snapshot) {
+            required.insert(descendant.pid);
+            if required.len() > FOREGROUND_QUERY_LIMIT {
+                return None;
+            }
+        }
+    }
+    (required.len() <= FOREGROUND_QUERY_LIMIT).then_some(required)
 }
 
 #[repr(C)]
@@ -386,29 +421,22 @@ fn boot_id() -> Option<String> {
     )
 }
 
-#[derive(Debug, PartialEq, Eq)]
-struct ImageIdentity {
-    volume: u32,
-    index: u64,
-}
-
-fn image_identity(path: &Path) -> Option<(ImageIdentity, OwnedHandle)> {
+fn open_image_file(path: &Path) -> Option<OwnedHandle> {
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Storage::FileSystem::{
-        CreateFileW, GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION, FILE_READ_ATTRIBUTES,
-        FILE_SHARE_READ, OPEN_EXISTING,
+        CreateFileW, FILE_EXECUTE, FILE_SHARE_READ, OPEN_EXISTING, SYNCHRONIZE,
     };
     let mut path: Vec<u16> = path.as_os_str().encode_wide().collect();
     if path.contains(&0) {
         return None;
     }
     path.push(0);
-    // Keep the executable file from being rewritten/renamed through this proof.
-    // Compare file identity, not Windows spelling/case, argv0 or a basename.
+    // Hold both trusted files without write/delete sharing throughout proof.
+    // A pathname/file ID alone cannot attest an earlier loaded image.
     let raw = unsafe {
         CreateFileW(
             path.as_ptr(),
-            FILE_READ_ATTRIBUTES,
+            FILE_EXECUTE | SYNCHRONIZE,
             FILE_SHARE_READ,
             null_mut(),
             OPEN_EXISTING,
@@ -419,20 +447,26 @@ fn image_identity(path: &Path) -> Option<(ImageIdentity, OwnedHandle)> {
     if raw == INVALID_HANDLE_VALUE {
         return None;
     }
-    let handle = unsafe { OwnedHandle::from_raw_handle(raw) };
-    let mut information = MaybeUninit::<BY_HANDLE_FILE_INFORMATION>::zeroed();
-    if unsafe { GetFileInformationByHandle(raw, information.as_mut_ptr()) } == 0 {
-        return None;
+    Some(unsafe { OwnedHandle::from_raw_handle(raw) })
+}
+
+fn loaded_image_status(process: HANDLE, file: &OwnedHandle) -> i32 {
+    use windows_sys::Wdk::System::Threading::ProcessImageFileMapping;
+    let mut input = file.as_raw_handle();
+    // Native class 44 reads an input HANDLE, despite the query API name. Exact
+    // STATUS_SUCCESS means the file shares the loaded image's SectionObjectPointer.
+    // See https://ntdoc.m417z.com/processinfoclass#processimagefilemapping-44.
+    // SAFETY: live process/file handles and exact native HANDLE-sized input;
+    // both are held through the remaining incarnation/declaration checks.
+    unsafe {
+        NtQueryInformationProcess(
+            process,
+            ProcessImageFileMapping,
+            (&mut input as *mut HANDLE).cast(),
+            size_of::<HANDLE>() as u32,
+            null_mut(),
+        )
     }
-    let information = unsafe { information.assume_init() };
-    Some((
-        ImageIdentity {
-            volume: information.dwVolumeSerialNumber,
-            index: (u64::from(information.nFileIndexHigh) << 32)
-                | u64::from(information.nFileIndexLow),
-        },
-        handle,
-    ))
 }
 
 struct LauncherEvidence {
@@ -440,8 +474,9 @@ struct LauncherEvidence {
     launcher: InvocationProcess,
     child_sid: String,
     launcher_sid: String,
-    // Host, launcher, declaration program, actual child; kernel file identities.
-    images: [ImageIdentity; 4],
+    // Direct kernel mapping checks: host->host file, launcher->SAME host file,
+    // child->declared file. Only exact status zero is proof; never path fallback.
+    image_status: [i32; 3],
     declaration: crate::extension_cli::ForegroundDeclaration,
 }
 
@@ -462,8 +497,7 @@ fn launcher_evidence_matches(
         && child.birth >= launcher.birth
         && &proof.child_sid == sid
         && &proof.launcher_sid == sid
-        && proof.images[0] == proof.images[1]
-        && proof.images[2] == proof.images[3]
+        && proof.image_status == [0; 3]
         && child.process.argv.as_ref() == Some(&proof.declaration.argv)
         && &proof.declaration == fresh
 }
@@ -479,8 +513,10 @@ fn transparent_launcher_proof(peer: &InvocationPeer) -> Option<()> {
     if child.parent_pid != launcher.pid || child.birth < launcher.birth {
         return None;
     }
-    let child_handle = live_process(child.pid)?;
-    let launcher_handle = live_process(launcher.pid)?;
+    // Stronger query access is confined to this optional launcher refinement;
+    // ordinary ancestry/birth and known-agent observations retain limited access.
+    let child_handle = live_process_with_access(child.pid, PROCESS_QUERY_INFORMATION)?;
+    let launcher_handle = live_process_with_access(launcher.pid, PROCESS_QUERY_INFORMATION)?;
     if process_creation_time(child_handle.0) != Some(child.birth)
         || process_creation_time(launcher_handle.0) != Some(launcher.birth)
     {
@@ -491,16 +527,14 @@ fn transparent_launcher_proof(peer: &InvocationPeer) -> Option<()> {
     if child.process.argv.as_ref()? != &declaration.argv {
         return None;
     }
-    let (host_image, _host_file) = image_identity(&std::env::current_exe().ok()?)?;
-    let (launcher_image, _launcher_file) =
-        image_identity(Path::new(&process_executable_path(launcher_handle.0)?))?;
-    if launcher_image != host_image {
-        return None;
-    }
-    let (declared_image, _declared_file) = image_identity(Path::new(declaration.argv.first()?))?;
-    let (child_image, _child_file) =
-        image_identity(Path::new(&process_executable_path(child_handle.0)?))?;
-    if child_image != declared_image {
+    let host_file = open_image_file(&std::env::current_exe().ok()?)?;
+    let declared_file = open_image_file(Path::new(declaration.argv.first()?))?;
+    let image_status = [
+        loaded_image_status(unsafe { GetCurrentProcess() }, &host_file),
+        loaded_image_status(launcher_handle.0, &host_file),
+        loaded_image_status(child_handle.0, &declared_file),
+    ];
+    if image_status != [0; 3] {
         return None;
     }
     let topology = parents()?;
@@ -519,7 +553,7 @@ fn transparent_launcher_proof(peer: &InvocationPeer) -> Option<()> {
         launcher: fresh_launcher,
         child_sid: account_sid_text(child_handle.0).ok()?,
         launcher_sid: account_sid_text(launcher_handle.0).ok()?,
-        images: [host_image, launcher_image, declared_image, child_image],
+        image_status,
         declaration,
     };
     // Fresh full parse + digest + enabled/unambiguous registration, not a static

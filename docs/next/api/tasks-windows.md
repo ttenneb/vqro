@@ -55,7 +55,7 @@ setting an inherited CTRL_C-ignore flag. Native close/logoff and interrupt
 behavior must be tested; it is not guaranteed by cross-compilation.
 
 Only one extra launcher hop can be transparent to human classification. The
-host must prove live parent/incarnations/SIDs, kernel executable file identities,
+host must prove live parent/incarnations/SIDs, direct loaded-image bindings,
 an enabled unambiguous exact declaration/generation, and **all** resolved static
 arguments plus the literally forwarded user tail. A name, argv prefix,
 environment variable, arbitrary grandchild or failed query is never sufficient.
@@ -63,6 +63,23 @@ An original owned non-agent shell root must still be proved. The Windows walk
 can stop before a positively matched current-server PID/birth or foreign SID;
 metadata errors are failures, not boundaries. A root beyond the retained
 64-process prefix is Unknown.
+
+Loaded-image proof holds two executable files: the trusted host file and the
+resolved declared program. Native `NtQueryInformationProcess` class 44
+(`ProcessImageFileMapping`) must return **exact STATUS_SUCCESS** for host → host
+file, launcher → that same host file, and child → declared file. A pathname or
+file ID alone does not establish a previously loaded image after rename/rebind.
+Stronger process-query and file execute/synchronize rights apply only to this
+optional launcher proof. Unsupported, denied, mismatched or other statuses mean
+no transparent human hop; there is no path-only fallback. Native API availability
+and rename behavior require Windows validation. See the
+[native class contract](https://ntdoc.m417z.com/processinfoclass#processimagefilemapping-44).
+
+Selected-job capture compares the entire relevant root/descendant PID union and
+parent topology against its final complete bounded snapshot, then rechecks all
+retained SID/birth/argv metadata. Added, removed, moved, partial or capped trees
+provide no agent proof. These are bounded observations, not an atomic freeze of
+process creation.
 
 ## Data and uncertainty
 
