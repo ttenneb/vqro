@@ -27,14 +27,14 @@ struct Probe {
     root_pid: u32,
     root_birth: Option<u64>,
     known_agent: Option<crate::detect::Agent>,
-    foreground: Box<dyn Fn() -> Option<u32> + Send>,
+    foreground: Box<dyn Fn() -> Option<(u32, u64)> + Send>,
 }
 impl Probe {
     fn observe(&self, deadline: Instant) -> Option<String> {
         if Instant::now() >= deadline || self.root_birth.is_none() || self.known_agent.is_none() {
             return None;
         }
-        let foreground = (self.foreground)()?;
+        let (foreground, foreground_birth) = (self.foreground)()?;
         if Instant::now() >= deadline {
             return None;
         }
@@ -42,7 +42,9 @@ impl Probe {
         // not substitute for kernel socket credentials on caller attribution.
         let peer = crate::platform::invocation_peer_for_process(foreground)?;
         if !crate::platform::invocation_peer_is_current(&peer)
-            || (self.foreground)() != Some(foreground)
+            || peer.ancestry.first().map(|entry| (entry.pid, entry.birth))
+                != Some((foreground, foreground_birth))
+            || (self.foreground)() != Some((foreground, foreground_birth))
         {
             return None;
         }
@@ -178,7 +180,7 @@ mod tests {
             known_agent: Some(crate::detect::Agent::Pi),
             foreground: Box::new(|| {
                 std::thread::sleep(Duration::from_millis(15));
-                Some(u32::MAX)
+                Some((u32::MAX, 1))
             }),
         };
         assert_eq!(

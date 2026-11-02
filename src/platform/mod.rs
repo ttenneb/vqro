@@ -240,49 +240,50 @@ pub(crate) fn sample_terminal_telemetry(
     TerminalTelemetrySample::Unsupported
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 pub(crate) fn socket_peer_birth(_stream: &crate::ipc::LocalStream) -> Option<(u32, u64)> {
     None
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 pub(crate) fn invocation_peer(
     _stream: &crate::ipc::LocalStream,
 ) -> Option<crate::action_invocation::InvocationPeer> {
     None
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 pub(crate) fn invocation_peer_for_process(
     _pid: u32,
 ) -> Option<crate::action_invocation::InvocationPeer> {
     None
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 pub(crate) fn invocation_peer_is_current(_peer: &crate::action_invocation::InvocationPeer) -> bool {
     false
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 pub(crate) fn invocation_process_birth(_pid: u32) -> Option<u64> {
     None
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos", test))]
+#[cfg(any(target_os = "linux", target_os = "macos", windows, test))]
 const INVOCATION_ANCESTRY_LIMIT: usize = 64;
 
-#[cfg(any(target_os = "linux", target_os = "macos", test))]
+#[cfg(any(target_os = "linux", target_os = "macos", windows, test))]
 enum InvocationAncestor {
     Process(crate::action_invocation::InvocationProcess),
     // A positively observed platform boundary, never an I/O/metadata error.
-    // Linux currently walks to PID 0; macOS excludes foreign-euid ancestors.
+    // Linux walks to PID 0; macOS stops before foreign euid; Windows before
+    // a foreign SID or positively matched current server incarnation.
     #[cfg_attr(target_os = "linux", allow(dead_code))]
     Boundary,
 }
 
 /// A root outside the retained chain cannot be used by caller classification.
-#[cfg(any(target_os = "linux", target_os = "macos", test))]
+#[cfg(any(target_os = "linux", target_os = "macos", windows, test))]
 fn capture_invocation_ancestry(
     mut pid: u32,
     mut read: impl FnMut(u32) -> Option<InvocationAncestor>,
@@ -314,7 +315,7 @@ fn capture_invocation_ancestry(
 }
 
 /// Recheck lifetime and topology; same-PID exec is deliberately one lifetime.
-#[cfg(any(target_os = "linux", target_os = "macos", test))]
+#[cfg(any(target_os = "linux", target_os = "macos", windows, test))]
 fn invocation_ancestry_is_current(
     ancestry: &[crate::action_invocation::InvocationProcess],
     mut read: impl FnMut(u32) -> Option<(u64, u32)>,
@@ -370,7 +371,11 @@ pub(crate) fn foreground_cli_command(command: std::process::Command) -> std::io:
     {
         unix_common::foreground_cli_command(command)
     }
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    #[cfg(windows)]
+    {
+        windows::foreground_cli_command_platform(command)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
     {
         let _ = command;
         Err(std::io::Error::new(
@@ -930,7 +935,12 @@ mod invocation_identity_tests {
         let pid = std::process::id();
         let peer = invocation_peer_for_process(pid).expect("current same-user process ancestry");
         // SAFETY: geteuid has no arguments or memory preconditions.
-        assert_eq!(peer.uid, unsafe { libc::geteuid() });
+        assert_eq!(
+            peer.account,
+            crate::action_invocation::InvocationAccount::Unix {
+                uid: unsafe { libc::geteuid() }
+            }
+        );
         let first = peer.ancestry.first().expect("observed process");
         assert_eq!(first.pid, pid);
         assert_eq!(Some(first.birth), invocation_process_birth(pid));
@@ -952,9 +962,11 @@ mod invocation_identity_tests {
                 continue;
             }
             let peer = InvocationPeer {
-                uid: 501,
+                account: crate::action_invocation::InvocationAccount::Unix { uid: 501 },
                 boot_id: "boot".into(),
                 ancestry: ancestry.expect("same-user prefix"),
+                foreground_cli: false,
+                foreground: None,
             };
             assert!(peer.ancestry.iter().all(|entry| entry.pid != boundary));
             let execution = crate::action_invocation::observed_execution(
@@ -1005,9 +1017,11 @@ mod invocation_identity_tests {
         assert_eq!(ancestry.len(), INVOCATION_ANCESTRY_LIMIT);
         assert!(!ancestry.iter().any(|entry| entry.pid == 65));
         let peer = InvocationPeer {
-            uid: 501,
+            account: crate::action_invocation::InvocationAccount::Unix { uid: 501 },
             boot_id: "boot".into(),
             ancestry,
+            foreground_cli: false,
+            foreground: None,
         };
         assert_eq!(
             crate::action_invocation::observed_execution(

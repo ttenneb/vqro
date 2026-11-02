@@ -557,7 +557,7 @@ mod tests {
                 "req",
                 &InvocationCaller::HumanUnverified {
                     terminal_id: "term".into(),
-                    uid: 1000,
+                    account: crate::action_invocation::InvocationAccount::Unix { uid: 1000 },
                 }
             )
             .is_none(),

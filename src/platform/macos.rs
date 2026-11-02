@@ -127,21 +127,26 @@ pub(crate) fn invocation_peer_for_process(
         ))
     })?;
     let peer = crate::action_invocation::InvocationPeer {
-        uid,
+        account: crate::action_invocation::InvocationAccount::Unix { uid },
         boot_id,
         ancestry,
+        foreground_cli: false,
+        foreground: None,
     };
     invocation_peer_is_current(&peer).then_some(peer)
 }
 
 pub(crate) fn invocation_peer_is_current(peer: &crate::action_invocation::InvocationPeer) -> bool {
+    let crate::action_invocation::InvocationAccount::Unix { uid } = &peer.account else {
+        return false;
+    };
     // SAFETY: geteuid has no arguments or memory preconditions.
-    if peer.uid != unsafe { libc::geteuid() } {
+    if *uid != unsafe { libc::geteuid() } {
         return false;
     }
     super::invocation_ancestry_is_current(&peer.ancestry, |pid| {
         let info = invocation_bsdinfo(pid)?;
-        (info.pbi_uid == peer.uid).then_some((invocation_birth(&info)?, info.pbi_ppid))
+        (info.pbi_uid == *uid).then_some((invocation_birth(&info)?, info.pbi_ppid))
     })
 }
 
@@ -1316,9 +1321,11 @@ mod tests {
             },
         };
         let mut peer = crate::action_invocation::InvocationPeer {
-            uid,
+            account: crate::action_invocation::InvocationAccount::Unix { uid },
             boot_id: invocation_boot_id().expect("boot namespace"),
             ancestry: vec![entry],
+            foreground_cli: false,
+            foreground: None,
         };
         assert_eq!(invocation_boot_id().as_deref(), Some(peer.boot_id.as_str()));
         assert_eq!(invocation_process_birth(pid), Some(birth));
@@ -1330,9 +1337,11 @@ mod tests {
         peer.ancestry[0].parent_pid = 0;
         assert!(!invocation_peer_is_current(&peer));
         peer.ancestry[0].parent_pid = info.pbi_ppid;
-        peer.uid = uid.wrapping_add(1);
+        peer.account = crate::action_invocation::InvocationAccount::Unix {
+            uid: uid.wrapping_add(1),
+        };
         assert!(!invocation_peer_is_current(&peer));
-        peer.uid = uid;
+        peer.account = crate::action_invocation::InvocationAccount::Unix { uid };
         child.kill().expect("stop owned child");
         child.wait().expect("reap owned child");
         assert!(!invocation_peer_is_current(&peer));

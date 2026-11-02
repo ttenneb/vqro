@@ -1,14 +1,15 @@
 # Experimental Tasks core
 
-Linux/macOS trusted protocol-2 executable, Python 3 stdlib SQLite. Task policy and
+Trusted protocol-2 executable, Python 3 stdlib SQLite. Task policy and
 persistence live here; the host supplies neutral invocation/caller observations.
 Not sandboxed, not secure human authentication, not Pi todo integration.
 
-The store is platform-independent: `$XDG_STATE_HOME/vqro/extensions/vqro.tasks`
-when set, otherwise `~/.local/state/vqro/extensions/vqro.tasks` on Linux **and
-macOS**. The provider creates the directory; no Linux-specific state-directory
-API is needed. `provider.py --data-dir` overrides it. Native macOS verification
-is required; the process-based demo harnesses currently remain Linux-only.
+Linux/macOS use `$XDG_STATE_HOME/vqro/extensions/vqro.tasks` when set, otherwise
+`~/.local/state/vqro/extensions/vqro.tasks`. Windows uses the absolute local
+`%LOCALAPPDATA%/vqro/extensions/vqro.tasks` directory. The provider creates it;
+`provider.py --data-dir` overrides it. Windows needs an explicitly configured
+absolute CPython executable in the exact admitted manifest (see below). Native
+macOS/Windows verification is required; process-based demos remain Linux-only.
 
 Durable addressed messages are a second record family in the same store
 (`messages.py`, schema v4): `vqro message send/list/claim/edit` with the sender
@@ -34,6 +35,7 @@ the tab pane entry is gone from the manifest, and a badge click opens the pane
 panels instead of launching another terminal app. `view.py` stays as the
 extension's formatting library and as the shape reference for the retired tab.
 
+- [Windows interpreter setup, identity and native trial](../../docs/next/api/tasks-windows.md)
 - [Tasks policy, CLI, receipts and limits](../../docs/next/api/tasks-core-v0.md)
 - [The retired full-tab view, kept as the shape reference](../../docs/next/api/tasks-view-v0.md)
 - [Public generic invocation and authority boundary](../../docs/next/api/extension-action-invoke-v1.md)

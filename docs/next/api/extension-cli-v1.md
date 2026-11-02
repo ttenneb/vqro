@@ -1,8 +1,9 @@
 # Local extension CLI contributions v1
 
-Available: manifest-v1 executable extensions on Linux/macOS. Windows foreground
-command replacement is **not supported yet**; moved commands fail clearly, with
-no caller-classification workaround. Remote execution is not provided here.
+Available: manifest-v1 executable extensions on Linux/macOS and experimental
+Windows foreground spawn/wait. Windows cannot replace a process in place: only
+an exactly proved single launcher hop can preserve human classification (see
+[Windows requirements](tasks-windows.md)). Remote execution is not provided here.
 
 An enabled local extension may contribute aliases without adding a core product
 command or API method:
@@ -34,9 +35,17 @@ extension root, without parent/root escapes. Bare programs use PATH. User
 arguments are forwarded literally with unchanged caller cwd, stdin, stdout,
 stderr and exit status; they undergo no shell expansion. The host supplies
 neutral extension-root, binary and selected socket context, never caller/UID/
-execution overrides. Foreground process replacement retains the invoking CLI
-PID and direct-shell-child or Pi ancestry. All API writes still receive fresh
-host-attributed callers and existing service admission/capability checks.
+execution overrides. Unix foreground process replacement retains the invoking
+CLI PID and direct-shell-child or Pi ancestry. Windows requires an explicit
+`.exe` program (no implicit batch/shell dispatch); the foreground launcher waits
+for its inherited-console child and returns its exit code. Human transparency
+requires kernel executable identities, live SID/birth/parent proof, an enabled
+exact declaration/generation, complete resolved argv including forwarded user
+tail, and the original owned shell root. Bare programs cannot prove this Windows
+human hop: use an absolute trusted executable. No arbitrary grandchild, name or
+environment-marker exception exists. Agent/foreground rules are unchanged.
+All API writes still receive fresh host-attributed callers and existing service
+admission/capability checks.
 
 This uses the existing cooperative same-user local executable-extension trust,
 **not WASM sandboxing**. Installation/discovery grants no API authority. A

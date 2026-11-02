@@ -1,5 +1,5 @@
 //! Neutral attribution for trusted executable action calls.
-//! Cooperative Linux/macOS process-lifetime identity, not same-user human authentication.
+//! Cooperative local process-lifetime identity, not same-user human authentication.
 //! Same-PID exec is the same process lifetime; imported roots lack authority proof.
 use serde::Serialize;
 
@@ -11,11 +11,36 @@ pub(crate) struct InvocationProcess {
     pub process: crate::platform::ForegroundProcess,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(untagged)]
+pub(crate) enum InvocationAccount {
+    #[cfg_attr(not(unix), allow(dead_code))]
+    // Unix account serialization is also a contract test on Windows.
+    Unix { uid: u32 },
+    #[cfg_attr(not(windows), allow(dead_code))]
+    // Windows account serialization is also a contract test on Unix.
+    Windows { sid: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct InvocationForeground {
+    pub root_pid: u32,
+    pub root_birth: u64,
+    pub pid: u32,
+    pub birth: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct InvocationPeer {
-    pub uid: u32,
+    pub account: InvocationAccount,
     pub boot_id: String,
     pub ancestry: Vec<InvocationProcess>,
+    /// Off-actor proof of the exact one-hop foreground CLI launcher. Never
+    /// inferred from a name, environment marker or arbitrary grandchild depth.
+    pub foreground_cli: bool,
+    /// None uses live runtime PTY evidence. Some uses only these request-local
+    /// off-actor selected-job observations; an empty set grants no agent proof.
+    pub foreground: Option<Vec<InvocationForeground>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -24,7 +49,8 @@ pub(crate) enum InvocationCaller {
     Unknown,
     HumanUnverified {
         terminal_id: String,
-        uid: u32,
+        #[serde(flatten)]
+        account: InvocationAccount,
     },
     Agent {
         terminal_id: String,
@@ -44,8 +70,17 @@ struct TerminalEvidence<'a> {
     session: Option<&'a crate::agent_resume::PersistedAgentSession>,
 }
 
-fn is_shell(name: &str) -> bool {
-    matches!(name, "bash" | "sh" | "zsh" | "fish" | "dash")
+fn is_shell(name: &str, account: &InvocationAccount) -> bool {
+    match account {
+        InvocationAccount::Unix { .. } => matches!(name, "bash" | "sh" | "zsh" | "fish" | "dash"),
+        InvocationAccount::Windows { .. } => {
+            let name = name.to_ascii_lowercase();
+            matches!(
+                name.trim_end_matches(".exe"),
+                "bash" | "sh" | "zsh" | "fish" | "dash" | "cmd" | "powershell" | "pwsh"
+            )
+        }
+    }
 }
 
 fn is_shell_wrapper(process: &crate::platform::ForegroundProcess) -> bool {
@@ -75,13 +110,36 @@ fn classify(peer: &InvocationPeer, terminal: TerminalEvidence<'_>) -> Option<Inv
     if terminal.root_birth != Some(peer.ancestry[root_index].birth) {
         return Some(InvocationCaller::Unknown);
     }
+    let foreground = match &peer.foreground {
+        None => terminal.foreground,
+        Some(observations) => {
+            let mut proofs = observations
+                .iter()
+                .filter(|proof| proof.root_pid == terminal.root_pid);
+            let first = proofs.next();
+            if proofs.next().is_some() {
+                None
+            } else {
+                first
+                    .filter(|proof| {
+                        Some(proof.root_birth) == terminal.root_birth
+                            && peer
+                                .ancestry
+                                .iter()
+                                .any(|entry| entry.pid == proof.pid && entry.birth == proof.birth)
+                    })
+                    .map(|proof| proof.pid)
+                    .filter(|pid| terminal.foreground.is_none_or(|observed| observed == *pid))
+            }
+        }
+    };
     for entry in &peer.ancestry[..=root_index] {
         let job = crate::platform::ForegroundJob {
             process_group_id: entry.pid,
             processes: vec![entry.process.clone()],
         };
         if let Some((agent, _)) = crate::detect::identify_agent_in_job(&job) {
-            if terminal.foreground != Some(entry.pid)
+            if foreground != Some(entry.pid)
                 || is_shell_wrapper(&entry.process)
                 || terminal.known_agent != Some(agent)
             {
@@ -104,10 +162,13 @@ fn classify(peer: &InvocationPeer, terminal: TerminalEvidence<'_>) -> Option<Inv
     }
     let root = &peer.ancestry[root_index];
     Some(
-        if root_index == 1 && !terminal.has_agent_label && is_shell(&root.process.name) {
+        if (root_index == 1 || (root_index == 2 && peer.foreground_cli))
+            && !terminal.has_agent_label
+            && is_shell(&root.process.name, &peer.account)
+        {
             InvocationCaller::HumanUnverified {
                 terminal_id: terminal.terminal_id,
-                uid: peer.uid,
+                account: peer.account.clone(),
             }
         } else {
             InvocationCaller::Unknown
@@ -224,11 +285,140 @@ mod tests {
         );
     }
 
+    #[test]
+    fn captured_selected_job_requires_both_incarnations_and_agrees_with_probe() {
+        let mut peer = agent_peer();
+        peer.account = InvocationAccount::Windows {
+            sid: "S-1-5-21-1-2-3-1001".into(),
+        };
+        let proof = InvocationForeground {
+            root_pid: 10,
+            root_birth: 100,
+            pid: 20,
+            birth: 200,
+        };
+        peer.foreground = Some(vec![proof.clone()]);
+        let mut action = terminal(20, Some(Agent::Pi));
+        action.foreground = None; // Windows actor never queries native processes.
+        assert!(matches!(
+            classify(&peer, action),
+            Some(InvocationCaller::Agent { .. })
+        ));
+        assert_eq!(
+            observed_execution(&peer, "term".into(), 10, Some(100), 20, Some(Agent::Pi)),
+            Some("boot:20:200".into())
+        );
+        assert_eq!(
+            observed_execution(&peer, "term".into(), 10, Some(100), 21, Some(Agent::Pi)),
+            None
+        );
+        for stale in [
+            InvocationForeground {
+                root_birth: 101,
+                ..proof.clone()
+            },
+            InvocationForeground {
+                birth: 201,
+                ..proof.clone()
+            },
+            InvocationForeground {
+                pid: 99,
+                ..proof.clone()
+            },
+        ] {
+            peer.foreground = Some(vec![stale]);
+            assert_eq!(
+                observed_execution(&peer, "term".into(), 10, Some(100), 20, Some(Agent::Pi)),
+                None
+            );
+        }
+        peer.foreground = Some(Vec::new());
+        assert_eq!(
+            observed_execution(&peer, "term".into(), 10, Some(100), 20, Some(Agent::Pi)),
+            None
+        );
+        peer.foreground = Some(vec![proof]);
+        peer.ancestry[0].process.name = "codex".into();
+        peer.ancestry[0].process.argv0 = Some("codex".into());
+        peer.ancestry[0].process.argv = Some(vec!["codex".into()]);
+        assert_eq!(
+            observed_execution(&peer, "term".into(), 10, Some(100), 20, Some(Agent::Pi)),
+            None
+        );
+        let mut direct = self::peer(vec![process(10, 1, 100, "pi")]);
+        direct.foreground = Some(vec![InvocationForeground {
+            root_pid: 10,
+            root_birth: 100,
+            pid: 10,
+            birth: 100,
+        }]);
+        assert_eq!(
+            observed_execution(&direct, "term".into(), 10, Some(100), 10, Some(Agent::Pi)),
+            Some("boot:10:100".into())
+        );
+    }
+
+    #[test]
+    fn windows_sid_shape_preserves_unix_json_and_requires_launcher_proof() {
+        let unix = InvocationCaller::HumanUnverified {
+            terminal_id: "term".into(),
+            account: InvocationAccount::Unix { uid: 1000 },
+        };
+        assert_eq!(
+            serde_json::to_value(unix).unwrap(),
+            serde_json::json!({"class":"human_unverified", "terminal_id":"term", "uid":1000})
+        );
+        let account = InvocationAccount::Windows {
+            sid: "S-1-5-21-1-2-3-1001".into(),
+        };
+        let windows = InvocationCaller::HumanUnverified {
+            terminal_id: "term".into(),
+            account: account.clone(),
+        };
+        assert_eq!(
+            serde_json::to_value(windows).unwrap(),
+            serde_json::json!({"class":"human_unverified", "terminal_id":"term", "sid":"S-1-5-21-1-2-3-1001"})
+        );
+        let mut peer = peer(vec![
+            process(30, 20, 300, "python.exe"),
+            process(20, 10, 200, "vqro.exe"),
+            process(10, 1, 100, "pwsh.exe"),
+        ]);
+        peer.account = account;
+        assert!(matches!(
+            classify(&peer, terminal(10, None)),
+            Some(InvocationCaller::Unknown)
+        ));
+        peer.foreground_cli = true;
+        assert!(matches!(
+            classify(&peer, terminal(10, None)),
+            Some(InvocationCaller::HumanUnverified { .. })
+        ));
+        assert!(matches!(
+            classify(&peer, terminal(20, Some(Agent::Pi))),
+            Some(InvocationCaller::Unknown)
+        ));
+        peer.ancestry.insert(0, process(40, 30, 400, "helper.exe"));
+        assert!(matches!(
+            classify(&peer, terminal(10, None)),
+            Some(InvocationCaller::Unknown)
+        ));
+        peer.ancestry.remove(0);
+        let mut stale = terminal(10, None);
+        stale.root_birth = Some(101);
+        assert!(matches!(
+            classify(&peer, stale),
+            Some(InvocationCaller::Unknown)
+        ));
+    }
+
     fn peer(ancestry: Vec<InvocationProcess>) -> InvocationPeer {
         InvocationPeer {
-            uid: 1000,
+            account: InvocationAccount::Unix { uid: 1000 },
             boot_id: "boot".into(),
             ancestry,
+            foreground_cli: false,
+            foreground: None,
         }
     }
     fn terminal(foreground: u32, known_agent: Option<Agent>) -> TerminalEvidence<'static> {
