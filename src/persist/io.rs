@@ -451,6 +451,9 @@ pub(crate) fn durable_collections_action_sequence() -> std::io::Result<u64> {
 #[derive(serde::Deserialize)]
 struct SessionWriteMetadata {
     version: u32,
+    /// Only the live-handoff high-water reader consults this fact; Windows has
+    /// no live handoff, so the field exists solely for that reader and its tests.
+    #[cfg(any(unix, test))]
     #[serde(default)]
     collections_action_sequence: u64,
 }

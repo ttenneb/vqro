@@ -13,6 +13,7 @@ use crate::workspace::Workspace;
 /// Maximum snapshot version this binary can read.
 pub(crate) const SNAPSHOT_VERSION: u32 = 8;
 /// Admitted input version from pre-tree legacy-authority writers. Never written.
+#[cfg(any(unix, test))]
 pub(crate) const LEGACY_SNAPSHOT_WRITER_VERSION: u32 = 6;
 /// Pane history has no terminal-identity fields and remains wire-compatible at v4.
 pub(super) const HISTORY_SNAPSHOT_VERSION: u32 = 4;

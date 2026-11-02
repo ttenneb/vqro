@@ -49,6 +49,7 @@ pub(crate) const BUNDLE: crate::bundled::DefaultBundle = crate::bundled::Default
     plugin: None,
 };
 
+#[cfg(unix)]
 fn generation_dir() -> PathBuf {
     crate::bundled::generation_dir(
         &crate::bundled::bundled_root(),
@@ -89,6 +90,7 @@ const PER_ENTRY_DIRS: &[(&str, &[&str])] = &[
 ];
 /// Entries of the human's agent dir that are never mirrored into the profile.
 /// `SYSTEM.md` is replaced by [`VQRO_SYSTEM_MD`] rather than linked.
+#[cfg(unix)]
 const UNMIRRORED: &[&str] = &["settings.json", ".ready", "sessions", "tmp", "SYSTEM.md"];
 /// The Vqro system prompt written into the profile.
 const VQRO_SYSTEM_MD: &str = include_str!("SYSTEM.md");
@@ -267,6 +269,7 @@ pub(crate) fn ensure_profile() -> io::Result<()> {
 /// `skills/vqro`. The generation name rule matches the tasks generations. Anything
 /// else - another bundled path, a custom or user generation, or a link outside -
 /// is foreign and preserved.
+#[cfg(unix)]
 fn is_owned_pi_asset(root: &Path, path: &Path) -> bool {
     let Ok(relative) = path.strip_prefix(root) else {
         return false;
@@ -1001,6 +1004,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn owned_pi_asset_matches_only_our_generation_paths() {
         let root = Path::new("/cfg/bundled");
