@@ -158,7 +158,11 @@ Before cutover, fixtures prove old-reader rejection, exact current restore, reta
 
 ## Prior-client compatibility floor
 
-The client floor remains endpoint generation 1 across Local, SSH, and Cloud. Binary downgrade is independent.
+The original client floor was endpoint generation 1 across Local, SSH, and Cloud.
+That floor is superseded by the owner-approved
+[terminal admission decision](terminal-client-admission-v2.md): terminal clients
+require generation 2 or private protocol 24; unchanged named codecs stay frozen.
+Binary downgrade is independent.
 
 Cutover requires frozen generation-1 codec/method fixtures; new-server/current-client, new-server/oldest-maintained-generation-1-client, and current-client/baseline-server behavior; one smoke per transport rather than a Cartesian matrix; package available/unavailable/replaced/stale cases; old-snapshot import; new-snapshot restore; journal recovery; and old-reader rejection.
 
@@ -242,7 +246,9 @@ A remnant is unacceptable if it answers label/archive policy without a current p
 9. Production is exact-Git opt-in; offline/default bundling is deferred and the conformance pin stays test-only.
 10. Workers/persistence use bounded messages; the App actor never waits or joins.
 11. Available archive semantics are frozen; unavailable mode disables all Collection methods without risking PTYs.
-12. Endpoint generation 1 remains the client floor with representative transport tests.
+12. Original generation-1 codec fixtures remain frozen inputs; terminal admission
+    now follows the [generation-2 decision](terminal-client-admission-v2.md), with
+    representative success and connection-local refusal tests.
 13. A lean baseline precedes worker changes; exhaustive matrices are deferred.
 14. `collections_authority.v1` is authoritative; registry, journal, and runtime generations have narrower roles.
 15. Normal package-policy interpretation and degraded Collections are excluded from host remnants.

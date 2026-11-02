@@ -223,7 +223,7 @@ On startup the host:
 
 No invocation lease survives restart or live handoff. Durable approvals survive when exact artifacts do. Pending calls fail closed. Generic terminal identities and PTYs are not part of binding state and remain recoverable.
 
-Generation-1 endpoint framing and existing methods remain unchanged. New clients can inspect fabric status; old clients continue to use all pre-fabric methods. `host.document.v2`, `HostDocumentV1`, Collections, Spaces, and private protocol 23 are unchanged.
+At fabric acceptance, generation-1 endpoint framing and existing methods remained unchanged; old clients could continue to use all pre-fabric methods. `host.document.v2`, `HostDocumentV1`, Collections, Spaces, and private protocol 23 were unchanged by fabric. The later [terminal admission decision](terminal-client-admission-v2.md) requires generation 2/private 24 for terminal clients only; unchanged codecs, raw `vqro.api.v1` and fabric artifacts/pins remain unchanged.
 
 ## 9. Acceptance gates
 

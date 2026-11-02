@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 // ---------------------------------------------------------------------------
 
 /// Current protocol version. Bumped when wire format changes incompatibly.
-pub const PROTOCOL_VERSION: u32 = 23;
+pub const PROTOCOL_VERSION: u32 = 24;
 
 /// Maximum allowed frame payload size (2 MB). Frames larger than this are
 /// rejected to prevent denial-of-service via oversized length prefixes.
@@ -1636,6 +1636,11 @@ pub fn read_message<R: Read, M: for<'de> Deserialize<'de>>(
     reader: &mut R,
     max_frame_size: usize,
 ) -> Result<M, FramingError> {
+    let payload = read_payload(reader, max_frame_size)?;
+    decode_payload(&payload)
+}
+
+fn read_payload<R: Read>(reader: &mut R, max_frame_size: usize) -> Result<Vec<u8>, FramingError> {
     // Read the 4-byte length prefix, reassembling partial reads.
     let mut len_buf = [0u8; LENGTH_PREFIX_BYTES];
     read_exact_or_eof(reader, &mut len_buf)?;
@@ -1651,8 +1656,12 @@ pub fn read_message<R: Read, M: for<'de> Deserialize<'de>>(
     // Read the payload, reassembling partial reads.
     let mut payload = vec![0u8; claimed_len];
     read_exact_or_eof(reader, &mut payload)?;
+    Ok(payload)
+}
 
-    let (msg, consumed) = bincode::serde::decode_from_slice(&payload, bincode::config::standard())
+fn decode_payload<M: for<'de> Deserialize<'de>>(payload: &[u8]) -> Result<M, FramingError> {
+    let claimed_len = payload.len();
+    let (msg, consumed) = bincode::serde::decode_from_slice(payload, bincode::config::standard())
         .map_err(|e| FramingError::Bincode(e.to_string()))?;
 
     // Enforce that the decoder consumed the full payload.
@@ -1666,6 +1675,42 @@ pub fn read_message<R: Read, M: for<'de> Deserialize<'de>>(
     }
 
     Ok(msg)
+}
+
+/// Bootstrap outcome before decoding version-dependent terminal geometry.
+/// The legacy outer tags (0 direct, 11 shell) and leading version stay frozen.
+pub enum ClientHello {
+    Message(ClientMessage),
+    IncompatiblePrivate {
+        version: u32,
+        encoding: RenderEncoding,
+    },
+}
+
+pub fn read_client_hello<R: Read>(
+    reader: &mut R,
+    max_frame_size: usize,
+) -> Result<ClientHello, FramingError> {
+    let payload = read_payload(reader, max_frame_size)?;
+    let (tag, offset): (u32, usize) =
+        bincode::decode_from_slice(&payload, bincode::config::standard())
+            .map_err(|e| FramingError::Bincode(e.to_string()))?;
+    if tag == 0 || tag == 11 {
+        let (version, _): (u32, usize) =
+            bincode::decode_from_slice(&payload[offset..], bincode::config::standard())
+                .map_err(|e| FramingError::Bincode(e.to_string()))?;
+        if version != PROTOCOL_VERSION {
+            return Ok(ClientHello::IncompatiblePrivate {
+                version,
+                encoding: if tag == 0 {
+                    RenderEncoding::TerminalAnsi
+                } else {
+                    RenderEncoding::SemanticFrame
+                },
+            });
+        }
+    }
+    decode_payload(&payload).map(ClientHello::Message)
 }
 
 /// Like `Read::read_exact`, but returns `FramingError::UnexpectedEof`
@@ -1698,14 +1743,14 @@ pub enum VersionCheck {
 ///
 /// Current rules:
 /// - Version 0 (pre-persistence client) is always rejected.
-/// - Matching major versions are accepted.
+/// - Matching private protocol versions are accepted.
 /// - A client with a newer version than the server is rejected.
 /// - A client with an older version than the server is rejected
 ///   (backward compatibility is not yet supported).
 pub fn check_client_version(client_version: u32) -> VersionCheck {
     if client_version == 0 {
         return VersionCheck::Incompatible(
-            "pre-persistence client (version 0) is not supported".to_owned(),
+            "pre-persistence Vqro client (version 0) is not supported".to_owned(),
         );
     }
 
@@ -1713,11 +1758,11 @@ pub fn check_client_version(client_version: u32) -> VersionCheck {
         VersionCheck::Compatible
     } else if client_version < PROTOCOL_VERSION {
         VersionCheck::Incompatible(format!(
-            "client version {client_version} is older than server version {PROTOCOL_VERSION}; please upgrade your herdr client"
+            "client version {client_version} is older than server version {PROTOCOL_VERSION}; please upgrade your Vqro client"
         ))
     } else {
         VersionCheck::Incompatible(format!(
-            "client version {client_version} is newer than server version {PROTOCOL_VERSION}; please upgrade the herdr server"
+            "client version {client_version} is newer than server version {PROTOCOL_VERSION}; please upgrade the Vqro server"
         ))
     }
 }
@@ -1743,6 +1788,23 @@ mod tests {
     // payload is also append-closed.
 
     // ---- Round-trip: ClientMessage ----
+
+    #[test]
+    fn hello_admission_keeps_current_payload_and_frame_validation() {
+        // A recognized CURRENT version is not enough: require a valid body.
+        for bytes in [
+            vec![0, 0, 0, 0],
+            vec![2, 0, 0, 0, 0, 24],
+            vec![1, 0, 0, 0, 255],
+        ] {
+            assert!(read_client_hello(&mut bytes.as_slice(), MAX_FRAME_SIZE).is_err());
+        }
+        let oversized = ((MAX_FRAME_SIZE + 1) as u32).to_le_bytes();
+        assert!(matches!(
+            read_client_hello(&mut oversized.as_slice(), MAX_FRAME_SIZE),
+            Err(FramingError::Oversized { .. })
+        ));
+    }
 
     #[test]
     fn client_hello_roundtrip() {

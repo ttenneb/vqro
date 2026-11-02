@@ -2,9 +2,9 @@
 //!
 //! The endpoint generation is intentionally independent from the private
 //! binary protocol used by same-install CLI, direct-terminal, and handoff
-//! paths. Generation 1 is the compatibility floor for Local, SSH, and Cloud
-//! shell endpoints and must remain available indefinitely unless retired for a
-//! security reason. New JSON fields must be optional or have serde defaults;
+//! paths. Vqro generation 2 retires generation 1 during development; see
+//! docs/next/architecture/terminal-client-admission-v2.md. Unchanged named codecs remain v1.
+//! New JSON fields must be optional or have serde defaults;
 //! new enum values need an `Unknown` fallback. Unknown named controls are
 //! optional and ignored unless negotiated as part of the core.
 
@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 
 use super::{ClientShellSnapshot, ClientSurfaceSize, ServerMessage};
 
-pub const ENDPOINT_PROTOCOL_GENERATION: u32 = 1;
+pub const ENDPOINT_PROTOCOL_GENERATION: u32 = 2;
 pub const ENDPOINT_HELLO_KIND: &str = "endpoint.hello.v1";
 pub const ENDPOINT_WELCOME_KIND: &str = "endpoint.welcome.v1";
 pub const SNAPSHOT_CODEC_V1: &str = "shell.snapshot.v1";
@@ -581,7 +581,8 @@ mod tests {
             "/tests/fixtures/endpoint-welcome-v1.json"
         )))
         .unwrap();
-        assert_eq!(welcome.generation, ENDPOINT_PROTOCOL_GENERATION);
+        assert_eq!(hello.generation, 1);
+        assert_eq!(welcome.generation, 1);
         assert_eq!(welcome.snapshot_codec, SNAPSHOT_CODEC_V1);
         assert_eq!(welcome.surface_codec, SURFACE_CODEC_V1);
         assert_eq!(welcome.input_codec, INPUT_CODEC_V1);

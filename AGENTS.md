@@ -157,8 +157,12 @@ Examples:
 ### Stable client endpoint contract
 
 The client-owned TUI endpoint generation is independent from the private
-same-install protocol. Vqro inherited endpoint generation 1 from Herdr; this
-makes no promise of interoperability with Herdr. Coexistence is enforced by
+same-install protocol. Vqro terminal admission requires endpoint generation 2
+or private protocol 24; generation 1 and private 22/23 are explicitly retired
+(owner-approved 2026-11-01). Unchanged named codecs remain v1; raw JSON API
+`vqro.api.v1` and extension/adapter pins are unchanged. See
+[terminal admission decision](docs/next/architecture/terminal-client-admission-v2.md).
+This makes no promise of interoperability with Herdr. Coexistence is enforced by
 Vqro's separate binary, sockets, and state; remote use is currently disabled.
 
 **Development-period decision (human-approved 2026-10-04): there is no
@@ -168,13 +172,15 @@ reason, and a same-PR documentation update. Do not silently reinterpret
 generation 1. Prefer new codec/method names, optional advertised actions and
 `Unknown` fallbacks; the rules below remain the default when practical.
 
-Session v8 does not retire generation 1 or alter its named binary codecs.
+Session v8 itself did not retire generation 1 or alter its named binary codecs;
+the later terminal admission decision above explicitly retires that generation.
 `layout.tree.export` is a new optional advertised method with the neutral
 `layout.tree.v1` JSON result. Existing layout methods keep their selected-only
-pane semantics. Private `PROTOCOL_VERSION` remains 23: no bincode-reachable
-protocol type changes. The inherited stable v0.9.0 and preview
-2026-09-08-62431dbd033b published protocol 22 / endpoint generation 1; Vqro
-master already uses protocol 23 / generation 1. Session versions are independent.
+pane semantics. Session v8 originally used private protocol 23 / generation 1;
+the later terminal admission decision raises these to 24 / 2 without changing
+bincode-reachable payload shapes. The inherited stable v0.9.0 and preview
+2026-09-08-62431dbd033b published protocol 22 / endpoint generation 1.
+Session versions are independent.
 See [tree export and conversion](docs/next/api/layout-tree-v1.md).
 
 Fixture disposition for this change: endpoint hello/welcome/snapshot v1,

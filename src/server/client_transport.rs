@@ -804,8 +804,23 @@ pub(crate) fn handle_client_handshake(
     )?;
 
     // Read the handshake message.
-    let hello: ClientMessage = match protocol::read_message(&mut stream, MAX_FRAME_SIZE) {
-        Ok(msg) => msg,
+    let hello = match protocol::read_client_hello(&mut stream, MAX_FRAME_SIZE) {
+        Ok(protocol::ClientHello::Message(msg)) => msg,
+        Ok(protocol::ClientHello::IncompatiblePrivate { version, encoding }) => {
+            if let protocol::VersionCheck::Incompatible(reason) =
+                protocol::check_client_version(version)
+            {
+                let _ = protocol::write_message(
+                    &mut stream,
+                    &ServerMessage::Welcome {
+                        version: PROTOCOL_VERSION,
+                        encoding,
+                        error: Some(reason),
+                    },
+                );
+            }
+            return Ok(());
+        }
         Err(protocol::FramingError::UnexpectedEof) => {
             debug!(client_id, "client disconnected before handshake");
             return Ok(());
@@ -851,6 +866,30 @@ pub(crate) fn handle_client_handshake(
             (cols, rows, cell_width_px, cell_height_px, pixel_mouse, None)
         }
         ClientMessage::EndpointControl { kind, data } if kind == ENDPOINT_HELLO_KIND => {
+            // Decode only the stable admission field before the core payload.
+            // An old client must get a readable refusal even if its shape differs.
+            #[derive(serde::Deserialize)]
+            struct Generation {
+                generation: u32,
+            }
+            let generation: Generation = match serde_json::from_str(&data) {
+                Ok(generation) => generation,
+                Err(error) => {
+                    write_endpoint_rejection(
+                        &mut stream,
+                        "invalid_hello",
+                        format!("invalid Vqro endpoint hello: {error}"),
+                    );
+                    return Ok(());
+                }
+            };
+            if generation.generation != ENDPOINT_PROTOCOL_GENERATION {
+                write_endpoint_rejection(&mut stream, "unsupported_generation", format!(
+                    "Vqro endpoint generation {} is unsupported; this server supports generation {ENDPOINT_PROTOCOL_GENERATION}; upgrade the Vqro client/server together",
+                    generation.generation,
+                ));
+                return Ok(());
+            }
             let hello: EndpointClientHello = match serde_json::from_str(&data) {
                 Ok(hello) => hello,
                 Err(error) => {
@@ -862,15 +901,7 @@ pub(crate) fn handle_client_handshake(
                     return Ok(());
                 }
             };
-            let incompatibility = if hello.generation != ENDPOINT_PROTOCOL_GENERATION {
-                Some((
-                    "unsupported_generation",
-                    format!(
-                        "endpoint generation {} is unsupported; this server supports generation {ENDPOINT_PROTOCOL_GENERATION}",
-                        hello.generation
-                    ),
-                ))
-            } else if !hello.supports_required_codecs() {
+            let incompatibility = if !hello.supports_required_codecs() {
                 Some((
                     "no_common_core",
                     "client and server have no compatible endpoint core codecs".to_owned(),
@@ -901,7 +932,7 @@ pub(crate) fn handle_client_handshake(
                 version: PROTOCOL_VERSION,
                 encoding: RenderEncoding::SemanticFrame,
                 error: Some(
-                    "this client predates the stable endpoint protocol; upgrade the Herdr client"
+                    "this client predates the Vqro endpoint protocol; upgrade the Vqro client"
                         .to_owned(),
                 ),
             };
@@ -2258,6 +2289,169 @@ mod tests {
                 ..
             } if request_id == "req-2"
         ));
+    }
+
+    #[test]
+    fn legacy_private_hello_is_refused_before_decoding_its_body() {
+        use std::io::Write as _;
+        for tag in [0u8, 11] {
+            for version in [22u8, 23] {
+                let (mut client, server, _path) = local_stream_pair("legacy-private-refusal");
+                let (tx, mut rx) = mpsc::channel(4);
+                let quit = Arc::new(AtomicBool::new(false));
+                let worker =
+                    std::thread::spawn(move || handle_client_handshake(server, 42, &tx, &quit));
+                // Only the frozen enum tag and version, deliberately no body:
+                // admission must not depend on decoding today's payload shape.
+                client.write_all(&[2, 0, 0, 0, tag, version]).unwrap();
+                let welcome: ServerMessage =
+                    protocol::read_message(&mut client, MAX_FRAME_SIZE).unwrap();
+                let ServerMessage::Welcome {
+                    version: supported,
+                    error: Some(error),
+                    ..
+                } = welcome
+                else {
+                    panic!("expected readable refusal");
+                };
+                assert_eq!(supported, 24);
+                assert!(error.contains("Vqro"), "{error}");
+                assert!(error.contains(&version.to_string()), "{error}");
+                worker.join().unwrap().unwrap();
+                assert!(
+                    rx.try_recv().is_err(),
+                    "rejection must not publish a connection"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn generation_one_hello_is_refused_before_decoding_core_payload() {
+        for data in [
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/fixtures/endpoint-hello-v1.json"
+            )),
+            r#"{"generation":1}"#,
+        ] {
+            let (mut client, server, _path) = local_stream_pair("legacy-endpoint-refusal");
+            let (tx, mut rx) = mpsc::channel(4);
+            let quit = Arc::new(AtomicBool::new(false));
+            let worker =
+                std::thread::spawn(move || handle_client_handshake(server, 43, &tx, &quit));
+            protocol::write_message(
+                &mut client,
+                &ClientMessage::EndpointControl {
+                    kind: ENDPOINT_HELLO_KIND.into(),
+                    data: data.into(),
+                },
+            )
+            .unwrap();
+            let welcome: ServerMessage =
+                protocol::read_message(&mut client, MAX_FRAME_SIZE).unwrap();
+            let ServerMessage::EndpointControl { kind, data } = welcome else {
+                panic!("expected endpoint refusal");
+            };
+            assert_eq!(kind, ENDPOINT_WELCOME_KIND);
+            let welcome: EndpointServerWelcome = serde_json::from_str(&data).unwrap();
+            assert_eq!(welcome.generation, 2);
+            let error = welcome.error.unwrap();
+            assert_eq!(error.code, "unsupported_generation");
+            assert!(error.message.contains("Vqro"));
+            worker.join().unwrap().unwrap();
+            assert!(
+                rx.try_recv().is_err(),
+                "rejection must not publish a connection"
+            );
+        }
+    }
+
+    #[test]
+    fn rejected_hello_does_not_disconnect_an_accepted_client() {
+        let (mut good, server, _good_path) = local_stream_pair("isolation-good");
+        let (tx, mut rx) = mpsc::channel(8);
+        let quit = Arc::new(AtomicBool::new(false));
+        let good_tx = tx.clone();
+        let good_quit = quit.clone();
+        let good_worker =
+            std::thread::spawn(move || handle_client_handshake(server, 50, &good_tx, &good_quit));
+        protocol::write_message(
+            &mut good,
+            &ClientMessage::TerminalHello {
+                version: PROTOCOL_VERSION,
+                cols: 80,
+                rows: 24,
+                cell_width_px: 8,
+                cell_height_px: 16,
+                pixel_mouse: false,
+            },
+        )
+        .unwrap();
+        let _: ServerMessage = protocol::read_message(&mut good, MAX_FRAME_SIZE).unwrap();
+        let Some(ServerEvent::ClientConnected { writer, .. }) = rx.blocking_recv() else {
+            panic!("good client must be admitted first");
+        };
+
+        for hello in [
+            ClientMessage::TerminalHello {
+                version: 23,
+                cols: 80,
+                rows: 24,
+                cell_width_px: 8,
+                cell_height_px: 16,
+                pixel_mouse: false,
+            },
+            ClientMessage::TerminalHello {
+                version: 25,
+                cols: 80,
+                rows: 24,
+                cell_width_px: 8,
+                cell_height_px: 16,
+                pixel_mouse: false,
+            },
+            ClientMessage::EndpointControl {
+                kind: ENDPOINT_HELLO_KIND.into(),
+                data: r#"{"generation":1}"#.into(),
+            },
+            ClientMessage::EndpointControl {
+                kind: ENDPOINT_HELLO_KIND.into(),
+                data: r#"{"generation":3}"#.into(),
+            },
+        ] {
+            let (mut bad, server, _bad_path) = local_stream_pair("isolation-bad");
+            let bad_tx = tx.clone();
+            let bad_quit = quit.clone();
+            let worker =
+                std::thread::spawn(move || handle_client_handshake(server, 51, &bad_tx, &bad_quit));
+            protocol::write_message(&mut bad, &hello).unwrap();
+            let refusal: ServerMessage = protocol::read_message(&mut bad, MAX_FRAME_SIZE).unwrap();
+            assert!(matches!(
+                refusal,
+                ServerMessage::Welcome { error: Some(_), .. }
+                    | ServerMessage::EndpointControl { .. }
+            ));
+            worker.join().unwrap().unwrap();
+            assert!(
+                rx.try_recv().is_err(),
+                "rejected hello must publish no session event"
+            );
+            protocol::write_message(
+                &mut good,
+                &ClientMessage::Input {
+                    data: b"still connected".to_vec(),
+                },
+            )
+            .unwrap();
+            assert!(
+                matches!(rx.blocking_recv(), Some(ServerEvent::ClientInput { client_id: 50, data }) if data == b"still connected")
+            );
+            assert!(!quit.load(Ordering::Acquire));
+        }
+        drop(writer);
+        drop(good);
+        quit.store(true, Ordering::Release);
+        good_worker.join().unwrap().unwrap();
     }
 
     #[test]

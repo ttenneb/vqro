@@ -19,7 +19,9 @@ host → consumer → provider path without adding another authority mechanism:
 
 This is a product use of the existing one-call read relay. It does not change manifest v3,
 contract identity, binding persistence, invocation leases, R1 error classes, or endpoint
-generation 1. It does not add events, subscriptions, nested calls, provider host calls,
+generation 1 at its acceptance. The later [terminal admission decision](terminal-client-admission-v2.md)
+raises terminal admission to generation 2/private 24 only, without changing these
+package contracts or pins. This product does not add events, subscriptions, nested calls, provider host calls,
 automatic provider choice, package capability inheritance, or a public SDK.
 
 The keywords MUST, MUST NOT, SHOULD, and MAY are normative.

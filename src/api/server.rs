@@ -93,52 +93,30 @@ fn start_server_inner(
     let running = Arc::new(AtomicBool::new(true));
     let listener_running = Arc::clone(&running);
     let thread = std::thread::spawn(move || {
-        let mut resource_failures = 0u32;
-        for stream in listener.incoming() {
-            match stream {
-                Ok(stream) => {
-                    resource_failures = 0;
-                    let api_tx = api_tx.clone();
-                    let event_hub = event_hub.clone();
-                    let capabilities = capabilities.clone();
-                    let server_stop = server_stop.clone();
-                    let connection_running = Arc::clone(&listener_running);
-                    std::thread::spawn(move || {
-                        if let Err(err) = handle_connection_with_stop(
-                            stream,
-                            &api_tx,
-                            &event_hub,
-                            &connection_running,
-                            capabilities,
-                            server_stop.as_ref(),
-                        ) {
-                            warn!(err = %err, "api connection failed");
-                        }
-                    });
-                }
-                Err(err) if err.kind() == std::io::ErrorKind::Interrupted => {
-                    if !listener_running.load(Ordering::Relaxed) {
-                        break;
+        run_accept_loop(
+            listener.incoming(),
+            &listener_running,
+            wait_for_accept_retry,
+            |stream| {
+                let api_tx = api_tx.clone();
+                let event_hub = event_hub.clone();
+                let capabilities = capabilities.clone();
+                let server_stop = server_stop.clone();
+                let connection_running = Arc::clone(&listener_running);
+                std::thread::spawn(move || {
+                    if let Err(err) = handle_connection_with_stop(
+                        stream,
+                        &api_tx,
+                        &event_hub,
+                        &connection_running,
+                        capabilities,
+                        server_stop.as_ref(),
+                    ) {
+                        warn!(err = %err, "api connection failed");
                     }
-                }
-                Err(err)
-                    if crate::platform::local_listener_accept_error_is_resource_exhaustion(
-                        &err,
-                    ) =>
-                {
-                    resource_failures = resource_failures.saturating_add(1);
-                    let delay = accept_retry_backoff(resource_failures);
-                    warn!(err = %err, ?delay, "api listener temporarily exhausted; retrying");
-                    if !wait_for_accept_retry(&listener_running, delay) {
-                        break;
-                    }
-                }
-                Err(err) => {
-                    error!(err = %err, "api listener accept failed");
-                    break;
-                }
-            }
-        }
+                });
+            },
+        );
         debug!("api server thread exiting");
     });
 
@@ -148,6 +126,162 @@ fn start_server_inner(
         identity,
         running,
     })
+}
+
+// Selective port of upstream bde45262: retry all accept errors, not just
+// descriptor exhaustion. Preserve bounded, shutdown-interruptible fork backoff.
+fn run_accept_loop<S>(
+    incoming: impl IntoIterator<Item = io::Result<S>>,
+    running: &AtomicBool,
+    mut wait: impl FnMut(&AtomicBool, Duration) -> bool,
+    mut handle: impl FnMut(S),
+) {
+    let mut consecutive_errors = 0u32;
+    for stream in incoming {
+        if !running.load(Ordering::Relaxed) {
+            break;
+        }
+        match stream {
+            Ok(stream) => {
+                if consecutive_errors > 0 {
+                    info!(consecutive_errors, "api listener accept recovered");
+                    consecutive_errors = 0;
+                }
+                handle(stream);
+            }
+            Err(err) => {
+                if consecutive_errors == 0 {
+                    error!(err = %err, resource_exhaustion = crate::platform::local_listener_accept_error_is_resource_exhaustion(&err), "api listener accept failed; retrying");
+                }
+                consecutive_errors = consecutive_errors.saturating_add(1);
+                if !wait(running, accept_retry_backoff(consecutive_errors)) {
+                    break;
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod accept_loop_tests {
+    use super::*;
+
+    #[test]
+    fn retries_broad_errors_with_bounded_backoff_and_resets_after_success() {
+        let running = AtomicBool::new(true);
+        let mut handled = Vec::new();
+        let mut delays = Vec::new();
+        let incoming = [
+            Ok(1),
+            Err(io::Error::from(io::ErrorKind::ConnectionAborted)),
+            Err(io::Error::from(io::ErrorKind::Interrupted)),
+            Err(io::Error::other("transient accept failure")),
+            Ok(2),
+            Err(io::Error::from(io::ErrorKind::WouldBlock)),
+            Ok(3),
+        ];
+        run_accept_loop(
+            incoming,
+            &running,
+            |_, delay| {
+                delays.push(delay);
+                true
+            },
+            |s| handled.push(s),
+        );
+        assert_eq!(handled, vec![1, 2, 3]);
+        assert_eq!(delays, [25, 50, 100, 25].map(Duration::from_millis));
+        assert_eq!(accept_retry_backoff(u32::MAX), ACCEPT_RETRY_MAX_BACKOFF);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn descriptor_exhaustion_recovers_then_shutdown_stops_retries() {
+        let running = AtomicBool::new(true);
+        let mut handled = Vec::new();
+        let mut waits = 0;
+        run_accept_loop(
+            [
+                Err(io::Error::from_raw_os_error(libc::EMFILE)),
+                Err(io::Error::from_raw_os_error(libc::ENFILE)),
+                Ok(7),
+                Err(io::Error::other("shutdown")),
+                Ok(8),
+            ],
+            &running,
+            |running, _| {
+                waits += 1;
+                if waits == 3 {
+                    running.store(false, Ordering::Relaxed);
+                }
+                running.load(Ordering::Relaxed)
+            },
+            |s| handled.push(s),
+        );
+        assert_eq!(handled, vec![7]);
+        assert_eq!(waits, 3);
+    }
+
+    #[test]
+    fn logs_once_per_error_burst_and_reports_recovery() {
+        #[derive(Clone)]
+        struct LogBuffer(Arc<std::sync::Mutex<Vec<u8>>>);
+        impl io::Write for LogBuffer {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        let log = LogBuffer(Arc::new(std::sync::Mutex::new(Vec::new())));
+        let capture = log.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_writer(move || capture.clone())
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            run_accept_loop(
+                [
+                    Err(io::Error::other("first")),
+                    Err(io::Error::other("repeated")),
+                    Ok(1),
+                    Err(io::Error::other("next burst")),
+                    Ok(2),
+                ],
+                &AtomicBool::new(true),
+                |_, _| true,
+                |_| {},
+            );
+        });
+        let output = String::from_utf8(log.0.lock().unwrap().clone()).unwrap();
+        assert_eq!(
+            output
+                .matches("api listener accept failed; retrying")
+                .count(),
+            2,
+            "{output}"
+        );
+        assert_eq!(
+            output.matches("api listener accept recovered").count(),
+            2,
+            "{output}"
+        );
+        assert!(!output.contains("repeated"), "{output}");
+    }
+
+    #[test]
+    fn shutdown_does_not_dispatch_an_accepted_connection() {
+        let running = AtomicBool::new(false);
+        run_accept_loop(
+            [Ok(1)],
+            &running,
+            |_, _| panic!("no retry after shutdown"),
+            |_| panic!("no dispatch after shutdown"),
+        );
+    }
 }
 
 fn accept_retry_backoff(failures: u32) -> Duration {

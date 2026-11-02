@@ -145,7 +145,7 @@ fn client_protocol_accepts_hello(socket_path: &Path) -> io::Result<bool> {
 fn validate_running_server_compatibility(saved_federation: bool) -> io::Result<()> {
     let Some(status) = read_server_status()? else {
         return Err(io::Error::other(format!(
-            "a herdr server is listening, but its status API is unavailable.\n\n{}\nIf that fails, stop the old server process manually.",
+            "a Vqro server is listening, but its status API is unavailable.\n\n{}\nIf that fails, stop the old server process manually.",
             crate::session::active_restart_after_update_guidance()
         )));
     };
@@ -163,7 +163,7 @@ fn validate_running_server_compatibility(saved_federation: bool) -> io::Result<(
     let requirement = if saved_federation && !surface_interest {
         "saved SSH machines require surface lifecycle support"
     } else {
-        "the stable endpoint generation is incompatible"
+        "the Vqro endpoint generation is incompatible"
     };
     Err(io::Error::other(format!(
         "This session needs one final server update before vqro can attach ({requirement}).\n\nserver: v{} endpoint generation {}\nclient: v{} endpoint generation {}\n\n{}",

@@ -153,7 +153,7 @@ pub(crate) fn probe_endpoint_negotiation(
 ///
 /// Direct terminal clients retain the same-install private protocol. Client-owned
 /// shells use the stable endpoint generation and negotiate whole codecs without
-/// comparing Herdr build versions.
+/// comparing Vqro build versions.
 pub(super) fn do_handshake(
     stream: &mut LocalStream,
     cols: u16,
@@ -249,7 +249,7 @@ pub(super) fn do_handshake(
             return Err(ClientError::Protocol(protocol::FramingError::Io(
                 io::Error::new(
                     io::ErrorKind::InvalidData,
-                    "server does not support the stable Herdr endpoint protocol; update this machine",
+                    "server does not support the Vqro endpoint protocol; update this machine",
                 ),
             )));
         };
@@ -278,7 +278,7 @@ pub(super) fn do_handshake(
         {
             return Err(ClientError::HandshakeRejected {
                 version: welcome.generation,
-                error: "server has no compatible endpoint core; update this machine".into(),
+                error: "Vqro server has no compatible endpoint core or generation; update client/server together".into(),
             });
         }
         info!(
@@ -314,6 +314,12 @@ pub(super) fn do_handshake(
                 .unwrap_or(error);
                 return Err(ClientError::HandshakeRejected { version, error });
             }
+            if version != PROTOCOL_VERSION {
+                return Err(ClientError::HandshakeRejected {
+                    version,
+                    error: format!("Vqro server protocol {version} is incompatible with client protocol {PROTOCOL_VERSION}; update client/server together"),
+                });
+            }
             info!(version, ?encoding, "handshake succeeded");
             Ok(HandshakeResult {
                 encoding,
@@ -324,5 +330,140 @@ pub(super) fn do_handshake(
         _ => Err(ClientError::Protocol(protocol::FramingError::Io(
             io::Error::new(io::ErrorKind::InvalidData, "expected Welcome message"),
         ))),
+    }
+}
+
+#[cfg(test)]
+mod admission_tests {
+    use super::*;
+    use interprocess::local_socket::traits::Listener as _;
+
+    fn handshake_with_reply(
+        reply: ServerMessage,
+        endpoint: bool,
+    ) -> Result<HandshakeResult, ClientError> {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let name = format!(
+            "vqro-hs-{}-{}.sock",
+            std::process::id(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        );
+        // Unix socket names must fit sockaddr_un, even with a long scratch root.
+        #[cfg(unix)]
+        let path = std::path::PathBuf::from("/tmp").join(name);
+        #[cfg(not(unix))]
+        let path = std::env::temp_dir().join(name);
+        let listener = crate::ipc::bind_local_listener(&path).unwrap();
+        let mut client = crate::ipc::connect_local_stream(&path).unwrap();
+        let mut server = listener.accept().unwrap();
+        let worker = std::thread::spawn(move || {
+            let hello: ClientMessage = protocol::read_message(&mut server, MAX_FRAME_SIZE).unwrap();
+            if endpoint {
+                let ClientMessage::EndpointControl { kind, data } = hello else {
+                    panic!("expected endpoint hello");
+                };
+                assert_eq!(kind, ENDPOINT_HELLO_KIND);
+                assert_eq!(
+                    serde_json::from_str::<EndpointClientHello>(&data)
+                        .unwrap()
+                        .generation,
+                    2
+                );
+            } else {
+                assert!(matches!(
+                    hello,
+                    ClientMessage::TerminalHello { version: 24, .. }
+                ));
+            }
+            protocol::write_message(&mut server, &reply).unwrap();
+        });
+        let result = do_handshake(
+            &mut client,
+            80,
+            24,
+            8,
+            16,
+            false,
+            endpoint.then_some(crate::protocol::ClientSurfaceSize { cols: 80, rows: 24 }),
+            false,
+            false,
+            true,
+        );
+        worker.join().unwrap();
+        drop(listener);
+        let _ = std::fs::remove_file(path);
+        result
+    }
+
+    #[test]
+    fn direct_admission_rejects_mismatched_success_welcome() {
+        for version in [22, 23, 24, 25] {
+            let result = handshake_with_reply(
+                ServerMessage::Welcome {
+                    version,
+                    encoding: RenderEncoding::TerminalAnsi,
+                    error: None,
+                },
+                false,
+            );
+            if version == 24 {
+                assert!(matches!(
+                    result.unwrap().encoding,
+                    RenderEncoding::TerminalAnsi
+                ));
+            } else {
+                let error = result.unwrap_err().to_string();
+                assert!(error.contains("Vqro"), "{error}");
+                assert!(error.contains(&version.to_string()), "{error}");
+            }
+        }
+    }
+
+    #[test]
+    fn endpoint_admission_rejects_old_and_future_success_welcome() {
+        for generation in [1, 2, 3] {
+            let mut welcome = EndpointServerWelcome::compatible(Vec::new());
+            welcome.generation = generation;
+            let result = handshake_with_reply(
+                ServerMessage::EndpointControl {
+                    kind: ENDPOINT_WELCOME_KIND.into(),
+                    data: serde_json::to_string(&welcome).unwrap(),
+                },
+                true,
+            );
+            assert_eq!(result.is_ok(), generation == 2);
+            if generation != 2 {
+                assert!(result.unwrap_err().to_string().contains("Vqro"));
+            }
+        }
+    }
+
+    #[test]
+    fn endpoint_admission_rejects_frozen_old_server_welcome() {
+        let result = handshake_with_reply(
+            ServerMessage::EndpointControl {
+                kind: ENDPOINT_WELCOME_KIND.into(),
+                data: include_str!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/tests/fixtures/endpoint-welcome-v1.json"
+                ))
+                .into(),
+            },
+            true,
+        );
+        assert!(result.unwrap_err().to_string().contains("Vqro"));
+    }
+
+    #[test]
+    fn old_server_explicit_refusal_is_preserved() {
+        let result = handshake_with_reply(
+            ServerMessage::Welcome {
+                version: 23,
+                encoding: RenderEncoding::TerminalAnsi,
+                error: Some("upgrade Vqro".into()),
+            },
+            false,
+        );
+        assert!(result.is_err());
     }
 }

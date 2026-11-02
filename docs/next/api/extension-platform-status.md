@@ -74,7 +74,11 @@ Changed snapshots supersede older attempts; stale or canceled completions cannot
 
 ## Compatibility boundaries
 
-- Endpoint generation 1 and its named codecs remain frozen.
+- Terminal admission now requires endpoint generation 2 (or private protocol 24);
+  generation 1 and private 22/23 are retired by the accepted
+  [terminal admission decision](../architecture/terminal-client-admission-v2.md).
+  Unchanged named v1 codecs remain frozen; raw `vqro.api.v1`, extension artifacts,
+  adapter contracts and exact pins are unchanged.
 - `host.document.v2` remains action-free. Actions and effect plans require separately named contracts.
 - `vqro.collections` and `vqro.spaces` have no bundled provider owner; only their exact production packages may publish them.
 - Real PTYs remain host-owned and recoverable without any extension provider.

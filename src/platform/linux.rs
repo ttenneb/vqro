@@ -220,7 +220,106 @@ pub(crate) fn launch_executable() -> std::io::Result<PathBuf> {
     Ok(executable)
 }
 
-pub fn raise_server_nofile_limit() {}
+/// Raise only the soft limit: the hard limit is the server's existing ceiling.
+/// Selective adaptation of fork dbdff708; macOS retains its fixed target.
+pub fn raise_server_nofile_limit() {
+    let result = raise_nofile_limit_to_hard_with(
+        || {
+            let mut limit = std::mem::MaybeUninit::<libc::rlimit>::uninit();
+            // SAFETY: getrlimit initializes the supplied rlimit on success.
+            if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, limit.as_mut_ptr()) } != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(unsafe { limit.assume_init() })
+        },
+        |limit| {
+            // SAFETY: limit is an initialized rlimit; only its soft limit changed.
+            if unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, limit) } != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        },
+    );
+    match result {
+        Ok(None) => {}
+        Ok(Some((previous, target))) => {
+            tracing::info!(previous, target, "raised server file descriptor soft limit")
+        }
+        Err(err) => tracing::warn!(err = %err, "failed to raise server file descriptor limit"),
+    }
+}
+
+fn raise_nofile_limit_to_hard_with(
+    get: impl FnOnce() -> std::io::Result<libc::rlimit>,
+    set: impl FnOnce(&libc::rlimit) -> std::io::Result<()>,
+) -> std::io::Result<Option<(libc::rlim_t, libc::rlim_t)>> {
+    let mut limit = get()?;
+    if limit.rlim_cur >= limit.rlim_max {
+        return Ok(None);
+    }
+    let previous = limit.rlim_cur;
+    limit.rlim_cur = limit.rlim_max;
+    set(&limit)?;
+    Ok(Some((previous, limit.rlim_cur)))
+}
+
+#[cfg(test)]
+mod nofile_tests {
+    use super::*;
+
+    #[test]
+    fn raises_soft_to_hard_without_changing_hard_limit() {
+        for hard in [4096, libc::RLIM_INFINITY] {
+            let result = raise_nofile_limit_to_hard_with(
+                || {
+                    Ok(libc::rlimit {
+                        rlim_cur: 256,
+                        rlim_max: hard,
+                    })
+                },
+                |limit| {
+                    assert_eq!(limit.rlim_cur, hard);
+                    assert_eq!(limit.rlim_max, hard);
+                    Ok(())
+                },
+            )
+            .unwrap();
+            assert_eq!(result, Some((256, hard)));
+        }
+    }
+
+    #[test]
+    fn already_at_hard_limit_does_not_set() {
+        assert_eq!(
+            raise_nofile_limit_to_hard_with(
+                || Ok(libc::rlimit {
+                    rlim_cur: 4096,
+                    rlim_max: 4096
+                }),
+                |_| panic!("must not set an unchanged limit"),
+            )
+            .unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn get_and_set_failures_are_returned_without_retry() {
+        assert!(raise_nofile_limit_to_hard_with(
+            || Err(std::io::Error::other("get failed")),
+            |_| panic!("get failed"),
+        )
+        .is_err());
+        assert!(raise_nofile_limit_to_hard_with(
+            || Ok(libc::rlimit {
+                rlim_cur: 256,
+                rlim_max: 4096
+            }),
+            |_| Err(std::io::Error::other("set failed")),
+        )
+        .is_err());
+    }
+}
 
 pub(crate) fn should_draw_host_cursor_by_default() -> bool {
     running_inside_wsl()
