@@ -95,6 +95,12 @@ impl fmt::Display for InvalidTerminalId {
     }
 }
 
+impl Borrow<str> for TerminalId {
+    fn borrow(&self) -> &str {
+        self.as_str()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -165,11 +171,5 @@ mod tests {
         ] {
             assert!(TerminalId::parse(invalid).is_err(), "accepted {invalid}");
         }
-    }
-}
-
-impl Borrow<str> for TerminalId {
-    fn borrow(&self) -> &str {
-        self.as_str()
     }
 }
