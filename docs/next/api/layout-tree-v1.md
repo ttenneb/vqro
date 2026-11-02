@@ -86,6 +86,34 @@ through durable temporary-file replacement and never automatically restores a
 backup after publication. Downgrade is unsupported: future session versions are
 refused, and writers refuse overwriting a higher-version file with a lower one.
 
+## Recovery images and unavailable terminals
+
+Ordinary saves, checkpoint publication, handoff publication and intentional clear
+preserve best-effort rolling structural recovery images in `session-snapshots`
+beside the resolved session target. At most 48 owned images are retained, with a
+15-minute cadence and unchanged-image suppression across process restarts. Clock
+rollback does not indefinitely suspend preservation. Unrelated user files,
+symlinks and incomplete copies are not pruned. Copy failure never blocks a healthy
+primary save or clear. These images are manual recovery material, not authority:
+startup never selects an arbitrary copy or replays package state from one. The
+fail-closed rejected-load policy and byte-exact conversion backups still apply.
+
+Missing saved directories and failed shell launches retain their nested/hidden
+leaves, stable terminal identity, selection, labels, cwd and agent session facts
+without executing in a fallback directory. A terminal without a runtime displays
+a restore error; fixing the directory/shell and restarting retries the saved
+facts. Imported live terminals are not restarted merely because their saved cwd
+is unavailable. Saved checkout membership survives unavailable/unreadable Git
+metadata; only positive evidence of a different repository at that exact checkout
+rejects membership. Explicit checkout provenance never follows a shell's cwd.
+
+History v4 adds optional `layout_fingerprint`, a deterministic SHA-256 binding of
+the complete structural image, including hidden/nested layout and normalized
+unordered maps/sets. Only matching bound history is replayed. Unbound legacy or
+mismatched history is ignored without rejecting an otherwise valid structural
+session. This digest is presentation provenance, not per-node identity or package
+authority; it cannot lower the action high-water barrier.
+
 ## Previous live exporter field audit
 
 The complete unconditional omitted/zeroed durable-field set on the previous

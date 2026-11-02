@@ -206,7 +206,11 @@ where
 
 pub(super) fn save_to_path(path: &Path, snapshot: &SessionSnapshot) -> std::io::Result<()> {
     prepare_session_write(path, snapshot.version)?;
-    save_json_to_path(path, snapshot, MAX_SESSION_SNAPSHOT_BYTES)
+    let target = resolve_write_target(path)?;
+    super::recovery::preserve(&target);
+    save_json_to_path(path, snapshot, MAX_SESSION_SNAPSHOT_BYTES)?;
+    super::recovery::preserve(&target);
+    Ok(())
 }
 
 /// A conversion backup is immutable, byte-exact, private, and durable before
@@ -279,6 +283,22 @@ fn save_json_to_path<T: serde::Serialize>(
     snapshot: &T,
     maximum: u64,
 ) -> std::io::Result<()> {
+    save_json_to_path_with(
+        path,
+        snapshot,
+        maximum,
+        std::fs::File::sync_all,
+        crate::platform::durable_replace_file,
+    )
+}
+
+fn save_json_to_path_with<T: serde::Serialize>(
+    path: &Path,
+    snapshot: &T,
+    maximum: u64,
+    sync: impl FnOnce(&std::fs::File) -> std::io::Result<()>,
+    replace: impl FnOnce(&Path, &Path) -> std::io::Result<()>,
+) -> std::io::Result<()> {
     let target = resolve_write_target(path)?;
     if let Some(parent) = target.parent() {
         std::fs::create_dir_all(parent)?;
@@ -301,9 +321,9 @@ fn save_json_to_path<T: serde::Serialize>(
     let mut temporary = crate::platform::create_private_state_file(&tmp_path)?;
     let result = (|| {
         temporary.write_all(&json)?;
-        temporary.sync_all()?;
+        sync(&temporary)?;
         drop(temporary);
-        crate::platform::durable_replace_file(&tmp_path, &target)
+        replace(&tmp_path, &target)
     })();
     if result.is_err() {
         let _ = std::fs::remove_file(&tmp_path);
@@ -319,7 +339,9 @@ pub(super) fn save_to_paths(
 ) -> std::io::Result<()> {
     save_to_path(session_path, snapshot)?;
     if let Some(history) = history {
-        save_json_to_path(history_path, history, MAX_HISTORY_SNAPSHOT_BYTES)?;
+        let mut history = history.clone();
+        history.layout_fingerprint = super::snapshot::layout_fingerprint(snapshot);
+        save_json_to_path(history_path, &history, MAX_HISTORY_SNAPSHOT_BYTES)?;
     } else {
         clear_path(history_path)?;
     }
@@ -355,8 +377,10 @@ pub(crate) struct StagedHandoffSnapshot {
 impl StagedHandoffSnapshot {
     pub(crate) fn publish(mut self) -> std::io::Result<()> {
         prepare_session_write(&self.target, SNAPSHOT_VERSION)?;
+        super::recovery::preserve(&self.target);
         crate::platform::durable_replace_file(&self.path, &self.target)?;
         self.published = true;
+        super::recovery::preserve(&self.target);
         Ok(())
     }
 }
@@ -395,7 +419,7 @@ fn stage_handoff_snapshot_to_path(
         .and_then(|name| name.to_str())
         .ok_or_else(|| std::io::Error::other("handoff snapshot path has no UTF-8 file name"))?;
     let path = target.with_file_name(format!("{file_name}{HANDOFF_STAGE_MARKER}{suffix}"));
-    save_to_path(&path, snapshot)?;
+    save_json_to_path(&path, snapshot, MAX_SESSION_SNAPSHOT_BYTES)?;
     Ok(StagedHandoffSnapshot {
         path,
         target,
@@ -415,12 +439,19 @@ pub fn save(snapshot: &SessionSnapshot, history: Option<&SessionHistorySnapshot>
 
 pub fn clear() {
     let path = session_path();
-    if let Err(err) = clear_path(&path) {
+    if let Err(err) = clear_session_path(&path) {
         crate::logging::session_clear_failed(&path, &err.to_string());
         return;
     }
     clear_history();
     crate::logging::session_cleared(&path);
+}
+
+pub(super) fn clear_session_path(path: &Path) -> std::io::Result<()> {
+    prepare_session_write(path, SNAPSHOT_VERSION)?;
+    let target = resolve_write_target(path)?;
+    super::recovery::preserve(&target);
+    clear_path(path)
 }
 
 pub fn clear_history() {
@@ -1092,6 +1123,7 @@ mod tests {
 
     fn history_snapshot(secret: &str) -> SessionHistorySnapshot {
         SessionHistorySnapshot {
+            layout_fingerprint: None,
             version: super::super::snapshot::HISTORY_SNAPSHOT_VERSION,
             workspaces: vec![WorkspaceHistorySnapshot {
                 tabs: vec![TabHistorySnapshot {
@@ -1539,6 +1571,62 @@ mod tests {
         assert_eq!(depth_error.outcome, AtomicSessionSaveOutcome::NotPublished);
         assert!(!directory.join("depth-target.json").exists());
         std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn ordinary_writer_syncs_before_replace_and_keeps_primary_on_faults() {
+        let (path, _) = temp_session_paths("ordinary-faults");
+        let original = empty_snapshot();
+        save_to_path(&path, &original).unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        let mut next = original.clone();
+        next.selected = 42;
+        for fail_sync in [true, false] {
+            let steps = std::cell::RefCell::new(Vec::new());
+            let result = save_json_to_path_with(
+                &path,
+                &next,
+                MAX_SESSION_SNAPSHOT_BYTES,
+                |file| {
+                    steps.borrow_mut().push("sync");
+                    assert!(file.metadata()?.len() > 0);
+                    if fail_sync {
+                        Err(std::io::Error::other("sync fault"))
+                    } else {
+                        file.sync_all()
+                    }
+                },
+                |_, _| {
+                    steps.borrow_mut().push("replace");
+                    Err(std::io::Error::other("replace fault before publication"))
+                },
+            );
+            assert!(result.is_err());
+            assert_eq!(std::fs::read(&path).unwrap(), bytes);
+            assert_eq!(
+                *steps.borrow(),
+                if fail_sync {
+                    vec!["sync"]
+                } else {
+                    vec!["sync", "replace"]
+                }
+            );
+            assert!(std::fs::read_dir(path.parent().unwrap())
+                .unwrap()
+                .all(|entry| !entry
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .contains(".tmp.")));
+        }
+        save_to_path(&path, &next).unwrap();
+        assert_eq!(
+            super::super::snapshot::parse_snapshot(&std::fs::read_to_string(&path).unwrap())
+                .unwrap()
+                .selected,
+            42
+        );
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 
     #[test]

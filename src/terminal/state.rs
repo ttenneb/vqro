@@ -170,6 +170,8 @@ pub struct TerminalState {
     recent_agent_process_exit: Option<RecentAgentProcessExit>,
     agent_process_acquisition_pending: bool,
     pub pending_agent_resume_plan: Option<crate::agent_resume::AgentResumePlan>,
+    /// A retained terminal with no runtime; restart retries its original facts.
+    pub restore_error: Option<String>,
 }
 
 impl TerminalState {
@@ -207,6 +209,7 @@ impl TerminalState {
             recent_agent_process_exit: None,
             agent_process_acquisition_pending: false,
             pending_agent_resume_plan: None,
+            restore_error: None,
         }
     }
 
@@ -2193,6 +2196,7 @@ impl TerminalState {
         self.recent_agent_process_exit = None;
         self.agent_process_acquisition_pending = false;
         self.pending_agent_resume_plan = None;
+        self.restore_error = None;
         self.clear_agent_name();
     }
 

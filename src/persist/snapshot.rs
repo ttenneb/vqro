@@ -62,6 +62,10 @@ pub struct SessionHistorySnapshot {
     /// structural session snapshot.
     #[serde(default)]
     pub version: u32,
+    /// Optional presentation history is admitted only for this exact structural image.
+    /// Unbound legacy history is ignored; structural legacy sessions remain supported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layout_fingerprint: Option<String>,
     pub workspaces: Vec<WorkspaceHistorySnapshot>,
 }
 
@@ -1076,7 +1080,17 @@ fn capture_tab(
     let mut panes = HashMap::new();
     for id in tab.panes.keys() {
         let cwd = tab
-            .cwd_for_pane(*id, terminals, terminal_runtimes)
+            .terminal_id(*id)
+            .and_then(|terminal_id| {
+                terminal_runtimes
+                    .get(terminal_id)
+                    .and_then(|runtime| runtime.cwd_for_persistence())
+                    .or_else(|| {
+                        terminals
+                            .get(terminal_id)
+                            .map(|terminal| terminal.cwd.clone())
+                    })
+            })
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| "/".into()));
         let terminal = tab
             .panes
@@ -1157,6 +1171,21 @@ fn capture_tab(
     }
 }
 
+/// A whole-image binding, not an identity or an authority token. JSON objects are
+/// ordered by serde_json; the sole unordered set is normalized separately.
+pub(super) fn layout_fingerprint(snapshot: &SessionSnapshot) -> Option<String> {
+    use sha2::{Digest, Sha256};
+
+    let mut value = serde_json::to_value(snapshot).ok()?;
+    let mut collapsed: Vec<_> = snapshot.collapsed_space_keys.iter().collect();
+    collapsed.sort_unstable();
+    value["collapsed_space_keys"] = serde_json::to_value(collapsed).ok()?;
+    Some(format!(
+        "{:x}",
+        Sha256::digest(serde_json::to_vec(&value).ok()?)
+    ))
+}
+
 /// Capture pane screen history separately from the structural session snapshot.
 pub fn capture_history(
     workspaces: &[Workspace],
@@ -1164,6 +1193,7 @@ pub fn capture_history(
 ) -> SessionHistorySnapshot {
     SessionHistorySnapshot {
         version: HISTORY_SNAPSHOT_VERSION,
+        layout_fingerprint: None,
         workspaces: workspaces
             .iter()
             .map(|workspace| WorkspaceHistorySnapshot {

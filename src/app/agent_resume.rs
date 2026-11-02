@@ -233,6 +233,15 @@ impl App {
             return false;
         };
 
+        if !cwd.is_dir() {
+            if let Some(terminal) = self.state.terminals.get_mut(&terminal_id) {
+                terminal.pending_agent_resume_plan = None;
+                terminal.restore_error = Some("Saved directory is unavailable. Restore the directory and restart this session.".into());
+                terminal.revision = terminal.revision.saturating_add(1);
+            }
+            return true;
+        }
+
         let runtime = match crate::terminal::TerminalRuntime::spawn(
             pane_id,
             rows,
@@ -257,9 +266,11 @@ impl App {
                     "failed to start shell for deferred agent resume"
                 );
                 if let Some(terminal) = self.state.terminals.get_mut(&terminal_id) {
-                    terminal.clear_agent_runtime_identity_after_respawn();
+                    terminal.pending_agent_resume_plan = None;
+                    terminal.restore_error = Some(format!("Could not start the saved shell: {err}. Fix the shell configuration and restart this session."));
+                    terminal.revision = terminal.revision.saturating_add(1);
                 }
-                return false;
+                return true;
             }
         };
 
@@ -376,6 +387,51 @@ mod tests {
             "-c".into(),
             "printf '%s' 'restored agent: shell quoted | marker'; sleep 5".into(),
         ]
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn failed_deferred_restore_preserves_resume_reference_and_stops_retrying() {
+        for missing_shell in [false, true] {
+            let mut app = test_app();
+            app.state.workspaces = vec![crate::workspace::Workspace::test_new("unavailable")];
+            app.state.active = Some(0);
+            app.state.ensure_test_terminals();
+            let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+            let terminal_id = app.state.workspaces[0]
+                .terminal_id(pane_id)
+                .unwrap()
+                .clone();
+            if missing_shell {
+                app.state.default_shell = "__vqro_missing_shell__".into();
+            }
+            let terminal = app.state.terminals.get_mut(&terminal_id).unwrap();
+            if !missing_shell {
+                terminal.cwd = std::env::current_dir()
+                    .unwrap()
+                    .join("__vqro_missing_resume_cwd__");
+                assert!(!terminal.cwd.exists());
+            }
+            let session = crate::agent_resume::PersistedAgentSession {
+                source: "vqro:codex".into(),
+                agent: "codex".into(),
+                session_ref: crate::agent_resume::AgentSessionRef::id("restore-test").unwrap(),
+            };
+            terminal.persisted_agent_session = Some(session.clone());
+            terminal.pending_agent_resume_plan = Some(crate::agent_resume::AgentResumePlan {
+                agent: "codex".into(),
+                argv: long_running_test_argv(),
+                dedupe_key: "restore-test".into(),
+            });
+            assert!(app.start_pending_agent_resume_for_terminal(&terminal_id, 24, 80, true));
+            assert!(app.terminal_runtimes.get(&terminal_id).is_none());
+            let terminal = &app.state.terminals[&terminal_id];
+            assert!(terminal.pending_agent_resume_plan.is_none());
+            assert_eq!(terminal.persisted_agent_session.as_ref(), Some(&session));
+            assert!(terminal.restore_error.is_some());
+            assert!(!app.has_pending_agent_resumes());
+            assert!(!app.start_pending_agent_resume_for_terminal(&terminal_id, 24, 80, true));
+        }
     }
 
     #[cfg(unix)]

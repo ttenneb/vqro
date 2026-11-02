@@ -372,6 +372,7 @@ where
         not_published(std::io::Error::new(std::io::ErrorKind::InvalidData, error))
     })?;
     super::io::prepare_session_write(&paths.session, session.version).map_err(not_published)?;
+    super::recovery::preserve(&paths.session);
     let extension_bytes = encode_bounded(extension_state, MAX_STATE_STORE_BYTES, "extension state")
         .map_err(not_published)?;
 
@@ -472,6 +473,9 @@ where
             FsOperation::ParentSync(FsSite::AbortCleanupParent),
             &paths.parent,
         );
+    }
+    if result.is_ok() {
+        super::recovery::preserve(&paths.session);
     }
     result
 }

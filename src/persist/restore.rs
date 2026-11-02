@@ -27,6 +27,10 @@ use super::{
     WorkspaceSnapshot,
 };
 
+#[cfg(test)]
+#[path = "restore_preservation_tests.rs"]
+mod preservation_tests;
+
 struct AgentRestoreState<'a> {
     enabled: bool,
     resumed_sessions: &'a mut HashSet<String>,
@@ -494,6 +498,14 @@ fn restore_with_imports_and_failures(
     render_notify: Arc<Notify>,
     render_dirty: Arc<RenderSignal>,
 ) -> RestoreFailures<RestoredSession> {
+    let history = history.filter(|history| {
+        let matches = history.layout_fingerprint.is_some()
+            && history.layout_fingerprint == super::snapshot::layout_fingerprint(snapshot);
+        if !matches {
+            warn!("ignoring unbound legacy or mismatched pane history; structural restore is unaffected");
+        }
+        matches
+    });
     let mut workspaces = Vec::new();
     let mut terminals = HashMap::new();
     let mut terminal_runtimes = HashMap::new();
@@ -680,13 +692,49 @@ fn restore_workspace(
     )
 }
 
-fn restored_worktree_space_membership(
+fn unavailable_restored_terminal(
+    terminal_id: TerminalId,
+    pane: Option<&super::snapshot::PaneSnapshot>,
+    cwd: PathBuf,
+    reason: String,
+) -> TerminalState {
+    warn!(cwd = %cwd.display(), %reason, "preserving unavailable restored pane");
+    let mut terminal = TerminalState::new(terminal_id, cwd);
+    terminal.restore_error = Some(reason);
+    if let Some(pane) = pane {
+        terminal.manual_label = pane.label.clone();
+        terminal.launch_argv = pane.launch_argv.clone();
+        if let Some(session) = restored_terminal_agent_session(pane.agent_session.as_ref(), false) {
+            terminal.set_persisted_agent_session(session);
+        }
+        match (
+            pane.agent_name.as_ref(),
+            pane.managed_agent_kind
+                .as_deref()
+                .and_then(crate::detect::parse_canonical_agent_label),
+        ) {
+            (Some(name), Some(agent)) => terminal.restore_managed_agent(name.clone(), agent),
+            (Some(name), None) => terminal.set_agent_name(name.clone()),
+            _ => {}
+        }
+    }
+    terminal
+}
+
+pub(crate) fn restored_worktree_space_membership(
     space: Option<crate::workspace::WorktreeSpaceMembership>,
 ) -> Option<crate::workspace::WorktreeSpaceMembership> {
     space.filter(|space| {
-        space.checkout_path.exists()
-            && crate::workspace::git_space_metadata(&space.checkout_path)
-                .is_some_and(|current| current.key == space.key)
+        crate::workspace::git_space_metadata(&space.checkout_path).is_none_or(|current| {
+            // An ancestor repo or incomplete linked-worktree metadata does not
+            // prove the saved checkout was replaced. Unavailability retains it.
+            current.checkout_key
+                != crate::worktree::canonical_or_original(&space.checkout_path)
+                    .display()
+                    .to_string()
+                || current.key == space.key
+                || !std::path::Path::new(&current.key).join("objects").is_dir()
+        })
     })
 }
 
@@ -747,22 +795,20 @@ fn restore_tab(
             .map(|p| p.cwd.clone())
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| "/".into()));
 
-        let cwd = if saved_cwd.exists() {
-            saved_cwd
-        } else {
-            warn!(
-                cwd = %saved_cwd.display(),
-                "saved pane cwd does not exist, falling back to HOME"
+        let cwd = saved_cwd;
+        let has_import = old_id.is_some_and(|old_id| imported_panes.contains_key(old_id));
+        if !has_import && !cwd.is_dir() {
+            let terminal = unavailable_restored_terminal(
+                terminal_id.clone(),
+                saved_pane,
+                cwd,
+                "Saved directory is unavailable. Restore the directory and restart this session."
+                    .into(),
             );
-            let home = std::env::var("HOME")
-                .map(PathBuf::from)
-                .unwrap_or_else(|_| PathBuf::from("/"));
-            if home.exists() {
-                home
-            } else {
-                PathBuf::from("/")
-            }
-        };
+            panes.insert(*id, PaneState::new(terminal_id));
+            terminals.push(terminal);
+            continue;
+        }
 
         let saved_label = saved_pane.and_then(|p| p.label.clone());
         let saved_agent_name = saved_pane.and_then(|p| p.agent_name.clone());
@@ -953,8 +999,16 @@ fn restore_tab(
                     tab = ?snap.custom_name,
                     pane_id = id.raw(),
                     err = %e,
-                    "failed to restore pane, skipping"
+                    "failed to restore pane"
                 );
+                if !was_imported {
+                    let terminal = unavailable_restored_terminal(
+                        terminal_id.clone(), saved_pane, cwd,
+                        format!("Could not start the saved shell: {e}. Fix the shell configuration and restart this session."),
+                    );
+                    panes.insert(*id, PaneState::new(terminal_id));
+                    terminals.push(terminal);
+                }
             }
         }
     }
@@ -1359,6 +1413,12 @@ fn recover_typed_layout(
                 });
             }
         }
+        // Policy is optional in structural v8 input. The legacy projection
+        // still expects an entry for every stack, including unlabeled parents.
+        // Missing policy must not cause Tab::from_restored to drop a valid tree.
+        for id in layout.collection_ids() {
+            legacy_collection_snapshots.entry(id).or_default();
+        }
         return Some(RecoveredTabLayout {
             layout,
             legacy_collection_snapshots,
@@ -1532,18 +1592,73 @@ mod tests {
     }
 
     #[test]
-    fn restored_worktree_space_membership_drops_missing_checkout() {
-        let missing =
-            std::env::temp_dir().join(format!("herdr-missing-worktree-{}", std::process::id()));
+    fn restored_worktree_space_membership_preserves_unavailable_and_rejects_replacement() {
+        let root = std::env::temp_dir().join(format!(
+            "vqro-checkout-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(root.join(".git/objects")).unwrap();
+        std::fs::write(root.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+        let ancestor = crate::workspace::git_space_metadata(&root).unwrap();
+        let checkout = root.join("checkout");
         let membership = crate::workspace::WorktreeSpaceMembership {
-            key: "repo-key".into(),
-            label: "herdr".into(),
-            repo_root: missing.join("repo"),
-            checkout_path: missing.join("checkout"),
+            key: "original-repo-key".into(),
+            label: "saved".into(),
+            repo_root: root.join("original"),
+            checkout_path: checkout.clone(),
             is_linked_worktree: true,
         };
-
-        assert_eq!(restored_worktree_space_membership(Some(membership)), None);
+        assert_eq!(
+            restored_worktree_space_membership(Some(membership.clone())),
+            Some(membership.clone())
+        );
+        std::fs::create_dir_all(&checkout).unwrap();
+        assert_eq!(
+            restored_worktree_space_membership(Some(membership.clone())),
+            Some(membership.clone())
+        );
+        std::fs::create_dir_all(checkout.join(".git/objects")).unwrap();
+        std::fs::write(checkout.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+        assert_eq!(
+            restored_worktree_space_membership(Some(membership.clone())),
+            None
+        );
+        let current = crate::workspace::git_space_metadata(&checkout).unwrap();
+        let matching = crate::workspace::WorktreeSpaceMembership {
+            key: current.key,
+            ..membership.clone()
+        };
+        assert_eq!(
+            restored_worktree_space_membership(Some(matching.clone())),
+            Some(matching)
+        );
+        std::fs::remove_dir_all(checkout.join(".git")).unwrap();
+        let git_dir = root.join(".git/worktrees/restored");
+        std::fs::create_dir_all(&git_dir).unwrap();
+        std::fs::write(git_dir.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+        std::fs::write(
+            checkout.join(".git"),
+            format!("gitdir: {}\n", git_dir.display()),
+        )
+        .unwrap();
+        let linked = crate::workspace::WorktreeSpaceMembership {
+            key: ancestor.key,
+            ..membership.clone()
+        };
+        assert_eq!(
+            restored_worktree_space_membership(Some(linked.clone())),
+            Some(linked)
+        );
+        std::fs::remove_dir_all(root).unwrap();
+        assert!(crate::workspace::git_space_metadata(&checkout).is_none());
+        assert_eq!(
+            restored_worktree_space_membership(Some(membership.clone())),
+            Some(membership)
+        );
     }
 
     #[test]
@@ -3206,6 +3321,37 @@ mod tests {
         let _ = runtime.try_send_bytes(bytes::Bytes::from_static(b"exit\n"));
     }
 
+    #[tokio::test]
+    async fn legacy_or_stale_history_is_ignored_without_rejecting_structural_restore() {
+        for binding in [None, Some("stale-layout".to_string())] {
+            let (snapshot, mut history) = snapshot_with_saved_pane_history();
+            history.layout_fingerprint = binding;
+            let (events, _rx) = mpsc::channel(8);
+            let (workspaces, _terminals, runtimes) = restore(
+                &snapshot,
+                Some(&history),
+                5,
+                40,
+                4096,
+                test_restore_shell(),
+                crate::config::ShellModeConfig::NonLogin,
+                false,
+                events,
+                Arc::new(Notify::new()),
+                Arc::new(RenderSignal::new()),
+            )
+            .unwrap();
+            assert_eq!(workspaces.len(), 1);
+            let runtime = runtimes.values().next().unwrap();
+            assert!(!runtime
+                .recent_unwrapped_text(10)
+                .contains("RESTORED_HISTORY"));
+            for runtime in runtimes.into_values() {
+                runtime.shutdown();
+            }
+        }
+    }
+
     fn snapshot_with_saved_pane_history() -> (SessionSnapshot, SessionHistorySnapshot) {
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
         let mut panes = HashMap::new();
@@ -3221,8 +3367,9 @@ mod tests {
                 launch_argv: None,
             },
         );
-        let history = SessionHistorySnapshot {
-            version: super::super::snapshot::SNAPSHOT_VERSION,
+        let mut history = SessionHistorySnapshot {
+            layout_fingerprint: None,
+            version: super::super::snapshot::HISTORY_SNAPSHOT_VERSION,
             workspaces: vec![WorkspaceHistorySnapshot {
                 tabs: vec![super::super::snapshot::TabHistorySnapshot {
                     panes: HashMap::from([(
@@ -3275,6 +3422,9 @@ mod tests {
             sidebar_section_split: Some(0.5),
             collapsed_space_keys: Default::default(),
         };
+        let mut snapshot = snapshot;
+        super::super::snapshot::normalize_terminal_identities(&mut snapshot, false).unwrap();
+        history.layout_fingerprint = super::super::snapshot::layout_fingerprint(&snapshot);
         (snapshot, history)
     }
 }
