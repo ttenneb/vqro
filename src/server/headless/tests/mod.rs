@@ -7082,6 +7082,92 @@ async fn client_shell_release_cleanup_does_not_promote_and_survives_disconnect()
     shutdown_test_runtimes(&mut server);
 }
 
+#[tokio::test]
+async fn client_shell_hidden_nested_pixel_pane_does_not_request_host_pixels() {
+    let mut server = test_headless_server();
+    let mut workspace = crate::workspace::Workspace::test_new("nested-pixel-visibility");
+    let root = workspace.tabs[0].root_pane;
+    let selected = workspace.test_split(ratatui::layout::Direction::Horizontal);
+    let hidden = workspace.test_split(ratatui::layout::Direction::Horizontal);
+    let collection = workspace.tabs[0]
+        .create_collection_near(
+            crate::layout::LayoutLeaf::Pane(root),
+            ratatui::layout::Direction::Vertical,
+            0.5,
+            Some("helpers".into()),
+        )
+        .unwrap();
+    workspace.tabs[0]
+        .collect_tiled_pane(selected, collection)
+        .unwrap();
+    workspace.tabs[0]
+        .collect_tiled_pane(hidden, collection)
+        .unwrap();
+    workspace.tabs[0].layout.focus_pane(root);
+    assert!(workspace.tabs[0].layout.is_pane_visible(selected));
+    assert!(!workspace.tabs[0].layout.is_pane_visible(hidden));
+    for pane in [root, selected, hidden] {
+        workspace.insert_test_runtime(
+            pane,
+            crate::terminal::TerminalRuntime::test_with_screen_bytes(
+                40,
+                23,
+                if pane == hidden {
+                    b"\x1b[?1003h\x1b[?1006h\x1b[?1016h"
+                } else {
+                    b"plain"
+                },
+            ),
+        );
+    }
+    server.app.state.workspaces = vec![workspace];
+    server.app.state.active = Some(0);
+    server.app.state.selected = 0;
+    server.app.state.mode = crate::app::Mode::Terminal;
+    server.app.state.ensure_test_terminals();
+    server.app.state.assert_invariants_for_test();
+    let (writer, _control, _render) = test_client_writer();
+    let mut client = ClientConnection::new(
+        (80, 24),
+        crate::kitty_graphics::HostCellSize {
+            width_px: 10,
+            height_px: 20,
+        },
+        1,
+        RenderEncoding::SemanticFrame,
+        Some(writer),
+    );
+    client.mode = ClientConnectionMode::ClientShell;
+    client.pixel_mouse = true;
+    client.shell_surface_active = true;
+    client.shell_mouse_capture = true;
+    server.clients.insert(1, client);
+    server.stream_host_mouse_capture_mode();
+    assert_eq!(
+        server.clients[&1].host_sgr_pixels_active,
+        Some(false),
+        "hidden1016 must not change host units"
+    );
+
+    // Selecting it makes it a visible, unfocused pixel target. Zooming another
+    // pane must exclude it again, without destroying its live terminal modes.
+    server.app.state.workspaces[0].tabs[0]
+        .layout
+        .focus_pane(hidden);
+    server.app.state.workspaces[0].tabs[0]
+        .layout
+        .focus_pane(root);
+    assert!(server.app.state.workspaces[0].tabs[0]
+        .layout
+        .is_pane_visible(hidden));
+    server.stream_host_mouse_capture_mode();
+    assert_eq!(server.clients[&1].host_sgr_pixels_active, Some(true));
+    server.app.state.workspaces[0].tabs[0].zoomed = true;
+    server.stream_host_mouse_capture_mode();
+    assert_eq!(server.clients[&1].host_sgr_pixels_active, Some(false));
+    shutdown_test_runtimes(&mut server);
+}
+
 // Pixel mouse is a Unix client capability.
 #[cfg(unix)]
 #[tokio::test]

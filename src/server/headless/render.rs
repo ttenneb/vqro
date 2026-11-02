@@ -131,7 +131,7 @@ impl HeadlessServer {
         if tab.zoomed {
             return false;
         }
-        tab.layout.pane_ids().into_iter().any(|pane_id| {
+        tab.layout.any_visible_pane(|pane_id| {
             self.app
                 .state
                 .runtime_for_pane_in_workspace(

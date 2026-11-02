@@ -281,6 +281,25 @@ impl TileLayout {
     }
 
     /// Scalar visibility check for source dirtiness; never allocates or visits hidden children.
+    /// Test a scalar fact over visible leaves only, without collecting geometry
+    /// or visiting hidden stack members in pane-scaled presentation paths.
+    pub(crate) fn any_visible_pane(&self, mut predicate: impl FnMut(PaneId) -> bool) -> bool {
+        fn any(node: &TypedNode, predicate: &mut impl FnMut(PaneId) -> bool) -> bool {
+            match node {
+                TypedNode::Leaf(pane) => predicate(*pane),
+                TypedNode::Split { first, second, .. } => {
+                    any(first, predicate) || any(second, predicate)
+                }
+                TypedNode::Stack {
+                    selected, children, ..
+                } => children
+                    .get(*selected)
+                    .is_some_and(|child| any(child, predicate)),
+            }
+        }
+        any(&self.root, &mut predicate)
+    }
+
     pub(crate) fn is_pane_visible(&self, pane: PaneId) -> bool {
         fn visible(node: &TypedNode, pane: PaneId) -> bool {
             match node {
