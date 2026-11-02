@@ -608,7 +608,7 @@ impl HeadlessServer {
                 .next_headless_loop_deadline_with_git_refresh(
                     now,
                     needs_render,
-                    self.has_app_client(),
+                    self.git_refresh_scheduled(),
                 )
                 .map(|deadline| deadline.min(now + CLIENT_ACCEPT_POLL_INTERVAL))
                 .or(Some(now + CLIENT_ACCEPT_POLL_INTERVAL));
@@ -990,6 +990,12 @@ impl HeadlessServer {
 
     fn has_app_client(&self) -> bool {
         self.app_client_count() > 0
+    }
+
+    /// Periodic Git refresh follows attached clients. A refresh whose worker
+    /// failed to start still retries without one, so restored metadata settles.
+    fn git_refresh_scheduled(&self) -> bool {
+        self.has_app_client() || self.app.git_refresh_spawn_retry_pending
     }
 
     fn cancel_client_extension_work(&mut self, client_id: u64) {
@@ -3929,12 +3935,22 @@ impl HeadlessServer {
         }
         if matches!(
             &msg.request.method,
-            api::schema::Method::WorktreeCreate(_) | api::schema::Method::WorktreeRemove(_)
+            api::schema::Method::WorktreeCreate(_)
+                | api::schema::Method::WorktreeRemove(_)
+                | api::schema::Method::WorktreeList(_)
+                | api::schema::Method::WorktreeOpen(_)
         ) {
-            let deferred_changed = self
-                .app
-                .handle_deferred_worktree_api_request(msg.request, msg.respond_to);
-            return changed | deferred_changed;
+            let client_local = !matches!(
+                &msg.origin,
+                api::ApiOrigin::LocalSocket | api::ApiOrigin::LocalSocketPeer(_)
+            );
+            let read_only = matches!(&msg.request.method, api::schema::Method::WorktreeList(_));
+            let deferred_changed = self.app.handle_deferred_worktree_api_request(
+                msg.request,
+                msg.respond_to,
+                client_local,
+            );
+            return changed | (deferred_changed && !read_only);
         }
         if self.foreground_client_id.is_some_and(|client_id| {
             self.clients
@@ -4221,7 +4237,15 @@ impl HeadlessServer {
             }
         }
 
-        if self.has_app_client() {
+        if self
+            .app
+            .restored_worktree_validation_retry_at
+            .is_some_and(|deadline| now >= deadline)
+        {
+            self.app.start_restored_worktree_validation(now);
+        }
+
+        if self.git_refresh_scheduled() {
             self.app.start_git_status_refresh_if_due(now);
         }
 

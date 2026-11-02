@@ -152,8 +152,15 @@ pub struct App {
     pub(crate) git_refresh_in_flight: bool,
     pub(crate) git_refresh_due_after_in_flight: bool,
     pub(crate) git_identity_refresh_requested: bool,
+    /// A refresh worker failed to start; retry it even without a client.
+    pub(crate) git_refresh_spawn_retry_pending: bool,
+    /// Saved worktree memberships awaiting background validation after restore.
+    pub(crate) pending_restored_worktree_spaces:
+        Vec<(String, crate::workspace::WorktreeSpaceMembership)>,
+    pub(crate) restored_worktree_validation_retry_at: Option<Instant>,
     pub(crate) git_status_cache: HashMap<std::path::PathBuf, crate::workspace::GitStatusCacheEntry>,
     pub(crate) pending_api_worktree_creates: HashMap<std::path::PathBuf, u64>,
+    pub(crate) worktree_read_slots: std::sync::Arc<tokio::sync::Semaphore>,
     pub(crate) pending_api_worktree_removes: HashMap<String, u64>,
     pub(crate) pending_api_worktree_remove_paths: HashMap<std::path::PathBuf, u64>,
     pub(crate) pending_worktree_remove_runtime_exits: HashMap<crate::layout::PaneId, usize>,
@@ -852,13 +859,6 @@ impl App {
         state.reconcile_repositories();
         state.session_dirty = false;
 
-        for ws_idx in 0..state.workspaces.len() {
-            let cwd = state.workspaces[ws_idx]
-                .resolved_identity_cwd_from(&state.terminals, &restored_terminal_runtimes);
-            state.workspaces[ws_idx].cached_git_branch =
-                cwd.as_deref().and_then(crate::workspace::git_branch);
-        }
-
         // Background auto-update is disabled for non-persistent test apps
         // and in debug/test builds so local development never mutates the
         // running binary out from under spawned test processes.
@@ -870,13 +870,19 @@ impl App {
         );
         if version_check_enabled {
             let update_tx = event_tx.clone();
-            std::thread::spawn(move || crate::update::auto_update(update_tx));
+            if let Err(err) = crate::thread_spawn::spawn_named("vqro-update-check", move || {
+                crate::update::auto_update(update_tx)
+            }) {
+                tracing::warn!(err = %err, "failed to spawn update check thread");
+            }
         }
         if manifest_check_enabled {
             let manifest_update_tx = event_tx.clone();
-            std::thread::spawn(move || {
+            if let Err(err) = crate::thread_spawn::spawn_named("vqro-manifest-check", move || {
                 crate::detect::manifest_update::auto_update(manifest_update_tx)
-            });
+            }) {
+                tracing::warn!(err = %err, "failed to spawn agent manifest check thread");
+            }
         }
 
         let last_focus = state.active.and_then(|idx| {
@@ -953,8 +959,12 @@ impl App {
             git_refresh_in_flight: false,
             git_refresh_due_after_in_flight: false,
             git_identity_refresh_requested: false,
+            git_refresh_spawn_retry_pending: false,
+            pending_restored_worktree_spaces: Vec::new(),
+            restored_worktree_validation_retry_at: None,
             git_status_cache: HashMap::new(),
             pending_api_worktree_creates: HashMap::new(),
+            worktree_read_slots: std::sync::Arc::new(tokio::sync::Semaphore::new(8)),
             pending_api_worktree_removes: HashMap::new(),
             pending_api_worktree_remove_paths: HashMap::new(),
             pending_worktree_remove_runtime_exits: HashMap::new(),
@@ -1048,6 +1058,7 @@ impl App {
         app.validate_loaded_collections_authority();
         app.activate_persisted_extension_packages();
         app.refresh_collection_documents();
+        app.refresh_restored_workspace_git_metadata();
         app
     }
 
@@ -1153,6 +1164,7 @@ impl App {
         // every source after ownership transfer so a replacement server never serves
         // empty startup documents until an unrelated mutation happens.
         app.refresh_collection_documents();
+        app.refresh_restored_workspace_git_metadata();
         Ok(app)
     }
 

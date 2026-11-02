@@ -328,6 +328,9 @@ impl App {
             return workspace_not_found(id, &params.workspace_id);
         }
         let close_indices = self.state.workspace_close_indices(index);
+        if let Err(response) = self.require_restored_group_close_ready(&id, &close_indices) {
+            return response;
+        }
         if close_indices.len() >= 2 && !params.close_group {
             return encode_error(
                 id,

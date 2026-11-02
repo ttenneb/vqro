@@ -28,6 +28,7 @@ pub use self::restore::restore_handoff;
 #[cfg(unix)]
 pub(crate) use self::restore::validate_snapshot_admission;
 pub use self::restore::{restore, restore_delegations};
+pub(crate) use self::restore::restored_worktree_space_membership;
 #[cfg(any(unix, test))]
 pub(crate) use self::snapshot::terminal_id_for_pane_snapshot;
 pub use self::snapshot::{

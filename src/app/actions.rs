@@ -1719,7 +1719,24 @@ impl AppState {
                 let _ = cache_updates;
                 Vec::new()
             }
+            AppEvent::RestoredWorktreeSpaceChecked {
+                workspace_id,
+                expected,
+                valid,
+            } => {
+                if !valid {
+                    if let Some(workspace) = self.workspaces.iter_mut().find(|workspace| {
+                        workspace.id == workspace_id
+                            && workspace.worktree_space.as_ref() == Some(&expected)
+                    }) {
+                        workspace.worktree_space = None;
+                        self.session_dirty = true;
+                    }
+                }
+                Vec::new()
+            }
             AppEvent::WorktreeAddFinished(_) => Vec::new(),
+            AppEvent::WorktreeReadFinished(_) => Vec::new(),
             AppEvent::WorktreeRemoveFinished(_) => Vec::new(),
             AppEvent::TabBarCommandFinished { .. } => Vec::new(),
             AppEvent::PluginCommandFinished { .. }

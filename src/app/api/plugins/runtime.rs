@@ -115,10 +115,8 @@ impl App {
             stderr: None,
             error: None,
         };
-        self.push_plugin_command_log(log.clone());
-        self.state.plugin_commands_in_flight += 1;
         let event_tx = self.event_tx.clone();
-        std::thread::spawn(move || {
+        let spawned = crate::thread_spawn::spawn_named("vqro-plugin-command", move || {
             let child =
                 crate::plugin_command::command_for_argv_in_dir(&program, &args, &plugin_root)
                     .envs(env)
@@ -126,46 +124,7 @@ impl App {
                     .stderr(Stdio::piped())
                     .spawn();
             let finished = match child {
-                Ok(mut child) => {
-                    let stdout = child.stdout.take();
-                    let stderr = child.stderr.take();
-                    let stdout_reader = stdout.map(|stdout| {
-                        std::thread::spawn(move || {
-                            read_capped_plugin_output(stdout, PLUGIN_COMMAND_OUTPUT_MAX_BYTES)
-                        })
-                    });
-                    let stderr_reader = stderr.map(|stderr| {
-                        std::thread::spawn(move || {
-                            read_capped_plugin_output(stderr, PLUGIN_COMMAND_OUTPUT_MAX_BYTES)
-                        })
-                    });
-                    match child.wait() {
-                        Ok(status) => crate::events::AppEvent::PluginCommandFinished {
-                            log_id,
-                            finished_unix_ms: current_unix_ms(),
-                            exit_code: status.code(),
-                            stdout: stdout_reader
-                                .and_then(|reader| reader.join().ok())
-                                .unwrap_or_default(),
-                            stderr: stderr_reader
-                                .and_then(|reader| reader.join().ok())
-                                .unwrap_or_default(),
-                            error: None,
-                        },
-                        Err(err) => crate::events::AppEvent::PluginCommandFinished {
-                            log_id,
-                            finished_unix_ms: current_unix_ms(),
-                            exit_code: None,
-                            stdout: stdout_reader
-                                .and_then(|reader| reader.join().ok())
-                                .unwrap_or_default(),
-                            stderr: stderr_reader
-                                .and_then(|reader| reader.join().ok())
-                                .unwrap_or_default(),
-                            error: Some(err.to_string()),
-                        },
-                    }
-                }
+                Ok(child) => finish_plugin_child(log_id, child),
                 Err(err) => crate::events::AppEvent::PluginCommandFinished {
                     log_id,
                     finished_unix_ms: current_unix_ms(),
@@ -177,6 +136,21 @@ impl App {
             };
             let _ = event_tx.blocking_send(finished);
         });
+        if let Err(err) = spawned {
+            tracing::warn!(err = %err, "failed to spawn plugin command thread");
+            let log = PluginCommandLogInfo {
+                status: PluginCommandStatus::Failed,
+                finished_unix_ms: Some(current_unix_ms()),
+                stdout: Some(String::new()),
+                stderr: Some(String::new()),
+                error: Some(format!("could not start plugin command: {err}")),
+                ..log
+            };
+            self.push_plugin_command_log(log.clone());
+            return Ok(log);
+        }
+        self.push_plugin_command_log(log.clone());
+        self.state.plugin_commands_in_flight += 1;
         Ok(log)
     }
 
@@ -276,6 +250,74 @@ impl App {
             self.state.plugin_command_logs.drain(0..extra);
         }
     }
+}
+
+type PluginOutputReader = std::thread::JoinHandle<String>;
+
+fn finish_plugin_child(log_id: String, mut child: std::process::Child) -> crate::events::AppEvent {
+    let (stdout_reader, stderr_reader) =
+        match spawn_plugin_output_readers(child.stdout.take(), child.stderr.take()) {
+            Ok(readers) => readers,
+            Err(err) => {
+                // A missing reader would leave the plugin writing into a closed
+                // pipe, so stop it rather than report a misleading result.
+                tracing::warn!(err = %err, "failed to spawn plugin output reader");
+                let _ = child.kill();
+                let _ = child.wait();
+                return crate::events::AppEvent::PluginCommandFinished {
+                    log_id,
+                    finished_unix_ms: current_unix_ms(),
+                    exit_code: None,
+                    stdout: String::new(),
+                    stderr: String::new(),
+                    error: Some(format!("could not start output reader: {err}")),
+                };
+            }
+        };
+    let wait = child.wait();
+    // Descendants can hold the pipes open after the command exits; the run
+    // ends when the command does, not when its output closes.
+    let finished_unix_ms = current_unix_ms();
+    let join = |reader: Option<PluginOutputReader>| {
+        reader
+            .and_then(|reader| reader.join().ok())
+            .unwrap_or_default()
+    };
+    let stdout = join(stdout_reader);
+    let stderr = join(stderr_reader);
+    let (exit_code, error) = match wait {
+        Ok(status) => (status.code(), None),
+        Err(err) => (None, Some(err.to_string())),
+    };
+    crate::events::AppEvent::PluginCommandFinished {
+        log_id,
+        finished_unix_ms,
+        exit_code,
+        stdout,
+        stderr,
+        error,
+    }
+}
+
+fn spawn_plugin_output_readers(
+    stdout: Option<std::process::ChildStdout>,
+    stderr: Option<std::process::ChildStderr>,
+) -> std::io::Result<(Option<PluginOutputReader>, Option<PluginOutputReader>)> {
+    let stdout = stdout
+        .map(|stdout| {
+            crate::thread_spawn::spawn_named("vqro-plugin-stdout", move || {
+                read_capped_plugin_output(stdout, PLUGIN_COMMAND_OUTPUT_MAX_BYTES)
+            })
+        })
+        .transpose()?;
+    let stderr = stderr
+        .map(|stderr| {
+            crate::thread_spawn::spawn_named("vqro-plugin-stderr", move || {
+                read_capped_plugin_output(stderr, PLUGIN_COMMAND_OUTPUT_MAX_BYTES)
+            })
+        })
+        .transpose()?;
+    Ok((stdout, stderr))
 }
 
 fn current_unix_ms() -> u64 {
