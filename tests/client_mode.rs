@@ -1627,10 +1627,9 @@ fn client_receives_pane_surface_after_pane_output() {
 }
 
 #[test]
-fn pane_spawn_cwd_fallback_in_server() {
-    // Pane spawn failure cwd fallback in server context.
-    // This test verifies that the server can start even with invalid
-    // session data pointing to non-existent directories.
+fn unavailable_restored_pane_keeps_saved_cwd_and_retries_after_restart() {
+    // An unavailable saved leaf has no live shell: do not execute it in HOME
+    // or discard its cwd. Once repaired, restart retries that same saved fact.
     let _lock = test_lock();
     let base = unique_test_dir();
     let config_home = base.join("config");
@@ -1685,11 +1684,19 @@ fn pane_spawn_cwd_fallback_in_server() {
     assert_eq!(pane["result"]["pane"]["workspace_id"], workspace_id);
     let cwd = pane["result"]["pane"]["cwd"]
         .as_str()
-        .expect("restored pane should report fallback cwd");
-    assert_ne!(cwd, missing_cwd);
-    assert!(
-        std::path::Path::new(cwd).exists(),
-        "fallback cwd should exist: {cwd}"
+        .expect("unavailable pane should retain its saved cwd");
+    assert_eq!(cwd, missing_cwd);
+    assert!(!std::path::Path::new(cwd).exists());
+    let unavailable_input = send_json_request(
+        &api_socket,
+        &serde_json::json!({"id":"unavailable_input","method":"pane.send_text","params":{
+            "pane_id":pane_id,"text":"printf 'MUST_NOT_EXECUTE_IN_FALLBACK\\n'\n"
+        }})
+        .to_string(),
+    );
+    assert_eq!(
+        unavailable_input["error"]["code"], "pane_not_found",
+        "a retained leaf must not have a fallback shell: {unavailable_input}"
     );
 
     let client_shell = spawn_client_shell_process(&config_home, &runtime_dir, &api_socket);
@@ -1703,14 +1710,70 @@ fn pane_spawn_cwd_fallback_in_server() {
     );
     assert!(
         wait_until(Duration::from_secs(8), Duration::from_millis(20), || {
-            read_output(&output).contains("missing-cwd")
+            let screen = read_output(&output);
+            screen.contains("missing-cwd") && screen.contains("unavailable")
         }),
-        "client shell should render the restored session; output: {:?}",
+        "client shell should render the unavailable restored pane; output: {:?}",
         read_output(&output)
     );
 
+    drop(client_shell);
+    let stopped = send_json_request(
+        &api_socket,
+        r#"{"id":"stop","method":"server.stop","params":{}}"#,
+    );
+    assert!(stopped.get("error").is_none(), "{stopped}");
+    let mut spawned = spawned;
+    assert!(wait_until(
+        Duration::from_secs(10),
+        Duration::from_millis(20),
+        || { spawned.child.try_wait().unwrap().is_some() }
+    ));
     drop(spawned);
-    cleanup_spawned_herdr(client_shell, base);
+    let saved: Value =
+        serde_json::from_slice(&fs::read(data_dir.join("session.json")).unwrap()).unwrap();
+    let saved_panes = saved["workspaces"][0]["tabs"][0]["panes"]
+        .as_object()
+        .unwrap();
+    assert_eq!(saved_panes.len(), 1);
+    assert_eq!(saved_panes.values().next().unwrap()["cwd"], missing_cwd);
+
+    fs::create_dir(missing_cwd).unwrap();
+    let restarted = spawn_server(&config_home, &runtime_dir, &api_socket, &client_socket);
+    wait_for_socket(&api_socket, Duration::from_secs(10));
+    let recovered = send_json_request(
+        &api_socket,
+        &serde_json::json!({"id":"recovered","method":"pane.get","params":{"pane_id":pane_id}})
+            .to_string(),
+    );
+    assert!(recovered.get("error").is_none(), "{recovered}");
+    let live_cwd = recovered["result"]["pane"]["cwd"].as_str().unwrap();
+    assert!(std::path::Path::new(live_cwd).is_dir());
+    assert_eq!(
+        fs::canonicalize(live_cwd).unwrap(),
+        fs::canonicalize(missing_cwd).unwrap()
+    );
+    let live_cwd_file = base.join("live-cwd.txt");
+    let sent = send_json_request(
+        &api_socket,
+        &serde_json::json!({"id":"retry_input","method":"pane.send_text","params":{
+            "pane_id":pane_id,"text":format!("pwd > '{}'\n", live_cwd_file.display())
+        }})
+        .to_string(),
+    );
+    assert!(sent.get("error").is_none(), "{sent}");
+    assert!(
+        wait_until(Duration::from_secs(8), Duration::from_millis(20), || {
+            fs::read_to_string(&live_cwd_file).is_ok_and(|cwd| !cwd.trim().is_empty())
+        }),
+        "repaired pane must execute in a real shell"
+    );
+    let process_cwd = fs::read_to_string(&live_cwd_file).unwrap();
+    assert_eq!(
+        fs::canonicalize(process_cwd.trim()).unwrap(),
+        fs::canonicalize(missing_cwd).unwrap()
+    );
+    cleanup_spawned_herdr(restarted, base);
 }
 
 #[test]
