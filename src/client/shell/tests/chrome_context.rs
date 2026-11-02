@@ -4,6 +4,41 @@ fn frame_symbol(frame: &FrameData, x: u16, y: u16) -> &str {
     &frame.cells[usize::from(y) * usize::from(frame.width) + usize::from(x)].symbol
 }
 
+#[test]
+fn sidebar_attention_toggle_preserves_live_pane_surface_in_both_directions() {
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    state.show_agents = false;
+    state.set_snapshot(Box::new(snapshot()));
+    state.set_pane_surface(surface());
+    let before = state.compose(106, 30).expect("initial pane");
+    let pane_area = state.layout(106, 30).pane_surface;
+    assert_eq!(frame_symbol(&before, pane_area.x, pane_area.y), "L");
+
+    for show_agents in [true, false] {
+        let toggle = state.hits.attention_toggle;
+        assert!(!toggle.is_empty());
+        let outcome = state.handle_raw_events(vec![RawInputEvent::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: toggle.x,
+            row: toggle.y,
+            modifiers: KeyModifiers::empty(),
+        })]);
+        assert!(outcome.repaint);
+        assert!(!outcome.resize);
+        assert!(outcome.requests.is_empty());
+        assert_eq!(state.show_agents, show_agents);
+        assert!(
+            state.pane_surface.is_some(),
+            "chrome-only toggle lost the pane"
+        );
+        let after = state.compose(106, 30).expect("pane after toggle");
+        assert_eq!(frame_symbol(&after, pane_area.x, pane_area.y), "L");
+        assert!(!state.hits.tabs.is_empty());
+        assert!(!state.hits.panes.is_empty());
+        assert_eq!(after.cursor, before.cursor);
+    }
+}
+
 fn assert_rect_within(rect: Rect, bounds: Rect) {
     assert!(
         rect.x >= bounds.x
