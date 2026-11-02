@@ -72,7 +72,7 @@ human installation still requires appropriate approval.
 
 Explicit `agent.list`/`agent.get` API responses can include optional
 `AgentInfo.execution`, the process-lifetime `boot-id:pid:birth` key used by Linux
-caller attribution. It is present only when original owned-root birth,
+and macOS caller attribution. It is present only when original owned-root birth,
 known-agent and current foreground-leader ancestry/currentness can be proved.
 Unprovable/handoff/platform-unsupported, budget-exhausted or failed observations
 leave it absent. Absence never proves process death. A positively missing agent

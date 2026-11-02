@@ -240,34 +240,90 @@ pub(crate) fn sample_terminal_telemetry(
     TerminalTelemetrySample::Unsupported
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub(crate) fn socket_peer_birth(_stream: &crate::ipc::LocalStream) -> Option<(u32, u64)> {
     None
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub(crate) fn invocation_peer(
     _stream: &crate::ipc::LocalStream,
 ) -> Option<crate::action_invocation::InvocationPeer> {
     None
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub(crate) fn invocation_peer_for_process(
     _pid: u32,
-    _uid: u32,
 ) -> Option<crate::action_invocation::InvocationPeer> {
     None
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub(crate) fn invocation_peer_is_current(_peer: &crate::action_invocation::InvocationPeer) -> bool {
     false
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub(crate) fn invocation_process_birth(_pid: u32) -> Option<u64> {
     None
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos", test))]
+const INVOCATION_ANCESTRY_LIMIT: usize = 64;
+
+#[cfg(any(target_os = "linux", target_os = "macos", test))]
+enum InvocationAncestor {
+    Process(crate::action_invocation::InvocationProcess),
+    // A positively observed platform boundary, never an I/O/metadata error.
+    // Linux currently walks to PID 0; macOS excludes foreign-euid ancestors.
+    #[cfg_attr(target_os = "linux", allow(dead_code))]
+    Boundary,
+}
+
+/// A root outside the retained chain cannot be used by caller classification.
+#[cfg(any(target_os = "linux", target_os = "macos", test))]
+fn capture_invocation_ancestry(
+    mut pid: u32,
+    mut read: impl FnMut(u32) -> Option<InvocationAncestor>,
+) -> Option<Vec<crate::action_invocation::InvocationProcess>> {
+    let mut ancestry = Vec::new();
+    while pid != 0 && ancestry.len() < INVOCATION_ANCESTRY_LIMIT {
+        if ancestry
+            .iter()
+            .any(|entry: &crate::action_invocation::InvocationProcess| entry.pid == pid)
+        {
+            return None;
+        }
+        match read(pid)? {
+            InvocationAncestor::Boundary => break,
+            InvocationAncestor::Process(entry) => {
+                if entry.pid != pid || entry.process.pid != pid {
+                    return None;
+                }
+                pid = entry.parent_pid;
+                ancestry.push(entry);
+            }
+        }
+    }
+    // Also reject a cycle which closes exactly at the capture bound.
+    if ancestry.is_empty() || ancestry.iter().any(|entry| entry.pid == pid) {
+        return None;
+    }
+    Some(ancestry)
+}
+
+/// Recheck lifetime and topology; same-PID exec is deliberately one lifetime.
+#[cfg(any(target_os = "linux", target_os = "macos", test))]
+fn invocation_ancestry_is_current(
+    ancestry: &[crate::action_invocation::InvocationProcess],
+    mut read: impl FnMut(u32) -> Option<(u64, u32)>,
+) -> bool {
+    !ancestry.is_empty()
+        && ancestry.len() <= INVOCATION_ANCESTRY_LIMIT
+        && ancestry
+            .iter()
+            .all(|entry| read(entry.pid) == Some((entry.birth, entry.parent_pid)))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -845,6 +901,154 @@ fn child_exit_classification_only_checkpoints_interruptions() {
     #[cfg(unix)]
     assert!(ChildExitReason::Handoff.requires_session_checkpoint());
     assert!(!ChildExitReason::WaitFailed.requires_session_checkpoint());
+}
+
+#[cfg(test)]
+mod invocation_identity_tests {
+    use super::*;
+    use crate::action_invocation::{InvocationPeer, InvocationProcess};
+
+    fn process(pid: u32, parent_pid: u32) -> InvocationProcess {
+        let name = if pid == 20 { "pi" } else { "bash" };
+        InvocationProcess {
+            pid,
+            parent_pid,
+            birth: u64::from(pid) * 10,
+            process: ForegroundProcess {
+                pid,
+                name: name.into(),
+                argv0: Some(name.into()),
+                argv: Some(vec![name.into()]),
+                cmdline: Some(name.into()),
+            },
+        }
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn invocation_process_observation_uses_host_uid_not_placeholder() {
+        let pid = std::process::id();
+        let peer = invocation_peer_for_process(pid).expect("current same-user process ancestry");
+        // SAFETY: geteuid has no arguments or memory preconditions.
+        assert_eq!(peer.uid, unsafe { libc::geteuid() });
+        let first = peer.ancestry.first().expect("observed process");
+        assert_eq!(first.pid, pid);
+        assert_eq!(Some(first.birth), invocation_process_birth(pid));
+        assert!(invocation_peer_is_current(&peer));
+    }
+
+    #[test]
+    fn invocation_capture_excludes_positive_boundary_and_requires_owned_root_inside() {
+        for boundary in [1, 10, 20] {
+            let ancestry = capture_invocation_ancestry(20, |pid| {
+                Some(if pid == boundary {
+                    InvocationAncestor::Boundary
+                } else {
+                    InvocationAncestor::Process(process(pid, if pid == 20 { 10 } else { 1 }))
+                })
+            });
+            if boundary == 20 {
+                assert!(ancestry.is_none());
+                continue;
+            }
+            let peer = InvocationPeer {
+                uid: 501,
+                boot_id: "boot".into(),
+                ancestry: ancestry.expect("same-user prefix"),
+            };
+            assert!(peer.ancestry.iter().all(|entry| entry.pid != boundary));
+            let execution = crate::action_invocation::observed_execution(
+                &peer,
+                "term".into(),
+                10,
+                Some(100),
+                20,
+                Some(crate::detect::Agent::Pi),
+            );
+            assert_eq!(execution, (boundary == 1).then(|| "boot:20:200".into()));
+        }
+    }
+
+    #[test]
+    fn invocation_capture_rejects_errors_mismatched_pid_and_cycles() {
+        assert!(capture_invocation_ancestry(0, |_| panic!("must not read PID zero")).is_none());
+        assert!(capture_invocation_ancestry(20, |_| None).is_none());
+        assert!(capture_invocation_ancestry(20, |_| {
+            Some(InvocationAncestor::Process(process(21, 0)))
+        })
+        .is_none());
+        assert!(
+            capture_invocation_ancestry(20, |pid| {
+                (pid == 20).then(|| InvocationAncestor::Process(process(pid, 10)))
+            })
+            .is_none(),
+            "missing ancestor metadata is not a boundary"
+        );
+        assert!(capture_invocation_ancestry(20, |pid| {
+            Some(InvocationAncestor::Process(process(
+                pid,
+                if pid == 20 { 10 } else { 20 },
+            )))
+        })
+        .is_none());
+    }
+
+    #[test]
+    fn invocation_capture_is_bounded_and_cannot_prove_root_beyond_bound() {
+        let mut reads = 0;
+        let ancestry = capture_invocation_ancestry(1, |pid| {
+            reads += 1;
+            Some(InvocationAncestor::Process(process(pid, pid + 1)))
+        })
+        .expect("bounded prefix");
+        assert_eq!(reads, INVOCATION_ANCESTRY_LIMIT);
+        assert_eq!(ancestry.len(), INVOCATION_ANCESTRY_LIMIT);
+        assert!(!ancestry.iter().any(|entry| entry.pid == 65));
+        let peer = InvocationPeer {
+            uid: 501,
+            boot_id: "boot".into(),
+            ancestry,
+        };
+        assert_eq!(
+            crate::action_invocation::observed_execution(
+                &peer,
+                "term".into(),
+                65,
+                Some(650),
+                20,
+                Some(crate::detect::Agent::Pi),
+            ),
+            None
+        );
+        assert!(
+            capture_invocation_ancestry(1, |pid| {
+                Some(InvocationAncestor::Process(process(
+                    pid,
+                    if pid == 64 { 1 } else { pid + 1 },
+                )))
+            })
+            .is_none(),
+            "a cycle closing at the bound is rejected too"
+        );
+    }
+
+    #[test]
+    fn invocation_currentness_rejects_pid_reuse_reparenting_and_missing_identity() {
+        let ancestry = vec![process(20, 10), process(10, 0)];
+        assert!(invocation_ancestry_is_current(&ancestry, |pid| {
+            Some((u64::from(pid) * 10, if pid == 20 { 10 } else { 0 }))
+        }));
+        for replacement in [None, Some((201, 10)), Some((200, 11))] {
+            assert!(!invocation_ancestry_is_current(&ancestry, |pid| {
+                if pid == 20 {
+                    replacement
+                } else {
+                    Some((100, 0))
+                }
+            }));
+        }
+        assert!(!invocation_ancestry_is_current(&[], |_| unreachable!()));
+    }
 }
 
 #[cfg(all(test, unix))]

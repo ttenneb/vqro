@@ -1,7 +1,8 @@
 # Tasks core and graph
 
-Status: **experimental, Linux trusted executable only**. Working extension policy,
-not a frozen task ABI or a production package-admission claim.
+Status: **experimental, Linux/macOS trusted executable**. Working extension policy,
+not a frozen task ABI or a production package-admission claim. Native macOS runtime
+verification is still required; the automated process demo harnesses remain Linux-only.
 
 `extensions/tasks/` owns persistence, graph/acceptance policy, budgets and derived
 debts. The host owns terminal/execution identity and neutral

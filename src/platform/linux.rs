@@ -32,30 +32,23 @@ pub(crate) fn invocation_peer(
     if uid != unsafe { libc::geteuid() } {
         return None;
     }
-    invocation_peer_for_process(u32::try_from(credentials.pid()?).ok()?, uid)
+    invocation_peer_for_process(u32::try_from(credentials.pid()?).ok()?)
 }
 
 pub(crate) fn invocation_peer_for_process(
-    mut pid: u32,
-    uid: u32,
+    pid: u32,
 ) -> Option<crate::action_invocation::InvocationPeer> {
+    // Socket callers already checked kernel euid; process-only observations use
+    // the host account, never a caller-supplied or placeholder UID.
+    // SAFETY: geteuid has no arguments or memory preconditions.
+    let uid = unsafe { libc::geteuid() };
     let boot_id = std::fs::read_to_string("/proc/sys/kernel/random/boot_id")
         .ok()?
         .trim()
         .to_owned();
-    let mut ancestry = Vec::new();
-    for _ in 0..64 {
-        if pid == 0
-            || ancestry
-                .iter()
-                .any(|entry: &crate::action_invocation::InvocationProcess| entry.pid == pid)
-        {
-            break;
-        }
-        let entry = invocation_process(pid)?;
-        pid = entry.parent_pid;
-        ancestry.push(entry);
-    }
+    let ancestry = super::capture_invocation_ancestry(pid, |pid| {
+        invocation_process(pid).map(super::InvocationAncestor::Process)
+    })?;
     let peer = crate::action_invocation::InvocationPeer {
         uid,
         boot_id,
@@ -119,12 +112,10 @@ pub(crate) fn invocation_process_birth(pid: u32) -> Option<u64> {
 }
 
 pub(crate) fn invocation_peer_is_current(peer: &crate::action_invocation::InvocationPeer) -> bool {
-    !peer.ancestry.is_empty()
-        && peer.ancestry.iter().all(|entry| {
-            invocation_process(entry.pid).is_some_and(|current| {
-                current.birth == entry.birth && current.parent_pid == entry.parent_pid
-            })
-        })
+    super::invocation_ancestry_is_current(&peer.ancestry, |pid| {
+        let current = invocation_process(pid)?;
+        Some((current.birth, current.parent_pid))
+    })
 }
 
 use super::{

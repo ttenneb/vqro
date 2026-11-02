@@ -32,8 +32,8 @@ Use these lifecycle terms precisely:
 | Runtime | Trusted process protocol 2 | Restricted Wasmtime component using `vqro.service.v1` |
 | Install/update/rollback/remove lifecycle | Production compatibility lifecycle | Production exact-Git package journey; file/link contracts remain lower-level foundations |
 | Runtime instantiation after enable/restart | Production | Production |
-| Direct client/CLI generic action invocation | Experimental protocol-2 `action_invoke`, bounded existing workers and cooperative Linux caller observations; see [action invocation](extension-action-invoke-v1.md) | Unavailable; package-to-package calls remain Service Fabric |
-| Task policy/store/CLI | Experimental Linux trusted Tasks executable; extension-owned records/debts, scoped receipts and cooperative-unverified human accept/answer; see [Tasks core](tasks-core-v0.md) | Unavailable |
+| Direct client/CLI generic action invocation | Experimental protocol-2 `action_invoke`, bounded existing workers and cooperative Linux/macOS caller observations; see [action invocation](extension-action-invoke-v1.md) | Unavailable; package-to-package calls remain Service Fabric |
+| Task policy/store/CLI | Experimental Linux/macOS trusted Tasks executable; extension-owned records/debts, scoped receipts and cooperative-unverified human accept/answer; see [Tasks core](tasks-core-v0.md) | Unavailable |
 | Read-only task pane/tree | Experimental Tasks terminal pane via existing plugin tab/split; extension-owned filters/debts, optional API-only exact-execution observation; [task pane](tasks-view-v0.md) | Unavailable |
 | Host document v1 | Production for admitted protocol-2 providers; trusted non-reserved publishers may request terminal-group, activity or relationship snapshots (see [trusted semantic documents](trusted-semantic-documents-v1.md)) | Validated cached output for the exact pinned Collections and Spaces authority packages |
 | `host.state.v1` lease | Not granted through the package dispatcher | Revocable read-only lease for the exact pinned Collections package during audit and typed action planning; no package write lease |

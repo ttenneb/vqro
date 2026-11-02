@@ -38,8 +38,9 @@ impl Probe {
         if Instant::now() >= deadline {
             return None;
         }
-        // UID is not used for this agent-only projection; it is not caller attribution.
-        let peer = crate::platform::invocation_peer_for_process(foreground, 0)?;
+        // The platform captures a host-account process observation; this does
+        // not substitute for kernel socket credentials on caller attribution.
+        let peer = crate::platform::invocation_peer_for_process(foreground)?;
         if !crate::platform::invocation_peer_is_current(&peer)
             || (self.foreground)() != Some(foreground)
         {

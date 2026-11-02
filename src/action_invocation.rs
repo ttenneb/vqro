@@ -1,5 +1,5 @@
 //! Neutral attribution for trusted executable action calls.
-//! Cooperative Linux process-lifetime identity, not same-user human authentication.
+//! Cooperative Linux/macOS process-lifetime identity, not same-user human authentication.
 //! Same-PID exec is the same process lifetime; imported roots lack authority proof.
 use serde::Serialize;
 

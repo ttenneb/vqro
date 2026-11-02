@@ -29,7 +29,174 @@ pub(crate) use super::unix_common::{
 };
 
 const PROC_PGRP_ONLY: u32 = 2;
+// Darwin proc_info.h pbi_flags ABI; libc does not expose this flag.
+const PROC_FLAG_LP64: u32 = 0x10;
 const SERVER_NOFILE_LIMIT_TARGET: libc::rlim_t = 8192;
+
+/// Kernel credentials for the connected peer, not caller-supplied environment.
+fn socket_peer_credentials(stream: &crate::ipc::LocalStream) -> Option<(u32, u32)> {
+    use std::os::fd::{AsFd as _, AsRawFd as _};
+    let crate::ipc::LocalStream::UdSocket(stream) = stream;
+    socket_peer_credentials_fd(stream.as_fd().as_raw_fd())
+}
+
+fn socket_peer_credentials_fd(fd: RawFd) -> Option<(u32, u32)> {
+    let mut pid: libc::pid_t = 0;
+    let mut size = std::mem::size_of_val(&pid) as libc::socklen_t;
+    let mut uid: libc::uid_t = 0;
+    let mut gid: libc::gid_t = 0;
+    // SAFETY: both calls receive live, correctly sized output storage. A bad or
+    // disconnected descriptor is an error, never a fallback identity.
+    unsafe {
+        if libc::getsockopt(
+            fd,
+            libc::SOL_LOCAL,
+            libc::LOCAL_PEERPID,
+            (&mut pid as *mut libc::pid_t).cast(),
+            &mut size,
+        ) != 0
+            || size as usize != std::mem::size_of_val(&pid)
+            || pid <= 0
+            || libc::getpeereid(fd, &mut uid, &mut gid) != 0
+            || uid != libc::geteuid()
+        {
+            return None;
+        }
+    }
+    Some((u32::try_from(pid).ok()?, uid))
+}
+
+pub(crate) fn socket_peer_birth(stream: &crate::ipc::LocalStream) -> Option<(u32, u64)> {
+    let (pid, _) = socket_peer_credentials(stream)?;
+    Some((pid, invocation_process_birth(pid)?))
+}
+
+pub(crate) fn invocation_peer(
+    stream: &crate::ipc::LocalStream,
+) -> Option<crate::action_invocation::InvocationPeer> {
+    let (pid, _) = socket_peer_credentials(stream)?;
+    invocation_peer_for_process(pid)
+}
+
+pub(crate) fn invocation_peer_for_process(
+    pid: u32,
+) -> Option<crate::action_invocation::InvocationPeer> {
+    // Socket callers already checked kernel euid. Explicit process observations
+    // are restricted to the same host account too, not a synthetic UID.
+    // SAFETY: geteuid has no arguments or memory preconditions.
+    let uid = unsafe { libc::geteuid() };
+    let boot_id = invocation_boot_id()?;
+    let ancestry = super::capture_invocation_ancestry(pid, |pid| {
+        let info = invocation_bsdinfo(pid)?;
+        if info.pbi_uid != uid {
+            return Some(super::InvocationAncestor::Boundary);
+        }
+        let birth = invocation_birth(&info)?;
+        // KERN_PROCARGS2 includes environment too, so bound that acquisition
+        // separately from the Linux-equivalent 16 KiB argument limit.
+        let argv =
+            invocation_procargs2_argv(&kern_procargs2_bounded(pid, 1024 * 1024)?, info.pbi_flags)?;
+        let argv_bytes = argv.iter().try_fold(0usize, |total, arg| {
+            total.checked_add(arg.len())?.checked_add(1)
+        })?;
+        if argv_bytes > 16384 {
+            return None;
+        }
+        let name = comm_from_bsdinfo(&info)?;
+        let current = invocation_bsdinfo(pid)?;
+        if current.pbi_uid != uid
+            || (current.pbi_flags & PROC_FLAG_LP64) != (info.pbi_flags & PROC_FLAG_LP64)
+            || current.pbi_ppid != info.pbi_ppid
+            || invocation_birth(&current) != Some(birth)
+        {
+            return None;
+        }
+        Some(super::InvocationAncestor::Process(
+            crate::action_invocation::InvocationProcess {
+                pid,
+                parent_pid: info.pbi_ppid,
+                birth,
+                process: ForegroundProcess {
+                    pid,
+                    name,
+                    argv0: argv.first().cloned(),
+                    cmdline: Some(argv.join(" ")),
+                    argv: Some(argv),
+                },
+            },
+        ))
+    })?;
+    let peer = crate::action_invocation::InvocationPeer {
+        uid,
+        boot_id,
+        ancestry,
+    };
+    invocation_peer_is_current(&peer).then_some(peer)
+}
+
+pub(crate) fn invocation_peer_is_current(peer: &crate::action_invocation::InvocationPeer) -> bool {
+    // SAFETY: geteuid has no arguments or memory preconditions.
+    if peer.uid != unsafe { libc::geteuid() } {
+        return false;
+    }
+    super::invocation_ancestry_is_current(&peer.ancestry, |pid| {
+        let info = invocation_bsdinfo(pid)?;
+        (info.pbi_uid == peer.uid).then_some((invocation_birth(&info)?, info.pbi_ppid))
+    })
+}
+
+fn invocation_bsdinfo(pid: u32) -> Option<libc::proc_bsdinfo> {
+    if pid == 0 || libc::pid_t::try_from(pid).is_err() {
+        return None;
+    }
+    let info = process_bsdinfo(pid)?;
+    (info.pbi_pid == pid && invocation_birth(&info).is_some()).then_some(info)
+}
+
+fn invocation_birth(info: &libc::proc_bsdinfo) -> Option<u64> {
+    if info.pbi_start_tvsec == 0 || info.pbi_start_tvusec >= 1_000_000 {
+        return None;
+    }
+    info.pbi_start_tvsec
+        .checked_mul(1_000_000)?
+        .checked_add(info.pbi_start_tvusec)
+}
+
+pub(crate) fn invocation_process_birth(pid: u32) -> Option<u64> {
+    invocation_birth(&invocation_bsdinfo(pid)?)
+}
+
+fn invocation_boot_id() -> Option<String> {
+    // A UUID including its NUL fits exactly in this fixed-size buffer. Never
+    // substitute a host UUID or a random per-server value across restarts.
+    let mut bytes = [0u8; 37];
+    let mut size = bytes.len();
+    // SAFETY: the name is NUL-terminated and bytes/size are writable storage;
+    // null newp makes this a read-only query.
+    let result = unsafe {
+        libc::sysctlbyname(
+            c"kern.bootsessionuuid".as_ptr(),
+            bytes.as_mut_ptr().cast(),
+            &mut size,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if result != 0 || size != bytes.len() || bytes[36] != 0 {
+        return None;
+    }
+    let value = std::str::from_utf8(&bytes[..36]).ok()?;
+    if !value.bytes().enumerate().all(|(index, byte)| {
+        if matches!(index, 8 | 13 | 18 | 23) {
+            byte == b'-'
+        } else {
+            byte.is_ascii_hexdigit()
+        }
+    }) {
+        return None;
+    }
+    Some(value.to_ascii_lowercase())
+}
 
 pub(crate) fn should_draw_host_cursor_by_default() -> bool {
     false
@@ -452,8 +619,18 @@ fn process_argv0_name(pid: u32) -> Option<String> {
 
 /// Raw `sysctl(KERN_PROCARGS2)` call. Returns the full buffer.
 fn kern_procargs2(pid: u32) -> Option<Vec<u8>> {
+    kern_procargs2_bounded(pid, usize::MAX)
+}
+
+fn kern_procargs2_bounded(pid: u32, max_bytes: usize) -> Option<Vec<u8>> {
+    let pid = libc::pid_t::try_from(pid).ok()?;
+    if pid <= 0 {
+        return None;
+    }
+    // SAFETY: both read-only sysctl calls receive correctly sized output
+    // storage; the first size is bounded before allocating the second buffer.
     unsafe {
-        let mut mib = [libc::CTL_KERN, libc::KERN_PROCARGS2, pid as libc::c_int];
+        let mut mib = [libc::CTL_KERN, libc::KERN_PROCARGS2, pid];
 
         // First call: query required buffer size
         let mut size: libc::size_t = 0;
@@ -465,12 +642,16 @@ fn kern_procargs2(pid: u32) -> Option<Vec<u8>> {
             std::ptr::null_mut(),
             0,
         );
-        if ret != 0 || size == 0 {
+        if ret != 0 {
             return None;
         }
 
-        // Second call: read data
-        let mut buf = vec![0u8; size];
+        // The size probe is advisory across same-PID exec. XNU can return a
+        // truncated tail with success and size == capacity. Reserve headroom
+        // and reject that ambiguous/saturated result instead of parsing it.
+        let capacity = procargs2_read_capacity(size, max_bytes)?;
+        let mut buf = vec![0u8; capacity];
+        size = capacity;
         let ret = libc::sysctl(
             mib.as_mut_ptr(),
             3,
@@ -482,9 +663,26 @@ fn kern_procargs2(pid: u32) -> Option<Vec<u8>> {
         if ret != 0 {
             return None;
         }
-        buf.truncate(size);
-        Some(buf)
+        procargs2_complete_read(buf, size)
     }
+}
+
+fn procargs2_read_capacity(probed: usize, max_bytes: usize) -> Option<usize> {
+    if probed < std::mem::size_of::<i32>() {
+        return None;
+    }
+    let capacity = probed.checked_add(1)?;
+    (capacity <= max_bytes).then_some(capacity)
+}
+
+fn procargs2_complete_read(mut buf: Vec<u8>, returned: usize) -> Option<Vec<u8>> {
+    // sysctl_procargsx's partial-copy branch returns the supplied capacity,
+    // including argc. Equality is ambiguous even when sysctl reports success.
+    if returned < std::mem::size_of::<i32>() || returned >= buf.len() {
+        return None;
+    }
+    buf.truncate(returned);
+    Some(buf)
 }
 
 pub fn write_clipboard(bytes: &[u8]) -> bool {
@@ -794,7 +992,11 @@ fn process_bsdinfo(pid: u32) -> Option<libc::proc_bsdinfo> {
         )
     };
 
-    (ret == size).then_some(info)
+    complete_bsdinfo(info, ret)
+}
+
+fn complete_bsdinfo(info: libc::proc_bsdinfo, bytes: libc::c_int) -> Option<libc::proc_bsdinfo> {
+    (bytes as usize == std::mem::size_of::<libc::proc_bsdinfo>()).then_some(info)
 }
 
 fn comm_from_bsdinfo(info: &libc::proc_bsdinfo) -> Option<String> {
@@ -825,6 +1027,8 @@ pub fn process_agent_hint(pid: u32) -> Option<crate::detect::Agent> {
     super::parse_agent_env_hint(procargs2_env(&buf)?)
 }
 
+// Legacy best-effort foreground metadata/hints only. Caller authority must use
+// invocation_procargs2_argv's exact aligned boundary, including empty argv[0].
 fn procargs2_argv_start(rest: &[u8]) -> Option<usize> {
     let exec_end = rest.iter().position(|&byte| byte == 0)?;
     let mut pos = exec_end;
@@ -843,7 +1047,37 @@ fn skip_nul_strings(bytes: &[u8], start: usize, count: usize) -> Option<usize> {
     Some(current)
 }
 
+/// Caller authority uses XNU's target-pointer-aligned argv boundary, not the
+/// best-effort metadata reader's NUL scan. Empty argv[0] is legal on Darwin;
+/// skipping all leading NULs could otherwise turn environment into arguments.
+fn invocation_procargs2_argv(buf: &[u8], process_flags: u32) -> Option<Vec<String>> {
+    let rest = buf.get(4..)?;
+    let exec_end = rest.iter().position(|&byte| byte == 0)?;
+    if exec_end == 0 {
+        return None;
+    }
+    // XNU exec_extract_strings aligns ip_startargv after executable_path= and
+    // the path. The 16-byte key is stripped by sysctl_procargsx, preserving
+    // alignment relative to rest. See Apple XNU bsd/kern/kern_exec.c.
+    let pointer_size = if process_flags & PROC_FLAG_LP64 != 0 {
+        8
+    } else {
+        4
+    };
+    let path_end = exec_end.checked_add(1)?;
+    let start = path_end.checked_add(pointer_size - 1)? & !(pointer_size - 1);
+    if rest.get(path_end..start)?.iter().any(|&byte| byte != 0) {
+        return None;
+    }
+    procargs2_argv_at(buf, start)
+}
+
 fn procargs2_argv(buf: &[u8]) -> Option<Vec<String>> {
+    let rest = buf.get(4..)?;
+    procargs2_argv_at(buf, procargs2_argv_start(rest)?)
+}
+
+fn procargs2_argv_at(buf: &[u8], start: usize) -> Option<Vec<String>> {
     if buf.len() < 4 {
         return None;
     }
@@ -855,18 +1089,19 @@ fn procargs2_argv(buf: &[u8]) -> Option<Vec<String>> {
 
     // Layout: [argc: i32] [exec_path\0] [padding\0...] [argv[0]\0] ... [env\0] ...
     let rest = &buf[4..];
-    let mut current = procargs2_argv_start(rest)?;
+    let mut current = start;
+    // Even an empty argument requires a NUL byte. Reject impossible counts
+    // before reserving memory from the kernel-supplied argc.
+    if argc as usize > rest.len().checked_sub(current)? {
+        return None;
+    }
     let mut argv = Vec::with_capacity(argc as usize);
     for _ in 0..argc {
         if current >= rest.len() {
             return None;
         }
-        let end = rest[current..]
-            .iter()
-            .position(|&b| b == 0)
-            .map(|offset| current + offset)
-            .unwrap_or(rest.len());
-        if end == current {
+        let end = current + rest[current..].iter().position(|&b| b == 0)?;
+        if end == current && argv.is_empty() {
             return None;
         }
         argv.push(String::from_utf8_lossy(&rest[current..end]).into_owned());
@@ -1041,12 +1276,180 @@ mod tests {
         );
     }
 
+    #[test]
+    fn invocation_kernel_peer_credentials_match_connected_process() {
+        use std::os::fd::AsRawFd;
+        use std::os::unix::net::{UnixListener, UnixStream};
+        let directory = std::env::temp_dir().join(format!("vqro-peer-{}", std::process::id()));
+        std::fs::create_dir(&directory).expect("private socket directory");
+        let path = directory.join("peer.sock");
+        let listener = UnixListener::bind(&path).expect("bind");
+        let client = UnixStream::connect(&path).expect("connect");
+        let (server, _) = listener.accept().expect("accept");
+        assert_eq!(
+            socket_peer_credentials_fd(server.as_raw_fd()),
+            Some((std::process::id(), unsafe { libc::geteuid() },))
+        );
+        assert!(socket_peer_credentials_fd(-1).is_none());
+        drop((client, server, listener));
+        std::fs::remove_file(path).expect("remove owned socket");
+        std::fs::remove_dir(directory).expect("remove owned directory");
+    }
+
+    #[test]
+    fn invocation_libproc_identity_rechecks_birth_parent_uid_and_exit() {
+        let mut child = Command::new("/bin/sleep").arg("30").spawn().expect("child");
+        let pid = child.id();
+        let info = invocation_bsdinfo(pid).expect("child BSD info");
+        let birth = invocation_birth(&info).expect("child birth");
+        let uid = unsafe { libc::geteuid() };
+        let entry = crate::action_invocation::InvocationProcess {
+            pid,
+            parent_pid: info.pbi_ppid,
+            birth,
+            process: ForegroundProcess {
+                pid,
+                name: "sleep".into(),
+                argv0: None,
+                argv: None,
+                cmdline: None,
+            },
+        };
+        let mut peer = crate::action_invocation::InvocationPeer {
+            uid,
+            boot_id: invocation_boot_id().expect("boot namespace"),
+            ancestry: vec![entry],
+        };
+        assert_eq!(invocation_boot_id().as_deref(), Some(peer.boot_id.as_str()));
+        assert_eq!(invocation_process_birth(pid), Some(birth));
+        assert_eq!(info.pbi_ppid, std::process::id());
+        assert!(invocation_peer_is_current(&peer));
+        peer.ancestry[0].birth += 1;
+        assert!(!invocation_peer_is_current(&peer));
+        peer.ancestry[0].birth = birth;
+        peer.ancestry[0].parent_pid = 0;
+        assert!(!invocation_peer_is_current(&peer));
+        peer.ancestry[0].parent_pid = info.pbi_ppid;
+        peer.uid = uid.wrapping_add(1);
+        assert!(!invocation_peer_is_current(&peer));
+        peer.uid = uid;
+        child.kill().expect("stop owned child");
+        child.wait().expect("reap owned child");
+        assert!(!invocation_peer_is_current(&peer));
+        assert!(invocation_process_birth(0).is_none());
+        assert!(invocation_process_birth(u32::MAX).is_none());
+    }
+
+    #[test]
+    fn invocation_bsdinfo_rejects_short_reads_and_invalid_birth() {
+        let size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
+        for bytes in [-1, 0, size - 1, size + 1] {
+            let info = unsafe { std::mem::zeroed() };
+            assert!(complete_bsdinfo(info, bytes).is_none());
+        }
+        let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+        assert!(invocation_birth(&info).is_none());
+        info.pbi_start_tvsec = 42;
+        info.pbi_start_tvusec = 999_999;
+        assert_eq!(invocation_birth(&info), Some(42_999_999));
+        info.pbi_start_tvusec = 1_000_000;
+        assert!(invocation_birth(&info).is_none());
+        info.pbi_start_tvsec = u64::MAX;
+        info.pbi_start_tvusec = 0;
+        assert!(invocation_birth(&info).is_none());
+    }
+
+    #[test]
+    fn invocation_procargs_rejects_truncation_and_impossible_argc() {
+        let mut buf = build_procargs2("/usr/bin/node", &["node", "pi"], &[]);
+        buf.pop();
+        assert!(procargs2_argv(&buf).is_none(), "unterminated last argv");
+        buf[..4].copy_from_slice(&i32::MAX.to_ne_bytes());
+        assert!(procargs2_argv(&buf).is_none(), "impossible count");
+        for argc in [-1i32, 0] {
+            buf[..4].copy_from_slice(&argc.to_ne_bytes());
+            assert!(procargs2_argv(&buf).is_none());
+        }
+        assert!(kern_procargs2_bounded(std::process::id(), 1).is_none());
+        let buf = build_procargs2("/bin/echo", &["echo", "", "hello"], &["AGENT=pi"]);
+        assert_eq!(
+            procargs2_argv(&buf),
+            Some(vec!["echo".into(), "".into(), "hello".into()])
+        );
+    }
+
+    #[test]
+    fn invocation_procargs_rejects_saturated_reads_after_size_growth() {
+        assert_eq!(procargs2_read_capacity(100, 1024), Some(101));
+        assert!(procargs2_read_capacity(1024, 1024).is_none());
+        assert!(procargs2_read_capacity(usize::MAX, usize::MAX).is_none());
+        assert!(procargs2_read_capacity(0, 1024).is_none());
+        let capacity = procargs2_read_capacity(100, 1024).expect("bounded headroom");
+        // Model XNU success after exec grows args: its tail/padded copy returns
+        // exactly capacity, not an overflow indication. Never parse that tail.
+        assert!(procargs2_complete_read(vec![b'p'; capacity], capacity).is_none());
+        assert!(procargs2_complete_read(vec![0; capacity], capacity + 1).is_none());
+        assert!(procargs2_complete_read(vec![0; capacity], 3).is_none());
+        assert_eq!(
+            procargs2_complete_read(vec![0; capacity], 100).map(|buf| buf.len()),
+            Some(100)
+        );
+        // Growth within rounded probe slack is complete if it leaves headroom.
+        assert_eq!(
+            procargs2_complete_read(vec![0; 108], 104).map(|buf| buf.len()),
+            Some(104)
+        );
+    }
+
+    #[test]
+    fn invocation_procargs_uses_target_alignment_and_rejects_empty_argv0() {
+        for (pointer_size, flags) in [(4, 0), (8, PROC_FLAG_LP64)] {
+            for length in 1..=32 {
+                let path = format!("/{}", "x".repeat(length));
+                for argv in [&[""][..], &["", "node"][..], &["", "pi"][..]] {
+                    let buf = build_procargs2_aligned(&path, argv, &["pi", "claude"], pointer_size);
+                    assert!(
+                        invocation_procargs2_argv(&buf, flags).is_none(),
+                        "empty argv0 must not shift later arguments/environment into authority"
+                    );
+                }
+                let buf = build_procargs2_aligned(
+                    &path,
+                    &["node", "", "pi"],
+                    &["claude", "codex"],
+                    pointer_size,
+                );
+                assert_eq!(
+                    invocation_procargs2_argv(&buf, flags),
+                    Some(vec!["node".into(), "".into(), "pi".into()])
+                );
+            }
+        }
+        let mut buf = build_procargs2_aligned("/bin/node", &["node"], &["pi"], 8);
+        buf[4 + "/bin/node".len() + 1] = b'x';
+        assert!(
+            invocation_procargs2_argv(&buf, PROC_FLAG_LP64).is_none(),
+            "nonzero alignment padding"
+        );
+    }
+
     fn build_procargs2(exec_path: &str, argv: &[&str], env: &[&str]) -> Vec<u8> {
+        build_procargs2_aligned(exec_path, argv, env, 8)
+    }
+
+    fn build_procargs2_aligned(
+        exec_path: &str,
+        argv: &[&str],
+        env: &[&str],
+        pointer_size: usize,
+    ) -> Vec<u8> {
         let mut buf = Vec::new();
         buf.extend_from_slice(&(argv.len() as i32).to_ne_bytes());
         buf.extend_from_slice(exec_path.as_bytes());
         buf.push(0);
-        buf.push(0);
+        while (buf.len() - 4) % pointer_size != 0 {
+            buf.push(0);
+        }
         for arg in argv {
             buf.extend_from_slice(arg.as_bytes());
             buf.push(0);
