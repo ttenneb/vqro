@@ -253,28 +253,20 @@ impl App {
         let response = match read_result {
             Err((code, message)) => encode_error(request.id, &code, message),
             Ok(data) => {
-                let mut source = WorktreeSource {
-                    workspace_idx: None,
-                    source_checkout_path: data.source_checkout_path,
-                    source_repo_root: data.source_repo_root,
-                    repo_key: data.repo_key,
-                    repo_name: data.repo_name,
-                };
-                // An index captured before Git ran could now name a different workspace.
-                source.workspace_idx = source_workspace_id
+                let source_workspace_idx = source_workspace_id
                     .as_ref()
                     .and_then(|id| self.state.workspaces.iter().position(|ws| &ws.id == id))
                     .filter(|&idx| {
                         let ws = &self.state.workspaces[idx];
                         if let Some(current) = ws.worktree_space() {
                             !current.is_linked_worktree
-                                && current.key == source.repo_key
-                                && current.repo_root == source.source_repo_root
-                                && current.checkout_path == source.source_checkout_path
+                                && current.key == data.repo_key
+                                && current.repo_root == data.source_repo_root
+                                && current.checkout_path == data.source_checkout_path
                         } else if let Some(current) = ws.git_space() {
                             !current.is_linked_worktree
-                                && current.key == source.repo_key
-                                && current.repo_root == source.source_repo_root
+                                && current.key == data.repo_key
+                                && current.repo_root == data.source_repo_root
                         } else {
                             // Git was already discovered on the worker. A cache miss here
                             // must only compare the captured source path, not rediscover it.
@@ -287,9 +279,35 @@ impl App {
                                     == Some(cwd)
                             })
                         }
-                    })
-                    .or_else(|| self.find_parent_workspace_by_key(&source.repo_key))
-                    .or_else(|| self.open_workspace_idx_for_checkout(&source.source_checkout_path));
+                    });
+                // A workspace-scoped request names one captured source. If that
+                // workspace was closed, re-pointed at another repository or
+                // reordered away, this completion is stale: never recreate it,
+                // never overwrite the newer membership, label or focus.
+                if source_workspace_id.is_some() && source_workspace_idx.is_none() {
+                    let _ = respond_to.send(encode_error(
+                        request.id,
+                        "worktree_source_changed",
+                        "the source workspace changed while worktree discovery was running; retry",
+                    ));
+                    return;
+                }
+                let mut source = WorktreeSource {
+                    workspace_idx: source_workspace_idx,
+                    source_checkout_path: data.source_checkout_path,
+                    source_repo_root: data.source_repo_root,
+                    repo_key: data.repo_key,
+                    repo_name: data.repo_name,
+                };
+                // A request that resolved its source from a cwd has no captured
+                // workspace; resolve it against current state at completion.
+                if source.workspace_idx.is_none() {
+                    source.workspace_idx = self
+                        .find_parent_workspace_by_key(&source.repo_key)
+                        .or_else(|| {
+                            self.open_workspace_idx_for_checkout(&source.source_checkout_path)
+                        });
+                }
                 match request.method {
                     Method::WorktreeList(_) => {
                         self.finish_worktree_list(request.id, source, data.entries)

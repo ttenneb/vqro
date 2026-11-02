@@ -711,6 +711,153 @@ mod tests {
         "/usr/bin/true"
     }
 
+    #[test]
+    fn reordered_but_unchanged_source_read_still_completes() {
+        // Pure workspace reordering keeps the captured identity and provenance,
+        // so the completion is current and must succeed.
+        let repo = create_committed_repo("api-worktree-reordered-source-repo");
+        let mut app = app_with_parent(&repo);
+        let mut sibling = Workspace::test_new("sibling");
+        sibling.identity_cwd = repo.clone();
+        sibling.cached_git_space = Some(crate::workspace::GitSpaceMetadata {
+            key: repo.display().to_string(),
+            checkout_key: repo.display().to_string(),
+            repo_name: "api-worktree-reordered-source-repo".into(),
+            repo_root: repo.clone(),
+            is_linked_worktree: false,
+        });
+        app.state.workspaces.push(sibling);
+        app.state.ensure_test_terminals();
+        let workspace_id = app.state.workspaces[1].id.clone();
+        let (entered, release) = crate::worktree::test_list_gate::block(&repo);
+        let (respond_to, response_rx) = response_channel();
+        assert!(app.handle_deferred_worktree_api_request(
+            Request {
+                id: "req".into(),
+                method: crate::api::schema::Method::WorktreeList(
+                    crate::api::schema::WorktreeListParams {
+                        workspace_id: Some(workspace_id.clone()),
+                        cwd: None,
+                        trust_repository: false,
+                    },
+                ),
+            },
+            respond_to,
+            false,
+        ));
+        entered
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("discovery started");
+        app.state.workspaces.swap(0, 1);
+        release.send(()).unwrap();
+        let event = wait_for_app_event(&mut app);
+        app.handle_internal_event(event);
+        let response: SuccessResponse = serde_json::from_str(
+            &response_rx
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap(),
+        )
+        .unwrap();
+        let ResponseResult::WorktreeList { source, .. } = response.result else {
+            panic!("expected a worktree list result");
+        };
+        assert_eq!(
+            source.source_workspace_id.as_deref(),
+            Some(workspace_id.as_str())
+        );
+        let _ = std::fs::remove_dir_all(repo);
+    }
+
+    #[test]
+    fn stale_workspace_scoped_read_rejects_closed_or_replaced_source() {
+        let repo = create_committed_repo("api-worktree-stale-source-repo");
+        for case in ["closed", "replaced"] {
+            let mut app = app_with_parent(&repo);
+            let workspace_id = app.state.workspaces[0].id.clone();
+            let (entered, release) = crate::worktree::test_list_gate::block(&repo);
+            let (respond_to, response_rx) = response_channel();
+            assert!(app.handle_deferred_worktree_api_request(
+                Request {
+                    id: "req".into(),
+                    method: crate::api::schema::Method::WorktreeList(
+                        crate::api::schema::WorktreeListParams {
+                            workspace_id: Some(workspace_id.clone()),
+                            cwd: None,
+                            trust_repository: false,
+                        },
+                    ),
+                },
+                respond_to,
+                false,
+            ));
+            entered
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .expect("discovery started");
+            match case {
+                "closed" => app.state.workspaces.clear(),
+                _ => {
+                    // Another repository now owns this workspace.
+                    app.state.workspaces[0].worktree_space =
+                        Some(crate::workspace::WorktreeSpaceMembership {
+                            key: "/elsewhere/repo".into(),
+                            label: "elsewhere".into(),
+                            repo_root: "/elsewhere/repo".into(),
+                            checkout_path: "/elsewhere/repo".into(),
+                            is_linked_worktree: false,
+                        });
+                }
+            }
+            let workspace_count_before = app.state.workspaces.len();
+            let membership_before = app
+                .state
+                .workspaces
+                .first()
+                .map(|workspace| workspace.worktree_space.clone());
+            let name_before = app
+                .state
+                .workspaces
+                .first()
+                .and_then(|workspace| workspace.custom_name.clone());
+            let session_dirty_before = app.state.session_dirty;
+            release.send(()).unwrap();
+            let event = wait_for_app_event(&mut app);
+            app.handle_internal_event(event);
+            let response: ErrorResponse = serde_json::from_str(
+                &response_rx
+                    .recv_timeout(std::time::Duration::from_secs(5))
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(response.error.code, "worktree_source_changed", "{case}");
+            assert_eq!(
+                app.state.workspaces.len(),
+                workspace_count_before,
+                "{case}: a stale completion must not create a workspace"
+            );
+            assert_eq!(
+                app.state
+                    .workspaces
+                    .first()
+                    .map(|workspace| workspace.worktree_space.clone()),
+                membership_before,
+                "{case}: a stale completion must not rewrite membership"
+            );
+            assert_eq!(
+                app.state
+                    .workspaces
+                    .first()
+                    .and_then(|workspace| workspace.custom_name.clone()),
+                name_before,
+                "{case}: a stale completion must not rename the source"
+            );
+            assert_eq!(
+                app.state.session_dirty, session_dirty_before,
+                "{case}: a stale completion must not dirty the session"
+            );
+        }
+        let _ = std::fs::remove_dir_all(repo);
+    }
+
     fn app_with_parent(repo: &Path) -> App {
         let mut app = test_app();
         let mut parent = Workspace::test_new("main");

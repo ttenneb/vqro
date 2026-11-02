@@ -62,7 +62,8 @@ fn test_headless_server_with_event_hub(event_hub: api::EventHub) -> HeadlessServ
     let (server_event_tx, server_event_rx) = mpsc::channel(64);
     let should_quit = Arc::new(AtomicBool::new(false));
     #[cfg(windows)]
-    spawn_windows_client_accept_thread(listener, should_quit.clone(), server_event_tx.clone());
+    spawn_windows_client_accept_thread(listener, should_quit.clone(), server_event_tx.clone())
+        .expect("spawn client accept thread");
     let server_keybindings = app_keybindings(&app);
     let headless_size = app.state.headless_size;
 
