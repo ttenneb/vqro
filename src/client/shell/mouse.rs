@@ -2752,7 +2752,7 @@ impl ClientShellState {
                 if super::contains(self.hits.attention_toggle, point) {
                     self.show_agents = !self.show_agents;
                     self.agent_scroll = 0;
-                    self.invalidate_pane_surface();
+                    // Only sidebar chrome changes; the coherent pane surface stays valid.
                     outcome.repaint = true;
                     return;
                 }
