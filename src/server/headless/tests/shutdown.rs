@@ -388,7 +388,6 @@ fn host_shutdown_guards_death_resume_autosave_and_api_before_final_save() {
                     },
                     respond_to,
                     response_write_complete: None,
-                    stream_active: None,
                 });
                 let response: api::schema::ErrorResponse =
                     serde_json::from_str(&rx.recv().unwrap()).unwrap();
