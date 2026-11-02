@@ -1707,11 +1707,12 @@ mod tests {
             missing.join("checkout"),
             "cached identity defaults to the saved cwd, not a discovered repository"
         );
-        // The worker predicate is what decides the membership's fate later.
+        // The worker predicate decides the membership's fate later; with #4770 an
+        // unavailable checkout keeps its saved grouping rather than being dropped.
         assert_eq!(
             restored_worktree_space_membership(Some(membership.clone())),
-            None,
-            "current predicate is only consulted by background validation"
+            Some(membership.clone()),
+            "background validation preserves an unavailable checkout's saved membership"
         );
     }
 
