@@ -118,6 +118,10 @@ build:
 bench-render-scale:
     cargo test --release --locked --bin vqro render_scale_profile -- --ignored --nocapture --test-threads=1
 
+# Profile full and retained text, static-image, and unchanged-image updates
+bench-retained-graphics:
+    cargo test --release --locked --bin vqro render_scale_profile_retained_graphics -- --ignored --nocapture --test-threads=1
+
 # ~3-5 minute CPU comparison; downloads stable unless HERDR_PERF_BASELINE_BIN is set
 bench-release-smoke:
     cargo build --release --locked
