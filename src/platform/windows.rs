@@ -382,12 +382,19 @@ pub(crate) fn set_default_plugin_pane_pwd(
 ) {
 }
 
+#[cfg(target_pointer_width = "64")]
 use windows_sys::{
+    Wdk::System::Threading::ProcessWow64Information, Win32::System::Kernel::STRING32,
+};
+
+use windows_sys::{
+    Wdk::System::Threading::ProcessCommandLineInformation,
     Wdk::System::Threading::{NtQueryInformationProcess, ProcessBasicInformation},
     Win32::{
         Foundation::{
             CloseHandle, GlobalFree, LocalFree, FILETIME, HANDLE, HWND, INVALID_HANDLE_VALUE,
-            MAX_PATH, NTSTATUS, STATUS_SUCCESS, UNICODE_STRING,
+            MAX_PATH, NTSTATUS, STATUS_BUFFER_OVERFLOW, STATUS_BUFFER_TOO_SMALL,
+            STATUS_INFO_LENGTH_MISMATCH, STATUS_SUCCESS, UNICODE_STRING,
         },
         Globalization::{CompareStringOrdinal, CSTR_EQUAL, CSTR_GREATER_THAN, CSTR_LESS_THAN},
         Security::{
@@ -562,6 +569,56 @@ pub(crate) fn terminal_title_for_presentation(title: &str) -> &str {
 
 pub(crate) fn prepare_paste_text_for_pty_platform(text: String) -> String {
     text.replace("\r\n", "\n").replace('\n', "\r\n")
+}
+
+pub(crate) fn normalize_cwd_for_launch_platform(path: &std::path::Path) -> PathBuf {
+    use std::os::windows::ffi::{OsStrExt, OsStringExt};
+    use std::path::{Component, Prefix};
+    use windows_sys::Win32::{
+        Foundation::INVALID_HANDLE_VALUE,
+        Storage::FileSystem::{FindClose, FindFirstFileW, WIN32_FIND_DATAW},
+    };
+
+    // The on-disk name for one component, so a case-insensitive but
+    // case-preserving directory is launched under the name it really has.
+    fn stored_name(path: &std::path::Path) -> Option<std::ffi::OsString> {
+        let input = path
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect::<Vec<_>>();
+        let mut data = std::mem::MaybeUninit::<WIN32_FIND_DATAW>::uninit();
+        let handle = unsafe { FindFirstFileW(input.as_ptr(), data.as_mut_ptr()) };
+        if handle == INVALID_HANDLE_VALUE {
+            return None;
+        }
+        let data = unsafe { data.assume_init() };
+        unsafe { FindClose(handle) };
+        let len = data
+            .cFileName
+            .iter()
+            .position(|&ch| ch == 0)
+            .unwrap_or(data.cFileName.len());
+        Some(std::ffi::OsString::from_wide(&data.cFileName[..len]))
+    }
+
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Prefix(prefix) => match prefix.kind() {
+                Prefix::Disk(drive) => {
+                    normalized.push(format!("{}:", char::from(drive).to_ascii_uppercase()))
+                }
+                _ => normalized.push(prefix.as_os_str()),
+            },
+            Component::Normal(name) => {
+                let candidate = normalized.join(name);
+                normalized.push(stored_name(&candidate).unwrap_or_else(|| name.to_os_string()));
+            }
+            _ => normalized.push(component.as_os_str()),
+        }
+    }
+    normalized
 }
 
 pub(crate) fn plugin_runtime_path_platform(path: &std::path::Path) -> PathBuf {
@@ -1492,7 +1549,9 @@ pub fn current_process_is_detached_server_daemon() -> bool {
         return false;
     }
 
-    matches!(current_process_is_in_job(), Ok(false))
+    // Job membership alone does not tie the daemon lifetime to its launcher:
+    // a non-killing job still lets the daemon outlive the process that created it.
+    matches!(current_job_kills_processes_on_close(), Ok(false))
 }
 
 pub fn foreground_job(child_pid: u32) -> Option<ForegroundJob> {
@@ -1532,10 +1591,84 @@ pub fn foreground_process_group_id(child_pid: u32) -> Option<u32> {
 
 pub fn process_cwd(pid: u32) -> Option<PathBuf> {
     let process = ProcessHandle::open(pid, PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ)?;
-    let process_parameters = read_process_parameters(process.0)?;
-    read_unicode_string(process.0, process_parameters.current_directory.dos_path)
+    process_cwd_from_handle(process.0)
+}
+
+/// The cwd that belongs to the pane's shell, not to a launcher in front of it.
+pub(crate) fn pane_process_cwd(child_pid: u32) -> Option<PathBuf> {
+    let process = ProcessHandle::open(
+        child_pid,
+        PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ,
+    )?;
+    if let Some(executable) = process_executable_path(process.0) {
+        // A Scoop shim keeps its launch cwd while the real shell changes
+        // directories. Never replace the saved shell directory with that
+        // launcher directory on exit.
+        if PathBuf::from(executable).with_extension("shim").is_file() {
+            let snapshot = cached_foreground_processes();
+            if let Some(shell_pid) = shim_shell_pid(child_pid, &snapshot) {
+                return process_cwd(shell_pid);
+            }
+            return None;
+        }
+    }
+    process_cwd_from_handle(process.0)
+}
+
+fn process_cwd_from_handle(process: HANDLE) -> Option<PathBuf> {
+    read_unicode_string(process, process_cwd_descriptor(process)?)
         .map(PathBuf::from)
         .filter(|path| path.is_absolute())
+}
+
+fn process_cwd_descriptor(process: HANDLE) -> Option<UNICODE_STRING> {
+    #[cfg(target_pointer_width = "64")]
+    {
+        let mut peb32_address = 0_usize;
+        // SAFETY: the output is a writable ULONG_PTR with its exact buffer size.
+        let status = unsafe {
+            NtQueryInformationProcess(
+                process,
+                ProcessWow64Information,
+                (&mut peb32_address as *mut usize).cast(),
+                size_of::<usize>() as u32,
+                null_mut(),
+            )
+        };
+        if status != STATUS_SUCCESS as NTSTATUS {
+            return None;
+        }
+        if peb32_address != 0 {
+            // WoW64's native PEB can report C:\Windows while the x86 shell uses
+            // another directory. Read its own pointer-width layout instead.
+            let peb = read_process_value::<Peb32>(process, peb32_address as *const c_void)?;
+            let parameters = read_process_value::<ProcessCwdParameters32>(
+                process,
+                peb.process_parameters as usize as *const c_void,
+            )?;
+            let cwd = parameters.current_directory;
+            return Some(UNICODE_STRING {
+                Length: cwd.Length,
+                MaximumLength: cwd.MaximumLength,
+                Buffer: cwd.Buffer as usize as *mut u16,
+            });
+        }
+    }
+    Some(read_process_parameters(process)?.current_directory.dos_path)
+}
+
+fn shim_shell_pid(child_pid: u32, snapshot: &ProcessSnapshot) -> Option<u32> {
+    snapshot.entry(child_pid)?;
+    let mut shells = snapshot
+        .children_by_parent
+        .get(&child_pid)?
+        .iter()
+        .filter_map(|&index| {
+            let entry = &snapshot.entries[index];
+            super::is_pane_shell_process_name(&entry.name).then_some(entry.pid)
+        });
+    let shell_pid = shells.next()?;
+    shells.next().is_none().then_some(shell_pid)
 }
 
 fn select_pane_foreground_job_cached(shell_pid: u32) -> Option<ForegroundJob> {
@@ -1958,6 +2091,18 @@ fn read_process_command(pid: u32, name: &str) -> WindowsProcessCommand {
     // importing an unrelated Windows command-line backend for profiling.
     #[cfg(test)]
     PROCESS_INSPECTION_COUNTS.with_borrow_mut(|counts| counts.command_reads += 1);
+    // Prefer the command-line information class: it needs only
+    // PROCESS_QUERY_LIMITED_INFORMATION, while the PEB path below also needs
+    // PROCESS_VM_READ, which hardened runtimes (Electron/Node) and security
+    // products deny. Without a command line, an agent launched through such a
+    // runtime is indistinguishable from a bare node.exe/bun.exe process.
+    if let Some(process) = ProcessHandle::open(pid, PROCESS_QUERY_LIMITED_INFORMATION) {
+        if let Some(cmdline) = read_process_command_line(process.0) {
+            let creation_time = process_creation_time(process.0);
+            return WindowsProcessCommand::from_cmdline(name, creation_time, Some(cmdline));
+        }
+    }
+
     let Some(process) =
         ProcessHandle::open(pid, PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ)
     else {
@@ -2249,6 +2394,83 @@ fn read_process_environment(process: HANDLE, address: *const c_void) -> Option<V
         }
     }
     None
+}
+
+/// Read a process command line with only `PROCESS_QUERY_LIMITED_INFORMATION`.
+///
+/// `ProcessCommandLineInformation` has been available since Windows 8.1, and
+/// unlike walking the target PEB it does not need `PROCESS_VM_READ`, which
+/// hardened runtimes and security products deny. Returns `None` for a process
+/// without a stored command line; the caller then tries the PEB path.
+fn read_process_command_line(process: HANDLE) -> Option<String> {
+    let mut required = 0_u32;
+    // SAFETY: a null buffer with length 0 only asks for the required size, and
+    // `required` is a valid out-pointer for the duration of the call.
+    let status = unsafe {
+        NtQueryInformationProcess(
+            process,
+            ProcessCommandLineInformation,
+            null_mut(),
+            0,
+            &mut required,
+        )
+    };
+    if status != STATUS_BUFFER_TOO_SMALL
+        && status != STATUS_INFO_LENGTH_MISMATCH
+        && status != STATUS_BUFFER_OVERFLOW
+    {
+        return None;
+    }
+
+    // `required` is already at least a UNICODE_STRING sized buffer.
+    let mut buffer = vec![0_u8; required as usize];
+    for _ in 0..2 {
+        // SAFETY: `buffer` is `required` bytes and both pointers are valid for
+        // the call; the kernel writes the length back into `required`.
+        let status = unsafe {
+            NtQueryInformationProcess(
+                process,
+                ProcessCommandLineInformation,
+                buffer.as_mut_ptr().cast(),
+                required,
+                &mut required,
+            )
+        };
+        // All three statuses mean the command line grew between the probe and
+        // the read. They are negative as NTSTATUS, so they must be checked
+        // before the failure test below.
+        let grew = status == STATUS_BUFFER_OVERFLOW
+            || status == STATUS_BUFFER_TOO_SMALL
+            || status == STATUS_INFO_LENGTH_MISMATCH;
+        if grew {
+            buffer = vec![0_u8; required as usize];
+            continue;
+        }
+        if status < 0 {
+            return None;
+        }
+        break;
+    }
+
+    // SAFETY: on success the kernel wrote a UNICODE_STRING followed by its
+    // UTF-16 contents. A Vec<u8> only guarantees byte alignment, so read the
+    // header unaligned.
+    let unicode = unsafe { buffer.as_ptr().cast::<UNICODE_STRING>().read_unaligned() };
+    let length = usize::from(unicode.Length);
+    if length == 0 || !length.is_multiple_of(2) {
+        return None;
+    }
+    let string_offset = size_of::<UNICODE_STRING>();
+    if string_offset + length > buffer.len() {
+        return None;
+    }
+    let units = buffer[string_offset..string_offset + length]
+        .chunks_exact(2)
+        .map(|unit| u16::from_ne_bytes([unit[0], unit[1]]))
+        .collect::<Vec<_>>();
+    String::from_utf16(&units)
+        .ok()
+        .filter(|command_line| !command_line.is_empty())
 }
 
 fn environment_variable_from_utf16(environment: &[u16], name: &str) -> Option<String> {
@@ -2776,6 +2998,22 @@ struct Peb {
     reserved3: [*mut c_void; 2],
     ldr: *mut c_void,
     process_parameters: *mut RtlUserProcessParameters,
+}
+
+#[cfg(target_pointer_width = "64")]
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct Peb32 {
+    reserved: [u32; 4],
+    process_parameters: u32,
+}
+
+#[cfg(target_pointer_width = "64")]
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct ProcessCwdParameters32 {
+    reserved: [u32; 9],
+    current_directory: STRING32,
 }
 
 #[repr(C)]
@@ -3710,6 +3948,67 @@ mod tests {
     }
 
     #[test]
+    fn windows_daemon_readiness_checks_job_limits_and_console() {
+        const CHILD_ENV: &str = "VQRO_TEST_DAEMON_READINESS_CHILD";
+        if std::env::var_os(CHILD_ENV).is_some() {
+            use super::*;
+
+            let job = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+            assert!(!job.is_null(), "create test job");
+            let job = unsafe { OwnedHandle::from_raw_handle(job) };
+            assert_ne!(
+                unsafe { AssignProcessToJobObject(job.as_raw_handle(), GetCurrentProcess()) },
+                0,
+                "assign child to test job"
+            );
+            assert!(current_process_is_in_job().unwrap());
+            assert!(
+                current_process_is_detached_server_daemon(),
+                "a console-free process in a non-killing job must be ready"
+            );
+
+            for (flags, ready) in [(JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, false), (0, true)] {
+                let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+                limits.BasicLimitInformation.LimitFlags = flags;
+                assert_ne!(
+                    unsafe {
+                        SetInformationJobObject(
+                            job.as_raw_handle(),
+                            JobObjectExtendedLimitInformation,
+                            std::ptr::from_ref(&limits).cast(),
+                            size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+                        )
+                    },
+                    0,
+                    "set test job limits"
+                );
+                assert_eq!(current_process_is_detached_server_daemon(), ready);
+            }
+            assert_ne!(unsafe { AllocConsole() }, 0, "allocate test console");
+            assert!(!current_process_is_detached_server_daemon());
+            assert_ne!(unsafe { FreeConsole() }, 0, "release test console");
+            return;
+        }
+
+        let mut child = Command::new(std::env::current_exe().unwrap());
+        child
+            .args([
+                "--exact",
+                "platform::windows::tests::windows_daemon_readiness_checks_job_limits_and_console",
+                "--nocapture",
+            ])
+            .env(CHILD_ENV, "1");
+        super::detach_server_daemon_command(&mut child);
+        let output = child.output().expect("run daemon readiness child");
+        assert!(
+            output.status.success(),
+            "daemon readiness child failed: {}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
     fn windows_background_and_server_daemon_commands_do_not_have_consoles() {
         if let Some(mode) = std::env::var_os(CONSOLE_TEST_CHILD_ENV) {
             assert!(
@@ -3855,15 +4154,17 @@ mod tests {
     }
 
     #[test]
-    fn windows_process_cwd_reads_child_launch_directory() {
-        let cwd = std::env::temp_dir().join(format!("herdr-cwd-test-{}", std::process::id()));
+    fn windows_process_cwd_reads_normalized_child_launch_directory() {
+        let name = format!("Vqro-Cwd-Case-{}", std::process::id());
+        let cwd = std::env::temp_dir().join(&name);
         fs::create_dir_all(&cwd).expect("create cwd fixture");
+        let launch_cwd = cwd.with_file_name(name.to_ascii_lowercase());
 
         let shell =
             std::env::var_os("ComSpec").unwrap_or_else(|| r"C:\Windows\System32\cmd.exe".into());
         let mut child = Command::new(shell)
             .args(["/D", "/Q", "/C", "ping -n 11 127.0.0.1 > NUL"])
-            .current_dir(&cwd)
+            .current_dir(super::normalize_cwd_for_launch_platform(&launch_cwd))
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -3874,7 +4175,7 @@ mod tests {
         let mut observed = None;
         while Instant::now() < deadline {
             observed = super::process_cwd(child.id());
-            if observed.as_deref() == Some(cwd.as_path()) {
+            if observed.as_ref().and_then(|path| path.file_name()) == Some(name.as_ref()) {
                 break;
             }
             thread::sleep(Duration::from_millis(100));
@@ -3884,7 +4185,11 @@ mod tests {
         let _ = child.wait();
         let _ = fs::remove_dir_all(&cwd);
 
-        assert_eq!(observed.as_deref(), Some(cwd.as_path()));
+        // The launch directory keeps its on-disk casing, not the caller's.
+        assert_eq!(
+            observed.as_ref().and_then(|path| path.file_name()),
+            Some(name.as_ref())
+        );
     }
 
     #[test]

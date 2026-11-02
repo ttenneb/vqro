@@ -351,6 +351,25 @@ pub(crate) fn plugin_runtime_path(path: &std::path::Path) -> std::path::PathBuf 
     plugin_runtime_path_platform(path)
 }
 
+/// Launch a pane in the path the filesystem actually stores.
+///
+/// Windows directories are case-insensitive but case-preserving, so a restored
+/// or reported cwd can differ in case from the on-disk name. Shells that print
+/// their own cwd then disagree with the saved one.
+pub(crate) fn normalize_cwd_for_launch(path: &std::path::Path) -> std::path::PathBuf {
+    normalize_cwd_for_launch_platform(path)
+}
+
+#[cfg(not(windows))]
+fn normalize_cwd_for_launch_platform(path: &std::path::Path) -> std::path::PathBuf {
+    path.to_path_buf()
+}
+
+/// The pane's shell cwd. Unix has no launcher shim in front of the shell, so
+/// this is the ordinary process cwd.
+#[cfg(not(windows))]
+pub(crate) use self::process_cwd as pane_process_cwd;
+
 #[cfg(not(windows))]
 fn plugin_runtime_path_platform(path: &std::path::Path) -> std::path::PathBuf {
     path.to_path_buf()
