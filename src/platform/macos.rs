@@ -642,12 +642,16 @@ fn kern_procargs2_bounded(pid: u32, max_bytes: usize) -> Option<Vec<u8>> {
             std::ptr::null_mut(),
             0,
         );
-        if ret != 0 || size == 0 || size > max_bytes {
+        if ret != 0 {
             return None;
         }
 
-        // Second call: read data
-        let mut buf = vec![0u8; size];
+        // The size probe is advisory across same-PID exec. XNU can return a
+        // truncated tail with success and size == capacity. Reserve headroom
+        // and reject that ambiguous/saturated result instead of parsing it.
+        let capacity = procargs2_read_capacity(size, max_bytes)?;
+        let mut buf = vec![0u8; capacity];
+        size = capacity;
         let ret = libc::sysctl(
             mib.as_mut_ptr(),
             3,
@@ -656,12 +660,29 @@ fn kern_procargs2_bounded(pid: u32, max_bytes: usize) -> Option<Vec<u8>> {
             std::ptr::null_mut(),
             0,
         );
-        if ret != 0 || size > buf.len() {
+        if ret != 0 {
             return None;
         }
-        buf.truncate(size);
-        Some(buf)
+        procargs2_complete_read(buf, size)
     }
+}
+
+fn procargs2_read_capacity(probed: usize, max_bytes: usize) -> Option<usize> {
+    if probed < std::mem::size_of::<i32>() {
+        return None;
+    }
+    let capacity = probed.checked_add(1)?;
+    (capacity <= max_bytes).then_some(capacity)
+}
+
+fn procargs2_complete_read(mut buf: Vec<u8>, returned: usize) -> Option<Vec<u8>> {
+    // sysctl_procargsx's partial-copy branch returns the supplied capacity,
+    // including argc. Equality is ambiguous even when sysctl reports success.
+    if returned < std::mem::size_of::<i32>() || returned >= buf.len() {
+        return None;
+    }
+    buf.truncate(returned);
+    Some(buf)
 }
 
 pub fn write_clipboard(bytes: &[u8]) -> bool {
@@ -1354,6 +1375,29 @@ mod tests {
         assert_eq!(
             procargs2_argv(&buf),
             Some(vec!["echo".into(), "".into(), "hello".into()])
+        );
+    }
+
+    #[test]
+    fn invocation_procargs_rejects_saturated_reads_after_size_growth() {
+        assert_eq!(procargs2_read_capacity(100, 1024), Some(101));
+        assert!(procargs2_read_capacity(1024, 1024).is_none());
+        assert!(procargs2_read_capacity(usize::MAX, usize::MAX).is_none());
+        assert!(procargs2_read_capacity(0, 1024).is_none());
+        let capacity = procargs2_read_capacity(100, 1024).expect("bounded headroom");
+        // Model XNU success after exec grows args: its tail/padded copy returns
+        // exactly capacity, not an overflow indication. Never parse that tail.
+        assert!(procargs2_complete_read(vec![b'p'; capacity], capacity).is_none());
+        assert!(procargs2_complete_read(vec![0; capacity], capacity + 1).is_none());
+        assert!(procargs2_complete_read(vec![0; capacity], 3).is_none());
+        assert_eq!(
+            procargs2_complete_read(vec![0; capacity], 100).map(|buf| buf.len()),
+            Some(100)
+        );
+        // Growth within rounded probe slack is complete if it leaves headroom.
+        assert_eq!(
+            procargs2_complete_read(vec![0; 108], 104).map(|buf| buf.len()),
+            Some(104)
         );
     }
 
