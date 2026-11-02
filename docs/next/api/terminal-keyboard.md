@@ -61,10 +61,11 @@ input. Admission is not a receipt that the child executed the command.
 
 Submission parts acknowledge only after the writer flushes. Delays and writer
 acknowledgements yield the executor. Once text is committed, abandoning the
-caller's acknowledgement does not drop its Enter. Synchronous shutdown waits
-only for an Enter already queued to the writer, using a completion that the
-writer releases directly even if the async executor cannot run. Closing during
-the submission delay still cancels an Enter not yet queued.
+caller's acknowledgement does not drop its Enter. Synchronous shutdown gives
+an Enter already queued to the writer a 250 ms grace, using a completion that the
+writer releases directly even if the async executor cannot run. A stalled pipe
+cannot hold this grace wait indefinitely; teardown can proceed after it expires.
+Closing during the submission delay still cancels an Enter not yet queued.
 
 ## Injected commands on macOS
 
