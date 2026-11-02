@@ -192,6 +192,44 @@ fn empty_invalid_future_and_missing_images_do_not_rotate_or_become_fallback() {
 }
 
 #[test]
+fn oversized_recognized_previous_image_cannot_block_healthy_save_or_clear() {
+    let root = Root::new();
+    root.write(&snapshot());
+    preserve_at(&root.session(), SystemTime::now()).unwrap();
+    let previous = root.copies()[0].1.clone();
+    let file = std::fs::File::options()
+        .write(true)
+        .open(&previous)
+        .unwrap();
+    // Sparse file proves the comparison does not allocate/read the full image.
+    file.set_len(super::super::snapshot::MAX_SESSION_SNAPSHOT_BYTES + 1)
+        .unwrap();
+    file.set_times(std::fs::FileTimes::new().set_modified(UNIX_EPOCH))
+        .unwrap();
+    drop(file);
+    assert!(super::super::io::read_bounded_text(
+        &previous,
+        super::super::snapshot::MAX_SESSION_SNAPSHOT_BYTES
+    )
+    .is_err());
+    let mut next = snapshot();
+    next.workspaces[0].custom_name = Some("healthy primary".into());
+    super::super::io::save_to_path(&root.session(), &next).unwrap();
+    assert_eq!(root.copies().len(), 2);
+    assert_eq!(
+        parse_snapshot(&std::fs::read_to_string(root.session()).unwrap())
+            .unwrap()
+            .workspaces[0]
+            .custom_name
+            .as_deref(),
+        Some("healthy primary")
+    );
+    super::super::io::clear_session_path(&root.session()).unwrap();
+    assert!(!root.session().exists());
+    assert_eq!(root.copies().len(), 2);
+}
+
+#[test]
 fn prune_continues_past_an_undeletable_entry() {
     let root = Root::new();
     let locked = root.0.join("directory");

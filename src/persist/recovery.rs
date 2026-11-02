@@ -31,32 +31,30 @@ fn preserve_at(path: &Path, now: SystemTime) -> io::Result<()> {
             return Ok(());
         }
     }
-    let file = match std::fs::File::open(path) {
-        Ok(file) => file,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+    let text = match super::io::read_bounded_text(path, super::snapshot::MAX_SESSION_SNAPSHOT_BYTES)
+    {
+        Ok(text) => text,
+        Err(error)
+            if matches!(
+                error.kind(),
+                io::ErrorKind::NotFound | io::ErrorKind::InvalidData
+            ) =>
+        {
+            return Ok(())
+        }
         Err(error) => return Err(error),
     };
-    if !file.metadata()?.is_file() {
-        return Err(io::Error::other("session recovery source is not a file"));
-    }
-    use std::io::Read;
-    let mut bytes = Vec::new();
-    file.take(super::snapshot::MAX_SESSION_SNAPSHOT_BYTES + 1)
-        .read_to_end(&mut bytes)?;
-    if bytes.len() as u64 > super::snapshot::MAX_SESSION_SNAPSHOT_BYTES {
-        return Ok(());
-    }
-    let Ok(text) = std::str::from_utf8(&bytes) else {
-        return Ok(());
-    };
-    let Ok(snapshot) = super::snapshot::parse_snapshot(text) else {
+    let bytes = text.as_bytes();
+    let Ok(snapshot) = super::snapshot::parse_snapshot(&text) else {
         return Ok(());
     };
     if snapshot.workspaces.is_empty() {
         return Ok(());
     }
     if let Some((_, latest)) = existing.last() {
-        if let Ok(previous) = std::fs::read_to_string(latest) {
+        if let Ok(previous) =
+            super::io::read_bounded_text(latest, super::snapshot::MAX_SESSION_SNAPSHOT_BYTES)
+        {
             if let Ok(previous) = super::snapshot::parse_snapshot(&previous) {
                 if super::snapshot::layout_fingerprint(&snapshot).is_some_and(|binding| {
                     super::snapshot::layout_fingerprint(&previous).as_ref() == Some(&binding)
@@ -87,7 +85,7 @@ fn preserve_at(path: &Path, now: SystemTime) -> io::Result<()> {
     let mut published = false;
     let result = (|| {
         let mut output = crate::platform::create_private_state_file(&pending)?;
-        output.write_all(&bytes)?;
+        output.write_all(bytes)?;
         output.sync_all()?;
         drop(output);
         // Publish without replacing any preexisting file, even on collision.

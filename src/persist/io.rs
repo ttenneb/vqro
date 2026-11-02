@@ -524,7 +524,7 @@ fn checkpoint_collections_action_sequence(path: &Path) -> std::io::Result<u64> {
     Ok(metadata.collections_action_sequence)
 }
 
-fn read_bounded_text(path: &Path, maximum: u64) -> std::io::Result<String> {
+pub(super) fn read_bounded_text(path: &Path, maximum: u64) -> std::io::Result<String> {
     let target = crate::platform::resolve_write_target(path)?;
     let mut file = std::fs::File::open(target)?;
     let metadata = file.metadata()?;
