@@ -48,7 +48,7 @@ impl SpawnedHerdr {
 impl Drop for SpawnedHerdr {
     fn drop(&mut self) {
         let pid = self.child.process_id();
-        let _ = self.child.kill();
+        support::stop_spawned_herdr(&mut *self.child);
         self.close_master();
 
         if let Some(pid) = pid {
@@ -946,7 +946,7 @@ fn federated_client_starts_without_local_and_survives_its_restart() {
         || read_output(&output).contains("local-online")
     ));
 
-    local.child.kill().unwrap();
+    support::stop_spawned_herdr(&mut *local.child);
     local.close_master();
     drop(local);
     let watermark = output_len(&output);
@@ -990,7 +990,7 @@ fn federated_client_starts_without_local_and_survives_its_restart() {
         "Local recovery must not steal selection"
     );
     let watermark = output_len(&output);
-    remote_server.child.kill().unwrap();
+    support::stop_spawned_herdr(&mut *remote_server.child);
     assert!(
         wait_until(Duration::from_secs(10), Duration::from_millis(20), || {
             read_output(&output)[watermark..].contains("reconnecting")

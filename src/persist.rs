@@ -10,6 +10,7 @@ pub(crate) mod coordinator;
 pub(crate) mod extension_state;
 mod io;
 pub mod plugin_registry;
+mod recovery;
 mod restore;
 mod snapshot;
 

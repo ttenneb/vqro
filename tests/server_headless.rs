@@ -2,6 +2,8 @@
 
 #![cfg(unix)]
 
+#[path = "support/server_shutdown.rs"]
+mod shutdown_tests;
 pub mod support;
 
 use std::fs;
@@ -44,7 +46,7 @@ impl SpawnedHerdr {
 impl Drop for SpawnedHerdr {
     fn drop(&mut self) {
         let pid = self.child.process_id();
-        let _ = self.child.kill();
+        support::stop_spawned_herdr(&mut *self.child);
         self.close_master();
 
         if let Some(pid) = pid {
@@ -109,7 +111,7 @@ fn spawn_server(
     register_runtime_dir(runtime_dir);
     fs::write(
         config_home.join("vqro-dev/config.toml"),
-        "onboarding = false\n",
+        "onboarding = false\n[update]\nversion_check = false\nmanifest_check = false\n",
     )
     .unwrap();
 
@@ -123,6 +125,17 @@ fn spawn_server(
         .unwrap();
 
     let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_vqro"));
+    for (key, _) in std::env::vars_os() {
+        if key.to_string_lossy().starts_with("HERDR_") || key.to_string_lossy().starts_with("VQRO_")
+        {
+            cmd.env_remove(key);
+        }
+    }
+    // Never acquire a delay inhibitor on the real test host.
+    cmd.env(
+        "DBUS_SYSTEM_BUS_ADDRESS",
+        format!("unix:path={}", config_home.join("no-system-bus").display()),
+    );
     cmd.arg("server");
     cmd.env("XDG_CONFIG_HOME", config_home);
     cmd.env("XDG_RUNTIME_DIR", runtime_dir);
@@ -248,8 +261,8 @@ fn server_removes_client_socket_on_exit() {
     wait_for_socket(&api_socket, Duration::from_secs(10));
     wait_for_file(&client_socket, Duration::from_secs(10));
 
-    // Kill the server.
-    let _ = spawned.child.kill();
+    // Stop the server explicitly; terminal hangup is not a stop request.
+    support::stop_spawned_herdr(&mut *spawned.child);
     spawned.close_master();
     let _ = spawned.child.wait();
 

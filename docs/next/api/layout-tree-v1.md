@@ -86,6 +86,68 @@ through durable temporary-file replacement and never automatically restores a
 backup after publication. Downgrade is unsupported: future session versions are
 refused, and writers refuse overwriting a higher-version file with a lower one.
 
+## Recovery images and unavailable terminals
+
+Ordinary saves, checkpoint publication, handoff publication and intentional clear
+preserve best-effort rolling structural recovery images in `session-snapshots`
+beside the resolved session target. At most 48 owned images are retained, with a
+15-minute cadence and unchanged-image suppression across process restarts. Clock
+rollback does not indefinitely suspend preservation. Unrelated user files,
+symlinks and incomplete copies are not pruned. Copy failure never blocks a healthy
+primary save or clear. These images are manual recovery material, not authority:
+startup never selects an arbitrary copy or replays package state from one. The
+fail-closed rejected-load policy and byte-exact conversion backups still apply.
+
+Missing saved directories and failed shell launches retain their nested/hidden
+leaves, stable terminal identity, selection, labels, cwd and agent session facts
+without executing in a fallback directory. A terminal without a runtime displays
+a restore error; fixing the directory/shell and restarting retries the saved
+facts. Imported live terminals are not restarted merely because their saved cwd
+is unavailable. Saved checkout membership survives unavailable/unreadable Git
+metadata; only positive evidence of a different repository at that exact checkout
+rejects membership. Explicit checkout provenance never follows a shell's cwd.
+
+History v4 adds optional `layout_fingerprint`, a deterministic SHA-256 binding of
+the complete structural image, including hidden/nested layout and normalized
+unordered maps/sets. Only matching bound history is replayed. Unbound legacy or
+mismatched history is ignored without rejecting an otherwise valid structural
+session. This digest is presentation provenance, not per-node identity or package
+authority; it cannot lower the action high-water barrier.
+
+## Host shutdown and launching-shell hangup
+
+Host shutdown takes precedence over queued pane deaths, agent-exit observations,
+due autosaves and new API mutations, so the final save sees intact layout and
+resume facts. Still-planning Collections actions/creates are canceled; an already
+publishing checkpoint is settled only through its existing persisted-completion
+event and authority/mutation fences before the final ordinary capture. Death,
+agent and new provider-plan events are not applied during settlement. A bounded
+settlement timeout or checkpoint error reports a failed final save, retains
+recovery evidence and never force-unblocks an uncertain write. Linux uses
+logind's delay inhibitor until that save decision completes;
+unavailable/lost logind or bus connections retry without blocking normal use.
+Windows probes the current session's shutdown/logoff state rather than guessing
+from child exit codes. macOS observes loginwindow restart/shutdown announcements,
+cancellation and point of no return before background agents die; undocumented
+or unavailable notifications degrade to the normal SIGTERM save path.
+
+Current JSON handoff manifest v3 adds optional `host_shutdown_intent` with
+`announced_at_ns` in the boot-wide monotonic clock domain. Absent/null means no
+pending announcement; writers omit None. Import adopts it before ownership and
+before starting the new monitor. It is not session/package authority and changes
+no terminal/bincode codec. The frozen v1 manifest remains an unchanged input
+fixture. Announcements/cancellations arriving after manifest capture but before
+replacement monitoring still reach only the old process; native platform trials
+must cover restart/handoff ordering. No cross-protocol live handoff is implied.
+
+A server survives SIGHUP and the closing terminal/shell that launched it; new
+clients can reconnect. SIGINT, SIGTERM and `server.stop` remain explicit save/exit
+requests. The early hangup handler resets on exec, preserving normal child-shell
+signal semantics. Unit server loops use injected probes/flags rather than
+watching the real host; the ignored Linux integration harness uses only private
+D-Bus/logind and a disposable server. Native macOS/Windows shutdown remains a
+separate acceptance trial, not a consequence of cross-build success.
+
 ## Previous live exporter field audit
 
 The complete unconditional omitted/zeroed durable-field set on the previous

@@ -65,6 +65,7 @@ class Demo:
                     "XDG_STATE_HOME": str(root / "state"), "XDG_RUNTIME_DIR": str(root / "run"),
                     "VQRO_CONFIG_PATH": str(config), "VQRO_SOCKET_PATH": str(root / "api.sock"),
                     "VQRO_CLIENT_SOCKET_PATH": str(root / "client.sock"),
+                    "DBUS_SYSTEM_BUS_ADDRESS": f"unix:path={root / 'run/no-system-bus'}",
                     "PATH": f"{root / 'bin'}:/usr/bin:/bin", "TERM": "xterm-256color", "SHELL": "/bin/bash",
                     "LANG": "C.UTF-8", "PI_CODING_AGENT_DIR": str(root / "home/.pi/agent"),
                     "PI_SKIP_VERSION_CHECK": "1", "NODE_COMPILE_CACHE": str(root / "node-cache")}

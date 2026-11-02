@@ -3,6 +3,7 @@ use super::*;
 /// Run the headless server. This is the entry point called from main.rs.
 pub fn run_server() -> io::Result<()> {
     init_logging();
+    crate::platform::ignore_server_hangup();
     crate::platform::raise_server_nofile_limit();
 
     let args: Vec<String> = std::env::args().collect();
@@ -210,6 +211,9 @@ fn run_handoff_import_server(socket_path: &Path, token: &str) -> io::Result<()> 
         // Carried across before any client attaches, so the first title sent is
         // the override rather than the configured one it replaced.
         server.api_window_title = received.manifest.api_window_title.take();
+        server
+            .host_shutdown_intent
+            .set(received.manifest.host_shutdown_intent.take());
         server.app.assume_handoff_ownership();
         server.app.unpause_handoff_readers();
         server.pending_handoff_repaint_nudge = true;

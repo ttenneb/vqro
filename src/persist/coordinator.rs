@@ -372,6 +372,7 @@ where
         not_published(std::io::Error::new(std::io::ErrorKind::InvalidData, error))
     })?;
     super::io::prepare_session_write(&paths.session, session.version).map_err(not_published)?;
+    super::recovery::preserve(&paths.session);
     let extension_bytes = encode_bounded(extension_state, MAX_STATE_STORE_BYTES, "extension state")
         .map_err(not_published)?;
 
@@ -473,7 +474,28 @@ where
             &paths.parent,
         );
     }
+    if result.is_ok() {
+        super::recovery::preserve(&paths.session);
+    }
     result
+}
+
+#[cfg(test)]
+pub(crate) fn persist_checkpoint_paused_after_session_for_test(
+    paths: &PersistencePaths,
+    session: &SessionSnapshot,
+    extension_state: &DurableExtensionStateV1,
+    published: std::sync::mpsc::Sender<()>,
+    release: std::sync::mpsc::Receiver<()>,
+) -> Result<(), PersistenceError> {
+    let ownership = PersistenceOwnership::try_acquire(paths)?;
+    persist_checkpoint_with(&ownership, paths, session, extension_state, |boundary| {
+        if boundary == Boundary::SessionReplaced {
+            published.send(()).map_err(std::io::Error::other)?;
+            release.recv().map_err(std::io::Error::other)?;
+        }
+        Ok(())
+    })
 }
 
 /// Inspects and completes a pending two-file checkpoint. Startup does not call this yet.

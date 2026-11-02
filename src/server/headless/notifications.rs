@@ -357,6 +357,10 @@ impl HeadlessServer {
     }
 
     pub(super) fn handle_internal_event_with_forwarding(&mut self, mut ev: AppEvent) -> bool {
+        if self.host_shutdown_requested() {
+            self.app.handle_shutdown_persistence_event(ev);
+            return false;
+        }
         if matches!(&ev, AppEvent::HostRelationshipsDocumentFinished(_)) {
             let AppEvent::HostRelationshipsDocumentFinished(result) = ev else {
                 unreachable!("variant checked above");
@@ -828,6 +832,9 @@ impl HeadlessServer {
         let mut had_event = false;
         let mut changed = false;
         for _ in 0..limit {
+            if self.host_shutdown_requested() {
+                break;
+            }
             let Ok(ev) = self.app.event_rx.try_recv() else {
                 break;
             };

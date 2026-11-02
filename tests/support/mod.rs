@@ -24,6 +24,13 @@ const CLIENT_MESSAGE_CLIENT_SHELL_PANE_INPUT: u32 = 13;
 const CLIENT_MESSAGE_CLIENT_SHELL_FOCUS: u32 = 18;
 const CLIENT_MESSAGE_ENDPOINT_CONTROL: u32 = 20;
 
+pub fn isolate_test_server_bus() {
+    std::env::set_var(
+        "DBUS_SYSTEM_BUS_ADDRESS",
+        "unix:path=/nonexistent-vqro-test-bus",
+    );
+}
+
 pub fn register_spawned_herdr_pid(pid: Option<u32>) {
     let Some(pid) = pid else {
         return;
@@ -32,6 +39,22 @@ pub fn register_spawned_herdr_pid(pid: Option<u32>) {
     ensure_cleanup_hooks();
     let mut registry = pid_registry_lock();
     registry.insert(pid);
+}
+
+/// portable-pty's kill sends SIGHUP, which detached servers now ignore.
+/// Stop only this still-running owned child, preserving ordinary cleanup.
+pub fn stop_spawned_herdr(child: &mut (dyn portable_pty::Child + Send + Sync)) {
+    if child.try_wait().ok().flatten().is_some() {
+        return;
+    }
+    match child.process_id() {
+        Some(pid) => unsafe {
+            libc::kill(pid as libc::pid_t, libc::SIGTERM);
+        },
+        None => {
+            let _ = child.kill();
+        }
+    }
 }
 
 pub fn unregister_spawned_herdr_pid(pid: Option<u32>) {
@@ -48,6 +71,10 @@ pub fn unregister_spawned_herdr_pid(pid: Option<u32>) {
 }
 
 pub fn register_runtime_dir(path: &Path) {
+    // Fixture setup precedes PTY/process construction; descendants and CLI
+    // autostarts inherit this unavailable bus instead of inhibiting the host.
+    // The explicit private-logind harness is a separate binary without this module.
+    isolate_test_server_bus();
     ensure_cleanup_hooks();
 
     let _ = fs::create_dir_all(path);

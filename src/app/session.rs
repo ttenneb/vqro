@@ -148,6 +148,60 @@ impl App {
         }
     }
 
+    /// Only durable completion events are meaningful after shutdown admission.
+    /// Never apply queued PTY deaths, agent exits or new package plans here.
+    pub(crate) fn handle_shutdown_persistence_event(&mut self, event: crate::events::AppEvent) {
+        match event {
+            crate::events::AppEvent::CollectionsCheckpointPersisted(result) => {
+                self.finish_collections_checkpoint(*result)
+            }
+            crate::events::AppEvent::CollectionsCreateCheckpointPersisted(result) => {
+                self.finish_collections_create_checkpoint(*result)
+            }
+            _ => return,
+        }
+        if !self.collections_mutations_blocked && !self.session_persistence_blocked {
+            self.pane_exit_checkpoint_pending = false;
+        }
+    }
+
+    pub(crate) async fn settle_persistence_before_shutdown(
+        &mut self,
+        timeout: Duration,
+    ) -> Result<(), &'static str> {
+        let canceled_plans = self.cancel_prepublication_collections_for_shutdown();
+        let awaiting_checkpoint = self.collections_mutations_blocked;
+        let deadline = tokio::time::Instant::now() + timeout;
+        while self.collections_mutations_blocked {
+            if tokio::time::Instant::now() >= deadline {
+                break;
+            }
+            match tokio::time::timeout_at(deadline, self.event_rx.recv()).await {
+                Ok(Some(event)) => self.handle_shutdown_persistence_event(event),
+                _ => break,
+            }
+        }
+        if self.collections_mutations_blocked {
+            // Publication may already have happened. Retain journal/evidence and
+            // both fences for startup recovery; never race a forced ordinary save.
+            self.session_persistence_blocked = true;
+            self.extension_state_persistence_blocked = true;
+            return Err("shutdown persistence completion unavailable; final ordinary save blocked, durable checkpoint recovery required");
+        }
+        if self.policy.persist_session && self.session_persistence_blocked {
+            // A selected completion may already have failed in the shutdown
+            // event guard before settlement began; do not report that as success.
+            return Err("shutdown session persistence blocked; final ordinary save refused, durable recovery or repair required");
+        }
+        if canceled_plans || awaiting_checkpoint {
+            // An admitted mutation supersedes an older pre-exit checkpoint.
+            // Capture current resume/cwd facts after publication reconciliation,
+            // even when the checkpoint finisher cleared session_dirty.
+            self.pane_exit_checkpoint_pending = false;
+        }
+        Ok(())
+    }
+
     pub(crate) fn save_session_on_shutdown(&mut self) {
         if self.pane_exit_checkpoint_pending && !self.state.session_dirty {
             self.session_save_deadline = None;

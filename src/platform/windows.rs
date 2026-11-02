@@ -15,6 +15,12 @@ use std::{
 
 mod clipboard_image;
 
+pub(crate) fn host_shutdown_in_progress() -> bool {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_SHUTTINGDOWN};
+    // The session-wide flag distinguishes shutdown/logoff from ordinary child failure.
+    unsafe { GetSystemMetrics(SM_SHUTTINGDOWN) != 0 }
+}
+
 #[derive(Debug)]
 pub(crate) struct PlatformPersistenceLock {
     _handle: OwnedHandle,

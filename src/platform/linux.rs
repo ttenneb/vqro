@@ -7,6 +7,9 @@ use std::{
     sync::OnceLock,
 };
 
+mod shutdown;
+pub(crate) use shutdown::monitor_host_shutdown;
+
 pub(super) const REMOTE_BRIDGE_CLOCK: libc::clockid_t = libc::CLOCK_BOOTTIME;
 
 pub(crate) fn socket_peer_birth(stream: &crate::ipc::LocalStream) -> Option<(u32, u64)> {

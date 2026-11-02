@@ -39,7 +39,7 @@ struct SpawnedHerdr {
 impl Drop for SpawnedHerdr {
     fn drop(&mut self) {
         let pid = self.child.process_id();
-        let _ = self.child.kill();
+        support::stop_spawned_herdr(&mut *self.child);
 
         if let Some(pid) = pid {
             let deadline = Instant::now() + Duration::from_secs(2);
@@ -200,6 +200,7 @@ fn wait_for_log_contains(path: &Path, needle: &str, timeout: Duration) {
 }
 
 fn run_cli(socket_path: &Path, args: &[&str]) -> std::process::Output {
+    support::isolate_test_server_bus();
     let mut command = Command::new(env!("CARGO_BIN_EXE_vqro"));
     command.args(args);
     command.env("VQRO_SOCKET_PATH", socket_path);

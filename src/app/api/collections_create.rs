@@ -786,6 +786,82 @@ impl App {
     }
 }
 
+#[cfg(test)]
+impl App {
+    pub(crate) fn test_queue_shutdown_create(
+        &mut self,
+    ) -> (Arc<AtomicBool>, std::sync::mpsc::Receiver<String>) {
+        assert!(!self.collections_mutations_blocked);
+        let (respond_to, rx) = std::sync::mpsc::channel();
+        let canceled = Arc::new(AtomicBool::new(false));
+        let authorization = self.test_shutdown_read_authorization();
+        let workspace = &self.state.workspaces[0];
+        let workspace_id = workspace.id.clone();
+        let tab_id = workspace.tabs[0].id.clone();
+        let pane_id = workspace.tabs[0].root_pane;
+        let target_pane_id = self.public_pane_id(0, pane_id).unwrap();
+        let reserved_id = crate::layout::CollectionId::alloc().unwrap();
+        let sequence = self.reserve_collections_action_sequence().unwrap();
+        self.collections_pending_creates.insert(
+            88,
+            PendingCollectionsCreate {
+                request_id: "shutdown-create".into(),
+                respond_to,
+                params: crate::api::schema::CollectionCreateParams {
+                    target_pane_id,
+                    direction: crate::api::schema::SplitDirection::Right,
+                    ratio: None,
+                    label: Some("never published".into()),
+                    focus: false,
+                },
+                workspace_id,
+                tab_id: tab_id.clone(),
+                workspace_index: 0,
+                tab_index: 0,
+                pane_id,
+                reserved_id,
+                container_id: crate::terminal_container::format_terminal_container_id(
+                    reserved_id.into(),
+                ),
+                sequence,
+                stage: CreateStage::Profile,
+                observations: authorization.terminal_observations(),
+                authorization,
+                expected_state: self
+                    .extension_state
+                    .snapshot(COLLECTIONS_NAMESPACE)
+                    .unwrap()
+                    .into(),
+                expected_terminals: None,
+                topology: None,
+                render_params: HostDocumentRenderParamsV2 {
+                    contract: HOST_DOCUMENT_RENDER_CONTRACT_V2.into(),
+                    requested_revision: 1,
+                    producer: DocumentProducerFenceV2 {
+                        package_id: "vqro.collections".into(),
+                        service_id: "collections".into(),
+                        artifact_sha256: "a".repeat(64),
+                        runtime_generation: 1,
+                        provider_generation: 1,
+                        scope_generation: 1,
+                    },
+                    scope: DocumentScopeV2 {
+                        contract: COLLECTIONS_SCOPE_CONTRACT_V1.into(),
+                        scope_id: tab_id.to_string(),
+                    },
+                },
+                profile: None,
+                actions: None,
+                invocation: None,
+                deadline: Instant::now() + TIMEOUT,
+                canceled: canceled.clone(),
+            },
+        );
+        self.collections_mutations_blocked = true;
+        (canceled, rx)
+    }
+}
+
 fn direction(params: &crate::api::schema::CollectionCreateParams) -> Direction {
     match params.direction {
         crate::api::schema::SplitDirection::Right => Direction::Horizontal,

@@ -2,6 +2,8 @@ use super::*;
 
 #[path = "pane_graphics.rs"]
 mod pane_graphics_tests;
+#[path = "shutdown.rs"]
+mod shutdown_tests;
 #[path = "surface_interest.rs"]
 mod surface_interest_tests;
 
@@ -92,6 +94,9 @@ fn test_headless_server_with_event_hub(event_hub: api::EventHub) -> HeadlessServ
         headless_size,
         effective_size: headless_size,
         shutting_down: false,
+        host_shutdown_requested: Arc::new(AtomicBool::new(false)),
+        host_shutdown_intent: Default::default(),
+        host_shutdown_probe: crate::platform::host_shutdown_in_progress,
         handoff_in_progress: false,
         #[cfg(unix)]
         pending_handoff_repaint_nudge: false,

@@ -248,8 +248,12 @@ pub struct HeadlessServer {
     /// Imported panes get one app-safe resize nudge after the first client attaches.
     #[cfg(unix)]
     pending_handoff_repaint_nudge: bool,
-    /// Flag set by Ctrl+C or `server stop` signal.
+    /// Flag set by explicit stop signal or `server stop`.
     should_quit: Arc<AtomicBool>,
+    host_shutdown_requested: Arc<AtomicBool>,
+    host_shutdown_intent: crate::platform::HostShutdownIntentCell,
+    #[cfg(test)]
+    host_shutdown_probe: fn() -> bool,
     /// Channel for receiving server events from client connection threads.
     server_event_rx: mpsc::Receiver<ServerEvent>,
     /// Sender for server events (cloned for each client thread).
@@ -373,6 +377,10 @@ impl HeadlessServer {
             headless_size,
             effective_size: headless_size,
             shutting_down: false,
+            host_shutdown_requested: Arc::new(AtomicBool::new(false)),
+            host_shutdown_intent: Default::default(),
+            #[cfg(test)]
+            host_shutdown_probe: crate::platform::host_shutdown_in_progress,
             handoff_in_progress: false,
             #[cfg(unix)]
             pending_handoff_repaint_nudge: false,
@@ -394,10 +402,21 @@ impl HeadlessServer {
     pub async fn run(&mut self) -> io::Result<()> {
         crate::logging::startup("server");
 
-        // Register SIGINT handler for graceful shutdown.
         let should_quit = self.should_quit.clone();
         let quit_notify = self.server_event_tx.clone();
-        ctrlc_handler(should_quit, quit_notify);
+        crate::platform::spawn_server_signal_monitor(move |signal| {
+            info!(%signal, "server stop requested");
+            should_quit.store(true, Ordering::Release);
+            let _ = quit_notify.try_send(ServerEvent::QuitSignal);
+        });
+        let quit_notify = self.server_event_tx.clone();
+        let _host_shutdown = crate::platform::HostShutdownMonitor::start(
+            self.host_shutdown_requested.clone(),
+            self.host_shutdown_intent.clone(),
+            move || {
+                let _ = quit_notify.try_send(ServerEvent::QuitSignal);
+            },
+        );
 
         let mut needs_render = true;
         let mut needs_full_render = true;
@@ -412,6 +431,13 @@ impl HeadlessServer {
             if self.shutting_down {
                 self.complete_shutdown().await?;
                 break;
+            }
+
+            // Preserve intact topology before applying shutdown-time PTY exits.
+            // Linux keeps its delay inhibitor until this run's final save returns.
+            if self.host_shutdown_requested() {
+                self.initiate_shutdown();
+                continue;
             }
 
             // Check if we should start shutting down.
@@ -638,7 +664,7 @@ impl HeadlessServer {
                 }
             };
 
-            if self.should_quit.load(Ordering::Acquire) {
+            if self.should_quit.load(Ordering::Acquire) || self.host_shutdown_requested() {
                 match event {
                     LoopEvent::Internal(ev) => {
                         self.handle_internal_event_with_forwarding(ev);
@@ -719,13 +745,55 @@ impl HeadlessServer {
             }
         }
 
-        // Save session on exit.
+        // Settle admitted persistence while the host delay inhibitor is still
+        // held. Cancel plans before publication, but reconcile already-publishing
+        // checkpoints through their existing completion/mutation fences.
+        if let Err(error) = self
+            .app
+            .settle_persistence_before_shutdown(Duration::from_secs(3))
+            .await
+        {
+            warn!(%error, "could not settle persistence before shutdown");
+            return Err(io::Error::other(error));
+        }
+        // Save session on exit; uncertain checkpoint publication stays fail closed.
         if self.app.policy.persist_session {
             self.app.save_session_on_shutdown();
         }
 
         info!("headless server exiting");
         Ok(())
+    }
+
+    fn reject_api_request_for_shutdown(msg: api::ApiRequestMessage) {
+        let response = serde_json::to_string(&api::schema::ErrorResponse {
+            id: msg.request.id,
+            error: api::schema::ErrorBody {
+                code: "server_unavailable".into(),
+                message: "server is shutting down".into(),
+            },
+        })
+        .unwrap_or_else(|_| {
+            r#"{"id":"","error":{"code":"server_unavailable","message":"server is shutting down"}}"#
+                .to_string()
+        });
+        let _ = msg.respond_to.send(response);
+    }
+
+    fn host_shutdown_requested(&self) -> bool {
+        #[cfg(not(test))]
+        let in_progress = crate::platform::host_shutdown_in_progress();
+        #[cfg(test)]
+        let in_progress = (self.host_shutdown_probe)();
+        if in_progress {
+            self.host_shutdown_requested.store(true, Ordering::Release);
+        }
+        let requested = self.host_shutdown_requested.load(Ordering::Acquire);
+        if requested {
+            // Stop this tick before autosave or another request can apply exits.
+            self.should_quit.store(true, Ordering::Release);
+        }
+        requested
     }
 
     fn allocate_activity_stamp(&mut self) -> u64 {
@@ -3674,20 +3742,8 @@ impl HeadlessServer {
             method = crate::api::api_method_name(&msg.request.method),
             "dispatching API request"
         );
-        if self.shutting_down {
-            // During shutdown, respond with server_unavailable.
-            let response = serde_json::to_string(&api::schema::ErrorResponse {
-                id: msg.request.id,
-                error: api::schema::ErrorBody {
-                    code: "server_unavailable".into(),
-                    message: "server is shutting down".into(),
-                },
-            })
-            .unwrap_or_else(|_| {
-                r#"{"id":"","error":{"code":"server_unavailable","message":"server is shutting down"}}"#
-                    .to_string()
-            });
-            let _ = msg.respond_to.send(response);
+        if self.shutting_down || self.host_shutdown_requested() {
+            Self::reject_api_request_for_shutdown(msg);
             return false;
         }
 
@@ -3793,6 +3849,10 @@ impl HeadlessServer {
                 api::schema::Method::ServerStop(_) | api::schema::Method::ServerLiveHandoff(_)
             );
         changed |= self.drain_all_internal_events_with_forwarding();
+        if self.host_shutdown_requested() {
+            Self::reject_api_request_for_shutdown(msg);
+            return changed;
+        }
 
         // Capture toast and effective pane states before the API call so we can
         // forward resulting client-local notifications. API requests like
@@ -4177,6 +4237,9 @@ impl HeadlessServer {
     ///
     /// Similar to the former App scheduler but without terminal resize polling.
     fn handle_scheduled_tasks_headless(&mut self, now: Instant, geometry_dirty: bool) -> bool {
+        if self.host_shutdown_requested() {
+            return false;
+        }
         let mut changed = false;
 
         // No resize polling needed — server has no terminal.
@@ -4308,16 +4371,6 @@ impl Drop for HeadlessServer {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-/// Installs a Ctrl+C handler that sets the should_quit flag and wakes up
-/// the event loop by sending a QuitSignal on the server event channel.
-fn ctrlc_handler(should_quit: Arc<AtomicBool>, server_event_tx: mpsc::Sender<ServerEvent>) {
-    let _ = ctrlc::set_handler(move || {
-        should_quit.store(true, Ordering::Release);
-        // Wake up the event loop so the quit flag is checked promptly.
-        let _ = server_event_tx.try_send(ServerEvent::QuitSignal);
-    });
-}
 
 /// Sleep until a deadline, or return pending if none.
 async fn sleep_until_or_pending(deadline: Option<Instant>) {
