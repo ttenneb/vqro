@@ -1420,8 +1420,9 @@ fn launch_server_daemon_with_wmi(command: &std::process::Command) -> std::io::Re
             "working directory",
         )?,
         process_startup_information: Win32_ProcessStartup {
-            // Breakaway keeps the daemon out of an inherited kill-on-close job;
-            // WMI reports a refused breakaway as a failed Create.
+            // Same breakaway request as the in-process launcher, with the same
+            // limit: partial breakaway is allowed inside a nested hierarchy, so
+            // readiness is decided by the job check, not by this flag.
             create_flags: DETACHED_PROCESS | CREATE_BREAKAWAY_FROM_JOB,
             environment_variables: effective_command_environment(command)?,
         },
@@ -1543,9 +1544,11 @@ fn current_job_kills_processes_on_close() -> std::io::Result<bool> {
 pub fn detach_server_daemon_command(command: &mut std::process::Command) {
     use std::os::windows::process::CommandExt;
 
-    // Leave any inherited job: an outer kill-on-close job would otherwise end the
-    // daemon with its launcher. A host that forbids breakaway fails this spawn
-    // instead of silently starting a launcher-bound server.
+    // Ask to leave inherited jobs: an outer kill-on-close job would otherwise end
+    // the daemon with its launcher. Windows permits partial breakaway inside a
+    // nested hierarchy and an ancestor may refuse it entirely, so this request is
+    // not proof of freedom; the detached-daemon check verifies the process is in
+    // no job at all and stays false otherwise.
     command.creation_flags(DETACHED_PROCESS | CREATE_BREAKAWAY_FROM_JOB);
 }
 
@@ -1558,8 +1561,9 @@ pub fn current_process_is_detached_server_daemon() -> bool {
     // launcher. `QueryInformationJobObject(NULL)` reports the *immediate* job
     // only, and Windows exposes no way to walk the ancestor chain, so an outer
     // kill-on-close job would still end a process whose inner job is harmless.
-    // Vqro's own daemon launches therefore request breakaway from any inherited
-    // job instead of relying on the immediate job's limits.
+    // Vqro's daemon launches request breakaway, but nested jobs permit partial
+    // breakaway until an ancestor forbids it, so that request cannot replace
+    // this check.
     matches!(current_process_is_in_job(), Ok(false))
 }
 
@@ -3984,25 +3988,30 @@ mod tests {
             );
             assert!(current_process_is_in_job().unwrap());
 
-            // Neither a harmless job nor a kill-on-close job proves freedom from
-            // a launcher: only the immediate job is visible, so both fail closed.
-            for flags in [0, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE] {
+            let apply_limits = |flags: u32| {
                 let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
                 limits.BasicLimitInformation.LimitFlags = flags;
-                assert_ne!(
-                    unsafe {
-                        SetInformationJobObject(
-                            job.as_raw_handle(),
-                            JobObjectExtendedLimitInformation,
-                            std::ptr::from_ref(&limits).cast(),
-                            size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
-                        )
-                    },
-                    0,
-                    "set test job limits"
-                );
+                unsafe {
+                    SetInformationJobObject(
+                        job.as_raw_handle(),
+                        JobObjectExtendedLimitInformation,
+                        std::ptr::from_ref(&limits).cast(),
+                        size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+                    )
+                }
+            };
+
+            // Neither a harmless job nor a kill-on-close job proves freedom from
+            // a launcher: only the immediate job is visible, so both fail closed.
+            // Capture readiness and clear the limit BEFORE asserting, so a failing
+            // assertion cannot drop a live kill-on-close job handle and terminate
+            // this child during teardown.
+            for flags in [0, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE] {
+                assert_ne!(apply_limits(flags), 0, "set test job limits");
+                let ready = current_process_is_detached_server_daemon();
+                assert_ne!(apply_limits(0), 0, "clear test job limits");
                 assert!(
-                    !current_process_is_detached_server_daemon(),
+                    !ready,
                     "job membership is not proof of detachment (flags {flags:#x})"
                 );
             }
@@ -4016,16 +4025,39 @@ mod tests {
 
         use std::os::windows::process::CommandExt;
 
-        let mut child = Command::new(std::env::current_exe().unwrap());
-        child
-            .args([
-                "--exact",
-                "platform::windows::tests::windows_daemon_readiness_requires_freedom_from_every_job",
-                "--nocapture",
-            ])
-            .env(CHILD_ENV, "1")
-            .creation_flags(super::DETACHED_PROCESS | super::CREATE_BREAKAWAY_FROM_JOB);
-        let output = child.output().expect("run daemon readiness child");
+        let child_command = |flags: u32| {
+            let mut child = Command::new(std::env::current_exe().unwrap());
+            child
+                .args([
+                    "--exact",
+                    "platform::windows::tests::windows_daemon_readiness_requires_freedom_from_every_job",
+                    "--nocapture",
+                ])
+                .env(CHILD_ENV, "1")
+                .creation_flags(flags);
+            child
+        };
+        // The ready case needs a job-free child, which needs breakaway. A runner
+        // can forbid that, in which case CreateProcess fails before the child can
+        // report its own skip; retry only this dedicated child without breakaway so
+        // the negative cases always run.
+        let output = match child_command(super::DETACHED_PROCESS | super::CREATE_BREAKAWAY_FROM_JOB)
+            .output()
+        {
+            Ok(output) => output,
+            Err(_) => child_command(super::DETACHED_PROCESS)
+                .output()
+                .expect("run daemon readiness child"),
+        };
+        // The child reports a skipped job-free case on its stderr; forward it so
+        // native logs show that skip instead of hiding it behind captured output.
+        for stream in [&output.stdout, &output.stderr] {
+            let text = String::from_utf8_lossy(stream);
+            let text = text.trim_end();
+            if !text.is_empty() {
+                eprintln!("{text}");
+            }
+        }
         assert!(
             output.status.success(),
             "daemon readiness child failed: {}{}",
