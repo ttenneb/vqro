@@ -197,7 +197,6 @@ pub(super) fn prompt_agent(
             None,
             None,
             None,
-            None,
             origin,
         )));
     };
@@ -236,12 +235,11 @@ pub(super) fn prompt_agent(
         api_tx,
         remaining_timeout_ms(wait.timeout_ms, wait_started).map(std::time::Duration::from_millis),
         None,
-        None,
         Some(("timeout", "timed out waiting for agent status")),
         origin,
     );
     #[cfg(not(windows))]
-    let prompt_response = dispatch_to_app(prompt_request, api_tx, None, None, None, None, origin);
+    let prompt_response = dispatch_to_app(prompt_request, api_tx, None, None, None, origin);
     let Ok(prompted) = agent_from_response(&request_id, &prompt_response) else {
         return Ok(Some(prompt_response));
     };

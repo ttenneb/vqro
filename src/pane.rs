@@ -40,6 +40,8 @@ use self::agent_detection::{
     DetectionScreenReadInput, PendingIdleConfirmation, ScreenDetectionPublishInput,
     AGENT_PENDING_IDLE_RECHECK, AGENT_STARTUP_GRACE_WINDOW,
 };
+#[cfg(test)]
+pub(crate) use self::terminal::test_encode_key_for_app;
 #[cfg(unix)]
 pub use self::terminal::InputState;
 use self::terminal::{GhosttyPaneTerminal, PaneTerminal};
@@ -3223,6 +3225,10 @@ impl PaneRuntime {
             .kitty_image_placements_with_data_filter(needs_data)
     }
 
+    pub(crate) fn kitty_image_fingerprints(&self, image_ids: &[u32]) -> Vec<Option<u64>> {
+        self.terminal.kitty_image_fingerprints(image_ids)
+    }
+
     pub fn keyboard_protocol(&self) -> crate::input::KeyboardProtocol {
         let fallback = crate::input::KeyboardProtocol::from_kitty_flags(
             self.kitty_keyboard_flags.load(Ordering::Relaxed),
@@ -3235,12 +3241,26 @@ impl PaneRuntime {
     }
 
     pub fn encode_terminal_key(&self, key: crate::input::TerminalKey) -> Vec<u8> {
-        self.terminal
-            .encode_terminal_key(key, self.keyboard_protocol())
+        self.terminal.encode_terminal_key(key)
     }
 
     pub fn try_send_bytes(&self, bytes: Bytes) -> Result<(), mpsc::error::TrySendError<Bytes>> {
         self.io.try_send_bytes(bytes)
+    }
+
+    /// Preflight a complete API command without changing input queue semantics.
+    pub(crate) fn validate_input_submission(&self, bytes: &[u8]) -> std::io::Result<()> {
+        match &self.io {
+            #[cfg(unix)]
+            PaneRuntimeIo::Actor(actor) => actor.validate_input_submission(bytes),
+            #[cfg(windows)]
+            PaneRuntimeIo::Actor(_) => {
+                let _ = bytes;
+                Ok(())
+            }
+            #[cfg(test)]
+            PaneRuntimeIo::TestChannel { .. } => Ok(()),
+        }
     }
 
     pub fn queue_user_input_submission(
@@ -3473,8 +3493,22 @@ impl PaneRuntime {
 
 #[cfg(test)]
 impl PaneRuntime {
+    #[cfg(unix)]
+    pub(crate) fn test_enable_kitty_source_forwarding(&self) {
+        let mut core = self.terminal.ghostty.core.lock().unwrap();
+        core.terminal.enable_kitty_graphics().unwrap();
+        core.terminal.set_kitty_source_forwarding(true).unwrap();
+    }
+
     pub(crate) fn test_with_channel(cols: u16, rows: u16) -> (Self, mpsc::Receiver<Bytes>) {
         Self::test_with_channel_and_scrollback_bytes(cols, rows, 0, &[], 4)
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn test_with_actor(actor: PtyIoActorHandle) -> Self {
+        let (mut runtime, _) = Self::test_with_channel(80, 24);
+        runtime.io = PaneRuntimeIo::Actor(actor);
+        runtime
     }
 
     pub(crate) fn test_with_channel_capacity(
@@ -3575,6 +3609,8 @@ impl PaneRuntime {
         let (resize_tx, _resize_rx) = watch::channel((rows, cols, 0, 0));
         let mut terminal =
             crate::ghostty::Terminal::new(cols, rows, scrollback_limit_bytes).unwrap();
+        // Runtime fixtures model the default config, which enables graphics.
+        terminal.enable_kitty_graphics().unwrap();
         terminal.write(bytes);
         let pane_id = PaneId::from_raw(0);
         let terminal = Arc::new(PaneTerminal::new(

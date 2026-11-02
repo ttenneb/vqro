@@ -249,11 +249,13 @@ mod agents_worktrees_notifications;
 mod attention;
 mod attention_profile;
 mod chrome_context;
+mod committed_text;
 mod copy;
 mod endpoint_requests;
 mod endpoints;
 mod extensions;
 mod graphics;
+mod input_conformance;
 #[path = "input.rs"]
 mod input_domain;
 mod keybindings_settings;

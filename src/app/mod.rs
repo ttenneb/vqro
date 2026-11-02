@@ -28,7 +28,6 @@ mod creation;
 mod custom_commands;
 mod git_refresh;
 mod ids;
-pub(crate) mod pane_graphics;
 mod popup;
 mod runtime;
 mod session;
@@ -128,9 +127,6 @@ impl AppPolicy {
 
 pub struct App {
     pub state: AppState,
-    pub(crate) pane_graphics: pane_graphics::Runtime,
-    pub(crate) pane_graphics_files: Arc<crate::pane_graphics_files::FileStore>,
-    pub(crate) direct_graphics_available: bool,
     pub(crate) pixel_mouse_available: bool,
     pub(crate) terminal_runtimes: crate::terminal::TerminalRuntimeRegistry,
     #[cfg(test)]
@@ -566,14 +562,12 @@ impl App {
         let mut checkpoint_recovery_blocked = false;
         let mut loaded_snapshot = None;
         let mut loaded_history = None;
-        let mut recover_collections_checkpoint = policy.restore_session || policy.persist_session;
+        let recover_collections_checkpoint = policy.restore_session || policy.persist_session;
+        // The source still owns persistence during handoff import. Recovery ran
+        // there already; reacquiring ownership would race its intentional fence.
         #[cfg(unix)]
-        {
-            // The source server still owns persistence while the replacement imports handoff
-            // state. Recovery ran in the source process; acquiring ownership here would race the
-            // intentional handoff fence and abort the replacement.
-            recover_collections_checkpoint &= policy != AppPolicy::HANDOFF_REPLACEMENT;
-        }
+        let recover_collections_checkpoint =
+            recover_collections_checkpoint && policy != AppPolicy::HANDOFF_REPLACEMENT;
         if recover_collections_checkpoint {
             if let Err(error) = crate::persist::recover_collections_checkpoint() {
                 session_persistence_blocked = true;
@@ -937,9 +931,6 @@ impl App {
             toast_deadline: None,
             last_api_notification_at: None,
             state,
-            pane_graphics: pane_graphics::Runtime::default(),
-            pane_graphics_files: Arc::new(crate::pane_graphics_files::FileStore::default()),
-            direct_graphics_available: false,
             pixel_mouse_available: false,
             terminal_runtimes: restored_terminal_runtimes,
             #[cfg(test)]

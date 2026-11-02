@@ -7,7 +7,7 @@ use std::{
     path::PathBuf,
     ptr::{copy_nonoverlapping, null_mut},
     sync::{
-        atomic::{AtomicU64, Ordering as AtomicOrdering},
+        atomic::{AtomicU32, AtomicU64, Ordering as AtomicOrdering},
         Arc, LazyLock, Mutex, OnceLock,
     },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -271,7 +271,8 @@ use windows_sys::{
         System::{
             Console::GetConsoleWindow,
             DataExchange::{
-                CloseClipboard, EmptyClipboard, GetClipboardData, OpenClipboard,
+                CloseClipboard, CountClipboardFormats, EmptyClipboard, EnumClipboardFormats,
+                GetClipboardData, GetClipboardOwner, GetClipboardSequenceNumber, OpenClipboard,
                 RegisterClipboardFormatW, SetClipboardData,
             },
             Diagnostics::{
@@ -292,7 +293,7 @@ use windows_sys::{
                 GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock, VirtualQueryEx, GMEM_MOVEABLE,
                 MEMORY_BASIC_INFORMATION,
             },
-            Ole::{CF_DIB, CF_DIBV5, CF_UNICODETEXT},
+            Ole::{CF_DIB, CF_DIBV5, CF_LOCALE, CF_OEMTEXT, CF_TEXT, CF_UNICODETEXT},
             Threading::{
                 GetCurrentProcess, GetExitCodeProcess, GetProcessTimes, OpenProcess, OpenThread,
                 QueryFullProcessImageNameW, ResumeThread, TerminateProcess, CREATE_NO_WINDOW,
@@ -463,11 +464,21 @@ fn standard_windows_path(path: &std::path::Path) -> Option<PathBuf> {
 /// Resolves against the current foreground layout because asynchronous console
 /// records do not retain the layout that was active when the key was pressed.
 pub(crate) fn resolve_base_printable_key(vk: u16, scan: u16) -> Option<char> {
+    // SAFETY: the foreground window and its layout are owned by Win32.
+    let layout = unsafe {
+        let thread_id = GetWindowThreadProcessId(GetForegroundWindow(), null_mut());
+        GetKeyboardLayout(thread_id)
+    };
+    resolve_base_printable_key_in_layout(vk, scan, layout)
+}
+
+pub(crate) fn resolve_base_printable_key_in_layout(
+    vk: u16,
+    scan: u16,
+    layout: windows_sys::Win32::UI::Input::KeyboardAndMouse::HKL,
+) -> Option<char> {
     // SAFETY: Win32 owns the handles; the fixed buffers match the API lengths.
     unsafe {
-        let thread_id = GetWindowThreadProcessId(GetForegroundWindow(), null_mut());
-        let layout = GetKeyboardLayout(thread_id);
-
         let key_state = [0u8; 256];
         let mut output = [0u16; 2];
         let written = ToUnicodeEx(
@@ -479,7 +490,9 @@ pub(crate) fn resolve_base_printable_key(vk: u16, scan: u16) -> Option<char> {
             0x4,
             layout,
         );
-        let units = output.get(..usize::try_from(written).ok()?)?;
+        // A negative result identifies a dead key; its spacing accent is still
+        // the key's identity. Flag 0x4 above keeps composition state unchanged.
+        let units = output.get(..usize::try_from(written.unsigned_abs()).ok()?)?;
         let mut chars = char::decode_utf16(units.iter().copied());
         let ch = chars.next()?.ok()?;
         (chars.next().is_none() && !ch.is_control()).then_some(ch)
@@ -2213,6 +2226,8 @@ pub fn process_exists(pid: u32) -> bool {
     ok && exit_code == STILL_ACTIVE
 }
 
+static LAST_CLIPBOARD_WRITE_SEQUENCE: AtomicU32 = AtomicU32::new(0);
+
 pub fn write_clipboard(bytes: &[u8]) -> bool {
     let Ok(text) = std::str::from_utf8(bytes) else {
         return false;
@@ -2255,6 +2270,16 @@ pub fn write_clipboard(bytes: &[u8]) -> bool {
             return false;
         }
 
+        // Closing may generate additional text formats and advance the sequence.
+        drop(_clipboard);
+        // Read the sequence first: a later writer must not become our last write.
+        let sequence = GetClipboardSequenceNumber();
+        let sequence = if GetClipboardOwner() == owner {
+            sequence
+        } else {
+            0
+        };
+        LAST_CLIPBOARD_WRITE_SEQUENCE.store(sequence, AtomicOrdering::Relaxed);
         true
     }
 }
@@ -2268,6 +2293,83 @@ pub fn open_path(path: &std::path::Path) -> std::io::Result<Option<std::process:
         .arg(path)
         .spawn()
         .map(Some)
+}
+
+/// Compare only our own last plain-text clipboard write; do not suppress copies
+/// after external changes or rich content.
+pub(crate) fn windows_virtual_terminal_input_active() -> bool {
+    use windows_sys::Win32::System::Console::{
+        GetConsoleMode, GetStdHandle, ENABLE_VIRTUAL_TERMINAL_INPUT, STD_INPUT_HANDLE,
+    };
+    let handle = unsafe { GetStdHandle(STD_INPUT_HANDLE) };
+    if handle.is_null() || handle == INVALID_HANDLE_VALUE {
+        return false;
+    }
+    let mut mode = 0;
+    (unsafe { GetConsoleMode(handle, &mut mode) } != 0) && mode & ENABLE_VIRTUAL_TERMINAL_INPUT != 0
+}
+
+pub fn clipboard_text_matches(bytes: &[u8]) -> Option<bool> {
+    let current = read_clipboard_unicode_text()?;
+    Some(clipboard_text_equals(&current, bytes))
+}
+
+fn clipboard_text_equals(current: &str, bytes: &[u8]) -> bool {
+    let Ok(payload) = std::str::from_utf8(bytes) else {
+        return false;
+    };
+    normalized_clipboard_newlines(payload) == normalized_clipboard_newlines(current)
+}
+
+fn normalized_clipboard_newlines(text: &str) -> std::borrow::Cow<'_, str> {
+    if text.contains("\r\n") {
+        std::borrow::Cow::Owned(text.replace("\r\n", "\n"))
+    } else {
+        std::borrow::Cow::Borrowed(text)
+    }
+}
+
+fn plain_text_clipboard_format(format: u32) -> bool {
+    format == CF_UNICODETEXT as u32
+        || format == CF_TEXT as u32
+        || format == CF_OEMTEXT as u32
+        || format == CF_LOCALE as u32
+}
+
+fn read_clipboard_unicode_text() -> Option<String> {
+    const MAX_CLIPBOARD_TEXT_BYTES: usize = 1024 * 1024;
+    for attempt in 0..10 {
+        if unsafe { OpenClipboard(null_mut()) } != 0 {
+            let _clipboard = ClipboardGuard;
+            let sequence = unsafe { GetClipboardSequenceNumber() };
+            if sequence == 0
+                || sequence != LAST_CLIPBOARD_WRITE_SEQUENCE.load(AtomicOrdering::Relaxed)
+            {
+                return None;
+            }
+            let format_count = unsafe { CountClipboardFormats() };
+            if format_count <= 0 {
+                return None;
+            }
+            let mut format = 0;
+            for _ in 0..format_count {
+                format = unsafe { EnumClipboardFormats(format) };
+                if format == 0 || !plain_text_clipboard_format(format) {
+                    return None;
+                }
+            }
+            let bytes = clipboard_global_bytes(CF_UNICODETEXT as u32, MAX_CLIPBOARD_TEXT_BYTES)?;
+            let units = bytes
+                .chunks_exact(2)
+                .map(|pair| u16::from_ne_bytes([pair[0], pair[1]]))
+                .take_while(|unit| *unit != 0);
+            return String::from_utf16(&units.collect::<Vec<_>>()).ok();
+        }
+        if attempt < 9 {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+    None
 }
 
 pub fn open_url(url: &str) -> std::io::Result<Option<std::process::Child>> {
@@ -2966,6 +3068,31 @@ pub(crate) fn write_package_staging_file(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn clipboard_text_equals_normalizes_line_endings() {
+        assert!(super::clipboard_text_equals("hello", b"hello"));
+        assert!(super::clipboard_text_equals("a\r\nb", b"a\nb"));
+        assert!(super::clipboard_text_equals("a\nb", b"a\r\nb"));
+        assert!(!super::clipboard_text_equals("hello ", b"hello"));
+        assert!(!super::clipboard_text_equals("hello", b"world"));
+        assert!(!super::clipboard_text_equals("hello", &[0xff]));
+        assert!(!super::clipboard_text_equals("a\rb", b"a\nb"));
+    }
+
+    #[test]
+    fn clipboard_format_check_rejects_rich_content() {
+        for format in [
+            super::CF_UNICODETEXT,
+            super::CF_TEXT,
+            super::CF_OEMTEXT,
+            super::CF_LOCALE,
+        ] {
+            assert!(super::plain_text_clipboard_format(format as u32));
+        }
+        assert!(!super::plain_text_clipboard_format(super::CF_DIB as u32));
+        assert!(!super::plain_text_clipboard_format(0xC000));
+    }
+
     use std::{
         fs,
         process::{Command, Stdio},

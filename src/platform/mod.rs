@@ -315,6 +315,15 @@ pub(crate) const fn capabilities() -> PlatformCapabilities {
     }
 }
 
+/// The byte the host terminal sends for Backspace according to the tty's erase
+/// setting (e.g. `^H` for MobaXterm and PuTTY-style terminals), when known.
+pub(crate) fn terminal_erase_byte() -> Option<u8> {
+    #[cfg(unix)]
+    return unix_common::terminal_erase_byte();
+    #[cfg(not(unix))]
+    None
+}
+
 pub(crate) fn terminal_grid_size() -> std::io::Result<(u16, u16)> {
     #[cfg(unix)]
     let (cols, rows) = unix_common::read_terminal_grid_size()?;
@@ -468,8 +477,35 @@ mod remote_bridge;
 mod remote_bridge_tests;
 #[cfg(unix)]
 mod unix_common;
+/// Other Unix platforms keep their existing input admission policy; their
+/// _PC_MAX_CANON values need not describe actual queue capacity.
+#[cfg(all(unix, not(target_os = "macos")))]
+#[derive(Clone, Default)]
+pub(crate) struct PtyInputGuard;
+#[cfg(all(unix, not(target_os = "macos")))]
+impl PtyInputGuard {
+    pub(crate) fn new(_master: &std::sync::Arc<std::fs::File>) -> Self {
+        Self
+    }
+    pub(crate) fn validate(&self, _bytes: &[u8]) -> std::io::Result<()> {
+        Ok(())
+    }
+}
 #[cfg(unix)]
-pub(crate) use unix_common::resource_symlink;
+pub(crate) mod unix_image_files;
+
+/// Kernel CoW snapshots are deliberately unsupported outside Linux.
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn clone_native_image_source(
+    _source_fd: i64,
+    _destination: &std::fs::File,
+    _expected_len: usize,
+) -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "native source cloning requires Linux",
+    ))
+}
 #[cfg(unix)]
 pub(crate) use unix_common::{
     begin_cli_output, configure_package_nofollow, create_private_package_directory, end_cli_output,
@@ -477,6 +513,8 @@ pub(crate) use unix_common::{
     spawn_server_signal_monitor, write_package_staging_file, PackageStagingBackend,
     RemoteBridgeWake,
 };
+#[cfg(unix)]
+pub(crate) use unix_common::{poll_fd_readable, read_fd, resource_symlink};
 
 mod client_state;
 mod package_fs;

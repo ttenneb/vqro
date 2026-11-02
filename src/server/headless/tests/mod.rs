@@ -1,5 +1,6 @@
 use super::*;
 
+mod native_graphics;
 #[path = "pane_graphics.rs"]
 mod pane_graphics_tests;
 #[path = "shutdown.rs"]
@@ -76,6 +77,7 @@ fn test_headless_server_with_event_hub(event_hub: api::EventHub) -> HeadlessServ
         client_socket_path: socket_path,
         client_socket_identity,
         clients: HashMap::new(),
+        native_graphics: Default::default(),
         #[cfg(unix)]
         next_client_id: 1,
         foreground_client_id: None,
@@ -222,7 +224,6 @@ fn headless_pane_list(server: &mut HeadlessServer) -> Vec<api::schema::PaneInfo>
         },
         respond_to,
         response_write_complete: None,
-        stream_active: None,
     });
     let response: api::schema::SuccessResponse =
         serde_json::from_str(&response_rx.recv().unwrap()).unwrap();
@@ -281,7 +282,6 @@ fn headless_api_request_drains_all_pending_internal_events_before_reading_state(
             },
             respond_to,
             response_write_complete: None,
-            stream_active: None,
         })
     );
     let response = response_rx
@@ -1953,7 +1953,6 @@ async fn client_local_navigation_does_not_emit_global_focus_transitions() {
             },
             respond_to,
             response_write_complete: None,
-            stream_active: None,
         },
     );
     server.app.sync_focus_events();
@@ -2045,7 +2044,6 @@ async fn client_local_navigation_emits_pane_focused_only_when_that_client_moves(
                 },
                 respond_to,
                 response_write_complete: None,
-                stream_active: None,
             },
         );
         let response = response_rx.recv().expect("navigation response");
@@ -2178,7 +2176,6 @@ async fn repeated_layout_action_reapplies_controller_geometry() {
             },
             respond_to,
             response_write_complete: None,
-            stream_active: None,
         },
     ));
 
@@ -3517,7 +3514,6 @@ async fn public_close_reapplies_controller_geometry() {
             },
             respond_to,
             response_write_complete: None,
-            stream_active: None,
         })
     );
 
@@ -3722,7 +3718,6 @@ async fn public_background_tab_create_preserves_client_locations() {
         },
         respond_to,
         response_write_complete: None,
-        stream_active: None,
     });
 
     assert_eq!(
@@ -3771,7 +3766,6 @@ async fn public_workspace_focus_preserves_each_clients_remembered_tabs() {
         },
         respond_to,
         response_write_complete: None,
-        stream_active: None,
     });
 
     let first_location = server.clients[&41].shell_location.as_ref().unwrap();
@@ -3855,7 +3849,6 @@ async fn public_agent_focus_replaces_a_diverged_client_shell_projection() {
         },
         respond_to,
         response_write_complete: None,
-        stream_active: None,
     });
     let response: crate::api::schema::SuccessResponse =
         serde_json::from_str(&response_rx.recv().expect("agent focus response")).unwrap();
@@ -3941,7 +3934,6 @@ async fn public_api_focus_replaces_every_client_shell_projection() {
         },
         respond_to,
         response_write_complete: None,
-        stream_active: None,
     });
     assert_eq!(server.app.state.active, Some(1));
     server.render_and_stream();
@@ -6136,6 +6128,43 @@ fn client_pane_pixel_mouse_uses_runtime_pixel_encoding() {
 }
 
 #[test]
+fn client_pane_cell_mouse_uses_pixel_units_when_sgr_pixels_is_set() {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("test runtime");
+    let _runtime_guard = rt.enter();
+    let (runtime, mut input_rx) =
+        crate::terminal::TerminalRuntime::test_with_channel_and_scrollback_bytes(
+            20,
+            5,
+            0,
+            b"\x1b[?1003h\x1b[?1006h\x1b[?1016h",
+            4,
+        );
+    runtime.resize(5, 20, 10, 20);
+
+    apply_client_pane_input_events(
+        &runtime,
+        &[crate::protocol::ClientPaneInputEvent::Mouse {
+            kind: crate::protocol::ClientMouseKind::Moved,
+            position: crate::protocol::ClientMousePosition::Cell { column: 2, row: 1 },
+            geometry: None,
+            modifiers: 0,
+            lines: 3,
+        }],
+    )
+    .expect("cell-aligned pixel mouse input");
+    assert_eq!(
+        input_rx.try_recv().expect("encoded pixel-unit mouse"),
+        Bytes::from_static(b"\x1b[<35;25;30M")
+    );
+    drop(runtime);
+    drop(_runtime_guard);
+    rt.shutdown_timeout(Duration::from_millis(100));
+}
+
+#[test]
 fn client_pane_pixel_mouse_stays_pixel_scaled_when_sgr_is_reasserted() {
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -7058,6 +7087,165 @@ async fn client_shell_release_cleanup_does_not_promote_and_survives_disconnect()
     shutdown_test_runtimes(&mut server);
 }
 
+#[tokio::test]
+async fn client_shell_hidden_nested_pixel_pane_does_not_request_host_pixels() {
+    let mut server = test_headless_server();
+    let mut workspace = crate::workspace::Workspace::test_new("nested-pixel-visibility");
+    let root = workspace.tabs[0].root_pane;
+    let selected = workspace.test_split(ratatui::layout::Direction::Horizontal);
+    let hidden = workspace.test_split(ratatui::layout::Direction::Horizontal);
+    let collection = workspace.tabs[0]
+        .create_collection_near(
+            crate::layout::LayoutLeaf::Pane(root),
+            ratatui::layout::Direction::Vertical,
+            0.5,
+            Some("helpers".into()),
+        )
+        .unwrap();
+    workspace.tabs[0]
+        .collect_tiled_pane(selected, collection)
+        .unwrap();
+    workspace.tabs[0]
+        .collect_tiled_pane(hidden, collection)
+        .unwrap();
+    workspace.tabs[0].layout.focus_pane(root);
+    assert!(workspace.tabs[0].layout.is_pane_visible(selected));
+    assert!(!workspace.tabs[0].layout.is_pane_visible(hidden));
+    for pane in [root, selected, hidden] {
+        workspace.insert_test_runtime(
+            pane,
+            crate::terminal::TerminalRuntime::test_with_screen_bytes(
+                40,
+                23,
+                if pane == hidden {
+                    b"\x1b[?1003h\x1b[?1006h\x1b[?1016h"
+                } else {
+                    b"plain"
+                },
+            ),
+        );
+    }
+    server.app.state.workspaces = vec![workspace];
+    server.app.state.active = Some(0);
+    server.app.state.selected = 0;
+    server.app.state.mode = crate::app::Mode::Terminal;
+    server.app.state.ensure_test_terminals();
+    server.app.state.assert_invariants_for_test();
+    let (writer, _control, _render) = test_client_writer();
+    let mut client = ClientConnection::new(
+        (80, 24),
+        crate::kitty_graphics::HostCellSize {
+            width_px: 10,
+            height_px: 20,
+        },
+        1,
+        RenderEncoding::SemanticFrame,
+        Some(writer),
+    );
+    client.mode = ClientConnectionMode::ClientShell;
+    client.pixel_mouse = true;
+    client.shell_surface_active = true;
+    client.shell_mouse_capture = true;
+    server.clients.insert(1, client);
+    server.stream_host_mouse_capture_mode();
+    assert_eq!(
+        server.clients[&1].host_sgr_pixels_active,
+        Some(false),
+        "hidden1016 must not change host units"
+    );
+
+    // Selecting it makes it a visible, unfocused pixel target. Zooming another
+    // pane must exclude it again, without destroying its live terminal modes.
+    server.app.state.workspaces[0].tabs[0]
+        .layout
+        .focus_pane(hidden);
+    server.app.state.workspaces[0].tabs[0]
+        .layout
+        .focus_pane(root);
+    assert!(server.app.state.workspaces[0].tabs[0]
+        .layout
+        .is_pane_visible(hidden));
+    server.stream_host_mouse_capture_mode();
+    assert_eq!(server.clients[&1].host_sgr_pixels_active, Some(true));
+    server.app.state.workspaces[0].tabs[0].zoomed = true;
+    server.stream_host_mouse_capture_mode();
+    assert_eq!(server.clients[&1].host_sgr_pixels_active, Some(false));
+    shutdown_test_runtimes(&mut server);
+}
+
+// Pixel mouse is a Unix client capability.
+#[cfg(unix)]
+#[tokio::test]
+async fn client_shell_requests_host_pixels_for_an_unfocused_pixel_pane() {
+    // #4750: host reports go to the pane under the pointer, focused or not.
+    let mut server = test_headless_server();
+    let mut workspace = crate::workspace::Workspace::test_new("pixel-split");
+    let first = workspace.tabs[0].root_pane;
+    let second = workspace.test_split(ratatui::layout::Direction::Horizontal);
+    let focused = workspace.focused_pane_id().expect("focused pane");
+    let unfocused = if focused == first { second } else { first };
+    workspace.insert_test_runtime(
+        focused,
+        crate::terminal::TerminalRuntime::test_with_screen_bytes(40, 23, b"plain"),
+    );
+    workspace.insert_test_runtime(
+        unfocused,
+        crate::terminal::TerminalRuntime::test_with_screen_bytes(
+            40,
+            23,
+            b"\x1b[?1003h\x1b[?1006h\x1b[?1016h",
+        ),
+    );
+    server.app.state.workspaces = vec![workspace];
+    server.app.state.active = Some(0);
+    server.app.state.selected = 0;
+    server.app.state.mode = crate::app::Mode::Terminal;
+    let (writer, control_rx, _render_rx) = test_client_writer();
+    assert!(
+        server.handle_server_event(ServerEvent::ClientShellConnected {
+            structure_enabled: false,
+            host_documents_enabled: false,
+            host_views_enabled: false,
+            pane_viewport_enabled: false,
+            pane_panels_enabled: false,
+            pane_view_enabled: false,
+            terminal_views_enabled: false,
+            client_id: 7,
+            surface_cols: 80,
+            surface_rows: 23,
+            cell_width_px: 10,
+            cell_height_px: 20,
+            pixel_mouse: true,
+            direct_graphics: false,
+            endpoint_keybindings: false,
+            mouse_capture: true,
+            surface_active: true,
+            writer,
+        })
+    );
+
+    // Control messages arrive asynchronously; wait for the mode instead of
+    // reading the channel once.
+    let mut mouse_modes = Vec::new();
+    for _ in 0..20 {
+        server.stream_host_mouse_capture_mode();
+        while let Ok(bytes) = control_rx.recv_timeout(Duration::from_millis(50)) {
+            if let ServerMessage::MouseCapture {
+                enabled,
+                sgr_pixels,
+            } = read_server_message(bytes)
+            {
+                mouse_modes.push((enabled, sgr_pixels));
+            }
+        }
+        if mouse_modes.last() == Some(&(true, true)) {
+            break;
+        }
+    }
+    assert_eq!(mouse_modes.last(), Some(&(true, true)), "{mouse_modes:?}");
+    shutdown_test_runtimes(&mut server);
+}
+
 #[test]
 fn client_shell_mouse_capture_combines_local_preference_with_endpoint_demand() {
     let mut server = test_headless_server();
@@ -7243,11 +7431,12 @@ fn direct_terminal_streams_child_keyboard_and_mouse_modes() {
             read_server_message(
                 client_control_rx
                     .recv_timeout(Duration::from_millis(100))
-                    .expect("modifyOtherKeys mode-one keyboard message")
+                    .expect("kitty flags change with modifyOtherKeys mode one")
             ),
+            // Like Ghostty, modifyOtherKeys level 1 is not a negotiated mode.
             ServerMessage::DirectTerminalKeyboardProtocol {
                 flags: 3,
-                modify_other_keys_level: 1
+                modify_other_keys_level: 0
             }
         ));
 
@@ -8058,7 +8247,6 @@ fn notification_show_api_forwards_one_semantic_client_notification() {
         },
         respond_to,
         response_write_complete: None,
-        stream_active: None,
     });
 
     assert!(changed);
@@ -8122,7 +8310,6 @@ fn notification_show_api_preserves_colon_in_forwarded_title() {
         },
         respond_to,
         response_write_complete: None,
-        stream_active: None,
     });
 
     assert!(changed);
@@ -8169,7 +8356,6 @@ fn notification_show_api_validates_empty_title_before_disabled_delivery() {
         },
         respond_to,
         response_write_complete: None,
-        stream_active: None,
     });
 
     assert!(changed);
@@ -8201,7 +8387,6 @@ fn notification_show_api_reports_no_foreground_client() {
         },
         respond_to,
         response_write_complete: None,
-        stream_active: None,
     });
 
     assert!(changed);
@@ -8253,7 +8438,6 @@ fn notification_show_api_includes_sound_in_semantic_event() {
             },
             respond_to,
             response_write_complete: None,
-            stream_active: None,
         })
     );
 
@@ -8432,7 +8616,6 @@ fn stale_api_agent_report_does_not_forward_done_sound() {
         },
         respond_to,
         response_write_complete: None,
-        stream_active: None,
     });
 
     assert!(changed);
