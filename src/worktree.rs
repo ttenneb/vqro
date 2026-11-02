@@ -557,7 +557,8 @@ fn worktree_list_contains_path(
     repo_root: &Path,
     path: &Path,
     trust_repository: bool,
-) -> Result<bool, String> {    let expected = canonical_or_original(path);
+) -> Result<bool, String> {
+    let expected = canonical_or_original(path);
     Ok(list_existing_worktrees(repo_root, trust_repository)?
         .into_iter()
         .any(|entry| canonical_or_original(&entry.path) == expected))

@@ -1188,21 +1188,66 @@ fn windows_hooks_decode_stdin_as_utf8() {
     // Korean Windows (CP949) and makes the hook silently drop the session.
     // Every bundled PowerShell hook must read the raw stdin stream as UTF-8.
     for (name, asset) in [
-        ("assets/antigravity_cli/herdr-agent-state.ps1", include_str!("assets/antigravity_cli/herdr-agent-state.ps1")),
-        ("assets/claude/herdr-agent-state.ps1", include_str!("assets/claude/herdr-agent-state.ps1")),
-        ("assets/claude/vqro-agent-state.ps1", include_str!("assets/claude/vqro-agent-state.ps1")),
-        ("assets/codex/herdr-agent-state.ps1", include_str!("assets/codex/herdr-agent-state.ps1")),
-        ("assets/codex/vqro-agent-state.ps1", include_str!("assets/codex/vqro-agent-state.ps1")),
-        ("assets/copilot/herdr-agent-state.ps1", include_str!("assets/copilot/herdr-agent-state.ps1")),
-        ("assets/cursor/herdr-agent-state.ps1", include_str!("assets/cursor/herdr-agent-state.ps1")),
-        ("assets/devin/herdr-agent-state.ps1", include_str!("assets/devin/herdr-agent-state.ps1")),
-        ("assets/droid/herdr-agent-state.ps1", include_str!("assets/droid/herdr-agent-state.ps1")),
-        ("assets/grok/herdr-agent-state.ps1", include_str!("assets/grok/herdr-agent-state.ps1")),
-        ("assets/kimi/herdr-agent-state.ps1", include_str!("assets/kimi/herdr-agent-state.ps1")),
-        ("assets/letta/herdr-agent-session.ps1", include_str!("assets/letta/herdr-agent-session.ps1")),
-        ("assets/mastracode/herdr-agent-state.ps1", include_str!("assets/mastracode/herdr-agent-state.ps1")),
-        ("assets/qodercli/herdr-agent-state.ps1", include_str!("assets/qodercli/herdr-agent-state.ps1")),
-        ("assets/qwen/herdr-agent-session.ps1", include_str!("assets/qwen/herdr-agent-session.ps1")),
+        (
+            "assets/antigravity_cli/herdr-agent-state.ps1",
+            include_str!("assets/antigravity_cli/herdr-agent-state.ps1"),
+        ),
+        (
+            "assets/claude/herdr-agent-state.ps1",
+            include_str!("assets/claude/herdr-agent-state.ps1"),
+        ),
+        (
+            "assets/claude/vqro-agent-state.ps1",
+            include_str!("assets/claude/vqro-agent-state.ps1"),
+        ),
+        (
+            "assets/codex/herdr-agent-state.ps1",
+            include_str!("assets/codex/herdr-agent-state.ps1"),
+        ),
+        (
+            "assets/codex/vqro-agent-state.ps1",
+            include_str!("assets/codex/vqro-agent-state.ps1"),
+        ),
+        (
+            "assets/copilot/herdr-agent-state.ps1",
+            include_str!("assets/copilot/herdr-agent-state.ps1"),
+        ),
+        (
+            "assets/cursor/herdr-agent-state.ps1",
+            include_str!("assets/cursor/herdr-agent-state.ps1"),
+        ),
+        (
+            "assets/devin/herdr-agent-state.ps1",
+            include_str!("assets/devin/herdr-agent-state.ps1"),
+        ),
+        (
+            "assets/droid/herdr-agent-state.ps1",
+            include_str!("assets/droid/herdr-agent-state.ps1"),
+        ),
+        (
+            "assets/grok/herdr-agent-state.ps1",
+            include_str!("assets/grok/herdr-agent-state.ps1"),
+        ),
+        (
+            "assets/kimi/herdr-agent-state.ps1",
+            include_str!("assets/kimi/herdr-agent-state.ps1"),
+        ),
+        (
+            "assets/letta/herdr-agent-session.ps1",
+            include_str!("assets/letta/herdr-agent-session.ps1"),
+        ),
+        (
+            "assets/mastracode/herdr-agent-state.ps1",
+            include_str!("assets/mastracode/herdr-agent-state.ps1"),
+        ),
+        (
+            "assets/qodercli/herdr-agent-state.ps1",
+            include_str!("assets/qodercli/herdr-agent-state.ps1"),
+        ),
+        (
+            "assets/qwen/herdr-agent-session.ps1",
+            include_str!("assets/qwen/herdr-agent-session.ps1"),
+        ),
     ] {
         assert!(
             asset.contains("OpenStandardInput()"),

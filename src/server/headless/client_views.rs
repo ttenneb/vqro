@@ -1085,7 +1085,8 @@ impl HeadlessServer {
         let explicit_focus_succeeded = successful_agent_focus_target
             .or(explicit_public_focus_target)
             .is_some_and(|target| self.default_shell_target() == Some(target));
-        let public_focus_succeeded = explicit_focus_succeeded || (create_focus_requested && target_changed);
+        let public_focus_succeeded =
+            explicit_focus_succeeded || (create_focus_requested && target_changed);
         if public_focus_succeeded {
             self.focus_all_shell_clients_on_default_target();
         }

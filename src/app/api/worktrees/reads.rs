@@ -13,9 +13,7 @@ use crate::events::{AppEvent, WorktreeReadData, WorktreeReadResult};
 use crate::workspace::{GitSpaceMetadata, WorktreeSpaceMembership};
 
 use super::super::responses::encode_error;
-use super::{
-    absolute_user_path, find_worktree_entry, ApiFailure, WorktreeSource,
-};
+use super::{absolute_user_path, find_worktree_entry, ApiFailure, WorktreeSource};
 
 // Capture only source provenance. Filesystem discovery and Git run on the worker;
 // workspace indices and the target's open state are resolved again on completion.

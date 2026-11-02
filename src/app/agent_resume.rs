@@ -84,7 +84,6 @@ impl App {
             }
         }
 
-        eprintln!("DBG loop-end changed={changed} runtimes={}", self.terminal_runtimes.len());
         if changed {
             self.schedule_session_save();
         }
@@ -625,9 +624,10 @@ mod tests {
         assert!(app.terminal_runtimes.get(&active_terminal).is_some());
         assert!(app.terminal_runtimes.get(&hidden_terminal).is_none());
         assert!(!app.start_pending_agent_resumes(Instant::now(), true));
-        assert!(
-            app.start_pending_agent_resumes(Instant::now() + std::time::Duration::from_millis(100), false,)
-        );
+        assert!(app.start_pending_agent_resumes(
+            Instant::now() + std::time::Duration::from_millis(100),
+            false,
+        ));
         assert!(app.terminal_runtimes.get(&hidden_terminal).is_some());
         assert!(
             app.pending_agent_resume_deadline.is_none(),

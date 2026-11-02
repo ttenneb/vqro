@@ -216,10 +216,15 @@ mod accept_loop_tests {
         let (tx, rx) = std::sync::mpsc::channel();
 
         crate::thread_spawn::test_hook::fail_next_spawns(1);
-        run_accept_loop([Ok(1), Ok(2)], &running, |_, _| true, |stream| {
-            let tx = tx.clone();
-            spawn_connection_handler(move || tx.send(stream).unwrap());
-        });
+        run_accept_loop(
+            [Ok(1), Ok(2)],
+            &running,
+            |_, _| true,
+            |stream| {
+                let tx = tx.clone();
+                spawn_connection_handler(move || tx.send(stream).unwrap());
+            },
+        );
         drop(tx);
 
         assert_eq!(rx.iter().collect::<Vec<_>>(), vec![2]);

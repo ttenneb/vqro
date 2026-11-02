@@ -1,7 +1,8 @@
 use std::path::{Path, PathBuf};
 
 use crate::api::schema::{
-    EventData, EventEnvelope, EventKind, ResponseResult, WorktreeInfo, WorktreeOpenParams, WorktreeSourceInfo,
+    EventData, EventEnvelope, EventKind, ResponseResult, WorktreeInfo, WorktreeOpenParams,
+    WorktreeSourceInfo,
 };
 use crate::app::App;
 
@@ -24,7 +25,8 @@ impl ApiFailure {
     }
 }
 
-fn absolute_user_path(path: &str) -> Result<PathBuf, ApiFailure> {    let path = crate::worktree::expand_tilde_path(path);
+fn absolute_user_path(path: &str) -> Result<PathBuf, ApiFailure> {
+    let path = crate::worktree::expand_tilde_path(path);
     if path.is_absolute() {
         Ok(path)
     } else {
@@ -526,7 +528,8 @@ fn worktree_source_from_space(
     workspace_idx: Option<usize>,
     allow_linked: bool,
     trust_repository: bool,
-) -> WorktreeSource {    let source_checkout_path = if allow_linked {
+) -> WorktreeSource {
+    let source_checkout_path = if allow_linked {
         parent_checkout_path_for_space(&space, trust_repository)
     } else {
         space.repo_root.clone()
@@ -1243,15 +1246,18 @@ mod tests {
         let repo = create_committed_repo("api-worktree-open-invalid-cwd-repo");
         let mut app = test_app();
 
-        let response = run_deferred_api_request(&mut app, Request {
-            id: "req".into(),
-            method: crate::api::schema::Method::WorktreeOpen(WorktreeOpenParams {
-                cwd: Some(repo.display().to_string()),
-                path: Some("/tmp/one".into()),
-                branch: Some("worktree/one".into()),
-                ..WorktreeOpenParams::default()
-            }),
-        });
+        let response = run_deferred_api_request(
+            &mut app,
+            Request {
+                id: "req".into(),
+                method: crate::api::schema::Method::WorktreeOpen(WorktreeOpenParams {
+                    cwd: Some(repo.display().to_string()),
+                    path: Some("/tmp/one".into()),
+                    branch: Some("worktree/one".into()),
+                    ..WorktreeOpenParams::default()
+                }),
+            },
+        );
 
         let error: ErrorResponse = serde_json::from_str(&response).unwrap();
         assert_eq!(error.error.code, "invalid_request");
@@ -1335,15 +1341,18 @@ mod tests {
         app.state.ensure_test_terminals();
 
         let workspace_id = app.state.workspaces[0].id.clone();
-        let response = run_deferred_api_request(&mut app, Request {
-            id: "req".into(),
-            method: crate::api::schema::Method::WorktreeOpen(WorktreeOpenParams {
-                workspace_id: Some(workspace_id),
-                branch: Some("worktree/api-open".into()),
-                focus: true,
-                ..WorktreeOpenParams::default()
-            }),
-        });
+        let response = run_deferred_api_request(
+            &mut app,
+            Request {
+                id: "req".into(),
+                method: crate::api::schema::Method::WorktreeOpen(WorktreeOpenParams {
+                    workspace_id: Some(workspace_id),
+                    branch: Some("worktree/api-open".into()),
+                    focus: true,
+                    ..WorktreeOpenParams::default()
+                }),
+            },
+        );
 
         let success: SuccessResponse = serde_json::from_str(&response).unwrap();
         let ResponseResult::WorktreeOpened {
@@ -1414,15 +1423,18 @@ mod tests {
         app.state.selected = 0;
 
         let workspace_id = app.state.workspaces[0].id.clone();
-        let response = run_deferred_api_request(&mut app, Request {
-            id: "req".into(),
-            method: crate::api::schema::Method::WorktreeOpen(WorktreeOpenParams {
-                workspace_id: Some(workspace_id),
-                branch: Some("worktree/api-open-label".into()),
-                label: Some("review".into()),
-                ..WorktreeOpenParams::default()
-            }),
-        });
+        let response = run_deferred_api_request(
+            &mut app,
+            Request {
+                id: "req".into(),
+                method: crate::api::schema::Method::WorktreeOpen(WorktreeOpenParams {
+                    workspace_id: Some(workspace_id),
+                    branch: Some("worktree/api-open-label".into()),
+                    label: Some("review".into()),
+                    ..WorktreeOpenParams::default()
+                }),
+            },
+        );
 
         let success: SuccessResponse = serde_json::from_str(&response).unwrap();
         let ResponseResult::WorktreeOpened {
@@ -1469,15 +1481,18 @@ mod tests {
         let mut app = test_app_with_event_hub(event_hub.clone());
         app.state.default_shell = test_shell().into();
 
-        let response = run_deferred_api_request(&mut app, Request {
-            id: "req".into(),
-            method: crate::api::schema::Method::WorktreeOpen(WorktreeOpenParams {
-                cwd: Some(repo.display().to_string()),
-                path: Some(repo.display().to_string()),
-                label: Some("source checkout".into()),
-                ..WorktreeOpenParams::default()
-            }),
-        });
+        let response = run_deferred_api_request(
+            &mut app,
+            Request {
+                id: "req".into(),
+                method: crate::api::schema::Method::WorktreeOpen(WorktreeOpenParams {
+                    cwd: Some(repo.display().to_string()),
+                    path: Some(repo.display().to_string()),
+                    label: Some("source checkout".into()),
+                    ..WorktreeOpenParams::default()
+                }),
+            },
+        );
 
         let success: SuccessResponse = serde_json::from_str(&response).unwrap_or_else(|err| {
             panic!("expected success response, got {response}: {err}");
@@ -1538,14 +1553,19 @@ mod tests {
         app.state.ensure_test_terminals();
 
         let workspace_id = app.state.workspaces[0].id.clone();
-        let response = run_deferred_api_request(&mut app, Request {
-            id: "req".into(),
-            method: crate::api::schema::Method::WorktreeList(crate::api::schema::WorktreeListParams {
-                workspace_id: Some(workspace_id),
-                cwd: None,
-                trust_repository: false,
-            }),
-        });
+        let response = run_deferred_api_request(
+            &mut app,
+            Request {
+                id: "req".into(),
+                method: crate::api::schema::Method::WorktreeList(
+                    crate::api::schema::WorktreeListParams {
+                        workspace_id: Some(workspace_id),
+                        cwd: None,
+                        trust_repository: false,
+                    },
+                ),
+            },
+        );
 
         let success: SuccessResponse = serde_json::from_str(&response).unwrap();
         let ResponseResult::WorktreeList { worktrees, .. } = success.result else {
@@ -1602,10 +1622,13 @@ mod tests {
                 trust_repository: false,
             }),
         ] {
-            let response = run_deferred_api_request(&mut app, Request {
-                id: "req".into(),
-                method,
-            });
+            let response = run_deferred_api_request(
+                &mut app,
+                Request {
+                    id: "req".into(),
+                    method,
+                },
+            );
             let success: SuccessResponse = serde_json::from_str(&response).unwrap();
             let ResponseResult::WorktreeList { source, worktrees } = success.result else {
                 panic!("expected worktree_list response");
@@ -1649,14 +1672,19 @@ mod tests {
         let mut app = app_with_parent(&repo);
 
         let workspace_id = app.state.workspaces[0].id.clone();
-        let response = run_deferred_api_request(&mut app, Request {
-            id: "req".into(),
-            method: crate::api::schema::Method::WorktreeList(crate::api::schema::WorktreeListParams {
-                workspace_id: Some(workspace_id),
-                cwd: None,
-                trust_repository: false,
-            }),
-        });
+        let response = run_deferred_api_request(
+            &mut app,
+            Request {
+                id: "req".into(),
+                method: crate::api::schema::Method::WorktreeList(
+                    crate::api::schema::WorktreeListParams {
+                        workspace_id: Some(workspace_id),
+                        cwd: None,
+                        trust_repository: false,
+                    },
+                ),
+            },
+        );
 
         let success: SuccessResponse = serde_json::from_str(&response).unwrap();
         let ResponseResult::WorktreeList { worktrees, .. } = success.result else {

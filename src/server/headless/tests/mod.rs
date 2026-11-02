@@ -6094,7 +6094,9 @@ async fn worktree_discovery_does_not_block_client_typing() {
         server.handle_server_event(ServerEvent::ClientShellPaneInput {
             client_id: 11,
             pane_id: public_pane_id.clone(),
-            events: vec![crate::protocol::ClientPaneInputEvent::TextCommit("x".into())],
+            events: vec![crate::protocol::ClientPaneInputEvent::TextCommit(
+                "x".into(),
+            )],
         });
         assert_eq!(
             input_rx
