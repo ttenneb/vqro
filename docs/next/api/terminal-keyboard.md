@@ -35,6 +35,22 @@ never pane input. The frozen `ClientInputEvent` codec is unchanged; this port do
 not add a Windows host-theme observation variant to it. Host protocol negotiation
 is restored after focus/reconnect/resize without replacing endpoint ownership.
 
+## Windows PTY forwarding
+
+The Windows PTY actor schedules input forwarding on the existing Tokio executor,
+not a dedicated blocking forwarding thread per pane. Blocking PTY reader, writer
+and control work stays on its existing threads. Queue admission still returns
+success, full or closed without waiting for PTY writes; accepted input remains
+FIFO, and a command's text/Enter transaction cannot be overtaken by later user
+input. Admission is not a receipt that the child executed the command.
+
+Submission parts acknowledge only after the writer flushes. Delays and writer
+acknowledgements yield the executor. Once text is committed, abandoning the
+caller's acknowledgement does not drop its Enter. Synchronous shutdown waits
+only for an Enter already queued to the writer, using a completion that the
+writer releases directly even if the async executor cannot run. Closing during
+the submission delay still cancels an Enter not yet queued.
+
 ## Injected commands on macOS
 
 `pane.send_input` and `agent.start` validate the complete encoded submission
