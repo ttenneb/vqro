@@ -450,7 +450,7 @@ impl TileLayout {
 
     pub fn splits(&self, area: Rect) -> Vec<SplitBorder> {
         let mut result = Vec::new();
-        typed_collect_splits(&self.root, area, vec![], &mut result);
+        typed_collect_splits(&self.root, area, &mut Vec::new(), &mut result);
         result
     }
 
@@ -489,15 +489,16 @@ impl TileLayout {
             PanePlacement::Stack(collection_id) => LayoutLeaf::Stack(collection_id),
         };
         let new_id = PaneId::alloc();
-        let old = std::mem::replace(&mut self.root, TypedNode::Leaf(PaneId::from_raw(0)));
-        self.root = typed_split_at(
-            old,
+        // Split the target leaf in place: rebuilding from the root recreated
+        // every node on the path and on every split of a deep layout.
+        typed_split_leaf_in_place(
+            &mut self.root,
             target_leaf,
             direction,
             LayoutLeaf::Pane(new_id),
             valid_split_ratio(ratio),
-        );
-        Some(new_id)
+        )
+        .then_some(new_id)
     }
 
     pub fn insert_pane_near(
@@ -514,14 +515,15 @@ impl TileLayout {
         {
             return false;
         }
-        let old = std::mem::replace(&mut self.root, TypedNode::Leaf(PaneId::from_raw(0)));
-        self.root = typed_split_at(
-            old,
+        if !typed_split_leaf_in_place(
+            &mut self.root,
             LayoutLeaf::Pane(target),
             direction,
             LayoutLeaf::Pane(moved),
             valid_split_ratio(ratio),
-        );
+        ) {
+            return false;
+        }
         if focus {
             self.focus_pane(moved);
         }
@@ -542,15 +544,13 @@ impl TileLayout {
         if self.root.stack(collection_id).is_some() || !self.can_insert_collection_near(target) {
             return false;
         }
-        let old = std::mem::replace(&mut self.root, TypedNode::Leaf(PaneId::from_raw(0)));
-        self.root = typed_split_at(
-            old,
+        typed_split_leaf_in_place(
+            &mut self.root,
             target,
             direction,
             LayoutLeaf::Stack(collection_id),
             valid_split_ratio(ratio),
-        );
-        true
+        )
     }
 
     pub fn focus_leaf(&mut self, leaf: LayoutLeaf) -> bool {
@@ -953,7 +953,7 @@ fn typed_collect_panes(
 fn typed_collect_splits(
     node: &TypedNode,
     area: Rect,
-    path: Vec<bool>,
+    path: &mut Vec<bool>,
     result: &mut Vec<SplitBorder>,
 ) {
     if let TypedNode::Split {
@@ -975,23 +975,25 @@ fn typed_collect_splits(
             area,
             path: path.clone(),
         });
-        let mut first_path = path.clone();
-        first_path.push(false);
-        typed_collect_splits(first, first_area, first_path, result);
-        let mut second_path = path;
-        second_path.push(true);
-        typed_collect_splits(second, second_area, second_path, result);
+        path.push(false);
+        typed_collect_splits(first, first_area, path, result);
+        path.pop();
+        path.push(true);
+        typed_collect_splits(second, second_area, path, result);
+        path.pop();
     }
 }
 
-fn typed_split_at(
-    node: TypedNode,
+/// Replaces the target leaf with a two-child split, leaving every other node in
+/// place. Returns whether the target was found.
+fn typed_split_leaf_in_place(
+    node: &mut TypedNode,
     target: LayoutLeaf,
     direction: Direction,
     new_leaf: LayoutLeaf,
     ratio: f32,
-) -> TypedNode {
-    let identity = match &node {
+) -> bool {
+    let identity = match &*node {
         TypedNode::Leaf(pane) => Some(LayoutLeaf::Pane(*pane)),
         TypedNode::Stack { id, .. } => Some(LayoutLeaf::Stack(*id)),
         TypedNode::Split { .. } => None,
@@ -1005,26 +1007,21 @@ fn typed_split_at(
                 children: Vec::new(),
             },
         };
-        return TypedNode::Split {
+        let existing = std::mem::replace(node, TypedNode::Leaf(PaneId::from_raw(0)));
+        *node = TypedNode::Split {
             direction,
             ratio,
-            first: Box::new(node),
+            first: Box::new(existing),
             second: Box::new(added),
         };
+        return true;
     }
     match node {
-        TypedNode::Leaf(_) | TypedNode::Stack { .. } => node,
-        TypedNode::Split {
-            direction: existing_direction,
-            ratio: existing_ratio,
-            first,
-            second,
-        } => TypedNode::Split {
-            direction: existing_direction,
-            ratio: existing_ratio,
-            first: Box::new(typed_split_at(*first, target, direction, new_leaf, ratio)),
-            second: Box::new(typed_split_at(*second, target, direction, new_leaf, ratio)),
-        },
+        TypedNode::Split { first, second, .. } => {
+            typed_split_leaf_in_place(first, target, direction, new_leaf, ratio)
+                || typed_split_leaf_in_place(second, target, direction, new_leaf, ratio)
+        }
+        TypedNode::Leaf(_) | TypedNode::Stack { .. } => false,
     }
 }
 
@@ -1425,6 +1422,36 @@ mod tests {
         assert!(placed
             .iter()
             .all(|id| layout.placement(*id) == Some(PanePlacement::Tiled)));
+    }
+
+    #[test]
+    fn split_borders_keep_distinct_paths_and_in_place_splits_are_local() {
+        let (mut layout, root) = TileLayout::new();
+        layout.split_pane(root, Direction::Horizontal, 0.5).unwrap();
+        layout.split_pane(root, Direction::Vertical, 0.5).unwrap();
+        let area = Rect::new(0, 0, 80, 24);
+        let splits = layout.splits(area);
+        assert_eq!(splits.len(), 2);
+        // One shared path buffer must still yield one distinct path per border.
+        let paths = splits
+            .iter()
+            .map(|split| split.path.clone())
+            .collect::<Vec<_>>();
+        assert!(paths.contains(&vec![]), "{paths:?}");
+        assert!(paths.contains(&vec![false]), "{paths:?}");
+        // Splitting a leaf in place leaves the unrelated branch geometry alone.
+        let sibling = layout
+            .pane_ids()
+            .into_iter()
+            .find(|pane_id| *pane_id != root)
+            .expect("sibling pane");
+        let sibling_before = pane_rect(&layout, sibling);
+        let added = layout
+            .split_pane(root, Direction::Horizontal, 0.5)
+            .expect("root is still splittable");
+        assert_eq!(pane_rect(&layout, sibling), sibling_before);
+        assert_eq!(layout.splits(area).len(), 3);
+        assert!(layout.pane_ids().contains(&added));
     }
 
     #[test]

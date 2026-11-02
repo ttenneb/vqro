@@ -20,11 +20,31 @@ impl App {
     /// Build the source used by the frozen endpoint snapshot v1 projection.
     /// Collection and delegation data are available through the API snapshot,
     /// but must not be folded into the immutable v1 endpoint codec.
+    // Full-projection reference: the client-shell projection tests compare the
+    // metadata snapshot against it, so it is test-only production visibility.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn session_snapshot_v1_compat(&self) -> SessionSnapshot {
         self.session_snapshot_with_structure(false)
     }
 
+    /// Build the same projection without live per-pane scroll reads.
+    ///
+    /// Client snapshots and agent projections never present scroll position, and
+    /// a scroll read takes the terminal core lock for every pane on every frame.
+    /// The frozen endpoint v1 source, also without live per-pane scroll reads.
+    pub(crate) fn session_snapshot_v1_compat_metadata(&self) -> SessionSnapshot {
+        self.session_snapshot_with_projection(false, Self::pane_metadata)
+    }
+
     fn session_snapshot_with_structure(&self, include_structure: bool) -> SessionSnapshot {
+        self.session_snapshot_with_projection(include_structure, Self::pane_info)
+    }
+
+    fn session_snapshot_with_projection(
+        &self,
+        include_structure: bool,
+        pane_info: fn(&Self, usize, crate::layout::PaneId) -> Option<crate::api::schema::PaneInfo>,
+    ) -> SessionSnapshot {
         let focused_workspace_id = self
             .state
             .active
@@ -41,6 +61,7 @@ impl App {
         let mut workspaces = Vec::new();
         let mut tabs = Vec::new();
         let mut layouts = Vec::new();
+        let mut panes = Vec::new();
         for (ws_idx, ws) in self.state.workspaces.iter().enumerate() {
             workspaces.push(self.workspace_info(ws_idx));
             for tab_idx in 0..ws.tabs.len() {
@@ -50,6 +71,13 @@ impl App {
                 if let Some(layout) = self.pane_layout_snapshot(ws_idx, tab_idx) {
                     layouts.push(layout);
                 }
+                panes.extend(
+                    ws.tabs[tab_idx]
+                        .layout
+                        .pane_ids()
+                        .into_iter()
+                        .filter_map(|pane_id| pane_info(self, ws_idx, pane_id)),
+                );
             }
         }
 
@@ -100,7 +128,7 @@ impl App {
             space_order,
             workspaces,
             tabs,
-            panes: self.collect_panes_for_workspace(None).unwrap_or_default(),
+            panes,
             layouts,
             // Runtime facts must remain available to any admitted document provider/client;
             // disabling a presentation extension revokes its document, not these identities.

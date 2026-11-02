@@ -84,6 +84,107 @@ fn assert_disabled_recovery_row_click_is_inert(
 }
 
 #[test]
+fn navigator_rows_keep_snapshot_order_across_many_workspaces_tabs_and_panes() {
+    // Endpoint-local indexes must not reorder anything: workspaces, tabs and
+    // panes keep snapshot order, and each tab still reports its own pane count.
+    let mut projected = snapshot();
+    projected.workspaces.clear();
+    projected.tabs.clear();
+    projected.panes.clear();
+    projected.agents.clear();
+    for workspace_index in 1..=3 {
+        let workspace_id = format!("ws_{workspace_index}");
+        projected.workspaces.push(ClientShellWorkspace {
+            workspace_id: workspace_id.clone(),
+            active_tab_id: format!("tab_{workspace_index}_1"),
+            new_workspace_cwd: "/repo".into(),
+            number: workspace_index,
+            label: format!("workspace {workspace_index}"),
+            custom_label: false,
+            branch: None,
+            git_ahead_behind: None,
+            tokens: Vec::new(),
+            worktree: None,
+            focused: workspace_index == 1,
+            agent_status: AgentStatus::Idle,
+        });
+        for tab_index in 1..=2 {
+            let tab_id = format!("tab_{workspace_index}_{tab_index}");
+            projected.tabs.push(ClientShellTab {
+                tab_id: tab_id.clone(),
+                workspace_id: workspace_id.clone(),
+                number: tab_index,
+                label: format!("tab {tab_index}"),
+                custom_label: false,
+                zoomed: false,
+                focused: false,
+                agent_status: AgentStatus::Idle,
+            });
+            for pane_index in 1..=3 {
+                projected.panes.push(ClientShellPane {
+                    pane_id: format!("pane_{workspace_index}_{tab_index}_{pane_index}"),
+                    workspace_id: workspace_id.clone(),
+                    tab_id: tab_id.clone(),
+                    label: None,
+                    cwd: Some("/repo".into()),
+                    foreground_cwd: None,
+                    focused: false,
+                    right_click_passthrough: false,
+                });
+            }
+        }
+    }
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    state.set_snapshot(Box::new(projected));
+    state.open_navigator_overlay();
+    let ClientShellOverlay::Navigator(navigator) = state.overlay.as_ref().expect("navigator")
+    else {
+        panic!("expected navigator");
+    };
+    let rows =
+        render::client_navigator_rows(&state.endpoints, &state.active_endpoint_id, navigator);
+    let labels = rows
+        .iter()
+        .map(|row| row.label.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        labels,
+        vec![
+            "workspace 1",
+            "tab 1",
+            "pane 1",
+            "pane 2",
+            "pane 3",
+            "tab 2",
+            "pane 1",
+            "pane 2",
+            "pane 3",
+            "workspace 2",
+            "tab 1",
+            "pane 1",
+            "pane 2",
+            "pane 3",
+            "tab 2",
+            "pane 1",
+            "pane 2",
+            "pane 3",
+            "workspace 3",
+            "tab 1",
+            "pane 1",
+            "pane 2",
+            "pane 3",
+            "tab 2",
+            "pane 1",
+            "pane 2",
+            "pane 3",
+        ]
+    );
+    for row in rows.iter().filter(|row| row.label.starts_with("tab ")) {
+        assert_eq!(row.meta, "3 panes", "each tab counts only its own panes");
+    }
+}
+
+#[test]
 fn existing_feature_rich_navigator_rows_remain_unchanged() {
     let mut projected = snapshot();
     projected.agents.push(ClientShellAgent {

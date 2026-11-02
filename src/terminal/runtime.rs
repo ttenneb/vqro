@@ -614,6 +614,11 @@ impl TerminalRuntime {
 
 #[cfg(test)]
 impl TerminalRuntime {
+    #[cfg(test)]
+    pub(crate) fn test_scroll_metrics_reads(&self) -> usize {
+        self.0.test_scroll_metrics_reads()
+    }
+
     #[cfg(unix)]
     pub(crate) fn test_enable_kitty_source_forwarding(&self) {
         self.0.test_enable_kitty_source_forwarding();

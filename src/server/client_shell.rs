@@ -205,7 +205,7 @@ pub(super) fn snapshot(
     config_diagnostic: Option<&str>,
     location: Option<&crate::server::clients::ClientShellLocation>,
 ) -> protocol::ClientShellSnapshot {
-    let snapshot = app.session_snapshot_v1_compat();
+    let snapshot = app.session_snapshot_v1_compat_metadata();
     let focused_workspace_id = location
         .and_then(|location| location.focused_workspace_id.clone())
         .or_else(|| snapshot.focused_workspace_id.clone());
@@ -780,6 +780,74 @@ fn split_hit_rect(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn snapshot_metadata_skips_scroll_reads_and_preserves_public_session_data() {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = crate::app::App::new(
+            &crate::config::Config::default(),
+            crate::app::AppPolicy::TEST,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        let mut workspace = crate::workspace::Workspace::test_new("active");
+        workspace.test_add_tab(None);
+        app.state.workspaces = vec![workspace, crate::workspace::Workspace::test_new("hidden")];
+        app.state.active = Some(0);
+        app.state.ensure_test_terminals();
+        for terminal in app.state.terminals.values_mut() {
+            terminal.set_detected_state(
+                Some(crate::detect::Agent::Pi),
+                crate::detect::AgentState::Working,
+            );
+        }
+        // Reading live scroll state takes each terminal's core lock; a metadata
+        // projection must not do it, while still reporting the same identities.
+        let scroll_reads = |app: &crate::app::App| {
+            (0..app.state.workspaces.len())
+                .flat_map(|ws_idx| {
+                    app.state.workspaces[ws_idx]
+                        .tabs
+                        .iter()
+                        .flat_map(|tab| tab.layout.pane_ids())
+                        .map(move |pane_id| (ws_idx, pane_id))
+                })
+                .filter_map(|(ws_idx, pane_id)| {
+                    app.state
+                        .runtime_for_pane_in_workspace(&app.terminal_runtimes, ws_idx, pane_id)
+                        .map(|runtime| runtime.test_scroll_metrics_reads())
+                })
+                .sum::<usize>()
+        };
+        let before = scroll_reads(&app);
+        let metadata = app.session_snapshot_v1_compat_metadata();
+        let after = scroll_reads(&app);
+        assert_eq!(
+            before, after,
+            "metadata snapshot must not read scroll state"
+        );
+        assert!(metadata.panes.iter().all(|pane| pane.scroll.is_none()));
+
+        let full = app.session_snapshot_v1_compat();
+        assert_eq!(full.panes.len(), metadata.panes.len());
+        for (full, metadata) in full.panes.iter().zip(metadata.panes.iter()) {
+            assert_eq!(full.pane_id, metadata.pane_id);
+            assert_eq!(full.terminal_id, metadata.terminal_id);
+            assert_eq!(full.workspace_id, metadata.workspace_id);
+            assert_eq!(full.tab_id, metadata.tab_id);
+            assert_eq!(full.focused, metadata.focused);
+            assert_eq!(full.cwd, metadata.cwd);
+            assert_eq!(full.agent, metadata.agent);
+            assert_eq!(full.agent_status, metadata.agent_status);
+            assert_eq!(full.terminal_size, metadata.terminal_size);
+            assert_eq!(full.revision, metadata.revision);
+        }
+        assert_eq!(full.workspaces, metadata.workspaces);
+        assert_eq!(full.tabs, metadata.tabs);
+        assert_eq!(full.layouts, metadata.layouts);
+        assert_eq!(full.agents, metadata.agents);
+    }
 
     #[test]
     fn snapshot_projects_cached_release_and_update_facts() {
