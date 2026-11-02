@@ -1077,7 +1077,7 @@ fn the_cursor_travels_with_the_grid_below_the_panel() {
         .copied()
         .expect("reserved band")
         .height;
-    let cursor = frame.cursor.expect("cursor");
+    let cursor = frame.cursor.as_ref().expect("cursor");
     assert_eq!(
         cursor.y,
         pane.projected_inner_rect.y.saturating_add(band),
@@ -1323,7 +1323,10 @@ fn the_fast_path_and_a_full_compose_agree_for_two_panelled_panes() {
     };
     let frame = state.compose(106, 30).expect("frame");
     let fast = composed.cursor.map(|cursor| (cursor.y, cursor.visible));
-    let full = frame.cursor.map(|cursor| (cursor.y, cursor.visible));
+    let full = frame
+        .cursor
+        .as_ref()
+        .map(|cursor| (cursor.y, cursor.visible));
     assert_eq!(
         fast, full,
         "the returned cursor (row, visible) must equal the full compose's"
@@ -1401,7 +1404,7 @@ fn a_background_patch_keeps_the_composes_cursor_in_the_pane() {
     );
     let frame = state.compose(106, 30).expect("frame");
     let area = state.layout(106, 30).pane_surface;
-    let cursor = frame.cursor.expect("a composed cursor");
+    let cursor = frame.cursor.as_ref().expect("a composed cursor");
     assert_eq!(
         cursor.y,
         area.y + 3 + band,

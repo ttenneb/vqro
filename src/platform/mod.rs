@@ -358,6 +358,21 @@ mod remote_bridge_tests;
 #[cfg(unix)]
 mod unix_common;
 #[cfg(unix)]
+pub(crate) mod unix_image_files;
+
+/// Kernel CoW snapshots are deliberately unsupported outside Linux.
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn clone_native_image_source(
+    _source_fd: i64,
+    _destination: &std::fs::File,
+    _expected_len: usize,
+) -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "native source cloning requires Linux",
+    ))
+}
+#[cfg(unix)]
 pub(crate) use unix_common::resource_symlink;
 #[cfg(unix)]
 pub(crate) use unix_common::{
