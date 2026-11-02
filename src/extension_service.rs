@@ -3397,7 +3397,7 @@ mod tests {
                 },
                 crate::action_invocation::InvocationCaller::HumanUnverified {
                     terminal_id: "term_fixture".into(),
-                    uid: 0,
+                    account: crate::action_invocation::InvocationAccount::Unix { uid: 0 },
                 },
                 tx,
             );

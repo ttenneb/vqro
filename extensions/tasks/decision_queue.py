@@ -1,6 +1,7 @@
 """Tasks-owned structured choices and deterministic record-only deadline policy."""
 import datetime as dt
 import json
+from local_platform import account
 
 FIELDS = {"options", "default", "reversible", "waiting_cost", "auto_at"}
 ACTIVE = {"open", "in_progress", "blocked"}
@@ -44,6 +45,8 @@ class Queue:
         self.db.execute("CREATE INDEX IF NOT EXISTS decision_due ON tasks(decision_due_at) WHERE kind='decision' AND state='open' AND decision_due_at IS NOT NULL")
         self.db.execute("CREATE TABLE IF NOT EXISTS decision_log (seq INTEGER PRIMARY KEY REFERENCES transitions(seq), task_id TEXT NOT NULL REFERENCES tasks(id), kind TEXT NOT NULL, result TEXT NOT NULL)")
         self.db.execute("CREATE TABLE IF NOT EXISTS decision_seen (uid INTEGER PRIMARY KEY, seq INTEGER NOT NULL)")
+        # Separate SID keyspace preserves existing Unix rows and schema-v4 readers.
+        self.db.execute("CREATE TABLE IF NOT EXISTS decision_seen_sid (sid TEXT PRIMARY KEY, seq INTEGER NOT NULL)")
 
     def deadline(self, value, at):
         if value is None:
@@ -211,23 +214,32 @@ class Queue:
         if caller.get("class") != "human_unverified":
             raise ValueError("human-only explicit last-look acknowledgement")
         current = self.db.execute("SELECT COALESCE(MAX(seq),0) FROM transitions").fetchone()[0]
-        previous = self.db.execute("SELECT seq FROM decision_seen WHERE uid=?", (caller["uid"],)).fetchone()
+        identity = account(caller)
+        if identity is None:
+            raise ValueError("human account unavailable")
+        kind, value = identity
+        table = "decision_seen_sid" if kind == "sid" else "decision_seen"
+        previous = self.db.execute(f"SELECT seq FROM {table} WHERE {kind}=?", (value,)).fetchone()
         if type(through) is not int or through < 0 or through > current or (previous and through < previous[0]):
             raise ValueError("last-look sequence cannot be future or regress")
         if previous is None:
-            self.store.quota({"decision_seen": 1})
-        self.db.execute("INSERT INTO decision_seen VALUES (?,?) ON CONFLICT(uid) DO UPDATE SET seq=excluded.seq", (caller["uid"], through))
-        return {"uid": caller["uid"], "seen_seq": through}
+            self.store.quota({table: 1})
+        self.db.execute(f"INSERT INTO {table} VALUES (?,?) ON CONFLICT({kind}) DO UPDATE SET seq=excluded.seq", (value, through))
+        return {kind: value, "seen_seq": through}
 
     def digest(self, caller):
         # One read snapshot; policy writes run outside this handler. Polling never ACKs.
         self.db.execute("BEGIN")
         try:
             sequence = self.db.execute("SELECT COALESCE(MAX(seq),0) FROM transitions").fetchone()[0]
-            uid = caller.get("uid") if caller.get("class") == "human_unverified" else None
-            looked = self.db.execute("SELECT seq FROM decision_seen WHERE uid=?", (uid,)).fetchone() if uid is not None else None
+            identity = account(caller) if caller.get("class") == "human_unverified" else None
+            looked = None
+            if identity is not None:
+                kind, value = identity
+                table = "decision_seen_sid" if kind == "sid" else "decision_seen"
+                looked = self.db.execute(f"SELECT seq FROM {table} WHERE {kind}=?", (value,)).fetchone()
             seen = looked[0] if looked else 0
-            result = {"sequence": sequence, "seen_seq": seen, "last_look_known": uid is not None,
+            result = {"sequence": sequence, "seen_seq": seen, "last_look_known": identity is not None,
                       "needs_you_now": [], "auto_since_look": [], "more": {},
                       "counts": {kind: self.db.execute("SELECT COUNT(DISTINCT task_id) FROM decision_log WHERE kind=?", (kind,)).fetchone()[0] for kind in ("auto", "revert")}}
             rows = self.db.execute("SELECT id FROM tasks WHERE kind='decision' AND state='open' ORDER BY created_at,id LIMIT 17").fetchall()

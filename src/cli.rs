@@ -56,6 +56,11 @@ pub(crate) const AGENT_HELP_FOOTER: &str = concat!(
     "  Keep VQRO_* routing isolated from any installed Herdr session.",
 );
 
+#[cfg(windows)]
+pub(crate) fn is_builtin_command(name: &str) -> bool {
+    spec::command().find_subcommand(name).is_some()
+}
+
 pub(crate) fn parse_token_assignment(raw: &str) -> Result<(String, Option<String>), String> {
     let Some((key, value)) = raw.split_once('=') else {
         return Err("token must use NAME=VALUE".into());

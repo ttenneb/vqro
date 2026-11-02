@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 """Read-only Tasks terminal pane. Host facts via API, task facts via admitted service."""
-import curses
 import datetime as dt
 import json
 import os
@@ -9,6 +8,7 @@ import socket
 import threading
 import time
 import unicodedata
+from local_platform import account, local_account
 
 FINAL = {"accepted", "done"}
 FILTERS = ("waiting on me", "stalled", "blocked", "working", "idle", "done/accepted", "old")
@@ -36,19 +36,25 @@ def api(method, params=None):
     path = os.environ.get("VQRO_SOCKET_PATH")
     if not path:
         raise RuntimeError("host did not supply VQRO_SOCKET_PATH")
-    with socket.socket(socket.AF_UNIX) as stream:
-        stream.settimeout(6)
-        stream.connect(path)
-        stream.sendall((json.dumps({"id": "tasks:view", "method": method, "params": params or {}}) + "\n").encode())
-        data = bytearray()
-        while b"\n" not in data:
-            part = stream.recv(65536)
-            if not part:
-                raise RuntimeError("API closed without reply")
-            data.extend(part)
-            if len(data) > 1024 * 1024:
-                raise RuntimeError("API reply exceeds view bound")
-    value = json.loads(data.partition(b"\n")[0])
+    frame = (json.dumps({"id": "tasks:view", "method": method, "params": params or {}}) + "\n").encode()
+    if os.name == "nt":
+        from windows_api import request
+        reply = request(path, frame)
+    else:
+        with socket.socket(socket.AF_UNIX) as stream:
+            stream.settimeout(6)
+            stream.connect(path)
+            stream.sendall(frame)
+            data = bytearray()
+            while b"\n" not in data:
+                part = stream.recv(65536)
+                if not part:
+                    raise RuntimeError("API closed without reply")
+                data.extend(part)
+                if len(data) > 1024 * 1024:
+                    raise RuntimeError("API reply exceeds view bound")
+        reply = data.partition(b"\n")[0]
+    value = json.loads(reply)
     if "error" in value:
         raise RuntimeError(value["error"].get("message", "API unavailable"))
     return value["result"]
@@ -88,7 +94,10 @@ def debtors(owed):
 
 def human_debtor(binding):
     # Presentation only: this neither authorizes acceptance nor rewrites bindings.
-    return (binding.get("role") == "human_unverified" or binding.get("class") == "human_unverified") and binding.get("uid", os.geteuid()) == os.geteuid()
+    if binding.get("role") != "human_unverified" and binding.get("class") != "human_unverified":
+        return False
+    observed = account(binding)
+    return (observed is None and not ({"uid", "sid"} & binding.keys())) or observed == local_account()
 
 
 def durable_attention(task, placements):
@@ -142,9 +151,9 @@ def label(owner, agents):
             names.append(mark + label(binding, agents))
         return "acceptors: " + (", ".join(names) or "unknown")
     if owner.get("role") == "human_unverified" or owner.get("class") == "human_unverified":
-        # A uid is kept here on purpose: two unverified humans on one machine have
-        # to be told apart, and there is no name to use.
-        return "human (unverified)" if human_debtor(owner) else f"human (unverified, uid {owner.get('uid')})"
+        # Accounts remain distinct; neither UID nor SID proves a human gesture.
+        kind, value = account(owner) or ("account", "unknown")
+        return "human (unverified)" if human_debtor(owner) else f"human (unverified, {kind} {value})"
     agent = (agents or {}).get(owner.get("terminal_id"))
     if exact(owner, agent):
         return clean(agent.get("name") or owner.get("agent") or "agent")
@@ -348,6 +357,7 @@ class Reader(threading.Thread):
 
 
 def run(screen):
+    import curses
     curses.curs_set(0)
     curses.mousemask(curses.BUTTON1_PRESSED | curses.BUTTON4_PRESSED | getattr(curses, "BUTTON5_PRESSED", 0))
     curses.mouseinterval(0)
@@ -504,4 +514,5 @@ def run(screen):
 
 
 if __name__ == "__main__":
+    import curses
     curses.wrapper(run)

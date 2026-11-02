@@ -39,18 +39,21 @@ existing capability grant are required for this invocation path.
 
 ## Caller observations
 
-Linux and macOS local API sockets capture kernel peer UID/PID and process birth **before**
-reading the request, then capture bounded ancestry off the App actor and recheck
-process/parent incarnations. The host combines that capture with its owned
+Linux/macOS local sockets and Windows local named pipes capture kernel peer PID
+and process birth **before** reading the request, then capture bounded same-account
+ancestry off the App actor and recheck process/parent incarnations. Unix account
+evidence is the peer UID; Windows uses the process token user SID. The host combines that capture with its owned
 terminal roots, cached original root birth, current foreground group and known
 agent type. Presentation labels and pane IDs are not caller authority.
 
 - `agent`: `terminal_id`, `agent`, `execution` (`boot-id:pid:birth`), with optional
   `session` metadata. The recognized ancestor must be the current owned-PTY
-  foreground leader and match the host's known agent type. Nested agents and
-  shell wrappers cannot inherit that execution principal.
-- `human_unverified`: `terminal_id`, kernel `uid`. Requires a direct child of a
-  positively known non-agent owned shell, not an arbitrary descendant.
+  foreground leader (Windows: host-selected job) and match the host's known agent
+  type. Nested agents and shell wrappers cannot inherit that execution principal.
+- `human_unverified`: `terminal_id`, kernel `uid` on Unix or token-user `sid` on
+  Windows, never both. Requires a direct child of a positively known non-agent
+  owned shell. Windows permits one exactly proved foreground extension launcher,
+  not an arbitrary descendant; see [Windows provenance](tasks-windows.md).
 - `unknown`: unsupported transport/platform, unmatched or uncertain ancestry,
   missing original root proof, or contradictory execution evidence.
 
@@ -82,6 +85,23 @@ same-euid ancestor needs complete identity and arguments, and PID, euid, birth
 and parent are rechecked. Syscall, short-read, parse or recheck failures and
 cycles fail closed. A pane root outside the retained chain (including beyond
 the 64-entry bound) cannot prove a caller. No authority crosses the euid boundary.
+
+Windows uses server-end `GetNamedPipeClientProcessId`, nonzero creation FILETIME,
+fresh Toolhelp parent observations, TokenUser SID and a validated kernel boot
+GUID. It stops before a positively matched current-server incarnation or foreign
+SID; inaccessible or missing metadata is never a boundary. Every retained entry
+needs bounded complete argv and fresh SID/birth/parent rechecks, with parent-birth
+ordering to reject reused-parent topology. A complete process snapshot is capped
+at 32768 entries; selected-job evidence queries at most 256 relevant processes
+per pass, compares the complete relevant descendant set and parent topology with
+its final fresh snapshot, then rechecks retained metadata. Added/removed/moved
+trees, cap, partial-query or inconsistent evidence yield
+no agent proof. Selection bypasses both foreground caches, covers shell and direct
+known-agent roots, and excludes escaped/out-of-chain jobs. Each request-local
+observation binds root and selected PID/birth; actor lookup still requires the
+original runtime root birth. Explicit API probes compare selected incarnations,
+not only PIDs. No process queries are added to actor classification or rendering.
+This reuses Windows host selected-job semantics, not kernel console-focus proof.
 
 Root birth is cached on fresh terminal creation. The initial single peer-birth
 read occurs on every local API connection, before its method is known; ancestry

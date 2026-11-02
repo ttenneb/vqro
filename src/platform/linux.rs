@@ -50,9 +50,11 @@ pub(crate) fn invocation_peer_for_process(
         invocation_process(pid).map(super::InvocationAncestor::Process)
     })?;
     let peer = crate::action_invocation::InvocationPeer {
-        uid,
+        account: crate::action_invocation::InvocationAccount::Unix { uid },
         boot_id,
         ancestry,
+        foreground_cli: false,
+        foreground: None,
     };
     invocation_peer_is_current(&peer).then_some(peer)
 }

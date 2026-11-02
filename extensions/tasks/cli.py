@@ -28,10 +28,14 @@ def api(method, params=None, request_id="cli:tasks", timeout=6):
     path = os.environ.get("VQRO_SOCKET_PATH")
     if not path:
         raise OSError("VQRO_SOCKET_PATH unavailable; invoke this contribution through vqro")
+    frame = (encoded({"id": request_id, "method": method, "params": params or {}}) + "\n").encode()
+    if os.name == "nt":
+        from windows_api import request
+        return json.loads(request(path, frame, timeout))
     with socket.socket(socket.AF_UNIX) as stream:
         stream.settimeout(timeout)
         stream.connect(path)
-        stream.sendall((encoded({"id": request_id, "method": method, "params": params or {}}) + "\n").encode())
+        stream.sendall(frame)
         data = bytearray()
         while b"\n" not in data:
             part = stream.recv(65536)

@@ -14,6 +14,12 @@ use std::{
 };
 
 mod clipboard_image;
+mod invocation;
+pub(crate) use invocation::{
+    foreground_cli_command as foreground_cli_command_platform, invocation_foreground_observation,
+    invocation_peer, invocation_peer_for_process, invocation_peer_is_current,
+    invocation_process_birth, socket_peer_birth,
+};
 
 pub(crate) fn host_shutdown_in_progress() -> bool {
     use windows_sys::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_SHUTTINGDOWN};
@@ -292,23 +298,28 @@ fn current_process_is_elevated() -> std::io::Result<bool> {
 }
 
 fn current_account_sid_text() -> std::io::Result<String> {
+    // SAFETY: the pseudo-handle always denotes this process.
+    account_sid_text(unsafe { GetCurrentProcess() })
+}
+
+fn account_sid_text(process: HANDLE) -> std::io::Result<String> {
     use widestring::U16CStr;
     use windows_sys::Win32::Foundation::LocalFree;
     use windows_sys::Win32::Security::{
         Authorization::ConvertSidToStringSidW, GetTokenInformation, TokenUser, TOKEN_QUERY,
         TOKEN_USER,
     };
-    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+    use windows_sys::Win32::System::Threading::OpenProcessToken;
 
     let mut token = null_mut();
-    if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
+    if unsafe { OpenProcessToken(process, TOKEN_QUERY, &mut token) } == 0 {
         return Err(std::io::Error::last_os_error());
     }
     let token = unsafe { OwnedHandle::from_raw_handle(token) };
     let mut needed = 0;
     unsafe { GetTokenInformation(token.as_raw_handle(), TokenUser, null_mut(), 0, &mut needed) };
-    if needed == 0 {
-        return Err(std::io::Error::last_os_error());
+    if needed == 0 || needed > 65536 {
+        return Err(std::io::Error::other("invalid account token size"));
     }
     // usize storage keeps TOKEN_USER aligned and its trailing SID alive.
     let mut buffer = vec![0usize; (needed as usize).div_ceil(size_of::<usize>())];
@@ -2435,7 +2446,10 @@ fn read_process_command_line(process: HANDLE) -> Option<String> {
         return None;
     }
 
-    // `required` is already at least a UNICODE_STRING sized buffer.
+    // Native command-line observations are bounded even for malformed metadata.
+    if !(size_of::<UNICODE_STRING>()..=1024 * 1024).contains(&(required as usize)) {
+        return None;
+    }
     let mut buffer = vec![0_u8; required as usize];
     for _ in 0..2 {
         // SAFETY: `buffer` is `required` bytes and both pointers are valid for
@@ -2456,6 +2470,9 @@ fn read_process_command_line(process: HANDLE) -> Option<String> {
             || status == STATUS_BUFFER_TOO_SMALL
             || status == STATUS_INFO_LENGTH_MISMATCH;
         if grew {
+            if !(size_of::<UNICODE_STRING>()..=1024 * 1024).contains(&(required as usize)) {
+                return None;
+            }
             buffer = vec![0_u8; required as usize];
             continue;
         }

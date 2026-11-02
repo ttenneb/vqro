@@ -9,6 +9,7 @@ from pathlib import Path
 import sqlite3
 import sys
 import uuid
+from local_platform import account, valid_sid, state_directory, stdin_lines
 
 import graph
 import decision_queue
@@ -38,14 +39,16 @@ def operation_id(value):
 def checked_binding(value):
     if not isinstance(value, dict):
         raise ValueError("caller binding must be an object")
-    keys = {"class", "terminal_id", "agent", "execution"} if value.get("class") == "agent" else {"class", "terminal_id", "uid"}
+    keys = {"class", "terminal_id", "agent", "execution"} if value.get("class") == "agent" else {"class", "terminal_id", "sid" if "sid" in value else "uid"}
     if set(value) != keys or value.get("class") not in ("agent", "human_unverified"):
         raise ValueError("invalid caller binding")
-    for key in keys - {"uid"}:
+    for key in keys - {"uid", "sid"}:
         if not isinstance(value[key], str) or not 1 <= len(value[key].encode()) <= 256:
             raise ValueError("invalid caller binding field")
     if "uid" in keys and (type(value["uid"]) is not int or not 0 <= value["uid"] <= 0xffffffff):
         raise ValueError("invalid caller uid")
+    if "sid" in keys and not valid_sid(value["sid"]):
+        raise ValueError("invalid caller sid")
     return value
 
 
@@ -61,7 +64,8 @@ def binding(caller):
     if caller.get("class") == "agent":
         return {key: caller[key] for key in ("class", "terminal_id", "agent", "execution")}
     if caller.get("class") == "human_unverified":
-        return {key: caller[key] for key in ("class", "terminal_id", "uid")}
+        checked_binding(caller)
+        return dict(caller)
     raise ValueError("unknown caller cannot mutate tasks")
 
 
@@ -274,7 +278,7 @@ class Store:
     @staticmethod
     def accept_match(left, right):
         if left.get("class") == right.get("class") == "human_unverified":
-            return left == HUMAN_ACCEPTOR or right == HUMAN_ACCEPTOR or left["uid"] == right["uid"]
+            return left == HUMAN_ACCEPTOR or right == HUMAN_ACCEPTOR or (account(left) is not None and account(left) == account(right))
         return left == right
 
     def acceptors(self, task):
@@ -650,13 +654,16 @@ def main():
     args = parser.parse_args()
     # Validate policy configuration without opening the store in document-only runtimes.
     decision_queue.Queue(None, args.decision_delay_seconds, OutcomeUnknown)
-    directory = args.data_dir or str(Path(os.environ.get("XDG_STATE_HOME", str(Path.home() / ".local/state"))) / "vqro/extensions/vqro.tasks")
+    directory = args.data_dir or state_directory()
     store, document_store = None, None
     capabilities = ["action_invoke", "host_document"] if args.native_attention else ["action_invoke"]
     methods = ["action.invoke.v1", "host.document.render"] if args.native_attention else ["action.invoke.v1"]
     emit({"type": "hello", "protocol": 2, "service_id": SERVICE, "requested_capabilities": capabilities, "methods": methods})
     pending = bytearray()
+    windows_input = stdin_lines() if os.name == "nt" else None
     def read_line(timeout):
+        if windows_input is not None:
+            return windows_input.get(timeout)
         if b"\n" not in pending:
             if not select.select([sys.stdin.fileno()], [], [], timeout)[0]:
                 return None
@@ -690,6 +697,8 @@ def main():
         try:
             line = read_line(store.decisions.next_delay(timestamp(), applied) if store is not None else None)
         except EOFError:
+            if windows_input is not None:
+                windows_input.close()
             return
         if line is None:
             continue

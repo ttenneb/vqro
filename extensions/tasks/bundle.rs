@@ -15,6 +15,8 @@ pub(crate) const BUNDLE: DefaultBundle = DefaultBundle {
         ("messages.py", include_str!("messages.py")),
         ("graph.py", include_str!("graph.py")),
         ("cli.py", include_str!("cli.py")),
+        ("local_platform.py", include_str!("local_platform.py")),
+        ("windows_api.py", include_str!("windows_api.py")),
     ],
     plugin: Some(DefaultPlugin {
         id: "vqro.tasks",

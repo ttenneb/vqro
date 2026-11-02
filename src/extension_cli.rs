@@ -4,7 +4,7 @@ use std::path::{Component, Path};
 use crate::api::schema::{InstalledPluginInfo, PluginPlatform};
 
 /// Internal manifest data only: never add this to a frozen endpoint codec.
-#[derive(Debug, Clone, serde::Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct CliCommand {
     pub name: String,
@@ -114,7 +114,24 @@ pub(crate) fn run(name: &str, args: &[String], remote: bool) -> std::io::Result<
         eprintln!("extension CLI commands are not supported yet for remote targets");
         return Ok(2);
     }
-    let entries = crate::persist::plugin_registry::try_load()?;
+    let (plugin, contribution) = match select(name) {
+        Ok(selected) => selected,
+        Err(error) => {
+            eprintln!("{error}");
+            return Ok(2);
+        }
+    };
+    let argv = argv(&contribution.command, Path::new(&plugin.plugin_root), args);
+    let mut command = std::process::Command::new(&argv[0]);
+    command.args(&argv[1..]);
+    command.env("VQRO_EXTENSION_ROOT", &plugin.plugin_root);
+    command.env("VQRO_BIN_PATH", std::env::current_exe()?);
+    command.env("VQRO_SOCKET_PATH", crate::api::socket_path());
+    crate::platform::foreground_cli_command(command)
+}
+
+fn select(name: &str) -> Result<(InstalledPluginInfo, CliCommand), String> {
+    let entries = crate::persist::plugin_registry::try_load().map_err(|error| error.to_string())?;
     let mut selected = None;
     for plugin in entries.iter().filter(|plugin| plugin.enabled) {
         let (fresh, commands) = match declarations(plugin) {
@@ -126,29 +143,77 @@ pub(crate) fn run(name: &str, args: &[String], remote: bool) -> std::io::Result<
         };
         if let Some(command) = commands.into_iter().find(|command| command.name == name) {
             if selected.is_some() {
-                eprintln!("extension CLI command {name} is ambiguous; no execution attempted");
-                return Ok(2);
+                return Err(format!(
+                    "extension CLI command {name} is ambiguous; no execution attempted"
+                ));
             }
             selected = Some((fresh, command));
         }
     }
     let Some((plugin, contribution)) = selected else {
-        eprintln!("unknown command: {name} (no available extension contribution)");
-        return Ok(2);
+        return Err(format!(
+            "unknown command: {name} (no available extension contribution)"
+        ));
     };
     if !supported(&plugin.platforms) || !supported(&contribution.platforms) {
-        eprintln!("extension CLI command {name} is not supported yet on this platform");
-        return Ok(2);
+        return Err(format!(
+            "extension CLI command {name} is not supported yet on this platform"
+        ));
     }
-    let argv = argv(&contribution.command, Path::new(&plugin.plugin_root), args);
-    let mut command = std::process::Command::new(&argv[0]);
-    command.args(&argv[1..]);
-    command.env("VQRO_EXTENSION_ROOT", &plugin.plugin_root);
-    command.env("VQRO_BIN_PATH", std::env::current_exe()?);
-    command.env("VQRO_SOCKET_PATH", crate::api::socket_path());
-    // Foreground replacement preserves the original direct shell child/Pi
-    // ancestry. Ordinary spawn/wait would change human callers to Unknown.
-    crate::platform::foreground_cli_command(command)
+    Ok((plugin, contribution))
+}
+
+/// Re-resolved off actor, before and after Windows launcher proof. This digest
+/// is freshness evidence, not a capability grant or transferred artifact consent.
+#[cfg(windows)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ForegroundDeclaration {
+    pub argv: Vec<String>,
+    pub root: String,
+    pub manifest: String,
+    pub digest: [u8; 32],
+}
+
+#[cfg(windows)]
+pub(crate) fn foreground_declaration(invocation: &[String]) -> Option<ForegroundDeclaration> {
+    use sha2::{Digest, Sha256};
+    use std::io::Read;
+    let name = invocation.get(1)?;
+    if crate::cli::is_builtin_command(name) {
+        return None;
+    }
+    let (plugin, contribution) = select(name).ok()?;
+    let mut bytes = Vec::new();
+    std::fs::File::open(&plugin.manifest_path)
+        .ok()?
+        .take(1024 * 1024 + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    if bytes.len() > 1024 * 1024 {
+        return None;
+    }
+    let digest = Sha256::digest(&bytes).into();
+    // Reject a manifest change across parse/hash observations too.
+    let (fresh, declarations) = declarations(&plugin).ok()?;
+    if fresh.plugin_root != plugin.plugin_root || !declarations.contains(&contribution) {
+        return None;
+    }
+    let argv = argv(
+        &contribution.command,
+        Path::new(&plugin.plugin_root),
+        &invocation[2..],
+    );
+    // No PATH/cwd guessing for transparent authority. Explicit invocation can
+    // still run bare programs, but cannot prove a Windows human through them.
+    if !Path::new(argv.first()?).is_absolute() {
+        return None;
+    }
+    Some(ForegroundDeclaration {
+        argv,
+        root: plugin.plugin_root,
+        manifest: plugin.manifest_path,
+        digest,
+    })
 }
 
 #[cfg(test)]

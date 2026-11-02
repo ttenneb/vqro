@@ -1,8 +1,9 @@
 # Tasks core and graph
 
-Status: **experimental, Linux/macOS trusted executable**. Working extension policy,
-not a frozen task ABI or a production package-admission claim. Native macOS runtime
-verification is still required; the automated process demo harnesses remain Linux-only.
+Status: **experimental trusted executable**, Linux/macOS and configured Windows.
+Working extension policy, not a frozen task ABI or production package-admission
+claim. [Windows requires exact interpreter setup](tasks-windows.md). Native
+macOS/Windows verification remains required; process demo harnesses remain Linux-only.
 
 `extensions/tasks/` owns persistence, graph/acceptance policy, budgets and derived
 debts. The host owns terminal/execution identity and neutral
@@ -53,7 +54,10 @@ below, not automatic work execution.
 `--owner` is the assignee's own `whoami` caller binding, not a pane/name. Assignment
 chooses an exact binding, not proof of liveness. Caller facts are host-derived:
 agents have `class`, `terminal_id`, `agent`, process-lifetime `execution`; humans
-have `class: human_unverified`, `terminal_id`, `uid`. Optional session metadata
+have `class: human_unverified`, `terminal_id`, and exactly one account: Unix `uid`
+or Windows token-user `sid`. Mixed accounts and malformed SIDs reject; cross-kind
+accounts never compare equal. See [Windows setup and bounds](tasks-windows.md).
+Optional session metadata
 is not ownership. Unknown callers can read, not mutate. `--caller` is a scope
 selector/precondition, never an authority flag.
 
