@@ -3610,6 +3610,69 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn detection_text_reuse_tracks_control_output_resize_and_alt_screen() {
+        // Control-only output advances the content revision without changing the
+        // extracted text; a resize does not invent a text change; an alternate
+        // screen read replaces the text instead of reusing the primary screen.
+        let runtime = PaneRuntime::test_with_scrollback_bytes(12, 3, 100_000, b"primary\r\nprompt");
+        let mut cache = DetectionTextCache::default();
+        let reads = Cell::new(0);
+        let refresh = |cache: &mut DetectionTextCache| {
+            cache.refresh(None, &runtime.content_seq, || {
+                reads.set(reads.get() + 1);
+                runtime.terminal.detection_text_for_cache()
+            })
+        };
+        assert!(refresh(&mut cache));
+        assert_eq!(reads.get(), 1);
+
+        // Cursor movement and an OSC title report carry no text change.
+        let (tx, _rx) = mpsc::channel(4);
+        runtime
+            .terminal
+            .process_pty_bytes(runtime.pane_id, 0, b"\x1b[2;3H\x1b]0;title\x07", &tx);
+        runtime
+            .content_seq
+            .fetch_add(2, std::sync::atomic::Ordering::Release);
+        assert!(
+            !refresh(&mut cache),
+            "control-only output is not a text change"
+        );
+        assert_eq!(reads.get(), 2, "the revision did advance, so it re-read");
+        assert_eq!(cache.text.trim_end(), "primary\nprompt");
+
+        // A resize keeps the same text and the same revision afterwards.
+        runtime.resize(4, 20, 8, 16);
+        runtime
+            .content_seq
+            .fetch_add(2, std::sync::atomic::Ordering::Release);
+        assert!(!refresh(&mut cache));
+        assert_eq!(reads.get(), 3);
+
+        // Switching to the alternate screen presents different text.
+        runtime
+            .terminal
+            .process_pty_bytes(runtime.pane_id, 0, b"\x1b[?1049h\x1b[Halt screen", &tx);
+        runtime
+            .content_seq
+            .fetch_add(2, std::sync::atomic::Ordering::Release);
+        assert!(refresh(&mut cache), "alt screen text must replace primary");
+        assert!(cache.text.contains("alt screen"), "{:?}", cache.text);
+
+        // A reset with no output clears the retained text and forces a fresh read.
+        cache.clear();
+        assert!(cache.text.is_empty());
+        let before_reset = reads.get();
+        assert!(
+            refresh(&mut cache),
+            "a cleared cache must report its re-read text as the current text"
+        );
+        assert_eq!(reads.get(), before_reset + 1);
+        assert!(cache.text.contains("alt screen"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn unidentified_detection_text_is_reused_until_terminal_content_changes() {
         // Unidentified panes re-run detection a few times a second. Reuse must
         // follow the write-bracketed content revision, so scrolling the viewport
