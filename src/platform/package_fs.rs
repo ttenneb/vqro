@@ -124,7 +124,7 @@ fn normal_components(path: &Path) -> io::Result<Vec<std::ffi::OsString>> {
         .collect()
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 

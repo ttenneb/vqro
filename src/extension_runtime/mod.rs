@@ -442,7 +442,7 @@ impl RuntimeFactory {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(crate) fn installed_process(
         installed: &crate::extension_package::InstalledPackageV1,
         service_id: &str,

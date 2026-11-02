@@ -168,7 +168,9 @@ fn cleanup(root: PathBuf) {
             use std::os::unix::fs::PermissionsExt;
             permissions.set_mode(if metadata.is_dir() { 0o700 } else { 0o600 });
         }
+        // Non-Unix fixtures clear read-only attributes; Unix uses explicit modes above.
         #[cfg(not(unix))]
+        #[allow(clippy::permissions_set_readonly_false)]
         permissions.set_readonly(false);
         let _ = std::fs::set_permissions(path, permissions);
     }

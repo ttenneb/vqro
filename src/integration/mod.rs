@@ -16,11 +16,13 @@ pub(crate) use actions::{
     artifact_asset_path, install_target, install_target_from_artifact, install_target_from_asset,
     uninstall_target, uninstall_target_artifact,
 };
+#[cfg(test)]
+pub(crate) use env::integration_env_lock;
+#[cfg(all(test, unix))]
+pub(crate) use env::IntegrationEnvLock;
 pub(crate) use env::{
     apply_pane_base_env, HERDR_PANE_ID_ENV_VAR, HERDR_TAB_ID_ENV_VAR, HERDR_WORKSPACE_ID_ENV_VAR,
 };
-#[cfg(test)]
-pub(crate) use env::{integration_env_lock, IntegrationEnvLock};
 pub(crate) use registry::{
     installed_integration_statuses, integration_recommendations, integration_target_label,
     print_outdated_update_notice,

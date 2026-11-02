@@ -356,7 +356,7 @@ pub(super) fn clear_path(path: &Path) -> std::io::Result<()> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(crate) fn publish_handoff_snapshot_to_path(
     path: &Path,
     snapshot: &SessionSnapshot,

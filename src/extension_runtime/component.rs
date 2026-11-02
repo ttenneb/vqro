@@ -1342,7 +1342,9 @@ pub(crate) mod tests {
         std::fs::write(path, bytes).unwrap();
     }
 
+    // Windows fixtures must clear the read-only attribute; Unix has a separate mode-based helper.
     #[cfg(windows)]
+    #[allow(clippy::permissions_set_readonly_false)]
     fn overwrite(path: &Path, bytes: &[u8]) {
         let mut permissions = std::fs::metadata(path).unwrap().permissions();
         permissions.set_readonly(false);
@@ -1372,7 +1374,9 @@ pub(crate) mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
+    // Windows fixtures must clear read-only attributes; Unix has a separate mode-based helper.
     #[cfg(windows)]
+    #[allow(clippy::permissions_set_readonly_false)]
     fn cleanup(root: PathBuf) {
         let mut pending = vec![root.clone()];
         while let Some(directory) = pending.pop() {

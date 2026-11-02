@@ -2703,7 +2703,7 @@ impl ExtensionServiceSupervisor {
         Ok(())
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub fn preflight_installed_process(
         installed: &crate::extension_package::InstalledPackageV1,
         service_id: &str,
@@ -2941,7 +2941,7 @@ impl ExtensionServiceSupervisor {
         self.finish_request(result)
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub fn invoke_host_document_action(
         &mut self,
         action: &crate::extension_contract::HostDocumentExtensionActionV1,

@@ -4587,7 +4587,9 @@ mod tests {
                     use std::os::unix::fs::PermissionsExt;
                     permissions.set_mode(0o755);
                 }
+                // Windows fixtures clear the read-only attribute; Unix uses explicit modes above.
                 #[cfg(windows)]
+                #[allow(clippy::permissions_set_readonly_false)]
                 permissions.set_readonly(false);
                 std::fs::set_permissions(path, permissions).unwrap();
                 for entry in std::fs::read_dir(path).unwrap() {
@@ -4761,7 +4763,9 @@ mod tests {
             use std::os::unix::fs::PermissionsExt;
             permissions.set_mode(0o644);
         }
+        // Windows fixtures clear the read-only attribute; Unix uses explicit modes above.
         #[cfg(windows)]
+        #[allow(clippy::permissions_set_readonly_false)]
         permissions.set_readonly(false);
         std::fs::set_permissions(&archive, permissions).unwrap();
         std::fs::write(&archive, b"corrupt active artifact").unwrap();

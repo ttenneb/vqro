@@ -813,12 +813,15 @@ fn read_bounded_frame(reader: &mut impl BufRead) -> Result<Vec<u8>, ExtensionSer
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use sha2::{Digest, Sha256};
 
+    #[cfg(unix)]
     fn sha256(bytes: &[u8]) -> String {
         format!("{:x}", Sha256::digest(bytes))
     }
 
+    #[cfg(unix)]
     fn temporary_directory(label: &str) -> PathBuf {
         let mut random = [0_u8; 8];
         crate::platform::fill_secure_random(&mut random).unwrap();
@@ -834,6 +837,7 @@ mod tests {
         root
     }
 
+    #[cfg(unix)]
     fn process_package_with_namespaces(
         script: &str,
         provides: &[&str],
@@ -900,6 +904,7 @@ mod tests {
         archive
     }
 
+    #[cfg(unix)]
     fn process_package_with(
         script: &str,
         provides: &[&str],
@@ -909,10 +914,12 @@ mod tests {
         process_package_with_namespaces(script, provides, capabilities, args, &["example.runtime"])
     }
 
+    #[cfg(unix)]
     fn process_package(script: &str, capabilities: &[&str]) -> Vec<u8> {
         process_package_with(script, &[], capabilities, &[])
     }
 
+    #[cfg(unix)]
     fn install_package_bytes(
         bytes: Vec<u8>,
     ) -> (PathBuf, crate::extension_package::InstalledPackageV1) {
@@ -934,6 +941,7 @@ mod tests {
         (root, installed)
     }
 
+    #[cfg(unix)]
     fn install_process_package(
         script: &str,
         capabilities: &[&str],
