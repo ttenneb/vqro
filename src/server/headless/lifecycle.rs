@@ -115,7 +115,7 @@ impl HeadlessServer {
             })
             .collect::<Vec<_>>();
         deferred_panes.sort_unstable();
-        let manifest = crate::server::handoff::manifest_for(
+        let mut manifest = crate::server::handoff::manifest_for(
             snapshot,
             panes,
             deferred_panes,
@@ -123,6 +123,7 @@ impl HeadlessServer {
             params.expected_version,
             self.api_window_title.clone(),
         );
+        manifest.host_shutdown_intent = self.host_shutdown_intent.get();
         let mut import_child = match crate::server::handoff::spawn_handoff_import(
             import_exe.as_deref(),
             &socket_path,
@@ -329,7 +330,10 @@ impl HeadlessServer {
         if self.shutting_down {
             return;
         }
-        info!("server shutdown initiated");
+        info!(
+            host_shutdown = self.host_shutdown_requested(),
+            "server shutdown initiated"
+        );
         self.shutting_down = true;
 
         // Clear client-local host graphics, then send ServerShutdown to all connected clients.

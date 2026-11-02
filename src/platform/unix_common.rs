@@ -305,6 +305,58 @@ fn set_sigpipe_disposition(handler: libc::sighandler_t) {
     }
 }
 
+extern "C" fn discard_signal(_signal: libc::c_int) {}
+
+/// Survive the launching shell's hangup. A handler (unlike SIG_IGN) resets
+/// on exec so child shells retain ordinary hangup behavior.
+pub(crate) fn ignore_server_hangup() {
+    let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
+    action.sa_sigaction = discard_signal as extern "C" fn(libc::c_int) as libc::sighandler_t;
+    action.sa_flags = libc::SA_RESTART;
+    unsafe {
+        libc::sigemptyset(&mut action.sa_mask);
+        if libc::sigaction(libc::SIGHUP, &action, std::ptr::null_mut()) != 0 {
+            tracing::warn!(error = %std::io::Error::last_os_error(), "failed to ignore server hangup");
+        }
+    }
+}
+
+/// Explicit stop signals still stop; hangup is only a detached-client event.
+pub(crate) fn spawn_server_signal_monitor(
+    on_quit: impl Fn(super::ServerQuitSignal) + Send + Sync + 'static,
+) {
+    use tokio::signal::unix::{signal, SignalKind};
+    let on_quit = std::sync::Arc::new(on_quit);
+    for (kind, quit_signal) in [
+        (SignalKind::interrupt(), super::ServerQuitSignal::Interrupt),
+        (SignalKind::terminate(), super::ServerQuitSignal::Terminate),
+    ] {
+        match signal(kind) {
+            Ok(mut stream) => {
+                let on_quit = on_quit.clone();
+                tokio::spawn(async move {
+                    while stream.recv().await.is_some() {
+                        on_quit(quit_signal);
+                    }
+                });
+            }
+            Err(error) => {
+                tracing::warn!(%error, signal = %quit_signal, "failed to install server stop handler")
+            }
+        }
+    }
+    match signal(SignalKind::hangup()) {
+        Ok(mut stream) => {
+            tokio::spawn(async move {
+                while stream.recv().await.is_some() {
+                    tracing::info!("ignoring SIGHUP; server keeps running");
+                }
+            });
+        }
+        Err(error) => tracing::warn!(%error, "failed to install SIGHUP handler"),
+    }
+}
+
 pub(crate) fn begin_cli_output() {
     set_sigpipe_disposition(libc::SIG_DFL);
 }

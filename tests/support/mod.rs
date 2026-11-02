@@ -34,6 +34,22 @@ pub fn register_spawned_herdr_pid(pid: Option<u32>) {
     registry.insert(pid);
 }
 
+/// portable-pty's kill sends SIGHUP, which detached servers now ignore.
+/// Stop only this still-running owned child, preserving ordinary cleanup.
+pub fn stop_spawned_herdr(child: &mut (dyn portable_pty::Child + Send + Sync)) {
+    if child.try_wait().ok().flatten().is_some() {
+        return;
+    }
+    match child.process_id() {
+        Some(pid) => unsafe {
+            libc::kill(pid as libc::pid_t, libc::SIGTERM);
+        },
+        None => {
+            let _ = child.kill();
+        }
+    }
+}
+
 pub fn unregister_spawned_herdr_pid(pid: Option<u32>) {
     let Some(pid) = pid else {
         return;

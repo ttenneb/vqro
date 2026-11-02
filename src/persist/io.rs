@@ -1573,6 +1573,62 @@ mod tests {
         std::fs::remove_dir_all(directory).unwrap();
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn ordinary_windows_replacement_failure_preserves_primary_and_history_then_retries() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let (session, history) = temp_session_paths("windows-replacement");
+        save_to_paths(
+            &session,
+            &history,
+            &empty_snapshot(),
+            Some(&history_snapshot("old history")),
+        )
+        .unwrap();
+        for path in [&session, &history] {
+            let original = std::fs::read(path).unwrap();
+            let locked = std::fs::OpenOptions::new()
+                .read(true)
+                .share_mode(windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ)
+                .open(path)
+                .unwrap();
+            let save = || {
+                if path == &session {
+                    let mut next = empty_snapshot();
+                    next.selected = 7;
+                    save_to_path(path, &next)
+                } else {
+                    save_json_to_path(
+                        path,
+                        &history_snapshot("new history"),
+                        MAX_HISTORY_SNAPSHOT_BYTES,
+                    )
+                }
+            };
+            assert!(save().is_err());
+            assert_eq!(std::fs::read(path).unwrap(), original);
+            drop(locked);
+            save().unwrap();
+        }
+        assert_eq!(
+            super::super::snapshot::parse_snapshot(&std::fs::read_to_string(&session).unwrap())
+                .unwrap()
+                .selected,
+            7
+        );
+        assert!(std::fs::read_to_string(&history)
+            .unwrap()
+            .contains("new history"));
+        assert!(std::fs::read_dir(session.parent().unwrap())
+            .unwrap()
+            .all(|entry| !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .contains(".tmp.")));
+        std::fs::remove_dir_all(session.parent().unwrap()).unwrap();
+    }
+
     #[test]
     fn ordinary_writer_syncs_before_replace_and_keeps_primary_on_faults() {
         let (path, _) = temp_session_paths("ordinary-faults");

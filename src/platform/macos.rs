@@ -7,6 +7,9 @@ use std::process::{Command, Stdio};
 use std::ptr::NonNull;
 use std::sync::OnceLock;
 
+mod shutdown;
+pub(crate) use shutdown::monitor_host_shutdown;
+
 pub(super) const REMOTE_BRIDGE_CLOCK: libc::clockid_t = libc::CLOCK_MONOTONIC;
 
 use super::{

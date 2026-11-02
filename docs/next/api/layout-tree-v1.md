@@ -114,6 +114,34 @@ mismatched history is ignored without rejecting an otherwise valid structural
 session. This digest is presentation provenance, not per-node identity or package
 authority; it cannot lower the action high-water barrier.
 
+## Host shutdown and launching-shell hangup
+
+Host shutdown takes precedence over queued pane deaths, agent-exit observations,
+due autosaves and new API mutations, so the final save sees intact layout and
+resume facts. Linux uses logind's delay inhibitor until that save completes;
+unavailable/lost logind or bus connections retry without blocking normal use.
+Windows probes the current session's shutdown/logoff state rather than guessing
+from child exit codes. macOS observes loginwindow restart/shutdown announcements,
+cancellation and point of no return before background agents die; undocumented
+or unavailable notifications degrade to the normal SIGTERM save path.
+
+Current JSON handoff manifest v3 adds optional `host_shutdown_intent` with
+`announced_at_ns` in the boot-wide monotonic clock domain. Absent/null means no
+pending announcement; writers omit None. Import adopts it before ownership and
+before starting the new monitor. It is not session/package authority and changes
+no terminal/bincode codec. The frozen v1 manifest remains an unchanged input
+fixture. Announcements/cancellations arriving after manifest capture but before
+replacement monitoring still reach only the old process; native platform trials
+must cover restart/handoff ordering. No cross-protocol live handoff is implied.
+
+A server survives SIGHUP and the closing terminal/shell that launched it; new
+clients can reconnect. SIGINT, SIGTERM and `server.stop` remain explicit save/exit
+requests. The early hangup handler resets on exec, preserving normal child-shell
+signal semantics. Unit server loops use injected probes/flags rather than
+watching the real host; the ignored Linux integration harness uses only private
+D-Bus/logind and a disposable server. Native macOS/Windows shutdown remains a
+separate acceptance trial, not a consequence of cross-build success.
+
 ## Previous live exporter field audit
 
 The complete unconditional omitted/zeroed durable-field set on the previous

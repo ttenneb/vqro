@@ -58,6 +58,9 @@ pub(crate) struct HandoffManifest {
     /// Absent from manifests written before this field existed.
     #[serde(default)]
     pub api_window_title: Option<String>,
+    /// Optional cancellable macOS restart announcement; not a session authority.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_shutdown_intent: Option<crate::platform::HostShutdownIntent>,
 }
 
 #[cfg(unix)]
@@ -638,6 +641,7 @@ pub(crate) fn manifest_for(
         panes,
         deferred_panes,
         api_window_title,
+        host_shutdown_intent: None,
     }
 }
 
@@ -1050,6 +1054,7 @@ mod tests {
             expected_protocol: None,
             snapshot,
             panes,
+            host_shutdown_intent: None,
             deferred_panes: Vec::new(),
             api_window_title: None,
         };
@@ -1094,6 +1099,7 @@ mod tests {
         .unwrap();
         let runtime = runtime_for(1, Some(terminal_id.to_string()));
         let mut duplicate = HandoffManifest {
+            host_shutdown_intent: None,
             version: HANDOFF_VERSION,
             source_version: "current".into(),
             source_protocol: crate::protocol::PROTOCOL_VERSION,
@@ -1134,6 +1140,7 @@ mod tests {
             expected_protocol: None,
             snapshot: snapshot.clone(),
             panes: Vec::new(),
+            host_shutdown_intent: None,
             deferred_panes: vec![1],
             api_window_title: None,
         };
@@ -1147,6 +1154,7 @@ mod tests {
             .unwrap()
             .terminal_id = None;
         let mut legacy = HandoffManifest {
+            host_shutdown_intent: None,
             version: LEGACY_HANDOFF_VERSION,
             source_version: "legacy".into(),
             source_protocol: crate::protocol::PROTOCOL_VERSION,
@@ -1171,6 +1179,7 @@ mod tests {
         snapshot.version = 5;
         snapshot.workspaces[0].tabs[0].id = None;
         let mut v2 = HandoffManifest {
+            host_shutdown_intent: None,
             version: TERMINAL_ID_HANDOFF_VERSION,
             source_version: "v2".into(),
             source_protocol: crate::protocol::PROTOCOL_VERSION,
@@ -1185,6 +1194,7 @@ mod tests {
         assert_eq!(v2.snapshot.version, crate::persist::SNAPSHOT_VERSION);
 
         let mut v3 = HandoffManifest {
+            host_shutdown_intent: None,
             version: HANDOFF_VERSION,
             source_version: "v3".into(),
             source_protocol: crate::protocol::PROTOCOL_VERSION,
@@ -1208,6 +1218,7 @@ mod tests {
             )
             .unwrap();
             let mut manifest = HandoffManifest {
+                host_shutdown_intent: None,
                 version: handoff_version,
                 source_version: "mixed".into(),
                 source_protocol: crate::protocol::PROTOCOL_VERSION,
@@ -1234,6 +1245,7 @@ mod tests {
         .unwrap();
         let mut manifest = HandoffManifest {
             version: HANDOFF_VERSION,
+            host_shutdown_intent: None,
             source_version: "future".into(),
             source_protocol: crate::protocol::PROTOCOL_VERSION,
             expected_version: None,
@@ -1307,6 +1319,7 @@ mod tests {
         valid.version = 5;
         valid.workspaces[0].tabs[0].id = None;
         let mut internal_only = HandoffManifest {
+            host_shutdown_intent: None,
             version: TERMINAL_ID_HANDOFF_VERSION,
             source_version: "v2".into(),
             source_protocol: crate::protocol::PROTOCOL_VERSION,
@@ -1349,6 +1362,37 @@ mod tests {
             serde_json::to_vec(&invalid_tab.snapshot).unwrap(),
             invalid_tab_before
         );
+    }
+
+    #[test]
+    fn optional_host_shutdown_intent_roundtrips_without_changing_absent_manifest_shape() {
+        let mut manifest = manifest_for(
+            one_pane_snapshot(),
+            Vec::new(),
+            Vec::new(),
+            None,
+            None,
+            None,
+        );
+        let absent = serde_json::to_value(&manifest).unwrap();
+        assert!(absent.get("host_shutdown_intent").is_none());
+        let decoded: HandoffManifest = serde_json::from_value(absent.clone()).unwrap();
+        assert!(decoded.host_shutdown_intent.is_none());
+        let mut explicit_none = absent;
+        explicit_none["host_shutdown_intent"] = serde_json::Value::Null;
+        assert!(serde_json::from_value::<HandoffManifest>(explicit_none)
+            .unwrap()
+            .host_shutdown_intent
+            .is_none());
+        let intent = serde_json::from_value(serde_json::json!({"announced_at_ns":42})).unwrap();
+        manifest.host_shutdown_intent = Some(intent);
+        let encoded = serde_json::to_vec(&manifest).unwrap();
+        let decoded: HandoffManifest = serde_json::from_slice(&encoded).unwrap();
+        assert_eq!(decoded.host_shutdown_intent, Some(intent));
+        assert_eq!(decoded.version, HANDOFF_VERSION);
+        let adopted = crate::platform::HostShutdownIntentCell::default();
+        adopted.set(decoded.host_shutdown_intent);
+        assert_eq!(adopted.get(), Some(intent));
     }
 
     #[cfg(target_os = "linux")]

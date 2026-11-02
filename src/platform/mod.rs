@@ -3,6 +3,117 @@
 //! Centralizes OS-dependent behavior behind a clean boundary so core
 //! modules don't scatter `#[cfg]` branches through product logic.
 
+/// Keeps an OS shutdown inhibitor/registration alive until the final save.
+pub(crate) struct HostShutdownMonitor {
+    task: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl HostShutdownMonitor {
+    pub(crate) fn start(
+        requested: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        intent: HostShutdownIntentCell,
+        wake: impl Fn() + Send + Sync + 'static,
+    ) -> Self {
+        // Unit-test server loops inject the shutdown probe/flag and must not
+        // acquire inhibitors on the real host. The private-bus integration
+        // harness drives this production path through the built server binary.
+        if cfg!(test) {
+            return Self { task: None };
+        }
+        Self {
+            task: monitor_host_shutdown(requested, intent, wake),
+        }
+    }
+}
+
+impl Drop for HostShutdownMonitor {
+    fn drop(&mut self) {
+        if let Some(task) = self.task.take() {
+            task.abort();
+        }
+    }
+}
+
+/// A cancellable macOS restart announcement, measured on the boot-wide clock.
+/// Handoff captures it with the manifest; later announcements/cancellations
+/// during transfer still reach only the old server until import starts watching.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct HostShutdownIntent {
+    announced_at_ns: u64,
+}
+
+// Windows has no live handoff or cancellable announcement to carry.
+#[cfg_attr(windows, allow(dead_code))]
+#[derive(Debug, Clone, Default)]
+pub(crate) struct HostShutdownIntentCell(
+    std::sync::Arc<std::sync::Mutex<Option<HostShutdownIntent>>>,
+);
+
+// Windows has no live handoff or cancellable announcement to carry.
+#[cfg_attr(windows, allow(dead_code))]
+impl HostShutdownIntentCell {
+    pub(crate) fn get(&self) -> Option<HostShutdownIntent> {
+        *self.lock()
+    }
+    pub(crate) fn set(&self, intent: Option<HostShutdownIntent>) {
+        *self.lock() = intent;
+    }
+    fn lock(&self) -> std::sync::MutexGuard<'_, Option<HostShutdownIntent>> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn monitor_host_shutdown(
+    _requested: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    _intent: HostShutdownIntentCell,
+    _wake: impl Fn() + Send + Sync + 'static,
+) -> Option<tokio::task::JoinHandle<()>> {
+    None
+}
+
+#[cfg(not(windows))]
+pub(crate) fn host_shutdown_in_progress() -> bool {
+    false
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ServerQuitSignal {
+    #[cfg(unix)]
+    Interrupt,
+    #[cfg(unix)]
+    Terminate,
+    #[cfg(not(unix))]
+    ConsoleControl,
+}
+
+impl std::fmt::Display for ServerQuitSignal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            #[cfg(unix)]
+            Self::Interrupt => "SIGINT",
+            #[cfg(unix)]
+            Self::Terminate => "SIGTERM",
+            #[cfg(not(unix))]
+            Self::ConsoleControl => "console control event",
+        })
+    }
+}
+
+#[cfg(not(unix))]
+pub(crate) fn spawn_server_signal_monitor(
+    on_quit: impl Fn(ServerQuitSignal) + Send + Sync + 'static,
+) {
+    if let Err(error) = ctrlc::set_handler(move || on_quit(ServerQuitSignal::ConsoleControl)) {
+        tracing::warn!(%error, "failed to install server stop handler");
+    }
+}
+
+#[cfg(not(unix))]
+pub(crate) fn ignore_server_hangup() {}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ForegroundProcess {
     pub pid: u32,
@@ -362,8 +473,9 @@ pub(crate) use unix_common::resource_symlink;
 #[cfg(unix)]
 pub(crate) use unix_common::{
     begin_cli_output, configure_package_nofollow, create_private_package_directory, end_cli_output,
-    forward_remote_bridge_stdio, open_package_staging, write_package_staging_file,
-    PackageStagingBackend, RemoteBridgeWake,
+    forward_remote_bridge_stdio, ignore_server_hangup, open_package_staging,
+    spawn_server_signal_monitor, write_package_staging_file, PackageStagingBackend,
+    RemoteBridgeWake,
 };
 
 mod client_state;
