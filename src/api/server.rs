@@ -510,7 +510,7 @@ fn handle_connection_with_stop(
                     &error_response_json(
                         request_id,
                         "caller_unknown",
-                        "local Linux peer identity is unavailable".into(),
+                        "local peer identity is unavailable".into(),
                     ),
                 );
             };

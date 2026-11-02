@@ -1,8 +1,14 @@
 # Experimental Tasks core
 
-Linux trusted protocol-2 executable, Python 3 stdlib SQLite. Task policy and
+Linux/macOS trusted protocol-2 executable, Python 3 stdlib SQLite. Task policy and
 persistence live here; the host supplies neutral invocation/caller observations.
 Not sandboxed, not secure human authentication, not Pi todo integration.
+
+The store is platform-independent: `$XDG_STATE_HOME/vqro/extensions/vqro.tasks`
+when set, otherwise `~/.local/state/vqro/extensions/vqro.tasks` on Linux **and
+macOS**. The provider creates the directory; no Linux-specific state-directory
+API is needed. `provider.py --data-dir` overrides it. Native macOS verification
+is required; the process-based demo harnesses currently remain Linux-only.
 
 Durable addressed messages are a second record family in the same store
 (`messages.py`, schema v4): `vqro message send/list/claim/edit` with the sender

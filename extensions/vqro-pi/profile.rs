@@ -833,6 +833,8 @@ mod tests {
         // c41ecdc2 after integrating its UI-framework asset changes, and again
         // on this branch after its label and panel-row asset edits (a deliberate
         // asset change, which is what this characterization exists to notice).
+        // Enabling macOS in the Tasks manifest deliberately changes its address;
+        // it was independently recomputed using the declared asset order.
         assert_eq!(generation_dir().file_name().unwrap(), "pi-14d420aa1fdb11d9");
         let installed = crate::persist::plugin_registry::load();
         let tasks = installed
@@ -841,7 +843,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             Path::new(&tasks.plugin_root).file_name().unwrap(),
-            "tasks-dd19d43534260225"
+            "tasks-4d065c4e059958c6"
         );
         crate::persist::plugin_registry::update(|entries| {
             entries

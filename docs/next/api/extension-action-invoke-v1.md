@@ -39,7 +39,7 @@ existing capability grant are required for this invocation path.
 
 ## Caller observations
 
-Linux local API sockets capture kernel peer UID/PID and process birth **before**
+Linux and macOS local API sockets capture kernel peer UID/PID and process birth **before**
 reading the request, then capture bounded ancestry off the App actor and recheck
 process/parent incarnations. The host combines that capture with its owned
 terminal roots, cached original root birth, current foreground group and known
@@ -61,10 +61,25 @@ agent executing through a shell pane can obtain `human_unverified`; do not claim
 human-gesture verification. Handoff roots without original birth proof stay
 unknown; generic terminal recovery remains usable.
 
-Capture bounds: 64 ancestors, 8192 bytes per process stat and 16384 bytes per
-command line. Root birth is cached on fresh terminal creation. The initial
-single peer-birth `/proc` read occurs on every local API connection, before its
-method is known; ancestry capture and foreground classification are action-only.
+Capture bounds: 64 ancestors and 16384 bytes per command line. Linux reads at
+most 8192 bytes per process stat. macOS uses kernel `LOCAL_PEERPID`/`getpeereid`,
+exact-sized `proc_pidinfo(PROC_PIDTBSDINFO)` PID/euid/parent/start observations,
+and a bounded `kern.bootsessionuuid` execution namespace. Its birth value is
+checked start-time seconds × 1,000,000 + microseconds; this is a lifetime key,
+not a portable timestamp format. macOS argument acquisition is capped at 1 MiB
+(including environment), with exactly `argc` NUL-terminated arguments retained;
+environment is excluded from caller matching.
+
+macOS stops **before** a positively observed foreign-euid ancestor, without
+querying that ancestor's arguments. This is not an error fallback: every retained
+same-euid ancestor needs complete identity and arguments, and PID, euid, birth
+and parent are rechecked. Syscall, short-read, parse or recheck failures and
+cycles fail closed. A pane root outside the retained chain (including beyond
+the 64-entry bound) cannot prove a caller. No authority crosses the euid boundary.
+
+Root birth is cached on fresh terminal creation. The initial single peer-birth
+read occurs on every local API connection, before its method is known; ancestry
+capture and foreground classification are action-only.
 Presentation and PTY parsing do not perform this work. Unrelated terminal roots
 do not allocate evidence or query foreground state.
 
