@@ -3374,8 +3374,11 @@ impl PaneRuntime {
             return Some(cwd);
         }
 
+        // Ask for the pane's shell cwd, not a launcher's: a Windows shim keeps
+        // its launch directory while the real shell changes directories, and
+        // this value is what gets persisted for the pane.
         let pid = self.child_pid.load(Ordering::Relaxed);
-        crate::platform::process_cwd(pid)
+        crate::platform::pane_process_cwd(pid)
     }
 
     /// A narrow cloned reader for explicit API observation, never render/fanout.

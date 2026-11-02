@@ -254,6 +254,11 @@ fn normalize_cwd_for_launch_platform(path: &std::path::Path) -> std::path::PathB
     path.to_path_buf()
 }
 
+/// The pane's shell cwd. Unix has no launcher shim in front of the shell, so
+/// this is the ordinary process cwd.
+#[cfg(not(windows))]
+pub(crate) use self::process_cwd as pane_process_cwd;
+
 #[cfg(not(windows))]
 fn plugin_runtime_path_platform(path: &std::path::Path) -> std::path::PathBuf {
     path.to_path_buf()

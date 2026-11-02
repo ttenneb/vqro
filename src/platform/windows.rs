@@ -376,9 +376,14 @@ pub(crate) fn set_default_plugin_pane_pwd(
 ) {
 }
 
+#[cfg(target_pointer_width = "64")]
 use windows_sys::{
-    Wdk::System::Threading::{NtQueryInformationProcess, ProcessBasicInformation},
+    Wdk::System::Threading::ProcessWow64Information, Win32::System::Kernel::STRING32,
+};
+
+use windows_sys::{
     Wdk::System::Threading::ProcessCommandLineInformation,
+    Wdk::System::Threading::{NtQueryInformationProcess, ProcessBasicInformation},
     Win32::{
         Foundation::{
             CloseHandle, GlobalFree, LocalFree, FILETIME, HANDLE, HWND, INVALID_HANDLE_VALUE,
@@ -1551,10 +1556,84 @@ pub fn foreground_process_group_id(child_pid: u32) -> Option<u32> {
 
 pub fn process_cwd(pid: u32) -> Option<PathBuf> {
     let process = ProcessHandle::open(pid, PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ)?;
-    let process_parameters = read_process_parameters(process.0)?;
-    read_unicode_string(process.0, process_parameters.current_directory.dos_path)
+    process_cwd_from_handle(process.0)
+}
+
+/// The cwd that belongs to the pane's shell, not to a launcher in front of it.
+pub(crate) fn pane_process_cwd(child_pid: u32) -> Option<PathBuf> {
+    let process = ProcessHandle::open(
+        child_pid,
+        PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ,
+    )?;
+    if let Some(executable) = process_executable_path(process.0) {
+        // A Scoop shim keeps its launch cwd while the real shell changes
+        // directories. Never replace the saved shell directory with that
+        // launcher directory on exit.
+        if PathBuf::from(executable).with_extension("shim").is_file() {
+            let snapshot = cached_foreground_processes();
+            if let Some(shell_pid) = shim_shell_pid(child_pid, &snapshot) {
+                return process_cwd(shell_pid);
+            }
+            return None;
+        }
+    }
+    process_cwd_from_handle(process.0)
+}
+
+fn process_cwd_from_handle(process: HANDLE) -> Option<PathBuf> {
+    read_unicode_string(process, process_cwd_descriptor(process)?)
         .map(PathBuf::from)
         .filter(|path| path.is_absolute())
+}
+
+fn process_cwd_descriptor(process: HANDLE) -> Option<UNICODE_STRING> {
+    #[cfg(target_pointer_width = "64")]
+    {
+        let mut peb32_address = 0_usize;
+        // SAFETY: the output is a writable ULONG_PTR with its exact buffer size.
+        let status = unsafe {
+            NtQueryInformationProcess(
+                process,
+                ProcessWow64Information,
+                (&mut peb32_address as *mut usize).cast(),
+                size_of::<usize>() as u32,
+                null_mut(),
+            )
+        };
+        if status != STATUS_SUCCESS as NTSTATUS {
+            return None;
+        }
+        if peb32_address != 0 {
+            // WoW64's native PEB can report C:\Windows while the x86 shell uses
+            // another directory. Read its own pointer-width layout instead.
+            let peb = read_process_value::<Peb32>(process, peb32_address as *const c_void)?;
+            let parameters = read_process_value::<ProcessCwdParameters32>(
+                process,
+                peb.process_parameters as usize as *const c_void,
+            )?;
+            let cwd = parameters.current_directory;
+            return Some(UNICODE_STRING {
+                Length: cwd.Length,
+                MaximumLength: cwd.MaximumLength,
+                Buffer: cwd.Buffer as usize as *mut u16,
+            });
+        }
+    }
+    Some(read_process_parameters(process)?.current_directory.dos_path)
+}
+
+fn shim_shell_pid(child_pid: u32, snapshot: &ProcessSnapshot) -> Option<u32> {
+    snapshot.entry(child_pid)?;
+    let mut shells = snapshot
+        .children_by_parent
+        .get(&child_pid)?
+        .iter()
+        .filter_map(|&index| {
+            let entry = &snapshot.entries[index];
+            super::is_pane_shell_process_name(&entry.name).then_some(entry.pid)
+        });
+    let shell_pid = shells.next()?;
+    shells.next().is_none().then_some(shell_pid)
 }
 
 fn select_pane_foreground_job_cached(shell_pid: u32) -> Option<ForegroundJob> {
@@ -2776,6 +2855,22 @@ struct Peb {
     reserved3: [*mut c_void; 2],
     ldr: *mut c_void,
     process_parameters: *mut RtlUserProcessParameters,
+}
+
+#[cfg(target_pointer_width = "64")]
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct Peb32 {
+    reserved: [u32; 4],
+    process_parameters: u32,
+}
+
+#[cfg(target_pointer_width = "64")]
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct ProcessCwdParameters32 {
+    reserved: [u32; 9],
+    current_directory: STRING32,
 }
 
 #[repr(C)]
