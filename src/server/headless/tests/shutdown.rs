@@ -46,6 +46,7 @@ fn host_shutdown_cancels_plans_but_settles_real_publishing_checkpoint_before_sav
         "selected-completion",
         "timeout",
         "checkpoint-error",
+        "selected-error",
     ] {
         let mut server = test_headless_server();
         server.app.policy.persist_session = true;
@@ -92,6 +93,7 @@ fn host_shutdown_cancels_plans_but_settles_real_publishing_checkpoint_before_sav
             "selected-completion",
             "timeout",
             "checkpoint-error",
+            "selected-error",
         ]
         .contains(&mode)
         {
@@ -145,10 +147,19 @@ fn host_shutdown_cancels_plans_but_settles_real_publishing_checkpoint_before_sav
         server
             .host_shutdown_requested
             .store(true, Ordering::Release);
-        if mode == "checkpoint-error" {
+        if mode == "checkpoint-error" || mode == "selected-error" {
             let paths = crate::persist::collections_checkpoint_paths();
             let before = std::fs::read(&paths.session).unwrap();
             drop(release.take());
+            if mode == "selected-error" {
+                let event = runtime.block_on(server.app.event_rx.recv()).unwrap();
+                assert!(matches!(
+                    &event,
+                    AppEvent::CollectionsCheckpointPersisted(_)
+                ));
+                assert!(!server.handle_internal_event_with_forwarding(event));
+                assert!(!server.app.collections_mutations_blocked);
+            }
             let result = runtime.block_on(server.run());
             assert!(
                 result.is_err(),
@@ -159,7 +170,10 @@ fn host_shutdown_cancels_plans_but_settles_real_publishing_checkpoint_before_sav
                 paths.journal.exists(),
                 "uncertain publication evidence must survive"
             );
-            assert_eq!(std::fs::read(paths.session).unwrap(), before);
+            assert_eq!(std::fs::read(&paths.session).unwrap(), before);
+            // Evidence survives until explicit startup-style roll-forward.
+            crate::persist::recover_collections_checkpoint().unwrap();
+            assert!(!paths.journal.exists());
             continue;
         }
         if mode == "timeout" {

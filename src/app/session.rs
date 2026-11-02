@@ -188,8 +188,10 @@ impl App {
             self.extension_state_persistence_blocked = true;
             return Err("shutdown persistence completion unavailable; final ordinary save blocked, durable checkpoint recovery required");
         }
-        if awaiting_checkpoint && self.session_persistence_blocked {
-            return Err("shutdown checkpoint failed; final ordinary save blocked, durable recovery required");
+        if self.policy.persist_session && self.session_persistence_blocked {
+            // A selected completion may already have failed in the shutdown
+            // event guard before settlement began; do not report that as success.
+            return Err("shutdown session persistence blocked; final ordinary save refused, durable recovery or repair required");
         }
         if canceled_plans || awaiting_checkpoint {
             // An admitted mutation supersedes an older pre-exit checkpoint.
