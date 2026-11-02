@@ -24,6 +24,13 @@ const CLIENT_MESSAGE_CLIENT_SHELL_PANE_INPUT: u32 = 13;
 const CLIENT_MESSAGE_CLIENT_SHELL_FOCUS: u32 = 18;
 const CLIENT_MESSAGE_ENDPOINT_CONTROL: u32 = 20;
 
+pub fn isolate_test_server_bus() {
+    std::env::set_var(
+        "DBUS_SYSTEM_BUS_ADDRESS",
+        "unix:path=/nonexistent-vqro-test-bus",
+    );
+}
+
 pub fn register_spawned_herdr_pid(pid: Option<u32>) {
     let Some(pid) = pid else {
         return;
@@ -64,6 +71,10 @@ pub fn unregister_spawned_herdr_pid(pid: Option<u32>) {
 }
 
 pub fn register_runtime_dir(path: &Path) {
+    // Fixture setup precedes PTY/process construction; descendants and CLI
+    // autostarts inherit this unavailable bus instead of inhibiting the host.
+    // The explicit private-logind harness is a separate binary without this module.
+    isolate_test_server_bus();
     ensure_cleanup_hooks();
 
     let _ = fs::create_dir_all(path);

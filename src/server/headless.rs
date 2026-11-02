@@ -745,7 +745,18 @@ impl HeadlessServer {
             }
         }
 
-        // Save session on exit.
+        // Settle admitted persistence while the host delay inhibitor is still
+        // held. Cancel plans before publication, but reconcile already-publishing
+        // checkpoints through their existing completion/mutation fences.
+        if let Err(error) = self
+            .app
+            .settle_persistence_before_shutdown(Duration::from_secs(3))
+            .await
+        {
+            warn!(%error, "could not settle persistence before shutdown");
+            return Err(io::Error::other(error));
+        }
+        // Save session on exit; uncertain checkpoint publication stays fail closed.
         if self.app.policy.persist_session {
             self.app.save_session_on_shutdown();
         }

@@ -224,6 +224,7 @@ pub(super) fn run_named_cli_with_env_and_socket_override(
     envs: &[(&str, &Path)],
     socket_override: Option<&Path>,
 ) -> std::process::Output {
+    crate::support::isolate_test_server_bus();
     let mut command = Command::new(env!("CARGO_BIN_EXE_vqro"));
     command
         .args(args)
@@ -320,6 +321,7 @@ pub(super) fn spawn_herdr_with_config(
 }
 
 pub(super) fn run_cli(socket_path: &Path, args: &[&str]) -> std::process::Output {
+    crate::support::isolate_test_server_bus();
     let mut command = Command::new(env!("CARGO_BIN_EXE_vqro"));
     command.args(args);
     command.env("VQRO_SOCKET_PATH", socket_path);
@@ -331,6 +333,7 @@ pub(super) fn run_cli_in_dir(
     args: &[&str],
     current_dir: &Path,
 ) -> std::process::Output {
+    crate::support::isolate_test_server_bus();
     let mut command = Command::new(env!("CARGO_BIN_EXE_vqro"));
     command.args(args);
     command.current_dir(current_dir);

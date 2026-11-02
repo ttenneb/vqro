@@ -1,6 +1,258 @@
 use super::*;
 
 #[test]
+fn host_shutdown_cancels_plans_but_settles_real_publishing_checkpoint_before_save() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let _entered = runtime.enter();
+    let _lock = crate::config::test_config_env_lock().lock().unwrap();
+    let previous = std::env::var_os("XDG_CONFIG_HOME");
+    let previous_session = std::env::var_os(crate::session::SESSION_ENV_VAR);
+    let root = std::env::temp_dir().join(format!(
+        "vqro-settlement-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    struct Restore(
+        std::path::PathBuf,
+        Option<std::ffi::OsString>,
+        Option<std::ffi::OsString>,
+    );
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            match &self.1 {
+                Some(value) => std::env::set_var("XDG_CONFIG_HOME", value),
+                None => std::env::remove_var("XDG_CONFIG_HOME"),
+            }
+            match &self.2 {
+                Some(value) => std::env::set_var(crate::session::SESSION_ENV_VAR, value),
+                None => std::env::remove_var(crate::session::SESSION_ENV_VAR),
+            }
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    let _restore = Restore(root.clone(), previous, previous_session);
+    std::env::set_var("XDG_CONFIG_HOME", &root);
+    std::env::remove_var(crate::session::SESSION_ENV_VAR);
+    for mode in [
+        "action-plan",
+        "create-plan",
+        "publishing",
+        "selected-completion",
+        "timeout",
+        "checkpoint-error",
+    ] {
+        let mut server = test_headless_server();
+        server.app.policy.persist_session = true;
+        server.app.state.workspaces =
+            vec![crate::workspace::Workspace::test_new("unsaved-shutdown")];
+        server.app.state.active = Some(0);
+        server.app.state.ensure_test_terminals();
+        server.app.save_session_now();
+        server.app.checkpoint_session_before_pane_exit();
+        let pane = server.app.state.workspaces[0].tabs[0].root_pane;
+        let terminal = server.app.state.workspaces[0]
+            .terminal_id(pane)
+            .unwrap()
+            .clone();
+        server.app.state.workspaces[0].test_split(ratatui::layout::Direction::Horizontal);
+        server.app.state.ensure_test_terminals();
+        server
+            .app
+            .state
+            .terminals
+            .get_mut(&terminal)
+            .unwrap()
+            .set_persisted_agent_session(crate::agent_resume::PersistedAgentSession {
+                source: "vqro:codex".into(),
+                agent: "codex".into(),
+                session_ref: crate::agent_resume::AgentSessionRef::id("unsaved-resume").unwrap(),
+            });
+        server.app.state.session_dirty = true;
+        let (canceled, response) = if mode == "create-plan" {
+            server.app.test_queue_shutdown_create()
+        } else {
+            server.app.test_queue_shutdown_action()
+        };
+        assert!(server.app.collections_mutations_blocked);
+        let high_water = server
+            .app
+            .capture_session_snapshot()
+            .collections_action_sequence;
+        assert!(high_water > 0);
+        let mut worker = None;
+        let mut release = None;
+        if [
+            "publishing",
+            "selected-completion",
+            "timeout",
+            "checkpoint-error",
+        ]
+        .contains(&mode)
+        {
+            let (published_tx, published_rx) = std::sync::mpsc::channel();
+            let (release_tx, release_rx) = std::sync::mpsc::channel();
+            worker = Some(server.app.test_publish_shutdown_checkpoint(
+                crate::persist::collections_checkpoint_paths(),
+                published_tx,
+                release_rx,
+            ));
+            published_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+            assert!(server.app.collections_pending_actions.is_empty());
+            assert!(
+                crate::persist::collections_checkpoint_paths()
+                    .journal
+                    .exists(),
+                "test must pause an actual partly-published two-image checkpoint"
+            );
+            assert!(
+                server.app.collections_mutations_blocked,
+                "empty planning map cannot release publishing fence"
+            );
+            release = Some(release_tx);
+            // A neutral resume observation newer than the publishing image must
+            // survive the ordinary capture after checkpoint reconciliation.
+            server
+                .app
+                .state
+                .terminals
+                .get_mut(&terminal)
+                .unwrap()
+                .set_persisted_agent_session(crate::agent_resume::PersistedAgentSession {
+                    source: "vqro:codex".into(),
+                    agent: "codex".into(),
+                    session_ref: crate::agent_resume::AgentSessionRef::id(
+                        "newer-than-publishing-image",
+                    )
+                    .unwrap(),
+                });
+        }
+        #[cfg(unix)]
+        {
+            let result =
+                server.perform_live_handoff(serde_json::from_value(serde_json::json!({})).unwrap());
+            assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::WouldBlock);
+            assert!(
+                !server.handoff_in_progress,
+                "handoff must not export across an admitted persistence fence"
+            );
+        }
+        server
+            .host_shutdown_requested
+            .store(true, Ordering::Release);
+        if mode == "checkpoint-error" {
+            let paths = crate::persist::collections_checkpoint_paths();
+            let before = std::fs::read(&paths.session).unwrap();
+            drop(release.take());
+            let result = runtime.block_on(server.run());
+            assert!(
+                result.is_err(),
+                "checkpoint error must surface a failed final-save outcome"
+            );
+            worker.take().unwrap().join().unwrap();
+            assert!(
+                paths.journal.exists(),
+                "uncertain publication evidence must survive"
+            );
+            assert_eq!(std::fs::read(paths.session).unwrap(), before);
+            continue;
+        }
+        if mode == "timeout" {
+            let path = crate::persist::collections_checkpoint_paths().session;
+            let before = std::fs::read(&path).unwrap();
+            assert!(runtime
+                .block_on(
+                    server
+                        .app
+                        .settle_persistence_before_shutdown(Duration::ZERO)
+                )
+                .is_err());
+            assert!(server.app.collections_mutations_blocked);
+            server.app.save_session_on_shutdown();
+            assert_eq!(
+                std::fs::read(&path).unwrap(),
+                before,
+                "uncertain checkpoint must not be overwritten"
+            );
+            release.take().unwrap().send(()).unwrap();
+            worker.take().unwrap().join().unwrap();
+            // Finish/recover the checkpoint before the next fixture; final save remains blocked.
+            let event = runtime.block_on(server.app.event_rx.recv()).unwrap();
+            server.handle_internal_event_with_forwarding(event);
+            continue;
+        }
+        if mode == "selected-completion" {
+            release.take().unwrap().send(()).unwrap();
+            let event = runtime.block_on(server.app.event_rx.recv()).unwrap();
+            assert!(matches!(
+                &event,
+                AppEvent::CollectionsCheckpointPersisted(_)
+            ));
+            assert!(!server.handle_internal_event_with_forwarding(event));
+            assert!(!server.app.collections_mutations_blocked);
+        } else if let Some(release) = release.take() {
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(100));
+                release.send(()).unwrap();
+            });
+        }
+        server
+            .app
+            .event_tx
+            .try_send(AppEvent::PaneDied {
+                pane_id: pane,
+                exit_reason: crate::platform::ChildExitReason::Exited,
+            })
+            .unwrap();
+        runtime.block_on(async {
+            tokio::time::timeout(Duration::from_secs(5), server.run())
+                .await
+                .unwrap()
+                .unwrap();
+        });
+        if let Some(worker) = worker {
+            worker.join().unwrap();
+        }
+        assert!(!server.app.collections_mutations_blocked);
+        assert!(server.app.collections_pending_actions.is_empty());
+        assert!(server.app.collections_pending_creates.is_empty());
+        assert_eq!(canceled.load(Ordering::Acquire), mode.ends_with("plan"));
+        assert!(response.recv_timeout(Duration::from_secs(1)).is_ok());
+        // Late provider completion after cancellation must not publish anything.
+        assert!(!server
+            .app
+            .finish_collections_action_plan(77, Err("late plan".into())));
+        assert!(!server
+            .app
+            .finish_collections_create_stage(88, Err("late create".into())));
+        let saved = crate::persist::load().unwrap();
+        assert_eq!(saved.workspaces[0].tabs[0].panes.len(), 2);
+        assert_eq!(
+            saved.workspaces[0].tabs[0].panes[&pane.raw()]
+                .agent_session
+                .as_ref()
+                .unwrap()
+                .value,
+            if ["publishing", "selected-completion"].contains(&mode) {
+                "newer-than-publishing-image"
+            } else {
+                "unsaved-resume"
+            }
+        );
+        assert!(saved.collections_action_sequence >= high_water);
+        assert!(!crate::persist::collections_checkpoint_paths()
+            .journal
+            .exists());
+        server.app.state.assert_invariants_for_test();
+    }
+}
+
+#[test]
 fn host_shutdown_guards_death_resume_autosave_and_api_before_final_save() {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()

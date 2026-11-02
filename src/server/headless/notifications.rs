@@ -358,6 +358,7 @@ impl HeadlessServer {
 
     pub(super) fn handle_internal_event_with_forwarding(&mut self, mut ev: AppEvent) -> bool {
         if self.host_shutdown_requested() {
+            self.app.handle_shutdown_persistence_event(ev);
             return false;
         }
         if matches!(&ev, AppEvent::HostRelationshipsDocumentFinished(_)) {

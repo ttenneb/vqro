@@ -26,10 +26,10 @@ impl HeadlessServer {
         &mut self,
         params: crate::api::schema::ServerLiveHandoffParams,
     ) -> io::Result<()> {
-        if self.app.extension_state_transaction_pending {
+        if self.app.extension_state_transaction_pending || self.app.collections_mutations_blocked {
             return Err(io::Error::new(
                 io::ErrorKind::WouldBlock,
-                "extension state transaction is still being durably committed",
+                "a persistence transaction is still being planned or durably committed",
             ));
         }
         info!("starting live handoff");

@@ -1,6 +1,28 @@
 use super::*;
 
 #[test]
+fn fixture_registration_overrides_inherited_system_bus_for_child_processes() {
+    let _lock = test_lock();
+    let base = unique_test_dir();
+    std::env::set_var(
+        "DBUS_SYSTEM_BUS_ADDRESS",
+        "unix:path=/other-private-unavailable-bus",
+    );
+    register_runtime_dir(&base);
+    assert_eq!(
+        std::env::var("DBUS_SYSTEM_BUS_ADDRESS").unwrap(),
+        "unix:path=/nonexistent-vqro-test-bus"
+    );
+    let output = std::process::Command::new("/bin/sh")
+        .args(["-c", "printf %s \"$DBUS_SYSTEM_BUS_ADDRESS\""])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert_eq!(output.stdout, b"unix:path=/nonexistent-vqro-test-bus");
+    cleanup_test_base(&base);
+}
+
+#[test]
 fn server_survives_launching_terminal_hangup_then_saves_on_explicit_stop() {
     let _lock = test_lock();
     for api_stop in [false, true] {

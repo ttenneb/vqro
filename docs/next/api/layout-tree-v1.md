@@ -118,7 +118,13 @@ authority; it cannot lower the action high-water barrier.
 
 Host shutdown takes precedence over queued pane deaths, agent-exit observations,
 due autosaves and new API mutations, so the final save sees intact layout and
-resume facts. Linux uses logind's delay inhibitor until that save completes;
+resume facts. Still-planning Collections actions/creates are canceled; an already
+publishing checkpoint is settled only through its existing persisted-completion
+event and authority/mutation fences before the final ordinary capture. Death,
+agent and new provider-plan events are not applied during settlement. A bounded
+settlement timeout or checkpoint error reports a failed final save, retains
+recovery evidence and never force-unblocks an uncertain write. Linux uses
+logind's delay inhibitor until that save decision completes;
 unavailable/lost logind or bus connections retry without blocking normal use.
 Windows probes the current session's shutdown/logoff state rather than guessing
 from child exit codes. macOS observes loginwindow restart/shutdown announcements,

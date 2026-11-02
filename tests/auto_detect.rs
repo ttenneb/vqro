@@ -200,6 +200,7 @@ fn wait_for_log_contains(path: &Path, needle: &str, timeout: Duration) {
 }
 
 fn run_cli(socket_path: &Path, args: &[&str]) -> std::process::Output {
+    support::isolate_test_server_bus();
     let mut command = Command::new(env!("CARGO_BIN_EXE_vqro"));
     command.args(args);
     command.env("VQRO_SOCKET_PATH", socket_path);

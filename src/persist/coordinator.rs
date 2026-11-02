@@ -480,6 +480,24 @@ where
     result
 }
 
+#[cfg(test)]
+pub(crate) fn persist_checkpoint_paused_after_session_for_test(
+    paths: &PersistencePaths,
+    session: &SessionSnapshot,
+    extension_state: &DurableExtensionStateV1,
+    published: std::sync::mpsc::Sender<()>,
+    release: std::sync::mpsc::Receiver<()>,
+) -> Result<(), PersistenceError> {
+    let ownership = PersistenceOwnership::try_acquire(paths)?;
+    persist_checkpoint_with(&ownership, paths, session, extension_state, |boundary| {
+        if boundary == Boundary::SessionReplaced {
+            published.send(()).map_err(std::io::Error::other)?;
+            release.recv().map_err(std::io::Error::other)?;
+        }
+        Ok(())
+    })
+}
+
 /// Inspects and completes a pending two-file checkpoint. Startup does not call this yet.
 ///
 /// Recovery accepts only exact configured targets and exact stage/target digests. Any ambiguity is

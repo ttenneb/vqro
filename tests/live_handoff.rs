@@ -78,6 +78,7 @@ fn spawn_server_binary_with_env(
     api_socket: &Path,
     extra_env: &[(&str, &str)],
 ) -> SpawnedHerdr {
+    register_runtime_dir(runtime_dir);
     fs::create_dir_all(config_home.join("vqro-dev")).unwrap();
     fs::create_dir_all(runtime_dir).unwrap();
     fs::write(
@@ -121,6 +122,7 @@ fn spawn_named_session_server(
     runtime_dir: &Path,
     session_name: &str,
 ) -> SpawnedHerdr {
+    register_runtime_dir(runtime_dir);
     fs::create_dir_all(config_home.join("vqro-dev")).unwrap();
     fs::create_dir_all(runtime_dir).unwrap();
     fs::write(
@@ -155,6 +157,7 @@ fn spawn_named_session_server(
 }
 
 fn spawn_default_session_server(config_home: &Path, runtime_dir: &Path) -> SpawnedHerdr {
+    register_runtime_dir(runtime_dir);
     fs::create_dir_all(config_home.join("vqro-dev")).unwrap();
     fs::create_dir_all(runtime_dir).unwrap();
     fs::write(
@@ -196,6 +199,7 @@ fn spawn_server_with_args_and_socket_env(
     api_socket_env: Option<&Path>,
     client_socket_env: Option<&Path>,
 ) -> SpawnedHerdr {
+    register_runtime_dir(runtime_dir);
     fs::create_dir_all(config_home.join("vqro-dev")).unwrap();
     fs::create_dir_all(runtime_dir).unwrap();
     fs::write(
@@ -2775,6 +2779,7 @@ fn run_legacy_v1_source_harness(commit: bool) {
     let api_socket = runtime_dir.join("herdr.sock");
     let client_socket = runtime_dir.join("herdr-client.sock");
     let handoff_socket = runtime_dir.join("legacy-handoff.sock");
+    register_runtime_dir(&runtime_dir);
     fs::create_dir_all(config_home.join("vqro-dev")).unwrap();
     fs::create_dir_all(&runtime_dir).unwrap();
     fs::write(

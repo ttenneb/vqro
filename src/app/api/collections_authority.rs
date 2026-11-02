@@ -24,6 +24,10 @@ use crate::extension_state::{
 // transport, replacement, rollback, and fail-closed evidence recorded in the release ledger.
 const COLLECTIONS_AUTHORITY_CUTOVER_ADMITTED: bool = true;
 
+#[cfg(test)]
+#[path = "collections_shutdown_fixture.rs"]
+mod shutdown_fixture;
+
 pub(crate) struct PendingCollectionsAction {
     request_id: String,
     respond_to: std::sync::mpsc::Sender<String>,
@@ -685,6 +689,29 @@ impl App {
         let mut session = self.capture_session_snapshot();
         session.collections_authority = authority.clone();
         Ok((state, authority, session))
+    }
+
+    /// A pending plan/create still lives in these maps only before publication.
+    /// Once a checkpoint worker owns it, the map is empty and its mutation fence
+    /// must be released only by that worker's persistence completion.
+    pub(crate) fn cancel_prepublication_collections_for_shutdown(&mut self) -> bool {
+        let had_pending = !self.collections_pending_actions.is_empty()
+            || !self.collections_pending_creates.is_empty();
+        for (_, pending) in self.collections_pending_actions.drain() {
+            pending.canceled.store(true, Ordering::Release);
+            let _ = pending.respond_to.send(super::responses::encode_error(
+                pending.request_id,
+                "server_unavailable",
+                "server is shutting down before publication",
+            ));
+        }
+        for (_, pending) in self.collections_pending_creates.drain() {
+            pending.cancel("server is shutting down before publication");
+        }
+        if had_pending {
+            self.collections_mutations_blocked = false;
+        }
+        had_pending
     }
 
     pub(crate) fn finish_collections_checkpoint(&mut self, result: CollectionsCheckpointResult) {
