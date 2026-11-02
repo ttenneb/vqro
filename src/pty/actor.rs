@@ -234,17 +234,10 @@ mod windows {
             {
                 let write_tx = write_tx.clone();
                 let accepting = Arc::clone(&accepting);
-<<<<<<< HEAD
-                crate::thread_spawn::spawn_named("vqro-pty-input", move || {
-                    run_input_forwarder(&mut data_rx, write_tx, accepting);
-                    debug!(pane_id, "windows pty input thread exiting");
-                })?;
-=======
                 tokio::spawn(async move {
                     run_input_forwarder(&mut data_rx, write_tx, accepting).await;
                     debug!(pane_id, "windows pty input task exiting");
                 });
->>>>>>> c3d5e5bada903f65c0e3dda993f88aa1d16d47d1
             }
 
             {

@@ -118,16 +118,14 @@ build:
 bench-render-scale:
     cargo test --release --locked --bin vqro render_scale_profile -- --ignored --nocapture --test-threads=1
 
-<<<<<<< HEAD
 # Profile full and retained text, static-image, and unchanged-image updates
 bench-retained-graphics:
     cargo test --release --locked --bin vqro render_scale_profile_retained_graphics -- --ignored --nocapture --test-threads=1
-=======
+
 # Native Windows-only idle process-inspection profile; no server is started.
 [windows]
 bench-process-inspection:
     cargo test --release --locked --bin vqro windows_process_inspection_profile -- --ignored --nocapture --test-threads=1
->>>>>>> 8291a65c7a0102bd7a454f4d32979a2b31369945
 
 # ~3-5 minute CPU comparison; downloads stable unless HERDR_PERF_BASELINE_BIN is set
 bench-release-smoke:
