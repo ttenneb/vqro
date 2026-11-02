@@ -4579,7 +4579,7 @@ mod tests {
     }
 
     #[test]
-    fn saved_machine_setup_handoffs_old_server_missing_presentation_fence() {
+    fn saved_machine_setup_rejects_captured_generation_one_even_with_required_capabilities() {
         let linux = RemotePlatform {
             os: "linux",
             arch: "x86_64",
@@ -4593,17 +4593,11 @@ mod tests {
             r#"{"version":"0.8.2","protocol":22,"endpoint_protocol_generation":1,"endpoint_capabilities":["surface_interest","health_check"]}"#,
         )
         .unwrap();
-        assert!(installed.supports_endpoint_requirement(&linux, true));
+        assert!(!installed.supports_endpoint_requirement(&linux, true));
         assert!(!running_binary.supports_endpoint_requirement(&linux, true));
-        for (live_capabilities, expected) in [
-            (
-                running_binary.endpoint_capabilities,
-                RemoteInstallRunningServerPlan::LiveHandoff,
-            ),
-            (
-                installed.endpoint_capabilities,
-                RemoteInstallRunningServerPlan::KeepRunning,
-            ),
+        for live_capabilities in [
+            running_binary.endpoint_capabilities,
+            installed.endpoint_capabilities,
         ] {
             let live_negotiation = crate::client::endpoint::EndpointNegotiation::new(
                 vec!["client_shell.surface.set".into()],
@@ -4625,6 +4619,70 @@ mod tests {
             };
 
             assert_eq!(
+                remote_server_restart_reason(
+                    endpoint_protocol_generation,
+                    detached_server_daemon,
+                    true,
+                    surface_interest,
+                    health_check,
+                ),
+                Some(RemoteServerRestartReason::EndpointProtocol),
+                "negotiated capabilities must not admit a retired generation",
+            );
+            assert_eq!(
+                remote_install_running_server_plan(
+                    endpoint_protocol_generation,
+                    detached_server_daemon,
+                    surface_interest,
+                    health_check,
+                    live_handoff,
+                    false,
+                    true,
+                ),
+                RemoteInstallRunningServerPlan::StopRequired(
+                    RemoteServerRestartReason::EndpointProtocol
+                ),
+            );
+        }
+    }
+
+    #[test]
+    fn saved_machine_setup_handoffs_current_generation_server_missing_presentation_fence() {
+        let linux = RemotePlatform {
+            os: "linux",
+            arch: "x86_64",
+        };
+        let installed = parse_client_status_json(
+            r#"{"version":"0.9.0","protocol":24,"endpoint_protocol_generation":2,"endpoint_capabilities":["surface_interest","presentation_effects_fence","health_check"]}"#,
+        ).unwrap();
+        let running_binary = parse_client_status_json(
+            r#"{"version":"0.9.0","protocol":24,"endpoint_protocol_generation":2,"endpoint_capabilities":["surface_interest","health_check"]}"#,
+        ).unwrap();
+        assert!(installed.supports_endpoint_requirement(&linux, true));
+        assert!(!running_binary.supports_endpoint_requirement(&linux, true));
+        for (live_capabilities, expected) in [
+            (
+                running_binary.endpoint_capabilities,
+                RemoteInstallRunningServerPlan::LiveHandoff,
+            ),
+            (
+                installed.endpoint_capabilities,
+                RemoteInstallRunningServerPlan::KeepRunning,
+            ),
+        ] {
+            let live_negotiation = crate::client::endpoint::EndpointNegotiation::new(
+                vec!["client_shell.surface.set".into()],
+                live_capabilities,
+            );
+            let RemoteServerStatus::Running {
+                endpoint_protocol_generation, surface_interest, health_check,
+                live_handoff, detached_server_daemon, ..
+            } = parse_remote_server_status_json(
+                r#"{"status":"running","running":true,"version":"0.9.0","protocol":24,"capabilities":{"live_handoff":true,"detached_server_daemon":true,"endpoint_protocol_generation":2,"surface_interest":true,"health_check":true}}"#,
+            ).unwrap().with_endpoint_negotiation(&live_negotiation) else {
+                panic!("current-generation server must be running");
+            };
+            assert_eq!(
                 remote_install_running_server_plan(
                     endpoint_protocol_generation,
                     detached_server_daemon,
@@ -4635,7 +4693,7 @@ mod tests {
                     true,
                 ),
                 expected,
-                "setup must follow the running server's negotiated capabilities",
+                "current-generation setup must follow negotiated capabilities",
             );
         }
     }
@@ -4653,14 +4711,26 @@ mod tests {
         let old =
             parse_client_status_json(r#"{"version":"0.8.2","endpoint_protocol_generation":1}"#)
                 .unwrap();
-        let current = parse_client_status_json(
+        let legacy_with_bridge = parse_client_status_json(
             r#"{"version":"0.9.0","endpoint_protocol_generation":1,"remote_host_bridge":true}"#,
         )
         .unwrap();
+        let current_without_bridge =
+            parse_client_status_json(r#"{"version":"0.9.0","endpoint_protocol_generation":2}"#)
+                .unwrap();
+        let current_with_bridge = parse_client_status_json(
+            r#"{"version":"0.9.0","endpoint_protocol_generation":2,"remote_host_bridge":true}"#,
+        )
+        .unwrap();
 
-        assert!(!old.supports_endpoint_requirement(&windows, false));
-        assert!(current.supports_endpoint_requirement(&windows, false));
-        assert!(old.supports_endpoint_requirement(&linux, false));
+        for legacy in [&old, &legacy_with_bridge] {
+            assert!(!legacy.supports_endpoint_requirement(&windows, false));
+            assert!(!legacy.supports_endpoint_requirement(&linux, false));
+        }
+        assert!(!current_without_bridge.supports_endpoint_requirement(&windows, false));
+        assert!(current_with_bridge.supports_endpoint_requirement(&windows, false));
+        assert!(current_without_bridge.supports_endpoint_requirement(&linux, false));
+        assert!(current_with_bridge.supports_endpoint_requirement(&linux, false));
         assert!(!local_binary_can_seed_remote(&windows));
         assert_eq!(
             windows_package_identity(true, &"a".repeat(64)),
