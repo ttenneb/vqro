@@ -132,3 +132,46 @@ just test-one link_activation
 just test-one ctrl_click
 just check
 ```
+
+## 0007 encoded PNG and immutable source retention
+
+status: active
+
+patch: `vendor/patches/libghostty-vt/0007-experimental-png-retention.patch`
+
+upstream reference: Herdr `c411883e` (#4561); Ghostty discussion/PR not opened.
+
+vendored base: `44f2a44df7e8c4a0c6df3f7d872ef3d7ead88e51`
+
+local files:
+
+- `vendor/libghostty-vt/include/ghostty/vt/terminal.h`
+- `vendor/libghostty-vt/include/ghostty/vt/kitty_graphics.h`
+- `vendor/libghostty-vt/src/terminal/c/terminal.zig`
+- `vendor/libghostty-vt/src/terminal/c/kitty_graphics.zig`
+- `vendor/libghostty-vt/src/terminal/kitty/graphics_image.zig`
+- `vendor/libghostty-vt/src/terminal/kitty/graphics_exec.zig`
+- `vendor/libghostty-vt/src/terminal/kitty/graphics_storage.zig`
+
+reason: opt-in embedding APIs retain encoded quiet PNG uploads or immutable,
+host-owned raw image snapshots with bounded storage and explicit ownership.
+Existing raw getters retain their meaning. Encoded PNG retention is experimental
+and default-off: compressed-pixel validation can be delayed, so Vqro exercises
+it only in tests; production PNG uploads still decode and validate fully.
+A separate default-off snapshot callback is enabled on Linux using same-filesystem
+CoW snapshots, never mutable producer paths. Unsupported snapshots use the
+original loader. Animation materializes pixels transactionally.
+
+remove when: upstream provides equivalent owned encoded-image and immutable raw
+source APIs with bounded storage, strict query handling and lazy materialization,
+or the experiment is retired.
+
+verification:
+
+```sh
+just test-one native_source
+just test-one png_forward_tests
+just test-one kitty_png_replacement
+just test-one kitty_file_image_survives
+just maintenance-test
+```

@@ -2571,7 +2571,7 @@ fn empty_collection_surface_renders_and_owns_blank_space_context_menu() {
 }
 
 /// A collection with two members, shown as a list, over one pane surface.
-fn listed_collection_state() -> ClientShellState {
+pub(super) fn listed_collection_state() -> ClientShellState {
     let mut projected = snapshot();
     projected.panes.push(ClientShellPane {
         pane_id: "pane_2".into(),

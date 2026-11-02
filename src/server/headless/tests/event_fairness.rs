@@ -17,7 +17,6 @@ fn queue_requests(server: &mut HeadlessServer, count: usize) -> std::sync::mpsc:
                 },
                 respond_to: respond_to.clone(),
                 response_write_complete: None,
-                stream_active: None,
             })
             .unwrap();
     }

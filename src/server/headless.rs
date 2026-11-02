@@ -75,8 +75,8 @@ mod bootstrap;
 mod client_views;
 mod endpoint_requests;
 mod lifecycle;
+mod native_graphics;
 mod notifications;
-mod pane_graphics;
 mod render;
 mod retained_surface;
 mod surface_interest;
@@ -136,29 +136,14 @@ enum LoopEvent {
     RenderRequested,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+/// Presentation work caused by a server event.
+///
+/// Keeping this classification separate from event delivery makes the input
+/// contract explicit: events may reach a PTY without necessarily repainting.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RenderImpact {
-    #[default]
     None,
-    Graphics,
     Full,
-}
-
-impl RenderImpact {
-    fn merge(&mut self, other: Self) {
-        *self = (*self).max(other);
-    }
-}
-
-fn record_render_impact(source: &'static str, impact: RenderImpact) {
-    let event = match (source, impact) {
-        ("api_requests", RenderImpact::Graphics) => "graphics_render_cause.api_requests",
-        ("api_requests", RenderImpact::Full) => "full_render_cause.api_requests",
-        ("server_events", RenderImpact::Graphics) => "graphics_render_cause.server_events",
-        ("server_events", RenderImpact::Full) => "full_render_cause.server_events",
-        _ => return,
-    };
-    crate::render_prof::event(event);
 }
 
 // ---------------------------------------------------------------------------
@@ -209,6 +194,7 @@ pub struct HeadlessServer {
     client_socket_path: PathBuf,
     client_socket_identity: SocketFileIdentity,
     clients: HashMap<u64, ClientConnection>,
+    native_graphics: native_graphics::NativeGraphics,
     #[cfg(unix)]
     next_client_id: u64,
     /// The client currently driving session-wide host presentation and side effects.
@@ -356,6 +342,7 @@ impl HeadlessServer {
             client_socket_path: client_path,
             client_socket_identity,
             clients: HashMap::new(),
+            native_graphics: Default::default(),
             #[cfg(unix)]
             next_client_id: 1,
             foreground_client_id: None,
@@ -454,22 +441,7 @@ impl HeadlessServer {
             }
 
             // 3. Drain API requests.
-            if self.pane_graphics_runtime_active() {
-                let api_impact = self.drain_api_requests_with_render_impact();
-                record_render_impact("api_requests", api_impact);
-                match api_impact {
-                    RenderImpact::None => {}
-                    RenderImpact::Graphics => {
-                        needs_render = true;
-                        needs_graphics_render = true;
-                    }
-                    RenderImpact::Full => {
-                        needs_render = true;
-                        needs_full_render = true;
-                        needs_graphics_render = false;
-                    }
-                }
-            } else if self.drain_api_requests_with_shutdown_check() {
+            if self.drain_api_requests_with_shutdown_check() {
                 needs_render = true;
                 needs_full_render = true;
                 crate::render_prof::event("full_render_cause.api_requests");
@@ -485,22 +457,7 @@ impl HeadlessServer {
             self.accept_client_connections()?;
 
             // 5. Drain server events from client threads.
-            if self.pane_graphics_runtime_active() {
-                let server_impact = self.drain_server_events_with_render_impact();
-                record_render_impact("server_events", server_impact);
-                match server_impact {
-                    RenderImpact::None => {}
-                    RenderImpact::Graphics => {
-                        needs_render = true;
-                        needs_graphics_render = true;
-                    }
-                    RenderImpact::Full => {
-                        needs_render = true;
-                        needs_full_render = true;
-                        needs_graphics_render = false;
-                    }
-                }
-            } else if self.drain_server_events() {
+            if self.drain_server_events() {
                 needs_render = true;
                 needs_full_render = true;
                 crate::render_prof::event("full_render_cause.server_events");
@@ -532,13 +489,10 @@ impl HeadlessServer {
                 crate::render_prof::event("full_render_cause.default_workspace");
             }
 
-            if self.retain_live_pane_graphics() {
+            if self.expire_native_graphics(now) {
                 needs_render = true;
-                needs_graphics_render = true;
-            }
-            if self.expire_direct_graphics(now) {
-                needs_render = true;
-                needs_graphics_render = true;
+                needs_full_render = true;
+                needs_graphics_render = false;
             }
 
             self.drain_client_config_reload_request();
@@ -678,43 +632,13 @@ impl HeadlessServer {
                     }
                 }
                 LoopEvent::Api(msg) => {
-                    if self.pane_graphics_runtime_active() {
-                        let impact = self.handle_api_request_with_render_impact(*msg);
-                        record_render_impact("api_requests", impact);
-                        match impact {
-                            RenderImpact::None => {}
-                            RenderImpact::Graphics => {
-                                needs_render = true;
-                                needs_graphics_render = true;
-                            }
-                            RenderImpact::Full => {
-                                needs_render = true;
-                                needs_full_render = true;
-                                needs_graphics_render = false;
-                            }
-                        }
-                    } else if self.handle_api_request_with_shutdown_check(*msg) {
+                    if self.handle_api_request_with_shutdown_check(*msg) {
                         needs_render = true;
                         needs_full_render = true;
                     }
                 }
                 LoopEvent::ServerEvent(ev) => {
-                    if self.pane_graphics_runtime_active() {
-                        let impact = self.handle_server_event_with_render_impact(ev);
-                        record_render_impact("server_events", impact);
-                        match impact {
-                            RenderImpact::None => {}
-                            RenderImpact::Graphics => {
-                                needs_render = true;
-                                needs_graphics_render = true;
-                            }
-                            RenderImpact::Full => {
-                                needs_render = true;
-                                needs_full_render = true;
-                                needs_graphics_render = false;
-                            }
-                        }
-                    } else if self.handle_server_event(ev) {
+                    if self.handle_server_event_with_render_impact(ev) == RenderImpact::Full {
                         needs_render = true;
                         needs_full_render = true;
                     }
@@ -814,15 +738,11 @@ impl HeadlessServer {
     }
 
     fn sync_foreground_client_state(&mut self) {
-        self.app.direct_graphics_available = self.direct_graphics_available();
         self.app.pixel_mouse_available = self.foreground_client_id.is_some_and(|id| {
             self.clients
                 .get(&id)
                 .is_some_and(|client| client.pixel_mouse)
         });
-        if !self.app.direct_graphics_available {
-            self.retire_all_direct_graphics();
-        }
         let Some(client_id) = self.foreground_client_id else {
             self.effective_size = self.headless_size;
             self.app.state.outer_terminal_focus = None;
@@ -955,47 +875,6 @@ impl HeadlessServer {
         })
     }
 
-    fn existing_direct_graphics_client(&self) -> Option<u64> {
-        self.app
-            .pane_graphics
-            .slots
-            .values()
-            .filter_map(crate::app::pane_graphics::Slot::direct_client)
-            .filter_map(|client_id| {
-                let client = self.clients.get(&client_id)?;
-                self.client_supports_direct_graphics(client_id)
-                    .then_some((client.last_activity, client_id))
-            })
-            .max()
-            .map(|(_, client_id)| client_id)
-    }
-
-    fn direct_graphics_client(&self) -> Option<u64> {
-        self.existing_direct_graphics_client().or_else(|| {
-            self.foreground_client_id
-                .filter(|client_id| self.client_supports_direct_graphics(*client_id))
-        })
-    }
-
-    fn direct_graphics_client_for_key(&self, key: &crate::app::pane_graphics::Key) -> Option<u64> {
-        match self
-            .app
-            .pane_graphics
-            .slots
-            .get(key)
-            .and_then(crate::app::pane_graphics::Slot::direct_client)
-        {
-            Some(client_id) => self
-                .client_supports_direct_graphics(client_id)
-                .then_some(client_id),
-            None => self.direct_graphics_client(),
-        }
-    }
-
-    fn direct_graphics_available(&self) -> bool {
-        self.direct_graphics_client().is_some()
-    }
-
     fn has_app_client(&self) -> bool {
         self.app_client_count() > 0
     }
@@ -1125,7 +1004,7 @@ impl HeadlessServer {
 
     fn remove_client(&mut self, client_id: u64) -> bool {
         self.cancel_client_extension_work(client_id);
-        self.retire_direct_graphics_for_client(client_id);
+        self.disconnect_native_graphics(client_id);
         let disconnected_focus = self
             .clients
             .get(&client_id)
@@ -1168,7 +1047,6 @@ impl HeadlessServer {
                 self.send_shell_focus_target(target, crate::ghostty::FocusEvent::Lost);
             }
         }
-        self.app.direct_graphics_available = self.direct_graphics_available();
         if was_foreground {
             self.promote_latest_remaining_client()
         } else {
@@ -1247,8 +1125,6 @@ impl HeadlessServer {
     }
 
     /// Drains server events from the dedicated channel.
-    ///
-    /// Uses the original full-render semantics when pane graphics are dormant.
     fn drain_server_events(&mut self) -> bool {
         let mut changed = false;
         for _ in 0..EXTERNAL_EVENT_DRAIN_LIMIT {
@@ -1258,24 +1134,9 @@ impl HeadlessServer {
             let Ok(ev) = self.server_event_rx.try_recv() else {
                 break;
             };
-            changed |= self.handle_server_event(ev);
+            changed |= self.handle_server_event_with_render_impact(ev) == RenderImpact::Full;
         }
         changed
-    }
-
-    /// Returns the strongest render impact from the drained event batch.
-    fn drain_server_events_with_render_impact(&mut self) -> RenderImpact {
-        let mut impact = RenderImpact::None;
-        for _ in 0..EXTERNAL_EVENT_DRAIN_LIMIT {
-            if self.should_quit.load(Ordering::Acquire) {
-                break;
-            }
-            let Ok(ev) = self.server_event_rx.try_recv() else {
-                break;
-            };
-            impact.merge(self.handle_server_event_with_render_impact(ev));
-        }
-        impact
     }
 
     async fn reject_late_client_connections(&mut self) {
@@ -2254,12 +2115,17 @@ impl HeadlessServer {
                 transfer_id,
                 image_id,
                 success,
-            } => self.complete_direct_graphics(client_id, transfer_id, image_id, success),
+            } => self
+                .native_result(client_id, transfer_id, image_id, success)
+                .unwrap_or(false),
             ServerEvent::GraphicsTransmissionStarted {
                 client_id,
                 transfer_id,
                 image_id,
-            } => self.start_direct_graphics_response(client_id, transfer_id, image_id),
+            } => {
+                self.native_started(client_id, transfer_id, image_id);
+                false
+            }
             ServerEvent::ClientAttachTerminal {
                 client_id,
                 terminal_id,
@@ -3639,38 +3505,6 @@ impl HeadlessServer {
         }
     }
 
-    fn drain_api_requests_with_render_impact(&mut self) -> RenderImpact {
-        let mut impact = RenderImpact::None;
-        for _ in 0..EXTERNAL_EVENT_DRAIN_LIMIT {
-            if self.should_quit.load(Ordering::Acquire) {
-                break;
-            }
-            let Ok(msg) = self.app.api_rx.try_recv() else {
-                break;
-            };
-            impact.merge(self.handle_api_request_with_render_impact(msg));
-        }
-        impact
-    }
-
-    fn handle_api_request_with_render_impact(
-        &mut self,
-        msg: api::ApiRequestMessage,
-    ) -> RenderImpact {
-        if matches!(
-            &msg.request.method,
-            api::schema::Method::PaneGraphicsStreamSet(_)
-                | api::schema::Method::PaneGraphicsStreamDirect(_)
-        ) {
-            return self.handle_pane_graphics_stream_frame(msg);
-        }
-        if self.handle_api_request_with_shutdown_check(msg) {
-            RenderImpact::Full
-        } else {
-            RenderImpact::None
-        }
-    }
-
     fn handle_api_request_with_shutdown_check_inner(
         &mut self,
         msg: api::ApiRequestMessage,
@@ -3741,12 +3575,6 @@ impl HeadlessServer {
         };
 
         let metadata_expired = self.app.expire_due_metadata(Instant::now());
-        let stream_open = match &msg.request.method {
-            api::schema::Method::PaneGraphicsStreamOpen(params) => Some(params.clone()),
-            _ => None,
-        };
-        let stream_active = msg.stream_active.clone();
-
         if let api::schema::Method::ServerLiveHandoff(params) = &msg.request.method {
             let handoff_result = if self.app.collections_mutations_blocked {
                 Err(std::io::Error::new(
@@ -3803,16 +3631,7 @@ impl HeadlessServer {
             _ => {}
         }
 
-        let pane_graphics_revision_before = matches!(
-            &msg.request.method,
-            api::schema::Method::PaneGraphicsSet(_)
-                | api::schema::Method::PaneGraphicsClear(_)
-                | api::schema::Method::PaneGraphicsStreamOpen(_)
-                | api::schema::Method::PaneGraphicsStreamClose(_)
-        )
-        .then_some(self.app.pane_graphics.revision());
-        let mut changed = metadata_expired
-            | (pane_graphics_revision_before.is_none() && api::request_changes_ui(&msg.request));
+        let mut changed = metadata_expired | api::request_changes_ui(&msg.request);
         let skip_default_workspace = skip_default_workspace_for_request
             || matches!(
                 &msg.request.method,
@@ -4025,10 +3844,6 @@ impl HeadlessServer {
                 }
             }
         }
-        if let (Some(params), Some(active)) = (stream_open.as_ref(), stream_active) {
-            self.app
-                .attach_pane_graphics_stream_active(params, active, &response);
-        }
         if let Some(spec) = alt_screen_read_spec {
             if let Ok(success) = serde_json::from_str::<api::schema::SuccessResponse>(&response) {
                 if let api::schema::ResponseResult::PaneRead { read } = success.result {
@@ -4053,10 +3868,6 @@ impl HeadlessServer {
             crate::agent_execution::respond(&self.app, response, msg.respond_to);
         } else {
             let _ = msg.respond_to.send(response);
-        }
-
-        if let Some(revision_before) = pane_graphics_revision_before {
-            changed |= revision_before != self.app.pane_graphics.revision();
         }
 
         // Forward new toast state only when a client-local delivery mode is selected.

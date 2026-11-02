@@ -22,8 +22,6 @@ use crate::ipc::{
     socket_file_identity, LocalStream, LocalStreamRead, SocketFileIdentity,
 };
 
-mod pane_graphics_stream;
-
 const SOCKET_PERMISSION_MODE: u32 = 0o600;
 pub(super) const CONNECTION_POLL_INTERVAL: Duration = Duration::from_millis(100);
 pub(super) const APP_RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -388,16 +386,45 @@ fn handle_connection_with_stop(
     let request = match serde_json::from_str::<Request>(line) {
         Ok(request) => request,
         Err(request_error) => {
-            write_json_line_allow_disconnect(
-                &mut stream,
-                &ErrorResponse {
-                    id: String::new(),
-                    error: ErrorBody {
-                        code: "invalid_request".into(),
-                        message: format!("invalid request: {request_error}"),
+            // Recover correlation without accepting ambiguous duplicate IDs.
+            #[derive(serde::Deserialize)]
+            struct RequestId {
+                id: String,
+            }
+            #[derive(serde::Deserialize)]
+            struct RequestMethod {
+                method: String,
+            }
+            let id = serde_json::from_str::<RequestId>(line)
+                .map(|request| request.id)
+                .unwrap_or_default();
+            let method = serde_json::from_str::<RequestMethod>(line)
+                .map(|request| request.method)
+                .unwrap_or_default();
+            let retired = matches!(
+                method.as_str(),
+                "pane.graphics.info"
+                    | "pane.graphics.set"
+                    | "pane.graphics.clear"
+                    | "pane.graphics.stream"
+            );
+            let response = ErrorResponse {
+                id,
+                error: ErrorBody {
+                    code: if retired {
+                        "unknown_method"
+                    } else {
+                        "invalid_request"
+                    }
+                    .into(),
+                    message: if retired {
+                        format!("unknown method: {method}")
+                    } else {
+                        format!("invalid request: {request_error}")
                     },
                 },
-            )?;
+            };
+            write_json_line_allow_disconnect(&mut stream, &response)?;
             return Ok(());
         }
     };
@@ -408,22 +435,6 @@ fn handle_connection_with_stop(
     crate::logging::api_request_started(&request_id, method, changes_ui);
 
     match request.method {
-        Method::PaneGraphicsStream(params) => {
-            let result =
-                pane_graphics_stream::serve(stream, request_id.clone(), params, api_tx, running);
-            match &result {
-                Ok(()) => crate::logging::api_request_completed(
-                    &request_id,
-                    method,
-                    "stream_closed",
-                    changes_ui,
-                ),
-                Err(err) => {
-                    crate::logging::api_request_failed(&request_id, method, &err.to_string())
-                }
-            }
-            result
-        }
         Method::EventsSubscribe(params) => {
             let result = stream_subscriptions(
                 stream,
@@ -522,7 +533,6 @@ fn handle_connection_with_stop(
                 },
                 respond_to,
                 response_write_complete: None,
-                stream_active: None,
             };
             let response = if api_tx.send(message).is_err() {
                 error_response_json(
@@ -647,7 +657,6 @@ fn handle_request(
         None,
         response_write_complete,
         None,
-        None,
         crate::api::ApiOrigin::LocalSocket,
     )
 }
@@ -755,14 +764,6 @@ pub(crate) fn api_method_name(method: &Method) -> &'static str {
         Method::PaneSendKeys(_) => "pane.send_keys",
         Method::PaneSendInput(_) => "pane.send_input",
         Method::PaneRead(_) => "pane.read",
-        Method::PaneGraphicsSet(_) => "pane.graphics.set",
-        Method::PaneGraphicsClear(_) => "pane.graphics.clear",
-        Method::PaneGraphicsInfo(_) => "pane.graphics.info",
-        Method::PaneGraphicsStream(_) => "pane.graphics.stream",
-        Method::PaneGraphicsStreamSet(_) => "pane.graphics.stream.set",
-        Method::PaneGraphicsStreamDirect(_) => "pane.graphics.stream.direct",
-        Method::PaneGraphicsStreamOpen(_) => "pane.graphics.stream.open",
-        Method::PaneGraphicsStreamClose(_) => "pane.graphics.stream.close",
         Method::PaneReportAgent(_) => "pane.report_agent",
         Method::PaneReportAgentSession(_) => "pane.report_agent_session",
         Method::PaneReportMetadata(_) => "pane.report_metadata",
@@ -1135,7 +1136,6 @@ pub(super) fn dispatch_to_app_with_timeout(
         timeout,
         None,
         None,
-        None,
         crate::api::ApiOrigin::LocalSocket,
     )
 }
@@ -1150,41 +1150,7 @@ pub(super) fn dispatch_to_app_with_caller_timeout(
         api_tx,
         timeout,
         None,
-        None,
         Some(("timeout", "timed out waiting for agent status")),
-        crate::api::ApiOrigin::LocalSocket,
-    )
-}
-
-pub(super) fn dispatch_stream_open(
-    request: Request,
-    api_tx: &ApiRequestSender,
-    timeout: Duration,
-    active: Arc<AtomicBool>,
-) -> String {
-    dispatch_to_app(
-        request,
-        api_tx,
-        Some(timeout),
-        None,
-        Some(active),
-        None,
-        crate::api::ApiOrigin::LocalSocket,
-    )
-}
-
-pub(super) fn dispatch_stream_frame(
-    request: Request,
-    api_tx: &ApiRequestSender,
-    active: Arc<AtomicBool>,
-) -> String {
-    dispatch_to_app(
-        request,
-        api_tx,
-        Some(crate::app::pane_graphics::DIRECT_OUTER_TIMEOUT),
-        None,
-        Some(active),
-        None,
         crate::api::ApiOrigin::LocalSocket,
     )
 }
@@ -1194,23 +1160,17 @@ pub(super) fn dispatch_to_app(
     api_tx: &ApiRequestSender,
     timeout: Option<Duration>,
     response_write_complete: Option<std::sync::mpsc::Receiver<()>>,
-    stream_active: Option<Arc<AtomicBool>>,
     timeout_response: Option<(&str, &str)>,
     origin: crate::api::ApiOrigin,
 ) -> String {
     let request_id = request.id.clone();
-    let request_active = stream_active.clone();
     let (respond_to, response_rx) = std::sync::mpsc::channel();
     if let Err(err) = api_tx.send(ApiRequestMessage {
         origin,
         request,
         respond_to,
         response_write_complete,
-        stream_active,
     }) {
-        if let Some(active) = request_active {
-            active.store(false, Ordering::Release);
-        }
         return error_response_json(
             request_id,
             "server_unavailable",
@@ -1240,9 +1200,6 @@ pub(super) fn dispatch_to_app(
     match response {
         Ok(response) => response,
         Err(err) => {
-            if let Some(active) = request_active {
-                active.store(false, Ordering::Release);
-            }
             if err.kind() == std::io::ErrorKind::TimedOut {
                 if let Some((code, message)) = timeout_response {
                     return error_response_json(request_id, code, message.into());
@@ -1504,6 +1461,93 @@ mod tests {
         let generic_error =
             r#"{"id":"req","error":{"code":"server_unavailable","message":"boom"}}"#;
         assert_eq!(api_response_outcome(generic_error), "error");
+    }
+
+    #[test]
+    fn removed_pane_graphics_methods_return_unknown_method_without_stream_upgrade() {
+        for method in [
+            "pane.graphics.info",
+            "pane.graphics.set",
+            "pane.graphics.clear",
+            "pane.graphics.stream",
+        ] {
+            let (mut client, server, _path) = local_stream_pair("removed-pane-graphics");
+            let (api_tx, mut api_rx) = mpsc::unbounded_channel::<ApiRequestMessage>();
+            writeln!(
+                client,
+                "{{\"id\":\"removed\",\"method\":\"{method}\",\"params\":{{}}}}"
+            )
+            .unwrap();
+            client.flush().unwrap();
+
+            handle_connection(
+                server,
+                &api_tx,
+                &EventHub::default(),
+                &Arc::new(AtomicBool::new(true)),
+                None,
+            )
+            .unwrap();
+
+            let response = read_line(&mut client);
+            let response: serde_json::Value = serde_json::from_str(&response).unwrap();
+            assert_eq!(response["id"], "removed", "{method}");
+            assert_eq!(response["error"]["code"], "unknown_method", "{method}");
+            assert!(response["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains(method)));
+            assert!(response.get("result").is_none(), "{method}");
+            assert!(api_rx.try_recv().is_err(), "{method} reached the app");
+        }
+    }
+
+    #[test]
+    fn unrelated_unknown_method_retains_standard_invalid_request_response() {
+        let (mut client, server, _path) = local_stream_pair("unknown-api-request");
+        let (api_tx, mut api_rx) = mpsc::unbounded_channel::<ApiRequestMessage>();
+        client
+            .write_all(b"{\"id\":\"unknown\",\"method\":\"nope\",\"params\":{}}\n")
+            .unwrap();
+        client.flush().unwrap();
+
+        handle_connection(
+            server,
+            &api_tx,
+            &EventHub::default(),
+            &Arc::new(AtomicBool::new(true)),
+            None,
+        )
+        .unwrap();
+
+        let response = read_line(&mut client);
+        let response: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(response["id"], "unknown");
+        assert_eq!(response["error"]["code"], "invalid_request");
+        assert!(api_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn ordinary_api_request_still_uses_normal_connection_path() {
+        let (mut client, server, _path) = local_stream_pair("ordinary-api-request");
+        let (api_tx, _api_rx) = mpsc::unbounded_channel::<ApiRequestMessage>();
+        client
+            .write_all(b"{\"id\":\"ordinary\",\"method\":\"ping\",\"params\":{}}\n")
+            .unwrap();
+        client.flush().unwrap();
+
+        handle_connection(
+            server,
+            &api_tx,
+            &EventHub::default(),
+            &Arc::new(AtomicBool::new(true)),
+            None,
+        )
+        .unwrap();
+
+        let response = read_line(&mut client);
+        let response: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(response["id"], "ordinary");
+        assert_eq!(response["result"]["type"], "pong");
     }
 
     #[test]
@@ -1872,41 +1916,5 @@ mod tests {
         let result = done_rx.recv_timeout(Duration::from_secs(2)).unwrap();
         assert!(result.is_ok());
         server_thread.join().unwrap();
-    }
-}
-
-#[cfg(test)]
-mod pane_graphics_request_tests {
-    use super::*;
-    use base64::Engine as _;
-
-    #[test]
-    fn maximum_public_graphics_request_fits_initial_json_line() {
-        let request = Request {
-            id: "graphics-max".into(),
-            method: Method::PaneGraphicsSet(crate::api::schema::PaneGraphicsSetParams {
-                pane_id: "pane_1".into(),
-                layer_id: None,
-                z_index: 0,
-                owner: String::new(),
-                format: crate::api::schema::PaneGraphicsFormat::Png,
-                image_width: 1,
-                image_height: 1,
-                data_base64: base64::engine::general_purpose::STANDARD
-                    .encode(vec![1_u8; crate::api::schema::PANE_GRAPHICS_SET_MAX_BYTES]),
-                data: None,
-                placement: crate::api::schema::PaneGraphicsPlacementParams::default(),
-            }),
-        };
-        let encoded = serde_json::to_vec(&request).unwrap();
-
-        assert!(encoded.len() < MAX_INITIAL_REQUEST_BYTES);
-    }
-
-    #[test]
-    fn duplicate_method_cannot_be_reinterpreted_as_graphics_stream() {
-        let encoded = r#"{"id":"duplicate","method":"ping","method":"pane.graphics.stream","params":{"pane_id":"pane_1"}}"#;
-
-        assert!(serde_json::from_str::<Request>(encoded).is_err());
     }
 }

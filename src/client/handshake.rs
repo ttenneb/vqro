@@ -72,6 +72,17 @@ pub(super) fn direct_graphics_profile_values(
     supported && !blocked_transport && terminals
 }
 
+/// Server-owned files require a shared filesystem; the host terminal profile alone
+/// cannot establish that for a saved SSH endpoint.
+fn direct_graphics_capability(
+    local_transport: bool,
+    exact_cell_size: bool,
+    cell_size: (u32, u32),
+    profile_allowed: bool,
+) -> bool {
+    local_transport && exact_cell_size && cell_size.0 > 0 && cell_size.1 > 0 && profile_allowed
+}
+
 #[cfg(unix)]
 fn direct_graphics_profile_allowed() -> bool {
     let term_program = std::env::var("TERM_PROGRAM").unwrap_or_default();
@@ -141,6 +152,7 @@ pub(crate) fn probe_endpoint_negotiation(
         false,
         false,
         false,
+        false, // This probe uses an SSH bridge, not a shared filesystem.
     )
     .map_err(io::Error::other)?;
     Ok(super::endpoint::EndpointNegotiation::new(
@@ -165,6 +177,7 @@ pub(super) fn do_handshake(
     endpoint_keybindings: bool,
     mouse_capture: bool,
     surface_active: bool,
+    local_transport: bool,
 ) -> Result<HandshakeResult, ClientError> {
     stream
         .set_nonblocking(false)
@@ -178,10 +191,12 @@ pub(super) fn do_handshake(
             cell_height_px,
             surface_size,
             pixel_mouse: exact_cell_size && cfg!(unix),
-            direct_graphics: exact_cell_size
-                && cell_width_px > 0
-                && cell_height_px > 0
-                && direct_graphics_profile_allowed(),
+            direct_graphics: direct_graphics_capability(
+                local_transport,
+                exact_cell_size,
+                (cell_width_px, cell_height_px),
+                direct_graphics_profile_allowed(),
+            ),
             endpoint_keybindings,
             mouse_capture,
             surface_active,
@@ -336,6 +351,17 @@ pub(super) fn do_handshake(
 #[cfg(test)]
 mod admission_tests {
     use super::*;
+
+    #[test]
+    fn direct_graphics_requires_local_transport_and_exact_geometry() {
+        let supported = direct_graphics_profile_values("ghostty", "", false, false, true);
+        assert!(direct_graphics_capability(true, true, (8, 16), supported));
+        assert!(!direct_graphics_capability(false, true, (8, 16), supported));
+        assert!(!direct_graphics_capability(true, false, (8, 16), supported));
+        assert!(!direct_graphics_capability(true, true, (0, 16), supported));
+        assert!(!direct_graphics_capability(true, true, (8, 0), supported));
+        assert!(!direct_graphics_capability(true, true, (8, 16), false));
+    }
     use interprocess::local_socket::traits::Listener as _;
 
     fn handshake_with_reply(
@@ -387,6 +413,7 @@ mod admission_tests {
             endpoint.then_some(crate::protocol::ClientSurfaceSize { cols: 80, rows: 24 }),
             false,
             false,
+            true,
             true,
         );
         worker.join().unwrap();
