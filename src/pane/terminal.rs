@@ -187,6 +187,8 @@ pub(crate) enum TerminalCompressionStep {
 
 pub(crate) struct GhosttyPaneTerminal {
     pub core: Mutex<GhosttyPaneCore>,
+    #[cfg(test)]
+    pub(super) scroll_metrics_reads: std::sync::atomic::AtomicUsize,
     key_encoder: Mutex<crate::ghostty::KeyEncoder>,
     pending_pty_responses: Arc<Mutex<Vec<Bytes>>>,
 }
@@ -1163,6 +1165,8 @@ impl GhosttyPaneTerminal {
             crate::ghostty::KeyEncoder::new().map_err(|e| std::io::Error::other(e.to_string()))?;
         key_encoder.set_from_terminal(&terminal);
         Ok(Self {
+            #[cfg(test)]
+            scroll_metrics_reads: std::sync::atomic::AtomicUsize::new(0),
             core: Mutex::new(GhosttyPaneCore {
                 #[cfg(test)]
                 dirty_collection_hook: None,
@@ -1785,7 +1789,16 @@ impl GhosttyPaneTerminal {
         }
     }
 
+    #[cfg(test)]
+    pub(super) fn test_scroll_metrics_reads(&self) -> usize {
+        self.scroll_metrics_reads
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     pub fn scroll_metrics(&self) -> Option<ScrollMetrics> {
+        #[cfg(test)]
+        self.scroll_metrics_reads
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let Ok(core) = self.core.lock() else {
             return None;
         };

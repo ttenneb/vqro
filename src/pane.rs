@@ -2983,6 +2983,12 @@ impl PaneRuntime {
         self.terminal.scroll_metrics()
     }
 
+    /// Test-only observation of how often live scroll state is read.
+    #[cfg(test)]
+    pub(crate) fn test_scroll_metrics_reads(&self) -> usize {
+        self.terminal.ghostty.test_scroll_metrics_reads()
+    }
+
     pub(crate) fn search_text_window(
         &self,
         query: &str,
