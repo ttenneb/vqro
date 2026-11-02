@@ -35,6 +35,21 @@ never pane input. The frozen `ClientInputEvent` codec is unchanged; this port do
 not add a Windows host-theme observation variant to it. Host protocol negotiation
 is restored after focus/reconnect/resize without replacing endpoint ownership.
 
+## Interactive echo scheduling
+
+Successfully admitted pane/popup key presses, repeats and nonempty text commits
+open a short32ms interactive echo window. Already accepted events keep that
+priority even when a later event in the same batch is rejected. Release, paste,
+empty text and rejected queue admissions do not create this scheduling hint.
+It is not an execution receipt or an activation policy.
+
+Visible, presentation-eligible PTY damage for that input target may bypass normal
+render cadence, with at most16 such extra renders per16ms epoch. More key presses
+do not replenish the current epoch's budget; unrelated or hidden output keeps its
+normal coalescing. Metadata-only retained patches with unchanged cursor policy do
+not emit terminal cursor writes. A changed suppression policy still applies even
+when semantic frame contents are identical.
+
 ## Windows PTY forwarding
 
 The Windows PTY actor schedules input forwarding on the existing Tokio executor,

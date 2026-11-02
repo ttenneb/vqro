@@ -76,6 +76,8 @@ fn test_headless_server_with_event_hub(event_hub: api::EventHub) -> HeadlessServ
         client_socket_identity,
         clients: HashMap::new(),
         native_graphics: Default::default(),
+        interactive_input_deadlines: HashMap::new(),
+        interactive_render_budget: None,
         #[cfg(unix)]
         next_client_id: 1,
         foreground_client_id: None,
@@ -4692,6 +4694,210 @@ async fn client_shell_mouse_motion_delivers_without_render_when_foreground() {
         input_rx.try_recv().is_ok(),
         "motion must still reach the PTY"
     );
+    shutdown_test_runtimes(&mut server);
+}
+
+#[tokio::test]
+async fn release_paste_empty_and_rejected_input_do_not_gain_interactive_priority() {
+    let mut server = test_headless_server();
+    let mut input_rx = install_focused_test_runtime(&mut server, b"\x1b[>3u");
+    let pane = server.app.state.workspaces[0].tabs[0].root_pane;
+    let runtime = server
+        .app
+        .state
+        .runtime_for_pane_in_workspace(&server.app.terminal_runtimes, 0, pane)
+        .unwrap();
+    let release = crate::protocol::ClientPaneInputEvent::Key {
+        code: crate::protocol::ClientKeyCode::Char('a'),
+        modifiers: 0,
+        kind: crate::protocol::ClientKeyKind::Release,
+        repeat_count: 1,
+        shifted_codepoint: None,
+        generated_text: None,
+        tracks_release: true,
+        physical_key_id: None,
+        windows_record: None,
+    };
+    for event in [
+        release,
+        crate::protocol::ClientPaneInputEvent::Paste("paste".into()),
+        crate::protocol::ClientPaneInputEvent::TextCommit(String::new()),
+    ] {
+        let mut accepted = false;
+        apply_client_terminal_input_events(runtime, &[event], true, &mut accepted).unwrap();
+        assert!(
+            !accepted,
+            "non-interactive input cannot open the echo window"
+        );
+        assert!(
+            input_rx.try_recv().is_ok(),
+            "classification is not based on dropping input"
+        );
+    }
+    for _ in 0..4 {
+        runtime.try_send_bytes(Bytes::from_static(b"full")).unwrap();
+    }
+    let mut accepted = false;
+    assert!(apply_client_terminal_input_events(
+        runtime,
+        &[crate::protocol::ClientPaneInputEvent::TextCommit(
+            "rejected".into()
+        )],
+        true,
+        &mut accepted
+    )
+    .is_err());
+    assert!(!accepted, "a full queue cannot mint interactive priority");
+    drop(input_rx);
+    assert!(apply_client_terminal_input_events(
+        runtime,
+        &[crate::protocol::ClientPaneInputEvent::TextCommit(
+            "closed".into()
+        )],
+        true,
+        &mut accepted
+    )
+    .is_err());
+    assert!(!accepted, "a closed queue cannot mint interactive priority");
+    shutdown_test_runtimes(&mut server);
+}
+
+#[tokio::test]
+async fn client_shell_split_echo_bypasses_cadence_with_bounded_visible_burst() {
+    let mut server = test_headless_server();
+    let mut input_rx = install_focused_test_runtime(&mut server, b"PS> old");
+    let pane_id = server.app.state.workspaces[0].tabs[0].root_pane;
+    let public_pane_id = server.app.public_pane_id(0, pane_id).unwrap();
+    let (_control_rx, render_rx) = connect_matching_test_shell(&mut server, 1);
+    server.render_and_stream();
+    recv_pane_surface(&render_rx, "initial prompt");
+    server.sync_immediate_pty_sources();
+    server.app.render_dirty.take();
+
+    assert_eq!(
+        server.handle_server_event_with_render_impact(ServerEvent::ClientShellPaneInput {
+            client_id: 1,
+            pane_id: public_pane_id,
+            events: vec![crate::protocol::ClientPaneInputEvent::TextCommit(
+                "Z".into()
+            )],
+        }),
+        RenderImpact::None
+    );
+    assert_eq!(input_rx.try_recv().unwrap(), Bytes::from_static(b"Z"));
+    assert!(server.interactive_input_deadlines.contains_key(&pane_id));
+
+    // A full queue after an accepted key must not lose that key's priority.
+    for _ in 0..3 {
+        let runtime = server
+            .app
+            .state
+            .runtime_for_pane_in_workspace(&server.app.terminal_runtimes, 0, pane_id)
+            .unwrap();
+        runtime
+            .try_send_bytes(Bytes::from_static(b"queued"))
+            .unwrap();
+    }
+    server.interactive_input_deadlines.clear();
+    server.handle_server_event_with_render_impact(ServerEvent::ClientShellPaneInput {
+        client_id: 1,
+        pane_id: server.app.public_pane_id(0, pane_id).unwrap(),
+        events: vec![
+            crate::protocol::ClientPaneInputEvent::TextCommit("A".into()),
+            crate::protocol::ClientPaneInputEvent::TextCommit("B".into()),
+        ],
+    });
+    for _ in 0..3 {
+        assert_eq!(input_rx.try_recv().unwrap(), Bytes::from_static(b"queued"));
+    }
+    assert_eq!(input_rx.try_recv().unwrap(), Bytes::from_static(b"A"));
+    assert!(input_rx.try_recv().is_err());
+    assert!(server.interactive_input_deadlines.contains_key(&pane_id));
+
+    let start = Instant::now();
+    server.note_interactive_input(pane_id, start);
+    server.app.record_render_attempt(start, true);
+    // Escape-only PTY updates must not use the whole allowance before the glyph.
+    for index in 0..12 {
+        let now = start + Duration::from_micros(index * 50 + 50);
+        write_shared_test_pane(&mut server, pane_id, b"\x1b[0m");
+        server.app.render_dirty.request_pty(pane_id);
+        assert!(server.can_render_interactive(now));
+        let request = server.app.render_dirty.take();
+        assert!(server.render_retained_pane_surface_and_stream(&request.pty_sources));
+        while let Ok(message) = render_rx.try_recv() {
+            let ServerMessage::PaneSurfacePatch(patch) = read_server_message(message) else {
+                panic!("expected retained patch for escape-only update");
+            };
+            assert!(patch.rows.is_empty());
+        }
+        server.app.record_render_attempt(now, true);
+        server.record_interactive_render(now);
+    }
+    for (index, bytes) in [b"\rPS>    \rPS> ".as_slice(), b"Z", b"\r\n", b"PS> "]
+        .into_iter()
+        .enumerate()
+    {
+        let now = start + Duration::from_millis(index as u64 + 1);
+        write_shared_test_pane(&mut server, pane_id, bytes);
+        server.app.render_dirty.request_pty(pane_id);
+        assert!(!server.app.can_render_now(now));
+        assert!(!server.app.can_present_now(now));
+        assert!(server.can_render_interactive(now));
+        let request = server.app.render_dirty.take();
+        assert!(server.render_retained_pane_surface_and_stream(&request.pty_sources));
+        recv_pane_surface_patch(&render_rx, "split prompt update");
+        if index == 1 {
+            assert!(frame_text(
+                &server.clients[&1]
+                    .render_state
+                    .last_pane_surface()
+                    .unwrap()
+                    .frame
+            )
+            .contains("PS> Z"));
+        }
+        server.app.record_render_attempt(now, true);
+        server.record_interactive_render(now);
+    }
+
+    let busy = start + Duration::from_millis(5);
+    // Repeated keys cannot replenish the output budget within its epoch.
+    server.note_interactive_input(pane_id, busy);
+    server.app.render_dirty.request_pty(pane_id);
+    assert!(!server.can_render_interactive(busy));
+    assert!(!server.app.can_render_now(busy));
+    let next_render = server
+        .app
+        .next_headless_loop_deadline_with_git_refresh(busy, true, false)
+        .unwrap();
+    assert!(server.app.can_render_now(next_render));
+
+    let next_epoch = start + Duration::from_millis(17);
+    assert!(server.can_render_interactive(next_epoch));
+    server.app.render_dirty.take();
+    let unrelated = crate::layout::PaneId::from_raw(pane_id.raw() + 1000);
+    server
+        .app
+        .render_dirty
+        .set_immediate_pty_sources(HashSet::from([pane_id, unrelated]));
+    server.app.render_dirty.request_pty(unrelated);
+    assert!(!server.can_render_interactive(next_epoch));
+    server.app.render_dirty.request_pty(pane_id);
+    server
+        .app
+        .render_dirty
+        .set_immediate_pty_sources(HashSet::from([unrelated]));
+    assert!(
+        !server.can_render_interactive(next_epoch),
+        "hidden input target stays coalesced"
+    );
+    server
+        .app
+        .render_dirty
+        .set_immediate_pty_sources(HashSet::from([pane_id]));
+    assert!(server.can_render_interactive(start + Duration::from_millis(33)));
+    assert!(!server.can_render_interactive(start + Duration::from_millis(38)));
     shutdown_test_runtimes(&mut server);
 }
 

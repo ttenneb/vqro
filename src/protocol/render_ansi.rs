@@ -52,6 +52,7 @@ pub(crate) struct EncodedBlit {
     pub(crate) full: bool,
     next_last_visible_cursor: Option<(u16, u16)>,
     next_last_cursor_shape: u8,
+    suppress_visible_cursor: bool,
 }
 
 /// Stateful encoder that diffs semantic frames into terminal ANSI bytes.
@@ -60,6 +61,7 @@ pub(crate) struct BlitEncoder {
     last_frame: Option<FrameData>,
     last_visible_cursor: Option<(u16, u16)>,
     last_cursor_shape: u8,
+    suppress_visible_cursor: bool,
 }
 
 impl BlitEncoder {
@@ -86,12 +88,16 @@ impl BlitEncoder {
         suppress_visible_cursor: bool,
     ) -> EncodedBlit {
         let previous_frame = self.last_frame.as_ref();
-        if !repaint && previous_frame == Some(frame) {
+        if !repaint
+            && previous_frame == Some(frame)
+            && self.suppress_visible_cursor == suppress_visible_cursor
+        {
             return EncodedBlit {
                 bytes: Vec::new(),
                 full: false,
                 next_last_visible_cursor: self.last_visible_cursor,
                 next_last_cursor_shape: self.last_cursor_shape,
+                suppress_visible_cursor,
             };
         }
         let prev = if repaint { None } else { previous_frame };
@@ -132,12 +138,14 @@ impl BlitEncoder {
             full,
             next_last_visible_cursor,
             next_last_cursor_shape,
+            suppress_visible_cursor,
         }
     }
 
     pub(crate) fn commit(&mut self, frame: FrameData, encoded: EncodedBlit) {
         self.last_visible_cursor = encoded.next_last_visible_cursor;
         self.last_cursor_shape = encoded.next_last_cursor_shape;
+        self.suppress_visible_cursor = encoded.suppress_visible_cursor;
         self.last_frame = Some(frame);
     }
 
@@ -154,6 +162,19 @@ impl BlitEncoder {
         let frame = self.last_frame.as_ref()?;
         if rows.iter().any(|row| !patch_row_fits(frame, row)) || patch_rows_overlap(rows) {
             return None;
+        }
+        // Metadata-only patches need output only when cursor policy changes.
+        if rows.is_empty()
+            && cursor == frame.cursor
+            && self.suppress_visible_cursor == suppress_visible_cursor
+        {
+            return Some(EncodedBlit {
+                bytes: Vec::new(),
+                full: false,
+                next_last_visible_cursor: self.last_visible_cursor,
+                next_last_cursor_shape: self.last_cursor_shape,
+                suppress_visible_cursor,
+            });
         }
         let mut bytes = Vec::new();
         let mut next_last_visible_cursor = self.last_visible_cursor;
@@ -173,6 +194,7 @@ impl BlitEncoder {
             full: false,
             next_last_visible_cursor,
             next_last_cursor_shape,
+            suppress_visible_cursor,
         })
     }
 
@@ -239,6 +261,7 @@ impl BlitEncoder {
         frame.cursor = cursor;
         self.last_visible_cursor = encoded.next_last_visible_cursor;
         self.last_cursor_shape = encoded.next_last_cursor_shape;
+        self.suppress_visible_cursor = encoded.suppress_visible_cursor;
         true
     }
 }
@@ -1858,6 +1881,80 @@ mod tests {
             .encode_patch(&rows, None, false)
             .expect("valid retained patch");
         assert_eq!(patch.bytes, full_diff.bytes);
+    }
+
+    #[test]
+    fn metadata_only_patch_skips_output_with_unchanged_cursor_policy() {
+        for cursor in [
+            None,
+            Some(CursorState {
+                x: 0,
+                y: 0,
+                visible: false,
+                shape: 2,
+            }),
+            Some(CursorState {
+                x: 0,
+                y: 0,
+                visible: true,
+                shape: 2,
+            }),
+        ] {
+            let mut frame = make_frame(1, 1, vec![make_cell("a", 0, 0, 0)]);
+            frame.cursor = cursor.clone();
+            let mut encoder = BlitEncoder::new();
+            let initial = encoder.encode(&frame, false);
+            encoder.commit(frame, initial);
+            let patch = encoder.encode_patch(&[], cursor.clone(), false).unwrap();
+            assert!(patch.bytes.is_empty());
+            assert!(encoder.commit_patch(&[], cursor, patch));
+        }
+    }
+
+    #[test]
+    fn unchanged_frame_and_patch_still_apply_cursor_policy_transitions() {
+        let mut frame = make_frame(1, 1, vec![make_cell("a", 0, 0, 0)]);
+        frame.cursor = Some(CursorState {
+            x: 0,
+            y: 0,
+            visible: true,
+            shape: 2,
+        });
+        let mut encoder = BlitEncoder::new();
+        let initial = encoder.encode(&frame, false);
+        encoder.commit(frame.clone(), initial);
+        let hidden = encoder
+            .encode_patch(&[], frame.cursor.clone(), true)
+            .unwrap();
+        assert!(String::from_utf8_lossy(&hidden.bytes).contains("\x1b[?25l"));
+        assert!(encoder.commit_patch(&[], frame.cursor.clone(), hidden));
+        assert!(encoder
+            .encode_patch(&[], frame.cursor.clone(), true)
+            .unwrap()
+            .bytes
+            .is_empty());
+        let shown = encoder
+            .encode_patch(&[], frame.cursor.clone(), false)
+            .unwrap();
+        assert!(String::from_utf8_lossy(&shown.bytes).contains("\x1b[?25h"));
+        assert!(encoder.commit_patch(&[], frame.cursor.clone(), shown));
+        assert!(encoder
+            .encode_patch(&[], frame.cursor.clone(), false)
+            .unwrap()
+            .bytes
+            .is_empty());
+
+        // Vqro also has an unchanged-full-frame fast path. It must not mask a
+        // changed cursor policy merely because the semantic frame is equal.
+        let hidden = encoder.encode_with_suppressed_visible_cursor(&frame, false);
+        assert!(String::from_utf8_lossy(&hidden.bytes).contains("\x1b[?25l"));
+        encoder.commit(frame.clone(), hidden);
+        assert!(encoder
+            .encode_with_suppressed_visible_cursor(&frame, false)
+            .bytes
+            .is_empty());
+        let shown = encoder.encode(&frame, false);
+        assert!(String::from_utf8_lossy(&shown.bytes).contains("\x1b[?25h"));
     }
 
     #[test]
