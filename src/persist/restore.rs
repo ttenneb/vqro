@@ -1337,12 +1337,16 @@ fn recover_typed_layout(
     fn prune(
         node: TypedNode,
         surviving: &HashSet<PaneId>,
+        views: &HashMap<PaneId, (String, String)>,
         valid_ids: &HashSet<TerminalContainerId>,
         placed: &mut HashSet<PaneId>,
     ) -> Option<TypedNode> {
         match node {
             TypedNode::Leaf(id) => {
-                (surviving.contains(&id) && placed.insert(id)).then_some(TypedNode::Leaf(id))
+                // A dangling terminal reference cannot claim a view-only
+                // survivor merely because their malformed raw IDs coincide.
+                (surviving.contains(&id) && !views.contains_key(&id) && placed.insert(id))
+                    .then_some(TypedNode::Leaf(id))
             }
             // A view pane carries its own content identity and has no terminal
             // record to be missing; it survives on placement alone.
@@ -1366,7 +1370,7 @@ fn recover_typed_layout(
                 let mut retained = Vec::new();
                 let mut retained_indices = Vec::new();
                 for (index, child) in children.into_iter().enumerate() {
-                    if let Some(child) = prune(child, surviving, valid_ids, placed) {
+                    if let Some(child) = prune(child, surviving, views, valid_ids, placed) {
                         retained.push(child);
                         retained_indices.push(index);
                     }
@@ -1388,8 +1392,8 @@ fn recover_typed_layout(
                 first,
                 second,
             } => match (
-                prune(*first, surviving, valid_ids, placed),
-                prune(*second, surviving, valid_ids, placed),
+                prune(*first, surviving, views, valid_ids, placed),
+                prune(*second, surviving, views, valid_ids, placed),
             ) {
                 (Some(first), Some(second)) => Some(TypedNode::Split {
                     direction,
@@ -1440,7 +1444,7 @@ fn recover_typed_layout(
         None => TypedNode::Leaf(pane),
     };
     let mut placed = HashSet::new();
-    let mut root = prune(node, surviving, &valid_ids, &mut placed);
+    let mut root = prune(node, surviving, &view_identities, &valid_ids, &mut placed);
     let mut unplaced: Vec<_> = surviving
         .iter()
         .copied()
@@ -3264,8 +3268,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn malformed_view_aliases_preserve_real_terminals_in_both_orders_and_view_only_tree() {
-        for (shape, version) in (0..3).flat_map(|shape| {
+    async fn malformed_cross_kind_aliases_preserve_authoritative_content_in_both_orders() {
+        // Real-row aliases (0..3) favor the terminal. Nested stack aliases with
+        // NO terminal row (3..5) must instead preserve the actual view content.
+        for (shape, version) in (0..5).flat_map(|shape| {
             [
                 super::super::snapshot::PREDECESSOR_SNAPSHOT_VERSION,
                 super::super::snapshot::SNAPSHOT_VERSION,
@@ -3293,8 +3299,10 @@ mod tests {
             let terminal_id =
                 super::super::snapshot::terminal_id_for_pane_snapshot(&tab.panes[&raw_id]).unwrap();
             tab.panes.get_mut(&raw_id).unwrap().agent_start_view_applied = true;
+            let alias_id = if shape >= 3 { u32::MAX - 1 } else { raw_id };
+            assert!(!tab.panes.contains_key(&alias_id) || shape < 3);
             let alias = LayoutSnapshot::View {
-                pane: raw_id,
+                pane: alias_id,
                 extension: "vqro.tasks".into(),
                 view: "tasks".into(),
             };
@@ -3312,7 +3320,24 @@ mod tests {
                     first: Box::new(alias),
                     second: Box::new(original),
                 },
-                _ => alias,
+                2 => alias,
+                _ => {
+                    let dangling = LayoutSnapshot::Pane(alias_id);
+                    let children = if shape == 3 {
+                        vec![dangling, alias, original]
+                    } else {
+                        vec![alias, dangling, original]
+                    };
+                    LayoutSnapshot::Stack {
+                        id: TerminalContainerId::from_validated(80_000 + shape).into(),
+                        selected: 0,
+                        children: vec![LayoutSnapshot::Stack {
+                            id: TerminalContainerId::from_validated(81_000 + shape).into(),
+                            selected: 0,
+                            children,
+                        }],
+                    }
+                }
             };
             let parsed =
                 crate::persist::parse_snapshot(&serde_json::to_string(&saved).unwrap()).unwrap();
@@ -3361,10 +3386,25 @@ mod tests {
                 runtimes.contains_key(&terminal_id),
                 "real terminal runtime survives"
             );
-            assert!(
-                workspace.tabs[0].layout.view_panes().is_empty(),
-                "only the malformed ambiguous view is dropped"
-            );
+            let views = workspace.tabs[0].layout.view_panes();
+            if shape < 3 {
+                assert!(
+                    views.is_empty(),
+                    "only the malformed ambiguous view is dropped"
+                );
+            } else {
+                assert_eq!(
+                    views.len(),
+                    1,
+                    "the dangling terminal leaf must not consume the view survivor"
+                );
+                assert!(workspace.terminal_id(views[0]).is_none());
+                let view = workspace.view_content(views[0]).unwrap();
+                assert_eq!(
+                    (view.extension.as_str(), view.view.as_str()),
+                    ("vqro.tasks", "tasks")
+                );
+            }
             workspace.assert_invariants_for_test();
             restored.assert_invariants_for_test();
         }
