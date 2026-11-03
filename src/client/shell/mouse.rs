@@ -1715,6 +1715,8 @@ impl ClientShellState {
                         extensions.search_focused = false;
                     }
                     outcome.repaint = true;
+                } else if super::contains(self.hits.extensions_python, point) {
+                    self.begin_python_confirmation(outcome);
                 } else if super::contains(self.hits.extensions_search, point) {
                     if let Some(ClientShellOverlay::Extensions(extensions)) = self.overlay.as_mut()
                     {

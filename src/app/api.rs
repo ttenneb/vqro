@@ -1632,6 +1632,9 @@ impl App {
             Method::ExtensionInstall(params) => {
                 return self.handle_extension_install(request.id, params);
             }
+            Method::ExtensionInterpreterConfirm(params) => {
+                return self.handle_extension_interpreter_confirm(request.id, params);
+            }
             Method::ExtensionEnable(params) => {
                 return self.handle_extension_enable(request.id, params);
             }

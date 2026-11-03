@@ -279,6 +279,8 @@ pub enum ResponseResult {
     },
     ExtensionList {
         extensions: Vec<super::extensions::ExtensionInfo>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        interpreter: Option<crate::extension_interpreter::InterpreterStatus>,
     },
     ExtensionChanged {
         extension: super::extensions::ExtensionInfo,

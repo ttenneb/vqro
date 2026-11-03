@@ -296,6 +296,8 @@ impl ProcessRuntime {
         let mut execution_staging = None;
         let mut command = match &factory.source {
             ProcessSource::Legacy { command, cwd } => {
+                let command = crate::extension_interpreter::resolve(command, cwd)
+                    .map_err(ExtensionServiceError::Configuration)?;
                 let program = command.first().ok_or_else(|| {
                     ExtensionServiceError::Configuration("service command must not be empty".into())
                 })?;

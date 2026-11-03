@@ -38,6 +38,49 @@ pub(crate) fn bundled_root() -> PathBuf {
     crate::config::config_dir().join("bundled")
 }
 
+/// Exact compiled bundle identity, not a plugin-name or directory-prefix check.
+/// Interpreter bootstrap is limited to bundles declaring the reserved token.
+pub(crate) fn is_current_default_plugin(root: &Path, token: &str) -> bool {
+    is_current_default_plugin_at(&bundled_root(), root, token)
+}
+
+fn is_current_default_plugin_at(bundled: &Path, root: &Path, token: &str) -> bool {
+    let Ok(canonical_root) = root.canonicalize() else {
+        return false;
+    };
+    crate::default_extensions::BUNDLES.iter().any(|bundle| {
+        let expected = generation_dir(bundled, bundle.prefix, bundle.assets);
+        bundle.plugin.is_some()
+            && bundle
+                .assets
+                .iter()
+                .any(|(name, body)| *name == "vqro-extension.toml" && body.contains(token))
+            // Windows manifest roots use verbatim canonical paths; compare
+            // canonical identities, not their ordinary/verbatim spelling.
+            && safe_under(bundled, &expected).is_ok()
+            && expected.canonicalize().is_ok_and(|path| path == canonical_root)
+            && bundle.assets.iter().all(|(name, body)| {
+                let path = expected.join(name);
+                safe_under(bundled, &path).is_ok()
+                    && std::fs::metadata(&path)
+                        .is_ok_and(|metadata| metadata.len() == body.len() as u64)
+                    && asset_matches(&path, body)
+            })
+    })
+}
+
+fn asset_matches(path: &Path, expected: &str) -> bool {
+    use std::io::Read;
+    let Ok(file) = std::fs::File::open(path) else {
+        return false;
+    };
+    let mut bytes = Vec::with_capacity(expected.len() + 1);
+    file.take(expected.len() as u64 + 1)
+        .read_to_end(&mut bytes)
+        .is_ok()
+        && bytes == expected.as_bytes()
+}
+
 fn opted_out() -> bool {
     std::env::var(OPT_OUT_ENV).is_ok_and(|value| !value.is_empty() && value != "0")
 }
@@ -290,6 +333,38 @@ fn link_default_plugin(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn symbolic_interpreter_requires_current_complete_bundle_not_tasks_name() {
+        let root = temp_root("python-provenance");
+        let token = crate::extension_interpreter::PYTHON_TOKEN;
+        let bundle = crate::default_extensions::BUNDLES
+            .iter()
+            .find(|bundle| bundle.assets.iter().any(|(_, body)| body.contains(token)))
+            .unwrap();
+        let generation = super::publish_generation(&root, bundle.prefix, bundle.assets).unwrap();
+        assert!(super::is_current_default_plugin_at(
+            &root,
+            &generation,
+            token
+        ));
+        assert!(super::is_current_default_plugin_at(
+            &root,
+            &generation.canonicalize().unwrap(),
+            token
+        ));
+        assert!(!super::is_current_default_plugin_at(
+            &root,
+            &root.join("vqro.tasks"),
+            token
+        ));
+        std::fs::write(generation.join("provider.py"), "changed").unwrap();
+        assert!(!super::is_current_default_plugin_at(
+            &root,
+            &generation,
+            token
+        ));
+        std::fs::remove_dir_all(root).unwrap();
+    }
     use super::*;
 
     fn assets() -> [(&'static str, &'static str); 2] {

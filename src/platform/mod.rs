@@ -3,6 +3,48 @@
 //! Centralizes OS-dependent behavior behind a clean boundary so core
 //! modules don't scatter `#[cfg]` branches through product logic.
 
+/// Explicit interpreter status queries, never called from render.
+pub(crate) fn tasks_python_status() -> Option<crate::extension_interpreter::InterpreterStatus> {
+    #[cfg(windows)]
+    {
+        tasks_python_binding(&crate::config::Config::load().config.extensions)
+    }
+    #[cfg(not(windows))]
+    {
+        None
+    }
+}
+
+pub(crate) fn tasks_python_binding(
+    config: &crate::config::ExtensionsConfig,
+) -> Option<crate::extension_interpreter::InterpreterStatus> {
+    #[cfg(windows)]
+    {
+        Some(windows::tasks_python_binding(config))
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = config;
+        None
+    }
+}
+
+pub(crate) fn tasks_python_program() -> Result<String, String> {
+    #[cfg(windows)]
+    {
+        let status = tasks_python_status().ok_or("Python status unavailable")?;
+        if status.confirmed {
+            status.path.ok_or(status.message)
+        } else {
+            Err(status.message)
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        Ok("python3".into())
+    }
+}
+
 /// Keeps an OS shutdown inhibitor/registration alive until the final save.
 pub(crate) struct HostShutdownMonitor {
     task: Option<tokio::task::JoinHandle<()>>,

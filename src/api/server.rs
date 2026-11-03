@@ -791,6 +791,7 @@ pub(crate) fn api_method_name(method: &Method) -> &'static str {
         Method::ExtensionList(_) => "extension.list",
         Method::ExtensionInstall(_) => "extension.install",
         Method::ExtensionEnable(_) => "extension.enable",
+        Method::ExtensionInterpreterConfirm(_) => "extension.interpreter.confirm",
         Method::ExtensionRemove(_) => "extension.remove",
         Method::ExtensionDataDelete(_) => "extension.data.delete",
         Method::ExtensionReorder(_) => "extension.reorder",

@@ -843,7 +843,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             Path::new(&tasks.plugin_root).file_name().unwrap(),
-            "tasks-760c384e85a88e86"
+            "tasks-953b15d93aca7427"
         );
         crate::persist::plugin_registry::update(|entries| {
             entries

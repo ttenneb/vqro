@@ -2801,6 +2801,22 @@
           "additionalProperties": false,
           "type": "object"
         },
+        "ExtensionInterpreterConfirmParams": {
+          "additionalProperties": false,
+          "properties": {
+            "confirmed": {
+              "type": "boolean"
+            },
+            "expected_path": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "expected_path",
+            "confirmed"
+          ],
+          "type": "object"
+        },
         "ExtensionListParams": {
           "properties": {
             "category": {
@@ -7838,6 +7854,22 @@
         {
           "properties": {
             "method": {
+              "const": "extension.interpreter.confirm",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/ExtensionInterpreterConfirmParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
               "const": "extension.remove",
               "type": "string"
             },
@@ -11078,6 +11110,27 @@
           },
           "required": [
             "messages"
+          ],
+          "type": "object"
+        },
+        "InterpreterStatus": {
+          "properties": {
+            "confirmed": {
+              "type": "boolean"
+            },
+            "message": {
+              "type": "string"
+            },
+            "path": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "confirmed",
+            "message"
           ],
           "type": "object"
         },
@@ -14332,6 +14385,16 @@
                     "$ref": "#/schemas/success_response/$defs/ExtensionInfo"
                   },
                   "type": "array"
+                },
+                "interpreter": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/schemas/success_response/$defs/InterpreterStatus"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
                 },
                 "type": {
                   "const": "extension_list",

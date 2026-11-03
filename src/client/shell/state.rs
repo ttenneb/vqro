@@ -209,6 +209,7 @@ pub(super) struct ShellHitMap {
     pub(super) extensions_categories: Vec<(Rect, Option<String>)>,
     pub(super) extensions_rows: Vec<(Rect, usize)>,
     pub(super) extensions_search: Rect,
+    pub(super) extensions_python: Rect,
     pub(super) product_announcement_scrollbar: Rect,
     pub(super) product_announcement_scroll_metrics: Option<crate::pane::ScrollMetrics>,
     pub(super) product_announcement_max_scroll: usize,
@@ -527,6 +528,7 @@ pub(super) enum ClientExtensionsTab {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum ClientExtensionConfirmation {
+    Python,
     Install,
     Remove,
     DeleteData,
@@ -543,6 +545,8 @@ pub(super) struct ClientExtensionsOverlay {
     pub(super) category: Option<String>,
     pub(super) selected: usize,
     pub(super) extensions: Vec<crate::api::schema::ExtensionInfo>,
+    pub(super) interpreter: Option<crate::extension_interpreter::InterpreterStatus>,
+    pub(super) interpreter_confirmation_path: Option<String>,
     pub(super) loading: bool,
     pub(super) mutating: bool,
     pub(super) confirmation: Option<ClientExtensionConfirmation>,

@@ -220,6 +220,13 @@ impl std::fmt::Display for ExtensionPackageKind {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ExtensionInterpreterConfirmParams {
+    pub expected_path: String,
+    pub confirmed: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ExtensionInfo {
     pub id: String,

@@ -13,6 +13,145 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+/// PEP 514 discovery is bounded, registry-only, and never executes a candidate.
+pub(crate) fn tasks_python_binding(
+    config: &crate::config::ExtensionsConfig,
+) -> crate::extension_interpreter::InterpreterStatus {
+    crate::extension_interpreter::binding(config, discover_tasks_python, valid_tasks_python)
+}
+
+fn valid_tasks_python(value: &str) -> bool {
+    fn allowed(path: &std::path::Path) -> bool {
+        path.is_absolute()
+            && path
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("exe"))
+            && !path
+                .components()
+                .any(|component| component.as_os_str().eq_ignore_ascii_case("WindowsApps"))
+    }
+    let path = std::path::Path::new(value);
+    !value
+        .chars()
+        .any(|c| c.is_control() || matches!(c, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}'))
+        && allowed(path)
+        && path.is_file()
+        && path.canonicalize().is_ok_and(|path| allowed(&path))
+}
+
+fn discover_tasks_python() -> Option<String> {
+    use windows_sys::Win32::{
+        Foundation::{
+            ERROR_FILE_NOT_FOUND, ERROR_NO_MORE_ITEMS, ERROR_PATH_NOT_FOUND, ERROR_SUCCESS,
+        },
+        System::Registry::*,
+    };
+    struct Key(HKEY);
+    impl Drop for Key {
+        fn drop(&mut self) {
+            unsafe {
+                RegCloseKey(self.0);
+            }
+        }
+    }
+    fn wide(value: &str) -> Vec<u16> {
+        value.encode_utf16().chain(Some(0)).collect()
+    }
+    fn open(parent: HKEY, path: &str, view: u32) -> Result<Option<Key>, ()> {
+        let mut key = std::ptr::null_mut();
+        let status =
+            unsafe { RegOpenKeyExW(parent, wide(path).as_ptr(), 0, KEY_READ | view, &mut key) };
+        match status {
+            ERROR_SUCCESS => Ok(Some(Key(key))),
+            ERROR_FILE_NOT_FOUND | ERROR_PATH_NOT_FOUND => Ok(None),
+            _ => Err(()),
+        }
+    }
+    fn string(key: HKEY, name: &str) -> Result<Option<String>, ()> {
+        let mut bytes = [0u16; 32768];
+        let mut size = std::mem::size_of_val(&bytes) as u32;
+        let status = unsafe {
+            RegGetValueW(
+                key,
+                std::ptr::null(),
+                wide(name).as_ptr(),
+                RRF_RT_REG_SZ,
+                std::ptr::null_mut(),
+                bytes.as_mut_ptr().cast(),
+                &mut size,
+            )
+        };
+        if status == ERROR_FILE_NOT_FOUND {
+            return Ok(None);
+        }
+        if status != ERROR_SUCCESS {
+            return Err(());
+        }
+        crate::extension_interpreter::registry_python_string(&bytes, size as usize)
+            .map(Some)
+            .ok_or(())
+    }
+    // User registration wins over machine registration. Within a hive choose
+    // numeric newest; prefer the native-width view, then deterministic path ties.
+    for (hive_rank, hive) in [(0, HKEY_CURRENT_USER), (1, HKEY_LOCAL_MACHINE)] {
+        let mut candidates = Vec::new();
+        for (view_rank, view) in [(0, KEY_WOW64_64KEY), (1, KEY_WOW64_32KEY)] {
+            let Some(core) = open(hive, "Software\\Python\\PythonCore", view).ok()? else {
+                continue;
+            };
+            let tags = crate::extension_interpreter::complete_python_tags(|index| {
+                let mut name = [0u16; 256];
+                let mut length = name.len() as u32;
+                let status = unsafe {
+                    RegEnumKeyExW(
+                        core.0,
+                        index,
+                        name.as_mut_ptr(),
+                        &mut length,
+                        std::ptr::null(),
+                        std::ptr::null_mut(),
+                        std::ptr::null_mut(),
+                        std::ptr::null_mut(),
+                    )
+                };
+                match status {
+                    ERROR_NO_MORE_ITEMS => Ok(None),
+                    ERROR_SUCCESS => String::from_utf16(name.get(..length as usize).ok_or(())?)
+                        .map(Some)
+                        .map_err(|_| ()),
+                    _ => Err(()),
+                }
+            })
+            .ok()?;
+            for tag in tags {
+                let Some(version) = crate::extension_interpreter::python_version(&tag) else {
+                    continue;
+                };
+                let Some(install) = open(core.0, &format!("{tag}\\InstallPath"), view).ok()? else {
+                    continue;
+                };
+                let path = match string(install.0, "ExecutablePath") {
+                    Ok(Some(path)) => Some(path),
+                    Ok(None) => string(install.0, "").ok().flatten().map(|path| {
+                        PathBuf::from(path)
+                            .join("python.exe")
+                            .to_string_lossy()
+                            .into_owned()
+                    }),
+                    Err(()) => None,
+                };
+                if let Some(path) = path.filter(|path| valid_tasks_python(path)) {
+                    candidates.push((hive_rank, version, view_rank, path));
+                }
+            }
+        }
+        if let Some(path) = crate::extension_interpreter::select_python_candidate(candidates) {
+            return Some(path);
+        }
+    }
+    None
+}
+
 mod clipboard_image;
 mod invocation;
 pub(crate) use invocation::{
@@ -3498,6 +3637,29 @@ pub(crate) fn write_package_staging_file(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn tasks_python_rejects_aliases_relative_directories_and_missing_paths() {
+        let root = std::env::temp_dir().join(format!("vqro-python-path-{}", std::process::id()));
+        std::fs::create_dir_all(root.join("WindowsApps")).unwrap();
+        let exe = root.join("python.exe");
+        std::fs::write(&exe, b"test regular file, never executed").unwrap();
+        assert!(super::valid_tasks_python(&exe.to_string_lossy()));
+        assert!(!super::valid_tasks_python(
+            &root.join("missing.exe").to_string_lossy()
+        ));
+        for path in [
+            root.clone(),
+            std::path::PathBuf::from("python.exe"),
+            root.join("WindowsApps").join("python.exe"),
+            root.join("python.cmd"),
+        ] {
+            if path.extension().is_some() && path.is_absolute() && !path.exists() {
+                std::fs::write(&path, b"not executed").unwrap();
+            }
+            assert!(!super::valid_tasks_python(&path.to_string_lossy()));
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
     #[test]
     fn clipboard_text_equals_normalizes_line_endings() {
         assert!(super::clipboard_text_equals("hello", b"hello"));

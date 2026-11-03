@@ -311,6 +311,10 @@ pub fn validated_sidebar_bounds(min: u16, max: u16) -> Option<(u16, u16)> {
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 pub struct ExtensionsConfig {
+    /// Explicit Windows Tasks Python candidate; still requires exact-path approval.
+    pub tasks_python: Option<String>,
+    /// Host-recorded exact approved Windows interpreter path.
+    pub confirmed_tasks_python: Option<String>,
     /// Bundled provider namespaces disabled by the user. Bundled providers are
     /// otherwise enabled by default and are never persisted as user plugins.
     pub disabled: BTreeSet<String>,

@@ -121,7 +121,17 @@ pub(crate) fn run(name: &str, args: &[String], remote: bool) -> std::io::Result<
             return Ok(2);
         }
     };
-    let argv = argv(&contribution.command, Path::new(&plugin.plugin_root), args);
+    let resolved = match crate::extension_interpreter::resolve(
+        &contribution.command,
+        Path::new(&plugin.plugin_root),
+    ) {
+        Ok(command) => command,
+        Err(error) => {
+            eprintln!("{error}");
+            return Ok(2);
+        }
+    };
+    let argv = argv(&resolved, Path::new(&plugin.plugin_root), args);
     let mut command = std::process::Command::new(&argv[0]);
     command.args(&argv[1..]);
     command.env("VQRO_EXTENSION_ROOT", &plugin.plugin_root);
@@ -198,11 +208,12 @@ pub(crate) fn foreground_declaration(invocation: &[String]) -> Option<Foreground
     if fresh.plugin_root != plugin.plugin_root || !declarations.contains(&contribution) {
         return None;
     }
-    let argv = argv(
+    let resolved = crate::extension_interpreter::resolve(
         &contribution.command,
         Path::new(&plugin.plugin_root),
-        &invocation[2..],
-    );
+    )
+    .ok()?;
+    let argv = argv(&resolved, Path::new(&plugin.plugin_root), &invocation[2..]);
     // No PATH/cwd guessing for transparent authority. Explicit invocation can
     // still run bare programs, but cannot prove a Windows human through them.
     if !Path::new(argv.first()?).is_absolute() {

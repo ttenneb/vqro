@@ -89,6 +89,7 @@ pub(crate) fn request_changes_ui(request: &Request) -> bool {
             | Method::PluginPaneClose(_)
             | Method::ExtensionInstall(_)
             | Method::ExtensionEnable(_)
+            | Method::ExtensionInterpreterConfirm(_)
             | Method::ExtensionRemove(_)
             | Method::ExtensionDataDelete(_)
             | Method::ExtensionReorder(_)

@@ -37,6 +37,94 @@ fn extension_info(installed: bool) -> crate::api::schema::ExtensionInfo {
     }
 }
 
+fn python_setup_state(path: Option<String>) -> ClientShellState {
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    state.set_snapshot(Box::new(snapshot()));
+    state.set_pane_surface(surface());
+    state.open_extensions_overlay(&mut ClientShellInput::default());
+    if let Some(ClientShellOverlay::Extensions(extensions)) = state.overlay.as_mut() {
+        extensions.loading = false;
+        extensions.extensions = vec![extension_info(true)];
+        extensions.interpreter = Some(crate::extension_interpreter::InterpreterStatus {
+            path,
+            confirmed: false,
+            message: "Install CPython 3.9+ from python.org or set tasks_python, then confirm."
+                .into(),
+        });
+    }
+    state
+}
+
+#[test]
+fn python_setup_mouse_confirmation_sends_exact_displayed_path() {
+    let path = "C:\\Users\\A  B\\Python313\\python.exe";
+    let mut state = python_setup_state(Some(path.into()));
+    state.compose(110, 34).unwrap();
+    let button = state.hits.extensions_python;
+    assert!(!button.is_empty());
+    let mut outcome = ClientShellInput::default();
+    state.handle_mouse(
+        crossterm::event::MouseEvent {
+            kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            column: button.x,
+            row: button.y,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        },
+        &mut outcome,
+    );
+    let frame = state.compose(110, 34).unwrap();
+    let text = frame
+        .cells
+        .iter()
+        .map(|cell| cell.symbol.as_str())
+        .collect::<String>();
+    assert!(text.contains("A  B"));
+    assert!(!state.hits.overlay_primary.is_empty());
+    // A refresh must not transfer the dialog to a different candidate.
+    if let Some(ClientShellOverlay::Extensions(extensions)) = state.overlay.as_mut() {
+        extensions.interpreter.as_mut().unwrap().path = Some("C:\\new\\python.exe".into());
+    }
+    let frame = state.compose(110, 34).unwrap();
+    let text = frame
+        .cells
+        .iter()
+        .map(|cell| cell.symbol.as_str())
+        .collect::<String>();
+    assert!(text.contains("A  B"));
+    assert!(!text.contains("C:\\new\\python.exe"));
+    state.confirm_extension_action(&mut outcome);
+    assert!(outcome.actions.iter().any(|action| matches!(action,
+        ClientShellAction::Endpoint { request, .. } if matches!(&request.method,
+            crate::api::schema::Method::ExtensionInterpreterConfirm(params) if params.confirmed && params.expected_path == path))));
+}
+
+#[test]
+fn missing_or_clipped_python_cannot_be_confirmed_and_other_extensions_still_work() {
+    let mut state = python_setup_state(None);
+    let mut outcome = ClientShellInput::default();
+    state.activate_selected_extension(&mut outcome);
+    assert!(outcome.actions.iter().any(|action| matches!(action, ClientShellAction::Endpoint { request, .. } if matches!(request.method, crate::api::schema::Method::ExtensionEnable(_)))));
+    let mut state = python_setup_state(None);
+    state.begin_python_confirmation(&mut ClientShellInput::default());
+    let frame = state.compose(110, 34).unwrap();
+    let text = frame
+        .cells
+        .iter()
+        .map(|cell| cell.symbol.as_str())
+        .collect::<String>();
+    assert!(text.contains("python.org"));
+    assert!(state.hits.overlay_primary.is_empty());
+    let mut outcome = ClientShellInput::default();
+    state.confirm_extension_action(&mut outcome);
+    assert!(outcome.actions.is_empty());
+    let mut state = python_setup_state(Some(format!("C:\\{}\\python.exe", "x".repeat(2000))));
+    state.begin_python_confirmation(&mut ClientShellInput::default());
+    state.compose(110, 34).unwrap();
+    assert!(state.hits.overlay_primary.is_empty());
+    state.confirm_extension_action(&mut outcome);
+    assert!(outcome.actions.is_empty());
+}
+
 #[test]
 fn global_menu_opens_browse_and_requests_optional_extension_list() {
     let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
@@ -73,6 +161,8 @@ fn extension_overlay_renders_categories_details_and_installed_tab() {
         category: None,
         selected: 0,
         extensions: vec![extension_info(true)],
+        interpreter: None,
+        interpreter_confirmation_path: None,
         loading: false,
         mutating: false,
         confirmation: None,
@@ -118,6 +208,8 @@ fn install_requires_host_confirmation_before_endpoint_mutation() {
         category: None,
         selected: 0,
         extensions: vec![extension_info(false)],
+        interpreter: None,
+        interpreter_confirmation_path: None,
         loading: false,
         mutating: false,
         confirmation: None,
@@ -169,6 +261,8 @@ fn confirmation_remains_bound_to_the_original_extension() {
         category: None,
         selected: 0,
         extensions: vec![first.clone(), second],
+        interpreter: None,
+        interpreter_confirmation_path: None,
         loading: false,
         mutating: false,
         confirmation: None,
@@ -209,6 +303,8 @@ fn inspected_git_package_requires_digest_bound_approval() {
         category: None,
         selected: 0,
         extensions: Vec::new(),
+        interpreter: None,
+        interpreter_confirmation_path: None,
         loading: true,
         mutating: false,
         confirmation: None,
