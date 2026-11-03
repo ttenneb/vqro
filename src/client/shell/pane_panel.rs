@@ -15,6 +15,8 @@ use crate::extension_contract::{HostDocumentItem, HostViewState, HostViewTone};
 use crate::protocol::endpoint::HostDocumentsProjectionV1;
 
 #[cfg(test)]
+mod background_tests;
+#[cfg(test)]
 mod frame_tests;
 
 /// A published view that fills one pane's slot.
@@ -311,7 +313,9 @@ fn draw_view_header(
     if rect.width == 0 || rect.height == 0 {
         return;
     }
-    let bg = palette.panel_bg;
+    // Terminal default cells use Reset: honor the host theme and transparency,
+    // rather than painting the UI panel's independent background.
+    let bg = ratatui::style::Color::Reset;
     let dim = Style::default()
         .fg(if focused {
             palette.accent
@@ -377,7 +381,7 @@ pub(super) fn render_view_pane(
         .unwrap_or(crate::view_sizing::READ_ONLY_SUMMARY);
     let scope = scope_label(&snapshot.agents, projection.scope);
     let header = Rect::new(outer.x + 1, outer.y, outer.width.saturating_sub(2), 1);
-    let background = Style::default().bg(palette.panel_bg);
+    let background = Style::default().bg(ratatui::style::Color::Reset);
     let focused = snapshot.focused_pane_id.as_deref() == Some(pane.pane_id.as_str());
     let edge = Style::default()
         .fg(if focused {
@@ -385,7 +389,7 @@ pub(super) fn render_view_pane(
         } else {
             palette.overlay0
         })
-        .bg(palette.panel_bg);
+        .bg(ratatui::style::Color::Reset);
     ratatui::widgets::Widget::render(
         ratatui::widgets::Block::default()
             .borders(ratatui::widgets::Borders::ALL)
@@ -442,7 +446,9 @@ pub(super) fn render_view_pane(
             body.y,
             columns,
             &truncate(&text, columns),
-            Style::default().fg(palette.overlay0).bg(palette.panel_bg),
+            Style::default()
+                .fg(palette.overlay0)
+                .bg(ratatui::style::Color::Reset),
         );
     }
 }

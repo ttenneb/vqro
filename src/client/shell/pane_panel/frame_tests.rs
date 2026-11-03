@@ -33,6 +33,7 @@ fn unavailable_view_preserves_every_perimeter_and_uses_host_inner_rect() {
             scope: &[],
         };
         let mut buffer = Buffer::empty(Rect::new(0, 0, 44, 12));
+        buffer.set_style(outer, Style::default().bg(app.palette.panel_bg));
         render_view_pane(
             &mut buffer,
             &index,
@@ -51,6 +52,15 @@ fn unavailable_view_preserves_every_perimeter_and_uses_host_inner_rect() {
             assert_eq!(buffer[(x, y)].symbol(), symbol);
         }
         assert_eq!(buffer[(0, 0)].symbol(), " ");
+        for y in outer.y..outer.bottom() {
+            for x in outer.x..outer.right() {
+                assert_eq!(
+                    buffer[(x, y)].bg,
+                    ratatui::style::Color::Reset,
+                    "unavailable view/frame background at {x},{y}"
+                );
+            }
+        }
         if width == 40 {
             let row = (inner.x..inner.right())
                 .map(|x| buffer[(x, inner.y)].symbol())
