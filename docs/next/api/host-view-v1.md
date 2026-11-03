@@ -160,6 +160,16 @@ provider returns, the view is drawn again.
 - A badge on the tab bar and the sidebar row selects its tab; the recorded
   decision is that a badge has no action of its own.
 
+Automatic metrics consume already accepted pane-rooted views from tab or
+session projections. A matching tab slice takes precedence; otherwise a
+session projection supplies facts for that exact namespace/view/covered pane.
+A new consumer seeds from the accepted cache even if publication preceded its
+creation. Session revisions are measured once and routed only to their actual
+consumers; only changed, presented targets request geometry. Provider
+unavailability clears these facts, and topology cleanup retains hidden live
+consumers without retaining closed ownership. This changes no document grant,
+source scope, or protocol, and geometry never invokes a provider.
+
 ## Image boundary verification
 
 The real-parser side/stacked Kitty test can export its actual host frame,

@@ -55,6 +55,10 @@ pub(crate) struct CachedDocument {
     pub incarnation: (u64, String, u64),
     pub measurements: HashMap<(String, String), DocumentMeasure>,
 }
+pub(crate) struct CachedSessionDocument {
+    pub available: bool,
+    pub document: CachedDocument,
+}
 #[derive(Clone)]
 pub(crate) struct AutoView {
     pub extension: String,
@@ -69,6 +73,7 @@ pub(crate) struct AutoView {
 pub(crate) struct ViewSizing {
     pub active: HashMap<PaneId, AutoView>,
     pub documents: HashMap<(String, String), CachedDocument>,
+    pub session_documents: HashMap<String, CachedSessionDocument>,
     pub visible_tabs: std::collections::HashSet<String>,
     pub pending_geometry: std::collections::HashSet<crate::workspace::TabId>,
     pub label_widths: HashMap<PaneId, u16>,

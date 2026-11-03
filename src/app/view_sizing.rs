@@ -36,6 +36,25 @@ impl App {
         if let Some(scope_id) = self.public_tab_id(workspace, tab_index) {
             self.refresh_auto_view_document(&content.extension, &scope_id, 0, 0);
         }
+        // A first consumer may be added after the session projection was
+        // already accepted. Seed from that cache, without provider calls.
+        let sessions = self
+            .host_document_caches
+            .iter()
+            .filter(|((namespace, _), _)| namespace == &content.extension)
+            .filter_map(|((_, scope), cache)| {
+                cache
+                    .current()
+                    .filter(|document| {
+                        document.namespace == content.extension
+                            && document.target == crate::extension_contract::HostTarget::Session
+                    })
+                    .map(|document| (scope.clone(), document.generation, document.revision))
+            })
+            .collect::<Vec<_>>();
+        for (scope, generation, revision) in sessions {
+            self.refresh_auto_view_document(&content.extension, &scope, generation, revision);
+        }
     }
 
     /// Topology invalidation, not a render/provider polling path. Keep valid
@@ -75,6 +94,17 @@ impl App {
             .flat_map(|ws| &ws.tabs)
             .flat_map(|tab| tab.layout.pane_ids())
             .collect::<std::collections::HashSet<_>>();
+        let namespaces = self
+            .state
+            .view_sizing
+            .active
+            .values()
+            .map(|entry| entry.extension.clone())
+            .collect::<std::collections::HashSet<_>>();
+        self.state
+            .view_sizing
+            .session_documents
+            .retain(|namespace, _| namespaces.contains(namespace));
         let terminals = self
             .state
             .view_sizing
@@ -195,13 +225,27 @@ impl App {
         let public = self
             .public_pane_id(workspace, entry.terminal)
             .unwrap_or_default();
-        let document = self
+        let specific = self
             .state
             .view_sizing
             .documents
             .get(&(entry.extension.clone(), scope.to_owned()));
+        let session = self
+            .state
+            .view_sizing
+            .session_documents
+            .get(&entry.extension)
+            .map(|cached| &cached.document);
+        let key = (entry.view.clone(), public);
+        // Prefer a matching target-specific slice; otherwise the accepted
+        // session projection supplies this exact pane/view's neutral facts.
+        let document = specific
+            .filter(|document| document.measurements.contains_key(&key))
+            .or_else(|| session.filter(|document| document.measurements.contains_key(&key)))
+            .or(session)
+            .or(specific);
         let measure = document
-            .and_then(|document| document.measurements.get(&(entry.view.clone(), public)))
+            .and_then(|document| document.measurements.get(&key))
             .copied()
             .unwrap_or(DocumentMeasure {
                 body: ViewMeasure::default(),
@@ -226,7 +270,78 @@ impl App {
         generation: u64,
         revision: u64,
     ) {
-        if self.state.view_sizing.active.is_empty() {
+        if !self
+            .state
+            .view_sizing
+            .active
+            .values()
+            .any(|entry| entry.extension == namespace)
+        {
+            return;
+        }
+        let source_key = (namespace.to_owned(), scope_id.to_owned());
+        let source = self
+            .host_document_caches
+            .get(&source_key)
+            .and_then(|cache| cache.current())
+            .filter(|document| document.namespace == namespace);
+        let session = source
+            .map(|document| document.target == crate::extension_contract::HostTarget::Session)
+            .unwrap_or_else(|| {
+                self.state
+                    .view_sizing
+                    .session_documents
+                    .get(namespace)
+                    .is_some_and(|cached| cached.document.incarnation.1 == scope_id)
+            });
+        if session {
+            let available = source.is_some();
+            let stamp = source
+                .map(|document| (document.generation, scope_id.to_owned(), document.revision))
+                .unwrap_or((generation, scope_id.to_owned(), revision));
+            let unchanged = self
+                .state
+                .view_sizing
+                .session_documents
+                .get(namespace)
+                .is_some_and(|cached| {
+                    cached.available == available && cached.document.incarnation == stamp
+                });
+            if !unchanged {
+                let measurements = source
+                    .map(crate::view_sizing::measure_document)
+                    .unwrap_or_default();
+                self.state.view_sizing.session_documents.insert(
+                    namespace.to_owned(),
+                    crate::view_sizing::CachedSessionDocument {
+                        available,
+                        document: CachedDocument {
+                            incarnation: stamp,
+                            measurements,
+                        },
+                    },
+                );
+            }
+            // Session documents are measured once, then routed in one tree
+            // pass to their actual consumers. Only changed visible consumers
+            // can enqueue geometry; no remembered viewport sweep occurs.
+            let mut targets = Vec::new();
+            for (wi, workspace) in self.state.workspaces.iter().enumerate() {
+                for (ti, tab) in workspace.tabs.iter().enumerate() {
+                    if tab.layout.view_panes().iter().any(|pane| {
+                        self.state
+                            .view_sizing
+                            .active
+                            .get(pane)
+                            .is_some_and(|entry| entry.extension == namespace)
+                    }) {
+                        targets.push((wi, ti));
+                    }
+                }
+            }
+            for (wi, ti) in targets {
+                self.refresh_cached_auto_target(wi, ti);
+            }
             return;
         }
         let Some((wi, ti)) = self.parse_tab_id(scope_id) else {
@@ -414,6 +529,113 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn accepted_tasks_shaped_session_document_seeds_new_view_and_routes_changed_facts() {
+        let (_send, receive) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &crate::config::Config::default(),
+            crate::app::AppPolicy::TEST,
+            None,
+            receive,
+            crate::api::EventHub::default(),
+        );
+        let mut workspace = crate::workspace::Workspace::test_new("session document");
+        let root = workspace.tabs[0].root_pane;
+        let (_, view) = workspace
+            .split_pane_with_view(
+                root,
+                "vqro.tasks",
+                "tasks",
+                ratatui::layout::Direction::Vertical,
+                0.5,
+                false,
+            )
+            .unwrap();
+        app.state.workspaces = vec![workspace];
+        app.state.active = Some(0);
+        app.state.ensure_test_terminals();
+        let public = app.public_pane_id(0, root).unwrap();
+        let source = "session-observation".to_owned();
+        // This is the real Tasks publisher shape: navigation/session target,
+        // pane-rooted view, nested section rows, and no artificial kind fields.
+        let mut document: crate::extension_contract::HostDocumentV1=serde_json::from_value(serde_json::json!({"contract":"host.view.v1","namespace":"vqro.tasks","generation":7,"revision":1,"surface":"navigation","target":{"kind":"session"},"items":[
+            {"id":"panel","role":"section","label":"Tasks","detail":"0/2 done · 2 ready","view":{"pane_id":public,"view_id":"tasks","state":"open"}},
+            {"id":"parent","parent_id":"panel","role":"section","label":"View panes layout","view":{"state":"open","waiting":"you","action":"start"}},
+            {"id":"child","parent_id":"parent","role":"section","label":"Spike fix","view":{"state":"open","waiting":"you","action":"start"}}
+        ]})).unwrap();
+        let key = ("vqro.tasks".into(), source.clone());
+        app.host_document_caches
+            .entry(key.clone())
+            .or_default()
+            .publish_for_namespace("vqro.tasks", 7, 0, &Default::default(), document.clone())
+            .unwrap();
+        let target = TabSurfaceTarget {
+            workspace_index: 0,
+            tab_index: 0,
+        };
+        let area = Rect::new(0, 0, 100, 200);
+        let cells = crate::kitty_graphics::HostCellSize::default();
+        app.resize_auto_views(target, area, cells);
+        app.activate_auto_view(0, 0, view);
+        assert_eq!(
+            app.state.view_sizing.active[&view].measure.rows, 2,
+            "activation seeds the already accepted session observation"
+        );
+        app.resize_auto_views(target, area, cells);
+        app.state.view_sizing.pending_geometry.clear();
+        assert_eq!(
+            app.state.workspaces[0].tabs[0]
+                .layout
+                .panes(area)
+                .into_iter()
+                .find(|pane| pane.id == view)
+                .unwrap()
+                .rect
+                .height,
+            4
+        );
+        crate::layout::TileLayout::take_auto_gathers_for_test();
+        crate::layout::TileLayout::take_geometry_gathers_for_test();
+        app.refresh_auto_view_document("vqro.tasks", &source, 7, 1);
+        assert!(app.state.view_sizing.pending_geometry.is_empty());
+        assert_eq!(crate::layout::TileLayout::take_auto_gathers_for_test(), 0);
+        assert_eq!(
+            crate::layout::TileLayout::take_geometry_gathers_for_test(),
+            0
+        );
+        let mut extra = document.items[2].clone();
+        extra.id = "extra".into();
+        document.items.push(extra);
+        document.revision = 2;
+        app.host_document_caches
+            .get_mut(&key)
+            .unwrap()
+            .publish_for_namespace("vqro.tasks", 7, 0, &Default::default(), document)
+            .unwrap();
+        app.emit_host_document_updated("vqro.tasks".into(), source.clone(), 7, 2, true);
+        assert_eq!(app.state.view_sizing.active[&view].measure.rows, 3);
+        assert_eq!(app.state.view_sizing.pending_geometry.len(), 1);
+        app.resize_auto_views(target, area, cells);
+        assert_eq!(
+            app.state.workspaces[0].tabs[0]
+                .layout
+                .panes(area)
+                .into_iter()
+                .find(|pane| pane.id == view)
+                .unwrap()
+                .rect
+                .height,
+            5
+        );
+        app.host_document_caches.get_mut(&key).unwrap().disable();
+        app.emit_host_document_updated("vqro.tasks".into(), source, 8, 3, false);
+        assert_eq!(
+            app.state.view_sizing.active[&view].measure.rows, 1,
+            "provider unavailability clears session metrics"
+        );
+        app.state.assert_invariants_for_test();
+    }
+
     #[tokio::test]
     async fn hidden_stack_view_metrics_cache_without_pending_or_geometry() {
         let (_send, receive) = tokio::sync::mpsc::unbounded_channel();
