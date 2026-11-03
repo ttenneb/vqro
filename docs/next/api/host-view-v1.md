@@ -160,6 +160,20 @@ provider returns, the view is drawn again.
 - A badge on the tab bar and the sidebar row selects its tab; the recorded
   decision is that a badge has no action of its own.
 
+## Image boundary verification
+
+The real-parser side/stacked Kitty test can export its actual host frame,
+accepted image bytes, clipped placements and body/view rectangles when
+`VQRO_IMAGE_EVIDENCE_ROOT` names a private scratch directory. The optional
+`scripts/replay-kitty-surface.py --font <installed-monospace-font> <side.json>
+<stacked.json>` replays those records with already-installed Pillow. It does
+**not** add a destination body clip: positive cases require zero changed pixels
+outside the terminal body or anywhere in the sibling view; oversized/title
+negative controls must detect leaks. It writes full and seam PNGs plus hashes.
+This is host-scene pixel evidence, not native GUI/font acceptance or a claim
+that client-owned view rows were rasterized by the replay. Native appearance
+and human visual acceptance remain separate gates. No installs are performed.
+
 ## Bounds
 
 512 items, 8 levels, 4096 characters of text, 256 actions, 24 characters of
