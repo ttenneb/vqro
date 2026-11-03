@@ -3,7 +3,7 @@ use std::path::Path;
 
 pub(crate) const PYTHON_TOKEN: &str = "vqro:python3";
 #[cfg(any(windows, test))]
-pub(crate) const REMEDY: &str = "Install CPython 3.9 or newer from python.org, or set [extensions] tasks_python to its absolute python.exe path; then confirm Python in Extensions → Python setup.";
+pub(crate) const REMEDY: &str = "Install CPython 3.9 or newer from python.org, or set [extensions] tasks_python to its absolute python.exe path; then confirm Python in Settings → Tasks.";
 
 #[derive(
     Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
@@ -52,7 +52,7 @@ fn confirm_at(
             .unwrap_or_default();
         let status = resolve(&config).ok_or("Python confirmation is only needed on Windows")?;
         if status.path.as_deref() != Some(expected) {
-            return Err("Python candidate changed or is invalid; reopen Extensions and confirm the current path".into());
+            return Err("Python candidate changed or is invalid; reopen Settings → Tasks and confirm the current path".into());
         }
         let updated = crate::config::ConfigEdit::ConfirmedTasksPython(expected).apply(content);
         let document: toml::Value =

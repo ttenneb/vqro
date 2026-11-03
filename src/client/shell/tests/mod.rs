@@ -266,4 +266,5 @@ mod pane_panel;
 mod pane_panel_profile;
 mod popup_focus_projection;
 mod recovery;
+mod settings_python;
 mod startup_overlays;

@@ -15,8 +15,6 @@ impl ClientShellState {
             category: None,
             selected: 0,
             extensions: Vec::new(),
-            interpreter: None,
-            interpreter_confirmation_path: None,
             loading: true,
             mutating: false,
             confirmation: None,
@@ -155,26 +153,6 @@ impl ClientShellState {
     }
 
     pub(super) fn confirm_extension_action(&mut self, outcome: &mut ClientShellInput) {
-        if let Some(ClientShellOverlay::Extensions(extensions)) = self.overlay.as_ref() {
-            if extensions.confirmation == Some(ClientExtensionConfirmation::Python) {
-                // The full literal path must fit the displayed confirmation.
-                if self.hits.overlay_primary.is_empty() {
-                    return;
-                }
-                if let Some(path) = extensions.interpreter_confirmation_path.clone() {
-                    self.queue_extension_mutation(
-                        crate::api::schema::Method::ExtensionInterpreterConfirm(
-                            crate::api::schema::ExtensionInterpreterConfirmParams {
-                                expected_path: path,
-                                confirmed: true,
-                            },
-                        ),
-                        outcome,
-                    );
-                }
-                return;
-            }
-        }
         let (confirmation, confirmed_extension, git_inspection) = match self.overlay.as_ref() {
             Some(ClientShellOverlay::Extensions(extensions)) => (
                 extensions.confirmation,
@@ -280,24 +258,9 @@ impl ClientShellState {
                     },
                 )
             }
-            Some(ClientExtensionConfirmation::Python) | None => return,
+            None => return,
         };
         self.queue_extension_mutation(method, outcome);
-    }
-
-    pub(super) fn begin_python_confirmation(&mut self, outcome: &mut ClientShellInput) {
-        if let Some(ClientShellOverlay::Extensions(extensions)) = self.overlay.as_mut() {
-            if extensions.interpreter.is_some() {
-                extensions.confirmation = Some(ClientExtensionConfirmation::Python);
-                extensions.interpreter_confirmation_path = extensions
-                    .interpreter
-                    .as_ref()
-                    .and_then(|status| status.path.clone());
-                extensions.confirmation_extension = None;
-                extensions.search_focused = false;
-                outcome.repaint = true;
-            }
-        }
     }
 
     pub(super) fn activate_selected_extension(&mut self, outcome: &mut ClientShellInput) {
@@ -510,7 +473,6 @@ impl ClientShellState {
                     extensions.selected = 0;
                 }
             }
-            KeyCode::Char('p') if modifiers.is_empty() => self.begin_python_confirmation(outcome),
             KeyCode::Char('c') if modifiers.is_empty() => self.cycle_extension_category(),
             KeyCode::Up | KeyCode::Char('k') if modifiers.is_empty() => {
                 self.move_extension_selection(-1)
@@ -749,9 +711,8 @@ impl ClientShellState {
                     match result {
                         Ok(crate::api::schema::ResponseResult::ExtensionList {
                             extensions: listed,
-                            interpreter,
+                            ..
                         }) => {
-                            extensions.interpreter = interpreter;
                             let selected_repository = extensions
                                 .selected_extension()
                                 .map(|extension| extension.repository.clone());
@@ -924,14 +885,6 @@ impl ClientShellState {
                                 *existing = extension;
                             }
                             extensions.message = Some("Extension updated.".into());
-                            refresh = true;
-                        }
-                        Ok(crate::api::schema::ResponseResult::ExtensionList {
-                            interpreter,
-                            ..
-                        }) => {
-                            extensions.interpreter = interpreter;
-                            extensions.message = Some("Python path confirmed.".into());
                             refresh = true;
                         }
                         Ok(crate::api::schema::ResponseResult::ExtensionDataDeleted { .. }) => {

@@ -556,6 +556,8 @@ impl ClientShellState {
                 | PendingEndpointKind::ExtensionPackageInspect(_)
                 | PendingEndpointKind::ExtensionPackageMutation(_)
                 | PendingEndpointKind::ExtensionMutation(_)
+                | PendingEndpointKind::SettingsInterpreterStatus(_)
+                | PendingEndpointKind::SettingsInterpreterConfirm(_)
                 | PendingEndpointKind::SelectionCopy
                 | PendingEndpointKind::TerminalInspector { .. }
                 | PendingEndpointKind::PaneScroll { .. }

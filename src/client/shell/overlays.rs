@@ -31,7 +31,6 @@ pub(crate) struct OverlayRender {
     pub(crate) extensions_categories: Vec<(Rect, Option<String>)>,
     pub(crate) extensions_rows: Vec<(Rect, usize)>,
     pub(crate) extensions_search: Rect,
-    pub(crate) extensions_python: Rect,
     pub(crate) product_announcement_scrollbar: Rect,
     pub(crate) product_announcement_scroll_metrics: Option<crate::pane::ScrollMetrics>,
     pub(crate) product_announcement_max_scroll: usize,

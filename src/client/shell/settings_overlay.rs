@@ -95,7 +95,11 @@ pub(super) fn render_settings_overlay(
         inner.height.saturating_sub(7),
     );
     let mut choice_hits = Vec::new();
+    let mut python_path_visible = false;
     match settings.section {
+        ClientSettingsSection::Tasks => {
+            python_path_visible = render_tasks_settings(buffer, content, &settings.tasks, palette);
+        }
         ClientSettingsSection::Theme => {
             let visible = usize::from(content.height);
             let scroll = settings.selected.saturating_sub(visible.saturating_sub(1));
@@ -164,13 +168,51 @@ pub(super) fn render_settings_overlay(
         }
     }
 
-    let buttons = row(inner, &[10, 12], 2, inner.height.saturating_sub(1));
-    let primary = buttons[0];
-    let close = buttons[1];
+    let tasks_tab = settings.section == ClientSettingsSection::Tasks;
+    let mutating = settings.tasks.pending && settings.tasks.confirming;
+    let buttons = row(
+        inner,
+        &[if tasks_tab { 16 } else { 10 }, 12],
+        2,
+        inner.height.saturating_sub(1),
+    );
+    let primary = if tasks_tab
+        && (settings.tasks.pending || (settings.tasks.confirming && !python_path_visible))
+    {
+        Rect::default()
+    } else {
+        buttons[0]
+    };
+    let close = if mutating {
+        Rect::default()
+    } else {
+        buttons[1]
+    };
+    let primary_label = if !tasks_tab {
+        " ↵ apply "
+    } else if settings.tasks.confirming {
+        " ↵ confirm "
+    } else if settings
+        .tasks
+        .interpreter
+        .as_ref()
+        .is_some_and(|status| status.confirmed)
+    {
+        " ↵ refresh "
+    } else if settings
+        .tasks
+        .interpreter
+        .as_ref()
+        .is_some_and(|status| status.path.is_some())
+    {
+        " ↵ review path "
+    } else {
+        " ↵ retry "
+    };
     button(
         buffer,
         primary,
-        " ↵ apply ",
+        primary_label,
         Style::default()
             .fg(contrast(palette))
             .bg(palette.accent)
@@ -179,7 +221,11 @@ pub(super) fn render_settings_overlay(
     button(
         buffer,
         close,
-        " esc close ",
+        if tasks_tab && settings.tasks.confirming {
+            " esc cancel "
+        } else {
+            " esc close "
+        },
         Style::default()
             .fg(palette.text)
             .bg(palette.surface0)
@@ -190,7 +236,15 @@ pub(super) fn render_settings_overlay(
         inner.x,
         inner.bottom().saturating_sub(2),
         inner.width,
-        " ↑↓ select  tab section",
+        if mutating {
+            " Confirming path with host…"
+        } else if tasks_tab && settings.tasks.confirming && !python_path_visible {
+            " Enlarge terminal to display the full path before approval."
+        } else if tasks_tab {
+            " tab section · setup applies only to Tasks"
+        } else {
+            " ↑↓ select  tab section"
+        },
         Style::default().fg(palette.overlay1).bg(palette.panel_bg),
     );
 
@@ -203,6 +257,95 @@ pub(super) fn render_settings_overlay(
         settings_choices: choice_hits,
         ..OverlayRender::default()
     })
+}
+
+/// Host facts only; no registry/config/filesystem access during rendering.
+fn render_tasks_settings(
+    buffer: &mut Buffer,
+    area: Rect,
+    tasks: &ClientTasksSettings,
+    palette: &Palette,
+) -> bool {
+    let mut lines = vec!["Tasks / Python setup".to_owned(), String::new()];
+    let path = if tasks.confirming {
+        tasks.confirmation_path.as_deref()
+    } else {
+        tasks
+            .interpreter
+            .as_ref()
+            .and_then(|status| status.path.as_deref())
+    };
+    let mut path_visible = false;
+    if tasks.pending && !tasks.confirming {
+        lines.extend(wrap_literal(
+            "Loading interpreter status from host…",
+            area.width,
+        ));
+    } else {
+        lines.extend(wrap_literal(
+            if tasks.confirming {
+                "Confirm this exact absolute executable:"
+            } else {
+                "Windows Python executable:"
+            },
+            area.width,
+        ));
+        if let Some(path) = path {
+            let path_lines = wrap_literal(path, area.width);
+            path_visible = lines.len() + path_lines.len() <= usize::from(area.height)
+                && path_lines
+                    .iter()
+                    .all(|line| display_width(line) <= area.width);
+            lines.extend(path_lines);
+        } else {
+            lines.extend(wrap_literal("No usable interpreter selected.", area.width));
+        }
+        lines.push(String::new());
+        if let Some(status) = tasks.interpreter.as_ref() {
+            lines.extend(wrap_literal(&status.message, area.width));
+        } else if tasks.loaded && tasks.message.is_none() {
+            lines.extend(wrap_literal("This host did not provide Windows Python setup status. Non-Windows Tasks uses python3; update an older Windows host if needed.", area.width));
+        }
+    }
+    if let Some(message) = tasks.message.as_deref() {
+        lines.extend(wrap_literal(message, area.width));
+    }
+    for (line, y) in lines.into_iter().zip(area.y..area.bottom()) {
+        put_text(
+            buffer,
+            area.x,
+            y,
+            area.width,
+            &line,
+            Style::default().fg(palette.text).bg(palette.panel_bg),
+        );
+    }
+    path_visible
+}
+
+/// Preserve every path character and space; never collapse or truncate it into
+/// a different executable. An overlong path disables the confirmation action.
+fn wrap_literal(text: &str, width: u16) -> Vec<String> {
+    use unicode_width::UnicodeWidthChar;
+    let mut lines = Vec::new();
+    let mut line = String::new();
+    let mut columns = 0;
+    for character in text.chars() {
+        if character == '\n' {
+            lines.push(std::mem::take(&mut line));
+            columns = 0;
+            continue;
+        }
+        let character_width = character.width().unwrap_or(0);
+        if columns + character_width > usize::from(width) && !line.is_empty() {
+            lines.push(std::mem::take(&mut line));
+            columns = 0;
+        }
+        line.push(character);
+        columns += character_width;
+    }
+    lines.push(line);
+    lines
 }
 
 fn render_choice_section(

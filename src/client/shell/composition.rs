@@ -1345,7 +1345,6 @@ impl ClientShellState {
                 self.hits.extensions_categories = rendered.extensions_categories;
                 self.hits.extensions_rows = rendered.extensions_rows;
                 self.hits.extensions_search = rendered.extensions_search;
-                self.hits.extensions_python = rendered.extensions_python;
                 self.hits.product_announcement_scrollbar = rendered.product_announcement_scrollbar;
                 self.hits.product_announcement_scroll_metrics =
                     rendered.product_announcement_scroll_metrics;
