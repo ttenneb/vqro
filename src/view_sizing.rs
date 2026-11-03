@@ -7,6 +7,20 @@ use crate::{
 use std::collections::HashMap;
 use unicode_width::UnicodeWidthStr;
 
+pub(crate) const READ_ONLY_SUMMARY: &str = "read-only";
+
+/// Includes the strict three-cell separator (four cells required) and the two
+/// outer frame corners. Inputs are already measured, avoiding extra render scans.
+pub(crate) fn header_outer_width(left_cells: u32, right_cells: u32) -> u32 {
+    left_cells.saturating_add(right_cells).saturating_add(6)
+}
+pub(crate) fn measured_header_width(title: u32, scope: u32, summary: u32) -> u32 {
+    header_outer_width(
+        title.saturating_add(scope).saturating_add(5),
+        summary.saturating_add(2),
+    )
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ViewMeasure {
     pub rows: u16,
@@ -106,18 +120,16 @@ pub(crate) fn measure_document(
             continue;
         }
         let mut rows = 0u16;
-        let header = root
-            .label
-            .width()
-            .saturating_add(
-                root.detail
-                    .as_deref()
-                    .filter(|detail| !detail.is_empty())
-                    .unwrap_or("read-only")
-                    .width(),
-            )
-            .saturating_add(6)
-            .min(4092) as u16;
+        let header = measured_header_width(
+            root.label.width() as u32,
+            0,
+            root.detail
+                .as_deref()
+                .filter(|detail| !detail.is_empty())
+                .unwrap_or(READ_ONLY_SUMMARY)
+                .width() as u32,
+        )
+        .min(4092) as u16;
         let mut width = 0usize;
         let mut pending = vec![(root.id.as_str(), 0usize)];
         let mut budget = document.items.len().min(512);

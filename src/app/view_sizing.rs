@@ -205,7 +205,12 @@ impl App {
             .copied()
             .unwrap_or(DocumentMeasure {
                 body: ViewMeasure::default(),
-                header: entry.view.width().saturating_add(15).min(4092) as u16,
+                header: crate::view_sizing::measured_header_width(
+                    entry.view.width() as u32,
+                    0,
+                    crate::view_sizing::READ_ONLY_SUMMARY.width() as u32,
+                )
+                .min(4092) as u16,
             });
         (
             measure.with_scope(width),

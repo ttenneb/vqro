@@ -338,7 +338,9 @@ fn draw_view_header(
     );
     let right = format!(" {summary} ");
     let right_width = display_width(&right);
-    if right_width + left_width + 3 < rect.width {
+    if crate::view_sizing::header_outer_width(u32::from(left_width), u32::from(right_width))
+        <= u32::from(rect.width) + 2
+    {
         put_text(
             buffer,
             rect.x + rect.width - right_width - 1,
@@ -372,7 +374,7 @@ pub(super) fn render_view_pane(
         .iter()
         .map(|view| view.summary)
         .find(|text| !text.is_empty())
-        .unwrap_or("read-only");
+        .unwrap_or(crate::view_sizing::READ_ONLY_SUMMARY);
     let scope = scope_label(&snapshot.agents, projection.scope);
     let header = Rect::new(outer.x + 1, outer.y, outer.width.saturating_sub(2), 1);
     let background = Style::default().bg(palette.panel_bg);
@@ -667,6 +669,65 @@ mod tests {
             tokens: Vec::new(),
             focused: false,
         }
+    }
+
+    #[test]
+    fn automatic_header_budget_keeps_actual_buffer_title_scope_and_summary() {
+        let document: crate::extension_contract::HostDocumentV1=serde_json::from_value(serde_json::json!({"contract":"host.document.v1","namespace":"sample.views","generation":1,"revision":1,"surface":"pane","target":{"kind":"tab","tab_id":"w1:t1"},"items":[{"id":"root","role":"section","label":"Tasks","detail":"0/0 done","view":{"kind":"section","pane_id":"w1:p1","view_id":"tasks"}}]})).unwrap();
+        let measured = crate::view_sizing::measure_document(&document);
+        let mut failures = Vec::new();
+        for (scope, columns) in [("worker".to_owned(), 100), ("a".repeat(64), 200)] {
+            let terminal = crate::layout::PaneId::from_raw(1);
+            let view = crate::layout::PaneId::from_raw(2);
+            let mut layout = crate::layout::TileLayout::from_tree(
+                crate::layout::TypedNode::Split {
+                    direction: ratatui::layout::Direction::Horizontal,
+                    ratio: 0.5,
+                    first: Box::new(crate::layout::TypedNode::Leaf(terminal)),
+                    second: Box::new(crate::layout::TypedNode::view(
+                        view,
+                        "sample.views",
+                        "tasks",
+                    )),
+                },
+                crate::layout::LayoutLeaf::Pane(terminal),
+            )
+            .unwrap();
+            let metric =
+                measured[&("tasks".into(), "w1:p1".into())].with_scope(display_width(&scope));
+            let area = Rect::new(0, 0, columns, 40);
+            layout.auto_size_views(area, &HashMap::from([(view, metric)]));
+            let rect = layout
+                .panes(area)
+                .into_iter()
+                .find(|pane| pane.id == view)
+                .unwrap()
+                .rect;
+            let mut buffer = Buffer::empty(area);
+            draw_view_header(
+                &mut buffer,
+                Rect::new(rect.x + 1, rect.y, rect.width.saturating_sub(2), 1),
+                "Tasks",
+                &scope,
+                "0/0 done",
+                false,
+                &Palette::catppuccin(),
+            );
+            let line = (rect.x..rect.right())
+                .map(|x| buffer[(x, rect.y)].symbol())
+                .collect::<String>();
+            if !line.contains(&format!("Tasks · {scope}")) || !line.contains("0/0 done") {
+                failures.push(format!(
+                    "scope_cells={},outer_width={}: {line}",
+                    display_width(&scope),
+                    rect.width
+                ));
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "header budget must fit actual title/scope/status when bounds allow: {failures:?}"
+        );
     }
 
     #[test]
