@@ -28,6 +28,11 @@ in-flight work, or a human turn that wins the race, is therefore not auto-replie
 and a delivered reply is never re-answered automatically. `vqro agent prompt` is human-only, so agents address
 each other with messages rather than pane input.
 
+Task/message ID references accept a unique prefix with at least six hex digits,
+with or without `task_`/`msg_`. Exact IDs win; ambiguity lists the full candidates.
+Existing-task/message writes still require `--rev`. TTY `task list`/`ready` uses
+unique short IDs; JSON keeps full IDs. Resolution and replay stay provider-owned.
+
 Presentation: this extension publishes **views** - a Tasks panel and a
 Messages panel per pane - which Vqro draws in the pane's top slot
 (`extensions/tasks/document.py`). The full-tab Tasks terminal view is retired:
