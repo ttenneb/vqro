@@ -177,7 +177,8 @@ fn pane_scroll_result(
     crate::api::schema::ResponseResult::PaneInfo {
         pane: crate::api::schema::PaneInfo {
             pane_id: "pane_1".into(),
-            terminal_id: "terminal_1".into(),
+            content: crate::api::schema::PaneContent::Terminal,
+            terminal_id: Some("terminal_1".into()),
             workspace_id: "ws_1".into(),
             tab_id: "tab_1".into(),
             focused: true,
@@ -262,8 +263,105 @@ mod keybindings_settings;
 mod link_hover;
 mod mobile;
 mod mouse_selection;
-mod pane_panel;
-mod pane_panel_profile;
 mod popup_focus_projection;
 mod recovery;
 mod startup_overlays;
+
+#[test]
+fn v2_surface_index_tracks_view_descriptors_and_an_empty_install_clears_them() {
+    let config = ClientShellConfig::from_config(&Config::default());
+    let mut state = ClientShellState::new(config);
+    state.set_snapshot(Box::new(snapshot()));
+
+    state.set_pane_surface_with_views(
+        surface(),
+        vec![crate::protocol::PaneSurfaceViewEntryV2 {
+            pane_id: "pane_2".into(),
+            extension: "vqro.tasks".into(),
+            view: "tasks".into(),
+            scope: vec!["pane_1".into()],
+        }],
+    );
+    assert_eq!(state.pane_surface_views.len(), 1);
+    assert_eq!(state.pane_surface_views[0].pane_id, "pane_2");
+    assert_eq!(state.pane_surface_views[0].view, "tasks");
+
+    // A later v1 surface is terminal-only: it must not keep a stale view index.
+    let mut v1 = surface();
+    v1.surface_revision = 2;
+    state.set_pane_surface_with_views(v1, Vec::new());
+    assert!(state.pane_surface_views.is_empty());
+}
+
+#[test]
+fn plain_patch_preserves_a_nonempty_v2_view_index_through_direct_and_recompose() {
+    let config = ClientShellConfig::from_config(&Config::default());
+    let mut state = ClientShellState::new(config);
+    state.set_snapshot(Box::new(snapshot()));
+    let descriptors = vec![crate::protocol::PaneSurfaceViewEntryV2 {
+        pane_id: "pane_2".into(),
+        extension: "vqro.tasks".into(),
+        view: "tasks".into(),
+        scope: vec!["pane_1".into()],
+    }];
+    state.set_pane_surface_with_views(surface(), descriptors.clone());
+    assert_eq!(state.pane_surface_views, descriptors);
+    state.compose(106, 20).expect("composed frame");
+
+    // A successful plain patch updates terminal cells and must leave the view
+    // index exactly as the last full surface set it (the retained/direct path).
+    let current = state.pane_surface.clone().expect("pane surface");
+    let mut panes = current.panes.clone();
+    panes[0].content_revision += 1;
+    let mut cell = current.frame.cells[0].clone();
+    cell.symbol = "y".into();
+    let patch = crate::protocol::PaneSurfacePatch {
+        boot_id: current.boot_id.clone(),
+        projection_revision: current.projection_revision,
+        base_surface_revision: current.surface_revision,
+        surface_revision: current.surface_revision + 1,
+        panes,
+        rows: vec![crate::protocol::PaneSurfacePatchRow {
+            x: 0,
+            y: 0,
+            cells: vec![cell],
+        }],
+        cursor: current.frame.cursor.clone(),
+    };
+    assert!(matches!(
+        state.apply_pane_surface_patch(patch),
+        super::surface_patch::ClientPaneSurfacePatchOutcome::Applied(_)
+    ));
+    assert_eq!(
+        state.pane_surface_views, descriptors,
+        "a plain patch must not change the view index"
+    );
+    // The recompose path rebuilds the frame; the descriptor index still holds.
+    state.compose(106, 20).expect("recomposed frame");
+    assert_eq!(state.pane_surface_views, descriptors);
+
+    // A rejected patch mutates neither the surface revision nor the index.
+    let before = state.pane_surface.clone().expect("pane surface");
+    let rejected = crate::protocol::PaneSurfacePatch {
+        boot_id: before.boot_id.clone(),
+        projection_revision: before.projection_revision,
+        base_surface_revision: before.surface_revision + 5,
+        surface_revision: before.surface_revision + 6,
+        panes: Vec::new(),
+        rows: Vec::new(),
+        cursor: None,
+    };
+    assert!(matches!(
+        state.apply_pane_surface_patch(rejected),
+        super::surface_patch::ClientPaneSurfacePatchOutcome::Rejected
+    ));
+    assert_eq!(state.pane_surface_views, descriptors);
+    assert_eq!(
+        state
+            .pane_surface
+            .as_ref()
+            .expect("pane surface")
+            .surface_revision,
+        before.surface_revision
+    );
+}

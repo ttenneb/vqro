@@ -158,7 +158,7 @@ Examples:
 
 The client-owned TUI endpoint generation is independent from the private
 same-install protocol. Vqro terminal admission requires endpoint generation 2
-or private protocol 24; generation 1 and private 22/23 are explicitly retired
+or private protocol 25; generation 1 and private 22/23/24 are explicitly retired
 (owner-approved 2026-11-01). Unchanged named codecs remain v1; raw JSON API
 `vqro.api.v1` and extension/adapter pins are unchanged. See
 [terminal admission decision](docs/next/architecture/terminal-client-admission-v2.md).
@@ -178,7 +178,9 @@ the later terminal admission decision above explicitly retires that generation.
 `layout.tree.v1` JSON result. Existing layout methods keep their selected-only
 pane semantics. Session v8 originally used private protocol 23 / generation 1;
 the later terminal admission decision raises these to 24 / 2 without changing
-bincode-reachable payload shapes. The inherited stable v0.9.0 and preview
+bincode-reachable payload shapes. View panes then raise private protocol to 25
+for the appended surface-v2 message, retaining endpoint generation 2 with explicit
+surface-v2 codec negotiation. The inherited stable v0.9.0 and preview
 2026-09-08-62431dbd033b published protocol 22 / endpoint generation 1.
 Session versions are independent.
 See [tree export and conversion](docs/next/api/layout-tree-v1.md).
@@ -191,13 +193,20 @@ input; its writer expectation becomes a canonical-tree conversion expectation.
 Tree output and v8 persistence get separate expectations; no old fixture is
 rewritten to bless a wire change.
 
+**Recorded generation-scoped extension (surface codec, 2026-10-07).** The pane
+surface lane is settled by
+[`docs/next/architecture/endpoint-surface-codec-v2.md`](docs/next/architecture/endpoint-surface-codec-v2.md),
+which is normative for this change and must be read before touching that lane.
+`ServerMessage` has one appended variant, `PaneSurfaceV2` (tag 21); serving is
+`shell.surface.v2` only, and patches stay `PaneSurfacePatch`.
+
 - Named core codecs are immutable. Do not add, remove, reorder, or reinterpret fields or enum variants reachable from a published codec. Introduce a new codec name and keep the old codec as a fallback instead.
 - Keep baseline JSON handshake and snapshot fields required. New JSON fields must be optional or have field-specific defaults; new enum values need an `Unknown` fallback where older clients can safely ignore them.
 - Add server features through advertised API methods and optional snapshot data when possible. A missing optional feature must disable only that action, not reject the connection.
 - Do not change the meaning or load-bearing parameter shape of an advertised endpoint method. If an old server could ignore a new field and incorrectly report success, add a new method name or a separately advertised capability and omit that field without it.
 - Missing methods, rejections, timeouts, and unavailable servers are client-local outcomes. They must not disconnect other compatible servers, and typing in a pane must not dismiss their notices.
-- Frozen endpoint fixtures, bincode digests, wire-tag tests, and `tests/fixtures/endpoint-method-shapes-v1.json` are compatibility contracts. Never update a generation-1 expectation merely to bless a wire change; create and negotiate a new codec or method.
-- Existing-value digests cannot detect an appended enum variant. Review every enum reachable from a frozen codec as append-closed even when tests remain green.
+- Frozen endpoint fixtures, bincode digests, wire-tag tests, and `tests/fixtures/endpoint-method-shapes-v1.json` are compatibility contracts. Never update a generation-1 expectation merely to bless a wire change; create and negotiate a new codec or method. The one recorded exception is the appended surface variant above, which is a new codec, not a re-blessed value.
+- Existing-value digests cannot detect an appended enum variant. Review every enum reachable from a frozen codec as append-closed even when tests remain green, except for the single recorded generation-scoped surface variant above.
 
 ## Workflow
 

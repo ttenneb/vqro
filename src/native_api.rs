@@ -100,7 +100,7 @@ mod tests {
     fn native_api_identity_is_not_the_private_or_bridge_generation() {
         assert_eq!(NATIVE_API_CONTRACT_V1, "vqro.api.v1");
         assert_eq!(NATIVE_API_MAJOR_VERSION, 1);
-        assert_eq!(crate::protocol::PROTOCOL_VERSION, 24);
+        assert_eq!(crate::protocol::PROTOCOL_VERSION, 25);
         assert_eq!(crate::protocol::endpoint::ENDPOINT_PROTOCOL_GENERATION, 2);
     }
 

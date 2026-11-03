@@ -1018,6 +1018,15 @@
           ],
           "type": "string"
         },
+        "PaneContent": {
+          "description": "What a pane holds. The nested-panes design makes a pane's content kind either\na terminal or an extension view.\n\nA client that does not know a future kind degrades to [`PaneContent::Unknown`]\nrather than rejecting the response, and an omitted value means\n[`PaneContent::Terminal`] for older servers and clients.",
+          "enum": [
+            "terminal",
+            "view",
+            "unknown"
+          ],
+          "type": "string"
+        },
         "PaneInfo": {
           "properties": {
             "agent": {
@@ -1038,6 +1047,10 @@
             },
             "agent_status": {
               "$ref": "#/schemas/event/$defs/AgentStatus"
+            },
+            "content": {
+              "$ref": "#/schemas/event/$defs/PaneContent",
+              "description": "What this pane holds. Omitted (the default) means a terminal, so a\nterminal pane's info is unchanged for older readers; a view pane carries\n`content: \"view\"`."
             },
             "cwd": {
               "type": [
@@ -1094,7 +1107,11 @@
               "type": "string"
             },
             "terminal_id": {
-              "type": "string"
+              "description": "The pane's terminal. Absent for a view pane, never the empty string.",
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "terminal_size": {
               "anyOf": [
@@ -1141,7 +1158,6 @@
           },
           "required": [
             "pane_id",
-            "terminal_id",
             "workspace_id",
             "tab_id",
             "focused",
@@ -3883,39 +3899,6 @@
           ],
           "type": "object"
         },
-        "PanePanelAction": {
-          "enum": [
-            "show",
-            "hide",
-            "toggle"
-          ],
-          "type": "string"
-        },
-        "PanePanelParams": {
-          "description": "One user request to open, close or toggle a pane panel view. Vqro forwards\nit to the attached clients that advertise the pane-panels control; a client\nkeeps its own view state and ignores requests it cannot place.",
-          "properties": {
-            "action": {
-              "$ref": "#/schemas/request/$defs/PanePanelAction"
-            },
-            "pane_id": {
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "view": {
-              "description": "The extension's view id (\"tasks\"); absent means every view the pane\npublishes.",
-              "type": [
-                "string",
-                "null"
-              ]
-            }
-          },
-          "required": [
-            "action"
-          ],
-          "type": "object"
-        },
         "PaneProcessInfoParams": {
           "properties": {
             "pane_id": {
@@ -4448,6 +4431,67 @@
           "required": [
             "start",
             "end"
+          ],
+          "type": "object"
+        },
+        "PaneViewAction": {
+          "enum": [
+            "add",
+            "close"
+          ],
+          "type": "string"
+        },
+        "PaneViewParams": {
+          "description": "The neutral view-pane operation. `add` puts a view pane beside a pane; the\nextension and view identity are supplied by the caller, never by a core\nTasks literal. `close` drops a view pane. Views are read-only content.",
+          "properties": {
+            "action": {
+              "$ref": "#/schemas/request/$defs/PaneViewAction"
+            },
+            "direction": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/request/$defs/SplitDirection"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Split direction for `add`; defaults to right."
+            },
+            "extension": {
+              "description": "The extension that publishes the view (\"vqro.tasks\").",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "focus": {
+              "default": false,
+              "type": "boolean"
+            },
+            "pane_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "ratio": {
+              "format": "float",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "view": {
+              "description": "The view id the extension publishes (\"tasks\").",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "action"
           ],
           "type": "object"
         },
@@ -7326,11 +7370,11 @@
         {
           "properties": {
             "method": {
-              "const": "PanePanel",
+              "const": "pane.view",
               "type": "string"
             },
             "params": {
-              "$ref": "#/schemas/request/$defs/PanePanelParams"
+              "$ref": "#/schemas/request/$defs/PaneViewParams"
             }
           },
           "required": [
@@ -11285,6 +11329,31 @@
               "type": "object"
             },
             {
+              "description": "A pane whose content is an extension view rather than a terminal. Its\nscope is derived from placement and is not part of this export.",
+              "properties": {
+                "extension": {
+                  "type": "string"
+                },
+                "pane_id": {
+                  "type": "string"
+                },
+                "type": {
+                  "const": "view",
+                  "type": "string"
+                },
+                "view": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "pane_id",
+                "extension",
+                "view"
+              ],
+              "type": "object"
+            },
+            {
               "properties": {
                 "box_id": {
                   "type": "string"
@@ -11363,6 +11432,15 @@
             "rate_limited",
             "no_foreground_client",
             "busy"
+          ],
+          "type": "string"
+        },
+        "PaneContent": {
+          "description": "What a pane holds. The nested-panes design makes a pane's content kind either\na terminal or an extension view.\n\nA client that does not know a future kind degrades to [`PaneContent::Unknown`]\nrather than rejecting the response, and an omitted value means\n[`PaneContent::Terminal`] for older servers and clients.",
+          "enum": [
+            "terminal",
+            "view",
+            "unknown"
           ],
           "type": "string"
         },
@@ -11468,6 +11546,10 @@
             "agent_status": {
               "$ref": "#/schemas/success_response/$defs/AgentStatus"
             },
+            "content": {
+              "$ref": "#/schemas/success_response/$defs/PaneContent",
+              "description": "What this pane holds. Omitted (the default) means a terminal, so a\nterminal pane's info is unchanged for older readers; a view pane carries\n`content: \"view\"`."
+            },
             "cwd": {
               "type": [
                 "string",
@@ -11523,7 +11605,11 @@
               "type": "string"
             },
             "terminal_id": {
-              "type": "string"
+              "description": "The pane's terminal. Absent for a view pane, never the empty string.",
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "terminal_size": {
               "anyOf": [
@@ -11570,7 +11656,6 @@
           },
           "required": [
             "pane_id",
-            "terminal_id",
             "workspace_id",
             "tab_id",
             "focused",
@@ -11843,35 +11928,6 @@
             "pane_id",
             "direction",
             "layout"
-          ],
-          "type": "object"
-        },
-        "PanePanelAction": {
-          "enum": [
-            "show",
-            "hide",
-            "toggle"
-          ],
-          "type": "string"
-        },
-        "PanePanelResult": {
-          "properties": {
-            "action": {
-              "$ref": "#/schemas/success_response/$defs/PanePanelAction"
-            },
-            "pane_id": {
-              "type": "string"
-            },
-            "view": {
-              "type": [
-                "string",
-                "null"
-              ]
-            }
-          },
-          "required": [
-            "pane_id",
-            "action"
           ],
           "type": "object"
         },
@@ -12338,6 +12394,40 @@
           "required": [
             "start",
             "end"
+          ],
+          "type": "object"
+        },
+        "PaneViewAction": {
+          "enum": [
+            "add",
+            "close"
+          ],
+          "type": "string"
+        },
+        "PaneViewResult": {
+          "properties": {
+            "action": {
+              "$ref": "#/schemas/success_response/$defs/PaneViewAction"
+            },
+            "extension": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "pane_id": {
+              "type": "string"
+            },
+            "view": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "pane_id",
+            "action"
           ],
           "type": "object"
         },
@@ -13710,17 +13800,17 @@
             },
             {
               "properties": {
-                "panel": {
-                  "$ref": "#/schemas/success_response/$defs/PanePanelResult"
-                },
                 "type": {
-                  "const": "pane_panel",
+                  "const": "pane_view",
                   "type": "string"
+                },
+                "view": {
+                  "$ref": "#/schemas/success_response/$defs/PaneViewResult"
                 }
               },
               "required": [
                 "type",
-                "panel"
+                "view"
               ],
               "type": "object"
             },

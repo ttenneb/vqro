@@ -1129,6 +1129,7 @@ impl HeadlessServer {
                     let crate::server::client_shell::RenderedPaneSurface {
                         frame,
                         panes,
+                        views,
                         collections,
                         splits,
                         popup,
@@ -1151,6 +1152,7 @@ impl HeadlessServer {
                     );
                     surface_parts = Some((
                         panes,
+                        views,
                         collections,
                         splits,
                         popup,
@@ -1201,7 +1203,7 @@ impl HeadlessServer {
 
             if surface_parts
                 .as_ref()
-                .is_some_and(|(_, _, _, _, graphics, _, _)| {
+                .is_some_and(|(_, _, _, _, _, graphics, _, _)| {
                     self.defer_changed_native_geometry(client_id, graphics)
                 })
             {
@@ -1210,7 +1212,7 @@ impl HeadlessServer {
             let mut native_upload =
                 surface_parts
                     .as_mut()
-                    .and_then(|(_, _, _, _, graphics, delivery, sources)| {
+                    .and_then(|(_, _, _, _, _, graphics, delivery, sources)| {
                         self.prepare_native_scene(client_id, graphics, delivery, sources)
                     });
             let terminal_views_surface = if shell_mode {
@@ -1257,33 +1259,35 @@ impl HeadlessServer {
             let has_graphics =
                 surface_parts
                     .as_ref()
-                    .is_some_and(|(_, _, _, _, graphics, _, _)| {
+                    .is_some_and(|(_, _, _, _, _, graphics, _, _)| {
                         !graphics.assets.is_empty()
                             || !graphics.placements.is_empty()
                             || !graphics.retained_assets.is_empty()
                     });
             let mut next_shell_graphics_delivery = None;
-            let prepared = if let Some((panes, collections, splits, popup, graphics, delivery, _)) =
-                surface_parts
-            {
-                next_shell_graphics_delivery = Some(delivery);
-                client.render_state.prepare_pane_surface_with_file(
-                    protocol::PaneSurfaceFrame {
-                        boot_id: self.client_shell_boot_id.clone(),
-                        projection_revision: shell_projection_revision,
-                        surface_revision: 0,
-                        frame,
-                        panes,
-                        collections,
-                        splits,
-                        popup,
-                        graphics,
-                    },
-                    native_upload.is_some(),
-                )
-            } else {
-                client.render_state.prepare_frame(frame)
-            };
+            let prepared =
+                if let Some((panes, views, collections, splits, popup, graphics, delivery, _)) =
+                    surface_parts
+                {
+                    next_shell_graphics_delivery = Some(delivery);
+                    client.render_state.prepare_pane_surface_with_file(
+                        protocol::PaneSurfaceFrame {
+                            boot_id: self.client_shell_boot_id.clone(),
+                            projection_revision: shell_projection_revision,
+                            surface_revision: 0,
+                            frame,
+                            panes,
+                            collections,
+                            splits,
+                            popup,
+                            graphics,
+                        },
+                        views,
+                        native_upload.is_some(),
+                    )
+                } else {
+                    client.render_state.prepare_frame(frame)
+                };
             let Some(mut prepared) = prepared else {
                 if let Some(framed) = terminal_views_render {
                     match writer.render.try_send(framed) {

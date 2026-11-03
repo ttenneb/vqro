@@ -27,6 +27,16 @@ Existing `layout.export`, `layout.apply` and `layout.set_split_ratio` retain
 pane-only, selected-branch response semantics. Their parameter shapes are
 unchanged. The new method does not imply nested tree application support.
 
+## Pane content kind
+
+A pane holds either a terminal or an extension view, so the `PaneInfo` returned
+by `pane.get`, `pane.focus` and the move responses names its content:
+
+- `content` is `terminal`, `view`, or `unknown` for a kind the client does not
+  know. An absent `content` means `terminal`, so a terminal pane's info is
+  unchanged and a view pane always carries `content: "view"`.
+- `terminal_id` is absent for a view pane, never the empty string.
+
 ## Persistence and upgrade
 
 All writers produce session version 8, independently of Collections authority.

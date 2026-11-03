@@ -273,6 +273,26 @@ smallest-client arbitration, patch translation around panels, and the
 extension UI framework marks the split panel as replaced by nested panes.
 Popovers are unchanged; they float above panes.
 
+### Stage 3 implementation notes (2026-10-07)
+
+Recorded deviations and deferrals from this section, so the design and the code
+agree:
+
+- **Scope composition reuses the per-pane evaluator.** The host derives the
+  scope from placement and composes the existing per-pane `host.view.v1` roots
+  whose `pane_id` is covered; it does not yet ask the extension for a view over
+  a scope. Re-keying that request in the host<->extension contract is a named
+  follow-up, not a second layout store: scope is still derived and never stored.
+- **The agent-start setting is one switch.** `ui.show_panels_on_agent_start` is
+  retired in favour of `ui.agent_start_view` (`<extension>:<view>`): setting the
+  identity turns the server-side rule on, and unset adds nothing. The rule
+  itself ships (adding the view beside a newly reported agent, once per terminal,
+  via a durable per-terminal marker); the extension-declared identity, so it is
+  on by default, is the immediate follow-up.
+- **Badge clicks.** A badge click selects its tab and has no action of its own
+  (the recorded decision of 2026-10-06), replacing "focuses the view pane
+  covering that pane, or adds one".
+
 ## Out of scope
 
 | Not included | Notes |
@@ -300,7 +320,14 @@ change (layout identity, persisted state, live handoff, protocol), so
 | 0 | Characterization tests for layout, Collections, session v7 restore and live handoff; roundtable on the design | 2–3 h | ~1 h roundtable |
 | 1 | Core tree: split and stack boxes at any depth (cap 4), panes as leaves, box IDs (names in stage 4), close rules, geometric focus. Testable with `AppState::test_new()`, no UI change | 4–6 h | ~1 h tests and review |
 | 2 | Session v8, v7 conversion with backup, live-upgrade conversion, `PROTOCOL_VERSION` bump, fixture replacement, `AGENTS.md` endpoint section change | 3–4 h | ~1 h |
-| 3 | View panes: view content, scope derivation, per-scope rendering, light frame, Tasks and Messages moved to scopes, panel v1 machinery deleted, badges, agent start rule, `vqro pane view` | 5–7 h | human screenshot review |
+| 3 | View panes: view content, scope derivation, per-scope rendering, light frame, Tasks and Messages moved to scopes, panel v1 machinery deleted, badges, agent start rule, `vqro pane view` | 5-7 h | human screenshot review |
+
+Stage 3 landed view content, placement-derived scope, the light frame, the
+Tasks/Messages views on scopes, the panel v1 deletion, badges, `vqro pane view`
+and the server-side agent-start rule (identity passed in). The remaining stage-3
+deltas -- the extension-declared agent-start identity (on by default) and
+re-keying the view request to a scope -- are named follow-ups in
+[Stage 3 implementation notes](#stage-3-implementation-notes-2026-10-07).
 | 4 | Collections absorbed: package and archiving removed, names and stack switcher and list view in core, CLI updated | 4–6 h | ~1 h |
 | 5 | Interaction: select box, drag drop zones, swap out of a box, box zoom and close | 4–6 h | human use and iteration |
 | 6 | Render-scale benchmark with nested views; docs | 1–2 h | ~0.5 h |

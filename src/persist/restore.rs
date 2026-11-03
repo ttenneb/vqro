@@ -244,6 +244,7 @@ fn reserve_restored_collection_ids(snapshot: &SessionSnapshot) {
     fn reserve_layout(layout: &LayoutSnapshot) {
         match layout {
             LayoutSnapshot::Pane(_) => {}
+            LayoutSnapshot::View { .. } => {}
             LayoutSnapshot::Stack { id, children, .. } => {
                 let _ = CollectionId::from_raw(id.raw());
                 for child in children {
@@ -279,6 +280,9 @@ fn restored_tab_identity_count(tab: &super::snapshot::TabSnapshot) -> usize {
         match layout {
             super::snapshot::LayoutSnapshot::Pane(id) => {
                 ids.insert(*id);
+            }
+            super::snapshot::LayoutSnapshot::View { pane, .. } => {
+                ids.insert(*pane);
             }
             super::snapshot::LayoutSnapshot::Stack { children, .. } => {
                 for child in children {
@@ -390,6 +394,7 @@ fn migrated_public_pane_numbers_by_old_raw(
 fn collect_layout_snapshot_pane_ids(node: &LayoutSnapshot, ids: &mut Vec<u32>) {
     match node {
         LayoutSnapshot::Pane(id) => ids.push(*id),
+        LayoutSnapshot::View { pane, .. } => ids.push(*pane),
         LayoutSnapshot::Stack { children, .. } => {
             for child in children {
                 collect_layout_snapshot_pane_ids(child, ids);
@@ -769,11 +774,19 @@ fn restore_tab(
     pane_ids.sort_by_key(|(old, _)| *old);
     let pane_ids: Vec<_> = pane_ids.into_iter().map(|(_, new)| new).collect();
 
+    // View panes are panes with no terminal record: they carry their content
+    // identity in the tree, so restore neither creates nor requires a terminal.
+    let mut view_panes = HashSet::new();
+    collect_view_panes(&typed_node, &mut view_panes);
+
     let mut panes = HashMap::new();
     let mut terminals = Vec::new();
     let mut terminal_runtimes = HashMap::new();
     let mut failed_imports = 0;
     for id in &pane_ids {
+        if view_panes.contains(id) {
+            continue;
+        }
         let old_id = reverse_id_map.get(id);
         let saved_pane = old_id.and_then(|old_id| snap.panes.get(old_id));
         let terminal_id = match saved_pane
@@ -882,7 +895,10 @@ fn restore_tab(
                     std::time::Instant::now(),
                 );
             }
-            panes.insert(*id, PaneState::new(terminal_id));
+            let mut pane_state = PaneState::new(terminal_id);
+            pane_state.agent_start_view_applied =
+                saved_pane.is_some_and(|pane| pane.agent_start_view_applied);
+            panes.insert(*id, pane_state);
             terminals.push(terminal);
             continue;
         }
@@ -980,7 +996,10 @@ fn restore_tab(
                         std::time::Instant::now(),
                     );
                 }
-                panes.insert(*id, PaneState::new(terminal_id.clone()));
+                let mut pane_state = PaneState::new(terminal_id.clone());
+                pane_state.agent_start_view_applied =
+                    saved_pane.is_some_and(|pane| pane.agent_start_view_applied);
+                panes.insert(*id, pane_state);
                 terminal_runtimes.insert(terminal_id, runtime);
                 terminals.push(terminal);
             }
@@ -1015,7 +1034,7 @@ fn restore_tab(
         }
     }
 
-    if panes.is_empty() {
+    if panes.is_empty() && view_panes.is_empty() {
         warn!(
             tab = ?snap.custom_name,
             "no panes could be restored for tab, dropping it"
@@ -1023,7 +1042,11 @@ fn restore_tab(
         return (None, failed_imports);
     }
 
-    let surviving: HashSet<PaneId> = panes.keys().copied().collect();
+    let surviving: HashSet<PaneId> = panes
+        .keys()
+        .copied()
+        .chain(view_panes.iter().copied())
+        .collect();
     let Some(recovered) = recover_typed_layout(
         snap,
         typed_node,
@@ -1204,6 +1227,9 @@ fn restore_typed_node_remapped(snap: &TabSnapshot) -> (TypedNode, HashMap<u32, P
             LayoutSnapshot::Pane(id) => {
                 ids.insert(*id);
             }
+            LayoutSnapshot::View { pane, .. } => {
+                ids.insert(*pane);
+            }
             LayoutSnapshot::Stack { children, .. } => {
                 for child in children {
                     collect(child, ids);
@@ -1225,6 +1251,11 @@ fn restore_typed_node_remapped(snap: &TabSnapshot) -> (TypedNode, HashMap<u32, P
     fn remap(node: &LayoutSnapshot, ids: &HashMap<u32, PaneId>) -> TypedNode {
         match node {
             LayoutSnapshot::Pane(old) => TypedNode::Leaf(ids[old]),
+            LayoutSnapshot::View {
+                pane,
+                extension,
+                view,
+            } => TypedNode::view(ids[pane], extension.clone(), view.clone()),
             LayoutSnapshot::Stack {
                 id,
                 selected,
@@ -1253,6 +1284,24 @@ fn restore_typed_node_remapped(snap: &TabSnapshot) -> (TypedNode, HashMap<u32, P
     (remap(&snap.layout, &id_map), id_map)
 }
 
+fn collect_view_panes(node: &TypedNode, out: &mut HashSet<PaneId>) {
+    match node {
+        TypedNode::View { pane, .. } => {
+            out.insert(*pane);
+        }
+        TypedNode::Leaf(_) => {}
+        TypedNode::Stack { children, .. } => {
+            for child in children {
+                collect_view_panes(child, out);
+            }
+        }
+        TypedNode::Split { first, second, .. } => {
+            collect_view_panes(first, out);
+            collect_view_panes(second, out);
+        }
+    }
+}
+
 fn recover_typed_layout(
     snap: &TabSnapshot,
     node: TypedNode,
@@ -1263,6 +1312,7 @@ fn recover_typed_layout(
     fn count_collection_leaves(node: &TypedNode, counts: &mut HashMap<TerminalContainerId, usize>) {
         match node {
             TypedNode::Leaf(_) => {}
+            TypedNode::View { .. } => {}
             TypedNode::Stack { id, children, .. } => {
                 *counts.entry(*id).or_default() += 1;
                 for child in children {
@@ -1294,6 +1344,17 @@ fn recover_typed_layout(
             TypedNode::Leaf(id) => {
                 (surviving.contains(&id) && placed.insert(id)).then_some(TypedNode::Leaf(id))
             }
+            // A view pane carries its own content identity and has no terminal
+            // record to be missing; it survives on placement alone.
+            TypedNode::View {
+                pane,
+                extension,
+                view,
+            } => (surviving.contains(&pane) && placed.insert(pane)).then_some(TypedNode::View {
+                pane,
+                extension,
+                view,
+            }),
             TypedNode::Stack {
                 id,
                 selected,
@@ -1341,6 +1402,43 @@ fn recover_typed_layout(
             },
         }
     }
+    // An unplaced survivor must keep its content identity. A view leaf carries
+    // no terminal record, so reconstructing it as a terminal `Leaf` would drop
+    // the pane's content (data loss); collect the view identities first because
+    // `prune` consumes the tree.
+    fn collect_view_identities(node: &TypedNode, views: &mut HashMap<PaneId, (String, String)>) {
+        match node {
+            TypedNode::View {
+                pane,
+                extension,
+                view,
+            } => {
+                views.insert(*pane, (extension.clone(), view.clone()));
+            }
+            TypedNode::Leaf(_) => {}
+            TypedNode::Stack { children, .. } => {
+                for child in children {
+                    collect_view_identities(child, views);
+                }
+            }
+            TypedNode::Split { first, second, .. } => {
+                collect_view_identities(first, views);
+                collect_view_identities(second, views);
+            }
+        }
+    }
+    let mut view_identities = HashMap::new();
+    collect_view_identities(&node, &mut view_identities);
+    // A survivor keeps its content identity wherever it is reattached: rebuilding
+    // a view as a terminal `Leaf` would drop its content.
+    let survivor_node = |pane: PaneId| match view_identities.get(&pane) {
+        Some((extension, view)) => TypedNode::View {
+            pane,
+            extension: extension.clone(),
+            view: view.clone(),
+        },
+        None => TypedNode::Leaf(pane),
+    };
     let mut placed = HashSet::new();
     let mut root = prune(node, surviving, &valid_ids, &mut placed);
     let mut unplaced: Vec<_> = surviving
@@ -1350,7 +1448,7 @@ fn recover_typed_layout(
         .collect();
     unplaced.sort_by_key(|pane| pane.raw());
     for pane in unplaced {
-        let leaf = TypedNode::Leaf(pane);
+        let leaf = survivor_node(pane);
         root = Some(match root {
             Some(existing) => TypedNode::Split {
                 direction: Direction::Horizontal,
@@ -1377,6 +1475,7 @@ fn recover_typed_layout(
     fn collect_leaves(node: &TypedNode, leaves: &mut Vec<LayoutLeaf>) {
         match node {
             TypedNode::Leaf(pane) => leaves.push(LayoutLeaf::Pane(*pane)),
+            TypedNode::View { pane, .. } => leaves.push(LayoutLeaf::Pane(*pane)),
             TypedNode::Stack { id, children, .. } => {
                 leaves.push(LayoutLeaf::Stack(*id));
                 for child in children {
@@ -1436,11 +1535,11 @@ fn recover_typed_layout(
     let root = panes
         .into_iter()
         .skip(1)
-        .fold(TypedNode::Leaf(first), |root, pane| TypedNode::Split {
+        .fold(survivor_node(first), |root, pane| TypedNode::Split {
             direction: Direction::Horizontal,
             ratio: 0.5,
             first: Box::new(root),
-            second: Box::new(TypedNode::Leaf(pane)),
+            second: Box::new(survivor_node(pane)),
         });
     let layout = TileLayout::from_tree(root, LayoutLeaf::Pane(first))?;
     exact_survivors(&layout).then_some(RecoveredTabLayout {
@@ -1464,6 +1563,11 @@ fn remap_inner(snap: &LayoutSnapshot, id_map: &mut HashMap<u32, PaneId>) -> Node
         LayoutSnapshot::Pane(old_id) => {
             let new_id = PaneId::alloc();
             id_map.insert(*old_id, new_id);
+            Node::Pane(new_id)
+        }
+        LayoutSnapshot::View { pane, .. } => {
+            let new_id = PaneId::alloc();
+            id_map.insert(*pane, new_id);
             Node::Pane(new_id)
         }
         LayoutSnapshot::Stack {
@@ -1652,6 +1756,7 @@ mod tests {
                             terminal_id: None,
                             cwd,
                             label: Some("keep my pane".into()),
+                            agent_start_view_applied: false,
                             agent_name: None,
                             managed_agent_kind: None,
                             agent_session: None,
@@ -1946,6 +2051,7 @@ mod tests {
                             managed_agent_kind: None,
                             agent_session: None,
                             launch_argv: None,
+                            agent_start_view_applied: false,
                         },
                     )]),
                     zoomed: false,
@@ -2001,6 +2107,7 @@ mod tests {
             managed_agent_kind: None,
             agent_session: None,
             launch_argv: None,
+            agent_start_view_applied: false,
         };
         let snapshot = SessionSnapshot {
             version: super::super::snapshot::SNAPSHOT_VERSION,
@@ -2520,6 +2627,56 @@ mod tests {
     }
 
     #[test]
+    fn unplaced_view_survivor_keeps_its_view_identity() {
+        use super::super::snapshot::{LayoutSnapshot, TabSnapshot};
+
+        let pane = PaneId::from_raw(171);
+        let box_id = crate::terminal_container::TerminalContainerId::parse(7_070_000).unwrap();
+        let snapshot = TabSnapshot {
+            id: None,
+            custom_name: None,
+            layout: LayoutSnapshot::View {
+                pane: 1,
+                extension: "vqro.tasks".into(),
+                view: "tasks".into(),
+            },
+            collections: Vec::new(),
+            panes: HashMap::new(),
+            zoomed: false,
+            focused: Some(1),
+            focused_leaf: Some(LayoutLeafSnapshot::Pane(1)),
+            root_pane: Some(1),
+        };
+        let id_map = HashMap::from([(1, pane)]);
+        let surviving = HashSet::from([pane]);
+        // The view's container id is already restored, so the whole container is
+        // pruned and the view becomes an unplaced survivor.
+        let mut restored_ids = HashSet::from([box_id]);
+        let node = TypedNode::Stack {
+            id: box_id,
+            selected: 0,
+            children: vec![TypedNode::View {
+                pane,
+                extension: "vqro.tasks".into(),
+                view: "tasks".into(),
+            }],
+        };
+
+        let recovered =
+            recover_typed_layout(&snapshot, node, &id_map, &surviving, &mut restored_ids).unwrap();
+        assert_eq!(
+            recovered.layout.pane_ids(),
+            vec![pane],
+            "the view survivor is reattached"
+        );
+        assert_eq!(
+            recovered.layout.view_at(pane).map(|content| content.view),
+            Some("tasks".to_owned()),
+            "an unplaced view survivor keeps its view identity, not a terminal leaf"
+        );
+    }
+
+    #[test]
     fn over_limit_orphan_records_do_not_consume_container_capacity() {
         use super::super::snapshot::{CollectionSnapshot, LayoutSnapshot, TabSnapshot};
 
@@ -2728,6 +2885,7 @@ mod tests {
                 managed_agent_kind: None,
                 agent_session: None,
                 launch_argv: None,
+                agent_start_view_applied: false,
             },
         )]);
         let mut layout = super::super::snapshot::LayoutSnapshot::Pane(1);
@@ -2895,6 +3053,7 @@ mod tests {
                                 value: "opencode-session".into(),
                             }),
                             launch_argv: None,
+                            agent_start_view_applied: false,
                         },
                     )]),
                     zoomed: false,
@@ -2987,6 +3146,7 @@ mod tests {
                                 managed_agent_kind: None,
                                 agent_session: None,
                                 launch_argv: None,
+                                agent_start_view_applied: false,
                             },
                         ),
                         (
@@ -2999,6 +3159,7 @@ mod tests {
                                 managed_agent_kind: None,
                                 agent_session: None,
                                 launch_argv: None,
+                                agent_start_view_applied: false,
                             },
                         ),
                     ]),
@@ -3065,6 +3226,155 @@ mod tests {
         }
     }
 
+    /// capture -> serialize -> parse -> restore, the durable round trip a restart
+    /// actually takes (not a hand-built DTO).
+    fn capture_parse_restore(
+        state: &crate::app::state::AppState,
+    ) -> (
+        Vec<Workspace>,
+        HashMap<crate::terminal::TerminalId, crate::terminal::TerminalState>,
+    ) {
+        let snapshot = crate::persist::capture(
+            &state.workspaces,
+            &state.repositories,
+            &state.space_order,
+            &state.terminals,
+            &crate::terminal::TerminalRuntimeRegistry::new(),
+            state.active,
+            state.selected,
+        );
+        let json = serde_json::to_string(&snapshot).expect("serialize captured session");
+        let parsed = crate::persist::parse_snapshot(&json).expect("parse captured session");
+        let (events, _event_rx) = mpsc::channel(4);
+        let (workspaces, terminals, _runtimes) = restore(
+            &parsed,
+            None,
+            24,
+            80,
+            0,
+            test_restore_shell(),
+            crate::config::ShellModeConfig::NonLogin,
+            false,
+            events,
+            Arc::new(Notify::new()),
+            Arc::new(RenderSignal::new()),
+        )
+        .expect("restore captured session");
+        (workspaces, terminals)
+    }
+
+    #[tokio::test]
+    async fn cold_restore_preserves_a_view_pane_and_its_agent_start_marker() {
+        let mut state = crate::app::state::AppState::test_new();
+        let mut workspace = Workspace::test_new("views");
+        let root = workspace.tabs[0].root_pane;
+        workspace
+            .split_pane_with_view(
+                root,
+                "vqro.tasks",
+                "tasks",
+                Direction::Horizontal,
+                0.5,
+                false,
+            )
+            .expect("view pane");
+        workspace
+            .pane_state_mut(root)
+            .expect("terminal pane")
+            .agent_start_view_applied = true;
+        state.workspaces = vec![workspace];
+        state.active = Some(0);
+        state.selected = 0;
+        state.ensure_test_terminals();
+
+        let (workspaces, terminals) = capture_parse_restore(&state);
+        let mut app_state = crate::app::state::AppState::test_new();
+        app_state.workspaces = workspaces;
+        app_state.terminals = terminals;
+        app_state.active = Some(0);
+        app_state.selected = 0;
+        let workspace = &app_state.workspaces[0];
+        let tab = &workspace.tabs[0];
+        let view_pane = tab.layout.view_panes()[0];
+        let terminal = tab
+            .layout
+            .pane_ids()
+            .into_iter()
+            .find(|pane| !tab.layout.view_panes().contains(pane))
+            .expect("terminal pane");
+        assert_eq!(
+            workspace
+                .view_content(view_pane)
+                .map(|content| content.view),
+            Some("tasks".to_owned())
+        );
+        assert_eq!(workspace.terminal_id(view_pane), None);
+        assert!(
+            workspace
+                .pane_state(terminal)
+                .expect("terminal pane")
+                .agent_start_view_applied
+        );
+        assert_eq!(app_state.terminals.len(), 1);
+        assert_eq!(
+            app_state.terminals.keys().next(),
+            workspace.terminal_id(terminal)
+        );
+        workspace.assert_invariants_for_test();
+        app_state.assert_invariants_for_test();
+    }
+
+    #[tokio::test]
+    async fn cold_restore_of_a_view_only_tab_keeps_the_view_and_both_helpers() {
+        let mut state = crate::app::state::AppState::test_new();
+        let mut workspace = Workspace::test_new("views");
+        let root = workspace.tabs[0].root_pane;
+        workspace
+            .split_pane_with_view(
+                root,
+                "vqro.tasks",
+                "tasks",
+                Direction::Horizontal,
+                0.5,
+                false,
+            )
+            .expect("view pane");
+        // Close the terminal: the view is promoted to a view-only root.
+        workspace.close_pane(root);
+        assert!(workspace.tabs[0].panes.is_empty());
+        state.workspaces = vec![workspace];
+        state.active = Some(0);
+        state.selected = 0;
+        state.ensure_test_terminals();
+
+        let (workspaces, terminals) = capture_parse_restore(&state);
+        let mut app_state = crate::app::state::AppState::test_new();
+        app_state.workspaces = workspaces;
+        app_state.terminals = terminals;
+        app_state.active = Some(0);
+        app_state.selected = 0;
+        let workspace = &app_state.workspaces[0];
+        let tab = &workspace.tabs[0];
+        assert!(
+            tab.panes.is_empty(),
+            "a view-only tab restores with no terminal record"
+        );
+        let view_pane = tab.layout.view_panes()[0];
+        assert_eq!(tab.root_pane, view_pane);
+        assert_eq!(
+            workspace
+                .view_content(view_pane)
+                .map(|content| content.view),
+            Some("tasks".to_owned())
+        );
+        assert!(
+            app_state.terminals.is_empty(),
+            "no terminal state for a view-only tab"
+        );
+        workspace.assert_invariants_for_test();
+        app_state.assert_invariants_for_test();
+    }
+
     #[tokio::test]
     async fn cold_restore_uses_persisted_repaired_public_tab_numbers() {
         let cwd = std::env::current_dir().unwrap();
@@ -3079,6 +3389,7 @@ mod tests {
                     managed_agent_kind: None,
                     agent_session: None,
                     launch_argv: None,
+                    agent_start_view_applied: false,
                 },
             )
         };
@@ -3095,6 +3406,7 @@ mod tests {
                 value: "codex-session".into(),
             }),
             launch_argv: None,
+            agent_start_view_applied: false,
         };
         let mut snapshot = SessionSnapshot {
             delegations: Vec::new(),
@@ -3293,6 +3605,7 @@ mod tests {
                                 value: "codex-session".into(),
                             }),
                             launch_argv: None,
+                            agent_start_view_applied: false,
                         },
                     )]),
                     zoomed: false,
@@ -3490,6 +3803,7 @@ mod tests {
                 managed_agent_kind: None,
                 agent_session: None,
                 launch_argv: None,
+                agent_start_view_applied: false,
             },
         );
         let mut history = SessionHistorySnapshot {

@@ -109,9 +109,6 @@ pub(crate) struct ClientShellConfig {
     pub(super) startup_config_diagnostic: Option<String>,
     pub(super) startup_server_notice: Option<String>,
     pub(super) startup_onboarding: bool,
-    /// Open a pane's views when an agent starts there. On by default; the user
-    /// opts out. Only a user action or this user-facing rule opens a view.
-    pub(super) show_panels_on_agent_start: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -156,7 +153,6 @@ pub(super) struct ShellHitMap {
     pub(super) attention_toggle: Rect,
     pub(super) panes: Vec<PaneHit>,
     pub(super) collections: Vec<CollectionChromeHit>,
-    pub(super) pane_panels: Vec<super::pane_panel::PanePanelHit>,
     pub(super) collection_members: Vec<CollectionMemberHit>,
     pub(super) popup: Option<PaneHit>,
     pub(super) pane_splits: Vec<PaneSplitHit>,
@@ -330,13 +326,6 @@ pub(super) enum ClientChromeDrag {
         grab_offset: i32,
         last_sent_ratio: Option<f32>,
         last_sent_at: Option<std::time::Instant>,
-    },
-    /// Dragging a pane panel's edge. The pane's PTY resizes once, on release.
-    PanePanelEdge {
-        pane_id: String,
-        start_row: u16,
-        start_height: u16,
-        max_height: u16,
     },
     PaneScrollbar {
         hit: PaneHit,
@@ -1097,9 +1086,14 @@ pub(crate) struct ClientShellState {
     pub(super) snapshot: Option<Box<ClientShellSnapshot>>,
     pub(super) structure: Option<Box<crate::protocol::endpoint::ClientShellStructureProjection>>,
     pub(super) pane_surface: Option<PaneSurfaceFrame>,
+    /// View-pane descriptors for the displayed surface, from the negotiated
+    /// `shell.surface.v2` wrapper. Empty for a v1 surface, which carries no view
+    /// panes. Kept beside the frame so the frame type stays byte-exact v1.
+    pub(super) pane_surface_views: Vec<crate::protocol::PaneSurfaceViewEntryV2>,
     /// A future projection surface waits here until its matching snapshot arrives. The visible
     /// pane surface always remains an exact snapshot pair.
     pub(super) pending_pane_surface: Option<PaneSurfaceFrame>,
+    pub(super) pending_pane_surface_views: Vec<crate::protocol::PaneSurfaceViewEntryV2>,
     pub(super) graphics: crate::kitty_graphics::surface::ClientState,
     pub(super) graphics_cell_size: crate::kitty_graphics::HostCellSize,
     pub(super) popup_terminal_id: Option<String>,
@@ -1121,35 +1115,9 @@ pub(crate) struct ClientShellState {
     pub(super) collection_list_views: HashSet<String>,
     pub(super) collection_expanded_members: HashMap<String, HashSet<String>>,
     pub(super) collection_preview_heights: HashMap<String, u16>,
-    /// Panel collapse state per pane: per client, never shared.
-    pub(super) pane_panel_display: HashMap<String, super::pane_panel::PanePanelDisplay>,
-    /// Which views the user (or the show-on-agent-start rule) has open, per
-    /// pane, by the extension's own view id. Per client, never shared.
-    ///
-    /// Panels are addressed by pane (that is what the server's request names)
-    /// but *kept* by terminal id, so a pane that moves between tabs keeps its
-    /// panels: `pane_terminal_ids` is the join, filled from the snapshot.
-    pub(super) pane_panel_open: HashMap<String, std::collections::BTreeSet<String>>,
-    /// Pane identity to terminal identity, joined from the published views:
-    /// a pane has exactly one terminal, so any placement in it is authoritative.
-    pub(super) pane_terminal_ids: HashMap<String, String>,
-    /// The same panels, kept by terminal identity. This is the durable key: a
-    /// pane that moves between tabs changes its pane id but not its terminal,
-    /// so the panes above are derived from this on every snapshot.
-    pub(super) panels_by_terminal: HashMap<String, std::collections::BTreeSet<String>>,
-    pub(super) display_by_terminal: HashMap<String, super::pane_panel::PanePanelDisplay>,
-    /// The last pane panel claim sent, so it is sent only when it changes.
-    pub(super) last_pane_panels: Option<crate::protocol::endpoint::ClientPanePanels>,
-    /// Panes that already had an agent when the rule last ran.
-    pub(super) panes_with_agents: std::collections::BTreeSet<String>,
-    /// The panel bands Vqro drew, clickable or not, for the patch filter.
-    pub(super) pane_panel_areas: Vec<Rect>,
-    /// Collection surfaces Vqro drew as lists, for the same patch filter: the
+    /// Collection surfaces Vqro drew as lists, for the patch filter: the
     /// server's patch was computed for the pane, not for the list over it.
     pub(super) collection_list_areas: Vec<Rect>,
-    /// Rows a panel moved each pane's grid down by, by pane id: a retained patch
-    /// row for that pane belongs that many rows lower.
-    pub(super) pane_panel_band_rows: HashMap<String, u16>,
     pub(super) collection_entered_pane: Option<String>,
     pub(super) collection_maximized_pane: Option<(String, String)>,
     /// Stable local presentation preferences; never carries connection/action authority.
@@ -1328,7 +1296,9 @@ impl ClientShellState {
             snapshot: None,
             structure: None,
             pane_surface: None,
+            pane_surface_views: Vec::new(),
             pending_pane_surface: None,
+            pending_pane_surface_views: Vec::new(),
             graphics: crate::kitty_graphics::surface::ClientState::new(),
             graphics_cell_size: crate::kitty_graphics::HostCellSize {
                 width_px: 1,
@@ -1351,16 +1321,7 @@ impl ClientShellState {
             collection_list_views: HashSet::new(),
             collection_expanded_members: HashMap::new(),
             collection_preview_heights: HashMap::new(),
-            pane_panel_display: HashMap::new(),
-            pane_panel_open: HashMap::new(),
-            pane_terminal_ids: HashMap::new(),
-            panels_by_terminal: HashMap::new(),
-            display_by_terminal: HashMap::new(),
-            last_pane_panels: None,
-            panes_with_agents: Default::default(),
-            pane_panel_areas: Vec::new(),
             collection_list_areas: Vec::new(),
-            pane_panel_band_rows: HashMap::new(),
             collection_entered_pane: None,
             collection_maximized_pane: None,
             recovery_presentations: HashMap::new(),
@@ -1627,21 +1588,15 @@ impl ClientShellState {
         self.collection_list_views.clear();
         self.collection_expanded_members.clear();
         self.collection_preview_heights.clear();
-        self.pane_panel_display.clear();
-        self.pane_panel_open.clear();
-        self.pane_terminal_ids.clear();
-        self.panels_by_terminal.clear();
-        self.display_by_terminal.clear();
-        self.last_pane_panels = None;
-        self.panes_with_agents.clear();
-        self.pane_panel_areas.clear();
         self.collection_list_areas.clear();
         self.collection_entered_pane = None;
         self.collection_maximized_pane = None;
         self.terminal_view_surfaces.clear();
         self.last_terminal_views_interest = None;
         self.pane_surface = None;
+        self.pane_surface_views.clear();
         self.pending_pane_surface = None;
+        self.pending_pane_surface_views.clear();
         self.input_leases = ClientInputLeases::default();
         self.popup_terminal_id = None;
         self.chrome_drag = None;
@@ -2004,27 +1959,25 @@ impl ClientShellState {
             }
         }
         self.snapshot = Some(snapshot);
-        // Pane identities are known now: restore the user's own panels, then
-        // apply the show-on-agent-start rule if the user enabled it.
-        self.restore_pane_panels();
-        let _ = self.apply_show_panels_on_agent_start();
         let focused_repository = self.focused_repository_id();
         if let Some(ClientShellOverlay::Extensions(extensions)) = self.overlay.as_mut() {
             extensions.repository_context = focused_repository;
         }
         let pending_surface = self.pending_pane_surface.take();
+        let pending_views = std::mem::take(&mut self.pending_pane_surface_views);
         if let Some(surface) = pending_surface {
             let matching = self.snapshot.as_ref().is_some_and(|snapshot| {
                 surface.boot_id == snapshot.boot_id
                     && surface.projection_revision == snapshot.revision
             });
             if matching {
-                self.install_pane_surface(surface, false);
+                self.install_pane_surface(surface, pending_views, false);
             } else if self.snapshot.as_ref().is_some_and(|snapshot| {
                 surface.boot_id == snapshot.boot_id
                     && surface.projection_revision > snapshot.revision
             }) {
                 self.pending_pane_surface = Some(surface);
+                self.pending_pane_surface_views = pending_views;
             }
         }
         self.resume_mobile_switcher_if_ready();
@@ -2035,7 +1988,24 @@ impl ClientShellState {
         self.pane_surface.is_some()
     }
 
+    /// Install a terminal-only frame with no view panes.
     pub(crate) fn set_pane_surface(&mut self, surface: PaneSurfaceFrame) {
+        self.set_pane_surface_with_views(surface, Vec::new());
+    }
+
+    /// Reinstall a frame derived from a patch without disturbing the committed
+    /// view descriptors: a patch never changes them.
+    pub(crate) fn reinstall_patched_surface(&mut self, surface: PaneSurfaceFrame) {
+        let views = std::mem::take(&mut self.pane_surface_views);
+        self.set_pane_surface_with_views(surface, views);
+    }
+
+    /// Install a `shell.surface.v2` frame together with its view descriptors.
+    pub(crate) fn set_pane_surface_with_views(
+        &mut self,
+        surface: PaneSurfaceFrame,
+        views: Vec<crate::protocol::PaneSurfaceViewEntryV2>,
+    ) {
         let Some(snapshot) = self.snapshot.as_ref() else {
             return;
         };
@@ -2054,16 +2024,22 @@ impl ClientShellState {
             // The next expected surface waits separately for its exact snapshot. Keeping the
             // current pair avoids treating this speculative successor as presentation evidence.
             self.pending_pane_surface = Some(surface);
+            self.pending_pane_surface_views = views;
             self.hits = ShellHitMap::default();
             return;
         }
         // A surface that skips one or more revisions supersedes any retained pair, but is still
         // not rendered until its matching snapshot arrives. Retain it monotonically so delayed
         // intermediate surfaces cannot replace it.
-        self.install_pane_surface(surface, true);
+        self.install_pane_surface(surface, views, true);
     }
 
-    fn install_pane_surface(&mut self, mut surface: PaneSurfaceFrame, retain_future: bool) {
+    fn install_pane_surface(
+        &mut self,
+        mut surface: PaneSurfaceFrame,
+        views: Vec<crate::protocol::PaneSurfaceViewEntryV2>,
+        retain_future: bool,
+    ) {
         let Some(snapshot) = self.snapshot.as_ref() else {
             return;
         };
@@ -2242,6 +2218,7 @@ impl ClientShellState {
         self.graphics
             .set_scene(std::mem::take(&mut surface.graphics));
         self.pane_surface = Some(surface);
+        self.pane_surface_views = views;
         self.invalidate_link_hover();
         self.resume_mobile_switcher_if_ready();
         self.reconcile_input_source();
@@ -2328,7 +2305,9 @@ impl ClientShellState {
 
     pub(crate) fn invalidate_pane_surface(&mut self) {
         self.pane_surface = None;
+        self.pane_surface_views.clear();
         self.pending_pane_surface = None;
+        self.pending_pane_surface_views.clear();
         self.hits = ShellHitMap::default();
         self.host_mouse_pixels = None;
     }

@@ -551,10 +551,14 @@ impl HeadlessServer {
             // The published row patch cannot carry images. Reuse the retained text/layout
             // in a graphics-capable surface message rather than invoking the full renderer.
             let (prepared, graphics_delivery) = if let Some((surface, delivery, _)) = graphics {
+                // A graphics refresh retains topology and its view descriptors.
+                let views = client.render_state.last_pane_surface_views().to_vec();
                 (
-                    client
-                        .render_state
-                        .prepare_pane_surface_with_file(surface, native_upload.is_some()),
+                    client.render_state.prepare_pane_surface_with_file(
+                        surface,
+                        views,
+                        native_upload.is_some(),
+                    ),
                     Some(delivery),
                 )
             } else {

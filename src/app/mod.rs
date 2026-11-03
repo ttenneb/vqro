@@ -125,6 +125,13 @@ impl AppPolicy {
     };
 }
 
+/// Parse `<extension>:<view>` for the server-side agent-start rule. A malformed
+/// value disables the rule rather than guessing an identity.
+fn parse_agent_start_view(value: Option<&str>) -> Option<(String, String)> {
+    let (extension, view) = value?.split_once(':')?;
+    (!extension.is_empty() && !view.is_empty()).then(|| (extension.to_owned(), view.to_owned()))
+}
+
 pub struct App {
     pub state: AppState,
     pub(crate) pixel_mouse_available: bool,
@@ -537,16 +544,19 @@ impl App {
         tab_index: Option<usize>,
         additional: usize,
     ) -> Result<(), crate::admission::AdmissionError> {
+        // Count structural identities (terminals and views), the same ones the
+        // restore boundary counts, so a run cannot admit a layout persistence
+        // would refuse. Terminal records alone would let view panes bypass it.
         let workspace_panes = workspace_index
             .and_then(|index| self.state.workspaces.get(index))
-            .map_or(0, crate::workspace::Workspace::pane_count);
+            .map_or(0, crate::workspace::Workspace::structural_pane_count);
         let tab_panes = workspace_index
             .zip(tab_index)
             .and_then(|(workspace, tab)| self.state.workspaces.get(workspace)?.tabs.get(tab))
-            .map_or(0, |tab| tab.panes.len());
+            .map_or(0, |tab| tab.layout.pane_count());
         let session_panes = self
             .state
-            .pane_count()
+            .structural_pane_count()
             .saturating_add(usize::from(self.state.popup_pane.is_some()));
         crate::admission::panes(session_panes, workspace_panes, tab_panes, additional)
     }
@@ -766,7 +776,6 @@ impl App {
         let mut state = AppState {
             terminals: std::collections::HashMap::new(),
             direct_attach_resize_locks: std::collections::HashSet::new(),
-            pane_panel_claims: std::collections::HashMap::new(),
             pane_id_aliases: std::collections::HashMap::new(),
             public_pane_id_aliases: std::collections::HashMap::new(),
             workspaces,
@@ -817,6 +826,7 @@ impl App {
             pane_scrollbars: config.ui.pane_scrollbars,
             pane_gaps: config.ui.pane_gaps,
             show_agent_labels_on_pane_borders: config.ui.show_agent_labels_on_pane_borders,
+            agent_start_view: parse_agent_start_view(config.ui.agent_start_view.as_deref()),
             tab_bar_right: Vec::new(),
             tab_bar_right_separator: String::new(),
             reveal_hidden_cursor_for_cjk_ime: config.experimental.reveal_hidden_cursor_for_cjk_ime,
@@ -1334,6 +1344,8 @@ impl App {
                 self.state.pane_gaps = config.ui.pane_gaps;
                 self.state.show_agent_labels_on_pane_borders =
                     config.ui.show_agent_labels_on_pane_borders;
+                self.state.agent_start_view =
+                    parse_agent_start_view(config.ui.agent_start_view.as_deref());
                 self.configure_tab_bar_status(
                     &config.ui.tab_bar_right,
                     &config.ui.tab_bar_right_separator,
@@ -2885,8 +2897,14 @@ mod tests {
         assert_eq!(tab.workspace_id, workspace.workspace_id);
         assert_eq!(root_pane.workspace_id, workspace.workspace_id);
         assert_eq!(root_pane.tab_id, tab.tab_id);
-        assert!(root_pane.terminal_id.starts_with("term_"));
-        assert_ne!(root_pane.terminal_id, root_pane.pane_id);
+        assert!(root_pane
+            .terminal_id
+            .as_deref()
+            .is_some_and(|id| id.starts_with("term_")));
+        assert_ne!(
+            root_pane.terminal_id.as_deref(),
+            Some(root_pane.pane_id.as_str())
+        );
     }
 
     #[test]

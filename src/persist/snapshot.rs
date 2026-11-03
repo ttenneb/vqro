@@ -11,10 +11,14 @@ use crate::workspace::Workspace;
 
 /// Current structural session snapshot format version.
 /// Maximum snapshot version this binary can read.
-pub(crate) const SNAPSHOT_VERSION: u32 = 8;
+pub(crate) const SNAPSHOT_VERSION: u32 = 9;
 /// Admitted input version from pre-tree legacy-authority writers. Never written.
 #[cfg(any(unix, test))]
 pub(crate) const LEGACY_SNAPSHOT_WRITER_VERSION: u32 = 6;
+/// Snapshot version written by the immediately previous release. Kept as an
+/// admitted live-handoff input so a normal upgrade from that build is not
+/// rejected before FD admission; its `Pane` leaf is unchanged and parses as-is.
+pub(crate) const PREDECESSOR_SNAPSHOT_VERSION: u32 = 8;
 /// Pane history has no terminal-identity fields and remains wire-compatible at v4.
 pub(super) const HISTORY_SNAPSHOT_VERSION: u32 = 4;
 pub(super) const MAX_SESSION_SNAPSHOT_BYTES: u64 = 16 * 1024 * 1024;
@@ -277,6 +281,10 @@ pub struct PaneSnapshot {
     pub agent_session: Option<PaneAgentSessionSnapshot>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub launch_argv: Option<Vec<String>>,
+    /// The server-side agent-start rule already ran for this terminal. Default
+    /// false so an older file simply lets the rule run once after upgrade.
+    #[serde(default)]
+    pub agent_start_view_applied: bool,
 }
 
 impl PaneSnapshot {
@@ -289,6 +297,7 @@ impl PaneSnapshot {
             managed_agent_kind: None,
             agent_session: None,
             launch_argv: None,
+            agent_start_view_applied: false,
         }
     }
 
@@ -315,6 +324,12 @@ pub struct PaneHistorySnapshot {
 #[derive(Clone, Serialize, Deserialize)]
 pub enum LayoutSnapshot {
     Pane(u32),
+    /// A view pane: a pane whose content is an extension view, not a terminal.
+    View {
+        pane: u32,
+        extension: String,
+        view: String,
+    },
     Stack {
         id: crate::layout::CollectionId,
         selected: usize,
@@ -515,6 +530,12 @@ where
     fn collect_layout_panes(layout: &LayoutSnapshot, panes: &mut Vec<u32>) {
         match layout {
             LayoutSnapshot::Pane(id) => panes.push(*id),
+            // A view is a structural pane with no terminal record. Rescuing it
+            // as a terminal would fabricate an identity and misreport a valid
+            // view-bearing capture as a structural change, which legacy handoff
+            // admission then rejects. Its public number is workspace-level and
+            // normalized separately; the layout leaf keeps the view identity.
+            LayoutSnapshot::View { .. } => {}
             // Stack descendants are not synthesized; missing references reach
             // typed recovery without runtimes. Standalone legacy references
             // retain the existing layout-only pane rescue.
@@ -912,6 +933,7 @@ fn legacy_identity_cwd(snap: &LegacyWorkspaceSnapshot) -> PathBuf {
 fn first_pane_id_in_layout(layout: &LayoutSnapshot) -> Option<u32> {
     match layout {
         LayoutSnapshot::Pane(id) => Some(*id),
+        LayoutSnapshot::View { pane, .. } => Some(*pane),
         LayoutSnapshot::Stack {
             selected, children, ..
         } => children.get(*selected).and_then(first_pane_id_in_layout),
@@ -1143,6 +1165,7 @@ fn capture_tab(
                 managed_agent_kind,
                 agent_session,
                 launch_argv,
+                agent_start_view_applied: tab.panes[id].agent_start_view_applied,
             },
         );
     }
@@ -1244,6 +1267,15 @@ fn capture_layout_leaf(leaf: crate::layout::LayoutLeaf) -> LayoutLeafSnapshot {
 fn capture_typed_node(node: &crate::layout::TypedNode) -> LayoutSnapshot {
     match node {
         crate::layout::TypedNode::Leaf(id) => LayoutSnapshot::Pane(id.raw()),
+        crate::layout::TypedNode::View {
+            pane,
+            extension,
+            view,
+        } => LayoutSnapshot::View {
+            pane: pane.raw(),
+            extension: extension.clone(),
+            view: view.clone(),
+        },
         crate::layout::TypedNode::Stack {
             id,
             selected,
@@ -1423,10 +1455,55 @@ mod tests {
         capture_history(&state.workspaces, terminal_runtimes)
     }
 
+    #[test]
+    fn normalizing_a_view_pane_does_not_fabricate_a_terminal_record() {
+        // A valid view-bearing capture intentionally has no PaneSnapshot for the
+        // view: it is a structural pane, not a terminal. Identity normalization
+        // must not rescue it into a fabricated terminal record or report the
+        // capture as a structural change (legacy handoff admission rejects that
+        // flag, and a fabricated terminal identity would be durable).
+        let mut state = state_with_workspaces(&["view-normalize"]);
+        let root = state.workspaces[0].tabs[0].root_pane;
+        let (_, view_pane) = state.workspaces[0]
+            .split_pane_with_view(
+                root,
+                "vqro.tasks",
+                "tasks",
+                Direction::Horizontal,
+                0.5,
+                false,
+            )
+            .expect("view pane");
+        // A view-bearing state must satisfy the content-aware invariants before
+        // and after capture/normalization.
+        state.assert_invariants_for_test();
+        let mut snapshot = capture_from_state(&state);
+        assert!(!snapshot.workspaces[0].tabs[0]
+            .panes
+            .contains_key(&view_pane.raw()));
+
+        let changes = normalize_identity_changes(&mut snapshot, false).expect("normalize");
+        assert!(
+            !changes.structural_state_changed,
+            "a valid view-bearing capture must not be a structural change"
+        );
+        assert!(
+            !snapshot.workspaces[0].tabs[0]
+                .panes
+                .contains_key(&view_pane.raw()),
+            "normalization must not fabricate a terminal record for a view"
+        );
+        assert!(snapshot.workspaces[0].tabs[0]
+            .panes
+            .contains_key(&root.raw()));
+    }
+
     fn root_split_ratio(tab: &TabSnapshot) -> Option<f32> {
         match &tab.layout {
             LayoutSnapshot::Split { ratio, .. } => Some(*ratio),
-            LayoutSnapshot::Pane(_) | LayoutSnapshot::Stack { .. } => None,
+            LayoutSnapshot::Pane(_)
+            | LayoutSnapshot::View { .. }
+            | LayoutSnapshot::Stack { .. } => None,
         }
     }
 
@@ -1601,6 +1678,7 @@ mod tests {
                 managed_agent_kind: None,
                 agent_session: None,
                 launch_argv: None,
+                agent_start_view_applied: false,
             },
         );
         panes.insert(
@@ -1613,6 +1691,7 @@ mod tests {
                 managed_agent_kind: None,
                 agent_session: None,
                 launch_argv: None,
+                agent_start_view_applied: false,
             },
         );
 
@@ -2850,7 +2929,7 @@ mod tests {
             LayoutSnapshot::Split { first, second, .. } => {
                 stack_in_snapshot(first, target).or_else(|| stack_in_snapshot(second, target))
             }
-            LayoutSnapshot::Pane(_) => None,
+            LayoutSnapshot::Pane(_) | LayoutSnapshot::View { .. } => None,
         }
     }
 
@@ -2946,6 +3025,7 @@ mod tests {
                 managed_agent_kind: None,
                 agent_session: None,
                 launch_argv: None,
+                agent_start_view_applied: false,
             },
         );
         panes.insert(
@@ -2960,6 +3040,7 @@ mod tests {
                 managed_agent_kind: None,
                 agent_session: None,
                 launch_argv: None,
+                agent_start_view_applied: false,
             },
         );
 
@@ -3012,5 +3093,20 @@ mod tests {
             restored.workspaces[0].tabs[0].panes[&0].cwd,
             PathBuf::from("/tmp/this-directory-does-not-exist-for-herdr-test")
         );
+    }
+
+    #[test]
+    fn pane_snapshot_persists_the_agent_start_view_marker() {
+        // The server-side agent-start rule runs once per terminal, so its marker
+        // is durable. An older file without the field lets the rule run once.
+        let mut pane = PaneSnapshot::without_terminal_id(std::path::PathBuf::from("/tmp"));
+        pane.agent_start_view_applied = true;
+        let encoded = serde_json::to_string(&pane).unwrap();
+        assert!(encoded.contains("agent_start_view_applied"));
+        let decoded: PaneSnapshot = serde_json::from_str(&encoded).unwrap();
+        assert!(decoded.agent_start_view_applied);
+        let legacy: PaneSnapshot =
+            serde_json::from_str(r#"{"cwd":"/tmp","terminal_id":null}"#).unwrap();
+        assert!(!legacy.agent_start_view_applied);
     }
 }

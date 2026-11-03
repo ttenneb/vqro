@@ -1,5 +1,15 @@
 use super::*;
 
+// Keep graphics assertions codec-independent, but require full surfaces to use
+// the negotiated v2 lane before unwrapping their unchanged inner frame.
+fn read_server_message(bytes: Vec<u8>) -> ServerMessage {
+    match super::read_server_message(bytes) {
+        ServerMessage::PaneSurfaceV2(surface) => ServerMessage::PaneSurface(surface.frame),
+        ServerMessage::PaneSurface(_) => panic!("retired v1 surface was served"),
+        message => message,
+    }
+}
+
 fn receive_render(receiver: &std::sync::mpsc::Receiver<Vec<u8>>, timeout: Duration) -> Vec<u8> {
     receiver.recv_timeout(timeout).unwrap()
 }

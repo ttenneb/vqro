@@ -1341,7 +1341,9 @@ async fn failed_source_read_retries_after_identical_suppression_without_producer
         assert!(graphics.assets.is_empty());
         surface.graphics = graphics;
         let client = server.clients.get_mut(&1).unwrap();
-        let prepared = client.render_state.prepare_pane_surface(surface.clone());
+        let prepared = client
+            .render_state
+            .prepare_pane_surface(surface.clone(), Vec::new());
         if attempt == 0 {
             client
                 .render_state
@@ -1387,7 +1389,7 @@ async fn failed_source_read_retries_after_identical_suppression_without_producer
     let client = server.clients.get_mut(&1).unwrap();
     let prepared = client
         .render_state
-        .prepare_pane_surface(surface)
+        .prepare_pane_surface(surface, Vec::new())
         .expect("recovered pixels must not be suppressed as identical");
     let ServerMessage::PaneSurface(recovered) = prepared.message() else {
         panic!("expected recovered surface");

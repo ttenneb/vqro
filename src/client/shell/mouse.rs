@@ -774,30 +774,6 @@ impl ClientShellState {
     pub(super) fn handle_mouse(&mut self, mouse: MouseEvent, outcome: &mut ClientShellInput) {
         self.update_link_hover(mouse, outcome);
         let point = (mouse.column, mouse.row);
-        // A pane panel scrolls under the wheel before the terminal sees it, so
-        // a slice longer than the panel is reachable without leaving the pane.
-        if matches!(
-            mouse.kind,
-            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
-        ) {
-            if let Some(hit) = self
-                .hits
-                .pane_panels
-                .iter()
-                .find(|hit| super::contains(hit.rect, point))
-                .map(|hit| hit.pane_id.clone())
-            {
-                let display = self.pane_panel_display.entry(hit).or_default();
-                display.scroll = match mouse.kind {
-                    MouseEventKind::ScrollUp => {
-                        display.scroll.saturating_sub(super::pane_panel::WHEEL_ROWS)
-                    }
-                    _ => display.scroll.saturating_add(super::pane_panel::WHEEL_ROWS),
-                };
-                outcome.repaint = true;
-                return;
-            }
-        }
         if self.mode == ClientShellMode::Navigate
             && self.workspace_preview_action_blocked()
             && self.overlay.is_none()
@@ -1136,24 +1112,6 @@ impl ClientShellState {
         }
         if mouse.kind == MouseEventKind::Drag(MouseButton::Left) {
             match self.chrome_drag.as_ref() {
-                Some(ClientChromeDrag::PanePanelEdge {
-                    pane_id,
-                    start_row,
-                    start_height,
-                    max_height,
-                }) => {
-                    // Dragging down grows the panel; the terminal resizes once,
-                    // when the drag is released.
-                    let delta = i32::from(mouse.row) - i32::from(*start_row);
-                    let height = (i32::from(*start_height) + delta).clamp(
-                        i32::from(super::pane_panel::PANEL_MIN_HEIGHT),
-                        i32::from(*max_height),
-                    ) as u16;
-                    let display = self.pane_panel_display.entry(pane_id.clone()).or_default();
-                    display.user_height = Some(height);
-                    outcome.repaint = true;
-                    return;
-                }
                 Some(ClientChromeDrag::SidebarWidth) => {
                     self.set_sidebar_width_from_column(mouse.column, outcome);
                     return;
@@ -1388,15 +1346,6 @@ impl ClientShellState {
                 self.workspace_press = None;
                 self.tab_press = None;
                 match drag {
-                    ClientChromeDrag::PanePanelEdge { .. } => {
-                        // Releasing the drag is the one resize: the claim is
-                        // sent on the next compose. The user's size is saved
-                        // once, here, not on every motion event.
-                        self.invalidate_pane_surface();
-                        self.persist_pane_panels();
-                        outcome.repaint = true;
-                        outcome.resize = true;
-                    }
                     ClientChromeDrag::Tab {
                         tab_id,
                         workspace_id,
@@ -2764,102 +2713,6 @@ impl ClientShellState {
                     .cloned()
                 {
                     self.open_attention(launch, outcome);
-                    return;
-                }
-                // Panel clicks are Vqro's: the header collapses the panel, a
-                // row marker collapses that row, and a row that names a
-                // terminal link focuses that terminal's pane.
-                if let Some(hit) = self
-                    .hits
-                    .pane_panels
-                    .iter()
-                    .find(|hit| super::contains(hit.rect, point))
-                    .cloned()
-                {
-                    let display = self
-                        .pane_panel_display
-                        .entry(hit.pane_id.clone())
-                        .or_default();
-                    match hit.action {
-                        super::pane_panel::PanePanelAction::ToggleView(key) => {
-                            if !display.collapsed_views.remove(&key) {
-                                display.collapsed_views.insert(key);
-                            }
-                            // An open or collapse re-fits the content, and the
-                            // user's choice is saved right away: a reattach
-                            // must not lose it.
-                            display.refit();
-                            self.persist_pane_panels();
-                        }
-                        super::pane_panel::PanePanelAction::ToggleRow(item_id) => {
-                            if !display.collapsed_rows.remove(&item_id) {
-                                display.collapsed_rows.insert(item_id);
-                            }
-                            display.refit();
-                            self.persist_pane_panels();
-                        }
-                        super::pane_panel::PanePanelAction::FocusPane(pane_id) => {
-                            self.push_endpoint_method(
-                                crate::api::schema::Method::PaneFocus(
-                                    crate::api::schema::PaneTarget { pane_id },
-                                ),
-                                outcome,
-                            );
-                        }
-                        super::pane_panel::PanePanelAction::OpenViews => {
-                            // The pane's own badge opens every view it
-                            // publishes, in this client.
-                            let Some(documents) = self
-                                .endpoints
-                                .iter()
-                                .find(|endpoint| endpoint.endpoint_id == self.active_endpoint_id)
-                                .and_then(ClientShellEndpoint::current_host_documents)
-                                .cloned()
-                            else {
-                                return;
-                            };
-                            let views =
-                                super::pane_panel::published_views(&documents, &hit.pane_id);
-                            if views.is_empty() {
-                                return;
-                            }
-                            let open = self.pane_panel_open.entry(hit.pane_id.clone()).or_default();
-                            for view_id in views {
-                                open.insert(view_id);
-                            }
-                            self.pane_panel_display
-                                .entry(hit.pane_id.clone())
-                                .or_default()
-                                .refit();
-                            self.persist_pane_panels();
-                            outcome.repaint = true;
-                            outcome.resize = true;
-                            return;
-                        }
-                        super::pane_panel::PanePanelAction::ResizePanel => {
-                            // Start a drag from the panel's own edge. The drawn
-                            // height is the frozen content fit, or the user's.
-                            let start_height = display
-                                .user_height
-                                .or(display.height)
-                                .unwrap_or(super::pane_panel::PANEL_MIN_HEIGHT);
-                            let pane_height = self
-                                .hits
-                                .panes
-                                .iter()
-                                .find(|pane_hit| pane_hit.pane_id == hit.pane_id)
-                                .map(|pane_hit| pane_hit.projected_inner_rect.height)
-                                .unwrap_or(0);
-                            self.chrome_drag = Some(ClientChromeDrag::PanePanelEdge {
-                                pane_id: hit.pane_id.clone(),
-                                start_row: mouse.row,
-                                start_height,
-                                max_height: (pane_height / super::pane_panel::PANEL_MAX_SHARE)
-                                    .max(super::pane_panel::PANEL_MIN_HEIGHT),
-                            });
-                        }
-                    }
-                    outcome.repaint = true;
                     return;
                 }
                 // Some terminals reserve Shift for selection and report a

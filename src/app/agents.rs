@@ -384,7 +384,8 @@ impl App {
         }
         let pane = self.pane_metadata(ws_idx, pane_id)?;
         Some(crate::api::schema::AgentInfo {
-            terminal_id: pane.terminal_id,
+            // An agent pane is a terminal pane, so it always carries a terminal.
+            terminal_id: pane.terminal_id?,
             execution: None,
             name: terminal.agent_name.clone(),
             agent: pane.agent,

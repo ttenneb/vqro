@@ -14,156 +14,11 @@ use super::*;
 use crate::extension_contract::{HostDocumentItem, HostViewState, HostViewTone};
 use crate::protocol::endpoint::HostDocumentsProjectionV1;
 
-/// Panel size comes from the layout, never from content.
-/// A panel fits its content up to a share of the pane, then scrolls. Its size
-/// follows the layout, the content at open time and the user, never the live
-/// document.
-pub(super) const PANEL_MIN_HEIGHT: u16 = 1;
-const TERMINAL_MIN_HEIGHT: u16 = 4;
-/// The most of a pane's height a panel takes before it scrolls.
-pub(super) const PANEL_MAX_SHARE: u16 = 3;
-pub(super) const WHEEL_ROWS: u16 = 3;
-/// The one quiet glyph the header carries after its title.
-const HEADER_MARK: &str = "⊟";
-
-/// A clickable cell inside a panel.
-#[derive(Clone)]
-pub(super) struct PanePanelHit {
-    pub(super) rect: Rect,
-    pub(super) pane_id: String,
-    pub(super) action: PanePanelAction,
-}
-
-#[derive(Clone, PartialEq, Eq)]
-pub(super) enum PanePanelAction {
-    /// Collapse or expand one section, by view key.
-    ToggleView(String),
-    /// Collapse or expand one row's children.
-    ToggleRow(String),
-    /// Focus the pane this row's terminal link names.
-    FocusPane(String),
-    /// The edge between the panel and the terminal: drag it to resize.
-    ResizePanel,
-    /// The pane's own badge: open every view this pane publishes.
-    OpenViews,
-}
-
-/// A pane's own badge: it has views to open and none showing them.
-pub(super) struct PaneBadge {
-    pub(super) rect: Rect,
-    pub(super) pane_id: String,
-    pub(super) label: String,
-}
-
-/// Plan one badge per pane that has published views but nothing open. Pure:
-/// the caller draws the labels and registers the hits.
-pub(super) fn pane_badges(
-    documents: &PanelIndex<'_>,
-    panes: &[PaneHit],
-    open: &HashMap<String, BTreeSet<String>>,
-) -> Vec<PaneBadge> {
-    let mut badges = Vec::new();
-    for pane in panes {
-        if pane.rect.width < 12
-            || pane.rect.height < 4
-            || open
-                .get(&pane.pane_id)
-                .is_some_and(|views| !views.is_empty())
-        {
-            continue;
-        }
-        let available = documents.published_views(&pane.pane_id);
-        if available.is_empty() {
-            continue;
-        }
-        let label = format!(" ⚑ {} ", available.len());
-        let width = display_width(&label);
-        if width + 2 >= pane.rect.width {
-            continue;
-        }
-        badges.push(PaneBadge {
-            rect: Rect::new(
-                pane.rect.right().saturating_sub(width + 1),
-                pane.rect.y,
-                width,
-                1,
-            ),
-            pane_id: pane.pane_id.clone(),
-            label,
-        });
-    }
-    badges
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) struct PanePanelGeometry {
-    pub(super) terminal: Rect,
-    pub(super) divider: Rect,
-    pub(super) panel: Rect,
-}
-
-/// The panel's own display state, per client. Persistence and the toggle
-/// command arrive with the `vqro pane panel` step; this keeps the interactions
-/// real until then.
-#[derive(Clone, Default)]
-pub(super) struct PanePanelDisplay {
-    /// Sections collapsed to their header line, by view key.
-    pub(super) collapsed_views: BTreeSet<String>,
-    /// Rows whose children are hidden.
-    pub(super) collapsed_rows: BTreeSet<String>,
-    /// The height the user dragged. Their size wins over the content fit.
-    pub(super) user_height: Option<u16>,
-    /// The height the panel is drawn at. Recomputed when it opens or when the
-    /// user expands or collapses something; live updates never change it.
-    pub(super) height: Option<u16>,
-    /// First visible content line. Live updates scroll rather than resize.
-    pub(super) scroll: u16,
-}
-
-impl PanePanelDisplay {
-    /// The moment the panel opens, or the user expands or collapses something:
-    /// the height follows the content again.
-    pub(super) fn refit(&mut self) {
-        self.height = None;
-        self.scroll = 0;
-    }
-}
-
-/// What one pane's panel needs from the caller: the terminal rect to claim as
-/// the pane's effective viewport, and the hits to register.
-pub(super) struct PanePanelRender {
-    pub(super) hits: Vec<PanePanelHit>,
-    /// Every pane whose panel is open, with the terminal rect it claims.
-    pub(super) claims: Vec<(String, Rect)>,
-    /// For each claimed pane: the band the host painted the grid in (the top of
-    /// the pane's inner rect) and the rect below the panel the grid belongs in.
-    /// The caller moves every grid row across, so the agent's newest rows and its
-    /// input box end at the pane's bottom edge and nothing is hidden.
-    pub(super) projected: Vec<(String, Rect, Rect)>,
-    /// For each claimed pane: where the server painted its terminal (the top of
-    /// the pane's inner rect) and where it belongs (the rect below the panel).
-    /// The panel band each pane reserved, clickable or not: a retained surface
-    /// patch must never paint over it.
-    pub(super) reserved: Vec<Rect>,
-    /// Every pane whose panel was drawn, with the height it was drawn at: the
-    /// content fit, capped by the pane. The caller freezes each at an open,
-    /// expand or collapse, so a later live update scrolls instead of resizing
-    /// the terminal - for every open pane, not just the last one rendered.
-    pub(super) drawn: Vec<(String, u16)>,
-}
-
-/// A published view that fills one pane's panel slot.
+/// A published view that fills one pane's slot.
 struct PanelView<'a> {
-    /// The extension's own id for this view. It is the section's identity: the
-    /// user names it to `vqro pane panel`, and collapse state is kept by it.
-    view_id: String,
-    /// The root block's kind, when the extension named one.
-    kind: Option<String>,
     title: &'a str,
     /// The extension's own summary of the slice, drawn after the title.
     summary: &'a str,
-    /// The panel's aggregate state, drawn as a glyph before the title.
-    state: Option<HostViewState>,
     rows: Vec<FlatRow<'a>>,
 }
 
@@ -175,51 +30,6 @@ struct FlatRow<'a> {
     lanes: Vec<bool>,
     is_last: bool,
     children: usize,
-}
-
-/// The pane's top edge slot: a band above the terminal, full pane width, at the
-/// caller's height. `None` means the pane is too small for a panel; the caller
-/// keeps it closed (a border badge opens it as a popover in a later step).
-pub(super) fn geometry(area: Rect, panel_height: u16) -> Option<PanePanelGeometry> {
-    if area.width < 12 {
-        return None;
-    }
-    let max_height = (area.height / PANEL_MAX_SHARE)
-        .max(PANEL_MIN_HEIGHT)
-        .min(area.height.saturating_sub(TERMINAL_MIN_HEIGHT));
-    let height = panel_height.min(max_height);
-    if height < PANEL_MIN_HEIGHT || area.height.saturating_sub(height) < TERMINAL_MIN_HEIGHT {
-        return None;
-    }
-    let terminal_y = area.y.saturating_add(height).saturating_add(1);
-    Some(PanePanelGeometry {
-        terminal: Rect::new(
-            area.x,
-            terminal_y,
-            area.width,
-            area.bottom().saturating_sub(terminal_y),
-        ),
-        divider: Rect::new(area.x, area.y.saturating_add(height), area.width, 1),
-        panel: Rect::new(area.x, area.y, area.width, height),
-    })
-}
-
-/// The height at which the whole content fits, before the pane's cap. Sections
-/// stack in one area, so their heights add.
-fn fit_height(views: &[PanelView<'_>], collapsed_views: &BTreeSet<String>) -> u16 {
-    let mut height = 0_u16;
-    for view in views {
-        height = height.saturating_add(1);
-        if collapsed_views.contains(&view.view_id) {
-            continue;
-        }
-        height = height.saturating_add(if view.rows.is_empty() {
-            1
-        } else {
-            view.rows.len() as u16
-        });
-    }
-    height.max(1)
 }
 
 /// What Vqro can draw. Anything else is drawn as "unsupported" in place, which
@@ -414,55 +224,22 @@ impl<'a> PanelIndex<'a> {
         }
         Self { items, children }
     }
-
-    /// Every view id a pane publishes, whatever the user has open.
-    pub(super) fn published_views(&self, pane_id: &str) -> Vec<String> {
-        let mut ids = Vec::new();
-        for (_, _, item) in &self.items {
-            let Some(view) = item.view.as_ref() else {
-                continue;
-            };
-            let (Some(item_pane), Some(view_id)) =
-                (view.pane_id.as_deref(), view.view_id.as_deref())
-            else {
-                continue;
-            };
-            if item_pane == pane_id && !item.flags.disabled && !ids.iter().any(|id| id == view_id) {
-                ids.push(view_id.to_owned());
-            }
-        }
-        ids
-    }
 }
 
-/// Every view id a pane publishes, whatever the user has open.
-pub(super) fn published_views(documents: &HostDocumentsProjectionV1, pane_id: &str) -> Vec<String> {
-    let mut ids = Vec::new();
-    for entry in &documents.documents {
-        for item in &entry.document.items {
-            let Some(view) = item.view.as_ref() else {
-                continue;
-            };
-            let (Some(item_pane), Some(view_id)) =
-                (view.pane_id.as_deref(), view.view_id.as_deref())
-            else {
-                continue;
-            };
-            if item_pane == pane_id && !item.flags.disabled && !ids.iter().any(|id| id == view_id) {
-                ids.push(view_id.to_owned());
-            }
-        }
-    }
-    ids
+/// One view pane, as the host projects it: the content identity and the public
+/// pane ids it covers. The scope is a host fact, shared by every client.
+pub(super) struct ViewPaneProjection<'a> {
+    pub(super) extension: &'a str,
+    pub(super) view: &'a str,
+    pub(super) scope: &'a [String],
 }
 
-/// Select the panel views published for one pane. Items that name a pane and a
-/// view id are roots; their descendants are the rows.
-fn panel_views<'a>(
+/// Select the published view roots that cover a view pane's scope. The extension
+/// keeps the meaning and the rows; core only supplies the covered terminals.
+fn view_sections<'a>(
     index: &'a PanelIndex<'a>,
-    pane_id: &str,
-    open_views: &BTreeSet<String>,
-    collapsed: &BTreeSet<String>,
+    documents: &HostDocumentsProjectionV1,
+    projection: &ViewPaneProjection<'_>,
 ) -> Vec<PanelView<'a>> {
     let mut views = Vec::new();
     for (_, document, item) in &index.items {
@@ -473,143 +250,167 @@ fn panel_views<'a>(
         else {
             continue;
         };
-        if item_pane != pane_id || item.flags.disabled || !open_views.contains(view_id) {
+        if item.flags.disabled || view_id != projection.view {
+            continue;
+        }
+        if !projection.scope.iter().any(|covered| covered == item_pane) {
+            continue;
+        }
+        if documents
+            .documents
+            .get(*document)
+            .is_some_and(|entry| entry.document.namespace != projection.extension)
+        {
             continue;
         }
         views.push(PanelView {
-            view_id: view_id.to_owned(),
-            kind: view.kind.clone(),
             title: item.label.as_str(),
             summary: item.detail.as_deref().unwrap_or_default(),
-            state: view.state,
-            rows: flatten(index, *document, item.id.as_str(), collapsed),
+            rows: flatten(index, *document, item.id.as_str(), &BTreeSet::new()),
         });
     }
     views
 }
 
-#[allow(clippy::too_many_arguments)]
-pub(super) fn render(
+/// The view header's scope text: one covered terminal is named, several are
+/// counted. The covered terminals come from the host's placement-derived scope.
+fn scope_label(agents: &[crate::protocol::ClientShellAgent], scope: &[String]) -> String {
+    if scope.is_empty() {
+        return "no terminals".to_owned();
+    }
+    if scope.len() > 1 {
+        return format!("{} terminals", scope.len());
+    }
+    let pane = scope[0].as_str();
+    agents
+        .iter()
+        .find(|agent| agent.pane_id == pane)
+        .and_then(|agent| {
+            agent
+                .display_agent
+                .as_deref()
+                .or(agent.name.as_deref())
+                .or(agent.agent.as_deref())
+        })
+        .map(str::to_owned)
+        .unwrap_or_else(|| pane.to_owned())
+}
+
+fn draw_view_header(
     buffer: &mut Buffer,
-    index: &PanelIndex<'_>,
-    snapshot: &ClientShellSnapshot,
-    panes: &[PaneHit],
-    open: &HashMap<String, BTreeSet<String>>,
-    inspector_pane: Option<&str>,
-    displays: &HashMap<String, PanePanelDisplay>,
+    rect: Rect,
+    title: &str,
+    scope: &str,
+    summary: &str,
+    light_frame: bool,
     palette: &Palette,
-    out: &mut PanePanelRender,
 ) {
-    for pane in panes {
-        let Some(open_views) = open.get(&pane.pane_id) else {
-            continue;
-        };
-        if open_views.is_empty() {
-            continue;
-        }
-        let display = displays.get(&pane.pane_id).cloned().unwrap_or_default();
-        render_pane(
+    if rect.width == 0 || rect.height == 0 {
+        return;
+    }
+    let bg = palette.panel_bg;
+    let dim = Style::default().fg(palette.overlay0).bg(bg);
+    let strong = Style::default()
+        .fg(palette.text)
+        .bg(bg)
+        .add_modifier(Modifier::BOLD);
+    // A light frame draws the divider itself: the pane's top row is the shared
+    // divider the title rides on. A full frame draws a box corner first.
+    let leading = if light_frame { "─ " } else { "┌─" };
+    let line = "─".repeat(rect.width as usize);
+    put_text(buffer, rect.x, rect.y, rect.width, &line, dim);
+    let left = format!("{leading} {title} · {scope} ");
+    let left_width = display_width(&left).min(rect.width.saturating_sub(2));
+    put_text(
+        buffer,
+        rect.x,
+        rect.y,
+        left_width,
+        &truncate(&left, left_width),
+        strong,
+    );
+    let right = format!(" {summary} ");
+    let right_width = display_width(&right);
+    if right_width + left_width + 3 < rect.width {
+        put_text(
             buffer,
-            index,
-            snapshot,
-            pane,
-            open_views,
-            inspector_pane,
-            &display,
-            palette,
-            out,
+            rect.x + rect.width - right_width - 1,
+            rect.y,
+            right_width,
+            &truncate(&right, right_width),
+            dim,
         );
     }
 }
 
+/// Draw one view pane: its frame and the rows the extension published for the
+/// covered terminals. Read-only; it claims no terminal and resizes nothing.
 #[allow(clippy::too_many_arguments)]
-fn render_pane(
+pub(super) fn render_view_pane(
     buffer: &mut Buffer,
     index: &PanelIndex<'_>,
+    documents: &HostDocumentsProjectionV1,
     snapshot: &ClientShellSnapshot,
     pane: &PaneHit,
-    open_views: &BTreeSet<String>,
-    inspector_pane: Option<&str>,
-    display: &PanePanelDisplay,
+    projection: &ViewPaneProjection<'_>,
+    light_frame: bool,
     palette: &Palette,
-    out: &mut PanePanelRender,
 ) {
-    if inspector_pane == Some(pane.pane_id.as_str()) {
+    let outer = pane.rect.intersection(buffer.area);
+    if outer.width < 4 || outer.height < 2 {
         return;
     }
-    let views = panel_views(index, &pane.pane_id, open_views, &display.collapsed_rows);
-    // The user has views open here and none of them is published any more: the
-    // extension failed or was disabled. Vqro owns that state and says so in the
-    // same place, instead of silently dropping a panel the user opened.
-    if views.is_empty() {
-        let missing = open_views.iter().cloned().collect::<Vec<_>>();
-        render_placeholder(
-            buffer,
-            pane,
-            display,
-            &missing,
-            "unavailable",
-            "└─ extension unavailable",
-            palette,
-            out,
-        );
-        return;
-    }
-    // The pane's full inner rect, including a scrollback lane: the panel owns
-    // that edge, so the terminal's own lane must not paint inside the panel.
-    let area = pane.projected_inner_rect.intersection(buffer.area);
-    // The height is fixed once the panel is open: live updates scroll instead
-    // of resizing the terminal, and the user's own size always wins.
-    // One header line per section is the floor: a collapsed panel is its
-    // headers, and the terminal gets every other row back.
-    // A view the user opened that is no longer published keeps its own row, so it
-    // counts as reserved space too: otherwise a collapsed panel is nothing but
-    // headers and the missing view is never drawn at all.
-    let missing = open_views
+    let views = view_sections(index, documents, projection);
+    let title = views.first().map_or(projection.view, |view| view.title);
+    let summary = views
         .iter()
-        .filter(|view_id| !views.iter().any(|view| &view.view_id == *view_id))
-        .count() as u16;
-    let pinned = views.len() as u16;
-    let headers = pinned + missing;
-    let all_collapsed = views
-        .iter()
-        .all(|view| display.collapsed_views.contains(&view.view_id));
-    let fit = fit_height(&views, &display.collapsed_views)
-        + views
-            .iter()
-            .filter(|view| !block_kind_supported(view.kind.as_deref()))
-            .count() as u16
-        + missing;
-    let panel_height = if all_collapsed {
-        headers
+        .map(|view| view.summary)
+        .find(|text| !text.is_empty())
+        .unwrap_or("read-only");
+    let scope = scope_label(&snapshot.agents, projection.scope);
+    let header = Rect::new(outer.x, outer.y, outer.width, 1);
+    draw_view_header(buffer, header, title, &scope, summary, light_frame, palette);
+    let background = Style::default().bg(palette.panel_bg);
+    let edge = Style::default().fg(palette.overlay0).bg(palette.panel_bg);
+    let (body, columns) = if light_frame {
+        (
+            Rect::new(
+                outer.x,
+                outer.y.saturating_add(1),
+                outer.width,
+                outer.height.saturating_sub(1),
+            ),
+            outer.width,
+        )
     } else {
-        display
-            .user_height
-            .or(display.height)
-            .unwrap_or(fit)
-            .max(headers)
+        (
+            Rect::new(
+                outer.x.saturating_add(1),
+                outer.y.saturating_add(1),
+                outer.width.saturating_sub(2),
+                outer.height.saturating_sub(2),
+            ),
+            outer.width.saturating_sub(2),
+        )
     };
-    let Some(geometry) = geometry(area, panel_height) else {
-        return;
-    };
-    // The band is Vqro chrome. Filling it with the panel background is what stops
-    // the terminal's own text showing through the panel's empty cells; a Reset
-    // background leaves whatever the terminal painted underneath.
-    let panel_style = Style::default().bg(palette.panel_bg);
-    super::render::render_pane_contribution_divider(buffer, geometry.divider, palette);
-    for y in geometry.panel.y..geometry.panel.bottom() {
-        for x in geometry.panel.x..geometry.panel.right() {
-            put_text(buffer, x, y, 1, " ", panel_style);
+    if !light_frame {
+        for y in outer.y..outer.bottom() {
+            put_text(buffer, outer.x, y, 1, "│", edge);
+            put_text(buffer, outer.right().saturating_sub(1), y, 1, "│", edge);
         }
+        let bottom = "─".repeat(outer.width as usize);
+        put_text(
+            buffer,
+            outer.x,
+            outer.bottom().saturating_sub(1),
+            outer.width,
+            &bottom,
+            edge,
+        );
     }
-    // The panel takes the pane's edge, so the terminal's scrollback lane, which
-    // the server still draws at the layout edge, is cleared with it.
-    if let Some(lane) = pane.scrollbar_rect {
-        let lane = lane.intersection(buffer.area);
-        for y in lane.y..lane.bottom() {
-            for x in lane.x..lane.right() {
-                put_text(buffer, x, y, 1, " ", panel_style);
-            }
+    for y in body.y..body.bottom() {
+        for x in body.x..body.right() {
+            put_text(buffer, x, y, 1, " ", background);
         }
     }
     let agents: HashMap<&str, &crate::protocol::ClientShellAgent> = snapshot
@@ -617,545 +418,36 @@ fn render_pane(
         .iter()
         .map(|agent| (agent.pane_id.as_str(), agent))
         .collect();
-    let width = geometry.panel.width;
-    let visible = geometry.panel.height;
-    // Section headers stay pinned; only the rows scroll, so a section never
-    // loses its name or its collapse marker.
-    // Headers are pinned in the sense that the panel's height reserves one line per
-    // section; the rows below them are what scrolls. Every section keeps one line of
-    // its own, in order: its header, or for a view the user opened that is no longer
-    // published, its one row. Those lines are reserved, so a long section can never
-    // push a later section's line out of the band.
-    let row_space = visible.saturating_sub(pinned);
-    let sections = panel_sections(&views, open_views, &display.collapsed_views);
-    // The rows below the headers share one budget: one row for every section that has
-    // a row, while the budget lasts, and then the rest of the budget to the sections
-    // in order. Reserving that first row is what keeps a long earlier section from
-    // starving a later section's rows out of the band entirely - its header was never
-    // in doubt, its rows are what would go missing - and spending the budget on what
-    // is drawn is what keeps the panel's bottom line from being left blank.
-    // A section with no header (a view the user opened that is no longer published)
-    // already draws its one row as its own reserved line, so it asks the pool for
-    // nothing: budgeting it a row too would leave a band line unused under a section
-    // whose rows are still waiting.
-    let pooled_rows = sections
-        .iter()
-        .map(|section| {
-            section
-                .rows
-                .len()
-                .saturating_sub(usize::from(section.header.is_none()))
-        })
-        .collect::<Vec<_>>();
-    let pool = usize::from(visible).saturating_sub(sections.len());
-    let headers_only = pool == 0;
-    let mut allocation = vec![0_usize; sections.len()];
-    let mut spare = pool;
-    for (index, wanted) in pooled_rows.iter().enumerate() {
-        if *wanted == 0 || spare == 0 {
-            continue;
-        }
-        allocation[index] = 1;
-        spare -= 1;
-    }
-    for (index, wanted) in pooled_rows.iter().enumerate() {
-        if spare == 0 {
-            break;
-        }
-        let give = wanted.saturating_sub(allocation[index]).min(spare);
-        allocation[index] += give;
-        spare -= give;
-    }
-    // One scroll offset moves every section that has more rows than its share, so a
-    // later section's later rows are reachable while every header stays where it is.
-    let most_scrollable = pooled_rows
-        .iter()
-        .zip(&allocation)
-        .max_by_key(|(wanted, allocated)| wanted.saturating_sub(**allocated))
-        .filter(|(wanted, allocated)| **wanted > **allocated);
-    let scroll_total = most_scrollable.map_or(0, |(wanted, _)| *wanted);
-    let scroll_page = most_scrollable.map_or(0, |(_, allocated)| *allocated);
-    let overflow = most_scrollable.is_some();
-    // The scroll indicator owns the last column, with one quiet column of
-    // gutter between it and the content.
-    let body_width = if overflow {
-        width.saturating_sub(2)
-    } else {
-        width.saturating_sub(1)
-    };
-    let scroll = display
-        .scroll
-        .min(scroll_total.saturating_sub(scroll_page) as u16);
-    let mut y = geometry.panel.y;
-    for (index, section) in sections.iter().enumerate() {
-        let mut rest = section.rows.as_slice();
-        if let Some(view) = section.header {
-            let collapsed = display.collapsed_views.contains(&view.view_id);
-            let header_rect = Rect::new(geometry.panel.x, y, body_width, 1);
-            if let Some(kind) = view
-                .kind
-                .as_deref()
-                .filter(|kind| !block_kind_supported(Some(kind)))
-            {
-                draw_unsupported_header(buffer, header_rect, view, kind, palette);
-            } else {
-                draw_header(buffer, header_rect, view, collapsed, palette);
-            }
-            out.hits.push(PanePanelHit {
-                rect: header_rect,
-                pane_id: pane.pane_id.clone(),
-                action: PanePanelAction::ToggleView(view.view_id.clone()),
-            });
-            y = y.saturating_add(1);
-        } else if let Some((first, remaining)) = rest.split_first() {
-            // No header to draw: the section's own row is the line that keeps it in
-            // the band, so it is drawn here and not counted against the pool.
-            let row_rect = Rect::new(geometry.panel.x, y, body_width, 1);
-            draw_plain_row(buffer, row_rect, first, palette);
-            y = y.saturating_add(1);
-            rest = remaining;
-        }
-        if headers_only || rest.is_empty() {
-            continue;
-        }
-        // The section's share of the row budget, with the shared scroll offset
-        // applied to every section that has more rows than its share.
-        let space = allocation[index].min(rest.len());
-        let offset = usize::from(scroll).min(rest.len().saturating_sub(space));
-        let remaining = &rest[offset..offset.saturating_add(space)];
-        for line in remaining {
-            if y >= geometry.panel.bottom() {
+    let collapsed = BTreeSet::new();
+    let mut y = body.y;
+    let mut drew_row = false;
+    for view in &views {
+        for row in &view.rows {
+            if y >= body.bottom() {
                 break;
             }
-            let row_rect = Rect::new(geometry.panel.x, y, body_width, 1);
-            match line {
-                PanelRow::Unsupported { title, kind } => {
-                    put_text(
-                        buffer,
-                        row_rect.x,
-                        y,
-                        body_width,
-                        &truncate(&format!("└─ {title}: unsupported {kind}"), body_width),
-                        Style::default().fg(palette.overlay0).bg(palette.panel_bg),
-                    );
-                }
-                PanelRow::Unavailable { view_id } => {
-                    put_text(
-                        buffer,
-                        row_rect.x,
-                        y,
-                        body_width,
-                        &truncate(&format!("└─ {view_id}: unavailable"), body_width),
-                        Style::default().fg(palette.overlay0).bg(palette.panel_bg),
-                    );
-                }
-                PanelRow::Empty => {
-                    put_text(
-                        buffer,
-                        row_rect.x,
-                        y,
-                        body_width,
-                        &truncate("└─ nothing to show", body_width),
-                        Style::default().fg(palette.overlay0).bg(palette.panel_bg),
-                    );
-                }
-                PanelRow::Row(row) => {
-                    draw_row(
-                        buffer,
-                        row_rect,
-                        row,
-                        &display.collapsed_rows,
-                        &agents,
-                        body_width,
-                        palette,
-                    );
-                    let prefix_width = display_width(&row_prefix(&row.lanes, row.is_last));
-                    let expandable = row.children > 0;
-                    if expandable {
-                        out.hits.push(PanePanelHit {
-                            rect: Rect::new(row_rect.x.saturating_add(prefix_width), y, 2, 1),
-                            pane_id: pane.pane_id.clone(),
-                            action: PanePanelAction::ToggleRow(row.item.id.clone()),
-                        });
-                    }
-                    let target = row
-                        .item
-                        .terminal
-                        .as_ref()
-                        .and_then(|terminal| terminal.placement.as_ref())
-                        .map(|placement| placement.pane_id.clone());
-                    let primary = match (&target, expandable) {
-                        (Some(target), _) => Some(PanePanelAction::FocusPane(target.clone())),
-                        (None, true) => Some(PanePanelAction::ToggleRow(row.item.id.clone())),
-                        (None, false) => None,
-                    };
-                    if let Some(action) = primary {
-                        out.hits.push(PanePanelHit {
-                            rect: row_rect,
-                            pane_id: pane.pane_id.clone(),
-                            action,
-                        });
-                    }
-                }
-            }
+            let rect = Rect::new(body.x, y, columns, 1);
+            draw_row(buffer, rect, row, &collapsed, &agents, columns, palette);
+            drew_row = true;
             y = y.saturating_add(1);
         }
-    }
-    if overflow {
-        let track = Rect::new(
-            geometry.panel.x.saturating_add(width.saturating_sub(1)),
-            geometry.panel.y.saturating_add(pinned),
-            1,
-            row_space,
-        );
-        super::render::render_panel_scroll(
-            buffer,
-            track,
-            scroll_total,
-            usize::from(scroll),
-            scroll_page,
-            palette,
-        );
-    }
-    // The edge between the panel and the terminal is the drag handle, unless
-    // every section is collapsed: there is nothing to resize then.
-    if !all_collapsed {
-        out.hits.push(PanePanelHit {
-            rect: geometry.divider,
-            pane_id: pane.pane_id.clone(),
-            action: PanePanelAction::ResizePanel,
-        });
-    }
-    if let Some(claimed) = out.claims.iter_mut().find(|claim| claim.0 == pane.pane_id) {
-        claimed.1 = geometry.terminal;
-    } else {
-        out.claims.push((pane.pane_id.clone(), geometry.terminal));
-    }
-    // The panel is a split: the host resized this pane's PTY to the rows below
-    // the panel, so the grid is exactly as tall as that rect and every one of its
-    // rows belongs there. The band they were painted in is the panel's.
-    out.projected.push((
-        pane.pane_id.clone(),
-        Rect::new(
-            area.x,
-            area.y,
-            geometry.terminal.width,
-            geometry
-                .panel
-                .height
-                .saturating_add(geometry.divider.height),
-        ),
-        geometry.terminal,
-    ));
-    out.reserved.push(Rect::new(
-        geometry.panel.x,
-        geometry.panel.y,
-        geometry.panel.width,
-        geometry
-            .panel
-            .height
-            .saturating_add(geometry.divider.height),
-    ));
-    out.drawn
-        .push((pane.pane_id.clone(), geometry.panel.height));
-}
-
-/// The panel a user opened whose view is no longer published: the extension
-/// failed or was disabled. Vqro draws the header and one dead row, and keeps
-/// the pane's edge reserved so the space stays stable when it recovers.
-fn render_placeholder(
-    buffer: &mut Buffer,
-    pane: &PaneHit,
-    display: &PanePanelDisplay,
-    missing: &[String],
-    right: &str,
-    row: &str,
-    palette: &Palette,
-    out: &mut PanePanelRender,
-) {
-    let area = pane.projected_inner_rect.intersection(buffer.area);
-    let collapsed = missing
-        .iter()
-        .any(|view_id| display.collapsed_views.contains(view_id));
-    let fit = if collapsed { 1 } else { 2 };
-    let panel_height = if collapsed {
-        1
-    } else {
-        display.user_height.or(display.height).unwrap_or(fit).max(1)
-    };
-    let Some(geometry) = geometry(area, panel_height) else {
-        return;
-    };
-    let dim = Style::default().fg(palette.overlay0).bg(palette.panel_bg);
-    let style = Style::default().bg(palette.panel_bg);
-    super::render::render_pane_contribution_divider(buffer, geometry.divider, palette);
-    for y in geometry.panel.y..geometry.panel.bottom() {
-        for x in geometry.panel.x..geometry.panel.right() {
-            put_text(buffer, x, y, 1, " ", style);
+        if y >= body.bottom() {
+            break;
         }
     }
-    let width = geometry.panel.width.saturating_sub(1);
-    let title = missing.first().map(String::as_str).unwrap_or("view");
-    let header = Rect::new(geometry.panel.x, geometry.panel.y, width, 1);
-    let marker = if collapsed { "▸" } else { "▾" };
-    put_text(buffer, header.x, header.y, 1, marker, dim);
-    put_text(
-        buffer,
-        header.x.saturating_add(2),
-        header.y,
-        1,
-        state_glyph(HostViewState::Blocked),
-        Style::default().fg(palette.red),
-    );
-    put_text(
-        buffer,
-        header.x.saturating_add(4),
-        header.y,
-        width.saturating_sub(4),
-        title,
-        Style::default()
-            .fg(palette.text)
-            .add_modifier(Modifier::BOLD),
-    );
-    let right = format!("{HEADER_MARK} · {right}");
-    let right_width = display_width(&right);
-    if right_width.saturating_add(8) < width {
-        put_text(
-            buffer,
-            header.x.saturating_add(width.saturating_sub(right_width)),
-            header.y,
-            right_width,
-            &right,
-            dim,
-        );
-    }
-    out.hits.push(PanePanelHit {
-        rect: header,
-        pane_id: pane.pane_id.clone(),
-        action: PanePanelAction::ToggleView(title.to_owned()),
-    });
-    if !collapsed && geometry.panel.height > 1 {
-        put_text(
-            buffer,
-            geometry.panel.x,
-            geometry.panel.y.saturating_add(1),
-            width,
-            &truncate(row, width),
-            dim,
-        );
-    }
-    if let Some(claimed) = out.claims.iter_mut().find(|claim| claim.0 == pane.pane_id) {
-        claimed.1 = geometry.terminal;
-    } else {
-        out.claims.push((pane.pane_id.clone(), geometry.terminal));
-    }
-    // The panel is a split: the host resized this pane's PTY to the rows below
-    // the panel, so the grid is exactly as tall as that rect and every one of its
-    // rows belongs there. The band they were painted in is the panel's.
-    out.projected.push((
-        pane.pane_id.clone(),
-        Rect::new(
-            area.x,
-            area.y,
-            geometry.terminal.width,
-            geometry
-                .panel
-                .height
-                .saturating_add(geometry.divider.height),
-        ),
-        geometry.terminal,
-    ));
-    out.reserved.push(Rect::new(
-        geometry.panel.x,
-        geometry.panel.y,
-        geometry.panel.width,
-        geometry
-            .panel
-            .height
-            .saturating_add(geometry.divider.height),
-    ));
-    out.drawn
-        .push((pane.pane_id.clone(), geometry.panel.height));
-}
-
-/// One drawable line of the scrolling region.
-enum PanelRow<'a> {
-    Row(&'a FlatRow<'a>),
-    Empty,
-    /// A section whose block kind Vqro does not know, in place.
-    Unsupported {
-        title: &'a str,
-        kind: &'a str,
-    },
-    /// A view the user opened whose provider stopped publishing it.
-    Unavailable {
-        view_id: &'a str,
-    },
-}
-
-/// The rows of every expanded section, in draw order.
-/// One drawable section: a published view and the rows that belong to it, in the
-/// order the panel stacks them. A view the user opened that is no longer published
-/// is a section of its own with no header, so its row stays where its section was.
-struct PanelSection<'a> {
-    header: Option<&'a PanelView<'a>>,
-    rows: Vec<PanelRow<'a>>,
-}
-
-fn panel_sections<'a>(
-    views: &'a [PanelView<'a>],
-    open_views: &'a BTreeSet<String>,
-    collapsed_views: &BTreeSet<String>,
-) -> Vec<PanelSection<'a>> {
-    let mut sections = Vec::new();
-    for view in views {
-        let mut rows = Vec::new();
-        if !collapsed_views.contains(&view.view_id) {
-            if let Some(kind) = view
-                .kind
-                .as_deref()
-                .filter(|kind| !block_kind_supported(Some(kind)))
-            {
-                rows.push(PanelRow::Unsupported {
-                    title: view.title,
-                    kind,
-                });
-            } else if view.rows.is_empty() {
-                rows.push(PanelRow::Empty);
-            } else {
-                rows.extend(view.rows.iter().map(PanelRow::Row));
-            }
-        }
-        sections.push(PanelSection {
-            header: Some(view),
-            rows,
-        });
-    }
-    for view_id in open_views {
-        if !views.iter().any(|view| &view.view_id == view_id) {
-            sections.push(PanelSection {
-                header: None,
-                rows: vec![PanelRow::Unavailable { view_id }],
-            });
-        }
-    }
-    sections
-}
-
-/// A section line that has no header of its own: an unsupported, unavailable or empty
-/// row, drawn in the same dim style the rows pool uses.
-fn draw_plain_row(buffer: &mut Buffer, rect: Rect, line: &PanelRow<'_>, palette: &Palette) {
-    let text = match line {
-        PanelRow::Unsupported { title, kind } => format!("└─ {title}: unsupported {kind}"),
-        PanelRow::Unavailable { view_id } => format!("└─ {view_id}: unavailable"),
-        PanelRow::Empty => "└─ nothing to show".to_string(),
-        PanelRow::Row(_) => return,
-    };
-    put_text(
-        buffer,
-        rect.x,
-        rect.y,
-        rect.width,
-        &truncate(&text, rect.width),
-        Style::default().fg(palette.overlay0).bg(palette.panel_bg),
-    );
-}
-
-fn draw_header(
-    buffer: &mut Buffer,
-    rect: Rect,
-    view: &PanelView<'_>,
-    collapsed: bool,
-    palette: &Palette,
-) {
-    let marker = if collapsed { "▸" } else { "▾" };
-    let state = view.state.unwrap_or_default();
-    // The header's own glyph reads as live only while work is in progress.
-    let (aggregate, aggregate_color) = if state == HostViewState::InProgress {
-        (state_glyph(HostViewState::Done), palette.accent)
-    } else {
-        (state_glyph(HostViewState::Open), palette.overlay0)
-    };
-    let dim = Style::default().fg(palette.overlay0);
-    let right = format!("{HEADER_MARK} · {}", view.summary);
-    let right_width = display_width(&right);
-    let right_fits = right_width.saturating_add(8) < rect.width;
-    put_text(buffer, rect.x, rect.y, 1, marker, dim);
-    put_text(
-        buffer,
-        rect.x.saturating_add(2),
-        rect.y,
-        1,
-        aggregate,
-        Style::default().fg(aggregate_color),
-    );
-    put_text(
-        buffer,
-        rect.x.saturating_add(4),
-        rect.y,
-        if right_fits {
-            rect.width.saturating_sub(4).saturating_sub(right_width)
+    if !drew_row {
+        let text = if views.is_empty() {
+            format!("└─ {} unavailable", projection.extension)
         } else {
-            rect.width.saturating_sub(4)
-        },
-        view.title,
-        Style::default()
-            .fg(palette.text)
-            .add_modifier(Modifier::BOLD),
-    );
-    if right_fits {
+            "└─ nothing to show".to_owned()
+        };
         put_text(
             buffer,
-            rect.x
-                .saturating_add(rect.width.saturating_sub(right_width)),
-            rect.y,
-            right_width,
-            &right,
-            dim,
-        );
-    }
-}
-
-/// A section Vqro cannot draw: its own header, marked unsupported, so it keeps
-/// its place in the stack and says why instead of replacing its siblings.
-fn draw_unsupported_header(
-    buffer: &mut Buffer,
-    rect: Rect,
-    view: &PanelView<'_>,
-    kind: &str,
-    palette: &Palette,
-) {
-    let dim = Style::default().fg(palette.overlay0);
-    put_text(buffer, rect.x, rect.y, 1, "▾", dim);
-    put_text(
-        buffer,
-        rect.x.saturating_add(2),
-        rect.y,
-        1,
-        "?",
-        Style::default().fg(palette.overlay0),
-    );
-    put_text(
-        buffer,
-        rect.x.saturating_add(4),
-        rect.y,
-        rect.width.saturating_sub(4),
-        view.title,
-        Style::default()
-            .fg(palette.text)
-            .add_modifier(Modifier::BOLD),
-    );
-    let right = format!("{HEADER_MARK} · unsupported {kind}");
-    let right_width = display_width(&right);
-    if right_width.saturating_add(8) < rect.width {
-        put_text(
-            buffer,
-            rect.x
-                .saturating_add(rect.width.saturating_sub(right_width)),
-            rect.y,
-            right_width,
-            &right,
-            dim,
+            body.x,
+            body.y,
+            columns,
+            &truncate(&text, columns),
+            Style::default().fg(palette.overlay0).bg(palette.panel_bg),
         );
     }
 }
@@ -1361,369 +653,44 @@ fn draw_row(
     }
 }
 
-impl ClientShellState {
-    /// Apply one user request from the server: open, close or toggle a view on
-    /// a pane. Only a user action ever opens a view.
-    pub(crate) fn apply_pane_panel_request(
-        &mut self,
-        request: crate::protocol::endpoint::ServerPanePanelRequest,
-    ) -> bool {
-        let Some(documents) = self
-            .endpoints
-            .iter()
-            .find(|endpoint| endpoint.endpoint_id == self.active_endpoint_id)
-            .and_then(ClientShellEndpoint::current_host_documents)
-        else {
-            return false;
-        };
-        let available = published_views(documents, &request.pane_id);
-        if available.is_empty() {
-            return false;
-        }
-        let wanted = match request.view_id.as_deref() {
-            Some(view_id) if available.iter().any(|id| id == view_id) => vec![view_id.to_owned()],
-            Some(_) => return false,
-            None => available,
-        };
-        let open = self
-            .pane_panel_open
-            .entry(request.pane_id.clone())
-            .or_default();
-        for view_id in wanted {
-            match request.action {
-                crate::protocol::endpoint::ServerPanePanelAction::Show => {
-                    open.insert(view_id);
-                }
-                crate::protocol::endpoint::ServerPanePanelAction::Hide => {
-                    open.remove(&view_id);
-                }
-                crate::protocol::endpoint::ServerPanePanelAction::Toggle => {
-                    if !open.remove(&view_id) {
-                        open.insert(view_id);
-                    }
-                }
-            }
-        }
-        if open.is_empty() {
-            self.pane_panel_open.remove(&request.pane_id);
-        }
-        // A user open, close or toggle re-fits the panel to its content.
-        self.pane_panel_display
-            .entry(request.pane_id)
-            .or_default()
-            .refit();
-        self.persist_pane_panels();
-        true
-    }
-
-    /// Show the pane's views when an agent starts there, if the client setting
-    /// asks for it. A rule the user enabled, never the extension.
-    pub(crate) fn apply_show_panels_on_agent_start(&mut self) -> bool {
-        if !self.config.show_panels_on_agent_start {
-            return false;
-        }
-        let Some(snapshot) = self.snapshot.as_deref() else {
-            return false;
-        };
-        let agents = snapshot
-            .agents
-            .iter()
-            .map(|agent| agent.pane_id.clone())
-            .collect::<Vec<_>>();
-        let Some(documents) = self
-            .endpoints
-            .iter()
-            .find(|endpoint| endpoint.endpoint_id == self.active_endpoint_id)
-            .and_then(ClientShellEndpoint::current_host_documents)
-            .cloned()
-        else {
-            return false;
-        };
-        let mut changed = false;
-        for pane_id in agents {
-            if self
-                .pane_panel_open
-                .get(&pane_id)
-                .is_some_and(|views| !views.is_empty())
-            {
-                continue;
-            }
-            let available = published_views(&documents, &pane_id);
-            if available.is_empty() {
-                continue;
-            }
-            // Only a pane that gained an agent since the last projection.
-            if !self.panes_with_agents.insert(pane_id.clone()) {
-                continue;
-            }
-            self.pane_panel_open
-                .entry(pane_id)
-                .or_default()
-                .insert(available[0].clone());
-            changed = true;
-        }
-        self.panes_with_agents.retain(|pane_id| {
-            snapshot
-                .agents
-                .iter()
-                .any(|agent| &agent.pane_id == pane_id)
-        });
-        if changed {
-            self.persist_pane_panels();
-        }
-        changed
-    }
-
-    /// Persist which views are open and how their panels look, per pane.
-    pub(super) fn persist_pane_panels(&mut self) {
-        let Some(path) = self.config.preferences_path.clone() else {
-            return;
-        };
-        self.sync_panel_identity();
-        let mut preferences = self.config.preferences.clone();
-        preferences.panels = self
-            .panels_by_terminal
-            .iter()
-            .filter(|(_, views)| !views.is_empty())
-            .map(|(terminal_id, views)| {
-                let display = self
-                    .display_by_terminal
-                    .get(terminal_id)
-                    .cloned()
-                    .unwrap_or_default();
-                preferences::ClientPanelPreference {
-                    terminal_id: terminal_id.clone(),
-                    views: views.iter().cloned().collect(),
-                    height: display.user_height,
-                    collapsed_views: display.collapsed_views.iter().cloned().collect(),
-                    collapsed_rows: display.collapsed_rows.iter().cloned().collect(),
-                }
-            })
-            .collect();
-        preferences
-            .panels
-            .sort_by(|left, right| left.terminal_id.cmp(&right.terminal_id));
-        self.config.preferences = preferences.clone();
-        let mut outcome = ClientShellInput::default();
-        if let Err(error) = preferences::store(&path, preferences) {
-            self.set_endpoint_error(error);
-            outcome.repaint = true;
-        }
-    }
-
-    /// The pane-to-terminal join, from the published views: a pane has exactly
-    /// one terminal, so a terminal placed in that pane is that pane's terminal.
-    fn pane_terminal_join(&self) -> HashMap<String, String> {
-        let Some(documents) = self
-            .endpoints
-            .iter()
-            .find(|endpoint| endpoint.endpoint_id == self.active_endpoint_id)
-            .and_then(ClientShellEndpoint::current_host_documents)
-        else {
-            return HashMap::new();
-        };
-        let mut join = HashMap::new();
-        for entry in &documents.documents {
-            for item in &entry.document.items {
-                if let Some(terminal) = item.terminal.as_ref() {
-                    if let Some(placement) = terminal.placement.as_ref() {
-                        join.insert(placement.pane_id.clone(), terminal.terminal_id.clone());
-                    }
-                }
-            }
-        }
-        join
-    }
-
-    /// Update the pane-to-terminal join and derive the pane-keyed state the
-    /// renderer uses from the terminal-keyed state that is authoritative.
-    fn rekey_panels(&mut self) {
-        let join = self.pane_terminal_join();
-        // A panel kept under its pane's id while the terminal was unknown moves
-        // to the terminal identity as soon as one is known again, so a provider
-        // outage does not strand it under the fallback key.
-        for (pane_id, terminal_id) in &join {
-            if terminal_id == pane_id || self.panels_by_terminal.contains_key(terminal_id) {
-                continue;
-            }
-            if let Some(views) = self.panels_by_terminal.remove(pane_id) {
-                self.panels_by_terminal.insert(terminal_id.clone(), views);
-            }
-            if let Some(display) = self.display_by_terminal.remove(pane_id) {
-                self.display_by_terminal
-                    .insert(terminal_id.clone(), display);
-            }
-        }
-        let live = self
-            .snapshot
-            .as_deref()
-            .map(|snapshot| {
-                snapshot
-                    .panes
-                    .iter()
-                    .map(|pane| pane.pane_id.clone())
-                    .collect::<std::collections::BTreeSet<_>>()
-            })
-            .unwrap_or_default();
-        // A pane whose terminal is known from before keeps that identity while
-        // it is still live: a provider outage removes every placement, and the
-        // panel must not lose what it is keyed by. A pane that never had a
-        // placement falls back to its own id, so its panels survive anyway.
-        let previous = self.pane_terminal_ids.clone();
-        let mut merged = join;
-        for pane_id in &live {
-            if !merged.contains_key(pane_id) {
-                if let Some(known) = previous.get(pane_id) {
-                    merged.insert(pane_id.clone(), known.clone());
-                } else {
-                    merged.insert(pane_id.clone(), pane_id.clone());
-                }
-            }
-        }
-        merged.retain(|pane_id, _| live.contains(pane_id));
-        self.pane_terminal_ids = merged;
-        let mut open = HashMap::new();
-        let mut display = HashMap::new();
-        for (pane_id, terminal_id) in &self.pane_terminal_ids {
-            if let Some(views) = self.panels_by_terminal.get(terminal_id) {
-                if !views.is_empty() {
-                    open.insert(pane_id.clone(), views.clone());
-                }
-            }
-            if let Some(stored) = self.display_by_terminal.get(terminal_id) {
-                display.insert(pane_id.clone(), stored.clone());
-            }
-        }
-        self.pane_panel_open = open;
-        self.pane_panel_display = display;
-    }
-
-    /// Keep the durable, terminal-keyed panels and the pane-keyed ones the
-    /// renderer uses in step. Called whenever the pane-keyed state changes and
-    /// when the pane identities may have: the fold uses the join that was in
-    /// force, so a pane that moved keeps its entry under its terminal.
-    pub(crate) fn sync_panel_identity(&mut self) {
-        let mut panels = HashMap::new();
-        let mut displays = HashMap::new();
-        for (pane_id, views) in std::mem::take(&mut self.pane_panel_open) {
-            // The same key the rekey uses: the terminal when it is known, the
-            // pane's own id otherwise. Skipping an unknown terminal here would
-            // drop the user's panel on the floor.
-            let terminal_id = self
-                .pane_terminal_ids
-                .get(&pane_id)
-                .cloned()
-                .unwrap_or_else(|| pane_id.clone());
-            panels.insert(terminal_id, views);
-        }
-        for (pane_id, display) in std::mem::take(&mut self.pane_panel_display) {
-            let terminal_id = self
-                .pane_terminal_ids
-                .get(&pane_id)
-                .cloned()
-                .unwrap_or_else(|| pane_id.clone());
-            displays.insert(terminal_id, display);
-        }
-        // A terminal whose pane is live but has no panel is closed on purpose:
-        // forgetting it is what makes closing stick. A terminal whose pane is
-        // not live (a restore before the join is known) keeps its entry.
-        let live = self
-            .pane_terminal_ids
-            .values()
-            .cloned()
-            .collect::<std::collections::HashSet<_>>();
-        self.panels_by_terminal
-            .retain(|terminal_id, _| !live.contains(terminal_id));
-        self.display_by_terminal
-            .retain(|terminal_id, _| !live.contains(terminal_id));
-        self.panels_by_terminal.extend(panels);
-        self.display_by_terminal.extend(displays);
-        self.rekey_panels();
-    }
-
-    /// Restore the persisted panels. The stored key is the terminal id, so a
-    /// pane that moved keeps its panels wherever it is now.
-    pub(super) fn restore_pane_panels(&mut self) {
-        if self.snapshot.is_none() {
-            return;
-        }
-        for panel in self.config.preferences.panels.clone() {
-            let terminal_id = panel.terminal_id.clone();
-            self.panels_by_terminal
-                .entry(terminal_id.clone())
-                .or_default()
-                .extend(panel.views);
-            let display = PanePanelDisplay {
-                user_height: panel.height,
-                collapsed_views: panel.collapsed_views.into_iter().collect(),
-                collapsed_rows: panel.collapsed_rows.into_iter().collect(),
-                ..Default::default()
-            };
-            self.display_by_terminal
-                .entry(terminal_id)
-                .or_insert(display);
-        }
-        self.sync_panel_identity();
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn geometry_puts_the_panel_above_a_usable_terminal() {
-        let area = Rect::new(3, 4, 100, 30);
-        let layout = geometry(area, 6).unwrap();
-        assert_eq!(layout.panel.width, 100);
-        assert_eq!(layout.panel.height, 6);
-        assert_eq!(layout.panel.y, area.y);
-        assert_eq!(layout.divider.y, area.y + 6);
-        assert_eq!(layout.terminal.y, area.y + 7);
-        assert!(layout.terminal.height >= TERMINAL_MIN_HEIGHT);
-        // The cap is a share of the pane, and a tiny pane stays closed.
-        let capped = geometry(area, 100).unwrap();
-        assert_eq!(capped.panel.height, 30 / PANEL_MAX_SHARE);
-        assert!(geometry(Rect::new(0, 0, 40, 4), 2).is_none());
-        assert!(geometry(Rect::new(0, 0, 10, 30), 2).is_none());
+    fn agent(pane_id: &str, name: Option<&str>) -> crate::protocol::ClientShellAgent {
+        crate::protocol::ClientShellAgent {
+            pane_id: pane_id.into(),
+            workspace_id: "w1".into(),
+            tab_id: "w1:t1".into(),
+            name: name.map(str::to_owned),
+            display_agent: None,
+            agent: None,
+            title: None,
+            terminal_title: None,
+            terminal_title_stripped: None,
+            agent_status: crate::api::schema::AgentStatus::Unknown,
+            state_change_seq: 0,
+            state_labels: Vec::new(),
+            tokens: Vec::new(),
+            focused: false,
+        }
     }
 
     #[test]
-    fn fit_height_adds_stacked_sections_and_collapsed_ones_cost_one_line() {
-        use crate::extension_contract::{HostDocumentItem, HostItemRole};
-        let item = HostDocumentItem {
-            id: "task:1".into(),
-            parent_id: None,
-            role: HostItemRole::Section,
-            label: "row".into(),
-            detail: None,
-            terminal: None,
-            action_ids: Vec::new(),
-            flags: Default::default(),
-            view: None,
-        };
-        let view = |key: &str, count: usize| PanelView {
-            view_id: key.to_string(),
-            kind: None,
-            title: "Tasks",
-            summary: "",
-            state: None,
-            rows: (0..count)
-                .map(|_| FlatRow {
-                    item: &item,
-                    lanes: Vec::new(),
-                    is_last: true,
-                    children: 1,
-                })
-                .collect(),
-        };
-        let views = vec![view("a", 2), view("b", 3)];
-        assert_eq!(7, fit_height(&views, &BTreeSet::new()));
-        assert_eq!(4, fit_height(&views, &BTreeSet::from(["b".to_string()])));
+    fn view_header_names_one_covered_terminal_and_counts_several() {
+        let agents = vec![
+            agent("w1:p2", Some("agent1")),
+            agent("w1:p3", Some("agent2")),
+        ];
+        assert_eq!("agent1", scope_label(&agents, &["w1:p2".to_owned()]));
         assert_eq!(
-            2,
-            fit_height(&views, &BTreeSet::from(["a".to_string(), "b".to_string()]))
+            "2 terminals",
+            scope_label(&agents, &["w1:p2".to_owned(), "w1:p3".to_owned()])
         );
+        // An unnamed covered pane falls back to its public id, and an empty
+        // scope says so rather than inventing a name.
+        assert_eq!("w1:p9", scope_label(&agents, &["w1:p9".to_owned()]));
+        assert_eq!("no terminals", scope_label(&agents, &[]));
     }
 
     #[test]

@@ -746,7 +746,7 @@ pub(crate) fn api_method_name(method: &Method) -> &'static str {
         Method::PaneEdges(_) => "pane.edges",
         Method::PaneFocusDirection(_) => "pane.focus_direction",
         Method::PaneResize(_) => "pane.resize",
-        Method::PanePanel(_) => "pane.panel",
+        Method::PaneView(_) => "pane.view",
         Method::PaneScroll(_) => "pane.scroll",
         Method::PaneEditScrollback(_) => "pane.edit_scrollback",
         Method::PaneSelectionRead(_) => "pane.selection.read",
@@ -1306,7 +1306,8 @@ mod tests {
     ) -> crate::api::schema::PaneInfo {
         crate::api::schema::PaneInfo {
             pane_id: pane_id.into(),
-            terminal_id: "term_1".into(),
+            content: crate::api::schema::PaneContent::Terminal,
+            terminal_id: Some("term_1".into()),
             workspace_id: "ws_1".into(),
             tab_id: "tab_1".into(),
             focused: true,

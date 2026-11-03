@@ -1508,7 +1508,7 @@ impl App {
             Method::PaneSwap(params) => return self.handle_pane_swap(request.id, params),
             Method::PaneMove(params) => return self.handle_pane_move(request.id, params),
             Method::PaneZoom(params) => return self.handle_pane_zoom(request.id, params),
-            Method::PanePanel(params) => return self.handle_pane_panel(request.id, params),
+            Method::PaneView(params) => return self.handle_pane_view(request.id, params),
             Method::PaneLayout(params) => return self.handle_pane_layout(request.id, params),
             Method::PaneProcessInfo(params) => {
                 return self.handle_pane_process_info(request.id, params);

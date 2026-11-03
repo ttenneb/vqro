@@ -138,7 +138,10 @@ class ReadinessDemo(Demo):
         # assertion. Capture every private pane's births before stopping it.
         if self.server and birth(self.server[0]) == self.server[1]:
             for pane in self.cli("pane", "list")["result"]["panes"]:
-                self.remember_pane(pane["pane_id"])
+                # Views have no process tree. Probing them raises pane_not_found
+                # and used to abort cleanup before the private server stopped.
+                if pane.get("content", "terminal") == "terminal":
+                    self.remember_pane(pane["pane_id"])
         super().stop()
         client = getattr(self, "client", None)
         if client and client.poll() is None:

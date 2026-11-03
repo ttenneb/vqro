@@ -338,10 +338,43 @@ impl App {
         ws_idx: usize,
         pane_id: crate::layout::PaneId,
     ) -> Option<crate::api::schema::PaneInfo> {
+        use crate::api::schema::{AgentStatus, PaneContent, PaneInfo};
         let ws = self.state.workspaces.get(ws_idx)?;
-        let pane = ws.pane_state(pane_id)?;
-        let terminal = self.state.terminals.get(&pane.attached_terminal_id)?;
         let tab_idx = ws.find_tab_index_for_pane(pane_id)?;
+        let focused = self.state.active == Some(ws_idx)
+            && ws.active_tab == tab_idx
+            && ws
+                .focused_pane_id()
+                .is_some_and(|focused| focused == pane_id);
+        // A view pane has no terminal record. Report its content kind with no
+        // terminal id rather than inventing a terminal or reporting not-found.
+        let Some(pane) = ws.pane_state(pane_id) else {
+            ws.view_content(pane_id)?;
+            return Some(PaneInfo {
+                pane_id: self.public_pane_id(ws_idx, pane_id)?,
+                content: PaneContent::View,
+                terminal_id: None,
+                workspace_id: self.public_workspace_id(ws_idx),
+                tab_id: self.public_tab_id(ws_idx, tab_idx)?,
+                focused,
+                cwd: None,
+                foreground_cwd: None,
+                label: None,
+                agent: None,
+                title: None,
+                terminal_title: None,
+                terminal_title_stripped: None,
+                display_agent: None,
+                agent_status: AgentStatus::Unknown,
+                state_labels: std::collections::HashMap::new(),
+                tokens: std::collections::HashMap::new(),
+                agent_session: None,
+                scroll: None,
+                terminal_size: None,
+                revision: 0,
+            });
+        };
+        let terminal = self.state.terminals.get(&pane.attached_terminal_id)?;
         let runtime =
             self.state
                 .runtime_for_pane_in_workspace(&self.terminal_runtimes, ws_idx, pane_id);
@@ -351,15 +384,12 @@ impl App {
             let (rows, cols) = runtime.current_size();
             crate::api::schema::PaneTerminalSize { rows, cols }
         });
-        let focused = self.state.active == Some(ws_idx)
-            && ws.active_tab == tab_idx
-            && ws
-                .focused_pane_id()
-                .is_some_and(|focused| focused == pane_id);
+
         let presentation = terminal.effective_presentation();
-        Some(crate::api::schema::PaneInfo {
+        Some(PaneInfo {
             pane_id: self.public_pane_id(ws_idx, pane_id)?,
-            terminal_id: terminal.id.to_string(),
+            content: PaneContent::Terminal,
+            terminal_id: Some(terminal.id.to_string()),
             workspace_id: self.public_workspace_id(ws_idx),
             tab_id: self.public_tab_id(ws_idx, tab_idx)?,
             focused,

@@ -334,7 +334,9 @@ impl ClientShellState {
             self.pending_requests
                 .retain(|_, request| request.boot_id == endpoint_boot_id);
             self.pane_surface = None;
+            self.pane_surface_views.clear();
             self.pending_pane_surface = None;
+            self.pending_pane_surface_views.clear();
         }
         self.apply_active_snapshot(snapshot);
         self.apply_cached_endpoint_structure(endpoint_id);

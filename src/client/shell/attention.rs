@@ -414,15 +414,6 @@ impl ClientShellState {
         }) {
             return;
         }
-        let Some(documents) = self
-            .endpoints
-            .iter()
-            .find(|endpoint| endpoint.endpoint_id == self.active_endpoint_id)
-            .and_then(ClientShellEndpoint::current_host_documents)
-            .cloned()
-        else {
-            return;
-        };
         let Some(snapshot) = self.snapshot.clone() else {
             return;
         };
@@ -449,41 +440,10 @@ impl ClientShellState {
                     );
                 }
             }
-            return;
         }
-        // The scope the badge covers: the panes of those panes' tabs.
-        let mut panes: Vec<(String, String)> = Vec::new();
-        for pane in &snapshot.panes {
-            let in_scope = match launch.kind.as_str() {
-                "workspace" => launch.ids.iter().any(|id| id == &pane.workspace_id),
-                "tab" => launch.ids.iter().any(|id| id == &pane.tab_id),
-                "session" => true,
-                _ => false,
-            };
-            if !in_scope {
-                continue;
-            }
-            for view_id in super::pane_panel::published_views(&documents, &pane.pane_id) {
-                panes.push((pane.pane_id.clone(), view_id));
-            }
-        }
-        if panes.is_empty() {
-            // Nothing to open here; keep the terminal usable rather than
-            // launching a foreign tab view.
-            self.set_endpoint_error("no extension views for this scope".to_string());
-            outcome.repaint = true;
-            return;
-        }
-        for (pane_id, view_id) in panes {
-            self.pane_panel_open
-                .entry(pane_id.clone())
-                .or_default()
-                .insert(view_id);
-            self.pane_panel_display.entry(pane_id).or_default().refit();
-        }
-        self.persist_pane_panels();
-        outcome.repaint = true;
-        outcome.resize = true;
+        // A badge has no action of its own. The recorded decision is that a badge
+        // click selects its tab, which the surrounding chrome already does; the
+        // extension's own tab view is retired.
     }
 }
 

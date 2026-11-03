@@ -2,6 +2,9 @@
 
 Status: shipped in v1 (implementation mandate:
 [extension UI framework](../architecture/extension-ui-framework.md)).
+Presentation is by nested panes: a **view pane** is a pane whose content is an
+extension view (stage 3, [nested panes](../architecture/nested-panes.md)); the
+pane-attached split band and its per-client claims are gone.
 
 A **view** is what an extension publishes for Vqro to draw. It travels the same
 live path as a host document: a trusted service declaring `provides =
@@ -34,7 +37,7 @@ target names the scope the view belongs to.
 
 **A view that changes must move `revision`.** Vqro re-fetches a provider's view
 only when the version the provider reports for an action changes, so anything
-that changes what a panel shows (a message, a task, an acknowledgement) must
+that changes what a view shows (a message, a task, an acknowledgement) must
 move it too. An idempotent retry must leave it unchanged.
 
 ## Items
@@ -51,8 +54,8 @@ contract:
 ```json
 "view": {
   "kind": "row",             // section | row; any other value draws as "unsupported"
-  "pane_id": "w2:p2",        // panel root only: the pane this view fills
-  "view_id": "tasks",        // panel root only: the user names this to `vqro pane panel`
+  "pane_id": "w2:p2",        // root only: the terminal pane this view was published for
+  "view_id": "tasks",        // root only: the view id a view pane names as (extension, view_id)
   "state": "blocked",        // open | in_progress | blocked | reported | done
   "action": "unblock",       // one word Vqro composes the waiting sentence around
   "waiting": "them",         // you | them: whose move the row waits for
@@ -60,10 +63,11 @@ contract:
 }
 ```
 
-- A **panel root** (no parent) names both `pane_id` and `view_id` and becomes a
-  section in that pane's panel. `state` on a root is the panel's aggregate.
+- A **view root** (no parent) names both `pane_id` and `view_id`. It is one
+  terminal pane's slice; a view pane composes the roots whose `pane_id` is in
+  its placement-derived scope. `state` on a root is the slice's aggregate.
 - A section's summary is `detail`, and a row's tone comes from its `state`.
-  Per-item `count` and `tone` overrides are **deferred**: no panel sends them,
+  Per-item `count` and `tone` overrides are **deferred**: no view sends them,
   and an optional field can be added later without a codec break.
 - Any other item carrying a `view` block must have a `parent_id`, or the view is
   rejected: a block that belongs to nothing would silently never draw.
@@ -87,23 +91,28 @@ to a later slice, together with the interaction model it belongs to, so no shape
 for it is frozen here. Adding one later is safe: an unknown field is ignored by
 every client.
 
-## Several clients at one pane
+## View panes and scopes
 
-One PTY serves every attached client, so panel sizes are arbitrated, never
-raced:
+A view pane is an ordinary layout pane: a stable pane identity, a rect, focus,
+zoom, move and close through the same layout engine as a terminal pane, and the
+content kind `(extension, view_id)` instead of a PTY. It has no terminal.
 
-- The pane's terminal is the **smallest** size any attached client claimed for
-  it. The client with the largest panel always fits, no client's terminal is
-  drawn under another client's panel, and the result never depends on which
-  request arrived last.
-- A claim from another boot than the current shell boot is stale and ignored.
-- When no attached client claims a pane, it returns to its layout geometry.
-- The tab's geometry controller applies the claims, so a client that does not
-  control the tab's geometry still changes what the controller draws and what
-  the pane's PTY is.
-- A server that does not advertise `pane_panels_v1` draws no panels at all: a
-  panel that could not claim its terminal's edge would be drawn over the
-  terminal instead of shrinking it. The connection stays usable.
+- **Scope comes from placement, not configuration.** A view pane covers every
+  terminal in its nearest parent container, in tree order. A view at the tab
+  root covers the terminals of the root subtree. The host derives the scope from
+  the shared layout, so every client sees the same set.
+- The header always shows the scope: `Tasks · agent1` for one covered terminal,
+  `Tasks · 3 terminals` for several.
+- The composition above is still per terminal pane: the host publishes each
+  terminal's slice as a view root, and a view pane composes the roots its scope
+  covers. The extension keeps the meaning; core supplies only the covered
+  terminals. Re-keying the request to a scope in the host<->extension contract is
+  a later, separate change.
+- **Frame.** A view pane sharing its box with a covered terminal gets the light
+  frame: the pane's top divider carries `title · scope · count` and no extra row
+  is spent. A view standing alone or zoomed gets the full frame.
+- A view pane that is not visible in the composed tab does no presentation work;
+  background panes still parse output as today.
 
 ## Delivery and negotiation
 
@@ -123,23 +132,20 @@ older client reject the whole view, while an unknown string lets it draw
 and a section that Vqro cannot draw still reserves its edge and says so. The
 block set can therefore grow without breaking an older surface.
 
-`unavailable` is Vqro-owned too: when a pane has a view open and the provider
-stops publishing it (the extension failed or was disabled), Vqro keeps the
-panel's edge reserved and draws the header with `unavailable` and one
-`extension unavailable` row, instead of silently dropping a panel the user
-opened. When the provider returns, the view is drawn again.
+`unavailable` is Vqro-owned too: when a view pane's provider stops publishing it
+(the extension failed or was disabled), Vqro keeps the pane and draws one
+`extension unavailable` row, instead of silently dropping the pane. When the
+provider returns, the view is drawn again.
 
 ## User-facing entry points
 
-- `vqro pane panel show|hide|toggle <pane> [<view>]` asks the attached clients
-  to open, close or toggle a view. An older client ignores the request and keeps
-  its own display state.
-- A badge on the pane border, the tab bar and the sidebar row opens the panel
-  for the panes it covers. A pane with views and nothing open draws its own
-  badge.
-- `ui.show_panels_on_agent_start` (off by default) opens a pane's first view
-  when an agent starts there. Only a user action or a user-enabled rule opens a
-  view.
+- `vqro pane view add <pane> <extension>:<view> [--direction right|down]
+  [--ratio FLOAT] [--focus]` adds a view pane beside a pane. `vqro pane view
+  close <view-pane>` drops it. Both are neutral: core stores the content
+  identity and the placement, never a Tasks literal, and a view pane keeps a
+  public pane identity like any pane.
+- A badge on the tab bar and the sidebar row selects its tab; the recorded
+  decision is that a badge has no action of its own.
 
 ## Bounds
 

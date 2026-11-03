@@ -264,6 +264,7 @@ impl HeadlessServer {
                 | Method::PaneResize(_)
                 | Method::PaneScroll(_)
                 | Method::PaneSplit(_)
+                | Method::PaneView(_)
                 | Method::PaneSwap(_)
                 | Method::PaneZoom(_)
                 | Method::TabClose(_)
@@ -297,6 +298,7 @@ impl HeadlessServer {
                 | Method::PaneFocusDirection(_)
                 | Method::PaneResize(_)
                 | Method::PaneSplit(_)
+                | Method::PaneView(_)
                 | Method::PaneSwap(_)
                 | Method::PaneZoom(_)
                 | Method::TabClose(_)
@@ -587,29 +589,6 @@ impl HeadlessServer {
         // claim wins: the largest panel always fits, no client's terminal is
         // drawn under another client's panel, and the size never depends on which
         // client's request arrived last.
-        let mut claimed: std::collections::HashMap<String, crate::protocol::ClientSurfaceSize> =
-            std::collections::HashMap::new();
-        for other in self.clients.values() {
-            // Every attached client that made a claim counts, foreground or
-            // not: a background client is still drawing its own panel over the
-            // same PTY.
-            let Some(request) = other.shell_pane_panels.as_ref() else {
-                continue;
-            };
-            if request.boot_id != self.client_shell_boot_id {
-                continue;
-            }
-            for claim in &request.claims {
-                claimed
-                    .entry(claim.pane_id.clone())
-                    .and_modify(|size| {
-                        size.cols = size.cols.min(claim.size.cols);
-                        size.rows = size.rows.min(claim.size.rows);
-                    })
-                    .or_insert(claim.size);
-            }
-        }
-        let pane_panels = (!claimed.is_empty()).then_some(claimed);
         let viewport_pane_id = pane_viewport
             .as_ref()
             .filter(|request| request.size.is_some())
@@ -629,12 +608,6 @@ impl HeadlessServer {
                     .as_ref()
                     .into_iter()
                     .flat_map(|interest| interest.views.iter().map(|view| &view.pane_id)),
-            )
-            .chain(
-                pane_panels
-                    .as_ref()
-                    .into_iter()
-                    .flat_map(|panels| panels.keys()),
             )
             .filter_map(|pane_id| self.app.parse_pane_id(pane_id))
             .filter_map(|(workspace_index, pane_id)| {
@@ -716,47 +689,6 @@ impl HeadlessServer {
                             }
                         }
                     }
-                }
-            }
-        }
-        if let Some(panels) = pane_panels {
-            for (pane_public_id, size) in panels {
-                let Some((workspace_index, pane_id)) = self.app.parse_pane_id(&pane_public_id)
-                else {
-                    continue;
-                };
-                if workspace_index != target.workspace_index {
-                    continue;
-                }
-                let Some(terminal_id) = self
-                    .app
-                    .state
-                    .workspaces
-                    .get(workspace_index)
-                    .and_then(|workspace| workspace.tabs.get(target.tab_index))
-                    .and_then(|tab| tab.terminal_id(pane_id))
-                else {
-                    continue;
-                };
-                if self
-                    .app
-                    .state
-                    .direct_attach_resize_locks
-                    .contains(terminal_id)
-                {
-                    continue;
-                }
-                if let Some(runtime) = self.app.state.runtime_for_pane_in_workspace(
-                    &self.app.terminal_runtimes,
-                    workspace_index,
-                    pane_id,
-                ) {
-                    runtime.resize(
-                        size.rows,
-                        size.cols,
-                        cell_size.width_px,
-                        cell_size.height_px,
-                    );
                 }
             }
         }

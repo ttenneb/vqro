@@ -765,7 +765,9 @@ impl Tab {
         launch_env: &PaneLaunchEnv,
         command: Option<SplitCommand<'_>>,
     ) -> std::io::Result<NewPane> {
-        if self.panes.len() >= crate::admission::MAX_TAB_PANES {
+        // Structural panes (terminals and views), not terminal records alone:
+        // views add no PaneState and must still count against the tab limit.
+        if self.layout.pane_count() >= crate::admission::MAX_TAB_PANES {
             return Err(std::io::Error::other("tab pane limit reached"));
         }
         let mut layout = self.layout.clone();
@@ -859,6 +861,49 @@ impl Tab {
 
     pub fn close_pane(&mut self, pane_id: PaneId) -> Option<DetachedPane> {
         self.detach_pane(pane_id)
+    }
+
+    /// Add a view pane beside `target`, beside it in `direction`. The view pane
+    /// has no terminal or runtime; it is a layout pane with content identity.
+    /// Returns the new pane identity, or `None` if the target is unknown or the
+    /// view identity is invalid.
+    pub(crate) fn split_with_view(
+        &mut self,
+        target: PaneId,
+        extension: &str,
+        view: &str,
+        direction: Direction,
+        ratio: f32,
+        focus_new_pane: bool,
+    ) -> Option<PaneId> {
+        if self.layout.pane_count() >= crate::admission::MAX_TAB_PANES {
+            return None;
+        }
+        let (pane, _) = self
+            .layout
+            .split_pane_with_view(target, direction, ratio, extension, view)?;
+        if focus_new_pane {
+            self.layout.focus_pane(pane);
+        }
+        Some(pane)
+    }
+
+    /// Remove a view pane from this tab's layout. A view pane has no terminal or
+    /// runtime to detach, so this only edits the tree; a tab whose last view is
+    /// the only pane is left alone, and the caller decides what that means.
+    pub(crate) fn close_view_pane(&mut self, pane_id: PaneId) {
+        if self.layout.pane_count() <= 1 {
+            return;
+        }
+        let next_root = self.promoted_root_if_needed(pane_id);
+        let Some(layout) = self.remove_layout_pane_candidate(pane_id) else {
+            return;
+        };
+        self.layout = layout;
+        self.zoomed = false;
+        if let Some(next_root) = next_root {
+            self.root_pane = next_root;
+        }
     }
 
     pub fn remove_pane(&mut self, pane_id: PaneId) -> Option<DetachedPane> {

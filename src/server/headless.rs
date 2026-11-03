@@ -1054,33 +1054,6 @@ impl HeadlessServer {
         }
     }
 
-    /// The effective panel claim per pane, smallest across attached clients, as
-    /// host session state. Called whenever a client's claims change and whenever a
-    /// client goes away: a retired claim must stop shrinking the pane's terminal.
-    fn refresh_pane_panel_claims(&mut self) {
-        let mut effective: std::collections::HashMap<crate::layout::PaneId, (u16, u16)> =
-            std::collections::HashMap::new();
-        for client in self.clients.values() {
-            let Some(request) = client.shell_pane_panels.as_ref() else {
-                continue;
-            };
-            if request.boot_id != self.client_shell_boot_id {
-                continue;
-            }
-            for claim in &request.claims {
-                let Some((_, pane_id)) = self.app.parse_pane_id(&claim.pane_id) else {
-                    continue;
-                };
-                let entry = effective
-                    .entry(pane_id)
-                    .or_insert((claim.size.rows, claim.size.cols));
-                entry.0 = entry.0.min(claim.size.rows.max(2));
-                entry.1 = entry.1.min(claim.size.cols.max(4));
-            }
-        }
-        self.app.state.pane_panel_claims = effective;
-    }
-
     fn remove_client(&mut self, client_id: u64) -> bool {
         self.cancel_client_extension_work(client_id);
         self.disconnect_native_graphics(client_id);
@@ -1102,9 +1075,6 @@ impl HeadlessServer {
         });
         let was_foreground = self.foreground_client_id == Some(client_id);
         let removed = self.clients.remove(&client_id);
-        // The removed client's panel claims go with it: without this the layout
-        // would keep skipping panes no attached client has a panel open in.
-        self.refresh_pane_panel_claims();
         self.tab_geometry_controllers
             .retain(|_, controller_id| *controller_id != client_id);
         if let Some(mut removed) = removed {
@@ -2054,7 +2024,6 @@ impl HeadlessServer {
                 pane_viewport_enabled,
                 pane_view_enabled,
                 terminal_views_enabled,
-                pane_panels_enabled,
                 writer,
             } => {
                 if self.handoff_in_progress {
@@ -2105,7 +2074,6 @@ impl HeadlessServer {
                 connection.shell_pane_viewport_enabled = pane_viewport_enabled;
                 connection.shell_pane_view_enabled = pane_view_enabled;
                 connection.shell_terminal_views_enabled = terminal_views_enabled;
-                connection.shell_pane_panels_enabled = pane_panels_enabled;
                 connection.shell_surface_active = surface_active;
                 connection.shell_projection_revision = 1;
                 let config_diagnostic = if endpoint_keybindings {
@@ -2939,77 +2907,6 @@ impl HeadlessServer {
                             data,
                         },
                     );
-                }
-                true
-            }
-            ServerEvent::ClientShellPanePanels {
-                client_id,
-                mut panels,
-            } => {
-                if !self.clients.get(&client_id).is_some_and(|client| {
-                    client.is_active_shell_client() && client.shell_pane_panels_enabled
-                }) || panels.boot_id != self.client_shell_boot_id
-                {
-                    return false;
-                }
-                let Some(target) = self.shell_target_for_client(client_id) else {
-                    return false;
-                };
-                let allowed = self
-                    .app
-                    .state
-                    .workspaces
-                    .get(target.workspace_index)
-                    .and_then(|workspace| workspace.tabs.get(target.tab_index))
-                    .map(|tab| tab.layout.pane_ids())
-                    .unwrap_or_default()
-                    .into_iter()
-                    .filter_map(|pane_id| {
-                        self.app
-                            .public_pane_id(target.workspace_index, pane_id)
-                            .map(|public_id| (public_id, pane_id))
-                    })
-                    .collect::<HashMap<_, _>>();
-                if panels.claims.len() > crate::protocol::endpoint::MAX_PANE_PANEL_CLAIMS {
-                    return false;
-                }
-                let mut seen = HashSet::new();
-                for claim in &mut panels.claims {
-                    if claim.pane_id.len() > 128
-                        || !allowed.contains_key(&claim.pane_id)
-                        || !seen.insert(claim.pane_id.clone())
-                    {
-                        return false;
-                    }
-                    claim.size.cols = claim.size.cols.clamp(1, 1000);
-                    claim.size.rows = claim.size.rows.clamp(1, 1000);
-                }
-                if self
-                    .clients
-                    .get(&client_id)
-                    .and_then(|client| client.shell_pane_panels.as_ref())
-                    == Some(&panels)
-                {
-                    return false;
-                }
-                if let Some(client) = self.clients.get_mut(&client_id) {
-                    client.shell_pane_panels = Some(panels);
-                }
-                self.refresh_pane_panel_claims();
-                // The claims are shared by every attached client, so the tab's
-                // geometry controller applies them: a client that is not the
-                // controller still changes what the controller draws and what
-                // the pane's PTY is.
-                let controller = self
-                    .tab_id_for_target(target)
-                    .and_then(|tab_id| self.tab_geometry_controllers.get(&tab_id).copied());
-                match controller {
-                    Some(controller) => {
-                        let _ = self.resize_shell_tab_if_controller(controller, true);
-                    }
-                    None => {
-                        let _ = self.resize_shell_tab_if_controller(client_id, true);
-                    }
                 }
                 true
             }

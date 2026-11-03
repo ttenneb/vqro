@@ -7,14 +7,15 @@ use crate::api::schema::{
     PaneFocusDirectionReason, PaneFocusDirectionResult, PaneInfo, PaneInputSetParams,
     PaneLayoutPane, PaneLayoutParams, PaneLayoutRect, PaneLayoutSnapshot, PaneLayoutSplit,
     PaneListParams, PaneMoveDestination, PaneMoveParams, PaneMoveReason, PaneMoveResult,
-    PaneNeighborParams, PaneNeighborResult, PanePanelAction, PanePanelParams, PanePanelResult,
-    PaneProcessInfo, PaneProcessInfoParams, PaneProcessInfoProcess, PaneReadParams, PaneReadResult,
-    PaneReleaseAgentParams, PaneRenameParams, PaneReportAgentParams, PaneReportAgentSessionParams,
+    PaneNeighborParams, PaneNeighborResult, PaneProcessInfo, PaneProcessInfoParams,
+    PaneProcessInfoProcess, PaneReadParams, PaneReadResult, PaneReleaseAgentParams,
+    PaneRenameParams, PaneReportAgentParams, PaneReportAgentSessionParams,
     PaneReportMetadataParams, PaneResizeParams, PaneResizeReason, PaneResizeResult,
     PaneScrollParams, PaneSelectionReadParams, PaneSendInputParams, PaneSendKeysParams,
     PaneSendTextParams, PaneSplitParams, PaneSwapParams, PaneSwapReason, PaneSwapResult,
-    PaneTarget, PaneTelemetry, PaneTelemetryParams, PaneTextPoint, PaneTextRange, PaneZoomMode,
-    PaneZoomParams, PaneZoomReason, PaneZoomResult, ResponseResult,
+    PaneTarget, PaneTelemetry, PaneTelemetryParams, PaneTextPoint, PaneTextRange, PaneViewAction,
+    PaneViewParams, PaneViewResult, PaneZoomMode, PaneZoomParams, PaneZoomReason, PaneZoomResult,
+    ResponseResult,
 };
 use crate::app::actions::{PaneZoomCommand, PaneZoomNoopReason};
 use crate::app::App;
@@ -1597,34 +1598,123 @@ impl App {
         self.schedule_session_save();
     }
 
-    /// A user's pane panel request: Vqro validates the pane and forwards the
-    /// request to attached clients, which own their own display state.
-    pub(super) fn handle_pane_panel(&mut self, id: String, params: PanePanelParams) -> String {
+    /// The neutral view-pane operation: add a view pane beside a pane, or close
+    /// a view pane. The extension and view identity come from the caller; core
+    /// holds no Tasks literal and stores only the canonical tree node.
+    pub(super) fn handle_pane_view(&mut self, id: String, params: PaneViewParams) -> String {
+        match params.action {
+            PaneViewAction::Add => self.add_pane_view(id, params),
+            PaneViewAction::Close => {
+                let Some((ws_idx, pane_id)) = self.resolve_optional_pane(params.pane_id.as_deref())
+                else {
+                    return encode_error(id, "pane_not_found", "pane not found");
+                };
+                let Some(public_pane_id) = self.public_pane_id(ws_idx, pane_id) else {
+                    return encode_error(id, "pane_not_found", "pane not found");
+                };
+                let Some(content) = self
+                    .state
+                    .workspaces
+                    .get(ws_idx)
+                    .and_then(|ws| ws.view_content(pane_id))
+                else {
+                    return encode_error(id, "not_a_view", "pane is not a view pane");
+                };
+                match self.close_pane(
+                    id.clone(),
+                    &PaneTarget {
+                        pane_id: public_pane_id.clone(),
+                    },
+                ) {
+                    Ok(()) => encode_success(
+                        id,
+                        ResponseResult::PaneView {
+                            view: PaneViewResult {
+                                pane_id: public_pane_id,
+                                extension: Some(content.extension),
+                                view: Some(content.view),
+                                action: PaneViewAction::Close,
+                            },
+                        },
+                    ),
+                    Err(response) => response,
+                }
+            }
+        }
+    }
+
+    fn add_pane_view(&mut self, id: String, params: PaneViewParams) -> String {
         let Some((ws_idx, pane_id)) = self.resolve_optional_pane(params.pane_id.as_deref()) else {
             return encode_error(id, "pane_not_found", "pane not found");
         };
-        let Some(pane_public_id) = self.public_pane_id(ws_idx, pane_id) else {
+        // A view is a structural pane: refuse the same way a terminal split does
+        // rather than create a layout that restore admission would later reject.
+        let Some(tab_idx) = self.state.workspaces[ws_idx].find_tab_index_for_pane(pane_id) else {
             return encode_error(id, "pane_not_found", "pane not found");
         };
-        let action = match params.action {
-            PanePanelAction::Show => crate::protocol::endpoint::ServerPanePanelAction::Show,
-            PanePanelAction::Hide => crate::protocol::endpoint::ServerPanePanelAction::Hide,
-            PanePanelAction::Toggle => crate::protocol::endpoint::ServerPanePanelAction::Toggle,
+        if let Err(error) = self.admit_new_panes(Some(ws_idx), Some(tab_idx), 1) {
+            return encode_error(id, "resource_limit", error.to_string());
+        }
+        let extension = params
+            .extension
+            .as_deref()
+            .filter(|value| !value.is_empty());
+        let view = params.view.as_deref().filter(|value| !value.is_empty());
+        let (Some(extension), Some(view)) = (extension, view) else {
+            return encode_error(id, "invalid_view", "extension and view are required");
         };
-        let _ = self
-            .event_tx
-            .try_send(crate::events::AppEvent::PanePanelRequested {
-                pane_id: pane_public_id.clone(),
-                view_id: params.view.clone(),
-                action,
-            });
+        let direction = match params
+            .direction
+            .unwrap_or(crate::api::schema::SplitDirection::Right)
+        {
+            crate::api::schema::SplitDirection::Right => ratatui::layout::Direction::Horizontal,
+            crate::api::schema::SplitDirection::Down => ratatui::layout::Direction::Vertical,
+        };
+        let view_share = params.ratio.unwrap_or(0.5);
+        if !view_share.is_finite() || !(0.1..=0.9).contains(&view_share) {
+            return encode_error(
+                id,
+                "invalid_ratio",
+                "view ratio must be between 0.1 and 0.9",
+            );
+        }
+        // The tree stores the first child's share; the appended view is second.
+        let ratio = 1.0 - view_share;
+        let previous_focus = self.state.current_pane_focus_target();
+        let Some((target_tab_idx, new_pane)) = self.state.workspaces[ws_idx].split_pane_with_view(
+            pane_id,
+            extension,
+            view,
+            direction,
+            ratio,
+            params.focus,
+        ) else {
+            return encode_error(
+                id,
+                "pane_view_failed",
+                "could not add a view pane beside that pane",
+            );
+        };
+        if params.focus {
+            self.state.switch_workspace_tab(ws_idx, target_tab_idx);
+            self.state
+                .record_pane_focus_change(previous_focus, ws_idx, new_pane);
+            self.state.mode = crate::app::Mode::Terminal;
+        }
+        self.schedule_session_save();
+        let Some(public_pane_id) = self.public_pane_id(ws_idx, new_pane) else {
+            return encode_error(id, "pane_view_failed", "view pane has no public identity");
+        };
+        self.emit_layout_updated_event(ws_idx, target_tab_idx);
+        self.refresh_collection_documents();
         encode_success(
             id,
-            ResponseResult::PanePanel {
-                panel: PanePanelResult {
-                    pane_id: pane_public_id,
-                    view: params.view,
-                    action: params.action,
+            ResponseResult::PaneView {
+                view: PaneViewResult {
+                    pane_id: public_pane_id,
+                    extension: Some(extension.to_owned()),
+                    view: Some(view.to_owned()),
+                    action: PaneViewAction::Add,
                 },
             },
         )
@@ -1802,7 +1892,86 @@ impl App {
             seq: params.seq,
         });
 
+        self.maybe_add_agent_start_view(pane_id);
         encode_success(id, ResponseResult::Ok {})
+    }
+
+    /// The server-side agent-start rule: when an agent is reported on a pane, add
+    /// the configured view beside it, once per terminal. Neutral: the extension
+    /// and view come from `ui.agent_start_view`; core holds no Tasks literal. It
+    /// does nothing when no view identity is set, the terminal already ran it, or
+    /// a view pane already covers the terminal. Setting the identity is the only
+    /// switch: there is no second on/off setting for the same rule.
+    fn maybe_add_agent_start_view(&mut self, pane_id: PaneId) {
+        let Some((extension, view)) = self.state.agent_start_view.clone() else {
+            return;
+        };
+        let Some(ws_idx) = self
+            .state
+            .workspaces
+            .iter()
+            .position(|workspace| workspace.find_tab_index_for_pane(pane_id).is_some())
+        else {
+            return;
+        };
+        let Some(tab_idx) = self.state.workspaces[ws_idx].find_tab_index_for_pane(pane_id) else {
+            return;
+        };
+        if self.state.workspaces[ws_idx]
+            .pane_state(pane_id)
+            .is_some_and(|pane| pane.agent_start_view_applied)
+        {
+            return;
+        }
+        let covered = {
+            let tab = &self.state.workspaces[ws_idx].tabs[tab_idx];
+            tab.layout
+                .view_panes()
+                .iter()
+                .any(|view_pane| tab.layout.view_scope(*view_pane).contains(&pane_id))
+        };
+        if covered {
+            self.mark_agent_start_view_applied(ws_idx, pane_id);
+            self.schedule_session_save();
+            return;
+        }
+        // Beside when the pane is wide, below when it is narrow, at a fixed size.
+        let wide = self
+            .state
+            .runtime_for_pane_in_workspace(&self.terminal_runtimes, ws_idx, pane_id)
+            .map(|runtime| {
+                let (rows, cols) = runtime.current_size();
+                cols >= rows.saturating_mul(2)
+            })
+            .unwrap_or(true);
+        let direction = if wide {
+            ratatui::layout::Direction::Horizontal
+        } else {
+            ratatui::layout::Direction::Vertical
+        };
+        // Refuse rather than mark applied when the structural limits are full:
+        // the marker records that a view was actually added, and a layout restore
+        // would reject must never be created.
+        if self
+            .admit_new_panes(Some(ws_idx), Some(tab_idx), 1)
+            .is_err()
+        {
+            return;
+        }
+        if self.state.workspaces[ws_idx]
+            .split_pane_with_view(pane_id, &extension, &view, direction, 0.5, false)
+            .is_some()
+        {
+            self.mark_agent_start_view_applied(ws_idx, pane_id);
+            self.schedule_session_save();
+            self.emit_layout_updated_event(ws_idx, tab_idx);
+        }
+    }
+
+    fn mark_agent_start_view_applied(&mut self, ws_idx: usize, pane_id: PaneId) {
+        if let Some(pane) = self.state.workspaces[ws_idx].pane_state_mut(pane_id) {
+            pane.agent_start_view_applied = true;
+        }
     }
 
     pub(super) fn handle_pane_report_agent_session(
@@ -3592,7 +3761,10 @@ mod tests {
         assert_eq!(move_result.previous_tab_id, source_tab_public);
         assert_eq!(move_result.pane.pane_id, move_result.previous_pane_id);
         assert_eq!(move_result.pane.tab_id, target_tab_public);
-        assert_eq!(move_result.pane.terminal_id, source_terminal.to_string());
+        assert_eq!(
+            move_result.pane.terminal_id.as_deref(),
+            Some(source_terminal.as_str())
+        );
         assert_eq!(move_result.closed_tab_id, Some(source_tab_public));
         assert_eq!(move_result.closed_workspace_id, None);
         assert_eq!(move_result.target_layout.panes.len(), 2);
@@ -3709,7 +3881,10 @@ mod tests {
             .starts_with(&format!("{target_workspace_id}:p")));
         assert_eq!(move_result.pane.workspace_id, target_workspace_id);
         assert_eq!(move_result.pane.tab_id, target_tab_id);
-        assert_eq!(move_result.pane.terminal_id, source_terminal.to_string());
+        assert_eq!(
+            move_result.pane.terminal_id.as_deref(),
+            Some(source_terminal.as_str())
+        );
         assert_eq!(app.state.workspaces.len(), 1);
         assert_eq!(
             app.state.workspaces[0].tabs[0].terminal_id(source),
@@ -3763,7 +3938,10 @@ mod tests {
         assert_eq!(move_result.closed_workspace_id, Some(source_workspace_id));
         assert_eq!(move_result.pane.workspace_id, target_workspace_id);
         assert_eq!(move_result.pane.tab_id, target_tab_id);
-        assert_eq!(move_result.pane.terminal_id, source_terminal.to_string());
+        assert_eq!(
+            move_result.pane.terminal_id.as_deref(),
+            Some(source_terminal.as_str())
+        );
         assert_eq!(
             app.state.workspaces[0].tabs[0].terminal_id(source),
             Some(&source_terminal)
@@ -3812,7 +3990,10 @@ mod tests {
         );
         assert_eq!(move_result.closed_tab_id, None);
         assert_eq!(move_result.pane.pane_id, source_public);
-        assert_eq!(move_result.pane.terminal_id, source_terminal.to_string());
+        assert_eq!(
+            move_result.pane.terminal_id.as_deref(),
+            Some(source_terminal.as_str())
+        );
         assert_eq!(app.state.workspaces[0].tabs.len(), 2);
         assert!(app.state.workspaces[0].tabs[0].terminal_id(right).is_some());
         assert_eq!(
@@ -3936,7 +4117,10 @@ mod tests {
             Some(true)
         );
         assert_ne!(move_result.pane.pane_id, source_public);
-        assert_eq!(move_result.pane.terminal_id, source_terminal.to_string());
+        assert_eq!(
+            move_result.pane.terminal_id.as_deref(),
+            Some(source_terminal.as_str())
+        );
         assert_eq!(app.state.workspaces.len(), 1);
         assert_eq!(
             app.state.workspaces[0].tabs[0].terminal_id(source),
@@ -5004,5 +5188,448 @@ mod tests {
 
             assert_eq!(metadata_error_code(&response), "invalid_metadata_ttl");
         }
+    }
+
+    #[test]
+    fn api_pane_view_add_places_a_terminal_less_view_pane_and_close_removes_it() {
+        let mut app = app_with_linked_worktree();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        let root = app.state.workspaces[0].tabs[0].root_pane;
+        let root_public = app.public_pane_id(0, root).unwrap();
+
+        let response = app.handle_pane_view(
+            "req".into(),
+            PaneViewParams {
+                pane_id: Some(root_public.clone()),
+                action: PaneViewAction::Add,
+                extension: Some("vqro.tasks".into()),
+                view: Some("tasks".into()),
+                direction: Some(crate::api::schema::SplitDirection::Right),
+                ratio: Some(0.5),
+                focus: true,
+            },
+        );
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        let ResponseResult::PaneView { view } = success.result else {
+            panic!("expected pane view response");
+        };
+        assert_eq!(view.action, PaneViewAction::Add);
+        assert_eq!(view.extension.as_deref(), Some("vqro.tasks"));
+        assert_eq!(view.view.as_deref(), Some("tasks"));
+
+        // The view pane is a first-class layout pane with a content identity and
+        // no terminal, and its scope is the terminal of the box it was added to.
+        let (ws_idx, view_pane) = app.parse_pane_id(&view.pane_id).unwrap();
+        assert_eq!(ws_idx, 0);
+        let tab = &app.state.workspaces[0].tabs[0];
+        assert_eq!(
+            tab.layout.view_at(view_pane).map(|content| content.view),
+            Some("tasks".to_owned())
+        );
+        assert!(tab.terminal_id(view_pane).is_none());
+        assert_eq!(tab.layout.view_scope(view_pane), vec![root]);
+        assert_eq!(tab.layout.pane_count(), 2);
+        assert!(tab.layout.pane_ids().contains(&view_pane));
+        assert!(!tab.panes.contains_key(&view_pane));
+        // A mixed tab (terminal + view) must satisfy the content-aware invariants.
+        app.state.assert_invariants_for_test();
+
+        // A view pane's own public identity is a real pane identity.
+        let layout = app.handle_layout_tree_export(
+            "req".into(),
+            crate::api::schema::LayoutExportParams {
+                tab_id: None,
+                pane_id: Some(view.pane_id.clone()),
+            },
+        );
+        let success: SuccessResponse = serde_json::from_str(&layout).unwrap();
+        let ResponseResult::LayoutTreeExport { layout } = success.result else {
+            panic!("expected layout tree export");
+        };
+        let crate::api::schema::LayoutTreeNode::Split { second, .. } = layout.root else {
+            panic!("expected the split that holds the view pane");
+        };
+        assert!(matches!(
+            *second,
+            crate::api::schema::LayoutTreeNode::View { pane_id, .. } if pane_id == view.pane_id
+        ));
+
+        // Closing it drops the view and leaves the terminal it covered.
+        let response = app.handle_pane_view(
+            "req".into(),
+            PaneViewParams {
+                pane_id: Some(view.pane_id.clone()),
+                action: PaneViewAction::Close,
+                extension: None,
+                view: None,
+                direction: None,
+                ratio: None,
+                focus: false,
+            },
+        );
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        let ResponseResult::PaneView { view: closed } = success.result else {
+            panic!("expected pane view response");
+        };
+        assert_eq!(closed.action, PaneViewAction::Close);
+        assert_eq!(closed.view.as_deref(), Some("tasks"));
+        assert_eq!(closed.pane_id, view.pane_id);
+        assert!(app.state.workspaces[0].tabs[0]
+            .layout
+            .view_at(view_pane)
+            .is_none());
+        assert_eq!(app.state.workspaces[0].tabs[0].layout.pane_count(), 1);
+        app.state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn api_pane_view_rejects_a_missing_identity_and_a_non_view_close() {
+        let mut app = app_with_linked_worktree();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        let root = app.state.workspaces[0].tabs[0].root_pane;
+        let root_public = app.public_pane_id(0, root).unwrap();
+
+        let response = app.handle_pane_view(
+            "req".into(),
+            PaneViewParams {
+                pane_id: Some(root_public.clone()),
+                action: PaneViewAction::Add,
+                extension: None,
+                view: Some("tasks".into()),
+                direction: None,
+                ratio: None,
+                focus: false,
+            },
+        );
+        assert_eq!(metadata_error_code(&response), "invalid_view");
+        assert_eq!(app.state.workspaces[0].tabs[0].layout.pane_count(), 1);
+
+        // Closing a terminal pane through the view operation is refused.
+        let response = app.handle_pane_view(
+            "req".into(),
+            PaneViewParams {
+                pane_id: Some(root_public),
+                action: PaneViewAction::Close,
+                extension: None,
+                view: None,
+                direction: None,
+                ratio: None,
+                focus: false,
+            },
+        );
+        assert_eq!(metadata_error_code(&response), "not_a_view");
+    }
+
+    #[test]
+    fn agent_start_rule_adds_the_configured_view_once_per_terminal() {
+        let mut app = app_with_linked_worktree();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.agent_start_view = Some(("vqro.tasks".into(), "tasks".into()));
+        let root = app.state.workspaces[0].tabs[0].root_pane;
+
+        app.maybe_add_agent_start_view(root);
+        let tab = &app.state.workspaces[0].tabs[0];
+        let views = tab.layout.view_panes();
+        assert_eq!(views.len(), 1, "the rule adds exactly one view pane");
+        assert_eq!(tab.layout.view_scope(views[0]), vec![root]);
+        assert_eq!(
+            tab.layout.view_at(views[0]).map(|content| content.view),
+            Some("tasks".to_owned())
+        );
+        assert!(
+            app.state.workspaces[0]
+                .pane_state(root)
+                .expect("terminal pane")
+                .agent_start_view_applied,
+            "the marker is durable state on the pane"
+        );
+
+        // A second agent start in the same terminal adds nothing: the marker is
+        // the once-per-terminal rule.
+        app.maybe_add_agent_start_view(root);
+        assert_eq!(app.state.workspaces[0].tabs[0].layout.view_panes().len(), 1);
+        assert_eq!(app.state.workspaces[0].tabs[0].layout.pane_count(), 2);
+    }
+
+    fn add_view_request(pane_id: &str) -> PaneViewParams {
+        PaneViewParams {
+            pane_id: Some(pane_id.to_owned()),
+            action: PaneViewAction::Add,
+            extension: Some("vqro.tasks".into()),
+            view: Some("tasks".into()),
+            direction: Some(crate::api::schema::SplitDirection::Right),
+            ratio: Some(0.5),
+            focus: false,
+        }
+    }
+
+    #[test]
+    fn api_pane_view_ratio_is_the_views_share_in_both_directions() {
+        for direction in [
+            crate::api::schema::SplitDirection::Right,
+            crate::api::schema::SplitDirection::Down,
+        ] {
+            let mut app = app_with_linked_worktree();
+            let root = app.state.workspaces[0].tabs[0].root_pane;
+            let public = app.public_pane_id(0, root).unwrap();
+            let mut params = add_view_request(&public);
+            params.direction = Some(direction);
+            params.ratio = Some(0.3);
+            let response = app.handle_pane_view("ratio".into(), params);
+            let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+            assert!(matches!(success.result, ResponseResult::PaneView { .. }));
+            let crate::layout::TypedNode::Split { ratio, second, .. } =
+                app.state.workspaces[0].tabs[0].layout.typed_root()
+            else {
+                panic!("expected terminal/view split");
+            };
+            assert!((*ratio - 0.7).abs() < f32::EPSILON);
+            assert!(matches!(**second, crate::layout::TypedNode::View { .. }));
+            app.state.assert_invariants_for_test();
+        }
+    }
+
+    #[test]
+    fn api_pane_view_invalid_ratio_is_atomic() {
+        for ratio in [f32::NAN, f32::INFINITY, -0.1, 0.0, 1.0] {
+            let mut app = app_with_linked_worktree();
+            let root = app.state.workspaces[0].tabs[0].root_pane;
+            let public = app.public_pane_id(0, root).unwrap();
+            let mut params = add_view_request(&public);
+            params.ratio = Some(ratio);
+            let response = app.handle_pane_view("ratio".into(), params);
+            assert_eq!(metadata_error_code(&response), "invalid_ratio");
+            assert_eq!(app.state.workspaces[0].tabs[0].layout.pane_count(), 1);
+            app.state.assert_invariants_for_test();
+        }
+    }
+
+    #[test]
+    fn api_pane_view_add_refuses_at_the_structural_tab_cap_without_growing_the_layout() {
+        // A view adds no PaneState, so a terminal-count check would let it bypass
+        // the tab cap and produce a layout restore admission rejects. The API must
+        // count structural panes and refuse atomically at the cap.
+        let mut app = app_with_linked_worktree();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        let root = app.state.workspaces[0].tabs[0].root_pane;
+        let root_public = app.public_pane_id(0, root).unwrap();
+        let cap = crate::admission::MAX_TAB_PANES;
+
+        let mut added = 0usize;
+        loop {
+            let response = app.handle_pane_view("req".into(), add_view_request(&root_public));
+            if let Ok(success) = serde_json::from_str::<SuccessResponse>(&response) {
+                assert!(matches!(success.result, ResponseResult::PaneView { .. }));
+                added += 1;
+                assert!(added < cap, "the cap must refuse before it is exceeded");
+                continue;
+            }
+            assert_eq!(metadata_error_code(&response), "resource_limit");
+            break;
+        }
+        // One terminal plus the views that fit; the refused add changed nothing.
+        assert_eq!(added + 1, cap);
+        assert_eq!(app.state.workspaces[0].tabs[0].layout.pane_count(), cap);
+    }
+
+    #[test]
+    fn agent_start_view_is_refused_and_unmarked_at_the_structural_cap() {
+        let mut app = app_with_linked_worktree();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.agent_start_view = Some(("vqro.tasks".into(), "tasks".into()));
+        let root = app.state.workspaces[0].tabs[0].root_pane;
+        // Fill the tab with views beside a second terminal, so the root terminal
+        // stays uncovered and the rule must take its add path, not the covered no-op.
+        let second = app.state.workspaces[0].test_split(ratatui::layout::Direction::Horizontal);
+        let second_public = app.public_pane_id(0, second).unwrap();
+        let cap = crate::admission::MAX_TAB_PANES;
+        while app.state.workspaces[0].tabs[0].layout.pane_count() < cap {
+            let response = app.handle_pane_view("req".into(), add_view_request(&second_public));
+            assert!(
+                serde_json::from_str::<SuccessResponse>(&response).is_ok(),
+                "fill refused before the cap"
+            );
+        }
+        assert_eq!(app.state.workspaces[0].tabs[0].layout.pane_count(), cap);
+        let views_before = app.state.workspaces[0].tabs[0].layout.view_panes().len();
+
+        app.maybe_add_agent_start_view(root);
+        assert_eq!(
+            app.state.workspaces[0].tabs[0].layout.view_panes().len(),
+            views_before,
+            "a refused agent-start add must not grow the layout"
+        );
+        assert!(
+            !app.state.workspaces[0]
+                .pane_state(root)
+                .expect("terminal pane")
+                .agent_start_view_applied,
+            "a refused add must not mark the terminal as having a view"
+        );
+    }
+
+    #[test]
+    fn api_pane_focus_on_a_view_succeeds_without_an_error_after_mutation() {
+        let mut app = app_with_linked_worktree();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        let root = app.state.workspaces[0].tabs[0].root_pane;
+        let root_public = app.public_pane_id(0, root).unwrap();
+        let response = app.handle_pane_view("req".into(), add_view_request(&root_public));
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        let ResponseResult::PaneView { view } = success.result else {
+            panic!("expected pane view response");
+        };
+        let view_public = view.pane_id;
+
+        // Focusing a view is content-aware: it succeeds with a view `PaneInfo` and
+        // never focuses then reports pane_not_found (which left the mutation but
+        // returned an error).
+        let response = app.handle_pane_focus(
+            "req".into(),
+            PaneTarget {
+                pane_id: view_public.clone(),
+            },
+        );
+        let success: SuccessResponse = serde_json::from_str(&response)
+            .unwrap_or_else(|error| panic!("focusing a view must succeed: {error}; {response}"));
+        let ResponseResult::PaneInfo { pane } = success.result else {
+            panic!("expected pane info response");
+        };
+        assert_eq!(pane.pane_id, view_public);
+        assert_eq!(pane.content, crate::api::schema::PaneContent::View);
+        assert!(pane.terminal_id.is_none(), "a view has no terminal id");
+        assert!(pane.focused);
+        let (_, view_pane) = app.parse_pane_id(&view_public).unwrap();
+        assert_eq!(
+            app.state.workspaces[0].tabs[0].layout.focused(),
+            view_pane,
+            "the layout focus moved to the view"
+        );
+    }
+
+    #[test]
+    fn closing_the_last_terminal_leaves_a_view_only_tab_passing_both_invariants() {
+        let mut app = app_with_linked_worktree();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        let root = app.state.workspaces[0].tabs[0].root_pane;
+        let root_public = app.public_pane_id(0, root).unwrap();
+        let response = app.handle_pane_view("req".into(), add_view_request(&root_public));
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        let ResponseResult::PaneView { view } = success.result else {
+            panic!("expected pane view response");
+        };
+        // Mixed (terminal + view) state passes both helpers.
+        app.state.assert_invariants_for_test();
+
+        let response = app.handle_pane_close(
+            "req".into(),
+            PaneTarget {
+                pane_id: root_public,
+            },
+        );
+        assert!(
+            serde_json::from_str::<SuccessResponse>(&response).is_ok(),
+            "closing the terminal should succeed: {response}"
+        );
+        let (_, view_pane) = app.parse_pane_id(&view.pane_id).unwrap();
+        let tab = &app.state.workspaces[0].tabs[0];
+        // View-only: the view is the root and there is no terminal record.
+        assert_eq!(tab.root_pane, view_pane);
+        assert_eq!(tab.layout.view_panes(), vec![view_pane]);
+        assert!(tab.panes.is_empty());
+        app.state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn terminal_pane_info_omits_the_content_kind_and_stays_unchanged() {
+        let mut app = app_with_linked_worktree();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        let root = app.state.workspaces[0].tabs[0].root_pane;
+        let root_public = app.public_pane_id(0, root).unwrap();
+        let response = app.handle_pane_focus(
+            "req".into(),
+            PaneTarget {
+                pane_id: root_public,
+            },
+        );
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        let ResponseResult::PaneInfo { pane } = success.result else {
+            panic!("expected pane info response");
+        };
+        assert_eq!(pane.content, crate::api::schema::PaneContent::Terminal);
+        assert!(pane.terminal_id.is_some());
+        // A terminal omits `content`, so its serialized info is byte-identical to
+        // the shape readers saw before the content kind existed.
+        let json = serde_json::to_value(&pane).unwrap();
+        assert!(
+            !json.as_object().unwrap().contains_key("content"),
+            "a terminal pane must omit the content kind"
+        );
+        assert!(json.get("terminal_id").is_some());
+    }
+
+    #[test]
+    fn agent_start_rule_does_nothing_when_no_identity_is_set() {
+        let mut app = app_with_linked_worktree();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        let root = app.state.workspaces[0].tabs[0].root_pane;
+
+        // No identity is passed in: core invents no Tasks literal, and setting the
+        // identity is the only switch, so the rule is off.
+        app.state.agent_start_view = None;
+        app.maybe_add_agent_start_view(root);
+        assert!(app.state.workspaces[0].tabs[0]
+            .layout
+            .view_panes()
+            .is_empty());
+        assert!(
+            !app.state.workspaces[0]
+                .pane_state(root)
+                .expect("terminal pane")
+                .agent_start_view_applied
+        );
+    }
+
+    #[test]
+    fn agent_start_rule_does_not_add_a_second_view_for_a_covered_terminal() {
+        let mut app = app_with_linked_worktree();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.agent_start_view = Some(("vqro.tasks".into(), "tasks".into()));
+        let root = app.state.workspaces[0].tabs[0].root_pane;
+        // A view already covers this terminal (added explicitly by the user).
+        app.state.workspaces[0]
+            .split_pane_with_view(
+                root,
+                "vqro.tasks",
+                "tasks",
+                ratatui::layout::Direction::Horizontal,
+                0.5,
+                false,
+            )
+            .expect("view pane added");
+
+        app.maybe_add_agent_start_view(root);
+        assert_eq!(
+            app.state.workspaces[0].tabs[0].layout.view_panes().len(),
+            1,
+            "a covering view is never duplicated"
+        );
+        // It still marks the terminal so a later start does not retry.
+        assert!(
+            app.state.workspaces[0]
+                .pane_state(root)
+                .expect("terminal pane")
+                .agent_start_view_applied
+        );
     }
 }

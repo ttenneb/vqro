@@ -522,10 +522,17 @@ fn unknown_config_key_diagnostics(
     paths
         .into_iter()
         .map(|path| {
-            format!(
-                "unknown config key {}; ignoring key",
-                format_config_key_path(&path)
-            )
+            let key = format_config_key_path(&path);
+            // A retired key names its replacement instead of only being ignored:
+            // silently dropping `ui.show_panels_on_agent_start` would re-enable a
+            // rule the user had turned off.
+            match key.as_str() {
+                "ui.show_panels_on_agent_start" => {
+                    "unknown config key ui.show_panels_on_agent_start is retired; set ui.agent_start_view instead"
+                        .to_string()
+                }
+                _ => format!("unknown config key {key}; ignoring key"),
+            }
         })
         .collect()
 }
@@ -1221,5 +1228,29 @@ mouse_capture = false
 
         assert!(loaded.diagnostics.is_empty(), "{:?}", loaded.diagnostics);
         assert_eq!(loaded.config.terminal.default_shell, "pwsh.exe");
+    }
+
+    #[test]
+    fn the_retired_agent_start_key_names_its_replacement() {
+        // Dropping the key silently would re-enable a rule the user turned off.
+        let content = "[ui]\nshow_panels_on_agent_start = false\n";
+        let (_, ignored) =
+            deserialize_with_ignored::<Config, _>(toml::Deserializer::new(content)).unwrap();
+        assert_eq!(
+            unknown_config_key_diagnostics(ignored, None),
+            vec![
+                "unknown config key ui.show_panels_on_agent_start is retired; set ui.agent_start_view instead"
+                    .to_string()
+            ]
+        );
+        // The message keeps the shared prefix, so the compact impact line still matches.
+        assert_eq!(
+            config_diagnostic_summary(&[
+                "unknown config key ui.show_panels_on_agent_start is retired; set ui.agent_start_view instead"
+                    .to_string()
+            ])
+            .as_deref(),
+            Some("config.toml has unknown keys; herdr config check")
+        );
     }
 }

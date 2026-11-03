@@ -18,6 +18,11 @@ pub const ENDPOINT_WELCOME_KIND: &str = "endpoint.welcome.v1";
 pub const SNAPSHOT_CODEC_V1: &str = "shell.snapshot.v1";
 pub const ENDPOINT_SNAPSHOT_KIND: &str = SNAPSHOT_CODEC_V1;
 pub const SURFACE_CODEC_V1: &str = "shell.surface.v1";
+/// Additive surface codec that carries per-pane view descriptors alongside the
+/// unchanged v1 frame. `shell.surface.v1` stays byte-exactly terminal-only and
+/// is retired from serving: a peer that advertises only v1 is refused
+/// client-locally rather than sent a v1 surface.
+pub const SURFACE_CODEC_V2: &str = "shell.surface.v2";
 pub const INPUT_CODEC_V1: &str = "shell.input.semantic.v1";
 pub const BLOB_CODEC_V1: &str = "shell.blob.v1";
 pub const SURFACE_INTEREST_CAPABILITY: &str = "surface_interest";
@@ -46,13 +51,6 @@ pub const PANE_VIEW_RESULT_KIND: &str = "pane.view.result.v1";
 pub const PANE_VIEW_ACTION_KIND: &str = "pane.view.action.v1";
 pub const PANE_VIEW_ACTION_RESULT_KIND: &str = "pane.view.action-result.v1";
 pub const PANE_VIEW_CONFIRM_KIND: &str = "pane.view.confirm.v1";
-/// Pane panels: a client may reserve an edge of several panes and claim the
-/// smaller terminal viewport for each, and the server may ask it to open, close
-/// or toggle one of the views it has.
-pub const PANE_PANELS_CAPABILITY: &str = "pane_panels_v1";
-pub const PANE_PANELS_KIND: &str = "pane.panels.v1";
-pub const PANE_PANELS_REQUEST_KIND: &str = "pane.panels.request.v1";
-pub const MAX_PANE_PANEL_CLAIMS: usize = 16;
 
 pub const TERMINAL_VIEWS_CAPABILITY: &str = "terminal_views_v1";
 pub const TERMINAL_VIEWS_INTEREST_KIND: &str = "terminal.views.interest.v1";
@@ -255,43 +253,6 @@ pub struct ClientShellDelegation {
     pub external_parent_id: Option<String>,
 }
 
-/// One pane whose terminal this client shows smaller because it draws a panel
-/// in the freed edge.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ClientPanePanelClaim {
-    pub pane_id: String,
-    pub size: crate::protocol::ClientSurfaceSize,
-}
-
-/// The complete set of panels a client has open, one claim per pane. Later
-/// versions replace earlier ones; an empty list releases every claim.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ClientPanePanels {
-    pub boot_id: String,
-    pub projection_revision: u64,
-    #[serde(default)]
-    pub claims: Vec<ClientPanePanelClaim>,
-}
-
-/// A user's request, forwarded to attached clients that understand it. Older
-/// clients ignore the kind and keep their own view state.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ServerPanePanelRequest {
-    pub pane_id: String,
-    /// The view to act on; absent means every view the pane publishes.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub view_id: Option<String>,
-    pub action: ServerPanePanelAction,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ServerPanePanelAction {
-    Show,
-    Hide,
-    Toggle,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClientTerminalViewsInterest {
     pub boot_id: String,
@@ -461,12 +422,25 @@ impl EndpointClientHello {
             && self
                 .surface_codecs
                 .iter()
-                .any(|codec| codec == SURFACE_CODEC_V1)
+                .any(|codec| codec == SURFACE_CODEC_V2 || codec == SURFACE_CODEC_V1)
             && self
                 .input_codecs
                 .iter()
                 .any(|codec| codec == INPUT_CODEC_V1)
             && self.blob_codecs.iter().any(|codec| codec == BLOB_CODEC_V1)
+    }
+
+    /// Whether this peer can be served the current `shell.surface.v2` payload.
+    ///
+    /// Serving is v2-only: a peer that never advertised v2 is refused
+    /// client-locally rather than sent the retired `shell.surface.v1` frame. The
+    /// frozen generation-1 hello still decodes and still satisfies
+    /// [`Self::supports_required_codecs`] for its historical contract; this is a
+    /// separate serving decision, not a decode one.
+    pub fn serves_surface_v2(&self) -> bool {
+        self.surface_codecs
+            .iter()
+            .any(|codec| codec == SURFACE_CODEC_V2)
     }
 }
 
@@ -476,7 +450,7 @@ impl EndpointServerWelcome {
             generation: ENDPOINT_PROTOCOL_GENERATION,
             server_version: crate::build_info::version(),
             snapshot_codec: SNAPSHOT_CODEC_V1.into(),
-            surface_codec: SURFACE_CODEC_V1.into(),
+            surface_codec: SURFACE_CODEC_V2.into(),
             input_codec: INPUT_CODEC_V1.into(),
             blob_codec: BLOB_CODEC_V1.into(),
             methods,
@@ -495,7 +469,7 @@ impl EndpointServerWelcome {
             generation: ENDPOINT_PROTOCOL_GENERATION,
             server_version: crate::build_info::version(),
             snapshot_codec: SNAPSHOT_CODEC_V1.into(),
-            surface_codec: SURFACE_CODEC_V1.into(),
+            surface_codec: SURFACE_CODEC_V2.into(),
             input_codec: INPUT_CODEC_V1.into(),
             blob_codec: BLOB_CODEC_V1.into(),
             methods: Vec::new(),
@@ -788,6 +762,30 @@ mod tests {
         let mut value = hello();
         value.blob_codecs.clear();
         assert!(!value.supports_required_codecs());
+    }
+
+    #[test]
+    fn v1_only_hello_decodes_historically_but_is_not_served() {
+        // The frozen generation-1 hello advertises only `shell.surface.v1`. It
+        // still decodes and satisfies the historical core-codec contract, but it
+        // is not served the retired v1 surface: `serves_surface_v2` is false.
+        let value = hello();
+        assert_eq!(value.surface_codecs, vec![SURFACE_CODEC_V1.to_owned()]);
+        assert!(value.supports_required_codecs());
+        assert!(!value.serves_surface_v2());
+    }
+
+    #[test]
+    fn v2_client_is_served_the_v2_surface() {
+        let mut value = hello();
+        value.surface_codecs = vec![SURFACE_CODEC_V2.into(), SURFACE_CODEC_V1.into()];
+        assert!(value.supports_required_codecs());
+        assert!(value.serves_surface_v2());
+
+        // Order in the advertised list does not matter.
+        let mut reversed = hello();
+        reversed.surface_codecs = vec![SURFACE_CODEC_V1.into(), SURFACE_CODEC_V2.into()];
+        assert!(reversed.serves_surface_v2());
     }
 
     #[test]

@@ -485,17 +485,34 @@ mod tests {
     }
 
     #[test]
-    fn handshake_network_failures_retry_but_incompatibility_needs_attention() {
+    fn codec_handshake_refusal_is_client_local_attention_while_network_failures_retry() {
+        // The refusal is the user-visible half of the retired-codec story. A
+        // startup handshake refusal maps to the client-local endpoint-attention
+        // outcome (`Unsupported` + `failure_needs_attention`), which surfaces it
+        // as the persistent notice; a transient network failure stays a retry.
+        // The notice's present/persist/survives-typing behaviour is proven by
+        // `client::shell::tests::recovery::recovery_focus_rejects_stale_projection_and_notice_survives_typing`,
+        // and the server-side isolation (a supported peer stays connected) by the
+        // real-predecessor probe, so this asserts only the mapping.
         let timeout = handshake_error(crate::client::ClientError::ConnectionLost(
             std::io::Error::new(std::io::ErrorKind::TimedOut, "timed out"),
         ));
         assert!(!failure_needs_attention(&timeout));
-        let rejected = handshake_error(crate::client::ClientError::HandshakeRejected {
-            version: 1,
-            error: "surface capability missing".into(),
-        });
-        assert_eq!(rejected.kind(), std::io::ErrorKind::Unsupported);
-        assert!(failure_needs_attention(&rejected));
+        for message in [
+            // new -> predecessor (the predecessor's greeting refusal)
+            "client and server have no compatible endpoint core codecs",
+            // predecessor -> new (this server's hello refusal)
+            "client cannot decode the current pane surface codec (shell.surface.v2); update this client",
+            // this client's own welcome guard
+            "server has no compatible endpoint core; update this machine",
+        ] {
+            let rejected = handshake_error(crate::client::ClientError::HandshakeRejected {
+                version: 1,
+                error: message.into(),
+            });
+            assert_eq!(rejected.kind(), std::io::ErrorKind::Unsupported);
+            assert!(failure_needs_attention(&rejected));
+        }
     }
 
     #[test]

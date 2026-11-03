@@ -28,12 +28,30 @@ in-flight work, or a human turn that wins the race, is therefore not auto-replie
 and a delivered reply is never re-answered automatically. `vqro agent prompt` is human-only, so agents address
 each other with messages rather than pane input.
 
-Presentation: this extension publishes **views** - a Tasks panel and a
-Messages panel per pane - which Vqro draws in the pane's top slot
-(`extensions/tasks/document.py`). The full-tab Tasks terminal view is retired:
-the tab pane entry is gone from the manifest, and a badge click opens the pane
-panels instead of launching another terminal app. `view.py` stays as the
-extension's formatting library and as the shape reference for the retired tab.
+Presentation: this extension publishes **views** - a Tasks view and a Messages
+view - which Vqro draws in a **view pane**: a pane whose content is an extension
+view instead of a terminal (`vqro pane view add <pane> vqro.tasks:tasks`). A view
+pane covers every terminal in its parent box, so the Tasks rows are the tasks of
+the agent panes beside it. The full-tab Tasks terminal view and the old
+pane-attached panel band are retired; a badge click selects its tab and has no
+action of its own. `view.py` stays as the extension's formatting library and as
+the shape reference for the retired tab.
+
+`vqro pane view add <pane> vqro.tasks:tasks --direction right --ratio 0.3`
+reserves **30% for the view**, leaving 70% for the existing pane. The same ratio
+meaning applies to `--direction down` (view below). The default is 0.5; accepted
+values are 0.1 through 0.9.
+
+For fresh terminal-capture evidence in both layouts, using an already-built
+binary and already-installed Pi:
+
+```sh
+python3 -B extensions/tasks/demo_view_pane.py --vqro /absolute/path/to/vqro --direction right
+python3 -B extensions/tasks/demo_view_pane.py --vqro /absolute/path/to/vqro --direction down
+```
+
+Each run owns a private root; view panes are excluded from process-tree cleanup
+because they never own a terminal or process.
 
 - [Windows interpreter setup, identity and native trial](../../docs/next/api/tasks-windows.md)
 - [Tasks policy, CLI, receipts and limits](../../docs/next/api/tasks-core-v0.md)

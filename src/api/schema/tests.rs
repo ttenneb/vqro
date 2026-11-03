@@ -929,7 +929,8 @@ fn worktree_request_and_response_round_trip() {
             },
             root_pane: PaneInfo {
                 pane_id: "w_1-1".into(),
-                terminal_id: "term_1".into(),
+                content: crate::api::schema::PaneContent::Terminal,
+                terminal_id: Some("term_1".into()),
                 workspace_id: "w_1".into(),
                 tab_id: "w_1:1".into(),
                 focused: true,
@@ -1362,7 +1363,8 @@ fn create_response_round_trips_with_root_pane() {
             },
             root_pane: PaneInfo {
                 pane_id: "w_1-3".into(),
-                terminal_id: "term_example".into(),
+                content: crate::api::schema::PaneContent::Terminal,
+                terminal_id: Some("term_example".into()),
                 workspace_id: "w_1".into(),
                 tab_id: "w_1:2".into(),
                 focused: false,

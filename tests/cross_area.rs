@@ -18,7 +18,7 @@ use support::{
     cleanup_test_base, client_shell_handshake, register_runtime_dir, register_spawned_herdr_pid,
     unregister_spawned_herdr_pid, CURRENT_ENDPOINT_PROTOCOL_GENERATION as CURRENT_PROTOCOL,
     SERVER_MESSAGE_ENDPOINT_CONTROL, SERVER_MESSAGE_PANE_SURFACE,
-    SERVER_MESSAGE_PANE_SURFACE_PATCH,
+    SERVER_MESSAGE_PANE_SURFACE_PATCH, SERVER_MESSAGE_PANE_SURFACE_V2,
 };
 
 fn unique_test_dir() -> PathBuf {
@@ -448,7 +448,11 @@ fn wait_for_frame(stream: &mut UnixStream, timeout: Duration) -> bool {
     while Instant::now() < deadline {
         let slice = deadline.saturating_duration_since(Instant::now());
         match read_server_variant(stream, slice) {
-            Ok(SERVER_MESSAGE_PANE_SURFACE | SERVER_MESSAGE_PANE_SURFACE_PATCH) => return true,
+            Ok(
+                SERVER_MESSAGE_PANE_SURFACE
+                | SERVER_MESSAGE_PANE_SURFACE_PATCH
+                | SERVER_MESSAGE_PANE_SURFACE_V2,
+            ) => return true,
             Ok(SERVER_MESSAGE_ENDPOINT_CONTROL) => {}
             Ok(_) => {}
             Err(err) if is_timeout(&err) => {}
