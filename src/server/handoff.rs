@@ -1406,6 +1406,85 @@ mod tests {
     }
 
     #[test]
+    fn missing_row_view_alias_does_not_create_a_handoff_terminal() {
+        for view_first in [false, true] {
+            let mut snapshot = one_pane_snapshot();
+            let workspace = &mut snapshot.workspaces[0];
+            workspace.public_pane_numbers.insert(2, 2);
+            workspace.next_public_pane_number = 3;
+            workspace.tabs[0]
+                .panes
+                .get_mut(&1)
+                .unwrap()
+                .agent_start_view_applied = true;
+            let view = crate::persist::LayoutSnapshot::View {
+                pane: 2,
+                extension: "vqro.tasks".into(),
+                view: "tasks".into(),
+            };
+            let dangling = crate::persist::LayoutSnapshot::Pane(2);
+            let children = if view_first {
+                vec![view, dangling]
+            } else {
+                vec![dangling, view]
+            };
+            workspace.tabs[0].layout = crate::persist::LayoutSnapshot::Split {
+                direction: crate::persist::DirectionSnapshot::Horizontal,
+                ratio: 0.5,
+                first: Box::new(crate::persist::LayoutSnapshot::Stack {
+                    id: crate::terminal_container::TerminalContainerId::from_validated(82_000)
+                        .into(),
+                    selected: 0,
+                    children,
+                }),
+                second: Box::new(crate::persist::LayoutSnapshot::Pane(1)),
+            };
+            let terminal_id =
+                crate::persist::terminal_id_for_pane_snapshot(&workspace.tabs[0].panes[&1])
+                    .unwrap();
+            let manifest = HandoffManifest {
+                version: HANDOFF_VERSION,
+                source_version: "view-only-survivor".into(),
+                source_protocol: crate::protocol::PROTOCOL_VERSION,
+                expected_version: None,
+                expected_protocol: None,
+                snapshot,
+                panes: vec![runtime_for(1, Some(terminal_id.to_string()))],
+                deferred_panes: Vec::new(),
+                api_window_title: None,
+                host_shutdown_intent: None,
+            };
+            let mut parsed: HandoffManifest =
+                serde_json::from_str(&serde_json::to_string(&manifest).unwrap()).unwrap();
+            validate_and_normalize_manifest(&mut parsed).expect(
+                "missing terminal reference cannot fabricate an FD requirement for a valid view",
+            );
+            assert_eq!(parsed.panes.len(), 1);
+            assert_eq!(parsed.panes[0].pane_id, 1);
+            assert_eq!(
+                parsed.panes[0].terminal_id.as_deref(),
+                Some(terminal_id.as_str())
+            );
+            let saved = &parsed.snapshot.workspaces[0].tabs[0];
+            assert_eq!(saved.panes.len(), 1);
+            assert!(
+                !saved.panes.contains_key(&2),
+                "no terminal row is synthesized for the view"
+            );
+            assert!(saved.panes[&1].agent_start_view_applied);
+            // A fabricated runtime for that view is rejected before ownership.
+            parsed
+                .panes
+                .push(runtime_for(2, Some(terminal_id.to_string())));
+            let error = validate_and_normalize_manifest(&mut parsed).unwrap_err();
+            assert!(
+                error.to_string().contains("no matching snapshot pane"),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
     fn future_snapshot_is_rejected_unchanged_before_fd_admission() {
         let mut snapshot = one_pane_snapshot();
         snapshot.version = crate::persist::SNAPSHOT_VERSION + 1;
