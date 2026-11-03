@@ -4476,6 +4476,7 @@
               ]
             },
             "ratio": {
+              "description": "The new VIEW's share of the split, in either direction (0.1..=0.9; default 0.5).",
               "format": "float",
               "type": [
                 "number",
